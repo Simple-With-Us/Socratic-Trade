@@ -48,6 +48,9 @@ import {
   ohlcBarsToCloses,
   ohlcBarsToPriceEntry,
   fetchCongressPriceNeeds,
+  getStaleCatchupState,
+  isCongressStaleCatchupDue,
+  recordStaleCatchup,
   mergeShareUniverse,
   resetCongressAuthBreakerForTests,
   resetCongressUpstreamBreakerForTests,
@@ -1555,6 +1558,147 @@ describe("fetchCongressPriceNeeds", () => {
       vi.fn(async () => new Response("nope", { status: 403 })) as unknown as typeof fetch
     );
     expect(bad.tickers).toEqual([]);
+  });
+
+  it("follows App A's nextCursor so tickers past the first page are not starved", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    const pages: Record<string, unknown> = {
+      first: { tickers: [{ ticker: "AA" }, { ticker: "AAL" }], spx: { needsHistoryBefore: "2014-01-01" }, pagination: { nextCursor: "AAL", limit: 2 } },
+      AAL: { tickers: [{ ticker: "ABBV" }, { ticker: "aal" }], pagination: { nextCursor: "ABBV", limit: 2 } },
+      ABBV: { tickers: [{ ticker: "ZZZ" }], pagination: { nextCursor: null, limit: 2 } }
+    };
+    const urls: string[] = [];
+    const pagedFetch = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      urls.push(url);
+      const cursor = new URL(url).searchParams.get("cursor") ?? "first";
+      return new Response(JSON.stringify(pages[cursor]), { status: 200 });
+    });
+    const res = await fetchCongressPriceNeeds(2, pagedFetch as unknown as typeof fetch);
+    expect(res.tickers.map((t) => t.ticker)).toEqual(["AA", "AAL", "ABBV", "ZZZ"]);
+    expect(res.spx?.needsHistoryBefore).toBe("2014-01-01");
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).not.toContain("cursor=");
+    expect(urls[1]).toContain("cursor=AAL");
+  });
+
+  it("stops at the page cap and keeps pages read before a later page fails", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "2";
+    try {
+      let n = 0;
+      const endless = vi.fn(async () => {
+        n += 1;
+        return new Response(
+          JSON.stringify({ tickers: [{ ticker: `T${n}` }], pagination: { nextCursor: `T${n}` } }),
+          { status: 200 }
+        );
+      });
+      const capped = await fetchCongressPriceNeeds(1, endless as unknown as typeof fetch);
+      expect(capped.tickers.map((t) => t.ticker)).toEqual(["T1", "T2"]);
+      expect(endless).toHaveBeenCalledTimes(2);
+
+      process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "4";
+      let calls = 0;
+      const flaky = vi.fn(async () => {
+        calls += 1;
+        if (calls === 2) return new Response("boom", { status: 500 });
+        return new Response(
+          JSON.stringify({ tickers: [{ ticker: "KEEP" }], pagination: { nextCursor: "KEEP" } }),
+          { status: 200 }
+        );
+      });
+      const partial = await fetchCongressPriceNeeds(1, flaky as unknown as typeof fetch);
+      expect(partial.tickers.map((t) => t.ticker)).toEqual(["KEEP"]);
+    } finally {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES;
+    }
+  });
+});
+
+describe("stale-price catch-up", () => {
+  const now = Date.UTC(2026, 5, 22, 23, 0, 0); // Mon 7 PM ET, after the close
+  const session = latestCompletedTradingSessionEtKey(now);
+
+  beforeEach(() => {
+    deleteInternalSetting("congress-share:staleCatchup");
+    deleteInternalSetting("congress-share:lastDailyRunDate");
+  });
+
+  it("records the withheld set, drops it when nothing is stale", () => {
+    recordStaleCatchup(now, ["ABEMX", "AAIC", "ABEMX"], false);
+    expect(getStaleCatchupState()).toEqual({
+      session,
+      tickers: ["ABEMX", "AAIC"],
+      attempts: 0,
+      lastAttemptMs: now
+    });
+    recordStaleCatchup(now, [], false);
+    expect(getStaleCatchupState()).toBeNull();
+  });
+
+  it("is due once the interval elapsed, for the same session, with attempts left", () => {
+    expect(isCongressStaleCatchupDue(now)).toBe(false); // nothing recorded
+    recordStaleCatchup(now, ["ABEMX"], false);
+    expect(isCongressStaleCatchupDue(now + 60_000)).toBe(false); // interval not elapsed
+    expect(isCongressStaleCatchupDue(now + 2 * 3_600_000)).toBe(true);
+    // a newer session completed: the next nightly run owns it
+    expect(isCongressStaleCatchupDue(now + 26 * 3_600_000)).toBe(false); // Tue 9 PM ET, after Tue's close
+    // attempts exhausted
+    setInternalSetting("congress-share:staleCatchup", { session, tickers: ["ABEMX"], attempts: 4, lastAttemptMs: now });
+    expect(isCongressStaleCatchupDue(now + 2 * 3_600_000)).toBe(false);
+  });
+
+  it("a continuing record keeps the attempt count while refreshing the remaining tickers", () => {
+    setInternalSetting("congress-share:staleCatchup", { session, tickers: ["A", "B"], attempts: 2, lastAttemptMs: now });
+    recordStaleCatchup(now + 3_600_000, ["B"], true);
+    expect(getStaleCatchupState()).toMatchObject({ tickers: ["B"], attempts: 2, lastAttemptMs: now + 3_600_000 });
+  });
+
+  it("the nightly run withholds stale tails, remembers them, and the price-only pass sends them once fresh", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    const fresh = barsEndingOnSession(now, [10, 11, 12]);
+    const stale = fresh.slice(0, 2); // newest close is one session behind
+    let navPublished = false;
+    mockedFetchDailyOHLC.mockImplementation(async (sym: string) => {
+      if (sym === "^GSPC") return fresh;
+      if (sym === "LATENAV") return navPublished ? fresh : stale;
+      return fresh;
+    });
+    const posts: Array<Record<string, unknown>> = [];
+    const fetchSpy = vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/export/price-needs")) {
+        return new Response(JSON.stringify({ tickers: [{ ticker: "LATENAV" }, { ticker: "OKAY" }] }), { status: 200 });
+      }
+      if (u.includes("/api/admin/securities/import")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        posts.push(body);
+        return new Response(ctImportOkBody(), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const first = await runCongressDailyShare({ now, force: true });
+      expect("staleTickers" in first ? first.staleTickers : undefined).toEqual(["LATENAV"]);
+      expect(getStaleCatchupState()?.tickers).toEqual(["LATENAV"]);
+
+      navPublished = true;
+      posts.length = 0;
+      const pass = await runCongressDailyShare({ now: now + 3 * 3_600_000, symbols: ["LATENAV"], priceOnly: true });
+      expect("staleTickers" in pass ? pass.staleTickers : undefined).toBeUndefined();
+      expect(getStaleCatchupState()).toBeNull();
+      const sentTickers = posts.flatMap((p) => (Array.isArray(p.prices) ? (p.prices as Array<{ ticker: string }>).map((x) => x.ticker) : []));
+      expect(sentTickers).toEqual(["LATENAV"]);
+      // price-only: no refs / fundamentals / analyst datasets re-sent
+      expect(posts.some((p) => "refs" in p || "fundamentals" in p || "analyst" in p)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

@@ -410,6 +410,12 @@ function priceNeedsLimit(): number {
   return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), 2000) : 500;
 }
 
+/** Max pages of App A's price-needs export read per run (each page is `priceNeedsLimit()` tickers). */
+function priceNeedsMaxPages(): number {
+  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES ?? 4);
+  return Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), 10) : 4;
+}
+
 /** App A export path for tickers still lacking history for congressional performance. */
 const PRICE_NEEDS_PATH = "/api/export/price-needs";
 /**
@@ -451,44 +457,64 @@ export async function fetchCongressPriceNeeds(
   // Do not count this read toward the upstream breaker, and do not take the half-open probe.
   // A price-needs 500 must not block imports that might still succeed.  Skip only while cooling.
   if (isCongressUpstreamBreakerTripped()) return empty;
-  const url = `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=${encodeURIComponent(String(limit))}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchImpl(url, {
-      method: "GET",
-      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-      signal: controller.signal,
-      cache: "no-store"
-    });
-    if (!res.ok) {
-      console.error(`[congress-share] price-needs failed: HTTP ${res.status}`);
-      return empty;
+  const maxPages = priceNeedsMaxPages();
+  const tickers: CongressPriceNeedTicker[] = [];
+  const seen = new Set<string>();
+  let spx: CongressPriceNeedsResponse["spx"];
+  let summary: CongressPriceNeedsResponse["summary"];
+  let cursor: string | null = null;
+  // App A pages this export by ticker (keyset, alphabetical).  Reading only the first page meant
+  // the same first `limit` tickers were requested every night: any that ST could not price (stale
+  // tail, mutual-fund NAV not out yet) stayed at the head and starved everything after them.
+  for (let page = 0; page < maxPages; page += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const url =
+        `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=${encodeURIComponent(String(limit))}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+      const res = await fetchImpl(url, {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+        signal: controller.signal,
+        cache: "no-store"
+      });
+      if (!res.ok) {
+        console.error(`[congress-share] price-needs failed: HTTP ${res.status}`);
+        break;
+      }
+      const body = (await res.json()) as CongressPriceNeedsResponse & {
+        pagination?: { nextCursor?: string | null };
+      };
+      if (page === 0) {
+        spx = body?.spx;
+        summary = body?.summary;
+      }
+      const rows = Array.isArray(body?.tickers) ? body.tickers : [];
+      for (const t of rows) {
+        if (!t || typeof t.ticker !== "string" || !t.ticker.trim()) continue;
+        const ticker = normalizeSymbol(t.ticker);
+        if (!ticker || seen.has(ticker)) continue;
+        seen.add(ticker);
+        tickers.push({
+          ticker,
+          oldestTradeDate: typeof t.oldestTradeDate === "string" ? t.oldestTradeDate : undefined,
+          needsDeepHistory: t.needsDeepHistory === true,
+          reasons: Array.isArray(t.reasons) ? t.reasons.map(String) : undefined
+        });
+      }
+      const next = body?.pagination?.nextCursor;
+      cursor = typeof next === "string" && next.trim() && next !== cursor ? next : null;
+      if (!cursor || tickers.length >= maxDailyTickers()) break;
+    } catch (err) {
+      console.error("[congress-share] price-needs error:", err instanceof Error ? err.message : err);
+      break; // keep the pages already read; a later page failing must not discard them
+    } finally {
+      clearTimeout(timer);
     }
-    const body = (await res.json()) as CongressPriceNeedsResponse;
-    const tickers = Array.isArray(body?.tickers)
-      ? body.tickers
-          .filter((t) => t && typeof t.ticker === "string" && t.ticker.trim())
-          .map((t) => ({
-            ticker: normalizeSymbol(t.ticker),
-            oldestTradeDate: typeof t.oldestTradeDate === "string" ? t.oldestTradeDate : undefined,
-            needsDeepHistory: t.needsDeepHistory === true,
-            reasons: Array.isArray(t.reasons) ? t.reasons.map(String) : undefined
-          }))
-          .filter((t) => Boolean(t.ticker))
-      : [];
-    return {
-      tickers,
-      spx: body?.spx,
-      summary: body?.summary
-    };
-  } catch (err) {
-    console.error("[congress-share] price-needs error:", err instanceof Error ? err.message : err);
-    return empty;
-  } finally {
-    clearTimeout(timer);
   }
+  return { tickers: tickers.slice(0, maxDailyTickers()), spx, summary };
 }
 
 /**
@@ -1761,6 +1787,11 @@ export interface RunCongressDailyShareOptions {
    * The scheduled nightly path always merges a page of needs even when this is false.
    */
   fromAppANeeds?: boolean;
+  /**
+   * Price-only pass (the stale catch-up): send just SPX + the supplied symbols' closes, skipping the
+   * screener refs and fundamentals/analyst datasets the nightly run already delivered.
+   */
+  priceOnly?: boolean;
   /** Opaque durable claim supplied by the outer admin guard; background callers omit it. */
   operationLeaseClaim?: OperationLeaseClaim;
 }
@@ -1793,6 +1824,8 @@ export interface CongressDailyShareSummary {
   fieldStoreParseSampleIssues?: string[];
   /** Tickers whose newest close was behind the latest completed session and were not pushed. */
   stalePricesWithheld?: number;
+  /** The withheld tickers themselves (canonical), so a later catch-up pass can retry exactly them. */
+  staleTickers?: string[];
   /** True when the S&P series was withheld for the same reason. */
   staleSpxWithheld?: boolean;
   /** Aggregated schema-invalid row drops across all POSTs in this run. */
@@ -2086,7 +2119,8 @@ async function runCongressDailyShareUnlocked(
   const shortVolume = advancesDailyMarker ? buildShortVolumeImport() : [];
   const shareDate = utcDate(now);
   const pushFundamentalsAnalyst =
-    advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true);
+    options.priceOnly !== true &&
+    (advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true));
   let fundamentalsImport: CongressFundamental[] = [];
   let analystImport: CongressAnalyst[] = [];
   let fieldStoreParseDropped = 0;
@@ -2100,7 +2134,7 @@ async function runCongressDailyShareUnlocked(
   }
 
   // Push company refs for the full public screener
-  const refs = await fetchNasdaqScreenerRefs();
+  const refs = options.priceOnly === true ? [] : await fetchNasdaqScreenerRefs();
 
   const stalePricesWithheld = staleTickers.length;
   if (stalePricesWithheld > 0 || staleSpxWithheld) {
@@ -2205,13 +2239,23 @@ async function runCongressDailyShareUnlocked(
     posts,
     failedPosts,
     sent,
-    ...(stalePricesWithheld > 0 ? { stalePricesWithheld } : {}),
+    ...(stalePricesWithheld > 0 ? { stalePricesWithheld, staleTickers: [...staleTickers] } : {}),
     ...(staleSpxWithheld ? { staleSpxWithheld } : {}),
     ...(rowsDroppedTotal > 0
       ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal }
       : {}),
     responses
   };
+  // Remember what was withheld so a catch-up can retry it the same evening instead of waiting a
+  // full UTC day.  The scheduled run (advancesDailyMarker) starts a fresh cycle; a catch-up pass
+  // continues the existing one.  Only a successful or fully-withheld run changes the state.
+  if (ok || posts === 0) {
+    if (advancesDailyMarker) {
+      recordStaleCatchup(now, staleTickers, false);
+    } else if (options.priceOnly === true) {
+      recordStaleCatchup(now, staleTickers, true);
+    }
+  }
   try {
     audit("congress_share_daily", {
       ok: summary.ok,
@@ -2241,6 +2285,117 @@ async function runCongressDailyShareUnlocked(
     // audit is best-effort
   }
   return summary;
+}
+
+// ── Same-session stale-price catch-up ───────────────────────────────────────────
+
+const STALE_CATCHUP_KEY = "congress-share:staleCatchup";
+
+interface StaleCatchupState {
+  /** Latest completed ET session the withheld tails were short of. */
+  session: string;
+  tickers: string[];
+  /** Catch-up passes already started for this cycle (counted before the pass runs). */
+  attempts: number;
+  lastAttemptMs: number;
+}
+
+function staleCatchupMaxAttempts(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_MAX_ATTEMPTS ?? 4);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 4;
+}
+
+function staleCatchupIntervalMs(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_INTERVAL_MS ?? 2 * 60 * 60_000);
+  return Number.isFinite(v) && v > 0 ? v : 2 * 60 * 60_000;
+}
+
+export function getStaleCatchupState(): StaleCatchupState | null {
+  const raw = getInternalSetting<StaleCatchupState>(STALE_CATCHUP_KEY);
+  if (
+    !raw ||
+    typeof raw.session !== "string" ||
+    !Array.isArray(raw.tickers) ||
+    raw.tickers.length === 0 ||
+    !Number.isFinite(raw.attempts) ||
+    !Number.isFinite(raw.lastAttemptMs)
+  ) {
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * The nightly run withholds any ticker whose newest close is behind the latest completed session
+ * (mutual-fund NAVs and thin names post their bar hours after the close), then advances the
+ * once-per-UTC-day marker — so those tickers waited a whole day and were re-withheld the next
+ * night.  Persist them so `runCongressStaleCatchupIfDue` can retry exactly that set later.
+ * `continuing` keeps the attempt count of the cycle in progress; otherwise a fresh cycle starts.
+ */
+export function recordStaleCatchup(now: number, tickers: readonly string[], continuing: boolean): void {
+  try {
+    if (tickers.length === 0) {
+      deleteInternalSetting(STALE_CATCHUP_KEY);
+      return;
+    }
+    const prior = continuing ? getStaleCatchupState() : null;
+    const state: StaleCatchupState = {
+      session: latestCompletedTradingSessionEtKey(now),
+      tickers: Array.from(new Set(tickers)).slice(0, maxDailyTickers()),
+      attempts: prior?.attempts ?? 0,
+      lastAttemptMs: now
+    };
+    setInternalSetting(STALE_CATCHUP_KEY, state);
+  } catch {
+    /* best-effort: the next nightly run rebuilds the list */
+  }
+}
+
+/** Pure: is a catch-up pass due?  Needs a pending list for the current session, retries left, and the interval elapsed. */
+export function isCongressStaleCatchupDue(now: number): boolean {
+  const state = getStaleCatchupState();
+  if (!state) return false;
+  // A newer session completed: the next nightly run owns it.  Drop the old list.
+  if (state.session !== latestCompletedTradingSessionEtKey(now)) return false;
+  if (state.attempts >= staleCatchupMaxAttempts()) return false;
+  // No check against the daily marker: the list only exists because a scheduled run recorded it
+  // for this session, and the marker's UTC date rolls over at about 7 PM ET, in the middle of the
+  // evening window this retry exists for.  A later scheduled run simply rebuilds the list.
+  return now - state.lastAttemptMs >= staleCatchupIntervalMs();
+}
+
+let staleCatchupInFlight: Promise<CongressDailyShareSummary | null> | null = null;
+
+/**
+ * Scheduler entry point: re-send, price-only, the tickers the nightly run withheld as stale, a few
+ * times (default 4, two hours apart) until their bars arrive.  Bounded: the attempt is counted
+ * before the pass starts, so a failing pass can never retry on every scheduler tick.
+ */
+export async function runCongressStaleCatchupIfDue(
+  now: number = Date.now()
+): Promise<CongressDailyShareSummary | null> {
+  try {
+    if (!isCongressShareAutoEnabled()) return null;
+    if (!isCongressStaleCatchupDue(now)) return null;
+    if (staleCatchupInFlight) return staleCatchupInFlight;
+    const state = getStaleCatchupState();
+    if (!state) return null;
+    setInternalSetting(STALE_CATCHUP_KEY, { ...state, attempts: state.attempts + 1, lastAttemptMs: now });
+    const run = runCongressDailyShare({ now, symbols: state.tickers, priceOnly: true })
+      .then((result) => ("skipped" in result && result.skipped ? null : (result as CongressDailyShareSummary)))
+      .catch((err) => {
+        console.error("[congress-share] stale catch-up error:", err);
+        return null;
+      })
+      .finally(() => {
+        staleCatchupInFlight = null;
+      });
+    staleCatchupInFlight = run;
+    return run;
+  } catch (err) {
+    console.error("[congress-share] stale catch-up error:", err);
+    return null;
+  }
 }
 
 /**
