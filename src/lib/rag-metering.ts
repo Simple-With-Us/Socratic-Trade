@@ -13,7 +13,6 @@
 import crypto from "crypto";
 import { audit, getDb, getInternalSetting, setInternalSetting } from "./db";
 import { recordPineconeWriteUnits } from "./pinecone-monthly-pace";
-import { pushRagUsage } from "./usage-monitor-push";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -178,20 +177,11 @@ export function recordRagUsage(entry: RagUsageEntry): void {
         cost ?? null,
         occurredAt
       );
-    // Fire-and-forget forward to the API Usage Monitor (no-op unless configured; never throws).
-    pushRagUsage({
-      sourceEventId: usageId,
-      occurredAt,
-      provider,
-      operation: entry.operation,
-      model: entry.model,
-      userId,
-      tokensIn,
-      tokensOut,
-      batchCount,
-      costUsd: cost,
-      providerRequestId: entry.providerRequestId,
-    });
+    // No live push to the API Usage Monitor.  RAG rows reach it only through the replay lane's
+    // closed 10-minute windows (usage-monitor-replay.ts):  one summed row per provider, operation,
+    // user and model instead of one per call, with self-hosted Qdrant left out (no cost, and its
+    // quantity was a record count mislabelled as tokens).  Live plus replay both sending per-row
+    // events was most of the ~8,000 rows a day this family produced.
   } catch {
     /* ledger is best-effort; never break the caller */
   }

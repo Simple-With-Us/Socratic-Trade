@@ -363,7 +363,11 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
           enrichmentMode: tradingDay ? undefined : "skip",
           seedEnrichment,
           signal,
-          deadlineAt
+          deadlineAt,
+          // Account-scoped market-data tape: the enrichment must bind to the
+          // operating account's feed (Alpaca PAPER `delayed_sip`) and its
+          // account-scoped cache identity — same as strategy-gather.ts.
+          connectedAccountId: policy.connectedAccountId
         }),
         "Market scan freshness deadline exceeded."
       );
