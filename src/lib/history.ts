@@ -299,9 +299,14 @@ export async function fetchDailyOHLC(
   };
   const tradierCredential = resolveTradierHistoryCredential();
   const alpacaHistory = resolveAlpacaHistoryCredential(userId);
-  const privateCacheKey = historyCacheKey(symbol, userId, "private");
-  const poolCacheKey = historyCacheKey(symbol, userId, "pool");
-  const sharedCacheKey = historyCacheKey(symbol, userId, "shared");
+  const lookbackDays = clampLookbackDays(opts?.lookbackDays);
+  const deepHistory = lookbackDays > MASSIVE_FREE_LOOKBACK_DAYS;
+  const startDate = new Date(now - lookbackDays * 24 * 60 * 60_000).toISOString().slice(0, 10);
+  // The in-memory key must carry the lookback: a short series cached by a 1y
+  // call must not satisfy a later 5y/deep call (Cluster B H1).
+  const privateCacheKey = historyCacheKey(symbol, userId, "private", lookbackDays);
+  const poolCacheKey = historyCacheKey(symbol, userId, "pool", lookbackDays);
+  const sharedCacheKey = historyCacheKey(symbol, userId, "shared", lookbackDays);
 
   const consented = hasDataPoolConsent(userId ?? "local");
   const privateHit = cache.get(privateCacheKey);
@@ -312,10 +317,6 @@ export async function fetchDailyOHLC(
   }
   const sharedHit = cache.get(sharedCacheKey);
   if (sharedHit && sharedHit.expiresAt > now) return sharedHit.bars;
-
-  const lookbackDays = clampLookbackDays(opts?.lookbackDays);
-  const deepHistory = lookbackDays > MASSIVE_FREE_LOOKBACK_DAYS;
-  const startDate = new Date(now - lookbackDays * 24 * 60 * 60_000).toISOString().slice(0, 10);
 
   // 1. Evaluate local SQLite history cache. Rows are permanent. A fresh series
   //    short-circuits the network only when it covers the requested start, or when
@@ -446,36 +447,64 @@ export async function fetchDailyOHLC(
         roicSource,
         tiingoSource,
         yahooSource("1y"),
+        twelveSource,
         marketstackSource
       ];
 
-  for (const source of sources) {
-    const liveBars = await source.fetch();
-    if (liveBars && liveBars.length >= 2) {
-      const fetchedAt = new Date(now).toISOString();
-      const stampedLive = stampOhlcBarProvenance(liveBars, source.sourceId, fetchedAt);
-      const finalBars = staleFallbackBars
-        ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
-        : stampedLive;
-      if (source.confirmsListingStart) {
-        const oldest = toBusinessDay(finalBars[0]?.time);
-        writeListingStart(symbol, oldest && oldest > startDate ? oldest : null);
-      }
-      persistEodBarsToCache(symbol, finalBars);
+  type LiveSource = (typeof sources)[number];
+  const acceptLiveBars = (source: LiveSource, liveBars: OHLCBar[]): OHLCBar[] => {
+    const fetchedAt = new Date(now).toISOString();
+    const stampedLive = stampOhlcBarProvenance(liveBars, source.sourceId, fetchedAt);
+    const finalBars = staleFallbackBars
+      ? stampOhlcBarProvenance(mergeOHLCBars(staleFallbackBars, stampedLive), source.sourceId, fetchedAt)
+      : stampedLive;
+    if (source.confirmsListingStart) {
+      const oldest = toBusinessDay(finalBars[0]?.time);
+      writeListingStart(symbol, oldest && oldest > startDate ? oldest : null);
+    }
+    persistEodBarsToCache(symbol, finalBars);
+    const cacheKey = source.scope === "private" ? privateCacheKey : source.scope === "pool" ? poolCacheKey : sharedCacheKey;
+    cache.set(cacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: finalBars });
+    if (source.scope === "shared") emitHistoryDemandFilled(symbol, now);
+    // Persist permanently (no row TTL) so a later deep request can serve history
+    // without re-downloading bars that already reach startDate.
+    if (source.fetch.name !== "fetchHistoryCacheEod") {
+      upsertHistoryCacheEod(symbol, finalBars);
+    }
+    return finalBars;
+  };
 
-      const cacheKey = source.scope === "private" ? privateCacheKey : source.scope === "pool" ? poolCacheKey : sharedCacheKey;
-      cache.set(cacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: finalBars });
-      if (source.scope === "shared") emitHistoryDemandFilled(symbol, now);
-      
-      // Persist permanently (no row TTL) so a later deep request can serve history
-      // without re-downloading bars that already reach startDate.
-      if (source.fetch.name !== "fetchHistoryCacheEod") {
-        upsertHistoryCacheEod(symbol, finalBars);
+  // On a deep request a short stub must not win over a later fuller tier
+  // (Cluster B H2): hold the first short series as a candidate and keep
+  // cascading. It is returned only when no tier covers the requested start.
+  let deepShortCandidate: { source: LiveSource; bars: OHLCBar[] } | undefined;
+  for (const source of sources) {
+    let liveBars: OHLCBar[] | null;
+    try {
+      liveBars = await source.fetch();
+    } catch (error) {
+      // A pre-flight throw in one tier must not abort the whole cascade (H6), but a
+      // failed provider must be distinguishable from genuinely unavailable history.
+      console.error(`[history] ${source.sourceId} failed for ${symbol}:`, error);
+      continue;
+    }
+    if (liveBars && liveBars.length >= 2) {
+      if (
+        deepHistory &&
+        !source.confirmsListingStart &&
+        !localSeriesCovers(symbol, liveBars, startDate, true)
+      ) {
+        // Hold the fullest short series seen so far, not the first: a later tier that
+        // still misses startDate but returns more bars is the better fallback.
+        if (deepShortCandidate === undefined || liveBars.length > deepShortCandidate.bars.length) {
+          deepShortCandidate = { source, bars: liveBars };
+        }
+        continue;
       }
-      
-      return finalBars;
+      return acceptLiveBars(source, liveBars);
     }
   }
+  if (deepShortCandidate) return acceptLiveBars(deepShortCandidate.source, deepShortCandidate.bars);
 
   // Fallback if active providers hit errors or expired keys: audit warning and return the stale base
   // (local cache and/or stale import).  This is not a success: the peer reader must be able to tell
@@ -509,10 +538,10 @@ export async function fetchDailyOHLC(
   return null;
 }
 
-function historyCacheKey(symbol: string, userId: string | undefined, scope: CacheScope): string {
-  if (scope === "private") return `user:${userId ?? "local"}:${symbol}`;
-  if (scope === "pool") return `pool:${symbol}`;
-  return `shared:${symbol}`;
+function historyCacheKey(symbol: string, userId: string | undefined, scope: CacheScope, lookbackDays: number): string {
+  if (scope === "private") return `user:${userId ?? "local"}:${symbol}:${lookbackDays}`;
+  if (scope === "pool") return `pool:${symbol}:${lookbackDays}`;
+  return `shared:${symbol}:${lookbackDays}`;
 }
 
 /**

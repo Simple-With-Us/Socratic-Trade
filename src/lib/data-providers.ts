@@ -60,7 +60,7 @@ import {
 import { NasdaqCalendarEnrichmentProvider } from "./nasdaq-calendar-provider";
 import { WisesheetsEnrichmentProvider, resolveWisesheetsApiKey } from "./wisesheets-provider";
 import { SimFinEnrichmentProvider, resolveSimFinApiKey } from "./simfin-provider";
-import { MarketauxEnrichmentProvider, resolveMarketauxApiKey } from "./marketaux-provider";
+import { MarketauxEnrichmentProvider } from "./marketaux-provider";
 import { scoreHeadlineRelevance } from "./news-relevance";
 import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 import { getStreamedHeadlines } from "./streams/news-store";
@@ -1202,11 +1202,12 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   }
   // Marketaux: a genuine per-article sentiment model (not a keyword-scored proxy), so it's seated
   // right after AV's own model-based NEWS_SENTIMENT rather than down with the keyword-proxy tiers.
-  // Key-gated on MARKETAUX_API_KEY (process.env only). Declares quotaScarce (free tier 100 req/day)
+  // Key-gated on a per-user stored key or MARKETAUX_API_KEY env. Declares quotaScarce (free tier 100 req/day)
   // + suppliesFields, so the free-first planner's wave gate only spends it on symbols still
   // missing headlines/sentiment after the free wave resolved.
-  const marketauxKey = resolveMarketauxApiKey();
-  if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), "env"));
+  const marketaux = resolveApiKeyWithSource("marketaux", userId);
+  const marketauxKey = marketaux.key;
+  if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), marketaux.source === "user" ? "user" : "env"));
   if (roic.key) providers.push(withHealthLane(new RoicAiEnrichmentProvider(roic.key, roic.source, userId), roic.source));
   // Massive REST: REAL second short-interest source (FINRA short interest / free float) for the
   // Yahoo-vs-Massive disagreement cross-check. Supplies ONLY the carrier shortPercentOfFloatSecondary
@@ -1228,7 +1229,8 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // mirror QuiverEnrichmentProvider) and both self-contained (no shared provider-rate-limit.ts
   // budget — each paces itself). Wisesheets declares quotaScarce (launched 2026-07-24, no track
   // record yet, 5,000 req/mo) so the free-first planner only spends it on genuine coverage gaps;
-  // SimFin does not (2 req/sec, no monthly cap) so it stays in the ordinary first-wins wave.
+  // SimFin deliberately stays ungated (docs/market-data-provider-pricing.md) so the wave-B gap
+  // filter cannot skip it before it fills its tracked ratios.
   const wisesheetsKey = resolveWisesheetsApiKey();
   if (wisesheetsKey) providers.push(withHealthLane(new WisesheetsEnrichmentProvider(wisesheetsKey), "env"));
   const simFinKey = resolveSimFinApiKey();

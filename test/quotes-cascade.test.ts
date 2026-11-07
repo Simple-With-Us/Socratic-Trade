@@ -568,6 +568,26 @@ describe("fetchFreshQuotesCascade", () => {
     expect(result.MSFT.venuePriceAuthoritative).toBeUndefined();
   });
 
+  it("on Tradier paper, cascades externally for symbols the venue could not price at all (Q5)", async () => {
+    const liveIso = new Date(Date.now() - 20 * 1000).toISOString();
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "tradier",
+      accountNumber: "VA00000000",
+      connectedAccountId: "tr-sand",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({ id: "tr-sand", broker: "tradier", environment: "paper" });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      MSFT: { price: 305, asOf: liveIso, bid: 304, ask: 306, volume: 1000, prevClose: 300, open: 301, high: 306, low: 300.5 }
+    });
+
+    const result = await fetchFreshQuotesCascade(["MSFT"], "local", "VA00000000", "tr-sand");
+
+    expect(mockEnrich).toHaveBeenCalledWith(["MSFT"]);
+    expect(result.MSFT.price).toBe(305);
+  });
+
   it("falls back to Level 2 (Alpaca Snapshot) if Level 1 returns a quote older than maxQuoteAgeSec (realtime)", async () => {
     const now = Date.now();
     const staleIso = new Date(now - 5 * 60 * 1000).toISOString(); // 5 minutes — stale vs 120s
@@ -775,6 +795,9 @@ describe("fetchFreshQuotesCascade", () => {
         bid: 149.9,
         ask: 150.1,
         prevClose: 148,
+        open: 149.8,
+        high: 150.4,
+        low: 149.6,
         vwap: 149.5,
         asOf: freshIso,
         provider: "alpaca"
@@ -1118,6 +1141,29 @@ describe("syncQuotesToFieldStore field provenance", () => {
     // The winning price keeps Finnhub's stamps.
     expect(byField.price.source).toBe("finnhub");
     expect(byField.price.asOf).toBe("2026-09-21T14:00:00.000Z");
+  });
+
+  it("persists bidSize/askSize/close/netChange fetched by the cascade (Q1)", () => {
+    mockUpsertSymbolFieldLatest.mockClear();
+    const quote: BrokerQuote = {
+      symbol: "AAPL",
+      price: 180.5,
+      bid: 180.4,
+      ask: 180.6,
+      bidSize: 300,
+      askSize: 200,
+      close: 180.5,
+      netChange: 2.5,
+      asOf: "2026-09-21T14:00:00.000Z",
+      fetchedAt: "2026-09-21T14:00:05.000Z",
+      provider: "finnhub"
+    };
+
+    syncQuotesToFieldStore({ AAPL: quote });
+
+    const records = mockUpsertSymbolFieldLatest.mock.calls[0][0] as any[];
+    const fields = records.map((r) => r.field);
+    expect(fields).toEqual(expect.arrayContaining(["bidSize", "askSize", "close", "netChange"]));
   });
 
   it("falls back to quote-level stamps when a field has no provenance receipt", () => {

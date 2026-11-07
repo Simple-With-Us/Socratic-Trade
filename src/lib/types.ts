@@ -2411,6 +2411,18 @@ export interface CandidateEvidence {
   congressMemberTradeScoredCount?: number;
   asOf?: string; // candidate data freshness (most-recent enrichment timestamp)
   provider?: string; // primary provider
+  // Decision-time quote tape (Cluster D F4): persisted in the signal_snapshot JSON only —
+  // no schema change. Lets post-hoc analysis tell whether sizing used a delayed/synthetic quote.
+  bid?: number;
+  ask?: number;
+  bidSize?: number;
+  askSize?: number;
+  volume?: number;
+  fetchedAt?: string;
+  delayedFallback?: boolean;
+  syntheticBid?: boolean;
+  syntheticAsk?: boolean;
+  venuePriceAuthoritative?: boolean;
   sources?: EnrichmentSources; // per-field provenance (source attribution)
   /** Decision-time leave-one-provider-out score estimate. This is shadow telemetry, not a causal
    *  claim: it removes only fields that provider won in the cascade and does not invent a fallback
