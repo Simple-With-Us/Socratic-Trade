@@ -812,6 +812,11 @@ export interface RetrieveDecisionExperiencesInput {
   runId: string;
   regime: string;
   candidates: SituationCandidate[];
+  /**
+   * Thesis tags the candidates would be tagged with (deterministic scorer), for the ST-4539
+   * past-case affinity re-rank's thesis boost.  Optional; omitted means no thesis boost.
+   */
+  thesisTags?: string[];
   connectedAccountId?: string;
   /** As-of stamp; defaults to now. Chunks dated after this are never admitted (no lookahead). */
   asOf?: string;
@@ -864,7 +869,9 @@ export async function retrieveDecisionExperiences(
         asOf,
         minScore: defaultMinScore(),
         connectedAccountId: input.connectedAccountId,
-        accountScope: "exact",
+        // Account-scoped episodic memory PLUS this user's pooled user-level lessons (post-mortem
+        // thesis x regime vectors carry memory_scope "user" and no connected_account_id).
+        accountScope: "exact-or-user",
         runId: input.runId,
         ...(input.signal ? { signal: input.signal } : {}),
         onStatus: (s) => {

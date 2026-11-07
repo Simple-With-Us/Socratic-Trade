@@ -1,6 +1,6 @@
-import { codeCliUrl } from "./code-cli";
+import { codeCliReady, codeCliUrl } from "./code-cli";
 import { resolveLlmCredential } from "./db";
-import { catalogEntryFor, nativeSlugFor, openRouterSlugFor } from "./llm-model-catalog";
+import { catalogEntryFor, isCodeCliOnlyModel, nativeSlugFor, openRouterSlugFor } from "./llm-model-catalog";
 import { resolveOpenAiModel, type LlmTransport } from "./llm-request";
 import { llmRouteFor } from "./llm-route";
 
@@ -31,6 +31,8 @@ export function llmModelFamily(model: string | undefined): LlmModelFamily {
   if (/gemini/i.test(normalized)) return "gemini";
   if (/(mistral|ministral|magistral|codestral|devstral|pixtral|open-mistral|open-mixtral)/i.test(normalized)) return "mistral";
   if (/deepseek/i.test(normalized)) return "deepseek";
+  // Llama models are gone from the catalog (ST-4589).  A stale stored llama id still classifies as
+  // Meta so it can never fall through to the OpenAI default and reach api.openai.com.
   if (/(llama|muse-)/i.test(normalized)) return "meta";
   if (/(kimi|moonshot)/i.test(normalized)) return "moonshot";
   if (/minimax/i.test(normalized)) return "minimax";
@@ -49,12 +51,67 @@ export const META_MODEL_API_URL = "https://api.meta.ai/v1/chat/completions";
 
 /**
  * The Meta-hosted slug the native Model API (api.meta.ai) serves for this model, or undefined.
- * Only the Muse Spark models are hosted there.  Glimmer is open-weight and Llama is not served,
- * so both stay OpenRouter-only.
+ * Muse Spark and Muse Wonder are hosted there (dev.meta.ai/docs/reasoning names muse-spark-1.3 and
+ * muse-wonder-1.0).  Glimmer is open-weight and stays OpenRouter-only.  Code CLI-only contributor
+ * ids (muse-wonder-*-contributor) are never sent to api.meta.ai.
  */
 export function metaNativeModelSlug(model: string | undefined): string | undefined {
+  const entry = catalogEntryFor(model);
+  if (!entry || entry.codeCliOnly) return undefined;
+  return /^muse-(?:spark|wonder)-/i.test(entry.nativeSlug) ? entry.nativeSlug : undefined;
+}
+
+/** The Muse Code id the Code CLI broker serves for this model: Spark, Wonder, and the Code
+ *  CLI-only Wonder contributor ids.  Undefined for anything else (Glimmer, unknown ids). */
+export function metaCodeCliModelSlug(model: string | undefined): string | undefined {
   const slug = catalogEntryFor(model)?.nativeSlug ?? "";
-  return /^muse-spark-/i.test(slug) ? slug : undefined;
+  return /^muse-(?:spark|wonder)-/i.test(slug) ? slug : undefined;
+}
+
+/**
+ * A model that cannot be served for this user on the route they chose (today: a Code CLI-only
+ * model while the user's Meta route is not Code CLI).  Failover chains treat it like a model with
+ * no credential: skip it and try the next one.
+ */
+export class LlmModelUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LlmModelUnavailableError";
+  }
+}
+
+/** Shown when a stored policy still names a removed Llama model. */
+export const LLAMA_REMOVED_MESSAGE = "Llama models are no longer offered; pick another model";
+
+/** The error codeCliUrl throws when the Code CLI route is selected but not enabled/configured. */
+export const CODE_CLI_NOT_CONFIGURED_MESSAGE = "Code CLI is disabled or not configured for this owner";
+
+/** True for endpoint-resolution errors a failover chain should SKIP (the model is unavailable for
+ *  this user) rather than abort on.  Any other error (DB/runtime) must still propagate. */
+export function isUnavailableModelResolutionError(error: unknown): boolean {
+  if (error instanceof LlmModelUnavailableError) return true;
+  return error instanceof Error && error.message === CODE_CLI_NOT_CONFIGURED_MESSAGE;
+}
+
+/** False only for a Code CLI-only model when this user's Meta route is not a ready Code CLI route.
+ *  Rotation and implicit failover use it so those models are picked only where they can run. */
+export function codeCliOnlyModelServable(model: string | undefined, userId: string = "local"): boolean {
+  if (!isCodeCliOnlyModel(model)) return true;
+  return llmRouteFor("meta", userId) === "code-cli" && codeCliReady(userId);
+}
+
+/**
+ * False when this user's chosen route cannot serve the model at all: a Code CLI-only model off a
+ * ready Code CLI route, or a Meta model the Code CLI broker has no adapter for (Glimmer) while the
+ * user's Meta route IS Code CLI.  Rotation uses it so a pick or implicit failover never lands on a
+ * model resolveLlmEndpoint would refuse.  (Code CLI selected but not ready is already caught by the
+ * credential check: resolveLlmCredential returns no key.)
+ */
+export function modelServableOnUserRoute(model: string | undefined, userId: string = "local"): boolean {
+  if (!codeCliOnlyModelServable(model, userId)) return false;
+  const family = llmModelFamily(model);
+  if (family === "meta" && llmRouteFor("meta", userId) === "code-cli") return Boolean(metaCodeCliModelSlug(model));
+  return true;
 }
 
 /**
@@ -158,8 +215,6 @@ function prefixUnknownOpenRouterId(raw: string): string {
     out = `minimax/${unprefixed}`;
   } else if (/^deepseek/i.test(unprefixed)) {
     out = `deepseek/${unprefixed}`;
-  } else if (/^llama/i.test(unprefixed)) {
-    out = `meta-llama/${unprefixed}`;
   } else if (/^(gpt|o1|o3)/i.test(unprefixed)) {
     out = `openai/${unprefixed}`;
   } else {
@@ -186,12 +241,20 @@ export function resolveLlmEndpoint(
   role: LlmTeamRole = "green"
 ): LlmEndpoint {
   const rawModel = resolveRoleModel(policy, role);
+  // Llama models are gone (ST-4589).  A stale stored llama id would reach OpenRouter unprefixed and
+  // 400; refuse it legibly instead, as an unavailable model the failover chains skip.
+  if (/llama/i.test(rawModel)) throw new LlmModelUnavailableError(LLAMA_REMOVED_MESSAGE);
   const family = llmModelFamily(rawModel);
   if ((family === "meta" || family === "minimax") && llmRouteFor(family, userId) === "code-cli") {
-    const cliModel = family === "meta" ? metaNativeModelSlug(rawModel) : nativeSlugFor(rawModel);
-    if (!cliModel) throw new Error("Model is not supported by Code CLI");
+    const cliModel = family === "meta" ? metaCodeCliModelSlug(rawModel) : nativeSlugFor(rawModel);
+    // e.g. muse-glimmer-30b while Meta is on Code CLI: unavailable for this user, so failover skips it.
+    if (!cliModel) throw new LlmModelUnavailableError(`${rawModel} is not supported by the Code CLI route`);
     return { provider: family, url: codeCliUrl(family, userId), key: "code-cli-no-provider-key",
       model: cliModel, keySource: "user", keyRef: "code-cli", transport: "chat-completions" };
+  }
+  // Code CLI-only ids exist on no other route: never send them to OpenRouter or api.meta.ai.
+  if (isCodeCliOnlyModel(rawModel)) {
+    throw new LlmModelUnavailableError(`${rawModel} runs only through the Code CLI route`);
   }
 
 
