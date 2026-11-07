@@ -325,7 +325,7 @@ describe("resolveVenueQuoteMode", () => {
     ).toBe("venue_locked");
   });
 
-  it("returns realtime for Alpaca paper (real-time paper simulation)", () => {
+  it("returns venue_delayed for the connected Alpaca paper account (delayed_sip tape)", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "ap",
       broker: "alpaca",
@@ -333,6 +333,17 @@ describe("resolveVenueQuoteMode", () => {
     });
     expect(
       resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap" }, "local")
+    ).toBe("venue_delayed");
+  });
+
+  it("keeps Alpaca live on the realtime tape", () => {
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-live",
+      broker: "alpaca",
+      environment: "live"
+    });
+    expect(
+      resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap-live" }, "local")
     ).toBe("realtime");
   });
 });
@@ -349,7 +360,9 @@ describe("fetchFreshQuotesCascade", () => {
   beforeEach(() => {
     vi.resetAllMocks();
 
-    // Default: Alpaca realtime venue
+    // Default: Alpaca LIVE (real-time venue).  The connected Alpaca PAPER
+    // account is a venue-delayed tape (owner authorization 2026-11-05) and has
+    // its own coverage in test/alpaca-paper-delayed-sip.test.ts.
     mockGetPolicy.mockReturnValue({
       activeBroker: "alpaca",
       accountNumber: "ACC123",
@@ -359,7 +372,7 @@ describe("fetchFreshQuotesCascade", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "alp-1",
       broker: "alpaca",
-      environment: "paper"
+      environment: "live"
     });
     mockGetActiveConnectedAccount.mockReturnValue(undefined);
     mockResolveAlpacaMarketData.mockReturnValue({
@@ -532,6 +545,89 @@ describe("fetchFreshQuotesCascade", () => {
     const age = quoteAgeSecForStalenessGate(result.MSFT, Date.now());
     expect(age.venueDelayed).toBe(true);
     expect(age.ageSec!).toBeLessThan(5);
+  });
+
+  it("venue_delayed WITHOUT skipActiveBroker: later levels do NOT fill (the venue tape is authoritative)", async () => {
+    // L1a ran and the venue priced nothing — the pending list is cleared so
+    // Alpaca/Yahoo can never overlay the paper venue tape.
+    const now = Date.now();
+    const freshIso = new Date(now - 20_000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      accountNumber: "PA33IDTHMFK9",
+      connectedAccountId: "ap-paper",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-paper",
+      broker: "alpaca",
+      environment: "paper"
+    });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 210,
+        asOf: freshIso,
+        bid: 209.9,
+        ask: 210.1,
+        prevClose: 205,
+        open: 206,
+        high: 211,
+        low: 204,
+        volume: 1000
+      }
+    });
+
+    const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper");
+
+    expect(mockGetEquityQuotes).toHaveBeenCalled();
+    expect(mockEnrich).not.toHaveBeenCalled();
+    expect(result.AAPL).toBeUndefined();
+  });
+
+  it("venue_delayed WITH skipActiveBroker: later levels may still fill (L1a never ran — Sentry pendingSymbols thread)", async () => {
+    // The caller already hit the broker itself, so L1a is skipped.  Blanking
+    // the pending list here would drop every fallback and leave the caller
+    // with an empty result.
+    const now = Date.now();
+    const freshIso = new Date(now - 20_000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      accountNumber: "PA33IDTHMFK9",
+      connectedAccountId: "ap-paper",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-paper",
+      broker: "alpaca",
+      environment: "paper"
+    });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 210,
+        asOf: freshIso,
+        bid: 209.9,
+        ask: 210.1,
+        prevClose: 205,
+        open: 206,
+        high: 211,
+        low: 204,
+        volume: 1000
+      }
+    });
+
+    const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper", {
+      skipActiveBroker: true
+    });
+
+    expect(mockGetEquityQuotes).not.toHaveBeenCalled();
+    expect(mockEnrich).toHaveBeenCalled();
+    expect(result.AAPL?.price).toBe(210);
   });
 
   it("on Tradier live, KEEPS the Tradier quote and does not overlay Alpaca or Yahoo", async () => {
