@@ -292,6 +292,8 @@ export async function scanMarket(
      * refreshes can reuse these locally while replacing price-family fields. */
     seedEnrichment?: Record<string, MarketQuoteSummary>;
     deadlineAt?: number;
+    /** Connected account the scan operates for (account-scoped market-data tape). */
+    connectedAccountId?: string;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -306,7 +308,8 @@ export async function scanMarket(
     congressMultiplier: scanOptions.congressMultiplier,
     enrichmentMode: scanOptions.enrichmentMode,
     seedEnrichment: scanOptions.seedEnrichment,
-    deadlineAt: scanOptions.deadlineAt
+    deadlineAt: scanOptions.deadlineAt,
+    connectedAccountId: scanOptions.connectedAccountId
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -490,7 +493,9 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // symbols' last known fields available even if they are not in today's ranked set.
     const enrichPlan = enrichmentPlanForDeadline(options?.deadlineAt);
     const skipLiveEnrich = options?.enrichmentMode === "skip" || enrichPlan.skipLiveEnrich;
-    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId);
+    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId, {
+      connectedAccountId: options?.connectedAccountId
+    });
     let rescoredRanked: MarketQuote[] = ranked;
     const preselectionPool = buildEnrichmentPreselectionPool(
       ranked,
@@ -1254,6 +1259,8 @@ export function mergeQuoteData(
       // Venue-delayed execution prices (Tradier sandbox) must survive the merge so policy ages
       // the snapshot, not the delayed trade print, and the cascade never re-overwrites them.
       venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+      expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+      delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
       fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
       delayedFallback: extra.delayedFallback ?? quote.delayedFallback,
       // Carry synthetic bid/ask flags through from the broker/Yahoo quote. When a side had a real value
@@ -1317,6 +1324,8 @@ export function mergeQuoteData(
         provider: extra?.provider ?? quote.provider,
         asOf: extra?.asOf ?? quote.asOf,
         venuePriceAuthoritative: extra?.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+        expectedDelaySec: extra?.expectedDelaySec ?? quote.expectedDelaySec,
+        delayToleranceSec: extra?.delayToleranceSec ?? quote.delayToleranceSec,
         fetchedAt: extra?.fetchedAt ?? quote.fetchedAt,
         delayedFallback: extra?.delayedFallback ?? quote.delayedFallback,
         syntheticBid: usedBid ? bidSynthetic : quote.syntheticBid,
@@ -1371,6 +1380,8 @@ export function mergeQuoteData(
       provider: quote.provider,
       asOf: quote.asOf,
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
+      expectedDelaySec: quote.expectedDelaySec,
+      delayToleranceSec: quote.delayToleranceSec,
       fetchedAt: quote.fetchedAt,
       delayedFallback: quote.delayedFallback,
       syntheticBid: quote.syntheticBid ?? quote.syntheticSpread ?? false,
@@ -1799,6 +1810,16 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     intradayChangePct: typeof extra.intradayChangePct === "number" ? extra.intradayChangePct : quote.intradayChangePct,
     vwap: extra.vwap && extra.vwap > 0 ? extra.vwap : quote.vwap,
     asOf: extra.asOf ?? quote.asOf,
+    // DELAYED-TAPE METADATA: a `delayed_sip` enrichment (Alpaca PAPER) must be
+    // aged with the delayed-tape rules, not the realtime-stale bar — otherwise
+    // a healthy ~900s-old print is treated as a stale realtime quote and every
+    // scan row fails the staleness gate.
+    expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+    delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
+    venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+    // A delayed tape ages by its RETRIEVAL stamp; a realtime quote keeps the
+    // observation time as its freshness signal (undefined here → unchanged).
+    fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
     companyName: extra.companyName ?? quote.companyName,
     sentiment: extra.sentiment ?? quote.sentiment,
     peRatio: extra.peRatio ?? quote.peRatio,

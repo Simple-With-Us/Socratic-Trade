@@ -114,7 +114,11 @@ export async function GET(request: Request) {
           universeFloor: policy.universeFloor,
           enrichmentMode: "skip",
           seedEnrichment,
-          signal
+          signal,
+          // Account-scoped market-data tape: bind the scan to the operating
+          // account (Alpaca PAPER `delayed_sip` + its cache identity) even
+          // when enrichment is skipped — same as strategy-gather.ts.
+          connectedAccountId: policy.connectedAccountId
         })
       )
     );

@@ -228,6 +228,38 @@ describe("runMarketScanFreshnessIfDue", () => {
     }
   });
 
+  it("forwards the operating account id into scanMarket so the enrichment binds to the account's tape", async () => {
+    // The freshness lane persists under policy.connectedAccountId, so the scan
+    // it runs must carry the SAME account: the full-universe enrichment then
+    // binds to the operating account's feed (Alpaca PAPER `delayed_sip`) and
+    // its account-scoped cache identity.
+    const { upsertConnectedAccount, getPolicy } = await import("../src/lib/db");
+    const userId = "owner-scan-account";
+    const accountId = "owner-scan-account-acct";
+    upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: "PAPERACCT",
+      label: "Owner paper",
+      isActive: true
+    });
+    try {
+      await runMarketScanFreshnessIfDue(MONDAY);
+      expect(getPolicy(userId).connectedAccountId).toBe(accountId);
+      const call = scanMarketMock.mock.calls.find((c) => c[3] === userId);
+      expect(call).toBeDefined();
+      const options = call![5] as { connectedAccountId?: string; enrichmentMode?: string };
+      expect(options.connectedAccountId).toBe(accountId);
+    } finally {
+      const db = getDb();
+      db.prepare("DELETE FROM connected_accounts WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM user_settings WHERE user_id = ?").run(userId);
+      db.prepare("DELETE FROM account_strategy_state WHERE user_id = ?").run(userId);
+    }
+  });
+
   it("rejects a hung scan at the freshness deadline so the next tick can run", async () => {
     scanMarketMock.mockImplementationOnce(() => new Promise(() => {}));
     const pending = runMarketScanFreshnessIfDue(MONDAY);
