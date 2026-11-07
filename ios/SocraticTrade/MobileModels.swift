@@ -30,6 +30,8 @@ struct MobileSnapshot: Decodable {
     /// payload where it is absent) leaves this nil and the app falls back to its built-in
     /// controls — see `MobileStore.serverAdvertises`.
     let catalog: ControlCatalog?
+    /// Server-built one-glance summary (`buildMobileBrief`).  Optional: older servers omit it.
+    let mobileBrief: MobileBrief?
     let readiness: Readiness
     let policy: PolicySummary
     let marketSession: String
@@ -78,6 +80,7 @@ struct MobileSnapshot: Decodable {
     private enum CodingKeys: String, CodingKey {
         case currentUser
         case catalog
+        case mobileBrief
         case readiness
         case policy
         case marketSession
@@ -116,6 +119,8 @@ struct MobileSnapshot: Decodable {
         // for `policy` — substituting `systemState: "stopped"` would hide an
         // actually active strategy.  Inner fields of a valid object still have
         // older-payload defaults in their own decoders.
+        // try?: display-only enrichment must never blank the snapshot.
+        mobileBrief = (try? values.decodeIfPresent(MobileBrief.self, forKey: .mobileBrief)) ?? nil
         readiness = try values.decode(Readiness.self, forKey: .readiness)
         policy = try values.decode(PolicySummary.self, forKey: .policy)
         marketSession = try values.decodeIfPresent(String.self, forKey: .marketSession) ?? "unknown"
@@ -244,6 +249,21 @@ struct ControlCatalog: Decodable, Equatable {
     var describesCommands: Bool {
         (commands?.isEmpty == false)
     }
+}
+
+struct MobileBrief: Decodable {
+    let headline: String
+    let summary: String
+    let items: [MobileBriefItem]
+    let nextActions: [String]
+    let generatedAt: String
+}
+
+struct MobileBriefItem: Decodable, Identifiable {
+    var id: String { label }
+    let label: String
+    let value: String
+    let tone: String?
 }
 
 struct CurrentUser: Decodable {

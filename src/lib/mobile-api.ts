@@ -121,6 +121,88 @@ export interface MobileClientInfo {
   deviceIdHash?: string;
 }
 
+
+export interface MobileBriefItem {
+  label: string;
+  value: string;
+  tone?: "ok" | "warn" | "danger" | "neutral";
+}
+
+export interface MobileBrief {
+  headline: string;
+  summary: string;
+  items: MobileBriefItem[];
+  nextActions: string[];
+  generatedAt: string;
+}
+
+function formatBriefMoney(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "n/a";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+
+function countByStatus(rows: Array<{ status?: string }> | undefined, status: string): number {
+  return rows?.filter((row) => row.status === status).length ?? 0;
+}
+
+export function buildMobileBrief(input: {
+  readiness: ReturnType<typeof mobileReadiness>;
+  portfolio?: { totalMarketValue?: unknown; buyingPower?: unknown } | null;
+  pendingProposals?: Array<{ executionMode?: string | null }>;
+  positions?: unknown[];
+  alerts?: Array<{ status?: string }>;
+  recentCommands?: Array<{ status?: string }>;
+  marketSession?: { label?: string; isOpen?: boolean } | string | null;
+  generatedAt?: string;
+}): MobileBrief {
+  const pending = input.pendingProposals?.length ?? 0;
+  const livePending = input.pendingProposals?.filter((proposal) => proposal.executionMode === "broker/live").length ?? 0;
+  const queued = input.readiness.commandBacklog.queued;
+  const running = input.readiness.commandBacklog.running;
+  const failedRecent = countByStatus(input.recentCommands, "failed");
+  const activeAlerts = countByStatus(input.alerts, "active");
+  const hasAccount = input.readiness.hasAccount;
+  const hasUniverse = input.readiness.hasUniverse;
+  const market = typeof input.marketSession === "string"
+    ? input.marketSession
+    : input.marketSession?.label ?? (input.marketSession?.isOpen ? "Open" : "Closed");
+
+  const blockers: string[] = [];
+  if (!hasAccount) blockers.push("connect an account");
+  if (!hasUniverse) blockers.push("choose a universe/watchlist");
+
+  const headline = blockers.length > 0
+    ? `Setup needed: ${blockers.join(" + ")}`
+    : pending > 0
+      ? `${pending} proposal${pending === 1 ? "" : "s"} waiting${livePending > 0 ? ` (${livePending} live)` : ""}`
+      : queued + running > 0
+        ? `${queued + running} mobile command${queued + running === 1 ? "" : "s"} in flight`
+        : `${input.readiness.systemState.replace(/_/g, " ")} / ${input.readiness.strategyAuthority.replace(/_/g, " ")}`;
+
+  const nextActions = blockers.length > 0
+    ? blockers.map((blocker) => `Finish setup: ${blocker}.`)
+    : pending > 0
+      ? ["Review pending proposals before they age.", livePending > 0 ? "Live approvals may require typed confirmation." : "Paper-account approvals still route through the broker account environment."]
+      : queued + running > 0
+        ? ["Watch command status until the queue drains."]
+        : ["Use Run once for a fresh scan or Start to resume autonomy."];
+
+  return {
+    headline,
+    summary: `${market} market; ${input.positions?.length ?? 0} position${(input.positions?.length ?? 0) === 1 ? "" : "s"}; ${activeAlerts} active alert${activeAlerts === 1 ? "" : "s"}.`,
+    items: [
+      { label: "Equity", value: formatBriefMoney(input.portfolio?.totalMarketValue), tone: "neutral" },
+      { label: "Buying power", value: formatBriefMoney(input.portfolio?.buyingPower), tone: "neutral" },
+      { label: "Pending", value: String(pending), tone: pending > 0 ? "warn" : "ok" },
+      { label: "Queue", value: `${queued} queued / ${running} running`, tone: queued + running > 0 ? "warn" : "ok" },
+      { label: "Recent failures", value: String(failedRecent), tone: failedRecent > 0 ? "danger" : "ok" }
+    ],
+    nextActions,
+    generatedAt: input.generatedAt ?? new Date().toISOString()
+  };
+}
+
 interface MobileCommandRecord {
   id: string;
   userId: string;

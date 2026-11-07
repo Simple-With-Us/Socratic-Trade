@@ -1,5 +1,5 @@
 import { getDashboardSnapshot } from "@/lib/dashboard";
-import { listMobileCommands, mobileControlCatalog, mobileReadiness } from "@/lib/mobile-api";
+import { buildMobileBrief, listMobileCommands, mobileControlCatalog, mobileReadiness } from "@/lib/mobile-api";
 import { withMobileEquityCurveCompat } from "@/lib/mobile-equity-curve-compat";
 import { compactMobileMarketScan } from "@/lib/mobile-scan";
 import { buildNotificationHistory } from "@/lib/notification-history";
@@ -16,14 +16,28 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   const user = resolveRequestUser(request);
   const snapshot = await getDashboardSnapshot(user.userId, user.email);
+  const readiness = mobileReadiness(user.userId);
+  const alerts = listAlerts(user.userId, "all");
+  const recentCommands = listMobileCommands({ userId: user.userId, limit: 30 });
+  const mobileBrief = buildMobileBrief({
+    readiness,
+    portfolio: snapshot.portfolio,
+    pendingProposals: snapshot.pendingProposals,
+    positions: snapshot.positions,
+    alerts,
+    recentCommands,
+    marketSession: snapshot.marketSession
+  });
+
   return NextResponse.json({
     // Server-side partial flag.  iOS ORs this with per-item decode drops so a timed-out
     // broker read pauses Owner Approve instead of looking like a complete book.
     partialData: snapshot.partialData === true,
     partialReason: snapshot.partialReason ?? null,
     currentUser: snapshot.currentUser,
+    mobileBrief,
     catalog: mobileControlCatalog(),
-    readiness: mobileReadiness(user.userId),
+    readiness,
     policy: {
       systemState: snapshot.policy.systemState,
       strategyAuthority: snapshot.policy.strategyAuthority,
@@ -55,7 +69,7 @@ export async function GET(request: Request) {
     performance: withMobileEquityCurveCompat(snapshot.performance),
     connectedAccounts: snapshot.connectedAccounts,
     watchlist: listWatchlist(user.userId),
-    alerts: listAlerts(user.userId, "all"),
+    alerts,
     notifications: buildNotificationHistory({
       notifications: snapshot.notifications,
       symbolMetaBySymbol: snapshot.symbolMetaBySymbol,
@@ -88,7 +102,7 @@ export async function GET(request: Request) {
           ? plainEnglishRunFailure({ status: group.status, summary: group.detail })
           : null
     })),
-    recentCommands: listMobileCommands({ userId: user.userId, limit: 30 }),
+    recentCommands,
     // Same last-good universe `/console/scan` paints when live Refresh 503s.
     latestScan: compactMobileMarketScan(snapshot.latestScan),
     weeklyMarketDigest: snapshot.weeklyMarketDigest

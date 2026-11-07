@@ -118,6 +118,34 @@ describe("mobile command gateway", () => {
     expect(getPolicy(userId, accountId).maxDailyPctOfNav).toBeUndefined();
   });
 
+  it("builds a mobile control brief from current readiness and command state", async () => {
+    const { buildMobileBrief, mobileReadiness, queueMobileCommand } = await import("../src/lib/mobile-api");
+    const userId = `mobile-brief-${randomUUID()}`;
+
+    queueMobileCommand({
+      userId,
+      commandType: "watchlist.add",
+      payload: { symbol: "MSFT" }
+    });
+
+    const brief = buildMobileBrief({
+      readiness: mobileReadiness(userId),
+      portfolio: { totalMarketValue: 12345, buyingPower: 6789 },
+      pendingProposals: [{ executionMode: "broker/live" }],
+      positions: [{ symbol: "MSFT" }],
+      alerts: [{ status: "active" }],
+      recentCommands: [{ status: "failed" }],
+      marketSession: { label: "Closed", isOpen: false },
+      generatedAt: "2026-07-22T00:00:00.000Z"
+    });
+
+    expect(brief.headline).toContain("Setup needed");
+    expect(brief.summary).toContain("Closed market");
+    expect(brief.items.find((item) => item.label === "Queue")).toMatchObject({ value: "1 queued / 0 running", tone: "warn" });
+    expect(brief.items.find((item) => item.label === "Recent failures")).toMatchObject({ value: "1", tone: "danger" });
+    expect(brief.generatedAt).toBe("2026-07-22T00:00:00.000Z");
+  });
+
   it("keeps command reads scoped to the authenticated user", async () => {
     const { queueMobileCommand, getMobileCommand, listMobileCommands } = await import("../src/lib/mobile-api");
     const owner = `owner-${randomUUID()}`;
