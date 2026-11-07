@@ -6,7 +6,7 @@ import type { LlmReasoningEffort } from "./types";
 export type OpenAiTransport = "responses" | "chat-completions";
 /** "rotation" is a UI-ONLY pseudo-provider for the "__rotate__" seat sentinel (see
  *  ROTATION_UI_REASONING_CAPABILITY) — no wire-shaping branch may ever match it. */
-export type LlmReasoningProvider = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "rotation";
+export type LlmReasoningProvider = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "minimax" | "meta" | "rotation";
 
 export interface LlmReasoningOption {
   value: LlmReasoningEffort;
@@ -116,12 +116,25 @@ function isAnthropicAdaptiveThinkingModel(model: string | undefined): boolean {
     /^claude-mythos-5(?:$|[-.:_])/.test(normalized) ||
     /^claude-opus-(?:5(?:\.5|-5)?|4-(?:6|7|8))(?:$|[-.:_])/.test(normalized) ||
     /^claude-sonnet-(?:5|4-6)(?:$|[-.:_])/.test(normalized) ||
+    // Haiku 5.5 (native claude-haiku-5-5): adaptive thinking, on by default, and any non-default
+    // temperature is a 400 on every request (platform.claude.com thinking docs, 2026-11-04).
+    /^claude-haiku-5(?:$|[-.:_])/.test(normalized) ||
     /^claude-(?:sonnet|haiku|opus|fable)-latest(?:$|[-.:_])/.test(normalized)
   );
 }
 
 function isXaiReasoningModel(model: string | undefined): boolean {
-  return /^(grok-4(?:\.(?:3|5|6))?|grok-(?:build-)?latest)(?:$|[-.:_])/i.test(lowerModel(model));
+  return /^(grok-4(?:\.(?:3|5|6|7))?|grok-(?:build-)?latest)(?:$|[-.:_])/i.test(lowerModel(model));
+}
+
+/** Grok 4.5+ (and the grok-latest alias): reasoning is mandatory, no "none". */
+function isModernXaiModel(model: string | undefined): boolean {
+  return /^(grok-4\.[5-7]|grok-latest)(?:$|[-.:_])/.test(lowerModel(model));
+}
+
+/** Grok 4.6+ (and grok-latest, which OpenRouter maps to grok-4.7 today) also accept xhigh. */
+function xaiSupportsXhigh(model: string | undefined): boolean {
+  return /^(grok-4\.[67]|grok-latest)(?:$|[-.:_])/.test(lowerModel(model));
 }
 
 function isGeminiModel(model: string | undefined): boolean {
@@ -145,12 +158,60 @@ function isMistralReasoningEffortModel(model: string | undefined): boolean {
   return /^(mistral-medium-3-5|mistral-medium-latest)(?:$|[-.:_])/.test(lowerModel(model));
 }
 
+/**
+ * Mistral Large 4 (catalog row mistral-large-latest, wire id mistral-large-4-0).  It reasons by
+ * default.  OpenRouter lists its efforts as high|none; Mistral's own guide lists low|medium|high and
+ * says it does NOT accept none.  "high" is the only value both document, so it is the only option.
+ * Deliberately does not match the older mistral-large-2512 / mistral-large-2407 ids.
+ */
+function isMistralLarge4Model(model: string | undefined): boolean {
+  return /^(mistral-large-latest|mistral-large-4(?:-0)?)(?:$|[.:_]|-(?!\d))/.test(lowerModel(model));
+}
+
+/** DeepSeek V4 / V4.1 Flash and Pro, the family-latest aliases, and the bare native ids
+ *  (deepseek-flash, deepseek-pro). */
 function isDeepSeekV4Model(model: string | undefined): boolean {
-  return /^(deepseek-v4-(?:flash|pro)|deepseek-(?:flash|pro)-latest)(?:$|[-.:_])/.test(lowerModel(model));
+  return /^(deepseek-v4(?:\.\d+)?-(?:flash|pro)|deepseek-(?:flash|pro)(?:-latest)?)(?:$|[-.:_])/.test(lowerModel(model));
 }
 
 function isGpt56Model(model: string | undefined): boolean {
   return /^(gpt-5\.6|gpt-5\.6-luna|gpt-5\.6-terra|gpt-5\.6-sol)(?:$|[-.:_])/i.test(lowerModel(model));
+}
+
+/** gpt-6.1-terra and gpt-6-luna: the full none-to-max ladder (OpenRouter supported_efforts,
+ *  2026-11-04; same ladder GPT-5.6 has). */
+function isGpt6NoneToMaxModel(model: string | undefined): boolean {
+  return /^(gpt-6\.1-terra|gpt-6-luna)(?:$|[-.:_])/i.test(lowerModel(model));
+}
+
+/** gpt-6.1-sol: reasoning is mandatory.  OpenAI's reasoning guide says it "does not support none
+ *  or minimal"; OpenRouter lists low..max. */
+function isGpt61SolModel(model: string | undefined): boolean {
+  return /^gpt-6\.1-sol(?:$|[-.:_])/i.test(lowerModel(model));
+}
+
+/** MiniMax-M3.1-Flash: effort low..max, thinking cannot be disabled, and the provider DEFAULT is
+ *  max (platform.minimax.io text-generation guide), so the app always sends an explicit effort.
+ *  MiniMax-M3 is deliberately NOT matched: neither MiniMax's guide nor OpenRouter's model list
+ *  documents an effort parameter for it. */
+function isMinimaxEffortModel(model: string | undefined): boolean {
+  return /^minimax-m3\.1-flash(?:$|[-.:_])/.test(lowerModel(model));
+}
+
+/** Muse Spark / Wonder (dev.meta.ai/docs/reasoning): minimal..max, "none" is a 400. */
+function isMuseEffortModel(model: string | undefined): boolean {
+  // `(?:$|…)`: the OpenRouter wire id for Wonder is the bare "meta/muse-wonder".
+  return /^muse-(?:spark|wonder)(?:$|[-.:_])/.test(lowerModel(model));
+}
+
+/** Contributor models do NOT accept max (Meta: "not available with muse-spark-1.3-contributor"). */
+function isMuseContributorModel(model: string | undefined): boolean {
+  return /^muse-.*-contributor(?:$|:)/.test(lowerModel(model));
+}
+
+/** Muse Glimmer: OpenRouter lists low..xhigh; Meta's guide does not cover it. */
+function isMuseGlimmerModel(model: string | undefined): boolean {
+  return /^muse-glimmer-/.test(lowerModel(model));
 }
 
 
@@ -162,6 +223,24 @@ export function reasoningCapabilityForModel(model: string | undefined): LlmReaso
       settingLabel: "Reasoning Effort",
       description: "GPT-5.6 supports the complete none-to-max reasoning ladder.",
       options: options(["none", "low", "medium", "high", "xhigh", "max"])
+    };
+  }
+  if (isGpt6NoneToMaxModel(model)) {
+    return {
+      provider: "openai",
+      label: "OpenAI Reasoning",
+      settingLabel: "Reasoning Effort",
+      description: "GPT-6.1 Terra and GPT-6 Luna support the complete none-to-max reasoning ladder.",
+      options: options(["none", "low", "medium", "high", "xhigh", "max"])
+    };
+  }
+  if (isGpt61SolModel(model)) {
+    return {
+      provider: "openai",
+      label: "OpenAI Reasoning",
+      settingLabel: "Reasoning Effort",
+      description: "GPT-6.1 Sol always reasons (no none or minimal); low through max are supported.",
+      options: options(["low", "medium", "high", "xhigh", "max"])
     };
   }
   if (isReasoningModel(model)) {
@@ -183,13 +262,13 @@ export function reasoningCapabilityForModel(model: string | undefined): LlmReaso
     };
   }
   if (isXaiReasoningModel(model)) {
-    const modern = /^(grok-4\.[56]|grok-latest)(?:$|[-.:_])/.test(lowerModel(model));
-    const supportsXhigh = /^(grok-4\.6|grok-latest)(?:$|[-.:_])/.test(lowerModel(model));
+    const modern = isModernXaiModel(model);
+    const supportsXhigh = xaiSupportsXhigh(model);
     return {
       provider: "xai",
       label: "Grok Reasoning",
       settingLabel: "Reasoning Effort",
-      description: modern ? "Grok 4.5/4.6 reasoning cannot be disabled; Grok 4.6 adds xhigh effort." : "Grok reasoning models accept none/low/medium/high effort.",
+      description: modern ? "Grok 4.5+ reasoning cannot be disabled; Grok 4.6 and 4.7 add xhigh effort." : "Grok reasoning models accept none/low/medium/high effort.",
       options: options(supportsXhigh ? ["low", "medium", "high", "xhigh"] : modern ? ["low", "medium", "high"] : ["none", "low", "medium", "high"])
     };
   }
@@ -219,6 +298,47 @@ export function reasoningCapabilityForModel(model: string | undefined): LlmReaso
       settingLabel: "Reasoning Effort",
       description: "Mistral Medium 3.5 accepts only high or none reasoning effort.",
       options: options(["none", "high"])
+    };
+  }
+  if (isMistralLarge4Model(model)) {
+    return {
+      provider: "mistral",
+      label: "Mistral Reasoning",
+      settingLabel: "Reasoning Effort",
+      description: "Mistral Large 4 always reasons; high is the only effort both OpenRouter and Mistral document.",
+      options: options(["high"])
+    };
+  }
+  if (isMinimaxEffortModel(model)) {
+    return {
+      provider: "minimax",
+      label: "MiniMax Thinking",
+      settingLabel: "Thinking Effort",
+      description: "MiniMax M3.1 Flash always thinks (it cannot be turned off) and defaults to max when no effort is sent, so the app always sends one.",
+      options: options(["low", "medium", "high", "xhigh", "max"])
+    };
+  }
+  if (isMuseEffortModel(model)) {
+    const contributor = isMuseContributorModel(model);
+    return {
+      provider: "meta",
+      // Distinct labels: the Strategy reasoning control de-duplicates capabilities by label, so a
+      // contributor seat must never borrow the non-contributor ladder (which includes max).
+      label: contributor ? "Muse Contributor Reasoning" : "Muse Reasoning",
+      settingLabel: "Reasoning Effort",
+      description: contributor
+        ? "Muse contributor models always reason and do not accept max; minimal through xhigh are supported."
+        : "Muse Spark and Wonder always reason (none is rejected); minimal through max are supported.",
+      options: options(contributor ? ["minimal", "low", "medium", "high", "xhigh"] : ["minimal", "low", "medium", "high", "xhigh", "max"])
+    };
+  }
+  if (isMuseGlimmerModel(model)) {
+    return {
+      provider: "meta",
+      label: "Muse Glimmer Reasoning",
+      settingLabel: "Reasoning Effort",
+      description: "Muse Glimmer always reasons; low through xhigh are supported.",
+      options: options(["low", "medium", "high", "xhigh"])
     };
   }
   if (isDeepSeekV4Model(model)) {
@@ -291,7 +411,7 @@ export function normalizeReasoningEffortForModel(
     if (effort === "high") return "high";
     return "none";
   }
-  if (capability.provider === "mistral") {
+  if (capability.provider === "mistral" && capability.options.some((option) => option.value === "none")) {
     // Mistral Medium 3.5 accepts exactly two efforts (provider 400: "supported values:
     // [high, none]"). Same opt-in rule as DeepSeek above: only an explicit high/xhigh/max
     // enables the slow high-reasoning tier; everything else — including the app's "medium"
