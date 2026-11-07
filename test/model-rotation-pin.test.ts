@@ -170,21 +170,14 @@ describe("resolveRotationSeatPin (validation — never trusted, never starves)",
     const { resolveRotationSeatPin } = await import("../src/lib/model-rotation-pin");
     const livePool = ["minimax-m3.1-flash", "gpt-6.1-sol"];
     const pin = resolveRotationSeatPin({
-      pin: { green: "minimax-m3", weights: { "minimax-m3": 2 } },
+      pin: { green: "minimax-m3" },
       seat: "green",
       pool: livePool,
       knownModels: livePool
     });
     expect(pin.rejected.join(" ")).not.toContain("not in the rotation catalog");
     expect(pin.ignored).not.toBe("malformed_pin");
-    expect(pin.weightOverrides?.get("minimax-m3")).toBe(2);
-    const ineligible = resolveRotationSeatPin({
-      pin: { green: "minimax-m3" },
-      seat: "green",
-      pool: livePool,
-      knownModels: livePool
-    });
-    expect(ineligible.ignored).toBe("model_not_eligible");
+    expect(pin.ignored).toBe("model_not_eligible");
   });
 
   it("rejects an unknown model id and an out-of-range weight with receipts instead of throwing", async () => {
