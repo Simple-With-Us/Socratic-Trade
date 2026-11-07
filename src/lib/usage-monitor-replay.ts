@@ -422,8 +422,8 @@ const DEFAULT_ROLLUP_GRACE_MS = 60_000;
 const MAX_ROLLUP_WINDOWS_PER_PASS = 12;
 const MAX_EVENTS_PER_POST = 100;
 
-/** Self-hosted Qdrant rows carry no cost and a record count mislabelled as tokens: not reported. */
-const ROLLUP_EXCLUDED_RAG_PROVIDERS = ["qdrant"] as const;
+// Self-hosted Qdrant rows are rolled up too, but as call volume (unit "request", no quantity, no
+// cost): see ragUsageEvent in usage-monitor-push.ts.  Their token columns hold a record count.
 
 function rollupMs(override: number | undefined, envName: string, fallback: number): number {
   if (typeof override === "number" && Number.isFinite(override) && override > 0) return Math.floor(override);
@@ -523,17 +523,16 @@ interface RagRollupGroup {
 
 async function ragWindowEvents(startIso: string, endIso: string, cursor: ReplayCursor | null): Promise<UsageMonitorEvent[]> {
   const after = afterCursorSql(cursor);
-  const excluded = ROLLUP_EXCLUDED_RAG_PROVIDERS.map(() => "?").join(", ");
   const groups = getDb()
     .prepare(
       "SELECT provider, operation, user_id, model, COUNT(*) AS rows, " +
       "SUM(COALESCE(tokens_in, 0)) AS tokens_in, SUM(COALESCE(tokens_out, 0)) AS tokens_out, " +
       "SUM(COALESCE(batch_count, 0)) AS batch_count, SUM(cost_est_usd) AS cost_usd " +
-      `FROM rag_usage WHERE created_at >= ? AND created_at < ? AND provider NOT IN (${excluded})${after.sql} ` +
+      `FROM rag_usage WHERE created_at >= ? AND created_at < ?${after.sql} ` +
       "GROUP BY provider, operation, user_id, model " +
       "ORDER BY provider, operation, user_id, COALESCE(model, '')"
     )
-    .all(startIso, endIso, ...ROLLUP_EXCLUDED_RAG_PROVIDERS, ...after.params) as RagRollupGroup[];
+    .all(startIso, endIso, ...after.params) as RagRollupGroup[];
   return Promise.all(
     groups.map((group) =>
       createRagRollupUsageMonitorEvent({

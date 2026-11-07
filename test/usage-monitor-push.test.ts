@@ -342,6 +342,57 @@ describe("usage-monitor-push", () => {
     expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "rag")).toHaveLength(0);
   });
 
+  it("builds a Qdrant rollup event as request volume and leaves other providers' shape alone", async () => {
+    const window = { windowStart: "2026-07-11T18:00:00.000Z", windowEnd: "2026-07-11T18:10:00.000Z" };
+    const qdrant = await push.createRagRollupUsageMonitorEvent({
+      ...window,
+      provider: "qdrant",
+      operation: "upsert",
+      userId: "local",
+      requests: 3,
+      tokensIn: 0,
+      tokensOut: 140,
+      batchCount: 140,
+      costUsd: 0.5, // never reported for Qdrant, even if a cost were present
+    });
+    expect(qdrant).toMatchObject({
+      service: "rag",
+      provider: "qdrant",
+      label: "upsert",
+      unit: "request",
+      requests: 3,
+      metricType: "usage",
+      occurredAt: window.windowStart,
+      windowStart: window.windowStart,
+      windowEnd: window.windowEnd,
+      metadata: { batchCount: 140, recordCount: 140 },
+    });
+    expect(qdrant.quantity).toBeUndefined();
+    expect(qdrant.costUsd).toBeUndefined();
+    expect(["request", "call", "token", "credit", "usd", "page", "job", "document", "row", "byte"])
+      .toContain(qdrant.unit);
+    // The idempotency key is the same pure function of window and group as for every provider.
+    const again = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "qdrant", operation: "upsert", userId: "local", requests: 3,
+      tokensIn: 0, tokensOut: 140, batchCount: 140,
+    });
+    expect(again.eventId).toBe(qdrant.eventId);
+
+    const voyage = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "voyage", operation: "embed", model: "voyage-finance-2", userId: "local",
+      requests: 2, tokensIn: 240, tokensOut: 0, batchCount: 2, costUsd: 0.003,
+    });
+    expect(voyage).toMatchObject({ unit: "token", quantity: 240, costUsd: 0.003, metricType: "cost", requests: 2 });
+    expect(voyage.metadata).toMatchObject({ batchCount: 2 });
+    expect((voyage.metadata as Record<string, unknown>).recordCount ?? null).toBeNull();
+
+    const pinecone = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "pinecone", operation: "query", userId: "local",
+      requests: 1, tokensIn: 5, tokensOut: 8, batchCount: 1,
+    });
+    expect(pinecone).toMatchObject({ unit: "credit", quantity: 5, metadata: { recordCount: 8 } });
+  });
+
   it("replays the same source identity with a stable key and occurredAt", async () => {
     const captured: CapturedRequest[] = [];
     push.__setUsageMonitorFetch(makeFetchStub(captured));
