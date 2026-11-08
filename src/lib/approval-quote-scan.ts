@@ -39,6 +39,8 @@ export function buildApprovalQuoteScan(
       provider: quote.provider,
       ...(quote.asOf ? { asOf: quote.asOf } : {}),
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
+      expectedDelaySec: quote.expectedDelaySec,
+      delayToleranceSec: quote.delayToleranceSec,
       fetchedAt: quote.fetchedAt,
       delayedFallback: quote.delayedFallback,
       sector: position?.sector,

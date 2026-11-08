@@ -31,6 +31,7 @@ import {
 } from "./db";
 import { getSymbolLatestPrices } from "./db-fundamentals";
 import { buildAuditFeed, buildSymbolMetaBySymbol, buildUnifiedFeed } from "./dashboard-feed";
+import { applyPositionPriceFallback } from "./dashboard-price-fallback";
 import type { StrategyDecisionLike } from "./dashboard-feed";
 import { currentMarketSession } from "./market-hours";
 import { isUnusableEmptyMarketScan } from "./scan-singleflight";
@@ -933,10 +934,10 @@ async function computeDashboardSnapshot(userId: string = "local", currentUser?: 
               .filter((quote) => typeof quote.price === "number" && quote.price > 0)
               .map((quote) => [normalizeSymbol(quote.symbol), quote.price as number] as const)
           );
-          for (const position of positions) {
-            const symbol = normalizeSymbol(position.symbol);
-            if (!(symbol in currentPrices) && position.quantity > 0) currentPrices[symbol] = position.marketValue / position.quantity;
-          }
+          // A symbol the delayed venue tape did not price stays MISSING.  Filling
+          // it from position.marketValue would show a derived cost basis as if it
+          // were a live quote (applyPositionPriceFallback).
+          currentPrices = applyPositionPriceFallback(currentPrices, positions, venueMode);
         }
       }
 
