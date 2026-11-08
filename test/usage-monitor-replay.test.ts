@@ -96,6 +96,28 @@ function insertRag(input: {
     .run(input.id, input.provider ?? "voyage", input.costUsd ?? null, input.createdAt);
 }
 
+function insertQdrantRag(input: {
+  id: string;
+  createdAt: string;
+  operation: "query" | "upsert";
+  records: number;
+  userId?: string;
+  model?: string | null;
+}): void {
+  // Qdrant meters a record count as tokens_out and batch_count, with tokens_in 0 and no cost.
+  getDb()
+    .prepare(
+      `INSERT INTO rag_usage (
+        id, user_id, operation, provider, model, tokens_in, tokens_out,
+        batch_count, cost_est_usd, created_at
+      ) VALUES (?, ?, ?, 'qdrant', ?, 0, ?, ?, NULL, ?)`
+    )
+    .run(input.id, input.userId ?? "local", input.operation, input.model ?? null, input.records, input.records, input.createdAt);
+}
+
+// The units the Usage Monitor accepts (request|call|token|credit|usd|page|job|document|row|byte).
+const UM_ACCEPTED_UNITS = ["request", "call", "token", "credit", "usd", "page", "job", "document", "row", "byte"];
+
 function storedWatermark(key: string): { createdAt: string; id: string } | null {
   const row = getDb()
     .prepare("SELECT value FROM settings WHERE key = ?")
@@ -492,7 +514,7 @@ describe("usage monitor durable replay", () => {
     expect(events[0]!.costUsd).toBeCloseTo(0.003, 9);
   });
 
-  it("sums per group, splits groups, and leaves self-hosted Qdrant out of the feed", async () => {
+  it("sums per group, splits groups, and reports self-hosted Qdrant as call volume", async () => {
     insertRag({ id: "rag-v-1", createdAt: "2026-07-10T16:01:00.000Z", costUsd: 0.001 });
     insertRag({ id: "rag-v-2", createdAt: "2026-07-10T16:02:00.000Z", costUsd: 0.001 });
     insertRag({ id: "rag-o-1", createdAt: "2026-07-10T16:03:00.000Z", provider: "openrouter", costUsd: 0.0005 });
@@ -504,16 +526,120 @@ describe("usage monitor durable replay", () => {
 
     const result = await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T17:00:00.000Z") });
 
-    expect(result.rag).toEqual({ sent: 3, complete: true, failed: false });
+    expect(result.rag).toEqual({ sent: 4, complete: true, failed: false });
     const events = captured.flatMap((request) => request.body.events);
     expect(events.map((e) => `${e.provider}:${e.windowStart}:${e.requests}`)).toEqual([
       "openrouter:2026-07-10T16:00:00.000Z:1",
+      "qdrant:2026-07-10T16:00:00.000Z:2",
       "voyage:2026-07-10T16:00:00.000Z:2",
       "voyage:2026-07-10T16:10:00.000Z:1",
     ]);
-    expect(events.some((e) => e.provider === "qdrant")).toBe(false);
-    // The watermark still moves past the Qdrant rows and the whole ledger.
     expect(storedWatermark(replay.USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag)?.id).toBe("rag-next");
+  });
+
+  it("reports closed Qdrant windows as request counts with no quantity or cost", async () => {
+    insertQdrantRag({ id: "q-query-1", createdAt: "2026-07-10T16:01:00.000Z", operation: "query", records: 8 });
+    insertQdrantRag({ id: "q-query-2", createdAt: "2026-07-10T16:02:00.000Z", operation: "query", records: 8 });
+    insertQdrantRag({ id: "q-query-3", createdAt: "2026-07-10T16:03:00.000Z", operation: "query", records: 5 });
+    insertQdrantRag({ id: "q-upsert-1", createdAt: "2026-07-10T16:04:00.000Z", operation: "upsert", records: 100 });
+    insertQdrantRag({ id: "q-upsert-2", createdAt: "2026-07-10T16:05:00.000Z", operation: "upsert", records: 40 });
+    insertQdrantRag({ id: "q-upsert-other", createdAt: "2026-07-10T16:06:00.000Z", operation: "upsert", records: 7, userId: "other" });
+    insertRag({ id: "ctl-openrouter", createdAt: "2026-07-10T16:07:00.000Z", provider: "openrouter", costUsd: 0.0005 });
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+
+    const result = await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T17:00:00.000Z") });
+
+    expect(result.rag).toEqual({ sent: 4, complete: true, failed: false });
+    const events = captured.flatMap((request) => request.body.events);
+    // Control: the capture fixture is live, so the Qdrant assertions below cannot pass vacuously.
+    expect(events.filter((e) => e.provider === "openrouter")).toHaveLength(1);
+
+    const qdrant = events.filter((e) => e.provider === "qdrant");
+    expect(qdrant).toHaveLength(3);
+    const byLabel = new Map(qdrant.map((e) => [`${e.label}:${(e.metadata as { userId: string }).userId}`, e]));
+    for (const [key, requests, records] of [
+      ["query:local", 3, 21],
+      ["upsert:local", 2, 140],
+      ["upsert:other", 1, 7],
+    ] as const) {
+      const event = byLabel.get(key)!;
+      expect(event).toMatchObject({
+        service: "rag",
+        unit: "request",
+        requests,
+        metricType: "usage",
+        windowStart: "2026-07-10T16:00:00.000Z",
+        windowEnd: "2026-07-10T16:10:00.000Z",
+        occurredAt: "2026-07-10T16:00:00.000Z",
+        metadata: { batchCount: records, recordCount: records },
+      });
+      expect(event).not.toHaveProperty("quantity");
+      expect(event).not.toHaveProperty("costUsd");
+      expect(UM_ACCEPTED_UNITS).toContain(event.unit);
+    }
+    expect(new Set(qdrant.map((e) => e.eventId)).size).toBe(3);
+  });
+
+  it("sends nothing for an open Qdrant window", async () => {
+    insertQdrantRag({ id: "q-open-1", createdAt: "2026-07-10T15:01:00.000Z", operation: "query", records: 3 });
+    insertRag({ id: "ctl-open", createdAt: "2026-07-10T15:02:00.000Z", provider: "openrouter", costUsd: 0.001 });
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+    const windowEnd = Date.parse("2026-07-10T15:10:00.000Z");
+
+    const open = await replay.runUsageMonitorReplay({ nowMs: windowEnd + 59_000 });
+    expect(open.rag).toEqual({ sent: 0, complete: true, failed: false });
+    expect(captured).toHaveLength(0);
+
+    const closed = await replay.runUsageMonitorReplay({ nowMs: windowEnd + 60_000 });
+    expect(closed.rag).toEqual({ sent: 2, complete: true, failed: false });
+    const events = captured.flatMap((request) => request.body.events);
+    // Control: the openrouter event is captured alongside the Qdrant one.
+    expect(events.map((e) => e.provider).sort()).toEqual(["openrouter", "qdrant"]);
+  });
+
+  it("keeps a mixed openrouter and Qdrant window as one token event plus separate request events", async () => {
+    insertRag({ id: "mix-or-1", createdAt: "2026-07-10T16:01:00.000Z", provider: "openrouter", costUsd: 0.0005 });
+    insertRag({ id: "mix-or-2", createdAt: "2026-07-10T16:02:00.000Z", provider: "openrouter", costUsd: 0.0007 });
+    insertQdrantRag({ id: "mix-q-1", createdAt: "2026-07-10T16:03:00.000Z", operation: "query", records: 4 });
+    insertQdrantRag({ id: "mix-q-2", createdAt: "2026-07-10T16:04:00.000Z", operation: "upsert", records: 9 });
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+
+    await replay.runUsageMonitorReplay({ nowMs: Date.parse("2026-07-10T17:00:00.000Z") });
+
+    const events = captured.flatMap((request) => request.body.events);
+    const tokenEvents = events.filter((e) => e.unit === "token");
+    expect(tokenEvents).toHaveLength(1);
+    expect(tokenEvents[0]).toMatchObject({ provider: "openrouter", requests: 2, quantity: 240, metricType: "cost" });
+    expect(tokenEvents[0]!.costUsd).toBeCloseTo(0.0012, 9);
+    const requestEvents = events.filter((e) => e.unit === "request");
+    expect(requestEvents.map((e) => `${e.provider}:${e.label}:${e.requests}`)).toEqual([
+      "qdrant:query:1",
+      "qdrant:upsert:1",
+    ]);
+  });
+
+  it("rebuilds byte-identical Qdrant events after a crash before the watermark write", async () => {
+    insertQdrantRag({ id: "crash-q-1", createdAt: "2026-07-10T16:01:00.000Z", operation: "query", records: 6 });
+    insertQdrantRag({ id: "crash-q-2", createdAt: "2026-07-10T16:02:00.000Z", operation: "upsert", records: 30 });
+    insertRag({ id: "crash-ctl", createdAt: "2026-07-10T16:03:00.000Z", provider: "openrouter", costUsd: 0.001 });
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(fetchStub(captured));
+    const nowMs = Date.parse("2026-07-10T17:00:00.000Z");
+
+    const first = await replay.runUsageMonitorReplay({ nowMs });
+    expect(first.rag).toEqual({ sent: 3, complete: true, failed: false });
+    const firstRaw = captured.map((request) => request.rawBody);
+    expect(captured.flatMap((request) => request.body.events).filter((e) => e.provider === "qdrant")).toHaveLength(2);
+    captured.length = 0;
+
+    getDb().prepare("DELETE FROM settings WHERE key = ?")
+      .run(replay.USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag);
+    const second = await replay.runUsageMonitorReplay({ nowMs });
+    expect(second.rag).toEqual({ sent: 3, complete: true, failed: false });
+    expect(captured.map((request) => request.rawBody)).toEqual(firstRaw);
   });
 
   it("seeds the rollup watermark on first start so already-delivered rows are not counted again", async () => {

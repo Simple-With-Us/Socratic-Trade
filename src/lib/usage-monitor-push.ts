@@ -757,7 +757,12 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
     : (entry.tokensIn ?? 0) + (entry.tokensOut ?? 0);
   // Voyage embed/rerank quantities are token estimates. Pinecone query/upsert quantities are
   // Read/Write Units in tokensIn, with records kept separately in metadata.
-  const unit: UsageUnit = isPinecone ? "credit" : "token";
+  // Self-hosted Qdrant has no cost, and its token columns hold a record count (tokens_out =
+  // batch_count = recordCount), not tokens.  Its closed-window rollup therefore reports call volume
+  // only: unit "request" (singular, the monitor's enum), requests = row count, no quantity or cost,
+  // with the record count kept in metadata.
+  const isQdrantRollup = entry.provider === "qdrant" && Boolean(entry.windowStart);
+  const unit: UsageUnit = isQdrantRollup ? "request" : isPinecone ? "credit" : "token";
   return {
     environment: usageMonitorEnv(),
     provider: entry.provider,
@@ -766,10 +771,10 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
     label: entry.operation,
     producerKeyRef: undefined, // RAG keys are app-funded; no per-attached-key fingerprint today
     billingMode: "estimated",
-    metricType: hasCost ? "cost" : "usage",
-    quantity: quantity > 0 ? quantity : undefined,
+    metricType: hasCost && !isQdrantRollup ? "cost" : "usage",
+    quantity: quantity > 0 && !isQdrantRollup ? quantity : undefined,
     unit,
-    costUsd: hasCost ? entry.costUsd : undefined,
+    costUsd: hasCost && !isQdrantRollup ? entry.costUsd : undefined,
     requests: finiteCount(entry.requests) ?? 1,
     confidence: "estimated",
     occurredAt: entry.occurredAt ?? new Date().toISOString(),
@@ -781,7 +786,7 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
       operation: entry.operation,
       userId: entry.userId,
       batchCount: entry.batchCount ?? null,
-      recordCount: isPinecone ? entry.tokensOut ?? null : null,
+      recordCount: isPinecone ? entry.tokensOut ?? null : isQdrantRollup ? entry.batchCount ?? null : null,
       // Voyage/SiliconFlow bypass OpenRouter entirely (no request-side trace enrichment is
       // possible), so this is the ONLY place their classifier context is ever recorded — sourced
       // locally, never inferred from the provider response.
