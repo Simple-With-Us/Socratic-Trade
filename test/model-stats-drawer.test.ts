@@ -15,7 +15,7 @@ describe("deriveRetiredModelIds", () => {
 
   it("returns stats ids that are not in the catalog, sorted", () => {
     const statsModelIds = ["gpt-6-astra", "minimax-m2.7", "gpt-4o-mini", "gemini-flash-latest"];
-    const catalogModelIds = ["gpt-6-astra", "gemini-flash-latest", "minimax-m3"];
+    const catalogModelIds = ["gpt-6-astra", "gemini-flash-latest", "minimax-m3.1-flash"];
     expect(deriveRetiredModelIds(statsModelIds, catalogModelIds)).toEqual(["gpt-4o-mini", "minimax-m2.7"]);
   });
 
