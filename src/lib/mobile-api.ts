@@ -142,6 +142,25 @@ function formatBriefMoney(value: unknown): string {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
+const MARKET_SESSION_WORDS: Record<string, string> = {
+  regular: "Open",
+  pre: "Pre-market",
+  post: "After-hours",
+  closed: "Closed"
+};
+
+function briefMarketLabel(session: { label?: string; isOpen?: boolean } | string | null | undefined): string {
+  if (typeof session === "string") {
+    const known = MARKET_SESSION_WORDS[session];
+    if (known) return known;
+    return session ? session.charAt(0).toUpperCase() + session.slice(1) : "-";
+  }
+  if (!session) return "-";
+  if (session.label) return session.label;
+  if (typeof session.isOpen === "boolean") return session.isOpen ? "Open" : "Closed";
+  return "-";
+}
+
 function countByStatus(rows: Array<{ status?: string }> | undefined, status: string): number {
   return rows?.filter((row) => row.status === status).length ?? 0;
 }
@@ -154,19 +173,23 @@ export function buildMobileBrief(input: {
   alerts?: Array<{ status?: string }>;
   recentCommands?: Array<{ status?: string }>;
   marketSession?: { label?: string; isOpen?: boolean } | string | null;
+  /** The connected account's mode; a pending row with no executionMode stamp runs in it. */
+  currentMode?: "broker/paper" | "broker/live";
+  /** True when the snapshot is degraded and its lists may be defaulted. */
+  partialData?: boolean;
   generatedAt?: string;
 }): MobileBrief {
   const pending = input.pendingProposals?.length ?? 0;
-  const livePending = input.pendingProposals?.filter((proposal) => proposal.executionMode === "broker/live").length ?? 0;
+  const livePending = input.pendingProposals?.filter((proposal) => (proposal.executionMode ?? input.currentMode) === "broker/live").length ?? 0;
   const queued = input.readiness.commandBacklog.queued;
   const running = input.readiness.commandBacklog.running;
   const failedRecent = countByStatus(input.recentCommands, "failed");
-  const activeAlerts = countByStatus(input.alerts, "active");
+  // PriceAlertStatus is "armed" | "triggered";  an armed alert is the live one.
+  const activeAlerts = countByStatus(input.alerts, "armed");
   const hasAccount = input.readiness.hasAccount;
   const hasUniverse = input.readiness.hasUniverse;
-  const market = typeof input.marketSession === "string"
-    ? input.marketSession
-    : input.marketSession?.label ?? (input.marketSession?.isOpen ? "Open" : "Closed");
+  const market = briefMarketLabel(input.marketSession);
+  const partialNote = input.partialData === true ? " Some account data did not load, so counts may be incomplete." : "";
 
   const blockers: string[] = [];
   if (!hasAccount) blockers.push("connect an account");
@@ -190,7 +213,7 @@ export function buildMobileBrief(input: {
 
   return {
     headline,
-    summary: `${market} market; ${input.positions?.length ?? 0} position${(input.positions?.length ?? 0) === 1 ? "" : "s"}; ${activeAlerts} active alert${activeAlerts === 1 ? "" : "s"}.`,
+    summary: `${market} market; ${input.positions?.length ?? 0} position${(input.positions?.length ?? 0) === 1 ? "" : "s"}; ${activeAlerts} active alert${activeAlerts === 1 ? "" : "s"}.${partialNote}`,
     items: [
       { label: "Equity", value: formatBriefMoney(input.portfolio?.totalMarketValue), tone: "neutral" },
       { label: "Buying power", value: formatBriefMoney(input.portfolio?.buyingPower), tone: "neutral" },

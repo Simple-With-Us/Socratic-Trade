@@ -13,6 +13,14 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function activeAccountMode(
+  accounts: Array<{ isActive?: boolean; environment?: string }> | undefined
+): "broker/paper" | "broker/live" | undefined {
+  const account = accounts?.find((a) => a.isActive);
+  if (!account) return undefined;
+  return account.environment === "paper" ? "broker/paper" : "broker/live";
+}
+
 export async function GET(request: Request) {
   const user = resolveRequestUser(request);
   const snapshot = await getDashboardSnapshot(user.userId, user.email);
@@ -26,7 +34,10 @@ export async function GET(request: Request) {
     positions: snapshot.positions,
     alerts,
     recentCommands,
-    marketSession: snapshot.marketSession
+    marketSession: snapshot.marketSession,
+    // Same rule as the console's deriveReality():  the active account's environment.
+    currentMode: activeAccountMode(snapshot.connectedAccounts),
+    partialData: snapshot.partialData === true
   });
 
   return NextResponse.json({

@@ -133,7 +133,7 @@ describe("mobile command gateway", () => {
       portfolio: { totalMarketValue: 12345, buyingPower: 6789 },
       pendingProposals: [{ executionMode: "broker/live" }],
       positions: [{ symbol: "MSFT" }],
-      alerts: [{ status: "active" }],
+      alerts: [{ status: "armed" }, { status: "triggered" }],
       recentCommands: [{ status: "failed" }],
       marketSession: { label: "Closed", isOpen: false },
       generatedAt: "2026-07-22T00:00:00.000Z"
@@ -141,9 +141,29 @@ describe("mobile command gateway", () => {
 
     expect(brief.headline).toContain("Setup needed");
     expect(brief.summary).toContain("Closed market");
+    expect(brief.summary).toContain("1 active alert.");
     expect(brief.items.find((item) => item.label === "Queue")).toMatchObject({ value: "1 queued / 0 running", tone: "warn" });
     expect(brief.items.find((item) => item.label === "Recent failures")).toMatchObject({ value: "1", tone: "danger" });
     expect(brief.generatedAt).toBe("2026-07-22T00:00:00.000Z");
+  });
+
+  it("labels session tokens, counts unstamped live approvals and flags partial data in the brief", async () => {
+    const { buildMobileBrief, mobileReadiness } = await import("../src/lib/mobile-api");
+    const base = { readiness: mobileReadiness(`mobile-brief-${randomUUID()}`), generatedAt: "2026-07-22T00:00:00.000Z" };
+
+    expect(buildMobileBrief({ ...base, marketSession: "regular" }).summary).toContain("Open market");
+    expect(buildMobileBrief({ ...base, marketSession: "pre" }).summary).toContain("Pre-market market");
+    expect(buildMobileBrief({ ...base, marketSession: null }).summary).toContain("- market");
+
+    const unstampedLive = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/live" });
+    const unstampedPaper = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/paper" });
+    if (!unstampedLive.headline.startsWith("Setup needed")) {
+      expect(unstampedLive.headline).toContain("(1 live)");
+      expect(unstampedPaper.headline).not.toContain("live");
+    }
+
+    expect(buildMobileBrief({ ...base, partialData: true }).summary).toContain("counts may be incomplete");
+    expect(buildMobileBrief({ ...base }).summary).not.toContain("counts may be incomplete");
   });
 
   it("keeps command reads scoped to the authenticated user", async () => {
