@@ -179,9 +179,10 @@ export function recordRagUsage(entry: RagUsageEntry): void {
       );
     // No live push to the API Usage Monitor.  RAG rows reach it only through the replay lane's
     // closed 10-minute windows (usage-monitor-replay.ts):  one summed row per provider, operation,
-    // user and model instead of one per call, with self-hosted Qdrant left out (no cost, and its
-    // quantity was a record count mislabelled as tokens).  Live plus replay both sending per-row
-    // events was most of the ~8,000 rows a day this family produced.
+    // user and model instead of one per call.  Self-hosted Qdrant is rolled up as call volume
+    // only (unit "request", requests = rows, no quantity or cost, record count in metadata),
+    // because its token columns hold a record count and it has no cost.  Live plus replay both
+    // sending per-row events was most of the ~8,000 rows a day this family produced.
   } catch {
     /* ledger is best-effort; never break the caller */
   }
