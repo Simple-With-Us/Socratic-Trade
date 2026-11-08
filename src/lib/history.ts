@@ -285,7 +285,15 @@ export async function fetchDailyOHLC(
   rawSymbol: string,
   now: number = Date.now(),
   userId?: string,
-  opts?: { skipAppATier?: boolean; usageLabel?: string; lookbackDays?: number },
+  opts?: {
+    skipAppATier?: boolean;
+    usageLabel?: string;
+    lookbackDays?: number;
+    /** Skip the in-process series cache.  The Congress.Trade stale catch-up sets this: a stale tail
+     *  fetched on a Friday night is cached until Monday's open (expiresAtRespectingMarketClose), so
+     *  without it every retry would be served the same pinned bars and never ask a provider. */
+    bypassMemoryCache?: boolean;
+  },
 ): Promise<OHLCBar[] | null> {
   const symbol = normalizeSymbol(rawSymbol);
   if (!symbol) return null;
@@ -309,14 +317,16 @@ export async function fetchDailyOHLC(
   const sharedCacheKey = historyCacheKey(symbol, userId, "shared", lookbackDays);
 
   const consented = hasDataPoolConsent(userId ?? "local");
-  const privateHit = cache.get(privateCacheKey);
-  if (privateHit && privateHit.expiresAt > now) return privateHit.bars;
-  if (consented) {
-    const poolHit = cache.get(poolCacheKey);
-    if (poolHit && poolHit.expiresAt > now) return poolHit.bars;
+  if (!opts?.bypassMemoryCache) {
+    const privateHit = cache.get(privateCacheKey);
+    if (privateHit && privateHit.expiresAt > now) return privateHit.bars;
+    if (consented) {
+      const poolHit = cache.get(poolCacheKey);
+      if (poolHit && poolHit.expiresAt > now) return poolHit.bars;
+    }
+    const sharedHit = cache.get(sharedCacheKey);
+    if (sharedHit && sharedHit.expiresAt > now) return sharedHit.bars;
   }
-  const sharedHit = cache.get(sharedCacheKey);
-  if (sharedHit && sharedHit.expiresAt > now) return sharedHit.bars;
 
   // 1. Evaluate local SQLite history cache. Rows are permanent. A fresh series
   //    short-circuits the network only when it covers the requested start, or when

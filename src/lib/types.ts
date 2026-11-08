@@ -1068,6 +1068,20 @@ export interface BrokerQuote {
    * continue.  (Codex P1 review on the quote cascade.)
    */
   venueDelayedTape?: boolean;
+  /**
+   * Documented expected publication delay of this quote's tape, in seconds.
+   * Alpaca PAPER trades on the `delayed_sip` feed (~900s).  When this is set,
+   * an `asOf` age near the expected delay is NORMAL — it must not trip the
+   * real-time staleness gate — but the timestamp is still checked
+   * independently: lag beyond `expectedDelaySec + delayToleranceSec` is
+   * EXCESS delay and is flagged (see `alpaca-paper-quotes.ts`).
+   */
+  expectedDelaySec?: number;
+  /**
+   * Tolerance (seconds) allowed ON TOP of `expectedDelaySec` before the lag
+   * counts as excess. Defaults to the Alpaca PAPER tolerance (120s).
+   */
+  delayToleranceSec?: number;
   /** Previous session closing price. Used for intraday price change and % change calculations. */
   prevClose?: number;
   /** Today's session opening price. */
@@ -2208,6 +2222,10 @@ export interface MarketQuote {
   asOf?: string;
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
   /** See BrokerQuote.fetchedAt. */
   fetchedAt?: string;
   /** See BrokerQuote.delayedFallback — carried through mergeQuoteData for approval cards. */
@@ -2493,6 +2511,10 @@ export interface MarketQuoteSummary {
   asOf?: string;
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
   /** See BrokerQuote.fetchedAt. */
   fetchedAt?: string;
   /** See BrokerQuote.delayedFallback. */
@@ -2581,6 +2603,12 @@ export interface MarketDataProviderOptions {
   seedEnrichment?: Record<string, MarketQuoteSummary>;
   /** Epoch ms when the strategy gather wall expires.  Drives internal wave budget. */
   deadlineAt?: number;
+  /**
+   * The connected account the scan is operating for.  Used to pick an
+   * ACCOUNT-SCOPED market-data tape (Alpaca PAPER → `delayed_sip`) without
+   * touching any process-global feed setting.
+   */
+  connectedAccountId?: string;
 }
 
 export interface MarketDataProvider {

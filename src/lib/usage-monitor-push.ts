@@ -742,6 +742,11 @@ export interface RagUsageMonitorEntry {
   /** OpenRouter's generation id for this call (embed/rerank via `baai/bge-m3`/`cohere/rerank-v3.5`).
    *  Undefined for Voyage/SiliconFlow/Pinecone — see `providerRequestIdFromPayload` in llm-usage.ts. */
   providerRequestId?: string;
+  /** Ledger rows this event covers.  Absent = one (the per-row event); a rollup sets the row count. */
+  requests?: number;
+  /** Closed rollup window (ISO).  Only the windowed rollup event sets these. */
+  windowStart?: string;
+  windowEnd?: string;
 }
 
 function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
@@ -752,7 +757,12 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
     : (entry.tokensIn ?? 0) + (entry.tokensOut ?? 0);
   // Voyage embed/rerank quantities are token estimates. Pinecone query/upsert quantities are
   // Read/Write Units in tokensIn, with records kept separately in metadata.
-  const unit: UsageUnit = isPinecone ? "credit" : "token";
+  // Self-hosted Qdrant has no cost, and its token columns hold a record count (tokens_out =
+  // batch_count = recordCount), not tokens.  Its closed-window rollup therefore reports call volume
+  // only: unit "request" (singular, the monitor's enum), requests = row count, no quantity or cost,
+  // with the record count kept in metadata.
+  const isQdrantRollup = entry.provider === "qdrant" && Boolean(entry.windowStart);
+  const unit: UsageUnit = isQdrantRollup ? "request" : isPinecone ? "credit" : "token";
   return {
     environment: usageMonitorEnv(),
     provider: entry.provider,
@@ -761,20 +771,22 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
     label: entry.operation,
     producerKeyRef: undefined, // RAG keys are app-funded; no per-attached-key fingerprint today
     billingMode: "estimated",
-    metricType: hasCost ? "cost" : "usage",
-    quantity: quantity > 0 ? quantity : undefined,
+    metricType: hasCost && !isQdrantRollup ? "cost" : "usage",
+    quantity: quantity > 0 && !isQdrantRollup ? quantity : undefined,
     unit,
-    costUsd: hasCost ? entry.costUsd : undefined,
-    requests: 1,
+    costUsd: hasCost && !isQdrantRollup ? entry.costUsd : undefined,
+    requests: finiteCount(entry.requests) ?? 1,
     confidence: "estimated",
     occurredAt: entry.occurredAt ?? new Date().toISOString(),
+    ...(entry.windowStart ? { windowStart: entry.windowStart } : {}),
+    ...(entry.windowEnd ? { windowEnd: entry.windowEnd } : {}),
     providerRequestId: entry.providerRequestId,
     metadata: cleanMetadata({
       model: entry.model ?? null,
       operation: entry.operation,
       userId: entry.userId,
       batchCount: entry.batchCount ?? null,
-      recordCount: isPinecone ? entry.tokensOut ?? null : null,
+      recordCount: isPinecone ? entry.tokensOut ?? null : isQdrantRollup ? entry.batchCount ?? null : null,
       // Voyage/SiliconFlow bypass OpenRouter entirely (no request-side trace enrichment is
       // possible), so this is the ONLY place their classifier context is ever recorded — sourced
       // locally, never inferred from the provider response.
@@ -799,6 +811,37 @@ export async function createRagUsageMonitorEvent(
   return {
     ...ragUsageEvent(entry),
     eventId: await telemetryIdempotencyKey("rag", entry.sourceEventId),
+  };
+}
+
+/** Delivery identity of one closed rollup window group.  Pure in (kind, window, group key), so a
+ *  crash replay rebuilds the identical event and the monitor dedupes it instead of 409-ing. */
+function rollupSourceId(windowStart: string, groupKey: readonly string[]): string {
+  return [windowStart, ...groupKey].join("\u0000");
+}
+
+/**
+ * One summed event for one closed window of rag_usage rows sharing (provider, operation, user,
+ * model).  `entry` carries the SUMS (tokens, batches, cost) and `requests` the row count; the
+ * window bounds are ISO instants.  Never call this for a window that can still receive rows: the
+ * monitor 409s a changed resend under the same key.
+ */
+export async function createRagRollupUsageMonitorEvent(
+  entry: RagUsageMonitorEntry & { windowStart: string; windowEnd: string; requests: number }
+): Promise<UsageMonitorEvent> {
+  return {
+    ...ragUsageEvent({ ...entry, occurredAt: entry.windowStart }),
+    eventId: await telemetryIdempotencyKey(
+      "rag-rollup",
+      // A NULL model and an empty-string model are different SQL groups (ragWindowEvents), so they
+      // must not share an identity: the monitor would 409 the second and it would be skipped.
+      rollupSourceId(entry.windowStart, [
+        entry.provider,
+        entry.operation,
+        entry.userId,
+        entry.model === undefined || entry.model === null ? "\u0000null" : `m:${entry.model}`,
+      ])
+    ),
   };
 }
 
@@ -846,6 +889,50 @@ export async function createProviderDispatchUsageMonitorEvent(entry: {
       unknownOutcome: entry.outcome === "unknown",
     }),
     eventId: await telemetryIdempotencyKey("provider-dispatch", entry.sourceEventId),
+  };
+}
+
+/**
+ * One summed event for one closed window of provider-dispatch outbox rows sharing (provider,
+ * operation, credential, user, outcome).  `requests` is the SUM of the rows' units.  Same
+ * no-cost invariant as the per-row event above; null for a retired provider family.
+ */
+export async function createProviderDispatchRollupUsageMonitorEvent(entry: {
+  windowStart: string;
+  windowEnd: string;
+  provider: string;
+  operation: string;
+  credentialRef: string;
+  userId: string;
+  outcome: "succeeded" | "failed" | "unknown";
+  requests: number;
+}): Promise<UsageMonitorEvent | null> {
+  if (suppressUsageMonitorProvider(entry.provider)) return null;
+  return {
+    environment: usageMonitorEnv(),
+    provider: entry.provider,
+    service: "provider-dispatch",
+    project: PROJECT,
+    label: entry.operation,
+    producerKeyRef: entry.credentialRef,
+    billingMode: "estimated",
+    metricType: "usage",
+    unit: "request",
+    requests: finiteCount(entry.requests) ?? 1,
+    confidence: entry.outcome === "unknown" ? "estimated" : "actual",
+    occurredAt: entry.windowStart,
+    windowStart: entry.windowStart,
+    windowEnd: entry.windowEnd,
+    metadata: cleanMetadata({
+      operation: entry.operation,
+      userId: entry.userId,
+      outcome: entry.outcome,
+      unknownOutcome: entry.outcome === "unknown",
+    }),
+    eventId: await telemetryIdempotencyKey(
+      "provider-dispatch-rollup",
+      rollupSourceId(entry.windowStart, [entry.provider, entry.operation, entry.credentialRef, entry.userId, entry.outcome])
+    ),
   };
 }
 

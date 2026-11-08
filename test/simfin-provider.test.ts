@@ -55,7 +55,7 @@ describe("SimFin enrichment provider", () => {
     // skipped before it fills the five tracked ratios.
     const { SimFinEnrichmentProvider } = await import("../src/lib/simfin-provider");
     const provider = new SimFinEnrichmentProvider("test-key");
-    expect(provider.quotaScarce).toBeFalsy();
+    expect(Reflect.get(provider, "quotaScarce")).toBeFalsy();
     expect(provider.suppliesFields).toEqual(
       expect.arrayContaining(["grossProfitMargin", "revenueGrowth", "returnOnEquity", "returnOnAssets", "debtToEquity"])
     );
