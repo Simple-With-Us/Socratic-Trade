@@ -547,10 +547,10 @@ describe("fetchFreshQuotesCascade", () => {
     expect(age.ageSec!).toBeLessThan(5);
   });
 
-  it("venue_delayed WITHOUT skipActiveBroker: venue-priced symbols are locked, unpriced ones still cascade (Q5)", async () => {
-    // L1a ran and the venue priced nothing for AAPL.  Only venue-PRICED symbols
-    // are locked against external overlay (see the priced-MSFT case above);
-    // a symbol the venue could not price at all stays pending for later levels.
+  it("venue_delayed WITHOUT skipActiveBroker: later levels do NOT fill (the venue tape is authoritative)", async () => {
+    // L1a ran and the Alpaca paper venue priced nothing — the pending list is
+    // cleared so Alpaca/Yahoo can never overlay the paper venue tape (Q5's
+    // unpriced-symbol cascade is Tradier-only; see the Tradier case below).
     const now = Date.now();
     const freshIso = new Date(now - 20_000).toISOString();
 
@@ -584,8 +584,8 @@ describe("fetchFreshQuotesCascade", () => {
     const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper");
 
     expect(mockGetEquityQuotes).toHaveBeenCalled();
-    expect(mockEnrich).toHaveBeenCalledWith(["AAPL"]);
-    expect(result.AAPL?.price).toBe(210);
+    expect(mockEnrich).not.toHaveBeenCalled();
+    expect(result.AAPL).toBeUndefined();
   });
 
   it("venue_delayed WITH skipActiveBroker: later levels may still fill (L1a never ran — Sentry pendingSymbols thread)", async () => {

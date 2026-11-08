@@ -945,12 +945,14 @@ export async function fetchFreshQuotesCascade(
   // --- LEVEL 1a: Active Broker Gateway ---
   throwIfCascadeAborted(signal);
   let venueMode: VenueQuoteMode = "realtime";
+  let venueBroker: string | undefined;
   let activeConnectedId: string | undefined;
   let activeAccount: ConnectedAccount | undefined;
   try {
     const policy = getPolicy(userId, connectedAccountId);
     maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
     venueMode = resolveVenueQuoteMode(policy, userId);
+    venueBroker = policy.activeBroker ? String(policy.activeBroker) : undefined;
     activeConnectedId = policy.connectedAccountId;
     activeAccount =
       (activeConnectedId ? getConnectedAccount(activeConnectedId, userId) : undefined) ??
@@ -979,8 +981,12 @@ export async function fetchFreshQuotesCascade(
   // `skipActiveBroker` the caller already hit the broker itself and L1a never
   // ran, so filtering here would drop every fallback and leave the caller
   // with an empty result (Sentry thread on pendingSymbols).
+  //
+  // Q5 applies to Tradier only.  Alpaca PAPER stays fail-closed: a symbol its
+  // delayed feed cannot price is missing, never a fresher secondary print.
   if (venueMode !== "realtime" && !options?.skipActiveBroker) {
-    pendingSymbols = pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]);
+    pendingSymbols =
+      venueBroker === "tradier" ? pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]) : [];
   }
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---

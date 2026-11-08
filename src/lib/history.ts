@@ -368,6 +368,10 @@ export async function fetchDailyOHLC(
   const importedSource = {
     scope: "shared" as const,
     sourceId: "imported-eod",
+    // A fresh dense import is already density-guarded and deliberately displaces a
+    // re-fetch even when it is shorter than a deep request, so the deep short-stub
+    // hold (H2) must not demote it to a candidate.
+    acceptsShortSeries: true,
     // A fresh, dense series may displace a re-fetch; a stale one was diverted to
     // `staleImportedBars` above (#4009). DEFAULT OFF + density-guarded inside
     // fetchImportedHistory so a sparse gap-fill never short-circuits.
@@ -433,6 +437,7 @@ export async function fetchDailyOHLC(
     scope: CacheScope;
     sourceId: string;
     confirmsListingStart?: boolean;
+    acceptsShortSeries?: boolean;
     fetch: () => Promise<OHLCBar[] | null>;
   }> = deepHistory
     ? [
@@ -502,6 +507,7 @@ export async function fetchDailyOHLC(
       if (
         deepHistory &&
         !source.confirmsListingStart &&
+        !source.acceptsShortSeries &&
         !localSeriesCovers(symbol, liveBars, startDate, true)
       ) {
         // Hold the fullest short series seen so far, not the first: a later tier that
