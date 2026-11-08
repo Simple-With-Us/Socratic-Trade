@@ -3,13 +3,31 @@
  * All tests run entirely offline (no real API key or network call required).
  */
 
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import os from "os";
 import path from "path";
 
 // Point the DB at a temp file before any imports touch it.
 const tmpDb = path.join(os.tmpdir(), `llm-provider-test-${Date.now()}.db`);
 process.env.DATABASE_URL = `file:${tmpDb}`;
+
+const LLM_ENV = [
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "XAI_API_KEY",
+  "GEMINI_API_KEY",
+  "MISTRAL_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "OPENROUTER_API_KEY",
+  "META_API_KEY",
+  "MOONSHOT_API_KEY",
+  "MINIMAX_API_KEY"
+];
+
+function noEnvKeys() {
+  vi.stubEnv("LLM_OPERATOR_FALLBACK", "off");
+  for (const k of LLM_ENV) vi.stubEnv(k, "");
+}
 
 describe("resolveLlmEndpoint", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,6 +43,15 @@ describe("resolveLlmEndpoint", () => {
     setApiKey = dbApiKeys.upsertUserApiKey;
     const mod = await import("../src/lib/llm-provider");
     resolveLlmEndpoint = mod.resolveLlmEndpoint;
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    noEnvKeys();
+  });
+
+  beforeAll(() => {
+    noEnvKeys();
   });
 
   it("routes to OpenRouter when user has an OpenRouter key", () => {
@@ -69,13 +96,23 @@ describe("resolveLlmEndpoint", () => {
 
   it("falls back to the native MiniMax endpoint with the MiniMax credential", () => {
     setApiKey("test-user-minimax", "minimax", "sk-minimax-test-key");
-    // 2026-09-18 catalog cleanup: minimax-m2.7 was removed in favor of minimax-m3.
-    const endpoint = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "test-user-minimax");
+    const endpoint = resolveLlmEndpoint({ llmModel: "minimax-m3.1-flash" }, "test-user-minimax");
     expect(endpoint.provider).toBe("minimax");
     expect(endpoint.url).toBe("https://api.minimax.io/v1/chat/completions");
     expect(endpoint.key).toBe("sk-minimax-test-key");
-    expect(endpoint.model).toBe("MiniMax-M3");
+    expect(endpoint.model).toBe("MiniMax-M3.1-Flash");
     expect(endpoint.transport).toBe("chat-completions");
+  });
+
+  it("keeps a stored minimax-m3 selection on the retired row wire ids", () => {
+    setApiKey("minimax-retired", "minimax", "sk-minimax-retired");
+    const native = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-retired");
+    expect(native.provider).toBe("minimax");
+    expect(native.model).toBe("MiniMax-M3");
+    setApiKey("minimax-retired-or", "openrouter", "openrouter-placeholder");
+    const routed = resolveLlmEndpoint({ llmModel: "minimax-m3" }, "minimax-retired-or");
+    expect(routed.provider).toBe("openrouter");
+    expect(routed.model).toBe("minimax/minimax-m3");
   });
 
   it("uses the same credential service for eligibility and actual MiniMax execution", async () => {
