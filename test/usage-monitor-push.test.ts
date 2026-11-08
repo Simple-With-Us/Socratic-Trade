@@ -393,6 +393,28 @@ describe("usage-monitor-push", () => {
     expect(pinecone).toMatchObject({ unit: "credit", quantity: 5, metadata: { recordCount: 8 } });
   });
 
+  it("builds a per-row Qdrant event as one request, never as tokens", async () => {
+    const event = await push.createRagUsageMonitorEvent({
+      provider: "qdrant",
+      operation: "upsert",
+      userId: "local",
+      sourceEventId: "rag-usage-row-1",
+      occurredAt: "2026-07-11T18:03:00.000Z",
+      tokensIn: 0,
+      tokensOut: 140,
+      batchCount: 140,
+    });
+    expect(event).toMatchObject({
+      provider: "qdrant",
+      unit: "request",
+      requests: 1,
+      metricType: "usage",
+      metadata: { batchCount: 140, recordCount: 140 },
+    });
+    expect(event.quantity).toBeUndefined();
+    expect(event.costUsd).toBeUndefined();
+  });
+
   it("replays the same source identity with a stable key and occurredAt", async () => {
     const captured: CapturedRequest[] = [];
     push.__setUsageMonitorFetch(makeFetchStub(captured));

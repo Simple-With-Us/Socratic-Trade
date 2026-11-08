@@ -760,8 +760,9 @@ function ragUsageEvent(entry: RagUsageMonitorEntry): UsageMonitorDraft {
   // Self-hosted Qdrant has no cost, and its token columns hold a record count (tokens_out =
   // batch_count = recordCount), not tokens.  Its closed-window rollup therefore reports call volume
   // only: unit "request" (singular, the monitor's enum), requests = row count, no quantity or cost,
-  // with the record count kept in metadata.
-  const isQdrantRollup = entry.provider === "qdrant" && Boolean(entry.windowStart);
+  // with the record count kept in metadata.  This holds for the per-row event too (requests
+  // defaults to 1), so no path reports a Qdrant record count as tokens.
+  const isQdrantRollup = entry.provider === "qdrant";
   const unit: UsageUnit = isQdrantRollup ? "request" : isPinecone ? "credit" : "token";
   return {
     environment: usageMonitorEnv(),
