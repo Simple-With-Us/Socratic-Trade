@@ -18,6 +18,14 @@ import { enrichmentPlanForDeadline } from "./gather-budget";
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
 import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import {
+  ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+  ALPACA_PAPER_DELAYED_FEED,
+  ALPACA_PAPER_EXPECTED_DELAY_SEC,
+  alpacaPaperFeedForAccount,
+  alpacaSnapshotCacheIdentity,
+  type AlpacaMarketDataFeed
+} from "./alpaca-paper-quotes";
+import {
   congressFundamentalsEnabled,
   getCongressTradeClient
 } from "./api-clients/congress";
@@ -29,6 +37,8 @@ import type { EnrichmentSources } from "./types";
 
 import {
   audit,
+  getActiveConnectedAccount,
+  getConnectedAccount,
   hasDataPoolConsent,
   resolveAlpacaMarketData,
   resolveAlphaVantageKeyPool,
@@ -184,6 +194,34 @@ export interface SymbolEnrichment {
   low?: number;
   vwap?: number;        // session volume-weighted average price (Alpaca dailyBar.vw)
   asOf?: string;
+  /**
+   * Documented publication delay of the tape this enrichment came from, in
+   * seconds (Alpaca PAPER `delayed_sip` ≈ 900s).
+   *
+   * When set, consumers MUST evaluate the observation with the DELAYED-TAPE
+   * rules (`alpaca-paper-quotes.ts`): the expected delay is the venue, not
+   * staleness, but lag beyond `expectedDelaySec + delayToleranceSec` is still
+   * excess delay and fails closed.  Without this flag a ~900s-old `asOf` is
+   * treated as a realtime-stale quote.
+   */
+  expectedDelaySec?: number;
+  /** Tolerance (seconds) on top of `expectedDelaySec` before lag counts as excess. */
+  delayToleranceSec?: number;
+  /**
+   * True when this enrichment came from the ACTIVE execution venue's own tape
+   * (the connected Alpaca PAPER account's `delayed_sip` feed).  Consumers age
+   * the snapshot by its retrieval time instead of the delayed trade print.
+   */
+  venuePriceAuthoritative?: boolean;
+  /**
+   * Wall-clock ISO when this enrichment was RETRIEVED.
+   *
+   * A delayed tape ages by retrieval time, not by the (expected ~900s old)
+   * trade print, so the retrieval stamp has to travel with the enrichment.
+   * Undefined for realtime providers — their observation time is the freshness
+   * signal and must not be replaced by a fetch clock.
+   */
+  fetchedAt?: string;
   sentiment?: number;    // 0–100 news tone (50 = neutral). News-derived only.
   peRatio?: number;
   headlines?: string[];
@@ -1122,7 +1160,10 @@ function withHealthLane(provider: MarketEnrichmentProvider, source: ApiKeySource
   return provider;
 }
 
-export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider {
+export function getEnrichmentProvider(
+  userId?: string,
+  options?: { connectedAccountId?: string }
+): MarketEnrichmentProvider {
   const providers: MarketEnrichmentProvider[] = [];
   const finnhub = resolveApiKeyWithSource("finnhub", userId);
   const alphaVantage = resolveAlphaVantageKeyPool(userId);
@@ -1140,6 +1181,16 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // Alpaca MARKET DATA: own key (individual) → operator's paper key (shared) for background/tenants.
   // Trading is unaffected (alpaca.ts resolves Alpaca strictly per-user).
   const alpacaData = resolveAlpacaMarketData(userId);
+  // ACCOUNT-SCOPED TAPE: when the operating account is the connected Alpaca
+  // PAPER account, the snapshot enrichment must read the SAME `delayed_sip`
+  // tape the broker gateway uses.  The feed is decided by the connected
+  // account row — never by the global `ALPACA_DATA_FEED` env var — and the
+  // cache key folds in the account/feed identity so the delayed tape can
+  // never contaminate another account's snapshot cache.
+  //
+  // The account lookup is INSIDE the Alpaca credential guard: without Alpaca
+  // snapshot credentials there is no snapshot provider to configure, so no
+  // connected-account DB read may run on this path.
   // ── Freshness-tier ordering (first-wins cascade) ──────────────────────────
   // The cascade below is first-wins per field (takeScalar keeps the first non-undefined
   // value). So provider ORDER decides which source wins the price-family fields
@@ -1153,7 +1204,16 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // WITHOUT disturbing fundamentals sourcing (still finnhub/fmp/yahoo below). It
   // self-skips when either Alpaca key is absent — then the delayed sources fill these
   // fields in exactly the same order they would today.
-  if (alpacaData.apiKey && alpacaData.secretKey) providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId), alpacaData.source));
+  if (alpacaData.apiKey && alpacaData.secretKey) {
+    // Connected-account lookup happens ONLY when the Alpaca snapshot provider
+    // is actually registered (credentials present).
+    const scanAccount =
+      (options?.connectedAccountId ? getConnectedAccount(options.connectedAccountId, userId ?? "local") : undefined) ??
+      getActiveConnectedAccount(userId ?? "local");
+    const scanFeed = alpacaSnapshotFeedForAccount(scanAccount);
+    const scanCacheIdentity = alpacaSnapshotCacheIdentity(scanAccount?.id, scanFeed);
+    providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId, scanFeed ? { feed: scanFeed, cacheIdentity: scanCacheIdentity } : undefined), alpacaData.source));
+  }
   // Tier 1.5 — Congress.Trade fundamentals/analyst cache-aside (opt-in, default OFF).
   // Owner: fundamentals should come from the multi-source cascade (Finnhub/ROIC/SEC/Yahoo/…),
   // not App A. Enable CONGRESS_TRADE_FUNDAMENTALS_ENABLED only as an extra peer tier.
@@ -1773,6 +1833,19 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         const r = data[symbol];
         if (!r) continue;
         currentRecord = r;
+        // DELAYED-TAPE METADATA (not a sourced scalar): the Alpaca snapshot
+        // provider is seated FIRST (tier 1) and is the only provider that
+        // carries tape metadata, so the first writer wins — exactly like the
+        // price-family scalars above.  These fields are the contract that lets
+        // `applyEnrichment` age a ~900s-old `delayed_sip` print with the
+        // delayed-tape rules instead of the realtime-stale bar.
+        if (base.expectedDelaySec === undefined && typeof r.expectedDelaySec === "number") {
+          base.expectedDelaySec = r.expectedDelaySec;
+          base.delayToleranceSec = r.delayToleranceSec;
+          if (r.venuePriceAuthoritative !== undefined) {
+            base.venuePriceAuthoritative = r.venuePriceAuthoritative;
+          }
+        }
         takeScalar("price", name, r.price);
         takeScalar("bid", name, r.bid);
         takeScalar("ask", name, r.ask);
@@ -2607,6 +2680,11 @@ const ALPACA_SNAPSHOT_CHUNK = 100; // Alpaca batch limit per request
 // HTTP 403 ("subscription does not permit querying recent SIP data") unless the
 // account has a paid SIP subscription. Configurable via ALPACA_DATA_FEED; any
 // value outside the allowed set falls back to "iex".
+//
+// `delayed_sip` is deliberately NOT selectable through this global env var:
+// the delayed tape is an ACCOUNT decision (Alpaca PAPER), and a process-wide
+// switch would silently repoint every other account's tape.  Use
+// `alpacaSnapshotFeedForAccount` / the provider's `feed` option instead.
 const ALPACA_ALLOWED_FEEDS = ["iex", "sip", "otc"] as const;
 export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
   const raw = String(process.env.ALPACA_DATA_FEED ?? "").trim().toLowerCase();
@@ -2615,21 +2693,73 @@ export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
     : "iex";
 }
 
+/**
+ * Account-scoped feed override for the Alpaca snapshot endpoint.
+ *
+ * Returns `delayed_sip` for the connected Alpaca PAPER account and `undefined`
+ * for every other account (which then uses the global `ALPACA_DATA_FEED`).
+ */
+export function alpacaSnapshotFeedForAccount(
+  account: { broker?: string; environment?: string } | null | undefined
+): AlpacaMarketDataFeed | undefined {
+  return alpacaPaperFeedForAccount(account);
+}
+
 export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "alpaca-snapshot";
   readonly configured = true;
   private readonly base = "https://data.alpaca.markets/v2/stocks/snapshots";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
+  /** Account-scoped feed override (e.g. `delayed_sip` for Alpaca PAPER). */
+  private readonly feed?: AlpacaMarketDataFeed;
+  /**
+   * Cache prefix.  Folded with the account/feed identity when an account-scoped
+   * feed is in play so a `delayed_sip` snapshot can never be served to — or
+   * overwrite — an `iex` snapshot of the same symbol.
+   */
+  private readonly cachePrefix: string;
 
   constructor(
     private readonly apiKey: string,
     private readonly apiSecret: string,
     keySource: ApiKeySource = "env",
-    private readonly userId?: string
+    private readonly userId?: string,
+    options?: { feed?: AlpacaMarketDataFeed; cacheIdentity?: string }
   ) {
     this.scope = cacheScopeForKeySource(keySource, userId);
     this.keySource = keySource;
+    this.feed = options?.feed;
+    this.cachePrefix = options?.cacheIdentity
+      ? `alpaca-snapshot:${options.cacheIdentity}`
+      : "alpaca-snapshot";
+  }
+
+  /** The feed this provider actually requests. */
+  effectiveFeed(): AlpacaMarketDataFeed {
+    return this.feed ?? alpacaDataFeed();
+  }
+
+  /**
+   * Delayed-tape metadata for the ACCOUNT-SCOPED `delayed_sip` tape.
+   *
+   * Only the Alpaca PAPER tape carries it.  `effectiveFeed()` can only be
+   * `delayed_sip` when the account-scoped override set it — the global
+   * `ALPACA_DATA_FEED` allowlist (`iex|sip|otc`) rejects it — so this never
+   * leaks onto another account's snapshot.
+   *
+   * `venuePriceAuthoritative` is APPLICABLE here: for the connected Alpaca
+   * PAPER account this tape IS the execution venue's tape, so consumers age
+   * the snapshot by its retrieval time instead of by the ~900s-old print.
+   */
+  tapeMetadata(fetchedAt?: string): AlpacaSnapshotTapeMetadata {
+    if (this.effectiveFeed() !== ALPACA_PAPER_DELAYED_FEED) return {};
+    return {
+      expectedDelaySec: ALPACA_PAPER_EXPECTED_DELAY_SEC,
+      delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+      venuePriceAuthoritative: true,
+      ...(fetchedAt !== undefined && { fetchedAt })
+    };
   }
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -2642,7 +2772,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
     const misses: string[] = [];
 
     for (const symbol of normalized) {
-      const cached = readEnrichmentCache("alpaca-snapshot", symbol, this.userId, consented, now);
+      const cached = readEnrichmentCache(this.cachePrefix, symbol, this.userId, consented, now);
       if (cached) result[symbol] = cached.data;
       else misses.push(symbol);
     }
@@ -2656,7 +2786,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
         // single unconverted hyphenated symbol in the batch gets the whole chunk rejected with
         // HTTP 400 (confirmed in prod: this was silently failing ~97% of snapshot calls whenever
         // the batch included a symbol like BRK-B from the S&P 500 scan universe).
-        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${alpacaDataFeed()}`;
+        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${this.effectiveFeed()}`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
         let snapshots: Record<string, AlpacaSnapshot>;
@@ -2675,15 +2805,18 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
         } finally {
           clearTimeout(timeout);
         }
+        // RETRIEVAL STAMP: when this snapshot was actually pulled.  A delayed
+        // tape ages by this stamp, not by its (expected ~900s old) print.
+        const fetchedAt = new Date().toISOString();
 
         for (const symbol of chunk) {
           const snap = snapshots[toAlpacaSymbol(symbol)];
-          const data = parseAlpacaSnapshot(snap);
+          const data = parseAlpacaSnapshot(snap, this.tapeMetadata(fetchedAt));
           const hasData = Object.keys(data).length > 0;
           if (hasData) {
             // Quote-family TTL (~30s default), NOT the blanket 6h fundamentals ttlMs() — see
             // alpacaSnapshotTtlMs() for why real-time price/bid/ask/volume can't share that cadence.
-            writeEnrichmentCache("alpaca-snapshot", symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
+            writeEnrichmentCache(this.cachePrefix, symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
           }
           result[symbol] = data;
         }
@@ -2703,7 +2836,28 @@ interface AlpacaSnapshot {
   prevDailyBar?: { c?: number };
 }
 
-export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): SymbolEnrichment {
+/**
+ * Tape metadata stamped onto a parsed Alpaca snapshot.
+ *
+ * Only the ACCOUNT-SCOPED `delayed_sip` tape carries these.  Every other feed
+ * (iex / sip / otc) leaves them undefined, so realtime snapshots keep their
+ * ordinary semantics.
+ */
+export interface AlpacaSnapshotTapeMetadata {
+  /** Documented publication delay of the tape (Alpaca PAPER `delayed_sip` ≈ 900s). */
+  expectedDelaySec?: number;
+  /** Tolerance on top of `expectedDelaySec` before lag counts as excess delay. */
+  delayToleranceSec?: number;
+  /** True when the tape is the ACTIVE execution venue's own tape. */
+  venuePriceAuthoritative?: boolean;
+  /** Wall-clock ISO when the snapshot was pulled (retrieval stamp). */
+  fetchedAt?: string;
+}
+
+export function parseAlpacaSnapshot(
+  snap: AlpacaSnapshot | undefined | null,
+  tape?: AlpacaSnapshotTapeMetadata
+): SymbolEnrichment {
   if (!snap) return {};
 
   const tradePrice = typeof snap.latestTrade?.p === "number" && snap.latestTrade.p > 0 ? snap.latestTrade.p : undefined;
@@ -2757,7 +2911,18 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
     ...(low !== undefined && { low }),
     ...(netChange !== undefined && { netChange }),
     ...(intradayChangePct !== undefined && { intradayChangePct }),
-    ...(asOf !== undefined && { asOf })
+    ...(asOf !== undefined && { asOf }),
+    // DELAYED-TAPE METADATA: carried through to `applyEnrichment` so the scan
+    // quote is aged by the delayed-tape rules instead of being treated as a
+    // realtime-stale observation.
+    ...(tape?.expectedDelaySec !== undefined && { expectedDelaySec: tape.expectedDelaySec }),
+    ...(tape?.delayToleranceSec !== undefined && { delayToleranceSec: tape.delayToleranceSec }),
+    ...(tape?.venuePriceAuthoritative !== undefined && {
+      venuePriceAuthoritative: tape.venuePriceAuthoritative
+    }),
+    // The RETRIEVAL stamp travels with a delayed tape so consumers age it by
+    // when it was pulled, never by the (expected ~900s old) trade print.
+    ...(tape?.fetchedAt !== undefined && { fetchedAt: tape.fetchedAt })
   };
 }
 

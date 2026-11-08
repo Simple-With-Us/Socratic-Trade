@@ -6,7 +6,11 @@
 
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
-import { probeCongressShareTokenIfDue, runCongressDailyShareIfDue } from "./congress-share";
+import {
+  probeCongressShareTokenIfDue,
+  runCongressDailyShareIfDue,
+  runCongressStaleCatchupIfDue
+} from "./congress-share";
 import { secXbrlEnrichmentEnabled } from "./data-providers";
 import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
@@ -1230,6 +1234,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // CONGRESS_SHARE_ENABLED are set and the batch hasn't already run today. Fully self-guarded.
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
+  );
+
+  // Same-session retry of the tickers the nightly share withheld as stale (late-posting NAVs and
+  // thin names), so they do not wait a whole UTC day.  Bounded retries; no-op when nothing pending.
+  void journalLane("congress-stale-catchup", {}, () => runCongressStaleCatchupIfDue(Date.now())).catch((err) =>
+    console.error("[scheduler] congress-share stale catch-up error:", err)
   );
 
   if (secXbrlEnrichmentEnabled()) {

@@ -439,8 +439,37 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       // Stamp lives on the approval card.  Do not append coordinator notes to
       // rationale — that text is user-facing on website + iOS.
     }
-    if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
-      const { ageSec, missing, venueDelayed } = quoteAgeSecForStalenessGate(scanQuote, now);
+    // A tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+    // ~900s).  Two honest cases land here:
+    //   (a) the market was OPEN and the observation runs beyond expected +
+    //       tolerance.  During RTH that can mean an ILLIQUID LAST PRINT (a
+    //       quiet name simply has not traded) OR a TAPE LAGGING behind what
+    //       the venue promises — the number cannot tell them apart, so the
+    //       opening is blocked either way, but the tape is not "proven
+    //       broken".
+    //   (b) the market was CLOSED.  An old asOf is then EXPECTED (no prints
+    //       happen while the market is shut), so it is NOT excess delay — but
+    //       a closed-session print is still not a tradable observation, so the
+    //       opening is blocked with its own reason.
+    // The expected ~900s delay is NOT excess and never lands here.  Checked
+    // independently of the maxQuoteAgeSec policy knob so it can never be
+    // skipped.
+    const quoteGate = quoteAgeSecForStalenessGate(scanQuote, now);
+    const excessDelaySec = quoteGate.excessDelaySec;
+    if (excessDelaySec !== undefined && excessDelaySec > 0) {
+      reasons.push(
+        `quote_last_print_beyond_delayed_sla: ${symbol} quote observation is ${excessDelaySec}s beyond the ` +
+          `expected delayed-feed window (illiquid last print or excess tape lag). The staleness gate is ` +
+          `blocking this opening.`
+      );
+    } else if (quoteGate.marketSessionOpen === false) {
+      reasons.push(
+        `quote_delayed_tape_session_closed: ${symbol} quote comes from a delayed tape and the market ` +
+          `session is closed, so the print is not a tradable observation. The staleness gate is blocking ` +
+          `this opening.`
+      );
+    } else if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
+      const { ageSec, missing, venueDelayed } = quoteGate;
       if (missing) {
         reasons.push(
           `quote_age_unknown: ${symbol} quote has no provider observation time. The staleness gate is blocking this opening.`

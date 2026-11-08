@@ -125,7 +125,10 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
             universeFloor: input.universeFloor,
             congressMultiplier: input.congressMultiplier,
             signal,
-            deadlineAt
+            deadlineAt,
+            // Account-scoped market-data tape: the connected Alpaca PAPER
+            // account scans on its own `delayed_sip` feed.
+            connectedAccountId: input.connectedAccountId
           }
         );
         throwIfGatherAborted(signal);
