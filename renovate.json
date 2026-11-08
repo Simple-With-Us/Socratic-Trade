@@ -48,6 +48,11 @@
       "enabled": false
     },
     {
+      "description": "@opentelemetry/instrumentation 0.300+ peers @opentelemetry/api >=1.10 <1.11, but sdk-trace-node, core, resources and sdk-trace-base 2.x peer api <1.10, so npm ci fails with ERESOLVE (PRs #4963, #5017). Remove this rule once the OTel SDK 2.x line accepts api 1.10.",
+      "matchPackageNames": ["@opentelemetry/instrumentation"],
+      "allowedVersions": "<0.300.0"
+    },
+    {
       "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],
       "groupName": "testing"
     }
