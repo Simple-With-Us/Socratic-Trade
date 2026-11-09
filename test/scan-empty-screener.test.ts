@@ -948,6 +948,20 @@ describe("allowWholeSetYahooFallback (ST-3999 freshness fail-fast)", () => {
   });
 });
 
+describe("allowWholeSetYahooFallback with a live, non-overlapping screener", () => {
+  it("keeps the Yahoo fallback when the screener answered but none of its rows are allowed", async () => {
+    stubFetches({
+      nasdaqRows: [{ symbol: "ZZZZ", name: "Other Co", lastsale: "$10.00", pctchange: "1.0%", netchange: "0.1", volume: "1000000", marketCap: "5000000000" }],
+      yahoo: "aapl"
+    });
+    const scan = await scanMarket(["AAPL"], [], undefined, undefined, [], {
+      enrichmentMode: "skip",
+      allowWholeSetYahooFallback: false
+    });
+    expect(scan.topCandidates.map((quote) => quote.symbol)).toContain("AAPL");
+  });
+});
+
 function stubFetches(input: { nasdaqRows: unknown[]; yahoo: "miss" | "aapl"; nasdaqAbort?: boolean }): void {
   vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
     const url = String(request);
