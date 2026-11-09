@@ -26,7 +26,6 @@ import {
   STRATEGY_GATHER_TIMEOUT_MESSAGE,
   gatherStrategyMarket
 } from "../src/lib/strategy-gather";
-import { ScanQuotesUnavailableError } from "../src/lib/market";
 
 const WEIGHTS = {
   liquidity: 1,
