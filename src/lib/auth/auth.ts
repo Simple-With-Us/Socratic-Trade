@@ -226,14 +226,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       } else if (typeof token[SESSION_JWT_SID_CLAIM] === "string") {
         const touched = touchAuthServerSession(token[SESSION_JWT_SID_CLAIM]);
         if (!touched) {
-          delete token[SESSION_JWT_SID_CLAIM];
-          delete token[SESSION_JWT_ABS_EXP_CLAIM];
-          delete token[SESSION_JWT_SRV_TOUCH_CLAIM];
-          delete token.email;
-        } else {
-          token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(touched.absoluteExpiresAt);
-          token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
+          return { exp: nowSeconds - 1, iat: nowSeconds - 1 };
         }
+        token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(touched.absoluteExpiresAt);
+        token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
       }
       return token;
     },

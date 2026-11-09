@@ -79,15 +79,23 @@ export function isAuthServerSessionActive(
   return new Date(session.absoluteExpiresAt).getTime() > nowMs;
 }
 
+const SESSION_LAST_SEEN_TOUCH_THROTTLE_MS = 5 * 60_000;
+
 export function touchAuthServerSession(sessionId: string, nowMs: number = Date.now()): AuthServerSession | null {
-  if (!isAuthServerSessionActive(sessionId, nowMs)) return null;
+  const existing = getAuthServerSession(sessionId);
+  if (!existing || existing.revokedAt) return null;
+  if (new Date(existing.absoluteExpiresAt).getTime() <= nowMs) return null;
+  const lastSeenMs = new Date(existing.lastSeenAt).getTime();
+  if (nowMs - lastSeenMs < SESSION_LAST_SEEN_TOUCH_THROTTLE_MS) {
+    return existing;
+  }
   const now = new Date(nowMs).toISOString();
   getDrizzle()
     .update(authSessions)
     .set({ last_seen_at: now })
     .where(and(eq(authSessions.id, sessionId), isNull(authSessions.revoked_at)))
     .run();
-  return getAuthServerSession(sessionId);
+  return { ...existing, lastSeenAt: now };
 }
 
 export function revokeAuthServerSession(sessionId: string, nowMs: number = Date.now()): boolean {

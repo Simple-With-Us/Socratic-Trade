@@ -86,7 +86,7 @@ export async function POST(request: Request) {
   // device was signed out or Apple retired the token, and coming back from either is a fresh
   // opt-in, not a launch-time re-assertion.
   const existing = getDeviceToken(token);
-  if (existing && existing.userId !== userId) {
+  if (existing && existing.userId !== userId && existing.disabledAt === null) {
     return NextResponse.json(
       { ok: false, error: "This device token is registered to another account. Sign out on that account first." },
       { status: 409 }

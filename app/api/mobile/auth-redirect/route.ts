@@ -1,3 +1,4 @@
+import "server-only";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { pickSessionCookie } from "@/lib/auth/session-cookie-names";

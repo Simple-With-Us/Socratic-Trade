@@ -17,6 +17,7 @@ import {
   mobileOAuthHandoffIsStrict,
 } from "../src/lib/auth/mobile-session-hardening";
 import { resolveRequestUser } from "../src/lib/request-user";
+import { touchAuthServerSession } from "../src/lib/db-auth-sessions";
 import { AUTHENTICATED_SESSION_SID_HEADER } from "../src/lib/auth/strip-identity";
 import { encodeSessionToken, decodeSessionToken } from "../src/lib/auth/session-token";
 import {
@@ -123,12 +124,22 @@ describe("server-backed sessions", () => {
 
   it("caps sliding refresh at the absolute server lifetime", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
-    const record = createAuthServerSession("user-c");
-    vi.setSystemTime(new Date("2026-03-15T00:00:00.000Z"));
-    const { slidingMaxAgeSeconds } = await import("../src/lib/db-auth-sessions");
-    expect(slidingMaxAgeSeconds(record.absoluteExpiresAt)).toBeLessThan(30 * 24 * 60 * 60);
-    vi.useRealTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const record = createAuthServerSession("user-c");
+      vi.setSystemTime(new Date("2026-03-15T00:00:00.000Z"));
+      const { slidingMaxAgeSeconds } = await import("../src/lib/db-auth-sessions");
+      expect(slidingMaxAgeSeconds(record.absoluteExpiresAt)).toBeLessThan(30 * 24 * 60 * 60);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throttles last_seen_at writes on session touch", () => {
+    const record = createAuthServerSession("user-touch-throttle");
+    const first = touchAuthServerSession(record.id);
+    const second = touchAuthServerSession(record.id);
+    expect(first?.lastSeenAt).toBe(second?.lastSeenAt);
   });
 
   it("revoke-all clears every session for the user", async () => {
@@ -199,6 +210,21 @@ describe("mobile session hardening compat", () => {
 });
 
 describe("POST /api/auth/sessions/revoke-all", () => {
+  it("clears legacy next-auth session cookies on the response", async () => {
+    const email = `cookies-${randomUUID()}@example.com`;
+    const { POST } = await import("../app/api/auth/sessions/revoke-all/route");
+    const res = await POST(
+      new Request("https://socratictrade.com/api/auth/sessions/revoke-all", {
+        method: "POST",
+        headers: { "x-authenticated-user-email": email },
+      }),
+    );
+    const setCookie = res.headers.getSetCookie?.() ?? [];
+    const names = setCookie.map((c) => c.split("=")[0]);
+    expect(names).toEqual(
+      expect.arrayContaining(["authjs.session-token", "next-auth.session-token"]),
+    );
+  });
   it("revokes all sessions for the authenticated user", async () => {
     const email = `revoke-${randomUUID()}@example.com`;
     const userId = userIdForEmail(email);

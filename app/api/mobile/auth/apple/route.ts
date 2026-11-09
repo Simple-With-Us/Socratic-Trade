@@ -1,3 +1,4 @@
+import "server-only";
 import { NextResponse } from "next/server";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { isEmailAllowed, userIdForEmail } from "../../../../../src/lib/auth/identity";
@@ -20,6 +21,10 @@ import {
   logMobileSessionHardeningCompat,
   mobileAppleSignInIsStrict,
 } from "@/lib/auth/mobile-session-hardening";
+import {
+  AppleVerifiedEmailSchema,
+  MobileAppleSignInBodySchema,
+} from "@/lib/auth/mobile-auth-schemas";
 
 // Module-scope JWKS: jose caches keys per resolver instance; recreate-per-request
 // re-fetches https://appleid.apple.com/auth/keys on every sign-in.
@@ -32,14 +37,12 @@ export async function POST(request: Request) {
 
   try {
     const body = await readJsonWithLimit(request, APPLE_AUTH_MAX_BYTES);
-    const identityToken = (body as { identityToken?: unknown })?.identityToken;
-    const name = (body as { name?: unknown })?.name;
-    const nonce = (body as { nonce?: unknown })?.nonce;
-
-    if (!identityToken || typeof identityToken !== "string") {
+    const parsedBody = MobileAppleSignInBodySchema.safeParse(body);
+    if (!parsedBody.success) {
       return NextResponse.json({ error: "Missing or invalid identityToken" }, { status: 400 });
     }
-    const nonceValue = typeof nonce === "string" ? nonce : "";
+    const { identityToken, name, nonce } = parsedBody.data;
+    const nonceValue = nonce ?? "";
     const strictApple = mobileAppleSignInIsStrict(request, nonceValue);
     if (strictApple) {
       if (!nonceValue) {
@@ -63,10 +66,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
     }
 
-    const email = payload.email as string | undefined;
-    if (!email) {
+    const emailParsed = AppleVerifiedEmailSchema.safeParse(payload.email);
+    if (!emailParsed.success) {
       return NextResponse.json({ error: "Apple token did not contain an email address." }, { status: 400 });
     }
+    const email = emailParsed.data;
 
     if (!isEmailAllowed(email)) {
       return NextResponse.json({ error: "Access denied." }, { status: 403 });

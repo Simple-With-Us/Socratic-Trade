@@ -21,6 +21,8 @@ describe("mobile OAuth handoff", () => {
     expect(consumeMobileAuthHandoff({ code: code!, codeVerifier: verifier })).toEqual({
       sessionToken: "session-secret",
       cookieName: "authjs.session-token",
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      handoffNonce: "nonce-abc",
     });
     expect(consumeMobileAuthHandoff({ code: code!, codeVerifier: verifier })).toBeUndefined();
   });

@@ -24,6 +24,8 @@ type MobileAuthHandoff = {
 export type ConsumedMobileAuthHandoff = {
   sessionToken: string;
   cookieName: KnownSessionCookieName;
+  sessionId: string;
+  handoffNonce: string;
 };
 
 type MobileAuthHandoffStore = Map<string, MobileAuthHandoff>;
@@ -113,5 +115,10 @@ export function consumeMobileAuthHandoff(input: {
   const expected = Buffer.from(handoff.codeChallenge, "utf8");
   const actual = Buffer.from(verifierChallenge(input.codeVerifier), "utf8");
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return undefined;
-  return { sessionToken: handoff.sessionToken, cookieName: handoff.cookieName };
+  return {
+    sessionToken: handoff.sessionToken,
+    cookieName: handoff.cookieName,
+    sessionId: handoff.sessionId,
+    handoffNonce: handoff.handoffNonce,
+  };
 }
