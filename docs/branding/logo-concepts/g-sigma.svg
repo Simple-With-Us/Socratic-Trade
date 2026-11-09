@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 180" role="img" aria-label="Sigma chart mark with stacked SOCRATIC TRADE wordmark">
+  <polyline points="190,42 110,42 160,90 110,138 190,138" fill="none" stroke="#0f1722" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="190" cy="42" r="7.5" fill="#0e9f6e"/>
+  <text x="234" y="86" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="42" font-weight="700" letter-spacing="2" fill="#0f1722" textLength="296">SOCRATIC</text>
+  <text x="234" y="132" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="42" font-weight="300" letter-spacing="16" fill="#0f1722" textLength="296">TRADE</text>
+</svg>

@@ -1,0 +1,33 @@
+#!/bin/bash
+# Pre-commit hook to prevent agents from committing in the main integration tree
+
+WORKTREE_DIR=$(git rev-parse --show-toplevel)
+MAIN_TREE="/Users/jay/Code/Socratic-Trade"
+
+if [ "$WORKTREE_DIR" = "$MAIN_TREE" ]; then
+    BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    
+    if [[ "$BRANCH_NAME" =~ ^(agent|claude|codex|cursor|monet|grok|kimi)/ ]]; then
+        if [ -z "${ALLOW_MAIN_WORKTREE_COMMIT:-}" ]; then
+            echo "======================================================================"
+            echo "🚨 CRITICAL ERROR: AGENTS MUST NOT WORK IN THE MAIN INTEGRATION TREE!"
+            echo "======================================================================"
+            echo "You are attempting to commit to an agent branch ($BRANCH_NAME)"
+            echo "while operating inside the main project folder ($MAIN_TREE)."
+            echo "This causes the main folder to drift out of sync and corrupts"
+            echo "the review base for other agents."
+            echo ""
+            echo "ACTION REQUIRED:"
+            echo "1. Abort your current operation."
+            echo "2. Run 'git checkout main' in this folder to restore it."
+            echo "3. cd into your correct agent lane (e.g., ~/apps/trading-antigravity)"
+            echo "4. Perform your work THERE."
+            echo ""
+            echo "(If you are the human owner making a surgical edit, run with:"
+            echo " ALLOW_MAIN_WORKTREE_COMMIT=1 git commit ...)"
+            echo "======================================================================"
+            exit 1
+        fi
+    fi
+fi
+exit 0

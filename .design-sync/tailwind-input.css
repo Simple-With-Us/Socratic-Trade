@@ -1,0 +1,7 @@
+/* design-sync CSS compile input. Pulls the real token layers + Tailwind, and
+   scopes utility generation to the two primitive files so the compiled sheet
+   carries exactly the classes the design system uses. */
+@import "../app/globals.css";
+@import "../app/console/console.css";
+@source "../app/ui/primitives.tsx";
+@source "../app/console/ui/primitives.tsx";

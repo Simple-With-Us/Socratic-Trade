@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 180" role="img" aria-label="Existing favicon badge with Socratic Trade wordmark">
+  <svg x="100" y="30" width="120" height="120" viewBox="0 0 512 512">
+    <rect width="512" height="512" rx="96" fill="#0a0f16" stroke="rgba(255,255,255,0.14)" stroke-width="8"/>
+    <path d="M104 330h304" stroke="#63e6be" stroke-width="32" stroke-linecap="round"/>
+    <path d="M128 310l72-78 62 48 106-118" fill="none" stroke="#f8fafc" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="128" cy="310" r="22" fill="#63e6be"/>
+    <circle cx="200" cy="232" r="22" fill="#63e6be"/>
+    <circle cx="262" cy="280" r="22" fill="#63e6be"/>
+    <circle cx="368" cy="162" r="22" fill="#63e6be"/>
+  </svg>
+  <text x="260" y="82" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" font-weight="650" fill="#0f1722" textLength="172">Socratic</text>
+  <text x="260" y="134" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="44" font-weight="300" fill="#0f1722" textLength="108">Trade</text>
+</svg>

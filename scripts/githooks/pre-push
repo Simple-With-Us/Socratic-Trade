@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# scripts/githooks/pre-push
+#
+# Installed via:  git config core.hooksPath scripts/githooks
+# (set + self-healed per-worktree by scripts/land.sh on every run)
+#
+# BLOCKS:
+#   1. Any push that would land commits on refs/heads/main at the remote
+#      (covers both "git push origin main" and "git push origin feature:main")
+#   2. Any push originating from the main integration worktree
+#      (~/Code/Agentic Trading) — that worktree is for human review/merge only
+#
+# ALLOWS:
+#   - Any push to agent/* or other non-main branches
+#   - Force-override for genuine emergencies: HOOKS_ALLOW_MAIN_PUSH=1 git push
+#
+# git calls pre-push with:  stdin lines of "local-ref local-sha remote-ref remote-sha"
+# and env:  GIT_PUSH_OPTION_COUNT, plus positional args $1=remote $2=remote-url
+
+set -euo pipefail
+
+RED='\033[0;31m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; RESET='\033[0m'
+die()  { echo -e "${RED}[pre-push] BLOCKED: $*${RESET}" >&2; exit 1; }
+warn() { echo -e "${YELLOW}[pre-push] WARN: $*${RESET}" >&2; }
+
+REMOTE="${1:-origin}"
+MAIN_INTEGRATION_WORKTREE="$HOME/Code/Agentic Trading"
+
+# ── guard 1: refuse pushes from the main integration worktree ──────────────
+if [[ -z "${HOOKS_ALLOW_MAIN_PUSH:-}" ]]; then
+  CURRENT_WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+  RESOLVED_CURRENT="$(cd "$CURRENT_WORKTREE" 2>/dev/null && pwd -P 2>/dev/null || echo "")"
+  RESOLVED_MAIN="$(cd "$MAIN_INTEGRATION_WORKTREE" 2>/dev/null && pwd -P 2>/dev/null || echo "__not_found__")"
+
+  if [[ "$RESOLVED_CURRENT" == "$RESOLVED_MAIN" ]]; then
+    die "You are pushing from '~/Code/Agentic Trading' (the main integration worktree).
+  That worktree is for human/Cursor review and merges only.
+  Agents: push from your own worktree instead:
+    Claude      → ~/apps/trading-claude   (branch agent/claude)
+    Codex       → ~/apps/trading-codex    (branch agent/codex)
+    Antigravity → ~/apps/trading-antigravity (branch agent/antigravity)
+    Kimi        -> ~/apps/trading-kimi     (branch agent/kimi-lane)
+  If you are the human integrator and need to push from here (e.g. a hotfix):
+    HOOKS_ALLOW_MAIN_PUSH=1 git push $REMOTE ..."
+  fi
+fi
+
+# ── guard 2: refuse any push whose destination is refs/heads/main ──────────
+# Read stdin: each line is "<local-ref> <local-sha> <remote-ref> <remote-sha>"
+# An empty remote-sha (40 zeros) means the remote ref doesn't exist yet.
+BLOCKED_REFS=""
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  # Ignore deletions (local_sha is all zeros)
+  if [[ "$local_sha" == "0000000000000000000000000000000000000000" ]]; then
+    continue
+  fi
+  if [[ "$remote_ref" == "refs/heads/main" ]]; then
+    BLOCKED_REFS="${BLOCKED_REFS} ${local_ref}:refs/heads/main"
+  fi
+done
+
+if [[ -n "${BLOCKED_REFS}" && -z "${HOOKS_ALLOW_MAIN_PUSH:-}" ]]; then
+  CURRENT_BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")"
+  die "Direct push to 'main' is not allowed for agents.
+  Blocked push(es):${BLOCKED_REFS}
+
+  The correct workflow is:
+    1.  Work on your agent/* branch
+    2.  Run:  bash scripts/land.sh
+        (fetches, merges main, runs tsc/test/build, pushes branch, opens PR)
+    3.  The human reviewer merges the PR into main
+
+  Current branch: ${CURRENT_BRANCH}
+  Current remote: ${REMOTE}
+
+  GENUINE EMERGENCY ONLY — to push directly to main (human integrator):
+    HOOKS_ALLOW_MAIN_PUSH=1 git push ${REMOTE} ${CURRENT_BRANCH}:main
+  This is logged. Use only for critical hotfixes when the PR flow is unavailable."
+fi
+
+exit 0

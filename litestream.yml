@@ -1,0 +1,22 @@
+dbs:
+  - path: /Users/jay/apps/trading-live/data/app.db
+    # PITR snapshot policy (Litestream 0.5.x): snapshot interval + retention are DB-level
+    # `snapshot:` settings, NOT per-replica keys (0.4.x placed retention/snapshot-interval on the
+    # replica; in 0.5.x that spot is ignored/rejected, so the intended PITR window silently never
+    # applied). Keep ~30 days of LTX snapshot history for point-in-time rollback.
+    # NOTE: validate against the deployed litestream binary before the sidecar reloads this config
+    # (`litestream replicate -config litestream.yml -exec true` dry-check) — the 0.4->0.5 schema
+    # shifted and the pinned version governs the exact accepted keys.
+    snapshot:
+      interval: 24h
+      retention: 720h       # 30 days of snapshot history
+    replicas:
+      - type: s3
+        bucket: ${AWS_S3_BUCKET_NAME}
+        path: trading-live/app.db
+        # Literal: litestream does its own ${VAR} substitution and does NOT support
+        # bash `:-` defaults — that form resolves to an EMPTY region. R2 wants "auto".
+        region: auto
+        endpoint: ${AWS_S3_ENDPOINT}
+        access-key-id: ${AWS_ACCESS_KEY_ID}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY}

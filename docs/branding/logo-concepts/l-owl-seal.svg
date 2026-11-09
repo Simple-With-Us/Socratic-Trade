@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Circular Socratic Trade seal with candlestick owl">
+  <circle cx="100" cy="100" r="92" fill="none" stroke="#0f1722" stroke-width="2.5"/>
+  <circle cx="100" cy="100" r="64" fill="none" stroke="#0f1722" stroke-width="1" stroke-opacity="0.35"/>
+  <defs>
+    <path id="arcTop" d="M 26 100 A 74 74 0 0 1 174 100"/>
+    <path id="arcBot" d="M 26 100 A 74 74 0 0 0 174 100"/>
+  </defs>
+  <text font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" font-weight="700" letter-spacing="6" fill="#0f1722">
+    <textPath href="#arcTop" startOffset="50%" text-anchor="middle">SOCRATIC</textPath>
+  </text>
+  <text font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" font-weight="500" letter-spacing="8" fill="#0e9f6e">
+    <textPath href="#arcBot" startOffset="50%" text-anchor="middle">TRADE</textPath>
+  </text>
+  <circle cx="26" cy="100" r="3" fill="#0e9f6e"/>
+  <circle cx="174" cy="100" r="3" fill="#0e9f6e"/>
+  <g transform="translate(63,58)">
+    <line x1="17" y1="10" x2="17" y2="24" stroke="#0e9f6e" stroke-width="3.5" stroke-linecap="round"/>
+    <line x1="57" y1="1"  x2="57" y2="15" stroke="#0f1722" stroke-width="3.5" stroke-linecap="round"/>
+    <rect x="0"  y="22" width="34" height="54" rx="11" fill="#0e9f6e"/>
+    <rect x="40" y="13" width="34" height="63" rx="11" fill="#0f1722"/>
+    <circle cx="17" cy="38" r="9" fill="#ffffff"/>
+    <circle cx="17" cy="38" r="4" fill="#0f1722"/>
+    <circle cx="57" cy="38" r="9" fill="#ffffff"/>
+    <circle cx="57" cy="38" r="4" fill="#0f1722"/>
+    <polygon points="30,48 44,48 37,59" fill="#e8a13a"/>
+    <line x1="17" y1="78" x2="17" y2="88" stroke="#0e9f6e" stroke-width="3.5" stroke-linecap="round"/>
+    <line x1="57" y1="78" x2="57" y2="88" stroke="#0f1722" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+</svg>

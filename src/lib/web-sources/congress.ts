@@ -1,0 +1,1208 @@
+// Congressional trade ingestion.
+//
+// Politicians disclose stock trades on a delay (up to ~45 days). When a disclosure
+// lands, copycat retail flow often follows — so surfacing fresh disclosures to the
+// agent lets it act on the same names before the copycats pile in.
+//
+// Sources, in priority order:
+//   1. Senate eFD  (efdsearch.senate.gov) — authoritative, free, no key. Validated
+//      live: CSRF -> accept terms -> POST report search -> parse each PTR's table.
+//      SENATE ONLY (structurally cannot see the House).
+//   2. Apify `johnvc` actor — HOUSE coverage (the eFD gap). Keyed (APIFY_API_TOKEN),
+//      pay-per-result (~$0.00001/row). Runs the actor synchronously and parses the
+//      normalized House Clerk disclosures. House-only by default so it complements eFD.
+//   3. Capitol Trades BFF (bff.capitoltrades.com) — public JSON back-end (House+Senate);
+//      currently CDN-blocked server-side, kept best-effort/configurable.
+//
+// All adapters degrade to nothing on failure — we never invent a trade.
+//
+// Note: The `CongressTrade` type used here is App B's internal representation.
+// The shared package's `CongressTransaction` (@jaywedgeworth22/congress-trading-shared)
+// is App A's wire format; `coerceCongressTrade()` converts between them.
+
+import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "../db";
+import { CongressTradeAuthError, congressAsCongressSourceEnabled, readCongressRetractionsPage, readCongressTransactionsPage } from "../api-clients/congress";
+import { normalizeSymbol } from "../money";
+import {
+  assertOperationLeaseOwnership,
+  OPERATION_LEASE_GROUPS,
+  runWithOperationLease,
+  throwIfOperationLeaseCancelled,
+  type OperationLeaseAware,
+  type OperationLeaseClaim
+} from "../operation-lease";
+import type { CongressSignal, CongressTrade } from "./types";
+import {
+  BROWSER_UA,
+  cookieHeader,
+  mergeSetCookies,
+  politeFetch,
+  politeFetchText,
+  runRateLimited
+} from "./http";
+
+const DATASET_KEY = "webSource:congress:dataset";
+/** Separate from the dataset so a rewrite of the trade list cannot drop the poll cursor. */
+export const CONGRESS_CURSOR_SETTING_KEY = "webSource:congress:cursor";
+export const CONGRESS_RETRACT_CURSOR_SETTING_KEY = "webSource:congress:retractCursor";
+const ATTEMPT_KEY = "webSource:congress:lastAttempt";
+const DEFAULT_TTL_MS = 24 * 60 * 60_000; // daily; congressional disclosures trickle in every day
+const DEFAULT_RETRY_BACKOFF_MS = 60 * 60_000; // wait 1h before retrying after a failed/empty scrape
+const DEFAULT_WINDOW_DAYS = 60; // how far back a trade still counts toward the signal
+const DEFAULT_LOOKBACK_DAYS = 45; // how far back to pull new filings each refresh
+const DEFAULT_MAX_FILINGS = 80; // cap PTR pages fetched per refresh (politeness)
+const EFD_BASE = "https://efdsearch.senate.gov";
+const DEFAULT_CAPITOL_TRADES_URL = "https://bff.capitoltrades.com/trades?per_page=100&page=1&sortBy=-txDate";
+
+export interface CongressDataset {
+  trades: CongressTrade[];
+  fetchedAt: string;
+  sources: string[];
+  recordCount: number;
+}
+
+export function congressTtlMs(): number {
+  const v = Number(process.env.WEB_SOURCE_CONGRESS_TTL_MS ?? DEFAULT_TTL_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_TTL_MS;
+}
+
+function windowDays(): number {
+  const v = Number(process.env.WEB_SOURCE_CONGRESS_WINDOW_DAYS ?? DEFAULT_WINDOW_DAYS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_WINDOW_DAYS;
+}
+
+export function getCongressDataset(): CongressDataset | undefined {
+  return getInternalSetting<CongressDataset>(DATASET_KEY);
+}
+
+// ── Pure parsers (unit-tested without network) ───────────────────────────────
+
+const TICKER_RE = /^[A-Z][A-Z.\-]{0,5}$/;
+
+/** Parse a disclosed dollar range like "$1,001 - $15,000" into numeric bounds. */
+export function parseAmountRange(text: string): { amountLow?: number; amountHigh?: number } {
+  const nums = (text.match(/\$[\d,]+/g) ?? []).map((s) => Number(s.replace(/[$,]/g, ""))).filter((n) => Number.isFinite(n));
+  if (nums.length === 0) return {};
+  if (nums.length === 1) return { amountLow: nums[0], amountHigh: nums[0] };
+  return { amountLow: nums[0], amountHigh: nums[1] };
+}
+
+function toIsoDate(mdy: string): string | undefined {
+  const m = mdy.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return undefined;
+  const [, mm, dd, yyyy] = m;
+  // Range-validate so a corrupt source date (e.g. "13/45/2026") falls through to a
+  // fallback instead of producing "2026-13-45", which Date.parse() reads as NaN and
+  // then silently slips past the recency-window guard in aggregateCongressSignals.
+  const month = Number(mm);
+  const day = Number(dd);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+function stripTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+interface EfdFiling {
+  member: string;
+  viewUrl: string;
+  isPtr: boolean;
+  filedAt?: string;
+}
+
+/** Parse the DataTables JSON returned by /search/report/data/ into filing rows. */
+export function parseEfdReportRows(json: unknown): EfdFiling[] {
+  const data = (json as { data?: unknown[] })?.data;
+  if (!Array.isArray(data)) return [];
+  const filings: EfdFiling[] = [];
+  for (const row of data) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const first = stripTags(String(row[0] ?? ""));
+    const last = stripTags(String(row[1] ?? ""));
+    const linkCell = String(row[3] ?? "");
+    const hrefMatch = linkCell.match(/href=["']([^"']+)["']/);
+    const href = hrefMatch?.[1];
+    if (!href) continue;
+    const filedAt = toIsoDate(stripTags(String(row[4] ?? "")));
+    filings.push({
+      member: `${first} ${last}`.replace(/\s+/g, " ").trim(),
+      viewUrl: href.startsWith("http") ? href : `${EFD_BASE}${href}`,
+      isPtr: href.includes("/view/ptr/"),
+      filedAt
+    });
+  }
+  return filings;
+}
+
+/**
+ * Parse the transactions table from an e-filed PTR view page. Classifies each cell
+ * by content (ticker / date / amount / type) rather than fixed column index, so the
+ * parser survives column reordering in the source HTML.
+ */
+export function parsePtrTransactions(html: string, ctx: { member: string; filedAt?: string }): CongressTrade[] {
+  const tbody = html.match(/<tbody>([\s\S]*?)<\/tbody>/i);
+  if (!tbody) return [];
+  const rowChunks = tbody[1].split(/<tr[^>]*>/i).slice(1);
+  const trades: CongressTrade[] = [];
+  for (const chunk of rowChunks) {
+    const cells = (chunk.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) ?? []).map((c) => stripTags(c));
+    if (cells.length < 5) continue;
+
+    // Anchor the ticker to its fixed eFD column (4th cell:
+    // [#, txDate, owner, ticker, assetName, assetType, txType, amount, comment]).
+    // A row-wide search would mis-grab an all-caps asset-name token (e.g. "GOLD")
+    // when the ticker cell is "--" for a non-equity holding, fabricating a trade.
+    const ticker = cells[3];
+    if (!ticker || ticker === "--" || !TICKER_RE.test(ticker)) continue;
+
+    const typeCell = cells.find((c) => /\b(purchase|sale|exchange)\b/i.test(c));
+    if (!typeCell) continue;
+    let side: "buy" | "sell";
+    if (/purchase/i.test(typeCell)) side = "buy";
+    else if (/sale/i.test(typeCell)) side = "sell";
+    else continue; // exchanges aren't directional
+
+    const amountCell = cells.find((c) => /\$[\d,]+/.test(c)) ?? "";
+    // First date-looking cell that isn't the future-dated nothing; tx date precedes filing.
+    const dateCell = cells.map((c) => toIsoDate(c)).find(Boolean);
+
+    trades.push({
+      symbol: normalizeSymbol(ticker),
+      member: ctx.member,
+      chamber: "senate",
+      side,
+      ...parseAmountRange(amountCell),
+      tradedAt: dateCell ?? ctx.filedAt ?? new Date().toISOString().slice(0, 10),
+      disclosedAt: ctx.filedAt,
+      source: "senate-efd"
+    });
+  }
+  return trades;
+}
+
+/** Parse Capitol Trades BFF JSON (best-effort; their field names have shifted over time). */
+export function parseCapitolTradesBff(json: unknown): CongressTrade[] {
+  const data = (json as { data?: unknown[] })?.data;
+  if (!Array.isArray(data)) return [];
+  const trades: CongressTrade[] = [];
+  for (const raw of data) {
+    const row = raw as Record<string, any>;
+    const ticker =
+      row.asset?.assetTicker ?? row.assetTicker ?? row.ticker ?? row.issuer?.issuerTicker ?? row._stockTicker;
+    if (!ticker || typeof ticker !== "string") continue;
+    const sym = normalizeSymbol(ticker.split(":")[0]);
+    if (!TICKER_RE.test(sym)) continue;
+    const txType = String(row.txType ?? row.type ?? "").toLowerCase();
+    let side: "buy" | "sell";
+    if (/buy|purchase/.test(txType)) side = "buy";
+    else if (/sell|sale|sold/.test(txType)) side = "sell";
+    else continue;
+    const pol = row.politician ?? {};
+    const member =
+      [pol.firstName, pol.lastName].filter(Boolean).join(" ").trim() ||
+      String(row.politicianName ?? "").trim() ||
+      "Unknown";
+    const chamber: "senate" | "house" = /house|rep/i.test(String(pol.chamber ?? row.chamber ?? "")) ? "house" : "senate";
+    const value = Number(row.value ?? row.size ?? NaN);
+    trades.push({
+      symbol: sym,
+      member,
+      chamber,
+      side,
+      ...(Number.isFinite(value) ? { amountLow: value, amountHigh: value } : {}),
+      tradedAt: String(row.txDate ?? row.transactionDate ?? "").slice(0, 10) || new Date().toISOString().slice(0, 10),
+      disclosedAt: row.pubDate ? String(row.pubDate).slice(0, 10) : undefined,
+      source: "capitol-trades"
+    });
+  }
+  return trades;
+}
+
+// ── Apify congress actor (House coverage) ────────────────────────────────────
+
+const APIFY_CONGRESS_ACTOR = "johnvc~us-congress-financial-disclosures-and-stock-trading-data";
+const DEFAULT_APIFY_MAX_RESULTS = 300;
+
+const OWNER_LABELS: Record<string, string> = { sp: "Spouse", se: "Self", jt: "Joint", jo: "Joint", dc: "Child", ch: "Child" };
+
+/** Validate an ISO date and reject data-quality garbage (e.g. a "2036" future date). */
+function saneIsoDate(value: string, now: number): string | undefined {
+  const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return undefined;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  // Reject impossible calendar dates that would otherwise roll over to a valid timestamp (e.g.
+  // "2026-02-30" -> Mar 2): build the UTC date from the components and require it to round-trip.
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return undefined;
+  const iso = `${m[1]}-${m[2]}-${m[3]}`;
+  const ts = d.getTime();
+  if (!Number.isFinite(ts)) return undefined;
+  if (ts > now + 3 * 24 * 60 * 60_000) return undefined; // absurd future (allow small skew)
+  if (ts < Date.parse("2000-01-01")) return undefined; // absurd past
+  return iso;
+}
+
+/**
+ * Normalize a raw trade-date string to a sane ISO date, REJECTING future-dated values. A trade
+ * cannot occur after today, so a future date (e.g. a "12/26/2026" parsed from a corrupt source) is
+ * an unambiguous data-quality error — we drop it rather than let it poison the recency window or
+ * surface an impossible date in the UI. Accepts ISO directly or a US MM/DD/YYYY value.
+ */
+function normalizeTradeDate(value: string | undefined, now: number): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const mdy = toIsoDate(trimmed);
+  const iso = saneIsoDate(trimmed, now) ?? (mdy ? saneIsoDate(mdy, now) : undefined);
+  if (!iso) return undefined;
+  // A congressional trade/disclosure DATE is a timezone-less calendar date, so `saneIsoDate`'s small
+  // (±3 day) future skew — meant for timestamps — is too lax here: even tomorrow is impossible.
+  // Reject anything strictly after today (lexicographic compare is valid for YYYY-MM-DD).
+  const todayIso = new Date(now).toISOString().slice(0, 10);
+  return iso > todayIso ? undefined : iso;
+}
+
+/** Parse the Apify `johnvc` actor's dataset items into CongressTrade rows (pure). */
+export function parseApifyCongress(items: unknown, now: number = Date.now()): CongressTrade[] {
+  if (!Array.isArray(items)) return [];
+  const out: CongressTrade[] = [];
+  for (const raw of items) {
+    const row = raw as Record<string, any>;
+    const tickerRaw = typeof row.Ticker === "string" ? row.Ticker.trim() : "";
+    if (!tickerRaw) continue;
+    const sym = normalizeSymbol(tickerRaw.split(":")[0]);
+    if (!TICKER_RE.test(sym)) continue;
+
+    const tx = String(row.Transaction_Type ?? "").trim().toLowerCase();
+    let side: "buy" | "sell";
+    if (/^p/.test(tx)) side = "buy"; // P / Purchase / "P (partial)"
+    else if (/^s/.test(tx)) side = "sell"; // S / Sale / "S (partial)" / "Sale (Partial)"
+    else continue; // exchanges / other are non-directional
+
+    const chamber: "senate" | "house" = /senate/i.test(String(row.House ?? "")) ? "senate" : "house";
+    const member =
+      [row.First_Name, row.Last_Name].map((v) => String(v ?? "").trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").trim() || "Unknown";
+    const tradedAt = saneIsoDate(String(row.Date ?? ""), now);
+    const disclosedAt = saneIsoDate(String(row.Notification_Date ?? ""), now);
+    if (!tradedAt && !disclosedAt) continue;
+    const ownerCode = String(row.Owner ?? "").trim().toLowerCase();
+
+    out.push({
+      symbol: sym,
+      member,
+      chamber,
+      side,
+      ...parseAmountRange(String(row.Amount_Range ?? "")),
+      ...(OWNER_LABELS[ownerCode] ? { owner: OWNER_LABELS[ownerCode] } : {}),
+      tradedAt: tradedAt ?? disclosedAt!,
+      disclosedAt,
+      source: "apify-congress"
+    });
+  }
+  return out;
+}
+
+/**
+ * Run the Apify `johnvc` congress actor synchronously and return parsed trades.
+ * Keyed by APIFY_API_TOKEN. House-only by default (eFD is authoritative for the Senate);
+ * set WEB_SOURCE_APIFY_CONGRESS_CHAMBERS=all to include Senate too. Returns [] when no token.
+ */
+export async function fetchApifyCongress(now: number = Date.now(), userId?: string): Promise<CongressTrade[]> {
+  // Apify is shared-operator-infra: the resolver returns the operator env token for any user
+  // (incl. no-userId background refresh), so no direct process.env read is needed here.
+  const token = resolveApiKey("apify", userId);
+  if (!token) return [];
+  const actor = (process.env.WEB_SOURCE_APIFY_CONGRESS_ACTOR || APIFY_CONGRESS_ACTOR).trim();
+  if (/^(off|false|disabled|none)$/i.test(actor)) return [];
+
+  const maxRaw = Number(process.env.WEB_SOURCE_APIFY_CONGRESS_MAX ?? DEFAULT_APIFY_MAX_RESULTS);
+  const maxResults = Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : DEFAULT_APIFY_MAX_RESULTS;
+  const lookbackRaw = Number(process.env.WEB_SOURCE_CONGRESS_WINDOW_DAYS ?? DEFAULT_WINDOW_DAYS);
+  const lookback = Number.isFinite(lookbackRaw) && lookbackRaw > 0 ? lookbackRaw : DEFAULT_WINDOW_DAYS;
+  const startDate = new Date(now - lookback * 24 * 60 * 60_000).toISOString().slice(0, 10);
+
+  const url = `https://api.apify.com/v2/acts/${actor}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;
+  const controller = new AbortController();
+  const timeoutMs = Number(process.env.WEB_SOURCE_APIFY_TIMEOUT_MS ?? 180_000);
+  const timeout = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 180_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ Start_Date: startDate, Max_Results: maxResults }),
+      signal: controller.signal
+    });
+    if (!res.ok) throw new Error(`Apify congress HTTP ${res.status}`);
+    const trades = parseApifyCongress(await res.json(), now);
+    const chambers = String(process.env.WEB_SOURCE_APIFY_CONGRESS_CHAMBERS ?? "house").toLowerCase();
+    return chambers === "all" || chambers === "both" ? trades : trades.filter((t) => t.chamber === "house");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ── Aggregation (pure) ───────────────────────────────────────────────────────
+
+/** Build per-symbol congressional signals for the requested symbols, within the window. */
+export function aggregateCongressSignals(
+  trades: CongressTrade[],
+  symbols: string[],
+  now: number = Date.now(),
+  window = windowDays()
+): Record<string, CongressSignal> {
+  const wanted = new Set(symbols.map(normalizeSymbol).filter(Boolean));
+  const cutoff = now - window * 24 * 60 * 60_000;
+  const bySymbol = new Map<string, CongressTrade[]>();
+  for (const t of trades) {
+    if (!wanted.has(t.symbol)) continue;
+    // Use disclosedAt as the recency anchor: trades are disclosed up to ~45 days after they
+    // occur, and the market can only react once the disclosure lands. Windowing on tradedAt
+    // would include trades the market hasn't seen yet (or saw weeks ago) and exclude fresh
+    // disclosures of older trades. Fall back to tradedAt when disclosedAt is absent.
+    const ts = Date.parse(t.disclosedAt || t.tradedAt || "");
+    if (Number.isFinite(ts) && ts < cutoff) continue;
+    const list = bySymbol.get(t.symbol) ?? [];
+    list.push(t);
+    bySymbol.set(t.symbol, list);
+  }
+
+  const out: Record<string, CongressSignal> = {};
+  for (const [symbol, list] of bySymbol) {
+    list.sort((a, b) => Date.parse(b.disclosedAt || b.tradedAt) - Date.parse(a.disclosedAt || a.tradedAt));
+    const buyMembers = distinct(list.filter((t) => t.side === "buy").map((t) => t.member));
+    const sellMembers = distinct(list.filter((t) => t.side === "sell").map((t) => t.member));
+    const buyCount = list.filter((t) => t.side === "buy").length;
+    const sellCount = list.filter((t) => t.side === "sell").length;
+    out[symbol] = {
+      netSignal: buyMembers.length - sellMembers.length,
+      buyCount,
+      sellCount,
+      buyMembers,
+      sellMembers,
+      windowDays: window,
+      lastTradedAt: list[0]?.tradedAt,
+      lastDisclosedAt: list[0]?.disclosedAt,
+      bulletin: buildBulletin(symbol, buyMembers, sellMembers, buyCount, sellCount, window, list)
+    };
+  }
+  return out;
+}
+
+function distinct(names: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const n of names) {
+    if (n && !seen.has(n)) {
+      seen.add(n);
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+function buildBulletin(
+  symbol: string,
+  buyMembers: string[],
+  sellMembers: string[],
+  buyCount: number,
+  sellCount: number,
+  window: number,
+  trades: CongressTrade[]
+): string {
+  const names = (m: string[]) => m.slice(0, 3).join(", ") + (m.length > 3 ? `, +${m.length - 3} more` : "");
+  let base = "";
+  if (buyCount > 0 && sellCount === 0) {
+    base = `Congress: ${buyMembers.length} member(s) disclosed BUYS of ${symbol} in the last ${window}d (${names(buyMembers)}); no sells.`;
+  } else if (sellCount > 0 && buyCount === 0) {
+    base = `Congress: ${sellMembers.length} member(s) disclosed SELLS of ${symbol} in the last ${window}d (${names(sellMembers)}); no buys.`;
+  } else if (buyCount === 0 && sellCount === 0) {
+    // Exchange-only window: no member buy or sell exists, so the mixed-activity branch below
+    // would render "mixed activity ... 0 buy(s) by  vs 0 sell(s) by ." — both wrong (it is not
+    // mixed) and malformed (names([]) is the empty string, leaving a dangling "by "). The
+    // exchange-count and latency/competitor clauses appended after this block still carry the
+    // real signal, so we only need the leading sentence to stop asserting a direction.
+    base = `Congress: no member buy or sell disclosures for ${symbol} in the last ${window}d.`;
+  } else {
+    base = `Congress: mixed activity on ${symbol} in last ${window}d — ${buyCount} buy(s) by ${names(buyMembers)} vs ${sellCount} sell(s) by ${names(sellMembers)}.`;
+  }
+
+  // Include latency/competitor discovery info for LLM insights.
+  const latencies = trades
+    .filter((t) => t.latencyProbeDelayMs !== undefined)
+    .slice(0, 3); // cap to 3 most recent
+
+  if (latencies.length > 0) {
+    const details = latencies
+      .map((t) => `latency: ${t.latencyProbeDelayMs}ms, health: ${t.latencyProbeHealth ?? "unknown"}, provider_pub: ${t.providerPublishedAt ?? "N/A"}`)
+      .join("; ");
+    base += ` (Competitor tracking stats for latest trades: ${details})`;
+  }
+
+  const exchangeCount = trades.filter((t) => t.side === "exchange").length;
+  if (exchangeCount > 0) {
+    base += `  Also ${exchangeCount} exchange disclosure(s) (not counted as buy or sell).`;
+  }
+
+  return base;
+}
+
+/** Read the cached dataset and build signals for the given symbols (no network). */
+export function getCongressSignals(symbols: string[], now: number = Date.now()): Record<string, CongressSignal> {
+  const dataset = getCongressDataset();
+  if (!dataset?.trades?.length) return {};
+  return aggregateCongressSignals(dataset.trades, symbols, now);
+}
+
+// ── Live adapters ────────────────────────────────────────────────────────────
+
+/**
+ * Scrape recent Senate PTR disclosures. Multi-step Django flow:
+ *   GET /search/ -> CSRF + cookies; POST /search/home/ (accept terms, token rotates);
+ *   POST /search/report/data/ -> filings; GET each e-filed PTR -> parse table.
+ */
+export async function scrapeSenateEfd(now: number = Date.now()): Promise<CongressTrade[]> {
+  const jar: Record<string, string> = {};
+  const landing = await politeFetch(`${EFD_BASE}/search/`, { headers: { "user-agent": BROWSER_UA } });
+  mergeSetCookies(jar, landing);
+  const landingHtml = await landing.text();
+  const formCsrf = landingHtml.match(/name=["']csrfmiddlewaretoken["']\s+value=["']([^"']+)["']/)?.[1] ?? jar.csrftoken;
+  if (!formCsrf) throw new Error("Senate eFD: no CSRF token");
+
+  const acceptBody = new URLSearchParams({ prohibition_agreement: "1", csrfmiddlewaretoken: formCsrf });
+  const accept = await politeFetch(`${EFD_BASE}/search/home/`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "user-agent": BROWSER_UA,
+      "content-type": "application/x-www-form-urlencoded",
+      referer: `${EFD_BASE}/search/`,
+      cookie: cookieHeader(jar),
+      "x-csrftoken": formCsrf
+    },
+    body: acceptBody
+  });
+  mergeSetCookies(jar, accept);
+  const apiToken = jar.csrftoken ?? formCsrf; // token rotates after accepting terms
+
+  const lookbackDays = Number(process.env.WEB_SOURCE_CONGRESS_LOOKBACK_DAYS ?? DEFAULT_LOOKBACK_DAYS);
+  const from = new Date(now - lookbackDays * 24 * 60 * 60_000);
+  const fmt = (d: Date) => `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
+  const searchBody = new URLSearchParams();
+  searchBody.append("draw", "1");
+  searchBody.append("start", "0");
+  searchBody.append("length", "100");
+  searchBody.append("report_types", "[11]"); // Periodic Transaction Reports
+  searchBody.append("filer_types", "[]");
+  searchBody.append("submitted_start_date", `${fmt(from)} 00:00:00`);
+  searchBody.append("submitted_end_date", "");
+  searchBody.append("candidate_state", "");
+  searchBody.append("senator_state", "");
+  searchBody.append("office_id", "");
+  searchBody.append("first_name", "");
+  searchBody.append("last_name", "");
+  searchBody.append("csrfmiddlewaretoken", apiToken);
+
+  const searchJson = await politeFetch(`${EFD_BASE}/search/report/data/`, {
+    method: "POST",
+    headers: {
+      "user-agent": BROWSER_UA,
+      "content-type": "application/x-www-form-urlencoded",
+      referer: `${EFD_BASE}/search/`,
+      cookie: cookieHeader(jar),
+      "x-csrftoken": apiToken,
+      "x-requested-with": "XMLHttpRequest"
+    },
+    body: searchBody
+  });
+  if (!searchJson.ok) throw new Error(`Senate eFD search HTTP ${searchJson.status}`);
+  const filings = parseEfdReportRows(await searchJson.json())
+    .filter((f) => f.isPtr)
+    .slice(0, Number(process.env.WEB_SOURCE_CONGRESS_MAX_FILINGS ?? DEFAULT_MAX_FILINGS));
+
+  const perFiling = await runRateLimited(filings, 350, async (filing) => {
+    try {
+      const html = await politeFetchText(filing.viewUrl, {
+        headers: { "user-agent": BROWSER_UA, cookie: cookieHeader(jar), referer: `${EFD_BASE}/search/` }
+      });
+      return parsePtrTransactions(html, { member: filing.member, filedAt: filing.filedAt });
+    } catch {
+      return [] as CongressTrade[];
+    }
+  });
+  return perFiling.flat();
+}
+
+/** Fetch Capitol Trades' public JSON back-end (best-effort; host can be configured/disabled). */
+export async function fetchCapitolTrades(): Promise<CongressTrade[]> {
+  const configured = process.env.WEB_SOURCE_CAPITOLTRADES_URL?.trim();
+  if (configured && /^(off|false|disabled|none)$/i.test(configured)) return [];
+  const base = configured || DEFAULT_CAPITOL_TRADES_URL;
+  const res = await politeFetch(base, {
+    headers: {
+      "user-agent": BROWSER_UA,
+      accept: "application/json",
+      origin: "https://www.capitoltrades.com",
+      referer: "https://www.capitoltrades.com/"
+    }
+  });
+  if (!res.ok) throw new Error(`Capitol Trades HTTP ${res.status}`);
+  return parseCapitolTradesBff(await res.json());
+}
+
+// ── Refresh orchestration ────────────────────────────────────────────────────
+
+function tradeKey(t: CongressTrade): string {
+  if (t.id) return `id:${t.id}`;
+  if (t.docId && t.rowKey) return `doc:${t.docId}|row:${t.rowKey}`;
+  return `${t.symbol}|${t.member}|${t.side}|${t.tradedAt}|${t.amountLow ?? ""}`;
+}
+
+/**
+ * Collapse rows that share a key.  An identity-keyed row (`id:` or `doc:|row:`,
+ * i.e. a Congress.Trade transaction) keeps the LATEST copy: callers pass prior
+ * rows first and incoming rows last, so a corrected row replaces the stale
+ * copy.  A keyless row (scraped adapters) keeps the FIRST copy, so adapter
+ * order still sets source preference (Senate eFD ahead of Apify and Capitol
+ * Trades).  The surviving row keeps the position of the key's first appearance.
+ */
+function dedupeTrades(trades: CongressTrade[]): CongressTrade[] {
+  const byKey = new Map<string, CongressTrade>();
+  for (const t of trades) {
+    const key = tradeKey(t);
+    const identityKeyed = key.startsWith("id:") || key.startsWith("doc:");
+    if (identityKeyed || !byKey.has(key)) byKey.set(key, t);
+  }
+  return Array.from(byKey.values());
+}
+
+function withinRetention(t: CongressTrade, cutoff: number): boolean {
+  const ts = Date.parse(t.disclosedAt ?? t.tradedAt);
+  return Number.isFinite(ts) && ts >= cutoff; // keep only parseable + within-retention rows
+}
+
+/**
+ * Merge incoming Congress.Trade rows into the prior window: latest copy wins,
+ * retracted ids are dropped, and the result is pruned to APP_A_RETENTION_DAYS.
+ * Shared by the push path (upsertCongressTrades) and the incremental pull poll.
+ *
+ * A retracted id is dropped from `incoming` too.  The poll reads transactions
+ * first and retractions second, and CT's retraction feed only serves
+ * retractions that are still open (a revive sets revived_at and hides it), so
+ * a retraction read in this poll is newer than any copy of the row read
+ * before it.  A revived row comes back on a later poll under the same id with
+ * a new cursor_seq, after its retraction closed.  (The two cursors are
+ * independent sequences, so they cannot be compared directly.)
+ */
+function mergeCongressWindow(
+  prior: CongressTrade[],
+  incoming: CongressTrade[],
+  now: number,
+  retractedIds: ReadonlySet<string> = new Set()
+): CongressTrade[] {
+  const cutoff = now - APP_A_RETENTION_DAYS * 24 * 60 * 60_000;
+  const notRetracted = (t: CongressTrade) => !(t.id && retractedIds.has(t.id));
+  const keptPrior = retractedIds.size === 0 ? prior : prior.filter(notRetracted);
+  const keptIncoming = retractedIds.size === 0 ? incoming : incoming.filter(notRetracted);
+  return dedupeTrades([...keptPrior, ...keptIncoming]).filter((t) => withinRetention(t, cutoff));
+}
+
+export function retryBackoffMs(): number {
+  const v = Number(process.env.WEB_SOURCE_RETRY_BACKOFF_MS ?? DEFAULT_RETRY_BACKOFF_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_RETRY_BACKOFF_MS;
+}
+
+export function isCongressRefreshDue(now: number = Date.now()): boolean {
+  // Back off briefly after ANY attempt so a failed scrape (which intentionally does
+  // not advance the dataset's fetchedAt) doesn't re-fire on every 60s scheduler tick.
+  const lastAttempt = getInternalSetting<string>(ATTEMPT_KEY);
+  if (lastAttempt && now - Date.parse(lastAttempt) < retryBackoffMs()) return false;
+  const dataset = getCongressDataset();
+  if (!dataset?.fetchedAt) return true;
+  return now - Date.parse(dataset.fetchedAt) >= congressTtlMs();
+}
+
+/**
+ * Refresh the cached congressional dataset if it's stale. Runs Senate eFD first
+ * (authoritative), then Capitol Trades (House coverage). Persists whatever was
+ * gathered; on total failure leaves the previous dataset untouched (never wipes to
+ * fake/empty mid-trading-day). Returns a result for auditing.
+ */
+export async function refreshCongress(
+  now: number = Date.now(),
+  force = false,
+  operationLeaseClaim?: OperationLeaseClaim
+): Promise<OperationLeaseAware<import("./types").WebSourceRefreshResult>> {
+  if (!force && !isCongressRefreshDue(now)) {
+    const ds = getCongressDataset();
+    return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
+  }
+
+  const guarded = await runWithOperationLease(
+    {
+      group: OPERATION_LEASE_GROUPS.CONGRESS_WEB_SOURCE,
+      operation: "refresh-websource:congress",
+      claim: operationLeaseClaim
+    },
+    async (claim, signal) => refreshCongressUnlocked(now, force, claim, signal)
+  );
+  if (!guarded.acquired) {
+    const ds = getCongressDataset();
+    return {
+      id: "congress",
+      ok: true,
+      recordCount: ds?.recordCount ?? 0,
+      sources: ds?.sources ?? [],
+      fetchedAt: ds?.fetchedAt ?? "",
+      skipped: true,
+      warning: `Skipped because ${guarded.busy.activeOperation} is already refreshing the congressional dataset.`,
+      operationLease: guarded.busy
+    };
+  }
+  return guarded.value;
+}
+
+async function refreshCongressUnlocked(
+  now: number,
+  force: boolean,
+  operationLeaseClaim: OperationLeaseClaim,
+  operationLeaseSignal: AbortSignal
+): Promise<import("./types").WebSourceRefreshResult> {
+  // Recheck after durable acquisition: a different process may have refreshed the dataset and
+  // advanced its timestamps after this caller's fast pre-check.
+  if (!force && !isCongressRefreshDue(now)) {
+    const ds = getCongressDataset();
+    return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
+  }
+  assertOperationLeaseOwnership(operationLeaseClaim);
+  resetAppAPollState();
+
+  // Record the attempt up front so a failure backs off (retryBackoffMs) instead of
+  // re-firing every tick; the dataset's fetchedAt still only advances on success.
+  setInternalSetting(ATTEMPT_KEY, new Date(now).toISOString());
+
+  const collected: CongressTrade[] = [];
+  const sources: string[] = [];
+  const warnings: string[] = [];
+
+  // A rejected Congress.Trade credential is a CONFIGURATION failure, not a
+  // transient outage: the retractions feed would stay dead and retracted rows
+  // would keep feeding the congress signal forever.  It is re-thrown after the
+  // dataset write (so the new disclosures still land) instead of being
+  // downgraded to a warning that reads like a merely degraded refresh.
+  let credentialError: CongressTradeAuthError | null = null;
+  const finish = (result: import("./types").WebSourceRefreshResult): import("./types").WebSourceRefreshResult => {
+    if (credentialError) throw credentialError;
+    return result;
+  };
+
+  // Quiver's direct API is retired, so it cannot fill senateTrades.
+  // When Congress.Trade is the source and it returns trades, do not also scrape
+  // Senate eFD. A throw, or an empty result that is not a successful incremental
+  // poll, falls back to the free eFD PTR scrape (agreement cookie + HTML).
+  // Otherwise run App B's own adapter cascade, which already starts at eFD.
+  const adapters = congressAsCongressSourceEnabled()
+    ? []
+    : [
+        { id: "senate-efd", run: () => scrapeSenateEfd(now) },
+        { id: "apify-congress", run: () => fetchApifyCongress(now) },
+        { id: "capitol-trades", run: fetchCapitolTrades }
+      ];
+
+  if (congressAsCongressSourceEnabled()) {
+    let appATrades: CongressTrade[] = [];
+    let appAFailed = false;
+    try {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      appATrades = await fetchAppACongressTrades(now);
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+    } catch (error) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      appAFailed = true;
+      warnings.push(`congress-trade: ${error instanceof Error ? error.message : "failed"}`);
+    }
+    if (!appAFailed && appAPollState.reachedServer) {
+      try {
+        await fetchAppARetractions();
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+      } catch (error) {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        if (error instanceof CongressTradeAuthError) {
+          // Missing/rejected credential: fail loudly, naming the variable.
+          credentialError = error;
+        } else {
+          // A retractions outage must not block new trades.  Ids already read this
+          // poll still apply; the cursor only advances to what was read.
+          warnings.push(`congress-trade retractions: ${error instanceof Error ? error.message : "failed"}`);
+        }
+      }
+    }
+    if (!appAFailed && appAPollState.reachedServer && appAPollState.incremental && (appATrades.length > 0 || appAPollState.retractedIds.size > 0)) {
+      // An incremental poll returns only rows after the stored cursor.  Merge
+      // them into the existing window; replacing it would drop every older row.
+      return finish(persistIncrementalCongressPoll(now, appATrades, warnings, operationLeaseClaim));
+    }
+    if (appAPollState.retractedIds.size > 0) {
+      // Backfill (full window) path: a row read live and then retracted before
+      // the retractions page must not survive, because the retract cursor
+      // advances with this write.  Same rule as mergeCongressWindow.
+      appATrades = appATrades.filter((t) => !(t.id && appAPollState.retractedIds.has(t.id)));
+    }
+    if (appATrades.length > 0) {
+      collected.push(...appATrades);
+      sources.push("congress-trade");
+    } else if (!(appAPollState.reachedServer && appAPollState.cursor > 0)) {
+      if (warnings.length === 0) warnings.push("congress-trade: empty");
+      try {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        const efd = await scrapeSenateEfd(now);
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        if (efd.length > 0) {
+          collected.push(...efd);
+          sources.push("senate-efd");
+        }
+      } catch (error) {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        warnings.push(`senate-efd: ${error instanceof Error ? error.message : "failed"}`);
+      }
+    }
+  }
+
+  for (const adapter of adapters) {
+    throwIfOperationLeaseCancelled(operationLeaseSignal);
+    try {
+      const trades = await adapter.run();
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      if (trades.length > 0) {
+        collected.push(...trades);
+        sources.push(adapter.id);
+      }
+    } catch (error) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      warnings.push(`${adapter.id}: ${error instanceof Error ? error.message : "failed"}`);
+    }
+  }
+
+  assertOperationLeaseOwnership(operationLeaseClaim);
+  const fetchedAt = new Date(now).toISOString();
+  if (collected.length === 0) {
+    const prior = getCongressDataset();
+    // A successful empty incremental poll is not an outage.  Keep the prior
+    // rows and refresh fetchedAt so the TTL still applies.  The cursor moves
+    // only after that write.
+    if (appAPollState.reachedServer && appAPollState.cursor > 0 && prior && prior.trades.length > 0) {
+      // The retractions this poll read must be applied to the dataset we are
+      // about to write: persistAppACursor() advances the retract cursor, and a
+      // retraction consumed without being applied would leave the retracted row
+      // in the dataset feeding the congress signal, with no re-read to fix it.
+      const trades =
+        appAPollState.retractedIds.size > 0
+          ? mergeCongressWindow(prior.trades, [], now, appAPollState.retractedIds)
+          : prior.trades;
+      const dataset: CongressDataset = { ...prior, trades, fetchedAt, recordCount: trades.length };
+      assertOperationLeaseOwnership(operationLeaseClaim);
+      setInternalSetting(DATASET_KEY, dataset);
+      persistAppACursor();
+      audit("web_source_refresh", { id: "congress", ok: true, recordCount: dataset.recordCount, sources: prior.sources, warnings });
+      return finish({ id: "congress", ok: true, recordCount: dataset.recordCount, sources: prior.sources, fetchedAt, warning: warnings.join("; ") || undefined });
+    }
+    if (appAPollState.reachedServer && appAPollState.cursor > 0) persistAppACursor();
+    // Don't overwrite a good prior dataset with nothing on a transient outage.
+    audit("web_source_refresh", { id: "congress", ok: false, recordCount: 0, warnings });
+    return finish({ id: "congress", ok: false, recordCount: prior?.recordCount ?? 0, sources: prior?.sources ?? [], fetchedAt: prior?.fetchedAt ?? "", warning: warnings.join("; ") || "no records" });
+  }
+
+  const trades = dedupeTrades(collected);
+  const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
+  assertOperationLeaseOwnership(operationLeaseClaim);
+  setInternalSetting(DATASET_KEY, dataset);
+  persistAppACursor();
+  audit("web_source_refresh", { id: "congress", ok: true, recordCount: trades.length, sources, warnings });
+  return finish({ id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined });
+}
+
+function persistIncrementalCongressPoll(
+  now: number,
+  incoming: CongressTrade[],
+  warnings: string[],
+  operationLeaseClaim: OperationLeaseClaim
+): import("./types").WebSourceRefreshResult {
+  const prior = getCongressDataset();
+  const trades = mergeCongressWindow(prior?.trades ?? [], incoming, now, appAPollState.retractedIds);
+  const sources = Array.from(new Set([...(prior?.sources ?? []), "congress-trade"]));
+  const fetchedAt = new Date(now).toISOString();
+  const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
+  assertOperationLeaseOwnership(operationLeaseClaim);
+  setInternalSetting(DATASET_KEY, dataset);
+  persistAppACursor();
+  audit("web_source_refresh", {
+    id: "congress",
+    ok: true,
+    recordCount: trades.length,
+    sources,
+    warnings,
+    incremental: true,
+    incoming: incoming.length,
+    retracted: appAPollState.retractedIds.size
+  });
+  return { id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined };
+}
+
+// ── App A (congress.trade) as the congressional source ───────────────────────
+// When CONGRESS_TRADE_AS_CONGRESS_SOURCE is on, App A is the system-of-record for disclosures.
+// We pull its /api/transactions feed and coerce rows into App B's CongressTrade shape. App A's
+// exact per-row field names are not finalized, so the coercer is tolerant (accepts common aliases).
+
+const APP_A_MAX_PAGES = 40;
+const APP_A_PAGE_SIZE = 500;
+const APP_A_MAX_TRADES = 20000;
+const APP_A_RETENTION_DAYS = 120; // bound the push-merged dataset (> the 60-day signal window)
+const APP_A_SOURCE = "congress.trade";
+
+/** Min extraction confidence (App A stamps 0–1 per row) below which we drop a disclosure as noise. */
+function appAMinConfidence(): number {
+  const v = Number(process.env.CONGRESS_TRADE_MIN_CONFIDENCE ?? 0.3);
+  return Number.isFinite(v) ? v : 0.3;
+}
+
+function pickStr(o: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return undefined;
+}
+
+function pickNum(o: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of keys) {
+    const v = o[k];
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.replace(/[$,]/g, "")) : NaN;
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+/** Tolerantly coerce an App A transaction row (or a pushed CongressTrade) into a CongressTrade. */
+export function coerceCongressTrade(raw: unknown): CongressTrade | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+
+  // App B is equity-focused: skip option disclosures (a P/S txType can't express call/put direction,
+  // so an option trade's directional meaning is ambiguous), and drop very-low-confidence extractions
+  // (App A stamps a 0–1 `confidence` on every transaction row).
+  if (o.isOption === true) return null;
+  const confidence = pickNum(o, ["confidence"]);
+  if (confidence !== undefined && confidence < appAMinConfidence()) return null;
+
+  const symbol = normalizeSymbol(pickStr(o, ["symbol", "ticker", "asset", "assetTicker", "issuerTicker"]) ?? "");
+  if (!symbol) return null;
+
+  // App A's /api/transactions uses single-letter codes: P/B buy, S / S_partial sell, E exchange.
+  // Gifts and other codes stay dropped.  Key order stays side, type, transactionType,
+  // txType, action so a bare SSE frame is read from `type` before `txType`.
+  const sideRaw = (pickStr(o, ["side", "type", "transactionType", "txType", "action"]) ?? "").toLowerCase();
+  let side: CongressTrade["side"] | undefined;
+  if (sideRaw === "p" || sideRaw === "b" || /(buy|purchase|acqui)/.test(sideRaw)) side = "buy";
+  else if (sideRaw === "s" || sideRaw.startsWith("s_") || /(sell|sale|dispos)/.test(sideRaw)) side = "sell";
+  else if (sideRaw === "e" || sideRaw === "exchange" || /\bexchange\b/.test(sideRaw)) side = "exchange";
+  if (!side) return null;
+
+  const now = Date.now();
+  const rawTradedAt = pickStr(o, ["tradedAt", "txDate", "transactionDate", "tradeDate", "date"]);
+  const rawDisclosedAt = pickStr(o, ["disclosedAt", "filedDate", "filedAt", "reportDate", "disclosureDate", "publishedAt", "pubDate"]);
+  const tradedAt = normalizeTradeDate(rawTradedAt, now);
+  const disclosedAt = normalizeTradeDate(rawDisclosedAt, now);
+  // A date field that was SUPPLIED but is unparseable ("2026-13-45") or FUTURE-dated is a
+  // data-quality error — reject the whole row rather than silently falling back to the other date,
+  // which would otherwise let a future-dated trade in under its disclosure date. Only fall back when
+  // a field was simply absent.
+  if (rawTradedAt && !tradedAt) return null;
+  if (rawDisclosedAt && !disclosedAt) return null;
+  const anchor = tradedAt ?? disclosedAt;
+  // Reject a trade with no usable date at all so garbage never accumulates and the
+  // disclosedAt-windowed signal stays correct.
+  if (!anchor) return null;
+
+  // Match the senate prefix (senate/senator) at the START — substring .includes("sen") would
+  // misclassify "representative".  "exec..." stays executive.  Anything else → house.
+  const chamberRaw = (pickStr(o, ["chamber", "house", "body"]) ?? "").toLowerCase();
+  const chamber: CongressTrade["chamber"] = chamberRaw.startsWith("exec")
+    ? "executive"
+    : chamberRaw.startsWith("sen")
+      ? "senate"
+      : "house";
+
+  const trade: CongressTrade = {
+    symbol,
+    member: pickStr(o, ["memberName", "member", "politician", "fullName", "name", "representative", "senator"]) ?? "Unknown",
+    chamber,
+    side,
+    tradedAt: anchor,
+    source: APP_A_SOURCE
+  };
+  if (disclosedAt) trade.disclosedAt = disclosedAt;
+  const amountLow = pickNum(o, ["amountLow", "amount_min", "minAmount", "sizeRangeLow", "valueLow", "amountMin"]);
+  const amountHigh = pickNum(o, ["amountHigh", "amount_max", "maxAmount", "sizeRangeHigh", "valueHigh", "amountMax"]);
+  if (amountLow !== undefined) trade.amountLow = amountLow;
+  if (amountHigh !== undefined) trade.amountHigh = amountHigh;
+  const owner = pickStr(o, ["owner", "ownerType", "holder"]);
+  if (owner) trade.owner = owner;
+  const id = pickStr(o, ["id"]);
+  if (id) trade.id = id;
+  const docId = pickStr(o, ["docId", "doc_id"]);
+  if (docId) trade.docId = docId;
+  const rowKey = pickStr(o, ["rowKey", "row_key"]);
+  if (rowKey) trade.rowKey = rowKey;
+  const party = pickStr(o, ["party"]);
+  if (party) trade.party = party;
+  const bioguideId = pickStr(o, ["bioguideId", "bioguide_id"]);
+  if (bioguideId) trade.bioguideId = bioguideId;
+  const pdfUrl = pickStr(o, ["pdfUrl", "pdf_url"]);
+  if (pdfUrl) trade.pdfUrl = pdfUrl;
+  const disclosureLagDays = pickNum(o, ["disclosureLagDays", "disclosure_lag_days"]);
+  if (disclosureLagDays !== undefined) trade.disclosureLagDays = disclosureLagDays;
+  const stockActStatus = pickStr(o, ["stockActStatus", "stock_act_status"]);
+  if (stockActStatus) trade.stockActStatus = stockActStatus;
+  const priceAtTrade = pickNum(o, ["priceAtTrade", "price_at_trade"]);
+  if (priceAtTrade !== undefined) trade.priceAtTrade = priceAtTrade;
+  const spxAtTrade = pickNum(o, ["spxAtTrade", "spx_at_trade"]);
+  if (spxAtTrade !== undefined) trade.spxAtTrade = spxAtTrade;
+  const priceAtFiling = pickNum(o, ["priceAtFiling", "price_at_filing"]);
+  if (priceAtFiling !== undefined) trade.priceAtFiling = priceAtFiling;
+  const spxAtFiling = pickNum(o, ["spxAtFiling", "spx_at_filing"]);
+  if (spxAtFiling !== undefined) trade.spxAtFiling = spxAtFiling;
+
+  applyPayloadLatency(trade, o);
+  const latencyProbeHealth = pickStr(o, ["latencyProbeHealth"]);
+  if (latencyProbeHealth) trade.latencyProbeHealth = latencyProbeHealth;
+  const latencyProbeDelayMs = pickNum(o, ["latencyProbeDelayMs"]);
+  if (latencyProbeDelayMs !== undefined) trade.latencyProbeDelayMs = latencyProbeDelayMs;
+  const providerPublishedAt = pickStr(o, ["providerPublishedAt"]);
+  if (providerPublishedAt) trade.providerPublishedAt = providerPublishedAt;
+
+  return trade;
+}
+
+function applyPayloadLatency(trade: CongressTrade, o: Record<string, unknown>): void {
+  const latency = o.latency;
+  if (!latency || typeof latency !== "object" || Array.isArray(latency)) return;
+  const lat = latency as Record<string, unknown>;
+  const status = pickStr(lat, ["status"]);
+  const provider = pickStr(lat, ["provider"]);
+  if (status) trade.latencyProbeHealth = status;
+  else if (provider) trade.latencyProbeHealth = provider;
+  const deltaSec = pickNum(lat, ["providerDeltaSec"]);
+  if (deltaSec !== undefined) trade.latencyProbeDelayMs = deltaSec * 1000;
+  const published = pickStr(lat, ["providerPublishedAt"]);
+  if (published) trade.providerPublishedAt = published;
+}
+
+/**
+ * Per-poll state for the Congress.Trade pull.  Pinned on globalThis: Next.js can
+ * load two copies of this module in one process (server bundle + route handler),
+ * and a module-level `let` would then split the poll state — the retraction ids
+ * read by one copy would be invisible to the copy that writes the dataset, so a
+ * retracted row would keep scoring.  One shared object keeps them in step.
+ */
+interface CongressAppAPollState {
+  /** True when the last poll's transactions request reached Congress.Trade. */
+  reachedServer: boolean;
+  /** Highest transactions cursor the last poll read. */
+  cursor: number;
+  /** True when the last poll started from a stored cursor (rows after it only). */
+  incremental: boolean;
+  /** Transaction ids the last poll's retractions page named (fetchAppARetractions). */
+  retractedIds: Set<string>;
+  /** Highest retractions cursor seen by the last poll (persisted after the dataset write). */
+  retractCursor: number;
+}
+
+const congressPollHost = globalThis as unknown as { __congressAppAPollState?: CongressAppAPollState };
+const appAPollState: CongressAppAPollState =
+  congressPollHost.__congressAppAPollState ??
+  (congressPollHost.__congressAppAPollState = {
+    reachedServer: false,
+    cursor: 0,
+    incremental: false,
+    retractedIds: new Set<string>(),
+    retractCursor: 0
+  });
+
+function resetAppAPollState(): void {
+  appAPollState.reachedServer = false;
+  appAPollState.cursor = 0;
+  appAPollState.incremental = false;
+  // Clear the shared instance in place — replacing the Set would leave other
+  // module copies holding the old one.
+  appAPollState.retractedIds.clear();
+  appAPollState.retractCursor = 0;
+}
+
+const APP_A_RETRACT_MAX_PAGES = 20;
+const APP_A_RETRACT_PAGE_SIZE = 500;
+
+function readStoredRetractCursor(): number {
+  const raw = getInternalSetting<number | string>(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function persistAppARetractCursor(): void {
+  if (appAPollState.retractCursor > readStoredRetractCursor()) setInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY, appAPollState.retractCursor);
+}
+
+/**
+ * Pull retracted transaction ids from Congress.Trade's
+ * /api/transactions/retractions?since=<cursor> into appAPollState.retractedIds.
+ * The endpoint ships in the CT follow-up to Congress.Trade#2867; until then it
+ * 404s and this is a no-op.  The cursor only advances when the dataset write
+ * succeeds (persistAppARetractCursor).
+ */
+export async function fetchAppARetractions(): Promise<string[]> {
+  const ids: string[] = [];
+  let since = readStoredRetractCursor();
+  appAPollState.retractCursor = since;
+  for (let page = 0; page < APP_A_RETRACT_MAX_PAGES; page++) {
+    const res = await readCongressRetractionsPage({ since, limit: APP_A_RETRACT_PAGE_SIZE });
+    if (!res) break;
+    for (const r of res.retractions) {
+      ids.push(r.txId);
+      appAPollState.retractedIds.add(r.txId);
+    }
+    if (res.cursor > appAPollState.retractCursor) appAPollState.retractCursor = res.cursor;
+    if (res.retractions.length === 0 || !(res.cursor > since)) break;
+    since = res.cursor;
+  }
+  return ids;
+}
+
+function readStoredCursor(): number {
+  const raw = getInternalSetting<number | string>(CONGRESS_CURSOR_SETTING_KEY);
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function persistAppACursor(): void {
+  if (!appAPollState.reachedServer || !(appAPollState.cursor > 0)) return;
+  if (appAPollState.cursor > readStoredCursor()) setInternalSetting(CONGRESS_CURSOR_SETTING_KEY, appAPollState.cursor);
+  persistAppARetractCursor();
+}
+
+function rowCursorSeq(raw: unknown): number | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const n = Number((raw as { cursorSeq?: unknown }).cursorSeq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Pull congressional disclosures from App A's public /api/transactions feed.
+ * The first backfill sends `from` alone (then `from` plus `since` to page that
+ * window; offset is capped, so since is the pager).  Once a cursor is stored,
+ * later polls send `since` alone.
+ */
+export async function fetchAppACongressTrades(now: number = Date.now()): Promise<CongressTrade[]> {
+  resetAppAPollState();
+  const out: CongressTrade[] = [];
+  const stored = readStoredCursor();
+  const backfill = stored <= 0;
+  const from = backfill
+    ? new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10)
+    : undefined;
+  appAPollState.incremental = !backfill;
+  let since: string | undefined = backfill ? undefined : String(stored);
+  for (let page = 0; page < APP_A_MAX_PAGES; page++) {
+    const res = await readCongressTransactionsPage({
+      limit: APP_A_PAGE_SIZE,
+      ...(from ? { from } : {}),
+      ...(since ? { since } : {})
+    }).catch(e => { console.error("getTransactions error:", e); return null; });
+    if (!res) break;
+    appAPollState.reachedServer = true;
+    if (res.transactions.length === 0) {
+      if (res.cursor > appAPollState.cursor) appAPollState.cursor = res.cursor;
+      break;
+    }
+    let consumed = appAPollState.cursor;
+    let stoppedEarly = false;
+    for (const raw of res.transactions) {
+      const rowCursor = rowCursorSeq(raw);
+      if (rowCursor !== undefined && rowCursor > consumed) consumed = rowCursor;
+      const t = coerceCongressTrade(raw);
+      if (t) out.push(t);
+      if (out.length >= APP_A_MAX_TRADES) {
+        stoppedEarly = true;
+        break;
+      }
+    }
+    if (stoppedEarly) {
+      if (consumed > appAPollState.cursor) appAPollState.cursor = consumed;
+      return out;
+    }
+    const pageCursor = Math.max(res.cursor, consumed);
+    if (pageCursor > appAPollState.cursor) appAPollState.cursor = pageCursor;
+    const next = pageCursor > 0 ? String(pageCursor) : undefined;
+    if (!next || next === since) break;
+    since = next;
+  }
+  return out;
+}
+
+/**
+ * Merge externally-received congressional trades (push webhook / SSE) into the persisted dataset,
+ * deduped and pruned to APP_A_RETENTION_DAYS. Returns how many net-new rows landed. Idempotent:
+ * re-sending the same trades is a no-op, and a re-sent id replaces the stored copy (latest wins).
+ * `added` counts net-new rows and `replaced` counts stored rows a changed copy overwrote.
+ */
+export function upsertCongressTrades(
+  incoming: CongressTrade[],
+  now: number = Date.now()
+): { added: number; replaced: number; total: number } {
+  const clean = incoming.filter((t): t is CongressTrade => Boolean(t && t.symbol && t.side && t.tradedAt));
+  const prior = getCongressDataset();
+  if (clean.length === 0) return { added: 0, replaced: 0, total: prior?.recordCount ?? 0 };
+  // `added` = distinct incoming keys not already present; `replaced` = identity-keyed incoming rows
+  // whose stored copy differs (a corrected disclosure re-sent under the same id).  Both are computed
+  // BEFORE retention pruning so the counts are accurate even when pruning drops unrelated old rows.
+  const priorByKey = new Map((prior?.trades ?? []).map((t) => [tradeKey(t), t] as const));
+  const latestIncoming = new Map(clean.map((t) => [tradeKey(t), t] as const));
+  let added = 0;
+  let replaced = 0;
+  for (const [key, t] of latestIncoming) {
+    const stored = priorByKey.get(key);
+    if (!stored) added++;
+    else if ((key.startsWith("id:") || key.startsWith("doc:")) && JSON.stringify(stored) !== JSON.stringify(t)) replaced++;
+  }
+  const merged = mergeCongressWindow(prior?.trades ?? [], clean, now);
+  const sources = Array.from(new Set([...(prior?.sources ?? []), APP_A_SOURCE]));
+  const dataset: CongressDataset = {
+    trades: merged,
+    fetchedAt: new Date(now).toISOString(),
+    sources,
+    recordCount: merged.length
+  };
+  setInternalSetting(DATASET_KEY, dataset);
+  return { added, replaced, total: merged.length };
+}
+
+/**
+ * Remove retracted Congress.Trade rows by transaction id (push `trade.retract`).
+ * Does not touch fetchedAt, so the pull TTL is unchanged.  Returns how many
+ * rows were removed.
+ */
+export function removeCongressTradesById(ids: readonly string[]): { removed: number; total: number } {
+  const prior = getCongressDataset();
+  const drop = new Set(ids.map((id) => id.trim()).filter(Boolean));
+  if (!prior || drop.size === 0) return { removed: 0, total: prior?.recordCount ?? 0 };
+  const kept = prior.trades.filter((t) => !(t.id && drop.has(t.id)));
+  const removed = prior.trades.length - kept.length;
+  if (removed === 0) return { removed: 0, total: prior.trades.length };
+  setInternalSetting(DATASET_KEY, { ...prior, trades: kept, recordCount: kept.length });
+  return { removed, total: kept.length };
+}

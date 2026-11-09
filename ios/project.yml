@@ -1,0 +1,215 @@
+# Project Format: Xcode 26.3-compatible (objectVersion / preferredProjectObjectVersion = 100).
+# XcodeGen 2.46 still emits objectVersion 77 for xcodeVersion 26.3; `xcodegen-post.py`
+# rewrites 77 -> 100 after generate (matches Congress.Trade). Do not leave 77 on main:
+# Xcode 26 on hosted macos-latest cannot archive objectVersion 77 (TestFlight rc=65).
+
+name: Socratic Trade
+
+options:
+  bundleIdPrefix: com.socratictrade.ios
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "15.0"
+  groupSortPosition: top
+  xcodeVersion: "26.3"
+  postGenCommand: "python3 xcodegen-post.py"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # RECORD OF WHAT SHIPPED, not the source of truth for what ships next.
+    # The ship script passes MARKETING_VERSION / CURRENT_PROJECT_VERSION on the
+    # xcodebuild command line, so these values never decide a build.  Under the
+    # fixed-version scheme (owner 2026-10-29) the marketing version stays 0.1.0
+    # and the build is the once-planned merge-timestamp number max(S, M + 1).
+    # `xcodegen generate` rewrites project.pbxproj from THIS file, so update
+    # both by hand whenever you notice drift; the build below is a placeholder
+    # the ship overrides.
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "202610290000"  # placeholder; ship script overrides per build
+    INFOPLIST_KEY_CFBundleDisplayName: "Socratic Trade"
+    INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
+    # SENTRY_DSN is not set here. An explicit empty string in the project file
+    # overrides Config/Sentry.xcconfig and bakes a blank DSN into Info.plist.
+    # CI passes SENTRY_DSN=... on the xcodebuild command line. Unset stays empty
+    # and SentryTelemetry skips init. Never put a DSN literal in this file.
+
+packages:
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa.git
+    from: "9.32.0"
+
+targets:
+  SocraticTrade:
+    type: application
+    platform: iOS
+    dependencies:
+      - package: Sentry
+        product: Sentry
+    sources:
+      - path: SocraticTrade
+        excludes:
+          - README.md
+          - Info.plist
+          - SocraticTrade.entitlements
+          - PrivacyInfo.xcprivacy
+      # App Store / TestFlight require a privacy manifest in the bundle.  Listed
+      # explicitly as a resource so `xcodegen generate` (Mac ship) copies it even
+      # if a later exclude-glob would drop unknown file types.
+      - path: SocraticTrade/PrivacyInfo.xcprivacy
+        buildPhase: resources
+        type: file
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.socratictrade.ios
+        DEVELOPMENT_TEAM: CC8UTF7ATG
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: SocraticTrade/SocraticTrade.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2,6"
+        SUPPORTS_MACCATALYST: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_NAME: "Socratic Trade"
+        # PRODUCT_NAME has a space, which sanitizes to module "Socratic_Trade" —
+        # that broke `@testable import SocraticTrade` in the test target (which,
+        # combined with the TEST_HOST mismatch, means the tests were never
+        # runnable).  Pin the module name so imports and the display name are
+        # decoupled.
+        PRODUCT_MODULE_NAME: SocraticTrade
+        # Debug stays Automatic for a logged-in Xcode session.  Do not set
+        # CODE_SIGN_IDENTITY to Apple Distribution in `base` -- that conflicts with
+        # CODE_SIGN_STYLE Automatic on Xcode 26 ("automatically signed for
+        # development, but Apple Distribution specified").
+      # Release (the TestFlight archive) signs MANUALLY with the App Store profile
+      # named in ios/appstore-profiles.json.  Xcode 26 automatic signing calls
+      # developerservices2.apple.com, and the fleet App Store Connect API key gets
+      # HTTP 401 NOT_AUTHORIZED there while api.appstoreconnect.apple.com accepts
+      # it (2026-09-30, docs/rollouts/2026-09-30-st-ios-first-ship.md).
+      # scripts/ios-install-appstore-profiles.sh downloads and installs the
+      # profile over the App Store Connect API before the archive; the Apple
+      # Distribution identity comes from ios-appstore-gm-prepare.sh.  Keep the
+      # specifier and ios/appstore-profiles.json identical
+      # (test/ios-manual-signing.test.ts).
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+          PROVISIONING_PROFILE_SPECIFIER: "Socratic Trade App Store (API) 2"
+    configFiles:
+      Debug: Config/Sentry.xcconfig
+      Release: Config/Sentry.xcconfig
+    info:
+      path: SocraticTrade/Info.plist
+      properties:
+        # Version fields MUST stay build-variable substitutions.  Without these two
+        # entries xcodegen emits literal "1.0"/"1" defaults on every `xcodegen
+        # generate`, silently detaching the shipped version from MARKETING_VERSION /
+        # CURRENT_PROJECT_VERSION above — that is exactly how the 2026-08-11 version
+        # regression (fixed in PR #2639) got introduced by an unrelated regen.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        SENTRY_DSN: $(SENTRY_DSN)
+        CFBundleDisplayName: Socratic Trade
+        LSApplicationCategoryType: public.app-category.finance
+        ITSAppUsesNonExemptEncryption: false
+        # Lato (SIL OFL 1.1) — the shared web/native typeface, sources in SocraticTrade/Fonts/.
+        # BARE FILENAMES, no "Fonts/" prefix: XcodeGen emits Fonts/ as a PBXGroup (not a folder
+        # reference), so the Resources build phase copies each .ttf to the TOP level of the
+        # bundle. A path that doesn't resolve here fails SILENTLY — the faces never register
+        # and every .app* style falls back to SF Pro with no error anywhere. `testAppFontsAreRegistered`
+        # in SocraticTradeTests is the guard; keep it passing rather than eyeballing a screenshot.
+        UIAppFonts:
+          - Lato-Regular.ttf
+          - Lato-Italic.ttf
+          - Lato-Bold.ttf
+          - Lato-Black.ttf
+        # An empty UILaunchScreen paints WHITE, and the app's own background is
+        # systemGroupedBackground (#F2F2F7) — so every cold launch flashed white before the
+        # candlestick splash appeared. LaunchBackground pins that same grey (deliberately the
+        # SAME value in both appearances: the launch screen renders before SwiftUI can apply
+        # the app's forced .light scheme, so a dark variant here would flash dark instead).
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: com.socratictrade.ios
+            CFBundleURLSchemes:
+              - socratictrade
+    entitlements:
+      path: SocraticTrade/SocraticTrade.entitlements
+      properties:
+        # xcodegen REWRITES SocraticTrade.entitlements from this block on every
+        # `xcodegen generate` — anything added only to the .entitlements file is silently
+        # dropped by the next regen.  Both must be edited together.
+        #
+        # `production` is the shipped value: TestFlight and the App Store are the SAME APNs
+        # environment (api.push.apple.com), and TestFlight builds are Release builds re-signed
+        # by Apple with a distribution profile.  Xcode's automatic signing (CODE_SIGN_STYLE:
+        # Automatic above) substitutes `development` when it builds against a development
+        # profile, so local Xcode runs still get sandbox tokens — and the app reports the
+        # environment it was actually signed with by reading this entitlement back out of the
+        # embedded provisioning profile at runtime (APNSEnvironment.current), never from
+        # #if DEBUG.
+        aps-environment: production
+        com.apple.developer.applesignin:
+          - Default
+        # Universal links.  The domain side is app/.well-known/apple-app-site-association/
+        # route.ts (served without a .json extension, appID CC8UTF7ATG.com.socratictrade.ios).
+        # Keep this list and SocraticTrade.entitlements in sync — xcodegen REWRITES that file
+        # from these properties, so an entry only added there is lost on the next regen.
+        #
+        # 2026-09-22 bundle-ID migration (see docs/rollouts/2026-09-22-bundle-id-migration.md):
+        # added applinks:socratic.trade + webcredentials:socratic.trade for the new
+        # socratic.trade zone (Jay owns the domain), and kept applinks:socratictrade.com so
+        # the existing universal-link surfaces do not break.
+        com.apple.developer.associated-domains:
+          - applinks:socratictrade.com
+          - applinks:socratic.trade
+          - webcredentials:socratic.trade
+        # NO App Group entitlement (removed 2026-09-30).  The 2026-09-22 migration added
+        # `com.apple.security.application-groups: [group.com.socratictrade]`, but the group
+        # was never assigned to the com.socratictrade.ios App ID, so every App Store profile
+        # for this bundle carries an EMPTY application-groups list and a Release signature
+        # that requests the group cannot match it.  The public App Store Connect API cannot
+        # assign an App Group, and no Swift code reads a shared container (no suiteName:,
+        # no containerURL(forSecurityApplicationGroupIdentifier:)).  To bring it back: assign
+        # group.com.socratictrade to the App ID in the Developer Portal, regenerate the
+        # "Socratic Trade App Store (API) 2" profile, then re-add the key here and regenerate.
+
+  SocraticTradeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      # Folder glob.  Layout math lives in LayoutMathTests.swift (was WrappingHStackTests.swift).
+      - path: SocraticTradeTests
+    dependencies:
+      - target: SocraticTrade
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.socratictrade.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: CC8UTF7ATG
+        CODE_SIGN_STYLE: Automatic
+        # The app target overrides PRODUCT_NAME to "Socratic Trade" (with a space);
+        # xcodegen derives TEST_HOST from the target NAME (SocraticTrade), which
+        # points at a bundle that does not exist — the test target could never run
+        # until these two overrides.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Socratic Trade.app/Socratic Trade"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  SocraticTrade:
+    build:
+      targets:
+        SocraticTrade: all
+        SocraticTradeTests: [test]
+    test:
+      targets:
+        - SocraticTradeTests

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 48" width="500" height="96" style="color:#0f1722">
+      <text x="6" y="33" font-family="'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif" font-size="24" font-weight="600" letter-spacing="1.5" fill="currentColor">SOCRATIC</text>
+      <line x1="146" y1="12" x2="146" y2="38" stroke="#0e9f6e" stroke-width="2.5"/>
+      <rect x="142.5" y="18" width="7" height="14" rx="1.5" fill="#0e9f6e"/>
+      <text x="156" y="33" font-family="'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif" font-size="24" font-weight="600" letter-spacing="1.5" fill="currentColor">TRADE</text>
+    </svg>

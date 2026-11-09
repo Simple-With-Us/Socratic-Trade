@@ -1,0 +1,87 @@
+# Scope: Full-filing RAG ingestion (Q2) — 10-K/10-Q body fetch → storeDocument → ingested_accessions de-dup → scope:shared
+
+> **2026-07-21 implementation note:** Production embeddings are now OpenRouter/SiliconFlow BGE-M3,
+> while a Voyage client may exist only in tests. Before a managed `storeDocument` commit, the gate
+> must require the initialized Pinecone authority and the credential for the resolved active
+> embedding provider—not a test-only Voyage client. A production-mode OpenRouter/Pinecone regression
+> protects that invariant. This is separate from the gated corpus re-embed/purge program.
+
+> **2026-07-12 scope correction:** this file preserves the original recent-10-K/10-Q implementation design.
+> It is not sufficient for a 1,000-issuer historical backfill: the scheduler path, regex parser, recent-only
+> discovery, coarse accession ledger, and global content-hash dedup all require replacement or hardening first.
+> The current architecture and rollout plan is
+> [`docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`](../reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md).
+
+_Scoped 2026-06-21 (multi-agent design pass). Effort: **m** · Autonomy: **autonomous-after-decisions**_
+
+## Current state
+WHAT EXISTS (verified against code):
+
+1. storeDocument (vector-db.ts:352-374) and chunkDocument (rag/chunk.ts:158-236) are fully implemented and unit-tested (test/rag-chunk.test.ts covers heading/table/overlap/empty cases). storeDocument has ZERO production callers — confirmed by grep across all src/ and test/ outside the defining files. It is dead scaffolding today.
+
+2. The only live SEC write path is: refreshEightK (sec8k.ts:257-333) → storeContexts (vector-db.ts:258-345). It calls buildEightKContext (sec8k.ts:214-223) which produces a 6-line summary (ticker, filedAt, accession, items, URL) — no filing body text. The store call is fire-and-forget, errors swallowed to console.warn (sec8k.ts:329). The 8-K events are capped at eightKRagLimit() = 16 by default (sec8k.ts:314).
+
+3. scope:shared metadata is MERGED already. cleanMetadata (vector-db.ts:155-167) writes scope='shared' for userId='local' and scope='private' otherwise. SHARED_SCOPE / PRIVATE_SCOPE constants exist (vector-db.ts:9-11). retrieveContextDetailed uses $or backward-compat filter (vector-db.ts:486-491) to also match legacy pre-scope userId='local' vectors. The scope-metadata rollout note (docs/rollouts/2026-06-21-rag-scope-metadata.md) confirms this landed and is tested in test/vector-db-scope.test.ts.
+
+4. The paid-tier knobs are all present: VECTOR_EMBED_BATCH_DELAY_MS (default 21000 — the free 3-RPM gate, comment says 'paid accounts can set this to 0', vector-db.ts:38), VECTOR_EMBED_BATCH_SIZE (default 8, vector-db.ts:37), VECTOR_CONTEXT_MAX_CHARS, VECTOR_EMBED_RETRY_ATTEMPTS. 429 detection and backoff are implemented (vector-db.ts:188-212).
+
+5. The isWithinAsOf point-in-time guard (vector-db.ts:381-389) looks for acceptance_datetime first, then as_of, then timestamp. storeDocument sets acceptance_datetime on every chunk (via chunkDocument, rag/chunk.ts:167). The live 8-K path uses only timestamp, so 8-K vectors have NO acceptance_datetime and the as_of guard is a no-op for them.
+
+6. The CIK→ticker map loader (sec8k.ts:131-138) already exists and is cached weekly in the settings KV. SEC EDGAR submissions JSON API (data.sec.gov/submissions/CIK.json) is NOT fetched anywhere — there is no 10-K/10-Q filing discovery code.
+
+7. HTML stripping utilities: decodeXmlEntities (sec8k.ts:158-165), basic tag-strip via replace(/<[^>]+>/g, ' ') pattern (sec8k.ts:171), and politeFetchText + secUserAgent are in http.ts. No full-text HTM strip pipeline exists yet.
+
+8. ingested_accessions table: DOES NOT EXIST anywhere in the codebase (grep across src/ + db.ts migration confirms). The design doc (chat-multiuser-learning-design.md §3.4) calls for it but it has not been built.
+
+9. The design doc (chat-multiuser-learning-design.md §3) calls for: filing-body fetcher from EDGAR submissions API, route through storeDocument, ingested_accessions de-dup, chunk-level content_hash cache, and the 'Later' label places this after auth and scope-metadata. The memory/rag-full-filing-ingestion-approved.md confirms owner chose option B (full filing bodies, paid Voyage key) on 2026-06-21.
+
+GAPS — nothing yet exists for:
+- EDGAR submissions API fetch (data.sec.gov/submissions/CIK##########.json) to enumerate recent 10-K/10-Q accessions per symbol
+- Primary document index fetch (.htm file from EDGAR filing index) per accession
+- Full-text HTM → plain text pipeline (strip HTML, preserve structure for chunker)
+- ingested_accessions SQLite table for de-dup
+- Scheduler hook to drive periodic ingestion per watchlist symbol
+- storeDocument called with scope='shared' + userId='local' (app-key funded)
+- Tests covering as_of drop of look-ahead chunks once bodies carry acceptance_datetime
+
+## Recommended approach
+Build a new src/lib/web-sources/sec-filings.ts module that fetches 10-K/10-Q bodies from EDGAR's submissions JSON API and routes them through the existing-but-dead storeDocument path. The key design choices: (1) App-key funded only — the scheduler has no user context, so all corpus writes go to userId='local' which cleanMetadata already maps to scope='shared'; this is correct by construction with no new wiring needed. (2) ingested_accessions table in SQLite (keyed by accession + doc_type) is the sole de-dup gate — never re-embed a filing regardless of which symbol triggered the lookup. (3) The HTML-to-text strip can reuse the existing decodeXmlEntities + tag-strip pattern from sec8k.ts, plus a structural newline injection around block elements (div/p/h1-h6/table) so the chunker's blockDocument function gets well-separated paragraphs and headings. (4) Gate backfill behind VECTOR_EMBED_BATCH_DELAY_MS=0 (env signal for paid key); free-key runs should only ingest the most recent 10-K/10-Q per symbol to avoid multi-hour stalls. (5) Wire the refreshFilingBodies call into the scheduler alongside refreshDueWebSources, with its own TTL (weekly per symbol is sufficient — annual/quarterly cadence). The scope:shared metadata and as_of point-in-time guard are already correct for the written vectors once acceptance_datetime is set by storeDocument (which it is — via chunkDocument). The 8-K path needs no change; it coexists as the catalyst-flag layer while the new path adds the analytical body layer.
+
+## Phased plan
+1. **ingested_accessions table + de-dup helpers in db.ts** (xs) — Add CREATE TABLE IF NOT EXISTS ingested_accessions (accession TEXT, doc_type TEXT, ticker TEXT, indexed_at TEXT, chunk_count INTEGER, PRIMARY KEY (accession, doc_type)) to the migrate() block in src/lib/db.ts near the user_memory table (db.ts:307-319). Add insertIngestedAccession(accession, docType, ticker, chunkCount) and hasIngestedAccession(accession, docType): boolean helper functions. This table is the only correctness-critical piece — without it, every scheduler tick re-embeds the same filing and burns Voyage tokens. No user_id scoping needed (corpus is shared and app-funded; accessions are globally unique). Add a test in test/vector-db.test.ts or a new test/sec-filings.test.ts asserting that a second ingest call for the same accession+doc_type is skipped.  
+   _Files:_ src/lib/db.ts (migrate block, ~db.ts:320 insertion point; two new exported helpers), test/sec-filings.test.ts (new, de-dup unit test)
+2. **EDGAR submissions fetcher + primary document resolver** (s) — New src/lib/web-sources/sec-filings.ts. Implement fetchRecentFilings(ticker: string, cik: string, docTypes: ('10-K'|'10-Q')[], limit: number): Promise<FilingRef[]> that calls https://data.sec.gov/submissions/CIK{padded10}.json with secUserAgent(), parses filings.recent.{accessionNumber[], form[], filingDate[], primaryDocument[]}, filters for docTypes, and returns the N most recent (default: 2 per type = 1 10-K + 2 10-Qs). Implement fetchFilingHtml(cik: string, accession: string, primaryDoc: string): Promise<string> that fetches https://www.sec.gov/Archives/edgar/data/{cik}/{accession-no-dashes}/{primaryDoc} with politeFetchText. Keep a per-CIK polite delay (300ms) via the existing sleep() helper in http.ts. Export a FilingRef interface: { accession, docType, filedAt, acceptanceDateTime, primaryDoc, url }. Unit-test the accession normalizer (dashes vs no-dashes) and the submissions JSON parser with a fixture.  
+   _Files:_ src/lib/web-sources/sec-filings.ts (new), test/sec-filings.test.ts (add parser + normalizer tests)
+3. **HTML-to-text extractor and storeDocument wiring** (s) — Add extractFilingText(html: string): string inside sec-filings.ts that: (1) strips <script> and <style> blocks entirely, (2) injects newlines around block elements (div, p, h1-h6, li, table, tr, td, th) using a replace pattern, (3) calls decodeXmlEntities, (4) strips remaining tags with replace(/<[^>]+>/g, ' '), (5) collapses runs of whitespace. Then implement ingestFiling(ticker, filingRef, userId='local'): Promise<{skipped: boolean, chunks: number, error?: string}>. It must: check hasIngestedAccession(filingRef.accession, filingRef.docType) → return {skipped:true, chunks:0} if already indexed; fetch + extract text; call storeDocument({text, ticker, doc_type, published_at: filingRef.filedAt, acceptance_datetime: filingRef.acceptanceDateTime, source:'sec-edgar', url: filingRef.url}, userId='local') which routes through chunkDocument then storeContexts; on success call insertIngestedAccession. Surface storeContexts error via the returned error field — do not swallow. Unit-test extractFilingText with a fixture HTML snippet (table preserved as pipe-delimited, headings preserved as lines).  
+   _Files:_ src/lib/web-sources/sec-filings.ts (extractFilingText, ingestFiling), test/sec-filings.test.ts (HTML extraction + storeDocument routing test with mocked storeContexts)
+4. **Scheduler hook + per-symbol watchlist-driven refresh** (m) — Add refreshFilingBodies(symbols: string[], now: number): Promise<void> inside sec-filings.ts. It loads the CIK map (reuse the existing loadCikMap from sec8k.ts — expose or duplicate the helper), maps each symbol to a CIK, calls fetchRecentFilings, filters out already-ingested accessions via hasIngestedAccession, then calls ingestFiling sequentially (no parallelism — one filing at a time to respect VECTOR_EMBED_BATCH_DELAY_MS). Add a TTL setting key 'webSource:sec10k:lastAttempt' per-symbol or globally (weekly cadence: 7 days). Gate the entire function: if VECTOR_EMBED_BATCH_DELAY_MS env > 5000 (i.e., free tier), cap at 1 filing per invocation total — so a free-tier user is never blocked for hours on a scheduler tick. Log and audit each filing outcome via audit('sec_filing_ingest', ...). Wire the call into the existing src/lib/web-sources/index.ts refreshDueWebSources() or into the scheduler directly after refreshDueWebSources. Symbols come from the union of the active policy universe + user watchlist (same source the scheduler already uses for market data). The call must never throw — wrap in try/catch and log.  
+   _Files:_ src/lib/web-sources/sec-filings.ts (refreshFilingBodies, TTL logic), src/lib/web-sources/index.ts (wire call) or src/lib/scheduler.ts (wire call), test/sec-filings.test.ts (free-tier 1-filing cap test)
+5. **Point-in-time test + backfill admin route** (s) — Add a test in test/vector-db.test.ts or test/sec-filings.test.ts that calls isWithinAsOf with a chunk whose acceptance_datetime is after the query asOf and confirms the chunk is excluded — pinning the backtest lookahead guard once bodies carry real acceptance_datetime. Without this test the as_of filter stays correct by code inspection but unverified by any test. Add a dev-gated POST /api/admin/reindex-10k route (alongside the existing /api/admin/reindex-8k in sec8k.ts) that accepts { symbols: string[], limit: number } and calls refreshFilingBodies directly, returning { indexed, skipped, errors }. Gate with the same NODE_ENV !== 'production' || x-admin-token guard as the existing admin routes. This route is the operator's backfill trigger once a paid Voyage key is set.  
+   _Files:_ test/sec-filings.test.ts or test/vector-db.test.ts (as_of drop test), app/api/admin/reindex-10k/route.ts (new)
+
+## Owner decisions needed
+- Backfill scope on scheduler invocation: should the scheduler ingest ALL watchlist symbols on first run (potentially hundreds of filings, many minutes even on paid tier) or just the symbols that appear in the current scan batch? Recommendation: scan-batch first (top N candidates per run), with a background sweep over the full watchlist only when VECTOR_EMBED_BATCH_DELAY_MS=0.
+- Free-tier behavior: confirm the cap of 1 filing per scheduler tick is acceptable (means full backfill requires a paid key and the /api/admin/reindex-10k manual trigger). The alternative is blocking the scheduler for many minutes, which is unacceptable.
+- 10-K/10-Q recency window: how many filings to keep per symbol? Recommendation from design doc: 1 10-K + 2 most-recent 10-Qs per symbol. Confirm or adjust this default.
+- CIK map sharing: loadCikMap is currently private in sec8k.ts. Decision needed: expose it from sec8k.ts as a named export, or duplicate the fetch logic in sec-filings.ts, or move it to a shared sec-utils.ts. The CIK map is already cached in the settings KV so duplication is cheap but inconsistent.
+- 8-K body ingest (design doc §3.4 deferred item): the design doc notes that 8-K exhibits could also go through storeDocument to replace the current 6-line summary. This is a separate decision — it widens scope significantly (per-filing HTML fetch for every fresh 8-K) and should be explicitly deferred or explicitly in-scope before an agent starts building.
+- Chunk-level content_hash dedup: the design doc mentions a content_hash cache at chunk level as an optimization (so a filing re-ingested with a new accession but identical text isn't re-embedded). This is not strictly necessary — ingested_accessions at the filing level is sufficient for correctness. Confirm whether to defer this optimization or include it in scope.
+
+## Risks
+- EDGAR throttling: EDGAR's fair-use policy requires a descriptive User-Agent and polite cadence. Bursting dozens of HTM fetches per refresh tick risks a 429 or IP block. The sequential-with-delay approach in the scheduler is mandatory, not optional. The SEC ToS says no more than 10 requests/second; the existing politeFetchText already does sequential fetching per runRateLimited, but the filing-body fetch bypasses runRateLimited — must add explicit polite delay or wrap in runRateLimited.
+- HTM file size: a 10-K body can be 2–10MB of HTML. politeFetchText has a default 9s timeout (http.ts:40). A large 10-K may hit the timeout. Need to raise timeoutMs for filing fetches (e.g., 30s) or stream the response.
+- Pinecone vector count growth: a single 10-K produces 100–500 chunks. 500 symbols × 3 filings × 300 chunks = 450,000 new vectors. At Voyage finance-2 pricing (~$0.00012/1K tokens), a full S&P 500 backfill could cost $50–200. The ingested_accessions de-dup prevents re-embedding, but the initial backfill cost must be understood before triggering it.
+- Stale free-tier index: on free Voyage (3 RPM, 21s/batch), a single 300-chunk 10-K takes ~13 minutes. If free-tier users ever accidentally trigger a full backfill without the cap guard, the scheduler blocks for hours. The 1-filing-per-tick free-tier cap is a hard safety requirement, not a nice-to-have.
+- The 8-K fire-and-forget error swallow (sec8k.ts:329) is a pre-existing bug: errors in the vector store call are console.warn only. The design doc flags this. The new filing ingest path must not copy this pattern — errors must surface to the audit log.
+- Primary document resolution: EDGAR's submissions JSON primaryDocument field names the main HTM file, but some 10-K/10-Q filings use .htm vs .html vs no extension, or use XBRL viewer links that redirect to iXBRL inline viewer rather than plain HTM. Need a fallback: if the primary document fetch returns a page with an XBRL viewer wrapper, follow to the .htm document listed in the filing index.
+
+## Dependencies
+The scope:shared metadata merge (SHARED_SCOPE constant, cleanMetadata writing scope field, retrieveContextDetailed $or filter) is ALREADY LANDED on main (vector-db.ts:9-11, 155-167, 486-491; confirmed by docs/rollouts/2026-06-21-rag-scope-metadata.md). No dependency on that work — it is done.
+
+The paid Voyage key (VECTOR_EMBED_BATCH_DELAY_MS=0) is an operational dependency, not a code dependency. The code should be built and shipped gated; the backfill is triggered manually via /api/admin/reindex-10k once the paid key is in place.
+
+Auth (middleware.ts, session-derived userId) is explicitly NOT a prerequisite for this item. The corpus write path uses userId='local' (app-funded, shared scope) and needs no per-user identity. The design doc §4 confirms this: 'ingest once, under the shared scope, app-funded.'
+
+The learned_context store (Q4) is also NOT a prerequisite. The Q2 filing ingest writes directly to Pinecone via the existing storeDocument → storeContexts path and is retrieved by the existing retrieveContext / retrieveContextDetailed at strategy.ts:138-151 — no new retrieval wiring needed.
+
+The only technical prerequisite is loadCikMap access (currently private in sec8k.ts). This is a 1-line change (export the function or extract to a shared util).

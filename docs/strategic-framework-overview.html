@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Strategic Framework Overview</title>
+<style>
+  @page { size: Letter; margin: 1in; }
+  body {
+    font-family: "Liberation Serif", "Times New Roman", Georgia, serif;
+    font-size: 11.5pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+    max-width: 100%;
+  }
+  h1 {
+    font-family: "Liberation Sans", Arial, Helvetica, sans-serif;
+    font-size: 24pt;
+    margin: 0 0 2pt 0;
+    color: #0f2742;
+  }
+  .subtitle {
+    font-family: "Liberation Sans", Arial, Helvetica, sans-serif;
+    font-size: 12pt;
+    color: #4a5a6a;
+    margin: 0 0 18pt 0;
+    font-weight: normal;
+  }
+  h2 {
+    font-family: "Liberation Sans", Arial, Helvetica, sans-serif;
+    font-size: 15pt;
+    color: #0f2742;
+    margin: 22pt 0 6pt 0;
+    padding-bottom: 3pt;
+    border-bottom: 1.5pt solid #c9d4e0;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-family: "Liberation Sans", Arial, Helvetica, sans-serif;
+    font-size: 12pt;
+    color: #1d3a5c;
+    margin: 14pt 0 3pt 0;
+    page-break-after: avoid;
+  }
+  p { margin: 0 0 8pt 0; }
+  ul { margin: 4pt 0 8pt 0; padding-left: 20pt; }
+  li { margin: 0 0 4pt 0; }
+  em { color: #2a2a2a; }
+  strong { color: #0f2742; }
+  .lead {
+    font-size: 12.5pt;
+    background: #f2f6fa;
+    border-left: 4pt solid #2c6fb5;
+    padding: 10pt 14pt;
+    margin: 0 0 18pt 0;
+    font-style: italic;
+  }
+  .note {
+    background: #fff7ec;
+    border-left: 4pt solid #d99a23;
+    padding: 8pt 12pt;
+    margin: 8pt 0 10pt 0;
+    font-size: 11pt;
+  }
+  .note strong { color: #8a5a00; }
+  .divider { border: none; border-top: 1pt solid #d9e0e8; margin: 20pt 0; }
+  dl { margin: 4pt 0; }
+  dt { font-weight: bold; color: #0f2742; margin-top: 6pt; font-family: "Liberation Sans", Arial, sans-serif; font-size: 10.5pt;}
+  dd { margin: 0 0 2pt 16pt; }
+  .footer-rule { border:none; border-top: 1pt solid #d9e0e8; margin-top: 24pt; }
+  .closing { font-size: 10.5pt; color: #4a5a6a; margin-top: 8pt; }
+</style>
+</head>
+<body>
+
+<h1>Strategic Framework Overview</h1>
+<p class="subtitle">An honest explanation of how the system thinks, decides, learns &mdash; and where it is limited</p>
+
+<p class="lead">In one sentence: an AI reads a great deal of market data, argues with itself about whether a trade is a good idea, and only if the idea survives that argument does a set of fixed safety rules let a small order through &mdash; and the system keeps score so it can, slowly, improve.</p>
+
+<p>This overview explains the whole idea behind the system: what it is trying to do, how it decides what to buy or sell, how it learns from its results, and &mdash; just as important &mdash; where it is weak, unproven, or could lose money. It is written to be honest rather than promotional. Nothing here is investment advice.</p>
+
+<h2>1. What the system is</h2>
+<p>It is a dashboard paired with an automated trading assistant for the U.S. stock market. It can:</p>
+<ul>
+  <li>Watch a list of stocks it is permitted to consider.</li>
+  <li>Pull in data about those stocks &mdash; price, company health, news, and more.</li>
+  <li>Ask a large language model (an AI similar to ChatGPT) to <em>propose</em> trades, with reasons.</li>
+  <li>Run every proposal through strict, non-AI <strong>safety rules</strong> before anything can happen.</li>
+  <li>Either simply <em>show</em> the proposals, or &mdash; only when this is deliberately switched on &mdash; place small orders automatically.</li>
+  <li>Record everything it does and grade its own past decisions so it can improve over time.</li>
+</ul>
+
+<h3>Three levels of &ldquo;real money,&rdquo; on purpose</h3>
+<p>The system is built so that doing nothing dangerous is the default. There are three modes, and moving up each step is deliberate:</p>
+<ul>
+  <li><strong>Test mode (default):</strong> A simulated account on a local computer. Fake cash, fake fills, but real market data. No real money can move.</li>
+  <li><strong>Paper mode:</strong> A practice account hosted by a real broker. Still fake money, but orders actually travel to a broker&rsquo;s system, making it a realistic rehearsal.</li>
+  <li><strong>Brokerage mode:</strong> A real account with real money. Orders here can genuinely buy and sell &mdash; and only when every safety rule allows it.</li>
+</ul>
+<div class="note"><strong>In plain terms:</strong> most of the value and nearly all of the testing happen in Test and Paper mode. Real-money mode is intentionally hard to reach and wrapped in limits. This should be treated as an <strong>experimental system</strong>, not a product that promises profits.</div>
+
+<h2>2. The core philosophy</h2>
+<p>Three beliefs shape every design decision:</p>
+<ul>
+  <li><strong>The AI is a smart analyst, not the boss.</strong> The AI is good at reasoning over messy information, but it can also be confidently wrong. So it may <em>suggest</em>, while a layer of simple, predictable, hand-written rules has the final say on whether an order is allowed. The AI can never talk its way past those rules.</li>
+  <li><strong>Don&rsquo;t fight the weather.</strong> Before looking at any single stock, the system assesses the overall market &ldquo;climate&rdquo; &mdash; calm or panicky, rising or falling. In a stormy market it demands more convincing before buying, leans toward safer choices, or considers betting against weak stocks.</li>
+  <li><strong>Keep score honestly, and learn slowly.</strong> Every decision is logged with the conditions at the time. The system grades itself on what actually made or lost money &mdash; not on how good the reasoning sounded &mdash; and those adjustments are <em>suggestions a human approves</em>, never silent self-edits.</li>
+</ul>
+
+<h2>3. How a single decision gets made: the six lenses</h2>
+<p>When evaluating a stock, the system looks through six different &ldquo;lenses.&rdquo; A trade should make sense from several angles, not just one &mdash; this guards against tunnel vision.</p>
+
+<h3>Lens 1 &mdash; The big picture (market regime)</h3>
+<p><em>What is the overall weather?</em> Broad market trend, a market &ldquo;fear gauge&rdquo; (higher means more anxiety), interest-rate direction, inflation, jobs data, and major long-term themes. The aim is to set the mood: bolder when calm, more cautious when stressed.</p>
+
+<h3>Lens 2 &mdash; Is the business actually good? (Fundamentals)</h3>
+<p><em>Is this a healthy company at a fair price?</em> The price paid relative to earnings, whether earnings are growing, how much cash the business generates, and how much debt it carries. The aim is to favor solid, reasonably priced companies &mdash; and to spot deteriorating ones worth betting against.</p>
+
+<h3>Lens 3 &mdash; Is now a good moment? (Technicals)</h3>
+<p><em>Even if it is a good company, is the timing right?</em> Price-chart patterns: trends, whether a stock looks stretched too far up or down, and unusual jumps in trading volume. This helps avoid catching a falling knife or chasing something that has already run too hot.</p>
+
+<h3>Lens 4 &mdash; What is the news saying? (Sentiment &amp; catalysts)</h3>
+<p><em>Is something happening now that could move the price?</em> Headlines and news sentiment for events &mdash; earnings surprises, product news, scandals &mdash; that the price may not have fully reacted to yet.</p>
+
+<h3>Lens 5 &mdash; What is &ldquo;smart money&rdquo; doing? (Alternative data)</h3>
+<p><em>What are insiders and the well-connected doing?</em> Signals outside the everyday news: company insiders buying or selling their own stock, disclosed trades by members of Congress, short-selling pressure, and important regulatory filings. These are condensed into one-line notes rather than dumped into the AI in full.</p>
+
+<h3>Lens 6 &mdash; The argument (Bull vs. Bear &ldquo;red team&rdquo;)</h3>
+<p><em>Prove it is a bad idea.</em> This is the distinctive part. Before a high-conviction trade is accepted, a second AI is told to do nothing but attack the idea and find every reason it will fail. The original case must answer those objections. Some objections are also checked by plain hard-coded rules that can veto a trade outright, with no AI judgment involved.</p>
+
+<div class="note"><strong>How the lenses combine:</strong> Lenses 1&ndash;5 each become a numeric score, blended by a weighting matrix into an overall ranking. The AI sees the scores <em>and</em> the underlying evidence, then reasons on top of them. The scores guide the AI; they do not replace its judgment &mdash; and neither replaces the safety rules.</div>
+
+<h2>4. The weighting matrix</h2>
+<p>By default, the lenses are blended roughly as:</p>
+<ul>
+  <li><strong>Fundamentals</strong> (is it a good business?): 30%</li>
+  <li><strong>Market regime</strong> (what is the weather?): 25%</li>
+  <li><strong>Technicals</strong> (is the timing right?): 25%</li>
+  <li><strong>News / sentiment</strong> (any catalysts?): 20%</li>
+</ul>
+<div class="note"><strong>These numbers are educated guesses.</strong> They were chosen by reasoning, not proven by data. They are a starting point. The learning loop is meant to recommend nudging them based on what actually works &mdash; but only a human can approve a change, and only once enough real results exist.</div>
+
+<h2>5. The learning loop</h2>
+<p>The long-game ambition is a system that remembers, grades itself, and improves.</p>
+
+<h3>What it records</h3>
+<p>For every executed trade it saves far more than profit or loss: the market conditions at entry and exit; a label for the <em>type</em> of trade (chosen from a fixed list so results can be grouped); how much the trade hurt before it helped, and vice versa (revealing bad timing, such as selling winners too early or holding losers too long); and gross-versus-net results, so the cost of trading is never hidden.</p>
+
+<h3>How it grades itself</h3>
+<p>It builds scorecards: which trade types actually make money, in which market weather, in which sectors. Because early on there are very few completed trades, it uses a statistical technique that distrusts conclusions drawn from a handful of examples &mdash; a 100% win rate from only two trades is pulled toward a neutral assumption until real evidence accumulates.</p>
+
+<h3>How it reflects</h3>
+<p>Feeding the AI every old trade and every day&rsquo;s news would be expensive and would actually worsen its reasoning. So only <em>changes</em> are fed in, and a background task periodically writes a short &ldquo;lessons learned&rdquo; note that is injected into future decisions in compact form.</p>
+
+<h3>How weights change</h3>
+<p>When there is enough evidence, the system can suggest shifting the weighting matrix or sector targets. Strict guardrails apply: at least 20 completed trades before any suggestion; small steps only; no extreme concentration in one stock or sector; and never automatic &mdash; a human approves it.</p>
+
+<div class="note"><strong>The loop is not fully closed yet.</strong> Today the learning mostly informs the AI&rsquo;s reasoning and produces human-reviewed suggestions. Those suggestions do not yet automatically change how large a position is taken. So &ldquo;self-tuning&rdquo; is currently closer to &ldquo;self-advising&rdquo; &mdash; a deliberate safety choice, but it means the system learns more slowly than the vision implies.</div>
+
+<h2>6. The safety net</h2>
+<p>This is the most important part for protecting real money. No matter what the AI &ldquo;decides,&rdquo; every potential real order must pass fixed checks. The defaults include:</p>
+<ul>
+  <li><strong>Stocks only</strong> &mdash; no options, crypto, or other complex instruments.</li>
+  <li><strong>A pre-approved universe</strong> &mdash; it can only consider stocks on a list that is set in advance.</li>
+  <li><strong>Tiny order size</strong> &mdash; a small dollar cap per order.</li>
+  <li><strong>Daily caps</strong> on total trading value and on the number of orders.</li>
+  <li><strong>A concentration limit</strong> so no single stock dominates the portfolio.</li>
+  <li><strong>A kill switch</strong> that immediately blocks all new orders.</li>
+  <li><strong>System states</strong> such as &ldquo;halted,&rdquo; &ldquo;close-only&rdquo; (no new bets, only exits), and &ldquo;liquidating&rdquo; (only sells).</li>
+  <li><strong>Stale-proposal expiry</strong> so an old, unapproved suggestion cannot be acted on as if it were fresh.</li>
+  <li><strong>Two authority levels:</strong> &ldquo;propose only&rdquo; (it suggests; a person acts) versus &ldquo;decide&rdquo; (it may act within all the limits above).</li>
+</ul>
+<p>Extra brakes apply to riskier situations &mdash; for example, tighter limits on short selling (betting a stock falls), because that carries, in theory, unlimited loss potential, plus a cash-buffer rule so the account is never fully deployed.</p>
+
+<h2>7. When it runs</h2>
+<p>A background scheduler wakes on a set interval and runs one decision cycle only when automation is enabled, the kill switch is off, and the U.S. market is open. It does not act overnight, when nothing can be traded anyway.</p>
+
+<h2>8. Where the data comes from</h2>
+<p>The system is built to run for free if needed: it always has a no-cost data floor, so every stock shows real numbers or a blank &mdash; it never invents a number to fill a gap. Optional paid sources add depth (company fundamentals, news sentiment, economic data, smart-money signals, and a searchable archive of filings).</p>
+<div class="note"><strong>A core rule:</strong> never label fabricated data as real, and never show a fake number next to a real one. If a value is unavailable, the cell is blank or marked &ldquo;n/a.&rdquo; This is good for trust, but it also means that on the free tier the system often works with partial information.</div>
+
+<h2>9. Honest weaknesses, limits, and risks</h2>
+<p>This section is the point of the document.</p>
+
+<h3>About the AI itself</h3>
+<ul>
+  <li><strong>It can be confidently wrong.</strong> The bull/bear debate and the hard safety rules reduce this risk but do not eliminate it. An AI can construct a persuasive case for a bad trade.</li>
+  <li><strong>It can be inconsistent.</strong> The same question can yield different reasoning. Settings reduce this, but it is a property of the tool.</li>
+  <li><strong>Its &ldquo;lessons&rdquo; can be wrong too.</strong> The reflection summaries are themselves AI-generated; a misleading lesson could nudge future decisions the wrong way.</li>
+</ul>
+
+<h3>About the data</h3>
+<ul>
+  <li><strong>Free data is delayed and incomplete.</strong> Default quotes can be delayed rather than live, and some &ldquo;smart-money&rdquo; feeds are rate-limited and frequently return nothing &mdash; so those edges are often absent rather than actively working.</li>
+  <li><strong>The stock list is a static snapshot</strong> captured on a specific date and not refreshed automatically, so it can drift out of date.</li>
+  <li><strong>Sentiment scoring is crude.</strong> News sentiment is still largely keyword-based rather than a sophisticated finance-trained model. Improving it is a known task, not a finished feature.</li>
+</ul>
+
+<h3>About the strategy logic</h3>
+<ul>
+  <li><strong>The factor weights are unproven guesses.</strong></li>
+  <li><strong>There is no rigorous backtester.</strong> The strategy has not been tested against decades of historical data. It is validated mostly by running forward in Test and Paper mode. A strategy can look fine over a few calm weeks and fall apart in a crash, so short-term results deserve heavy skepticism.</li>
+  <li><strong>Cold start.</strong> With fewer than 20 completed trades, the &ldquo;learning&rdquo; is barely learning; early behavior reflects the initial guesses, not earned wisdom.</li>
+  <li><strong>Overfitting risk.</strong> As it adapts to recent conditions it may get good at fighting the last war and be caught off guard when the market changes character.</li>
+  <li><strong>Tiny size hides reality.</strong> Small orders keep it safe, but at that size trading costs and price slippage dominate, so the profit-and-loss signal it learns from is noisy and may not scale to larger sizes.</li>
+  <li><strong>Short selling is high-risk and not fully proven.</strong> Guardrails exist, but the accounting and broker behavior for these trades need more verification before being trusted with real money.</li>
+</ul>
+
+<h3>About the plumbing</h3>
+<ul>
+  <li><strong>It runs as a single local process.</strong> The scheduler is not distributed or highly available; if the machine is off, nothing runs. It is a personal tool, not hardened infrastructure.</li>
+  <li><strong>No market-holiday calendar.</strong> It knows weekends and daily hours but may attempt a cycle on a holiday.</li>
+  <li><strong>The database is a single local file by default,</strong> with a documented backup path.</li>
+  <li><strong>Cost-saving shortcuts can drop context.</strong> To keep the AI affordable, the system trims what it sends; occasionally something useful is trimmed.</li>
+</ul>
+
+<h3>The bottom line</h3>
+<ul>
+  <li><strong>No edge is guaranteed.</strong> Markets are highly competitive and largely efficient, with many well-funded professionals doing this for a living. A free-data, small-size, experimental system should be assumed to have no proven edge until results over a long period and varied market conditions say otherwise.</li>
+  <li><strong>Real-money mode can lose money.</strong> The safety rules cap how fast and how much, but they cannot make a losing strategy profitable.</li>
+</ul>
+
+<h2>10. Glossary</h2>
+<dl>
+  <dt>Language model (AI)</dt><dd>Software that reads and writes text and can reason over information. Here it analyzes data and proposes trades.</dd>
+  <dt>Safety rules / policy gates</dt><dd>Fixed, hand-written if-then rules (no AI) that decide whether an order is allowed. The final authority.</dd>
+  <dt>Long / Short</dt><dd>&ldquo;Long&rdquo; is betting a price rises (normal buying). &ldquo;Short&rdquo; is betting a price falls; riskier, because losses can grow without a natural ceiling.</dd>
+  <dt>Fundamentals</dt><dd>Measures of a company&rsquo;s actual business health: earnings, cash, debt, growth.</dd>
+  <dt>Technicals</dt><dd>Patterns in the price chart and trading volume, used for timing.</dd>
+  <dt>Sentiment</dt><dd>The mood implied by news and headlines.</dd>
+  <dt>Regime</dt><dd>The overall &ldquo;weather&rdquo; of the market: calm or stormy, rising or falling.</dd>
+  <dt>Backtest</dt><dd>Simulating a strategy on historical data to estimate how it would have performed. (A rigorous one is currently missing here.)</dd>
+  <dt>Slippage</dt><dd>The difference between the price expected and the price actually obtained.</dd>
+</dl>
+
+<hr class="footer-rule">
+<p class="closing">This document describes an experimental system. It is not investment advice, and it does not promise or imply any financial return.</p>
+
+</body>
+</html>

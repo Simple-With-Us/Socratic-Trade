@@ -1,0 +1,598 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+
+// Isolated temp SQLite DB per test file, shared across the tests below (they run sequentially,
+// in file order — vitest does not parallelize tests within one file by default). The
+// zero-active-accounts test therefore runs FIRST, before any other test in this file creates an
+// active-autonomy account, so its "omitted" assertion is meaningful against the whole DB rather
+// than a per-account filter (getTradingLivenessSummary has no such filter — it scans every user,
+// matching what /api/health actually does).
+beforeAll(() => {
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-trading-liveness-${randomUUID()}.db`)}`;
+});
+
+afterEach(() => {
+  delete process.env.TRADING_LIVENESS_STALE_MINUTES;
+  delete process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES;
+});
+
+async function load() {
+  const db = await import("../src/lib/db");
+  const liveness = await import("../src/lib/trading-liveness");
+  return { db, liveness };
+}
+
+/** Insert a strategy_runs row with an explicit started_at/finished_at, bypassing the
+ * now()-stamped insertStrategyRun/finishStrategyRun helpers so tests can control run age. */
+function insertRunAt(
+  db: Awaited<ReturnType<typeof load>>["db"],
+  opts: {
+    userId: string;
+    connectedAccountId: string;
+    status: "completed" | "failed" | "skipped" | "skipped_budget" | "skipped_market_closed" | "skipped_broker_unhealthy";
+    startedAt: string;
+    finishedAt: string;
+    summary?: string;
+  }
+): void {
+  db.getDb()
+    .prepare(
+      `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.summary ?? opts.status);
+}
+
+async function makeAccount(db: Awaited<ReturnType<typeof load>>["db"], label: string, systemState: "active" | "halted" = "active"): Promise<{ userId: string; accountId: string }> {
+  const userId = `liveness-user-${randomUUID()}`;
+  const accountId = `liveness-acct-${randomUUID()}`;
+  db.upsertConnectedAccount({
+    id: accountId,
+    userId,
+    broker: "alpaca",
+    environment: "paper",
+    accountNumber: `ACC-${randomUUID().slice(0, 8)}`,
+    label,
+    isActive: true
+  });
+  if (systemState === "active") {
+    db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "active" }, userId, accountId);
+  }
+  return { userId, accountId };
+}
+
+describe("countLeadingFailedRuns", () => {
+  it("ignores runs that started at or before the re-arm cutoff", async () => {
+    const { liveness } = await load();
+    const cutoff = "2026-10-06T18:00:00.000Z";
+    expect(
+      liveness.countLeadingFailedRuns(
+        [
+          { status: "failed", started_at: "2026-10-06T18:00:05.000Z" },
+          { status: "failed", started_at: cutoff },
+          { status: "failed", started_at: "2026-10-06T17:59:00.000Z" },
+        ],
+        cutoff
+      )
+    ).toBe(1);
+    expect(
+      liveness.countLeadingFailedRuns(
+        [
+          { status: "completed", started_at: "2026-10-06T18:02:00.000Z" },
+          { status: "failed", started_at: "2026-10-06T18:01:00.000Z" },
+        ],
+        cutoff
+      )
+    ).toBe(0);
+  });
+});
+
+describe("trading-liveness", () => {
+  it("omits the dimension entirely when there are zero active-autonomy accounts AND no autopilot-eligible-but-halted ones", async () => {
+    const { db, liveness } = await load();
+    // A connected account exists with its default (non-autopilot) policy at the default "halted"
+    // systemState — it must not make the dimension appear because it is NEITHER active-autonomy
+    // NOR autopilot-eligible-but-halted (a halted non-autopilot account is expected to be quiet).
+    await makeAccount(db, "Halted Account", "halted");
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).toBeNull();
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.degraded).toBe(0);
+    expect(publicAgg.activeAccounts).toBe(0);
+    expect(typeof publicAgg.marketOpen).toBe("boolean");
+  });
+
+  it("omits autonomy_fully_dark when every autopilot-eligible account is deliberately halted", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Dark Account", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).toBeNull();
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+  });
+
+  it("treats close_only as deliberate idle for autonomy_fully_dark", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Exit Only", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "close_only" },
+      userId,
+      accountId
+    );
+    expect(await liveness.getTradingLivenessSummary()).toBeNull();
+    expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
+  });
+
+  it("pages autonomy_fully_dark when the app halted an autopilot account and nothing else is active", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const { userId, accountId } = await makeAccount(db, "Boot Halted Autopilot", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+    recordBootHaltReceipt(userId, accountId, {
+      at: "2026-10-14T18:00:00.000Z",
+      from: "active"
+    });
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(true);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(0);
+    expect(summary!.darkness?.activeAccounts).toBe(0);
+    expect(summary!.darkness?.eligibleAccounts).toBeGreaterThan(summary!.darkness?.eligibleDeliberatelyIdle ?? 0);
+    expect(summary!.degraded).toBe(true);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(true);
+    expect(publicAgg.activeAccounts).toBe(0);
+    expect(publicAgg.degradedReasons).toContain("autonomy_fully_dark");
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active but every autopilot account is halted", async () => {
+    const { db, liveness } = await load();
+    const halted = await makeAccount(db, "Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    const running = await makeAccount(db, "Ask First Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.accounts.length).toBe(1);
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(1);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.activeAccounts).toBe(1);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active even if the app halted autopilot", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const halted = await makeAccount(db, "App Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    recordBootHaltReceipt(halted.userId, halted.accountId, {
+      at: "2026-10-14T18:05:00.000Z",
+      from: "active"
+    });
+    const running = await makeAccount(db, "Ask First Still Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBeGreaterThan(0);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
+  });
+
+  it("maps a fully-dark fleet to degraded > 0 with the fleet-level reason (no account rows to count)", async () => {
+    const { liveness } = await load();
+    // Pure mapping check: a dark fleet has zero account rows, so the public `degraded` count
+    // cannot come from per-account rows — the darkness signal itself must flip it, or the
+    // health-route `degraded > 0` alert gate never fires for exactly the outage this tracks.
+    const publicAgg = liveness.toPublicTradingLiveness({
+      staleMinutes: 60,
+      maxConsecutiveFailures: 0,
+      marketOpen: true,
+      accounts: [],
+      degraded: true,
+      darkness: {
+        eligibleAccounts: 2,
+        activeAccounts: 0,
+        darkAccountLabels: [],
+        fleetActiveAccounts: 0,
+        eligibleDeliberatelyIdle: 0,
+        haltCauseUnknown: 0,
+        fullyDark: true
+      }
+    });
+    expect(publicAgg.degraded).toBeGreaterThan(0);
+    expect(publicAgg.autonomyFullyDark).toBe(true);
+    expect(publicAgg.autonomyEligibleAccounts).toBe(2);
+    expect(publicAgg.autonomyActiveAccounts).toBe(0);
+    expect(publicAgg.degradedReasons).toContain("autonomy_fully_dark");
+  });
+
+  it("reports healthy for a fresh completed run with no failures", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Fresh Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "completed",
+      startedAt: new Date(now - 5 * 60_000).toISOString(),
+      finishedAt: new Date(now - 4 * 60_000).toISOString()
+    });
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Fresh Account", now);
+    expect(result.degraded).toBe(false);
+    expect(result.degradedReasons).toEqual([]);
+    expect(result.consecutiveFailedRuns).toBe(0);
+    expect(result.lastCompletedRunAgeSeconds).toBe(240);
+  });
+
+  it("flags stale-last-completed-run and consecutive-failures separately and together", async () => {
+    process.env.TRADING_LIVENESS_STALE_MINUTES = "60";
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Degraded Account");
+    // Wednesday 18:00 UTC = 14:00 ET, mid regular session — market open, so the stale reason is
+    // eligible to fire (see the market-session-aware staleness tests below for the closed case).
+    const now = Date.parse("2026-07-15T18:00:00.000Z");
+
+    // A completed run well outside the 60-minute stale window...
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "completed",
+      startedAt: new Date(now - 400 * 60_000).toISOString(),
+      finishedAt: new Date(now - 399 * 60_000).toISOString()
+    });
+    // ...followed by 3 consecutive failed runs (>= the threshold), all after the completed run.
+    for (let i = 3; i >= 1; i--) {
+      insertRunAt(db, {
+        userId,
+        connectedAccountId: accountId,
+        status: "failed",
+        startedAt: new Date(now - i * 60_000).toISOString(),
+        finishedAt: new Date(now - i * 60_000 + 1000).toISOString()
+      });
+    }
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Degraded Account", now);
+    expect(result.degraded).toBe(true);
+    expect(result.consecutiveFailedRuns).toBe(3);
+    expect(result.lastCompletedRunAgeSeconds).toBe(399 * 60);
+    expect(result.degradedReasons.slice().sort()).toEqual(["consecutive_failures", "stale_last_completed_run"].sort());
+  });
+
+  it("reports the post-re-arm streak and ignores an in-flight failure that started earlier", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Rearm Window Account");
+    const rearmedAt = "2026-10-06T19:00:00.000Z";
+    const now = Date.parse("2026-10-06T20:00:00.000Z");
+    for (let i = 0; i < 4; i++) {
+      insertRunAt(db, {
+        userId,
+        connectedAccountId: accountId,
+        status: "failed",
+        startedAt: new Date(Date.parse(rearmedAt) - (i + 1) * 60_000).toISOString(),
+        finishedAt: new Date(Date.parse(rearmedAt) - i * 60_000).toISOString(),
+      });
+    }
+    db.setInternalSetting(liveness.runFailureWatchStateKey(userId, accountId), { rearmedAt });
+
+    const before = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(before.consecutiveFailedRuns).toBe(0);
+    expect(before.degradedReasons).not.toContain("consecutive_failures");
+
+    // Started before the re-arm, finished after.  Must not extend the public streak.
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: "2026-10-06T18:59:00.000Z",
+      finishedAt: "2026-10-06T19:05:00.000Z",
+    });
+    const inflight = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(inflight.consecutiveFailedRuns).toBe(0);
+
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: "2026-10-06T19:10:00.000Z",
+      finishedAt: "2026-10-06T19:11:00.000Z",
+    });
+    const after = liveness.computeAccountTradingLiveness(userId, accountId, "Rearm Window Account", now);
+    expect(after.consecutiveFailedRuns).toBe(1);
+  });
+
+  it("stops the consecutive-failure count at the most recent completed run", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "5";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Recovered Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+
+    // Two old failures, then a completed run, then one recent failure — only the trailing
+    // failure (after the completed run) should count.
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 30 * 60_000).toISOString(), finishedAt: new Date(now - 30 * 60_000).toISOString() });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 20 * 60_000).toISOString(), finishedAt: new Date(now - 20 * 60_000).toISOString() });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "completed", startedAt: new Date(now - 10 * 60_000).toISOString(), finishedAt: new Date(now - 9 * 60_000).toISOString() });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 2 * 60_000).toISOString(), finishedAt: new Date(now - 2 * 60_000).toISOString() });
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Recovered Account", now);
+    expect(result.consecutiveFailedRuns).toBe(1);
+    expect(result.consecutiveHaltEligibleFailures).toBe(1);
+    expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
+  });
+
+  it("surfaces the newest failed run summary for alerts and clears it after a completion", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Summary Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 10 * 60_000).toISOString(), finishedAt: new Date(now - 9 * 60_000).toISOString(), summary: "older broker failure" });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 2 * 60_000).toISOString(), finishedAt: new Date(now - 1 * 60_000).toISOString(), summary: "Alpaca 401:  secret missing" });
+
+    const failing = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(failing.latestFailedRunSummary).toBe("Alpaca 401: secret missing");
+    expect(failing.latestFailedRunAt).toBe(new Date(now - 2 * 60_000).toISOString());
+
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "completed", startedAt: new Date(now - 30_000).toISOString(), finishedAt: new Date(now).toISOString() });
+    const recovered = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(recovered.latestFailedRunSummary).toBeNull();
+    expect(recovered.latestFailedRunAt).toBeNull();
+  });
+
+  it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Stall Streak Account");
+    const now = Date.parse("2026-10-01T18:00:00.000Z");
+    const rows: Array<{ summary: string; offsetMin: number }> = [
+      { summary: "fetch failed", offsetMin: 8 },
+      { summary: "Process restarted mid-run — marked failed by stale-run sweep (started at 2026-10-01T17:00:00.000Z)", offsetMin: 6 },
+      { summary: "Strategy run stalled with no progress — marked failed by stale-run sweep (started at 2026-10-01T17:10:00.000Z)", offsetMin: 4 },
+      { summary: "App process was stalled (event loop blocked 27s of 30s); broker not at fault", offsetMin: 2 },
+      { summary: "Empty response returned from LLM API.", offsetMin: 1 }
+    ];
+    for (const row of rows) {
+      db.getDb()
+        .prepare(
+          `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
+           VALUES (?, ?, ?, ?, ?, 'failed', ?)`
+        )
+        .run(
+          randomUUID(),
+          userId,
+          accountId,
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          new Date(now - row.offsetMin * 60_000).toISOString(),
+          row.summary
+        );
+    }
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Stall Streak Account", now);
+    expect(result.consecutiveFailedRuns).toBe(5);
+    // fetch failed + LLM failure.  The three app-fault rows do not count.
+    expect(result.consecutiveHaltEligibleFailures).toBe(2);
+    expect(result.degraded).toBe(true);
+    expect(result.degradedReasons).toContain("consecutive_failures");
+  });
+
+  it("reports a stale last-completed-run without degrading while the market is closed", async () => {
+    process.env.TRADING_LIVENESS_STALE_MINUTES = "60";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Closed Market Account");
+    // Saturday — the market is closed all day regardless of time-of-day/DST.
+    const now = Date.parse("2026-07-18T18:00:00.000Z");
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "completed",
+      startedAt: new Date(now - 400 * 60_000).toISOString(),
+      finishedAt: new Date(now - 399 * 60_000).toISOString()
+    });
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Closed Market Account", now);
+    expect(result.marketOpen).toBe(false);
+    // The real age is still reported honestly — it's just not treated as an actionable signal.
+    expect(result.lastCompletedRunAgeSeconds).toBe(399 * 60);
+    expect(result.degradedReasons).not.toContain("stale_last_completed_run");
+    expect(result.degraded).toBe(false);
+  });
+
+  it("degrades on a stale last-completed-run when the market is open", async () => {
+    process.env.TRADING_LIVENESS_STALE_MINUTES = "60";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Open Market Account");
+    // Wednesday 18:00 UTC = 14:00 ET, mid regular session.
+    const now = Date.parse("2026-07-15T18:00:00.000Z");
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "completed",
+      startedAt: new Date(now - 400 * 60_000).toISOString(),
+      finishedAt: new Date(now - 399 * 60_000).toISOString()
+    });
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Open Market Account", now);
+    expect(result.marketOpen).toBe(true);
+    expect(result.degradedReasons).toContain("stale_last_completed_run");
+    expect(result.degraded).toBe(true);
+  });
+
+  it("does not treat pure skip statuses as healthy decision completions (UX PR-A1)", async () => {
+    process.env.TRADING_LIVENESS_STALE_MINUTES = "60";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Skip-Only Account");
+    // Wednesday mid-session — market open so staleness is actionable if lastCompleted is old.
+    const now = Date.parse("2026-07-15T18:00:00.000Z");
+    // Old completed run well outside the window...
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "completed",
+      startedAt: new Date(now - 400 * 60_000).toISOString(),
+      finishedAt: new Date(now - 399 * 60_000).toISOString()
+    });
+    // ...then only recent pre-decision skips (budget / market / broker). These must NOT
+    // refresh lastCompletedRunAt or clear staleness.
+    for (const status of ["skipped_budget", "skipped_market_closed", "skipped_broker_unhealthy"] as const) {
+      insertRunAt(db, {
+        userId,
+        connectedAccountId: accountId,
+        status,
+        startedAt: new Date(now - 5 * 60_000).toISOString(),
+        finishedAt: new Date(now - 4 * 60_000).toISOString()
+      });
+    }
+
+    const result = liveness.computeAccountTradingLiveness(userId, accountId, "Skip-Only Account", now);
+    expect(result.lastCompletedRunAgeSeconds).toBe(399 * 60);
+    expect(result.degradedReasons).toContain("stale_last_completed_run");
+    // Skips are neither failures nor completions — failure streak stays 0.
+    expect(result.consecutiveFailedRuns).toBe(0);
+  });
+
+  it("includes an active account in the summary and surfaces its degraded state", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "1";
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Summary Account");
+    const now = Date.now();
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: new Date(now - 60_000).toISOString(),
+      finishedAt: new Date(now - 60_000).toISOString()
+    });
+
+    const summary = await liveness.getTradingLivenessSummary(now);
+    expect(summary).not.toBeNull();
+    expect(summary!.degraded).toBe(true);
+    const row = summary!.accounts.find((a) => a.connectedAccountId === accountId);
+    expect(row?.degraded).toBe(true);
+    expect(row?.consecutiveFailedRuns).toBe(1);
+  });
+
+  it("/api/health never 503s on a degraded trading-liveness account, leaves the base shape intact, and exposes only a minimal public aggregate (no ids/labels/timestamps)", async () => {
+    process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "1";
+    const { db } = await load();
+    const { userId, accountId } = await makeAccount(db, "Route Account");
+    insertRunAt(db, {
+      userId,
+      connectedAccountId: accountId,
+      status: "failed",
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      finishedAt: new Date(Date.now() - 60_000).toISOString()
+    });
+
+    const { GET } = await import("../app/api/health/route");
+    // Anonymous (no x-ops-token): the trading-liveness aggregate is public in both views.
+    const response = await GET(new Request("http://localhost/api/health"));
+    // Trading-liveness degradation must NEVER 503 — a restart would re-trigger the boot
+    // autonomy interlock and halt the very account this signal is trying to protect.
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.checks).toHaveProperty("db");
+    expect(body.checks).toHaveProperty("schedulerLastTick");
+    expect(body.checks.tradingLivenessDegraded).toBe(true);
+    // PUBLIC route: only the minimal aggregate — counts + oldest age + market state. No
+    // userId/connectedAccountId/label/per-account rows/timestamps (that detail is authed-only,
+    // on the ops snapshot). Other tests in this shared-DB file may also have left active
+    // accounts behind, so this only checks shape/leakage, not exact counts.
+    expect(Object.keys(body.checks.tradingLiveness).sort()).toEqual(
+      [
+        "activeAccounts",
+        "autonomyActiveAccounts",
+        "autonomyEligibleAccounts",
+        "autonomyFullyDark",
+        "autonomyHaltCauseReadFailures",
+        "autonomyHaltCauseUnknown",
+        "autopilotAccounts",
+        "degraded",
+        "degradedReasons",
+        "marketOpen",
+        "maxConsecutiveFailedRuns",
+        "oldestCompletedRunAgeSeconds",
+        "runningAskFirstAccounts"
+      ].sort()
+    );
+    expect(typeof body.checks.tradingLiveness.activeAccounts).toBe("number");
+    expect(typeof body.checks.tradingLiveness.degraded).toBe("number");
+    expect(typeof body.checks.tradingLiveness.marketOpen).toBe("boolean");
+    expect(
+      body.checks.tradingLiveness.oldestCompletedRunAgeSeconds === null ||
+        typeof body.checks.tradingLiveness.oldestCompletedRunAgeSeconds === "number"
+    ).toBe(true);
+    expect(body.checks.tradingLiveness.activeAccounts).toBeGreaterThanOrEqual(1);
+    expect(body.checks.tradingLiveness.degraded).toBeGreaterThanOrEqual(1);
+    // The cause fields let a JSON-path monitor separate "failing every run" from out-of-session
+    // silence.  They must stay identity-free: a max across accounts and a fixed reason vocabulary.
+    expect(typeof body.checks.tradingLiveness.maxConsecutiveFailedRuns).toBe("number");
+    expect(body.checks.tradingLiveness.maxConsecutiveFailedRuns).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(body.checks.tradingLiveness.degradedReasons)).toBe(true);
+    expect(body.checks.tradingLiveness.degradedReasons).toContain("consecutive_failures");
+    for (const reason of body.checks.tradingLiveness.degradedReasons) {
+      expect(["stale_last_completed_run", "consecutive_failures", "autonomy_fully_dark"]).toContain(reason);
+    }
+    // The fleet-level darkness counts are identity-free numbers/booleans, safe for the public route.
+    expect(typeof body.checks.tradingLiveness.autonomyEligibleAccounts).toBe("number");
+    expect(typeof body.checks.tradingLiveness.autonomyActiveAccounts).toBe("number");
+    expect(typeof body.checks.tradingLiveness.autonomyFullyDark).toBe("boolean");
+    expect(body.checks.tradingLiveness).not.toHaveProperty("accounts");
+    const serialized = JSON.stringify(body.checks.tradingLiveness);
+    expect(serialized).not.toContain(accountId);
+    expect(serialized).not.toContain(userId);
+    expect(serialized).not.toContain("Route Account");
+  });
+});

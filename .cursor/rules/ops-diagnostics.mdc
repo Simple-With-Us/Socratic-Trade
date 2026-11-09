@@ -1,0 +1,40 @@
+---
+description: Auto-fetch production ops snapshot when investigating live strategy runs, account issues, or scheduler failures.
+alwaysApply: true
+---
+
+# Production ops diagnostics (Cursor Cloud)
+
+When the user asks about **production** behavior on `socratictrade.com` (strategy runs, multi-account autonomy, missing proposals, errors, audit logs, scheduler), **fetch the ops snapshot first** before guessing:
+
+```bash
+bash scripts/fetch-prod-ops-snapshot.sh
+```
+
+Optional: save to a file for parsing:
+
+```bash
+OPS_SNAPSHOT_OUT=/tmp/ops-snapshot.json bash scripts/fetch-prod-ops-snapshot.sh
+```
+
+## Prerequisites (owner one-time setup)
+
+1. **Production** (Coolify `socratic-app`): set `OPS_DIAGNOSTIC_TOKEN` (same value as cloud secret) in Infisical, then restart the Coolify app. Endpoint must be deployed (`GET /api/ops/snapshot`). Do not `pm2 restart trading` on the Mac.
+2. **Cursor Cloud Secrets** (cursor.com dashboard -> Cloud Agents -> Secrets):
+   - Name: `OPS_DIAGNOSTIC_TOKEN`
+   - Type: **Runtime Secret** (recommended)
+   - Scope: this repository (or team)
+   - Value: **must match** production `OPS_DIAGNOSTIC_TOKEN`
+
+`ADMIN_REINDEX_TOKEN` is not a fallback.  Production must set `OPS_DIAGNOSTIC_TOKEN`.  Do not mint a second token if both envs already share one value.
+
+## How to use the response
+
+- `users[].accounts[]` — per-account `systemState`, `strategyAuthority`, `llmModel`, `llmKeyConfigured`, `lastRunStartedAt`
+- `users[].recentRuns[]` — `accountLabel`, `status`, `summary` (look for "not available", "Account Mismatch", LLM errors)
+- `users[].recentAudit[]` — `recoverable_issue`, `run_skipped_score_threshold`, policy violations
+- `schedulerLastTick` / `schedulerAgeSeconds` — is autonomy ticking?
+
+If the script exits 1 with "OPS_DIAGNOSTIC_TOKEN is not set", tell the user to add the secret in Cursor Cloud settings and matching env on prod.
+
+If curl returns 404, the ops endpoint is not deployed yet — merge/deploy PR with `/api/ops/snapshot` first.
