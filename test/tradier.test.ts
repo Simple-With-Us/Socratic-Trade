@@ -849,6 +849,8 @@ describe("Tradier adapter — OTOCO/OCO equity legs surface for coverage (codex-
     expect(orders.find((o) => o.id === "500")?.clientOrderId).toBe("bracket");
     expect(orders.find((o) => o.id === "501")?.clientOrderId).toBeUndefined();
     expect(orders.find((o) => o.id === "502")?.clientOrderId).toBeUndefined();
+    expect(orders.find((o) => o.id === "501")?.parentClientOrderId).toBe("bracket");
+    expect(orders.find((o) => o.id === "501")?.orderClass).toBe("otoco");
     const stopLeg = orders.find((o) => o.type === "stop_market")!;
     expect(stopLeg).toMatchObject({ id: "502", symbol: "AAPL", side: "sell", type: "stop_market", state: "open", stopPrice: 180 });
     const { isLiveOrderState } = await import("../src/lib/broker-side");

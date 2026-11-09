@@ -84,7 +84,7 @@ function wereCreatedTogether(aIso: string | undefined, bIso: string | undefined)
  */
 export function loadOrderRoleContexts(
   orders: ReadonlyArray<
-    Pick<EquityOrder, "id" | "clientOrderId" | "symbol" | "orderClass"> & { createdAt?: string }
+    Pick<EquityOrder, "id" | "clientOrderId" | "parentClientOrderId" | "symbol" | "orderClass"> & { createdAt?: string }
   >,
   lookup: AppPlacedLookup
 ): Map<string, OrderRoleContext> {
@@ -161,12 +161,14 @@ export function loadOrderRoleContexts(
   for (const order of orders) {
     if (isBracketOrderClass(order.orderClass)) continue;
     const clientOrderId = order.clientOrderId?.trim();
-    if (!clientOrderId) continue; // no ref -> isAppPlacedBrokerOrder returns false without any DB read
-    if (isAppMintedClientOrderPrefix(clientOrderId)) continue; // resolves true without any DB read
+    const parentClientOrderId = order.parentClientOrderId?.trim();
+    const attributionRef = clientOrderId || parentClientOrderId;
+    if (!attributionRef) continue;
+    if (isAppMintedClientOrderPrefix(attributionRef)) continue;
     if (protectiveByOrderId.has(order.id)) continue;
-    if (syntheticByRefId.has(clientOrderId)) continue;
-    if (replacementByOrderId.has(order.id) || replacementByRefId.has(clientOrderId)) continue;
-    needsAppPlaced.push({ id: order.id, clientOrderId });
+    if (clientOrderId && syntheticByRefId.has(clientOrderId)) continue;
+    if (replacementByOrderId.has(order.id) || (clientOrderId && replacementByRefId.has(clientOrderId))) continue;
+    needsAppPlaced.push({ id: order.id, clientOrderId: attributionRef });
   }
 
   const appPlacedByOrderId = new Map<string, boolean>();
@@ -219,6 +221,7 @@ export function loadOrderRoleContexts(
 
   for (const order of orders) {
     const clientOrderId = order.clientOrderId?.trim();
+    const parentClientOrderId = order.parentClientOrderId?.trim();
     const protectiveRow = protectiveByOrderId.get(order.id);
     const syntheticRow = clientOrderId ? syntheticByRefId.get(clientOrderId) : undefined;
     const replacementRow = replacementByOrderId.get(order.id) ?? (clientOrderId ? replacementByRefId.get(clientOrderId) : undefined);
@@ -229,7 +232,9 @@ export function loadOrderRoleContexts(
       // comment above needsAppPlaced.
     } else if (clientOrderId && isAppMintedClientOrderPrefix(clientOrderId)) {
       appPlaced = true;
-    } else if (clientOrderId) {
+    } else if (parentClientOrderId && isAppMintedClientOrderPrefix(parentClientOrderId)) {
+      appPlaced = true;
+    } else if (clientOrderId || parentClientOrderId) {
       appPlaced = appPlacedByOrderId.get(order.id) ?? false;
     }
 
