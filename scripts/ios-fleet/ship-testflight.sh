@@ -1660,6 +1660,28 @@ ensure_tf_ready() {
     log "TestFlight internal testers can install this build"
     return 0
   fi
+  if [[ $rc -eq 5 ]]; then
+    # Apple finished processing the build, but it is assigned to no external
+    # group with testers or a public link, so nobody can install it.  This is
+    # not a failed upload (the build is in App Store Connect), so do not fail
+    # the job; make it impossible to miss instead.  A new bundle ID starts with
+    # no groups, and 14 green ships once reached nobody this way (GH #1018).
+    log "warning: build ${BUILD_NUM} is processed but ${BUNDLE_ID} has no external TestFlight group with testers or a public link; nobody can install it yet"
+    log "warning: the Sync standing TestFlight testers step assigns the external group; otherwise enable the public link under TestFlight > External Testing"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning title=TestFlight has no reachable external tester::${BUNDLE_ID} build ${BUILD_NUM} is processed but no external tester can install it.  Check the Sync standing TestFlight testers step."
+    fi
+    return 0
+  fi
+  if [[ $rc -eq 6 ]]; then
+    # Processed, but the external installability could not be read, so we
+    # cannot say anyone can install it.  Say so instead of printing the success line.
+    log "warning: build ${BUILD_NUM} is processed but the external TestFlight installability could not be read for ${BUNDLE_ID}; installability is unverified"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning title=TestFlight installability unverified::${BUNDLE_ID} build ${BUILD_NUM} is processed but the external installability could not be read.  Check TestFlight."
+    fi
+    return 0
+  fi
   if [[ $rc -eq 3 ]]; then
     log "warning: upload succeeded but ASC has not reached IN_BETA_TESTING yet; watch TestFlight"
     return 0
