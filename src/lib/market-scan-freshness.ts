@@ -262,7 +262,7 @@ function isFreshnessQuoteOutage(error: unknown): boolean {
   // Outage signals only (Kody review): the typed error above, the screener's
   // own timeout message, or an explicit unavailable/outage phrase.  A generic
   // error that merely mentions "quote" or "nasdaq" keeps the every-tick retry.
-  return /quotes?\s+(?:were\s+)?unavailable|screener timed out|(?:quote|screener|nasdaq)[\s_-]+(?:feed\s+)?(?:unavailable|outage)/i.test(message);
+  return /quotes?\s+(?:were\s+)?unavailable|screener timed out|(?:quotes?|screener|nasdaq)[\s_-]+(?:feed\s+)?(?:unavailable|outage)/i.test(message);
 }
 
 function noteFreshnessQuoteOutage(userId: string, now: number): void {
