@@ -62,14 +62,17 @@ describe("empty screener + expired seed", () => {
     const chartSpy = vi.spyOn(yahoo, "fetchYahooFinanceChartQuotes");
     const userId = "empty-screener-chart-user";
 
-    await expect(
-      scanMarket(["AAPL"], [], undefined, userId, [], { enrichmentMode: "skip" })
-    ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+    try {
+      await expect(
+        scanMarket(["AAPL"], [], undefined, userId, [], { enrichmentMode: "skip" })
+      ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
 
-    expect(chartSpy).toHaveBeenCalled();
-    const chartOptions = chartSpy.mock.calls[0]?.[1];
-    expect(chartOptions?.userId).toBe(userId);
-    chartSpy.mockRestore();
+      expect(chartSpy).toHaveBeenCalled();
+      const chartOptions = chartSpy.mock.calls[0]?.[1];
+      expect(chartOptions?.userId).toBe(userId);
+    } finally {
+      chartSpy.mockRestore();
+    }
   });
 
   it("Yahoo-fallbacks the whole allowed set, including index members, when the screener is empty", async () => {
