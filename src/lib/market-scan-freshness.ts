@@ -259,7 +259,10 @@ export function freshnessQuoteOutageForTests(userId: string): { consecutiveFailu
 function isFreshnessQuoteOutage(error: unknown): boolean {
   if (isScanQuotesUnavailableError(error)) return true;
   const message = error instanceof Error ? error.message : String(error);
-  return /quote|screener|nasdaq/i.test(message);
+  // Outage signals only (Kody review): the typed error above, the screener's
+  // own timeout message, or an explicit unavailable/outage phrase.  A generic
+  // error that merely mentions "quote" or "nasdaq" keeps the every-tick retry.
+  return /quotes?\s+(?:were\s+)?unavailable|screener timed out|(?:quote|screener|nasdaq)[\s_-]+(?:feed\s+)?(?:unavailable|outage)/i.test(message);
 }
 
 function noteFreshnessQuoteOutage(userId: string, now: number): void {
@@ -491,13 +494,16 @@ export async function runMarketScanFreshnessIfDue(now: number = Date.now(), upti
     });
     let refreshed = 0;
     let failed = 0;
+    let backedOff = 0;
     for (const result of settled) {
       if (result.status === "fulfilled" && result.value === "refreshed") refreshed += 1;
       if (result.status === "fulfilled" && result.value === "failed") failed += 1;
+      // Backed-off users skipped a doomed scan: neither a refresh nor a new failure.
+      if (result.status === "fulfilled" && result.value === "backed_off") backedOff += 1;
       if (result.status === "rejected") failed += 1;
     }
     if (refreshed > 0 || failed > 0) {
-      console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed}`);
+      console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed} backed_off=${backedOff}`);
     }
   } catch (err) {
     console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);
