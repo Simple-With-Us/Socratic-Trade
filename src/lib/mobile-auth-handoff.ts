@@ -76,9 +76,7 @@ export function createMobileAuthHandoff(input: {
   now?: number;
 }): string | undefined {
   if (!input.sessionToken || !hasValidCodeChallenge(input.codeChallenge)) return undefined;
-  const legacyCompat =
-    input.handoffNonce === LEGACY_MOBILE_HANDOFF_NONCE &&
-    input.sessionId === LEGACY_MOBILE_SESSION_ID;
+  const legacyCompat = input.handoffNonce === LEGACY_MOBILE_HANDOFF_NONCE;
   const strictValid =
     Boolean(input.handoffNonce) &&
     Boolean(input.sessionId) &&

@@ -11,13 +11,12 @@ export const SESSION_JWT_SID_CLAIM = "sid";
 export const SESSION_JWT_ABS_EXP_CLAIM = "absExp";
 
 /**
- * Last Node-side session touch (seconds). Edge middleware trusts Auth.js cookies only while
- * `srvTouch + SESSION_EDGE_TRUST_SEC` is in the future (see session-edge.ts).
+ * Last Node-side session touch (seconds), embedded on re-issued JWTs after refresh.
  */
 export const SESSION_JWT_SRV_TOUCH_CLAIM = "srvTouch";
 
 /**
- * Edge cannot query SQLite for revocation. Middleware accepts session cookies only when the JWT
- * was server-touched within this window; Node paths always check `auth_sessions`.
+ * Former edge revocation window (retired ST-2599). Edge now keys off absExp (sid JWTs) or exp
+ * (legacy) only; Node paths check `auth_sessions` for revocation.
  */
 export const SESSION_EDGE_TRUST_SEC = 5 * 60;

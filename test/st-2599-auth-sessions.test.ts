@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  SESSION_EDGE_TRUST_SEC,
   SESSION_JWT_ABS_EXP_CLAIM,
   SESSION_JWT_SID_CLAIM,
   SESSION_JWT_SRV_TOUCH_CLAIM,
 } from "../src/lib/auth/session-policy";
+import { backfillServerSessionClaims } from "../src/lib/auth/session-backfill";
 import { edgeSessionTrustValid } from "../src/lib/auth/session-edge";
 import {
   LEGACY_MOBILE_HANDOFF_NONCE,
@@ -62,7 +62,7 @@ describe("server-backed sessions", () => {
     expect(await decodeSessionToken({ token, secret, salt })).toBeNull();
   });
 
-  it("migrates legacy JWTs without sid into auth_sessions on Node decode", async () => {
+  it("migrates legacy JWTs without sid when Auth.js jwt callback backfills", async () => {
     const token = await encodeSessionToken({
       token: { email: "legacy-migrate@example.com" },
       secret,
@@ -70,19 +70,66 @@ describe("server-backed sessions", () => {
       maxAge: 3600,
     });
     const payload = await decodeSessionToken({ token, secret, salt });
-    expect(payload?.[SESSION_JWT_SID_CLAIM]).toBeTruthy();
-    expect(payload?.[SESSION_JWT_ABS_EXP_CLAIM]).toBeTruthy();
-    expect(payload?.[SESSION_JWT_SRV_TOUCH_CLAIM]).toBeTruthy();
+    expect(payload?.email).toBe("legacy-migrate@example.com");
+    expect(payload?.[SESSION_JWT_SID_CLAIM]).toBeFalsy();
+    const claims: import("jose").JWTPayload = { email: "legacy-migrate@example.com" };
+    expect(backfillServerSessionClaims(claims)).toBe(true);
+    expect(claims[SESSION_JWT_SID_CLAIM]).toBeTruthy();
+    expect(claims[SESSION_JWT_ABS_EXP_CLAIM]).toBeTruthy();
+    expect(claims[SESSION_JWT_SRV_TOUCH_CLAIM]).toBeTruthy();
   });
 
-  it("rejects edge-trusted cookies outside the server-touch window", () => {
+  it("does not insert auth_sessions rows on repeated Node decode of legacy JWTs", async () => {
+    const token = await encodeSessionToken({
+      token: { email: "legacy-no-orphan@example.com" },
+      secret,
+      salt,
+      maxAge: 3600,
+    });
+    const { getDrizzle } = await import("../src/lib/db/client");
+    const { authSessions } = await import("../src/lib/db/schema");
+    const countBefore = getDrizzle().select().from(authSessions).all().length;
+    for (let i = 0; i < 3; i++) {
+      expect(await decodeSessionToken({ token, secret, salt })).toBeTruthy();
+    }
+    expect(getDrizzle().select().from(authSessions).all().length).toBe(countBefore);
+  });
+
+  it("edge accepts legacy JWTs by exp only even when iat is hours old", () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(
+      edgeSessionTrustValid(
+        {
+          email: "legacy@example.com",
+          exp: now + 3600,
+          iat: now - 6 * 3600,
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("edge accepts sid JWTs older than five minutes when absExp is valid", () => {
     const now = Math.floor(Date.now() / 1000);
     expect(
       edgeSessionTrustValid(
         {
           [SESSION_JWT_SID_CLAIM]: "sid",
           [SESSION_JWT_ABS_EXP_CLAIM]: now + 3600,
-          [SESSION_JWT_SRV_TOUCH_CLAIM]: now - SESSION_EDGE_TRUST_SEC - 1,
+          [SESSION_JWT_SRV_TOUCH_CLAIM]: now - 3600,
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("edge rejects sid JWTs past absExp", () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(
+      edgeSessionTrustValid(
+        {
+          [SESSION_JWT_SID_CLAIM]: "sid",
+          [SESSION_JWT_ABS_EXP_CLAIM]: now - 1,
         },
         now,
       ),
@@ -204,6 +251,16 @@ describe("mobile session hardening compat", () => {
       codeChallenge: challenge("z".repeat(43)),
       handoffNonce: LEGACY_MOBILE_HANDOFF_NONCE,
       sessionId: LEGACY_MOBILE_SESSION_ID,
+    });
+    expect(code).toBeTruthy();
+  });
+
+  it("creates legacy handoff when nonce is legacy but session id is a real sid", () => {
+    const code = createMobileAuthHandoff({
+      sessionToken: "jwt",
+      codeChallenge: challenge("y".repeat(43)),
+      handoffNonce: LEGACY_MOBILE_HANDOFF_NONCE,
+      sessionId: randomUUID(),
     });
     expect(code).toBeTruthy();
   });

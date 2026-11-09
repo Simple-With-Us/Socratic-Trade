@@ -7,10 +7,8 @@
 
 import { decodeSessionJwtCrypto } from "./session-jwt-crypto";
 import {
-  SESSION_EDGE_TRUST_SEC,
   SESSION_JWT_ABS_EXP_CLAIM,
   SESSION_JWT_SID_CLAIM,
-  SESSION_JWT_SRV_TOUCH_CLAIM,
 } from "./session-policy";
 
 /** Auth.js v5 session cookie names, in preference order. */
@@ -23,25 +21,17 @@ export interface VerifiedSessionIdentity {
   sessionId?: string;
 }
 
-function sessionTouchUnix(payload: import("jose").JWTPayload): number | null {
-  const srvTouch = payload[SESSION_JWT_SRV_TOUCH_CLAIM];
-  if (typeof srvTouch === "number" && Number.isFinite(srvTouch)) return srvTouch;
-  const iat = payload.iat;
-  if (typeof iat === "number" && Number.isFinite(iat)) return iat;
-  return null;
-}
-
-/** Edge-safe session freshness: bounded by absolute cap and a short server-touch window. */
+/** Edge-safe session freshness without SQLite. Server-backed JWTs honor absExp; legacy JWTs honor exp. */
 export function edgeSessionTrustValid(payload: import("jose").JWTPayload, nowSeconds?: number): boolean {
   const now = nowSeconds ?? Math.floor(Date.now() / 1000);
-  const touch = sessionTouchUnix(payload);
-  if (touch === null) return false;
-  if (touch + SESSION_EDGE_TRUST_SEC <= now) return false;
   const sid = payload[SESSION_JWT_SID_CLAIM];
   if (typeof sid === "string" && sid) {
     const absExp = payload[SESSION_JWT_ABS_EXP_CLAIM];
     if (typeof absExp !== "number" || !Number.isFinite(absExp) || absExp <= now) return false;
+    return true;
   }
+  const exp = payload.exp;
+  if (typeof exp !== "number" || !Number.isFinite(exp) || exp <= now) return false;
   return true;
 }
 

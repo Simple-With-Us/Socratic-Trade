@@ -23,9 +23,10 @@ ST-2599 replaces stateless 30-day Auth.js JWTs with revocable server session row
 
 ## Decisions & Trade-offs
 
-- Edge middleware cannot open SQLite; it trusts cookies only while `srvTouch` (or `iat`) is within **5 minutes** (`SESSION_EDGE_TRUST_SEC`). Node decode + API handlers always consult `auth_sessions` (middleware forwards `x-authenticated-session-sid`).
+- Edge middleware cannot open SQLite; it accepts **legacy** JWTs on `exp` only and **server-backed** JWTs on `absExp` (no `srvTouch` age gate). Revocation is enforced on Node via `auth_sessions` (middleware forwards `x-authenticated-session-sid`).
 - Absolute session ceiling: 90 days from first sign-in; sliding cookie refresh capped at 30 days but never past `absExp`.
-- Legacy JWTs without `sid` are backfilled into `auth_sessions` on the next Node decode / JWT refresh with `sid`, `absExp`, and `srvTouch`.
+- Legacy JWTs without `sid` are backfilled into `auth_sessions` only on Auth.js JWT refresh (`jwt` callback), not on every `decodeSessionToken` (avoids orphan rows).
+- Shipped iOS web OAuth legacy path accepts `handoff_nonce=__legacy_compat__` with a real `sid` in the cookie (PKCE-only compat).
 - Shipped iOS builds without `handoff_nonce` / Apple server nonce use a logged legacy compat path until they send `x-socratic-mobile-session-hardening: 1` or the new fields (then enforcement is strict).
 
 ## Verification State
@@ -33,7 +34,7 @@ ST-2599 replaces stateless 30-day Auth.js JWTs with revocable server session row
 ```bash
 npm run lint
 npx tsc --noEmit
-npm test -- test/st-2599-auth-sessions.test.ts test/middleware-auth.test.ts test/apple-auth-route.test.ts test/apns-register-route.test.ts test/mobile-auth-handoff.test.ts
+npm test -- test/st-2599-auth-sessions.test.ts test/mobile-auth-redirect-route.test.ts test/middleware-auth.test.ts test/apple-auth-route.test.ts test/apns-register-route.test.ts test/mobile-auth-handoff.test.ts
 NODE_OPTIONS="--max-old-space-size=8192" npm run build
 ```
 
