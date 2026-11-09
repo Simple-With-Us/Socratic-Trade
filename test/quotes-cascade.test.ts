@@ -60,7 +60,15 @@ const mockFetchYahooFinanceQuote = vi.fn();
 const mockFetchYahooFinanceQuotesBatch = vi.fn();
 vi.mock("../src/lib/yahoo-finance", () => ({
   fetchYahooFinanceQuote: (sym: string) => mockFetchYahooFinanceQuote(sym),
-  fetchYahooFinanceQuotesBatch: (syms: string[]) => mockFetchYahooFinanceQuotesBatch(syms)
+  fetchYahooFinanceQuotesBatch: (syms: string[]) => mockFetchYahooFinanceQuotesBatch(syms),
+  fetchYahooFinanceChartQuotes: async (syms: string[]) => {
+    const map = new Map();
+    for (const sym of syms) {
+      const quote = await mockFetchYahooFinanceQuote(sym);
+      if (quote) map.set(sym, quote);
+    }
+    return map;
+  }
 }));
 
 describe("isQuoteFresh / cascadeFreshMaxAgeMs", () => {

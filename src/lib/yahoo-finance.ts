@@ -4,6 +4,7 @@ import { dataSourceFetch } from "./data-source-fetch";
  *  without it the operator env / residential default applies. */
 export interface YahooFetchOptions {
   userId?: string;
+  signal?: AbortSignal;
 }
 
 export interface YahooFinanceQuote {
@@ -112,11 +113,16 @@ export function yahooQuoteFromChartMeta(
 export async function fetchYahooFinanceQuote(symbol: string, options?: YahooFetchOptions): Promise<YahooFinanceQuote | undefined> {
   const clean = encodeURIComponent(symbol.toUpperCase());
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${clean}?interval=1d&range=1d`;
+  const callerSignal = options?.signal;
+  if (callerSignal?.aborted) return undefined;
   const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort();
+  if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort, { once: true });
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
     const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { userId: options?.userId });
     clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
     if (!response.ok) return undefined;
     const payload = await response.json() as { chart?: { result?: Array<{ meta?: Record<string, unknown>, indicators?: { quote?: Array<{ volume?: unknown[] }> } }> } };
     const meta = payload?.chart?.result?.[0]?.meta;
@@ -129,8 +135,75 @@ export async function fetchYahooFinanceQuote(symbol: string, options?: YahooFetc
     return yahooQuoteFromChartMeta(meta, Number.isFinite(volumeHint) ? volumeHint : undefined);
   } catch {
     clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
     return undefined;
   }
+}
+
+/** How long a v7 batch 401/403 (the crumb/cookie auth wall, which the keyless
+ *  path cannot satisfy) suppresses further v7 calls process-wide. Per-symbol
+ *  chart fallback still runs during the cooldown. */
+export const YAHOO_V7_AUTH_COOLDOWN_MS = 10 * 60 * 1000;
+
+let yahooV7AuthBlockedUntilMs = 0;
+
+function isYahooV7AuthBlocked(now: number = Date.now()): boolean {
+  return now < yahooV7AuthBlockedUntilMs;
+}
+
+function markYahooV7AuthBlocked(): void {
+  const now = Date.now();
+  if (now < yahooV7AuthBlockedUntilMs) return;
+  yahooV7AuthBlockedUntilMs = now + YAHOO_V7_AUTH_COOLDOWN_MS;
+  console.warn("[yahoo-finance] v7 batch endpoint is auth-walled (401/403); skipping v7 for 10m, using per-symbol chart fallback.");
+}
+
+/** Test-only reset for the v7 auth cooldown. */
+export function __resetYahooV7AuthCooldownForTests(): void {
+  yahooV7AuthBlockedUntilMs = 0;
+}
+
+/** Bounded pool for the per-symbol chart fallback: matches the proxy gate cap
+ *  (DEFAULT_PROXY_MAX_CONCURRENCY in proxy-fetch.ts) so fallback requests do
+ *  not queue behind each other inside the gate and abort on their own 5s
+ *  timers before a slot frees up (prod 2026-11-06). */
+export const YAHOO_CHART_FALLBACK_CONCURRENCY = 4;
+
+/** Own overall budget for the chart fallback. Launching stops after this and
+ *  whatever priced so far is returned. It starts when the fallback starts, so
+ *  an upstream batch abort/timeout can never consume the fallback's budget. */
+export const YAHOO_CHART_FALLBACK_DEADLINE_MS = 45_000;
+
+/** Per-symbol chart quotes with bounded concurrency and an overall deadline.
+ *  Each request's 5s timer starts only when a pool slot picks the symbol up —
+ *  time spent waiting in the queue is never charged against it. */
+export async function fetchYahooFinanceChartQuotes(
+  symbols: string[],
+  options?: { concurrency?: number; deadlineMs?: number; userId?: string; signal?: AbortSignal }
+): Promise<Map<string, YahooFinanceQuote>> {
+  const result = new Map<string, YahooFinanceQuote>();
+  const queue = Array.from(new Set(symbols.map((s) => s.toUpperCase().trim()).filter(Boolean)));
+  if (queue.length === 0) return result;
+  const concurrency = Math.max(1, options?.concurrency ?? YAHOO_CHART_FALLBACK_CONCURRENCY);
+  const deadlineAt = Date.now() + Math.max(0, options?.deadlineMs ?? YAHOO_CHART_FALLBACK_DEADLINE_MS);
+  const userId = options?.userId;
+  const signal = options?.signal;
+  const quoteOptions = userId === undefined && signal === undefined ? undefined : { userId, signal };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (signal?.aborted) return;
+      const symbol = queue.shift();
+      if (symbol === undefined) return;
+      // Stop launching after the deadline/abort; in-flight requests still settle.
+      if (Date.now() >= deadlineAt || signal?.aborted) return;
+      const quote = await fetchYahooFinanceQuote(symbol, quoteOptions);
+      if (quote) result.set(symbol, quote);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+  );
+  return result;
 }
 
 export async function fetchYahooFinanceQuotesBatch(
@@ -139,6 +212,9 @@ export async function fetchYahooFinanceQuotesBatch(
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   if (symbols.length === 0) return result;
+  // Auth-walled v7 answers 401 to every chunk while each burns its 8s budget;
+  // skip straight to chart fallback during the cooldown instead.
+  if (isYahooV7AuthBlocked()) return result;
 
   const chunkSize = 50;
   const chunks: string[][] = [];
@@ -155,6 +231,9 @@ export async function fetchYahooFinanceQuotesBatch(
     for (const map of maps) {
       for (const [symbol, quote] of map) result.set(symbol, quote);
     }
+    // A 401/403 in this wave auth-walled v7: skip the remaining chunks so
+    // callers fall straight through to per-symbol chart quotes.
+    if (isYahooV7AuthBlocked()) break;
   }
 
   return result;
@@ -170,6 +249,13 @@ async function fetchYahooQuoteChunk(chunk: string[], userId?: string): Promise<M
   try {
     const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { userId });
     clearTimeout(timeout);
+    // 401/403 is the crumb/cookie auth wall, not a transient miss: every later
+    // chunk would fail the same way. Mark it so the batch loop skips the rest
+    // (and later batches cool down) instead of burning 8s per chunk.
+    if (response.status === 401 || response.status === 403) {
+      markYahooV7AuthBlocked();
+      return result;
+    }
     if (!response.ok) return result;
     const payload = await response.json() as {
       quoteResponse?: {
