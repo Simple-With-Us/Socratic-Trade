@@ -171,6 +171,7 @@ describe("gatherStrategyMarket", () => {
     const result = await pending;
 
     expect(result.usedLastGood).toBe(true);
+    expect(result.lastGoodReason).toBe("timeout");
     expect(result.lastGoodAt).toBe(seed.generatedAt);
     expect(result.marketScan.topCandidates[0]?.symbol).toBe("MSFT");
     expect(result.marketScan.topCandidates[0]?.price).toBe(402);
@@ -242,6 +243,7 @@ describe("gatherStrategyMarket", () => {
     const result = await gatherStrategyMarket(gatherArgs());
 
     expect(result.usedLastGood).toBe(true);
+    expect(result.lastGoodReason).toBe("quotes_unavailable");
     expect(result.lastGoodAt).toBe(seed.generatedAt);
     expect(result.marketScan.topCandidates[0]?.symbol).toBe("MSFT");
     expect(result.marketScan.topCandidates[0]?.price).toBe(401);

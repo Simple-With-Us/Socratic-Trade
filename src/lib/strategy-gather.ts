@@ -29,6 +29,8 @@ export type StrategyGatherResult = {
   marketScan: MarketScan;
   usedLastGood: boolean;
   lastGoodAt?: string;
+  /** Why the live gather fell back to the last-good tape (set only when `usedLastGood`). */
+  lastGoodReason?: "timeout" | "quotes_unavailable";
 };
 
 export type StrategyGatherInput = {
@@ -163,10 +165,11 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
     const lastGood = newestPersistedMarketScan(input.userId, input.connectedAccountId);
     if (!lastGood) throw error;
 
+    const lastGoodReason = quotesUnavailable ? "quotes_unavailable" : "timeout";
     const seeded = withLastGoodWarning(
       lastGood.scan,
       lastGood.entry.createdAt,
-      quotesUnavailable ? "quotes_unavailable" : "timeout",
+      lastGoodReason,
       deadlineMs
     );
     const quoteController = new AbortController();
@@ -186,7 +189,8 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
       baseMarketScan: seeded,
       marketScan,
       usedLastGood: true,
-      lastGoodAt: lastGood.entry.createdAt
+      lastGoodAt: lastGood.entry.createdAt,
+      lastGoodReason
     };
   }
 }
