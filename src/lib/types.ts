@@ -2609,6 +2609,15 @@ export interface MarketDataProviderOptions {
    * touching any process-global feed setting.
    */
   connectedAccountId?: string;
+  /**
+   * Whether an empty/failed screener may fall back to Yahoo-pricing the whole
+   * allowed set (recoverQuotesWhenScreenerEmpty). Default true. The
+   * market-scan-freshness lane passes false: while the screener is down it
+   * must fail fast instead of re-saturating the proxy gate with a ~500-name
+   * Yahoo wave every minute (prod 2026-11-09 self-sustaining loop). The seed
+   * fallback still applies when a seed is present.
+   */
+  allowWholeSetYahooFallback?: boolean;
 }
 
 export interface MarketDataProvider {

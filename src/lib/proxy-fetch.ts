@@ -190,8 +190,21 @@ interface ProxyGateWaiter {
   enqueuedAt: number;
   signal?: AbortSignal;
   onAbort?: () => void;
+  priority: boolean;
   resolve(slot: ProxySlot): void;
   reject(err: unknown): void;
+}
+
+/** Options for ProxyConcurrencyGate.acquire. */
+export interface ProxyGateAcquireOptions {
+  /**
+   * Priority lane (Nasdaq screener): a priority waiter is granted ahead of
+   * queued normal waiters AND may use one reserved extra slot above the cap
+   * (cap+1 in flight at most). The reserved slot is only ever granted to a
+   * priority waiter — normal callers keep the exact historical FIFO-at-cap
+   * behavior, and abort-while-queued semantics are unchanged.
+   */
+  priority?: boolean;
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -209,6 +222,14 @@ function abortReason(signal: AbortSignal): unknown {
  *
  * Production code uses the module-level shared instance below; tests
  * construct their own with a fixed cap resolver.
+ *
+ * The priority lane (acquire's `{ priority: true }`) exists for the Nasdaq
+ * screener: bulk Yahoo waves saturate all 4 slots, and a screener request
+ * queued FIFO behind them burned its whole 15s caller budget waiting for a
+ * slot (prod 2026-11-09: screener 172/172 timeouts while the same URL
+ * answered in 1.7s). Priority waiters jump the queue and may take one
+ * reserved slot above the cap, so one latency-sensitive request per scan
+ * never starves behind bulk traffic.
  */
 export class ProxyConcurrencyGate {
   private inFlightCount = 0;
@@ -226,10 +247,10 @@ export class ProxyConcurrencyGate {
     return this.queue.length;
   }
 
-  acquire(signal?: AbortSignal): Promise<ProxySlot> {
+  acquire(signal?: AbortSignal, opts?: ProxyGateAcquireOptions): Promise<ProxySlot> {
     if (signal?.aborted) return Promise.reject(abortReason(signal));
     return new Promise<ProxySlot>((resolve, reject) => {
-      const waiter: ProxyGateWaiter = { enqueuedAt: Date.now(), signal, resolve, reject };
+      const waiter: ProxyGateWaiter = { enqueuedAt: Date.now(), signal, priority: opts?.priority === true, resolve, reject };
       if (signal) {
         waiter.onAbort = () => {
           const idx = this.queue.indexOf(waiter);
@@ -257,9 +278,27 @@ export class ProxyConcurrencyGate {
   }
 
   private pump(): void {
-    while (this.queue.length > 0 && this.inFlightCount < this.resolveMaxConcurrency()) {
-      const waiter = this.queue.shift();
+    for (;;) {
+      if (this.queue.length === 0) return;
+      const cap = this.resolveMaxConcurrency();
+      let index = -1;
+      if (this.inFlightCount < cap) {
+        // A free normal slot goes to the oldest priority waiter first, so a
+        // priority request never waits behind saturated bulk traffic; normal
+        // waiters keep strict FIFO among themselves.
+        index = this.queue.findIndex((waiter) => waiter.priority);
+        if (index === -1) index = 0;
+      } else if (this.inFlightCount < cap + 1) {
+        // Only the reserved extra slot remains: a priority waiter may take
+        // it, but a normal waiter never does — it keeps waiting.
+        index = this.queue.findIndex((waiter) => waiter.priority);
+        if (index === -1) return;
+      } else {
+        return;
+      }
+      const waiter = this.queue[index];
       if (!waiter) break;
+      this.queue.splice(index, 1);
       if (waiter.signal && waiter.onAbort) {
         waiter.signal.removeEventListener("abort", waiter.onAbort);
       }
@@ -458,11 +497,14 @@ function wrapBodyUntilSettle(
  * `options.onQueueWait` is called once with the milliseconds spent queued
  * for a slot, when that wait was measurable (> 0), so callers can tell queue
  * wait apart from leg time in their logs.
+ *
+ * `options.priority` takes the gate's priority lane (queue-jump + one
+ * reserved slot above the cap) — the Nasdaq screener's lane.
  */
 export function createProxiedFetch(
   proxyUrl: string | undefined,
   baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch,
-  options?: { proxyTimeoutMs?: number; onQueueWait?: (waitMs: number) => void }
+  options?: { proxyTimeoutMs?: number; onQueueWait?: (waitMs: number) => void; priority?: boolean }
 ): typeof fetch {
   if (!proxyUrl || !proxyUrl.trim()) return baseFetch;
   const agent = getProxyAgent(proxyUrl);
@@ -471,7 +513,7 @@ export function createProxiedFetch(
     const callerSignal = init?.signal ?? undefined;
     // Gate first: the leg timer is only created after a slot is granted, so
     // queue wait never counts against the leg timeout.
-    const slot = await sharedProxyConcurrencyGate.acquire(callerSignal);
+    const slot = await sharedProxyConcurrencyGate.acquire(callerSignal, { priority: options?.priority });
     try {
       if (slot.waitMs > 0) options?.onQueueWait?.(slot.waitMs);
     } catch (err) {

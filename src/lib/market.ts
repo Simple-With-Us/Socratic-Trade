@@ -294,6 +294,8 @@ export async function scanMarket(
     deadlineAt?: number;
     /** Connected account the scan operates for (account-scoped market-data tape). */
     connectedAccountId?: string;
+    /** False disables the whole-set Yahoo fallback (freshness lane fail-fast). Default true. */
+    allowWholeSetYahooFallback?: boolean;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -309,7 +311,8 @@ export async function scanMarket(
     enrichmentMode: scanOptions.enrichmentMode,
     seedEnrichment: scanOptions.seedEnrichment,
     deadlineAt: scanOptions.deadlineAt,
-    connectedAccountId: scanOptions.connectedAccountId
+    connectedAccountId: scanOptions.connectedAccountId,
+    allowWholeSetYahooFallback: scanOptions.allowWholeSetYahooFallback
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -332,6 +335,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const weights = options?.scoringWeights ?? DEFAULT_SCORING_WEIGHTS;
     // Item 2: congressional gate multiplier (1 = no change / default; 0 = go/no-go verdict zeroed it).
     const congressMultiplier = typeof options?.congressMultiplier === "number" ? options.congressMultiplier : 1;
+    const allowWholeSetYahooFallback = options?.allowWholeSetYahooFallback ?? true;
     const warnings: string[] = [];
     let quotes: MarketQuote[] = [];
     let cached = false;
@@ -370,7 +374,8 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
         const recovered = await recoverQuotesWhenScreenerEmpty({
           allowed,
           positions,
-          seed: options?.seedEnrichment
+          seed: options?.seedEnrichment,
+          allowWholeSetYahooFallback
         });
         quotes = [...quotes, ...recovered.quotes];
         warnings.push(...recovered.warnings);
@@ -404,7 +409,8 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       const recovered = await recoverQuotesWhenScreenerEmpty({
         allowed,
         positions,
-        seed: options?.seedEnrichment
+        seed: options?.seedEnrichment,
+        allowWholeSetYahooFallback
       });
       quotes = [...quotes, ...recovered.quotes];
       warnings.push(...recovered.warnings);
@@ -1661,6 +1667,7 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   allowed: Set<string>;
   positions: EquityPosition[];
   seed?: Record<string, MarketQuoteSummary>;
+  allowWholeSetYahooFallback?: boolean;
 }): Promise<{ quotes: MarketQuote[]; warnings: string[]; usedSeed: boolean }> {
   const seeded = input.seed ? persistedMarketQuotes(input.seed, input.positions) : [];
   if (seeded.length > 0) {
@@ -1670,6 +1677,15 @@ async function recoverQuotesWhenScreenerEmpty(input: {
         "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
       ],
       usedSeed: true
+    };
+  }
+  if (input.allowWholeSetYahooFallback === false) {
+    return {
+      quotes: [],
+      warnings: [
+        "Live Nasdaq screener data was unavailable; the whole-set Yahoo fallback is disabled for this scan."
+      ],
+      usedSeed: false
     };
   }
   const quoteOnly = await fetchAllowedSetMarketQuotes(Array.from(input.allowed), input.positions);

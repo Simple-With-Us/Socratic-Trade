@@ -22,13 +22,17 @@ vi.mock("../src/lib/market", async (importOriginal) => {
 import { audit, getDb, latestAuditByKind } from "../src/lib/db";
 import {
   FRESHNESS_BOOT_GRACE_SECONDS,
+  FRESHNESS_QUOTE_OUTAGE_BASE_BACKOFF_MS,
+  FRESHNESS_QUOTE_OUTAGE_MAX_BACKOFF_MS,
   FRESHNESS_SCAN_DEADLINE_MS,
   freshnessFastGateRowIdForTests,
+  freshnessQuoteOutageForTests,
   marketScanFreshnessMaxAgeHours,
   newestPersistedMarketScan,
   resetFreshnessGateForTests,
   runMarketScanFreshnessIfDue
 } from "../src/lib/market-scan-freshness";
+import { ScanQuotesUnavailableError } from "../src/lib/market";
 import { latestAuditStampByKind } from "../src/lib/db";
 import { resetScanSingleFlightForTests } from "../src/lib/scan-singleflight";
 
@@ -535,5 +539,97 @@ describe("newestPersistedMarketScan", () => {
     auditAt("market_scan", { scan: legacyScanWithoutWarnings }, "scope-legacy", MONDAY);
     const newest = newestPersistedMarketScan("scope-legacy");
     expect(newest?.scan.warnings).toEqual([]);
+  });
+});
+
+describe("quote-outage backoff + whole-set fallback opt-out (ST-3999)", () => {
+  function quoteOutage(): ScanQuotesUnavailableError {
+    return new ScanQuotesUnavailableError({ scannedSymbols: 5, warnings: ["screener down"] });
+  }
+
+  it("backs off from 1m and caps at 15m", () => {
+    expect(FRESHNESS_QUOTE_OUTAGE_BASE_BACKOFF_MS).toBe(60_000);
+    expect(FRESHNESS_QUOTE_OUTAGE_MAX_BACKOFF_MS).toBe(15 * 60_000);
+  });
+
+  it("passes allowWholeSetYahooFallback:false into scanMarket", async () => {
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1);
+    const options = scanMarketMock.mock.calls[0][5] as { allowWholeSetYahooFallback?: boolean };
+    expect(options.allowWholeSetYahooFallback).toBe(false);
+  });
+
+  it("backs off 1m after a quotes-unavailable failure and logs one line", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    scanMarketMock.mockRejectedValue(quoteOutage());
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1);
+    expect(freshnessQuoteOutageForTests("local")).toEqual({ consecutiveFailures: 1, nextAllowedAt: MONDAY + 60_000 });
+
+    vi.setSystemTime(MONDAY + 30_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 30_000);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1); // backed off, no second scan
+    expect(info.mock.calls.some((call) => String(call[0]).includes("backing off"))).toBe(true);
+
+    vi.setSystemTime(MONDAY + 61_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 61_000);
+    expect(scanMarketMock).toHaveBeenCalledTimes(2); // backoff expired, runs again
+    expect(freshnessQuoteOutageForTests("local")).toEqual({
+      consecutiveFailures: 2,
+      nextAllowedAt: MONDAY + 61_000 + 120_000
+    });
+  });
+
+  it("doubles the backoff to the 15m cap and resets on success", async () => {
+    scanMarketMock.mockRejectedValue(quoteOutage());
+    const expectedDelays = [60_000, 120_000, 240_000, 480_000, 900_000, 900_000];
+    let now = MONDAY;
+    for (const [index, delay] of expectedDelays.entries()) {
+      vi.setSystemTime(now);
+      await runMarketScanFreshnessIfDue(now);
+      expect(freshnessQuoteOutageForTests("local")).toEqual({ consecutiveFailures: index + 1, nextAllowedAt: now + delay });
+      now += delay;
+    }
+    // Success resets the count.
+    scanMarketMock.mockResolvedValue(makeScan(new Date(now).toISOString()));
+    vi.setSystemTime(now);
+    await runMarketScanFreshnessIfDue(now);
+    expect(freshnessQuoteOutageForTests("local")).toBeUndefined();
+    // …so the next outage starts back at 1m. Jump past the fresh scan's window first.
+    const staleAgain = now + 21 * 60 * 60_000;
+    scanMarketMock.mockRejectedValue(quoteOutage());
+    vi.setSystemTime(staleAgain);
+    await runMarketScanFreshnessIfDue(staleAgain);
+    expect(freshnessQuoteOutageForTests("local")).toEqual({ consecutiveFailures: 1, nextAllowedAt: staleAgain + 60_000 });
+  });
+
+  it("does not back off on generic (non-quote) failures", async () => {
+    scanMarketMock.mockRejectedValue(new Error("provider down"));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    vi.setSystemTime(MONDAY + 18_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 18_000);
+    expect(scanMarketMock).toHaveBeenCalledTimes(2);
+    expect(freshnessQuoteOutageForTests("local")).toBeUndefined();
+  });
+
+  it("backs off on screener-shaped plain errors, not just the typed error", async () => {
+    scanMarketMock.mockRejectedValue(new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com."));
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(freshnessQuoteOutageForTests("local")).toEqual({ consecutiveFailures: 1, nextAllowedAt: MONDAY + 60_000 });
+  });
+
+  it("backs off when the scan finishes with zero quotes", async () => {
+    scanMarketMock.mockResolvedValue({
+      ...makeScan(new Date(MONDAY).toISOString()),
+      scannedSymbols: 5,
+      returnedQuotes: 0,
+      topCandidates: [],
+      quotesBySymbol: {}
+    });
+    await runMarketScanFreshnessIfDue(MONDAY);
+    expect(freshnessQuoteOutageForTests("local")).toEqual({ consecutiveFailures: 1, nextAllowedAt: MONDAY + 60_000 });
+    vi.setSystemTime(MONDAY + 30_000);
+    await runMarketScanFreshnessIfDue(MONDAY + 30_000);
+    expect(scanMarketMock).toHaveBeenCalledTimes(1);
   });
 });
