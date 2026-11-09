@@ -375,10 +375,11 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
           allowed,
           positions,
           seed: options?.seedEnrichment,
-          // The fail-fast opt-out targets a DOWN screener.  When the screener
-          // answered with rows but none overlap the allowed set (custom-only
-          // universe), it is not an outage: keep the Yahoo fallback.
-          allowWholeSetYahooFallback: allowWholeSetYahooFallback || result.rows.length > 0
+          // The fail-fast opt-out targets a DOWN screener.  This branch only
+          // runs when no priced screener row intersects `allowed` (quotes is
+          // empty), so priced rows here mean the screener is live but the
+          // universe is custom-only: not an outage, keep the Yahoo fallback.
+          allowWholeSetYahooFallback: allowWholeSetYahooFallback || allQuotes.length > 0
         });
         quotes = [...quotes, ...recovered.quotes];
         warnings.push(...recovered.warnings);

@@ -960,6 +960,16 @@ describe("allowWholeSetYahooFallback with a live, non-overlapping screener", () 
     });
     expect(scan.topCandidates.map((quote) => quote.symbol)).toContain("AAPL");
   });
+
+  it("control: the same scan with an empty screener stays fail-fast (no Yahoo fallback)", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "aapl" });
+    await expect(
+      scanMarket(["AAPL"], [], undefined, undefined, [], {
+        enrichmentMode: "skip",
+        allowWholeSetYahooFallback: false
+      })
+    ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+  });
 });
 
 function stubFetches(input: { nasdaqRows: unknown[]; yahoo: "miss" | "aapl"; nasdaqAbort?: boolean }): void {
