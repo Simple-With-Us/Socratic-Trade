@@ -1,4 +1,12 @@
 import { dataSourceFetch } from "./data-source-fetch";
+import { isAbortOrTimeoutError } from "./network-errors";
+import { withProviderLimit } from "./provider-rate-limit";
+import { BROWSER_UA } from "./web-sources/http";
+import {
+  getYahooSessionCreds,
+  invalidateYahooSessionCreds,
+  YAHOO_SESSION_UA
+} from "./yahoo-session";
 
 /** Call-site options. userId selects that user's data-source proxy (when set);
  *  without it the operator env / residential default applies. */
@@ -48,6 +56,48 @@ export interface YahooFinanceQuote {
   changePct?: number;
 }
 
+export type YahooQuoteTelemetryKind =
+  | "v7_batch_complete"
+  | "v7_auth_wall"
+  | "v7_session_unavailable"
+  | "v7_chunk_abort"
+  | "v7_chunk_empty"
+  | "chart_quote_abort";
+
+export interface YahooQuoteTelemetry {
+  kind: YahooQuoteTelemetryKind;
+  symbolsRequested?: number;
+  symbolsPriced?: number;
+  v7Chunks?: number;
+  v7ChunksOk?: number;
+  v7ChunksAuth?: number;
+  v7ChunksAbort?: number;
+  v7SkippedCooldown?: boolean;
+  v7SkippedNoSession?: boolean;
+  chartAttempts?: number;
+  chartAborts?: number;
+}
+
+let lastYahooQuoteTelemetry: YahooQuoteTelemetry | undefined;
+
+export function peekLastYahooQuoteTelemetry(): YahooQuoteTelemetry | undefined {
+  return lastYahooQuoteTelemetry;
+}
+
+export function __resetYahooQuoteTelemetryForTests(): void {
+  lastYahooQuoteTelemetry = undefined;
+}
+
+function emitYahooQuoteTelemetry(payload: YahooQuoteTelemetry): void {
+  lastYahooQuoteTelemetry = payload;
+  console.warn("[yahoo-finance]", JSON.stringify({ ...payload, ts: Date.now() }));
+}
+
+function jitteredBackoffMs(attempt: number, baseMs: number, capMs: number): number {
+  const exp = Math.min(capMs, baseMs * 2 ** attempt);
+  return Math.round(exp + Math.random() * Math.min(250, baseMs));
+}
+
 function optionalFinite(value: unknown): number | undefined {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : undefined;
@@ -87,9 +137,6 @@ export function yahooQuoteFromChartMeta(
   const companyName = [meta.longName, meta.shortName]
     .find((value): value is string => typeof value === "string" && value.trim().length > 0)
     ?.trim();
-  // Sentry review: when Yahoo omits chartPreviousClose, fall back to undefined — NOT the
-  // current price.  Falling back to price fabricates intradayChangePct ≈ 0% and hides the
-  // real "previous close unknown" state from the quote route's fallback chain.
   const prevCloseRaw = meta.chartPreviousClose ? Number(meta.chartPreviousClose) : NaN;
   const prevClose = Number.isFinite(prevCloseRaw) && prevCloseRaw > 0 ? prevCloseRaw : undefined;
   const volume = Number(meta.regularMarketVolume ?? volumeHint ?? 0);
@@ -110,40 +157,90 @@ export function yahooQuoteFromChartMeta(
   };
 }
 
-export async function fetchYahooFinanceQuote(symbol: string, options?: YahooFetchOptions): Promise<YahooFinanceQuote | undefined> {
+export const YAHOO_CHART_QUOTE_TIMEOUT_MS = 9_000;
+export const YAHOO_CHART_QUOTE_MAX_ATTEMPTS = 3;
+export const YAHOO_CHART_QUOTE_BACKOFF_MS = 400;
+
+export async function fetchYahooFinanceQuote(
+  symbol: string,
+  options?: YahooFetchOptions
+): Promise<YahooFinanceQuote | undefined> {
   const clean = encodeURIComponent(symbol.toUpperCase());
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${clean}?interval=1d&range=1d`;
   const callerSignal = options?.signal;
   if (callerSignal?.aborted) return undefined;
-  const controller = new AbortController();
-  const onCallerAbort = (): void => controller.abort();
-  if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  try {
-    const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { userId: options?.userId });
-    clearTimeout(timeout);
-    callerSignal?.removeEventListener("abort", onCallerAbort);
-    if (!response.ok) return undefined;
-    const payload = await response.json() as { chart?: { result?: Array<{ meta?: Record<string, unknown>, indicators?: { quote?: Array<{ volume?: unknown[] }> } }> } };
-    const meta = payload?.chart?.result?.[0]?.meta;
-    if (!meta) return undefined;
-    const quote = payload?.chart?.result?.[0]?.indicators?.quote?.[0];
-    const volumeHint = Number(quote?.volume?.[0] ?? 0);
-    // Chart meta already includes fiftyTwoWeekHigh/Low on the same payload as
-    // price/volume/name. The previous mapper dropped them, so the iOS/web
-    // company sheet showed dashes for 52W even after a successful live fetch.
-    return yahooQuoteFromChartMeta(meta, Number.isFinite(volumeHint) ? volumeHint : undefined);
-  } catch {
-    clearTimeout(timeout);
-    callerSignal?.removeEventListener("abort", onCallerAbort);
-    return undefined;
+  const userId = options?.userId;
+
+  let chartAborts = 0;
+  for (let attempt = 0; attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS; attempt++) {
+    if (callerSignal?.aborted) return undefined;
+    try {
+      const response = await withProviderLimit("yahoo-finance", async () => {
+        const controller = new AbortController();
+        const onCallerAbort = (): void => controller.abort();
+        if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+        const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_QUOTE_TIMEOUT_MS);
+        try {
+          return await dataSourceFetch(
+            url,
+            {
+              cache: "no-store",
+              signal: controller.signal,
+              headers: { "user-agent": BROWSER_UA, accept: "application/json" }
+            },
+            { userId }
+          );
+        } finally {
+          clearTimeout(timeout);
+          callerSignal?.removeEventListener("abort", onCallerAbort);
+        }
+      });
+
+      if (response.status === 429 && attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS - 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 4_000))
+        );
+        continue;
+      }
+      if (!response.ok) return undefined;
+      const payload = await response.json() as {
+        chart?: {
+          result?: Array<{
+            meta?: Record<string, unknown>;
+            indicators?: { quote?: Array<{ volume?: unknown[] }> };
+          }>;
+        };
+      };
+      const meta = payload?.chart?.result?.[0]?.meta;
+      if (!meta) return undefined;
+      const quote = payload?.chart?.result?.[0]?.indicators?.quote?.[0];
+      const volumeHint = Number(quote?.volume?.[0] ?? 0);
+      return yahooQuoteFromChartMeta(meta, Number.isFinite(volumeHint) ? volumeHint : undefined);
+    } catch (error) {
+      if (isAbortOrTimeoutError(error)) {
+        chartAborts += 1;
+        if (attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS - 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 2_000))
+          );
+          continue;
+        }
+        emitYahooQuoteTelemetry({ kind: "chart_quote_abort", chartAborts, chartAttempts: attempt + 1 });
+      }
+      return undefined;
+    }
   }
+  return undefined;
 }
 
-/** How long a v7 batch 401/403 (the crumb/cookie auth wall, which the keyless
- *  path cannot satisfy) suppresses further v7 calls process-wide. Per-symbol
- *  chart fallback still runs during the cooldown. */
+/** How long a v7 batch 401/403 (crumb/cookie auth wall) suppresses further v7 calls process-wide. */
 export const YAHOO_V7_AUTH_COOLDOWN_MS = 10 * 60 * 1000;
+
+/** Per-chunk HTTP budget starts only after the yahoo-finance pacer slot is acquired. */
+export const YAHOO_V7_CHUNK_TIMEOUT_MS = 10_000;
+export const YAHOO_V7_CHUNK_MAX_ATTEMPTS = 2;
+/** Stop further v7 waves after this many chunks exhausted retries (proxy pressure). */
+export const YAHOO_V7_ABORT_WAVE_BREAK = 2;
 
 let yahooV7AuthBlockedUntilMs = 0;
 
@@ -155,7 +252,7 @@ function markYahooV7AuthBlocked(): void {
   const now = Date.now();
   if (now < yahooV7AuthBlockedUntilMs) return;
   yahooV7AuthBlockedUntilMs = now + YAHOO_V7_AUTH_COOLDOWN_MS;
-  console.warn("[yahoo-finance] v7 batch endpoint is auth-walled (401/403); skipping v7 for 10m, using per-symbol chart fallback.");
+  emitYahooQuoteTelemetry({ kind: "v7_auth_wall" });
 }
 
 /** Test-only reset for the v7 auth cooldown. */
@@ -165,8 +262,8 @@ export function __resetYahooV7AuthCooldownForTests(): void {
 
 /** Bounded pool for the per-symbol chart fallback: matches the proxy gate cap
  *  (DEFAULT_PROXY_MAX_CONCURRENCY in proxy-fetch.ts) so fallback requests do
- *  not queue behind each other inside the gate and abort on their own 5s
- *  timers before a slot frees up (prod 2026-11-06). */
+ *  not queue behind each other inside the gate and abort on their own timers
+ *  before a slot frees up (prod 2026-11-06). */
 export const YAHOO_CHART_FALLBACK_CONCURRENCY = 4;
 
 /** Own overall budget for the chart fallback. Launching stops after this and
@@ -175,8 +272,7 @@ export const YAHOO_CHART_FALLBACK_CONCURRENCY = 4;
 export const YAHOO_CHART_FALLBACK_DEADLINE_MS = 45_000;
 
 /** Per-symbol chart quotes with bounded concurrency and an overall deadline.
- *  Each request's 5s timer starts only when a pool slot picks the symbol up —
- *  time spent waiting in the queue is never charged against it. */
+ *  Each request's timer starts only when a pool slot picks the symbol up. */
 export async function fetchYahooFinanceChartQuotes(
   symbols: string[],
   options?: { concurrency?: number; deadlineMs?: number; userId?: string; signal?: AbortSignal }
@@ -188,21 +284,19 @@ export async function fetchYahooFinanceChartQuotes(
   const deadlineAt = Date.now() + Math.max(0, options?.deadlineMs ?? YAHOO_CHART_FALLBACK_DEADLINE_MS);
   const userId = options?.userId;
   const signal = options?.signal;
-  const quoteOptions = userId === undefined && signal === undefined ? undefined : { userId, signal };
+  const quoteOptions =
+    userId === undefined && signal === undefined ? undefined : { userId, signal };
   const worker = async (): Promise<void> => {
     for (;;) {
       if (signal?.aborted) return;
       const symbol = queue.shift();
       if (symbol === undefined) return;
-      // Stop launching after the deadline/abort; in-flight requests still settle.
       if (Date.now() >= deadlineAt || signal?.aborted) return;
       const quote = await fetchYahooFinanceQuote(symbol, quoteOptions);
       if (quote) result.set(symbol, quote);
     }
   };
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
-  );
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
   return result;
 }
 
@@ -211,139 +305,224 @@ export async function fetchYahooFinanceQuotesBatch(
   options?: { concurrency?: number; userId?: string }
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
-  if (symbols.length === 0) return result;
-  // Auth-walled v7 answers 401 to every chunk while each burns its 8s budget;
-  // skip straight to chart fallback during the cooldown instead.
-  if (isYahooV7AuthBlocked()) return result;
+  const requested = symbols.length;
+  if (requested === 0) return result;
+
+  const stats = {
+    v7Chunks: 0,
+    v7ChunksOk: 0,
+    v7ChunksAuth: 0,
+    v7ChunksAbort: 0,
+    v7SkippedCooldown: false,
+    v7SkippedNoSession: false
+  };
+
+  if (isYahooV7AuthBlocked()) {
+    stats.v7SkippedCooldown = true;
+    emitYahooQuoteTelemetry({
+      kind: "v7_batch_complete",
+      symbolsRequested: requested,
+      symbolsPriced: 0,
+      ...stats
+    });
+    return result;
+  }
+
+  let sessionCreds: Awaited<ReturnType<typeof getYahooSessionCreds>> | undefined;
+  try {
+    sessionCreds = await getYahooSessionCreds(options?.userId);
+  } catch {
+    stats.v7SkippedNoSession = true;
+    emitYahooQuoteTelemetry({
+      kind: "v7_session_unavailable",
+      symbolsRequested: requested,
+      symbolsPriced: 0,
+      ...stats
+    });
+    return result;
+  }
 
   const chunkSize = 50;
   const chunks: string[][] = [];
   for (let i = 0; i < symbols.length; i += chunkSize) {
     chunks.push(symbols.slice(i, i + chunkSize));
   }
-  // Default stays serial so existing quote-cascade callers do not suddenly fan out.
-  // Empty-screener fallback passes a small concurrency so a 500-name universe can
-  // still finish inside the interactive scan budget.
   const concurrency = Math.max(1, Math.min(options?.concurrency ?? 1, 4));
+
   for (let i = 0; i < chunks.length; i += concurrency) {
+    if (isYahooV7AuthBlocked()) break;
+    if (stats.v7ChunksAbort >= YAHOO_V7_ABORT_WAVE_BREAK) break;
     const wave = chunks.slice(i, i + concurrency);
-    const maps = await Promise.all(wave.map((chunk) => fetchYahooQuoteChunk(chunk, options?.userId)));
+    const maps = await Promise.all(
+      wave.map((chunk) => fetchYahooQuoteChunk(chunk, sessionCreds!, options?.userId, stats))
+    );
     for (const map of maps) {
       for (const [symbol, quote] of map) result.set(symbol, quote);
     }
-    // A 401/403 in this wave auth-walled v7: skip the remaining chunks so
-    // callers fall straight through to per-symbol chart quotes.
     if (isYahooV7AuthBlocked()) break;
+    if (stats.v7ChunksAbort >= YAHOO_V7_ABORT_WAVE_BREAK) break;
   }
 
+  emitYahooQuoteTelemetry({
+    kind: "v7_batch_complete",
+    symbolsRequested: requested,
+    symbolsPriced: result.size,
+    ...stats
+  });
   return result;
 }
 
-async function fetchYahooQuoteChunk(chunk: string[], userId?: string): Promise<Map<string, YahooFinanceQuote>> {
+type V7ChunkStats = {
+  v7Chunks: number;
+  v7ChunksOk: number;
+  v7ChunksAuth: number;
+  v7ChunksAbort: number;
+};
+
+async function fetchYahooQuoteChunk(
+  chunk: string[],
+  creds: { cookie: string; crumb: string },
+  userId: string | undefined,
+  stats: V7ChunkStats
+): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   const cleanSymbols = chunk.map((s) => encodeURIComponent(s.toUpperCase().trim())).join(",");
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${cleanSymbols}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${cleanSymbols}&crumb=${encodeURIComponent(creds.crumb)}`;
 
-  try {
-    const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { userId });
-    clearTimeout(timeout);
-    // 401/403 is the crumb/cookie auth wall, not a transient miss: every later
-    // chunk would fail the same way. Mark it so the batch loop skips the rest
-    // (and later batches cool down) instead of burning 8s per chunk.
-    if (response.status === 401 || response.status === 403) {
-      markYahooV7AuthBlocked();
+  stats.v7Chunks += 1;
+
+  for (let attempt = 0; attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await withProviderLimit("yahoo-finance", async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), YAHOO_V7_CHUNK_TIMEOUT_MS);
+        try {
+          return await dataSourceFetch(
+            url,
+            {
+              cache: "no-store",
+              signal: controller.signal,
+              headers: {
+                "user-agent": YAHOO_SESSION_UA,
+                Cookie: creds.cookie,
+                accept: "application/json"
+              }
+            },
+            { userId }
+          );
+        } finally {
+          clearTimeout(timeout);
+        }
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        stats.v7ChunksAuth += 1;
+        invalidateYahooSessionCreds(userId);
+        markYahooV7AuthBlocked();
+        return result;
+      }
+      if (!response.ok) {
+        emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
+        return result;
+      }
+
+      const payload = await response.json() as {
+        quoteResponse?: {
+          result?: Array<{
+            symbol: string;
+            regularMarketPrice?: number;
+            bid?: number;
+            ask?: number;
+            regularMarketPreviousClose?: number;
+            regularMarketOpen?: number;
+            regularMarketDayHigh?: number;
+            regularMarketDayLow?: number;
+            regularMarketVolume?: number;
+            regularMarketTime?: number;
+            regularMarketChange?: number;
+            regularMarketChangePercent?: number;
+            shortName?: string;
+            longName?: string;
+            trailingPE?: number;
+            fiftyTwoWeekHigh?: number;
+            fiftyTwoWeekLow?: number;
+          }>;
+        };
+      };
+
+      const items = payload?.quoteResponse?.result;
+      if (!items || items.length === 0) {
+        emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
+        return result;
+      }
+
+      for (const item of items) {
+        if (!item.symbol) continue;
+        const price = Number(item.regularMarketPrice);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        const prevClose = optionalPositive(item.regularMarketPreviousClose);
+        const open = optionalPositive(item.regularMarketOpen);
+        const high = optionalPositive(item.regularMarketDayHigh);
+        const low = optionalPositive(item.regularMarketDayLow);
+        const change = optionalFinite(item.regularMarketChange);
+        const changePct = optionalFinite(item.regularMarketChangePercent);
+        const companyName = [item.longName, item.shortName]
+          .find((v): v is string => typeof v === "string" && v.trim().length > 0)
+          ?.trim();
+        const peRatio = optionalPositive(item.trailingPE);
+        const fiftyTwoWeekHigh = optionalPositive(item.fiftyTwoWeekHigh);
+        const fiftyTwoWeekLow = optionalPositive(item.fiftyTwoWeekLow);
+
+        const syntheticBid = !(item.bid && item.bid > 0);
+        const syntheticAsk = !(item.ask && item.ask > 0);
+        const hasRealSpread = !syntheticBid && !syntheticAsk;
+        const bid = syntheticBid ? price * 0.999 : Number(item.bid);
+        const ask = syntheticAsk ? price * 1.001 : Number(item.ask);
+        const volume = Number(item.regularMarketVolume ?? 0);
+        const t = Number(item.regularMarketTime);
+        const asOf = Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : undefined;
+
+        result.set(item.symbol.toUpperCase().trim(), {
+          price,
+          bid,
+          ask,
+          volume,
+          asOf,
+          ...(prevClose !== undefined ? { prevClose } : {}),
+          ...(open !== undefined ? { open } : {}),
+          ...(high !== undefined ? { high } : {}),
+          ...(low !== undefined ? { low } : {}),
+          ...(change !== undefined ? { change } : {}),
+          ...(changePct !== undefined ? { changePct } : {}),
+          ...(companyName ? { companyName } : {}),
+          ...(peRatio !== undefined ? { peRatio } : {}),
+          ...(fiftyTwoWeekHigh !== undefined ? { fiftyTwoWeekHigh } : {}),
+          ...(fiftyTwoWeekLow !== undefined ? { fiftyTwoWeekLow } : {}),
+          syntheticBid,
+          syntheticAsk,
+          ...(hasRealSpread ? {} : { syntheticSpread: true })
+        });
+      }
+
+      if (result.size > 0) stats.v7ChunksOk += 1;
+      else emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
+      return result;
+    } catch (error) {
+      if (isAbortOrTimeoutError(error) && attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS - 1) {
+        stats.v7ChunksAbort += 1;
+        await new Promise((resolve) =>
+          setTimeout(resolve, jitteredBackoffMs(attempt, 300, 1_500))
+        );
+        continue;
+      }
+      stats.v7ChunksAbort += 1;
+      emitYahooQuoteTelemetry({
+        kind: "v7_chunk_abort",
+        v7ChunksAbort: stats.v7ChunksAbort,
+        v7Chunks: stats.v7Chunks
+      });
       return result;
     }
-    if (!response.ok) return result;
-    const payload = await response.json() as {
-      quoteResponse?: {
-        result?: Array<{
-          symbol: string;
-          regularMarketPrice?: number;
-          bid?: number;
-          ask?: number;
-          regularMarketPreviousClose?: number;
-          regularMarketOpen?: number;
-          regularMarketDayHigh?: number;
-          regularMarketDayLow?: number;
-          regularMarketVolume?: number;
-          regularMarketTime?: number;
-          regularMarketChange?: number;
-          regularMarketChangePercent?: number;
-          shortName?: string;
-          longName?: string;
-          trailingPE?: number;
-          fiftyTwoWeekHigh?: number;
-          fiftyTwoWeekLow?: number;
-        }>;
-      };
-    };
-
-    const items = payload?.quoteResponse?.result;
-    if (!items) return result;
-
-    for (const item of items) {
-      if (!item.symbol) continue;
-      const price = Number(item.regularMarketPrice);
-      if (!Number.isFinite(price) || price <= 0) continue;
-      // Mirror yahooQuoteFromChartMeta: omit prevClose when Yahoo does not supply it.
-      // Substituting `price` fabricates a 0% change and can falsely complete the cascade gate
-      // (Codex P2 review on #3449).
-      const prevClose = optionalPositive(item.regularMarketPreviousClose);
-      const open = optionalPositive(item.regularMarketOpen);
-      const high = optionalPositive(item.regularMarketDayHigh);
-      const low = optionalPositive(item.regularMarketDayLow);
-      const change = optionalFinite(item.regularMarketChange);
-      const changePct = optionalFinite(item.regularMarketChangePercent);
-      const companyName = [item.longName, item.shortName]
-        .find((v): v is string => typeof v === "string" && v.trim().length > 0)
-        ?.trim();
-      const peRatio = optionalPositive(item.trailingPE);
-      const fiftyTwoWeekHigh = optionalPositive(item.fiftyTwoWeekHigh);
-      const fiftyTwoWeekLow = optionalPositive(item.fiftyTwoWeekLow);
-
-      // Track each side independently so a one-sided quote keeps its REAL side (a real bid must not
-      // be blanket-tagged synthetic just because the ask had to be derived, and vice versa).
-      const syntheticBid = !(item.bid && item.bid > 0);
-      const syntheticAsk = !(item.ask && item.ask > 0);
-      const hasRealSpread = !syntheticBid && !syntheticAsk;
-      const bid = syntheticBid ? price * 0.999 : Number(item.bid);
-      const ask = syntheticAsk ? price * 1.001 : Number(item.ask);
-      const volume = Number(item.regularMarketVolume ?? 0);
-      const t = Number(item.regularMarketTime);
-      const asOf = Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : undefined;
-
-      result.set(item.symbol.toUpperCase().trim(), {
-        price,
-        bid,
-        ask,
-        volume,
-        asOf,
-        ...(prevClose !== undefined ? { prevClose } : {}),
-        ...(open !== undefined ? { open } : {}),
-        ...(high !== undefined ? { high } : {}),
-        ...(low !== undefined ? { low } : {}),
-        ...(change !== undefined ? { change } : {}),
-        ...(changePct !== undefined ? { changePct } : {}),
-        ...(companyName ? { companyName } : {}),
-        ...(peRatio !== undefined ? { peRatio } : {}),
-        ...(fiftyTwoWeekHigh !== undefined ? { fiftyTwoWeekHigh } : {}),
-        ...(fiftyTwoWeekLow !== undefined ? { fiftyTwoWeekLow } : {}),
-        // Side-specific synthetic flags set EXPLICITLY (true AND false) so a consumer that falls back
-        // to the coarse `syntheticSpread` when a side flag is absent (e.g. market.ts) never mislabels
-        // a real side: a one-sided quote's real side now carries an explicit `false`, so the fallback
-        // only fires for producers that genuinely don't set side flags. `syntheticSpread` stays true
-        // only when BOTH sides were derived (back-compat for any coarse-only consumer).
-        syntheticBid,
-        syntheticAsk,
-        ...(hasRealSpread ? {} : { syntheticSpread: true })
-      });
-    }
-  } catch (err) {
-    clearTimeout(timeout);
-    console.error("[yahoo-finance] batch fetch failed for chunk:", chunk, err);
   }
 
   return result;

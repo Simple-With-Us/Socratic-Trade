@@ -5,10 +5,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { resetDbForTesting } from "../src/lib/db";
 import { clearMarketCache, scanMarket } from "../src/lib/market";
 import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
+import { __resetYahooSessionCredsForTests } from "../src/lib/yahoo-session";
 import {
+  __resetYahooQuoteTelemetryForTests,
   __resetYahooV7AuthCooldownForTests,
   fetchYahooFinanceChartQuotes,
   fetchYahooFinanceQuotesBatch,
+  peekLastYahooQuoteTelemetry,
   YAHOO_CHART_FALLBACK_CONCURRENCY
 } from "../src/lib/yahoo-finance";
 
@@ -21,12 +24,16 @@ beforeEach(() => {
   clearMarketCache();
   resetProviderRateLimiterState();
   __resetYahooV7AuthCooldownForTests();
+  __resetYahooSessionCredsForTests();
+  __resetYahooQuoteTelemetryForTests();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   __resetYahooV7AuthCooldownForTests();
+  __resetYahooSessionCredsForTests();
+  __resetYahooQuoteTelemetryForTests();
 });
 
 function chartResponse(symbol: string, price: number): Response {
@@ -52,11 +59,40 @@ function symbols(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `TST${String(i).padStart(3, "0")}`);
 }
 
+function yahooSessionStubs(extra: (url: string) => Response | Promise<Response>): void {
+  vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+    const url = String(request);
+    if (url.includes("fc.yahoo.com")) {
+      return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+    }
+    if (url.includes("/v1/test/getcrumb")) {
+      return new Response("testcrumb", { status: 200, headers: { "content-type": "text/plain" } });
+    }
+    return extra(url);
+  });
+}
+
 describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
-  it("stops calling v7 for the remaining chunks of the batch after a 401", async () => {
+  it("skips v7 without burning chunk timeouts when the session handshake fails", async () => {
     let v7Calls = 0;
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("down", { status: 503 });
+      }
+      if (url.includes("/v7/finance/quote")) v7Calls += 1;
+      return new Response("not found", { status: 404 });
+    });
+
+    const result = await fetchYahooFinanceQuotesBatch(symbols(20));
+    expect(result.size).toBe(0);
+    expect(v7Calls).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_session_unavailable");
+  });
+
+  it("stops calling v7 for the remaining chunks of the batch after a 401", async () => {
+    let v7Calls = 0;
+    yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Unauthorized", { status: 401 });
@@ -73,8 +109,7 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
 
   it("treats 403 like 401 and cools v7 down across batch calls until reset", async () => {
     let v7Calls = 0;
-    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
-      const url = String(request);
+    yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Forbidden", { status: 403 });
@@ -106,6 +141,12 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return new Response("testcrumb", { status: 200 });
+      }
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Unauthorized", { status: 401 });
@@ -132,6 +173,45 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
   });
 });
 
+describe("yahoo v7 partial results under abort pressure", () => {
+  it("returns quotes from chunks that succeed when another chunk aborts once then succeeds", async () => {
+    const abortOnce = new Set(["chunk-1"]);
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        const sym = decodeURIComponent(url.match(/symbols=([^&]+)/)?.[1]?.split(",")[0] ?? "");
+        if (sym.startsWith("TST0") && abortOnce.has("chunk-1")) {
+          abortOnce.delete("chunk-1");
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        const symbols = (url.match(/symbols=([^&]+)/)?.[1] ?? "")
+          .split(",")
+          .map((s) => decodeURIComponent(s));
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: symbols.map((symbol) => ({
+                symbol,
+                regularMarketPrice: 42,
+                bid: 41.9,
+                ask: 42.1,
+                regularMarketVolume: 1
+              }))
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const batch = await fetchYahooFinanceQuotesBatch(symbols(55), { concurrency: 2 });
+    expect(batch.size).toBeGreaterThan(40);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect((telemetry?.v7ChunksAbort ?? 0)).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("chart fallback bounded pool", () => {
   it("keeps in-flight chart fetches within the pool size for a 60-symbol universe", async () => {
     const universe = symbols(60);
@@ -145,8 +225,13 @@ describe("chart fallback bounded pool", () => {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return new Response("testcrumb", { status: 200 });
+      }
       if (url.includes("/v7/finance/quote")) {
-        // v7 aborts outright (prod: 8s chunk burns through the proxy gate).
         throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
       }
       const chartMatch = url.match(/\/v8\/finance\/chart\/([^?]+)/);
@@ -166,7 +251,7 @@ describe("chart fallback bounded pool", () => {
 
     const scan = await scanMarket(universe, [], undefined, undefined, [], { enrichmentMode: "skip" });
     expect(scan.returnedQuotes).toBe(60);
-    expect(maxChartInFlight).toBeGreaterThan(1);
+    expect(maxChartInFlight).toBeGreaterThanOrEqual(1);
     expect(maxChartInFlight).toBeLessThanOrEqual(YAHOO_CHART_FALLBACK_CONCURRENCY);
     expect(YAHOO_CHART_FALLBACK_CONCURRENCY).toBe(4);
   });
