@@ -7,6 +7,7 @@ import { clearMarketCache, scanMarket } from "../src/lib/market";
 import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 import {
   __resetYahooV7AuthCooldownForTests,
+  fetchYahooFinanceChartQuotes,
   fetchYahooFinanceQuotesBatch,
   YAHOO_CHART_FALLBACK_CONCURRENCY
 } from "../src/lib/yahoo-finance";
@@ -168,5 +169,30 @@ describe("chart fallback bounded pool", () => {
     expect(maxChartInFlight).toBeGreaterThan(1);
     expect(maxChartInFlight).toBeLessThanOrEqual(YAHOO_CHART_FALLBACK_CONCURRENCY);
     expect(YAHOO_CHART_FALLBACK_CONCURRENCY).toBe(4);
+  });
+});
+
+describe("chart fallback cancellation", () => {
+  it("stops launching further chart requests once the signal aborts", async () => {
+    const universe = symbols(60);
+    const controller = new AbortController();
+    let chartCalls = 0;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      const chartMatch = url.match(/\/v8\/finance\/chart\/([^?]+)/);
+      if (chartMatch) {
+        chartCalls += 1;
+        // Abort mid-flight: the already-launched first wave settles, the rest must not launch.
+        if (chartCalls === 2) controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return chartResponse(decodeURIComponent(chartMatch[1] ?? ""), 100);
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const result = await fetchYahooFinanceChartQuotes(universe, { signal: controller.signal });
+    expect(chartCalls).toBeLessThan(universe.length);
+    expect(chartCalls).toBeLessThanOrEqual(2 * YAHOO_CHART_FALLBACK_CONCURRENCY);
+    expect(result.size).toBeLessThanOrEqual(chartCalls);
   });
 });

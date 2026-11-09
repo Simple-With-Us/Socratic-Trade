@@ -1198,7 +1198,7 @@ export async function fetchFreshQuotesCascade(
       // Bounded pool, not Promise.all: the unbounded fan-out queued behind the
       // proxy gate and aborted on its own 5s timers (prod 2026-11-06) — the
       // same bug as market.ts fetchQuoteOnlyMarketQuotes.
-      const singleResults = await fetchYahooFinanceChartQuotes(pendingSymbols);
+      const singleResults = await fetchYahooFinanceChartQuotes(pendingSymbols, { userId, signal });
       for (const [symbol, quote] of singleResults) {
         if (quote) {
           const resolvedPrice = quote.price ?? (quote.bid && quote.ask ? (quote.bid + quote.ask) / 2 : undefined);

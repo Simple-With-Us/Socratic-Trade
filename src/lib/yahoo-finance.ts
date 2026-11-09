@@ -4,6 +4,7 @@ import { dataSourceFetch } from "./data-source-fetch";
  *  without it the operator env / residential default applies. */
 export interface YahooFetchOptions {
   userId?: string;
+  signal?: AbortSignal;
 }
 
 export interface YahooFinanceQuote {
@@ -112,11 +113,16 @@ export function yahooQuoteFromChartMeta(
 export async function fetchYahooFinanceQuote(symbol: string, options?: YahooFetchOptions): Promise<YahooFinanceQuote | undefined> {
   const clean = encodeURIComponent(symbol.toUpperCase());
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${clean}?interval=1d&range=1d`;
+  const callerSignal = options?.signal;
+  if (callerSignal?.aborted) return undefined;
   const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort();
+  if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort, { once: true });
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
     const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { userId: options?.userId });
     clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
     if (!response.ok) return undefined;
     const payload = await response.json() as { chart?: { result?: Array<{ meta?: Record<string, unknown>, indicators?: { quote?: Array<{ volume?: unknown[] }> } }> } };
     const meta = payload?.chart?.result?.[0]?.meta;
@@ -129,6 +135,7 @@ export async function fetchYahooFinanceQuote(symbol: string, options?: YahooFetc
     return yahooQuoteFromChartMeta(meta, Number.isFinite(volumeHint) ? volumeHint : undefined);
   } catch {
     clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", onCallerAbort);
     return undefined;
   }
 }
@@ -172,7 +179,7 @@ export const YAHOO_CHART_FALLBACK_DEADLINE_MS = 45_000;
  *  time spent waiting in the queue is never charged against it. */
 export async function fetchYahooFinanceChartQuotes(
   symbols: string[],
-  options?: { concurrency?: number; deadlineMs?: number; userId?: string }
+  options?: { concurrency?: number; deadlineMs?: number; userId?: string; signal?: AbortSignal }
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   const queue = Array.from(new Set(symbols.map((s) => s.toUpperCase().trim()).filter(Boolean)));
@@ -180,13 +187,16 @@ export async function fetchYahooFinanceChartQuotes(
   const concurrency = Math.max(1, options?.concurrency ?? YAHOO_CHART_FALLBACK_CONCURRENCY);
   const deadlineAt = Date.now() + Math.max(0, options?.deadlineMs ?? YAHOO_CHART_FALLBACK_DEADLINE_MS);
   const userId = options?.userId;
+  const signal = options?.signal;
+  const quoteOptions = userId === undefined && signal === undefined ? undefined : { userId, signal };
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (signal?.aborted) return;
       const symbol = queue.shift();
       if (symbol === undefined) return;
-      // Stop launching after the deadline; in-flight requests still settle.
-      if (Date.now() >= deadlineAt) return;
-      const quote = await fetchYahooFinanceQuote(symbol, userId === undefined ? undefined : { userId });
+      // Stop launching after the deadline/abort; in-flight requests still settle.
+      if (Date.now() >= deadlineAt || signal?.aborted) return;
+      const quote = await fetchYahooFinanceQuote(symbol, quoteOptions);
       if (quote) result.set(symbol, quote);
     }
   };
