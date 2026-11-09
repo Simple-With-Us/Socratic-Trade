@@ -56,6 +56,22 @@ describe("empty screener + expired seed", () => {
     await expect(scanMarket(["AAPL"], [])).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 
+  it("forwards userId into Yahoo chart fallback when v7 misses on empty screener", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "miss" });
+    const yahoo = await import("../src/lib/yahoo-finance");
+    const chartSpy = vi.spyOn(yahoo, "fetchYahooFinanceChartQuotes");
+    const userId = "empty-screener-chart-user";
+
+    await expect(
+      scanMarket(["AAPL"], [], undefined, userId, [], { enrichmentMode: "skip" })
+    ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+
+    expect(chartSpy).toHaveBeenCalled();
+    const chartOptions = chartSpy.mock.calls[0]?.[1];
+    expect(chartOptions?.userId).toBe(userId);
+    chartSpy.mockRestore();
+  });
+
   it("Yahoo-fallbacks the whole allowed set, including index members, when the screener is empty", async () => {
     stubFetches({ nasdaqRows: [], yahoo: "aapl" });
 

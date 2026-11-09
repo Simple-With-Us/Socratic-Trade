@@ -1681,7 +1681,8 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   const requested = Array.from(input.allowed);
   const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
     signal: input.signal,
-    deadlineAt: input.deadlineAt
+    deadlineAt: input.deadlineAt,
+    userId: input.userId
   });
   let quotes = quoteOnly.quotes;
   const warnings = [...quoteOnly.warnings];
@@ -1745,7 +1746,8 @@ async function fetchAllowedSetMarketQuotes(
       options?.deadlineAt != null ? Math.max(0, options.deadlineAt - Date.now()) : undefined;
     const chart = await fetchQuoteOnlyMarketQuotes(missing, positions, {
       signal: options?.signal,
-      deadlineMs: remainingMs
+      deadlineMs: remainingMs,
+      userId: options?.userId
     });
     quotes.push(...chart.quotes);
     if (requested.length <= 8) warnings.push(...chart.warnings);
