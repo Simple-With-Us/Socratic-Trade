@@ -40,8 +40,8 @@ test("ensure_tf_ready has distinct branches for rc 0,3,4,5,6 and a dedicated rc=
   const rc2 = sliceBetween("# rc=2 is a usage error", "return 0\n}");
 
   const needles = {
-    5: "no external TestFlight group with testers",
-    6: "installability is unverified",
+    5: "no internal TestFlight testers with access to all builds",
+    6: "internal TestFlight tester count could not be read",
     3: "has not reached IN_BETA_TESTING",
     4: "ASC never surfaced build",
     2: "export compliance not declared",
@@ -55,8 +55,10 @@ test("ensure_tf_ready has distinct branches for rc 0,3,4,5,6 and a dedicated rc=
 
   assert.doesNotMatch(rc5, /stuck on export compliance/);
   assert.doesNotMatch(rc6, /stuck on export compliance/);
-  assert.match(rc5, /::warning title=TestFlight has no reachable external tester::/);
-  assert.match(rc6, /::warning title=TestFlight installability unverified::/);
+  assert.match(rc5, /::warning title=TestFlight has no reachable internal tester::/);
+  assert.match(rc6, /::warning title=TestFlight internal installability unverified::/);
+  assert.doesNotMatch(rc5, /external TestFlight/);
+  assert.doesNotMatch(rc6, /external installability/);
 });
 
 test("ensure_tf_ready runtime labels each mocked asc-api exit code distinctly", () => {
@@ -87,11 +89,13 @@ ensure_tf_ready
     assert.equal(run.status, 0, `ensure_tf_ready must stay green for rc=${rc}`);
     const out = `${run.stdout}\n${run.stderr}`;
     if (rc === 5) {
-      assert.match(out, /no external TestFlight group with testers/);
+      assert.match(out, /no internal TestFlight testers with access to all builds/);
       assert.doesNotMatch(out, /stuck on export compliance/);
+      assert.doesNotMatch(out, /external tester/);
     } else if (rc === 6) {
-      assert.match(out, /installability is unverified/);
+      assert.match(out, /internal TestFlight tester count could not be read/);
       assert.doesNotMatch(out, /stuck on export compliance/);
+      assert.doesNotMatch(out, /external installability/);
     } else if (rc === 3) {
       assert.match(out, /IN_BETA_TESTING/);
     } else if (rc === 4) {

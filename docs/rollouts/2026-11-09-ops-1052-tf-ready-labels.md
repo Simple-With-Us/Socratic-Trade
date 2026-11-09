@@ -6,7 +6,7 @@ Fleet issue OPS-1052: vendored `ship-testflight.sh` mislabeled `ensure-tf-ready`
 
 ## Changes Made
 
-- `ensure_tf_ready()` in `scripts/ios-fleet/ship-testflight.sh` now handles rc=5 (no reachable external tester) and rc=6 (installability unreadable) before the existing rc=3/4/2 paths.
+- `ensure_tf_ready()` in `scripts/ios-fleet/ship-testflight.sh` now handles rc=5 (processed, zero internal all-builds testers per `countInternalTesters`) and rc=6 (processed, internal count unreadable) before the existing rc=3/4/2 paths. Wording matches CL/UM internal semantics, not BotFleet external installability.
 - Added `scripts/ios-fleet/ship-tf-ready-labels.test.mjs` (static + mocked-runtime contract).
 - Wired the test into `.github/workflows/ci.yml` verify ship-gate step.
 - Refreshed `scripts/ios-fleet.sha256` for `ship-testflight.sh`.
@@ -15,7 +15,7 @@ Fleet issue OPS-1052: vendored `ship-testflight.sh` mislabeled `ensure-tf-ready`
 
 ## Decisions & Trade-offs
 
-- Did not change `asc-api.mjs` (no rc=5/6 emission on ST pin yet); shell labeling is forward-compatible.
+- Did not change `asc-api.mjs` in this effort: ST's vendored copy still documents exit codes 0/2/3/4 only and does not call `countInternalTesters` yet. Shell labeling matches CL/UM for when that pin lands.
 - Did not add standing-tester sync (owner limits: no ASC writes / invites).
 
 ## Verification State
