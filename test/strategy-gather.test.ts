@@ -25,6 +25,7 @@ import {
   STRATEGY_GATHER_TIMEOUT_MESSAGE,
   gatherStrategyMarket
 } from "../src/lib/strategy-gather";
+import { ScanQuotesUnavailableError } from "../src/lib/market";
 
 const WEIGHTS = {
   liquidity: 1,
@@ -223,5 +224,40 @@ describe("gatherStrategyMarket", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     await expect(pending).rejects.toThrow(STRATEGY_GATHER_TIMEOUT_MESSAGE);
+  });
+
+  it("uses the last completed tape when the live scan throws ScanQuotesUnavailableError", async () => {
+    const seed = lastGoodScan();
+    mockScanMarket.mockRejectedValue(
+      new ScanQuotesUnavailableError({ scannedSymbols: 500, warnings: ["nasdaq empty"] })
+    );
+    mockNewestPersisted.mockReturnValue({
+      scan: seed,
+      entry: { id: "audit-unavail-1", createdAt: seed.generatedAt }
+    });
+    mockFetchFreshQuotesCascade.mockResolvedValue({
+      MSFT: { symbol: "MSFT", price: 401, asOf: "2026-11-09T17:22:00.000Z", provider: "alpaca" }
+    });
+
+    const result = await gatherStrategyMarket(gatherArgs());
+
+    expect(result.usedLastGood).toBe(true);
+    expect(result.lastGoodReason).toBe("quotes_unavailable");
+    expect(result.lastGoodAt).toBe(seed.generatedAt);
+    expect(result.marketScan.topCandidates[0]?.symbol).toBe("MSFT");
+    expect(result.marketScan.topCandidates[0]?.price).toBe(401);
+    expect(
+      result.marketScan.warnings.some((warning) => warning.includes("no usable quotes"))
+    ).toBe(true);
+    expect(mockNewestPersisted).toHaveBeenCalledWith("local", "roth-1");
+  });
+
+  it("still fails when quotes are unavailable and no last-good tape exists", async () => {
+    mockScanMarket.mockRejectedValue(
+      new ScanQuotesUnavailableError({ scannedSymbols: 500, warnings: ["yahoo empty"] })
+    );
+    mockNewestPersisted.mockReturnValue(undefined);
+
+    await expect(gatherStrategyMarket(gatherArgs())).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 });

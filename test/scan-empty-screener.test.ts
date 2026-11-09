@@ -80,7 +80,7 @@ describe("empty screener + expired seed", () => {
     });
   });
 
-  it("uses a last-good seed before Yahoo-pricing the whole allowed set", async () => {
+  it("uses a last-good seed after Yahoo and broker recovery both miss", async () => {
     let yahooCalls = 0;
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);
@@ -118,7 +118,7 @@ describe("empty screener + expired seed", () => {
       }
     });
 
-    expect(yahooCalls).toBe(0);
+    expect(yahooCalls).toBeGreaterThan(0);
     expect(scan.topCandidates.map((quote) => quote.symbol).sort()).toEqual(["AAPL", "MSFT"]);
     expect(scan.warnings.join(" ")).toContain("stale fallback");
   });
