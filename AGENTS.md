@@ -475,7 +475,7 @@ Look first at Linear (`https://linear.app/simple-with-us`, through the `simple-b
 - Tooling: the `simple-chat` CLI (`~/.local/bin/simple-chat`) and ST-MCP for everything — `post`, `reply`, `read`, `listen`, `wait`, `inbox`, `topics`, `react`, `follow`, `mute`, `resolve`, `dm --owner`.
 Details: `~/apps/FLEET-PROTOCOL.md` § Chat: The Zulip Contract, § Posting, and § Linear and the Claim Lifecycle.
 
-**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → `gh pr create` (or update) → merge when CI is green. A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
+**Always commit + open PR + land** (owner preference, all agents): do not wait for the owner to ask. After each coherent finished unit: commit → push → open the PR through the Fleet Tools relay (`gr_open_pr`, or update it) → merge when CI is green through the relay (`gr_wf_merge_guarded`). A remote branch with no PR is unfinished. Canonical: `~/apps/FLEET-PROTOCOL.md` "Always commit + land finished work".
 
 ## Mac local processes (binding)
 
@@ -615,10 +615,10 @@ address:
     looks unprotected but is NOT.
   - `gh pr merge <n> --squash --admin` does **NOT** bypass it (`Required status check
     "verify" is failing`). Don't waste time on `--admin`.
-  - **Merge with `gh pr merge <n> --squash --auto`** — auto-merge IS enabled on this
+  - **Merge through the relay: arm auto-merge with `gr_wf_automerge_enable`** — auto-merge IS enabled on this
     repo, so this lands the PR the instant `verify` goes green (no babysitting).
   - If `verify` fails on a known flake (e.g. a timing-sensitive test), re-run just the
-    failed jobs: `gh run rerun <run-id> --failed`. The `approval-lock` broker-path
+    failed jobs through the relay: `gr_wf_run_rerun`. The `approval-lock` broker-path
     tests were a recurring offender — fixed 2026-06-21 with a 20s per-test timeout.
   - Because `verify` runs `npm run build`, a PR that breaks the build cannot merge —
     always run the full tsc/test/build trio locally before pushing.
