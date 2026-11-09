@@ -16,7 +16,7 @@ import {
   normalizeMarketScanCandidateLimit,
   normalizeMarketScanOutlierReserve
 } from "./scan-settings";
-import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
 import type {
   BrokerQuote,
   EnrichmentFieldObservations,
@@ -1705,8 +1705,12 @@ async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPo
   const quotes: MarketQuote[] = [];
   const unresolved: string[] = [];
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const results = await Promise.all(requested.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const));
-  for (const [symbol, quote] of results) {
+  // Bounded pool, not Promise.all: firing one chart call per symbol at once
+  // queued hundreds of requests behind the proxy gate, where each one's 5s
+  // timer fired before a slot freed up — zero quotes (prod 2026-11-06).
+  const bySymbol = await fetchYahooFinanceChartQuotes(requested);
+  for (const symbol of requested) {
+    const quote = bySymbol.get(symbol);
     if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
     else unresolved.push(symbol);
   }

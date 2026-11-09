@@ -17,7 +17,7 @@ import { getBrokerGateway } from "./broker";
 import { DEFAULT_POLICY } from "./defaults";
 import { AlpacaSnapshotEnrichmentProvider, apiKeyFingerprint, fetchWithRetry } from "./data-providers";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
-import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { normalizeSymbol } from "./money";
 import {
   isDelayedYahooFallbackQuote,
@@ -1195,9 +1195,10 @@ export async function fetchFreshQuotesCascade(
   throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0 && allowExternal) {
     try {
-      const singleResults = await Promise.all(
-        pendingSymbols.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const)
-      );
+      // Bounded pool, not Promise.all: the unbounded fan-out queued behind the
+      // proxy gate and aborted on its own 5s timers (prod 2026-11-06) — the
+      // same bug as market.ts fetchQuoteOnlyMarketQuotes.
+      const singleResults = await fetchYahooFinanceChartQuotes(pendingSymbols);
       for (const [symbol, quote] of singleResults) {
         if (quote) {
           const resolvedPrice = quote.price ?? (quote.bid && quote.ask ? (quote.bid + quote.ask) / 2 : undefined);
