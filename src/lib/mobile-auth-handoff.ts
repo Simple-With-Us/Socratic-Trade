@@ -4,6 +4,10 @@ import {
   isKnownSessionCookieName,
   type KnownSessionCookieName,
 } from "./auth/session-cookie-names";
+import {
+  LEGACY_MOBILE_HANDOFF_NONCE,
+  LEGACY_MOBILE_SESSION_ID,
+} from "./auth/mobile-session-hardening";
 
 const HANDOFF_TTL_MS = 2 * 60_000;
 const MAX_HANDOFFS = 256;
@@ -69,14 +73,16 @@ export function createMobileAuthHandoff(input: {
   cookieName?: string;
   now?: number;
 }): string | undefined {
-  if (
-    !input.sessionToken ||
-    !hasValidCodeChallenge(input.codeChallenge) ||
-    !input.handoffNonce ||
-    !input.sessionId
-  ) {
-    return undefined;
-  }
+  if (!input.sessionToken || !hasValidCodeChallenge(input.codeChallenge)) return undefined;
+  const legacyCompat =
+    input.handoffNonce === LEGACY_MOBILE_HANDOFF_NONCE &&
+    input.sessionId === LEGACY_MOBILE_SESSION_ID;
+  const strictValid =
+    Boolean(input.handoffNonce) &&
+    Boolean(input.sessionId) &&
+    input.handoffNonce !== LEGACY_MOBILE_HANDOFF_NONCE &&
+    input.sessionId !== LEGACY_MOBILE_SESSION_ID;
+  if (!legacyCompat && !strictValid) return undefined;
   const cookieName = input.cookieName ?? currentAuthjsSessionCookieName();
   if (!isKnownSessionCookieName(cookieName)) return undefined;
   const now = input.now ?? Date.now();

@@ -14,7 +14,12 @@ import {
 import {
   SESSION_JWT_ABS_EXP_CLAIM,
   SESSION_JWT_SID_CLAIM,
+  SESSION_JWT_SRV_TOUCH_CLAIM,
 } from "@/lib/auth/session-policy";
+import {
+  logMobileSessionHardeningCompat,
+  mobileAppleSignInIsStrict,
+} from "@/lib/auth/mobile-session-hardening";
 
 // Module-scope JWKS: jose caches keys per resolver instance; recreate-per-request
 // re-fetches https://appleid.apple.com/auth/keys on every sign-in.
@@ -34,18 +39,27 @@ export async function POST(request: Request) {
     if (!identityToken || typeof identityToken !== "string") {
       return NextResponse.json({ error: "Missing or invalid identityToken" }, { status: 400 });
     }
-    if (!nonce || typeof nonce !== "string") {
-      return NextResponse.json({ error: "Missing or invalid nonce" }, { status: 400 });
-    }
-    if (!consumeAppleSignInNonce(nonce)) {
-      return NextResponse.json({ error: "Invalid or expired nonce" }, { status: 401 });
+    const nonceValue = typeof nonce === "string" ? nonce : "";
+    const strictApple = mobileAppleSignInIsStrict(request, nonceValue);
+    if (strictApple) {
+      if (!nonceValue) {
+        return NextResponse.json({ error: "Missing or invalid nonce" }, { status: 400 });
+      }
+      if (!consumeAppleSignInNonce(nonceValue)) {
+        return NextResponse.json({ error: "Invalid or expired nonce" }, { status: 401 });
+      }
+    } else {
+      logMobileSessionHardeningCompat(
+        "/api/mobile/auth/apple",
+        "missing server nonce from shipped iOS build",
+      );
     }
 
     const { payload } = await jwtVerify(identityToken, APPLE_JWKS, {
       issuer: "https://appleid.apple.com",
       audience: resolveAppleClientIds(),
     });
-    if (payload.nonce !== nonce) {
+    if (strictApple && payload.nonce !== nonceValue) {
       return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
     }
 
@@ -67,6 +81,7 @@ export async function POST(request: Request) {
     const salt = process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token";
     const sessionRecord = createAuthServerSession(userIdForEmail(email));
 
+    const nowSeconds = Math.floor(Date.now() / 1000);
     const sessionJwt = await encodeSessionToken({
       token: {
         email,
@@ -74,6 +89,7 @@ export async function POST(request: Request) {
         loginAt: Date.now(),
         [SESSION_JWT_SID_CLAIM]: sessionRecord.id,
         [SESSION_JWT_ABS_EXP_CLAIM]: absoluteExpUnixSeconds(sessionRecord.absoluteExpiresAt),
+        [SESSION_JWT_SRV_TOUCH_CLAIM]: nowSeconds,
       },
       secret: authSecret,
       salt,

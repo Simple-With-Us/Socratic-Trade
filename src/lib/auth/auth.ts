@@ -43,8 +43,10 @@ import { decodeSessionToken, encodeSessionToken } from "./session-token";
 import {
   SESSION_JWT_ABS_EXP_CLAIM,
   SESSION_JWT_SID_CLAIM,
+  SESSION_JWT_SRV_TOUCH_CLAIM,
   SESSION_SLIDING_MAX_AGE_SEC,
 } from "./session-policy";
+import { backfillServerSessionClaims } from "./session-backfill";
 
 type EmailProfile = Profile & {
   email?: string | null;
@@ -213,18 +215,24 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // Bind account recreation to an actual provider sign-in, not JWT rolling refresh. The
       // middleware forwards this trusted claim so a pre-deletion cookie cannot clear a tombstone.
       if (account?.provider) token.loginAt = Date.now();
+      const nowSeconds = Math.floor(Date.now() / 1000);
       if (account?.provider && email) {
         const record = createAuthServerSession(userIdForEmail(email));
         token[SESSION_JWT_SID_CLAIM] = record.id;
         token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(record.absoluteExpiresAt);
+        token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
+      } else if (backfillServerSessionClaims(token, nowSeconds)) {
+        // Legacy JWT migrated to a server-backed session on first Node refresh.
       } else if (typeof token[SESSION_JWT_SID_CLAIM] === "string") {
         const touched = touchAuthServerSession(token[SESSION_JWT_SID_CLAIM]);
         if (!touched) {
           delete token[SESSION_JWT_SID_CLAIM];
           delete token[SESSION_JWT_ABS_EXP_CLAIM];
+          delete token[SESSION_JWT_SRV_TOUCH_CLAIM];
           delete token.email;
         } else {
           token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(touched.absoluteExpiresAt);
+          token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
         }
       }
       return token;

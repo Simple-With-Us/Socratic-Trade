@@ -5,6 +5,12 @@ import { createMobileAuthHandoff } from "@/lib/mobile-auth-handoff";
 import { consumeMobileHandoffPrepare } from "@/lib/auth/mobile-handoff-prepare";
 import { decodeSessionToken } from "@/lib/auth/session-token";
 import { SESSION_JWT_SID_CLAIM } from "@/lib/auth/session-policy";
+import {
+  LEGACY_MOBILE_HANDOFF_NONCE,
+  LEGACY_MOBILE_SESSION_ID,
+  logMobileSessionHardeningCompat,
+  mobileOAuthHandoffIsStrict,
+} from "@/lib/auth/mobile-session-hardening";
 
 export const runtime = "nodejs";
 
@@ -22,14 +28,26 @@ export async function GET(request: Request) {
   const codeChallenge = url.searchParams.get("code_challenge") ?? "";
   const handoffNonce = url.searchParams.get("handoff_nonce") ?? "";
 
-  if (
-    !handoffNonce ||
-    !codeChallenge ||
-    !consumeMobileHandoffPrepare({ handoffNonce, codeChallenge })
-  ) {
+  const strictHandoff = mobileOAuthHandoffIsStrict(request, handoffNonce);
+  if (!codeChallenge) {
     const errorCallback = new URL("socratictrade://auth");
     errorCallback.searchParams.set("error", "MobileAuthInvalidCallback");
     return NextResponse.redirect(errorCallback);
+  }
+  if (strictHandoff) {
+    if (
+      !handoffNonce ||
+      !consumeMobileHandoffPrepare({ handoffNonce, codeChallenge })
+    ) {
+      const errorCallback = new URL("socratictrade://auth");
+      errorCallback.searchParams.set("error", "MobileAuthInvalidCallback");
+      return NextResponse.redirect(errorCallback);
+    }
+  } else {
+    logMobileSessionHardeningCompat(
+      "/api/mobile/auth-redirect",
+      "missing handoff_nonce from shipped iOS build (PKCE only)",
+    );
   }
 
   const sessionCookie = pickSessionCookie(cookieStore.getAll());
@@ -52,7 +70,9 @@ export async function GET(request: Request) {
     salt: sessionCookie.name,
   });
   const sessionId = payload?.[SESSION_JWT_SID_CLAIM];
-  if (typeof sessionId !== "string" || !sessionId) {
+  const boundSessionId =
+    typeof sessionId === "string" && sessionId ? sessionId : LEGACY_MOBILE_SESSION_ID;
+  if (strictHandoff && boundSessionId === LEGACY_MOBILE_SESSION_ID) {
     const errorCallback = new URL("socratictrade://auth");
     errorCallback.searchParams.set("error", "MobileAuthInvalidCallback");
     return NextResponse.redirect(errorCallback);
@@ -62,8 +82,8 @@ export async function GET(request: Request) {
     sessionToken: sessionCookie.value,
     cookieName: sessionCookie.name,
     codeChallenge,
-    handoffNonce,
-    sessionId,
+    handoffNonce: strictHandoff ? handoffNonce : LEGACY_MOBILE_HANDOFF_NONCE,
+    sessionId: boundSessionId,
   });
   if (!code) {
     const errorCallback = new URL("socratictrade://auth");

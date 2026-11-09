@@ -3,9 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  SESSION_EDGE_TRUST_SEC,
   SESSION_JWT_ABS_EXP_CLAIM,
   SESSION_JWT_SID_CLAIM,
+  SESSION_JWT_SRV_TOUCH_CLAIM,
 } from "../src/lib/auth/session-policy";
+import { edgeSessionTrustValid } from "../src/lib/auth/session-edge";
+import {
+  LEGACY_MOBILE_HANDOFF_NONCE,
+  LEGACY_MOBILE_SESSION_ID,
+  MOBILE_SESSION_HARDENING_HEADER,
+  mobileAppleSignInIsStrict,
+  mobileOAuthHandoffIsStrict,
+} from "../src/lib/auth/mobile-session-hardening";
+import { resolveRequestUser } from "../src/lib/request-user";
+import { AUTHENTICATED_SESSION_SID_HEADER } from "../src/lib/auth/strip-identity";
 import { encodeSessionToken, decodeSessionToken } from "../src/lib/auth/session-token";
 import {
   createAuthServerSession,
@@ -33,11 +45,13 @@ function challenge(verifier: string): string {
 describe("server-backed sessions", () => {
   it("rejects a JWT after its server session is revoked", async () => {
     const record = createAuthServerSession("user-a");
+    const now = Math.floor(Date.now() / 1000);
     const token = await encodeSessionToken({
       token: {
         email: "a@example.com",
         [SESSION_JWT_SID_CLAIM]: record.id,
-        [SESSION_JWT_ABS_EXP_CLAIM]: Math.floor(Date.now() / 1000) + 3600,
+        [SESSION_JWT_ABS_EXP_CLAIM]: now + 3600,
+        [SESSION_JWT_SRV_TOUCH_CLAIM]: now,
       },
       secret,
       salt,
@@ -47,14 +61,59 @@ describe("server-backed sessions", () => {
     expect(await decodeSessionToken({ token, secret, salt })).toBeNull();
   });
 
+  it("migrates legacy JWTs without sid into auth_sessions on Node decode", async () => {
+    const token = await encodeSessionToken({
+      token: { email: "legacy-migrate@example.com" },
+      secret,
+      salt,
+      maxAge: 3600,
+    });
+    const payload = await decodeSessionToken({ token, secret, salt });
+    expect(payload?.[SESSION_JWT_SID_CLAIM]).toBeTruthy();
+    expect(payload?.[SESSION_JWT_ABS_EXP_CLAIM]).toBeTruthy();
+    expect(payload?.[SESSION_JWT_SRV_TOUCH_CLAIM]).toBeTruthy();
+  });
+
+  it("rejects edge-trusted cookies outside the server-touch window", () => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(
+      edgeSessionTrustValid(
+        {
+          [SESSION_JWT_SID_CLAIM]: "sid",
+          [SESSION_JWT_ABS_EXP_CLAIM]: now + 3600,
+          [SESSION_JWT_SRV_TOUCH_CLAIM]: now - SESSION_EDGE_TRUST_SEC - 1,
+        },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("resolveRequestUser rejects revoked authjs session sid from middleware", () => {
+    const record = createAuthServerSession(userIdForEmail("revoked-header@example.com"));
+    revokeAuthServerSession(record.id);
+    expect(() =>
+      resolveRequestUser(
+        new Request("https://socratictrade.com/api/dashboard", {
+          headers: {
+            "x-authenticated-user-email": "revoked-header@example.com",
+            "x-authenticated-identity-source": "authjs-session",
+            [AUTHENTICATED_SESSION_SID_HEADER]: record.id,
+          },
+        }),
+      ),
+    ).toThrow(/revoked/i);
+  });
+
   it("honors AUTH_SECRET rotation when the session row is still active", async () => {
     const record = createAuthServerSession("user-b");
+    const now = Math.floor(Date.now() / 1000);
     const oldSecret = "old-rotation-secret-32-characters!!";
     const newSecret = "new-rotation-secret-32-characters!!";
     const token = await encodeSessionToken({
       token: {
         [SESSION_JWT_SID_CLAIM]: record.id,
-        [SESSION_JWT_ABS_EXP_CLAIM]: Math.floor(Date.now() / 1000) + 3600,
+        [SESSION_JWT_ABS_EXP_CLAIM]: now + 3600,
+        [SESSION_JWT_SRV_TOUCH_CLAIM]: now,
       },
       secret: oldSecret,
       salt,
@@ -109,6 +168,33 @@ describe("apple sign-in nonce", () => {
     const first = issueAppleSignInNonce();
     const second = issueAppleSignInNonce();
     expect(first).not.toBe(second);
+  });
+});
+
+describe("mobile session hardening compat", () => {
+  it("treats missing nonce as legacy unless the client declares hardening", () => {
+    const base = new Request("https://socratictrade.com/api/mobile/auth-redirect");
+    expect(mobileOAuthHandoffIsStrict(base, "")).toBe(false);
+    expect(
+      mobileOAuthHandoffIsStrict(
+        new Request("https://socratictrade.com", {
+          headers: { [MOBILE_SESSION_HARDENING_HEADER]: "1" },
+        }),
+        "",
+      ),
+    ).toBe(true);
+    expect(mobileAppleSignInIsStrict(base, "")).toBe(false);
+    expect(mobileAppleSignInIsStrict(base, "server-nonce")).toBe(true);
+  });
+
+  it("creates legacy-compat handoff rows", () => {
+    const code = createMobileAuthHandoff({
+      sessionToken: "jwt",
+      codeChallenge: challenge("z".repeat(43)),
+      handoffNonce: LEGACY_MOBILE_HANDOFF_NONCE,
+      sessionId: LEGACY_MOBILE_SESSION_ID,
+    });
+    expect(code).toBeTruthy();
   });
 });
 

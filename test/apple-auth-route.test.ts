@@ -82,14 +82,30 @@ describe("POST /api/mobile/auth/apple", () => {
     expect(new Set(resolverArgs).size).toBe(1);
   });
 
-  it("rejects a missing nonce (400)", async () => {
+  it("allows legacy iOS builds without a server nonce", async () => {
     const { POST } = await import("../app/api/mobile/auth/apple/route");
     const res = await POST(
       new Request(APPLE_AUTH_URL, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identityToken: "token", name: "Owner" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(mocks.jwtVerify).toHaveBeenCalled();
+  });
+
+  it("rejects hardened clients that omit the server nonce (400)", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-socratic-mobile-session-hardening": "1",
+        },
         body: JSON.stringify({ identityToken: "token" }),
-      })
+      }),
     );
     expect(res.status).toBe(400);
     expect(mocks.jwtVerify).not.toHaveBeenCalled();

@@ -6,7 +6,12 @@
 // into the edge bundle.
 
 import { decodeSessionJwtCrypto } from "./session-jwt-crypto";
-import { SESSION_JWT_ABS_EXP_CLAIM, SESSION_JWT_SID_CLAIM } from "./session-policy";
+import {
+  SESSION_EDGE_TRUST_SEC,
+  SESSION_JWT_ABS_EXP_CLAIM,
+  SESSION_JWT_SID_CLAIM,
+  SESSION_JWT_SRV_TOUCH_CLAIM,
+} from "./session-policy";
 
 /** Auth.js v5 session cookie names, in preference order. */
 const SESSION_COOKIE_NAMES = ["__Secure-authjs.session-token", "authjs.session-token"] as const;
@@ -15,14 +20,33 @@ export interface VerifiedSessionIdentity {
   email: string;
   /** Explicit login callback time in milliseconds; unlike JWT iat, this is not rolled on refresh. */
   loginAt?: number;
+  sessionId?: string;
+}
+
+function sessionTouchUnix(payload: import("jose").JWTPayload): number | null {
+  const srvTouch = payload[SESSION_JWT_SRV_TOUCH_CLAIM];
+  if (typeof srvTouch === "number" && Number.isFinite(srvTouch)) return srvTouch;
+  const iat = payload.iat;
+  if (typeof iat === "number" && Number.isFinite(iat)) return iat;
+  return null;
+}
+
+/** Edge-safe session freshness: bounded by absolute cap and a short server-touch window. */
+export function edgeSessionTrustValid(payload: import("jose").JWTPayload, nowSeconds?: number): boolean {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const touch = sessionTouchUnix(payload);
+  if (touch === null) return false;
+  if (touch + SESSION_EDGE_TRUST_SEC <= now) return false;
+  const sid = payload[SESSION_JWT_SID_CLAIM];
+  if (typeof sid === "string" && sid) {
+    const absExp = payload[SESSION_JWT_ABS_EXP_CLAIM];
+    if (typeof absExp !== "number" || !Number.isFinite(absExp) || absExp <= now) return false;
+  }
+  return true;
 }
 
 function edgeBackedSessionValid(payload: import("jose").JWTPayload): boolean {
-  const sid = payload[SESSION_JWT_SID_CLAIM];
-  if (typeof sid !== "string" || !sid) return true;
-  const absExp = payload[SESSION_JWT_ABS_EXP_CLAIM];
-  if (typeof absExp !== "number" || !Number.isFinite(absExp)) return false;
-  return absExp > Math.floor(Date.now() / 1000);
+  return edgeSessionTrustValid(payload);
 }
 
 /**
@@ -75,9 +99,11 @@ export async function getSessionIdentity(
     const email = payload?.email;
     const loginAt = payload?.loginAt;
     if (typeof email === "string" && email.includes("@")) {
+      const sessionId = payload[SESSION_JWT_SID_CLAIM];
       return {
         email: email.trim().toLowerCase(),
         ...(typeof loginAt === "number" && Number.isFinite(loginAt) ? { loginAt } : {}),
+        ...(typeof sessionId === "string" && sessionId ? { sessionId } : {}),
       };
     }
     return null;

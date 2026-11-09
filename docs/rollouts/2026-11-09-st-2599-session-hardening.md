@@ -23,9 +23,10 @@ ST-2599 replaces stateless 30-day Auth.js JWTs with revocable server session row
 
 ## Decisions & Trade-offs
 
-- Edge middleware cannot open SQLite; revocation on edge is enforced via embedded `absExp`, while full revocation checks run on Node (Auth.js, API routes).
+- Edge middleware cannot open SQLite; it trusts cookies only while `srvTouch` (or `iat`) is within **5 minutes** (`SESSION_EDGE_TRUST_SEC`). Node decode + API handlers always consult `auth_sessions` (middleware forwards `x-authenticated-session-sid`).
 - Absolute session ceiling: 90 days from first sign-in; sliding cookie refresh capped at 30 days but never past `absExp`.
-- Legacy JWTs without `sid` remain valid until expiry (no server row).
+- Legacy JWTs without `sid` are backfilled into `auth_sessions` on the next Node decode / JWT refresh with `sid`, `absExp`, and `srvTouch`.
+- Shipped iOS builds without `handoff_nonce` / Apple server nonce use a logged legacy compat path until they send `x-socratic-mobile-session-hardening: 1` or the new fields (then enforcement is strict).
 
 ## Verification State
 
