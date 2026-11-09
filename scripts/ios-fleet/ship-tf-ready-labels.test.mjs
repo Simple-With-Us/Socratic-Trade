@@ -15,15 +15,28 @@ const shipPath = join(ROOT, "scripts/ios-fleet/ship-testflight.sh");
 const ship = readFileSync(shipPath, "utf8");
 const workflow = readFileSync(join(ROOT, ".github/workflows/ios-ship.yml"), "utf8");
 
-function sliceBetween(start, end) {
-  const a = ship.indexOf(start);
-  const b = end ? ship.indexOf(end, a + start.length) : ship.length;
-  assert.ok(a >= 0, `missing marker: ${start}`);
-  assert.ok(b > a, `missing end marker after: ${start}`);
-  return ship.slice(a, b);
+/** Full `ensure_tf_ready()` body only — never slice rc branches from the whole ship script (other rc=4 blocks exist). */
+function extractEnsureTfReadyBody(source) {
+  const extracted = spawnSync("sed", ["-n", "/^ensure_tf_ready()/,/^}/p", shipPath], {
+    encoding: "utf8",
+  }).stdout;
+  assert.ok(extracted.includes("ensure_tf_ready()"), "ensure_tf_ready() not found in ship-testflight.sh");
+  const start = source.indexOf("ensure_tf_ready() {");
+  assert.ok(start >= 0, "ensure_tf_ready() definition missing");
+  const closeLine = extracted.trimEnd().split("\n").pop() || "";
+  assert.equal(closeLine, "}", "sed range must end at ensure_tf_ready closing brace");
+  return extracted;
 }
 
-const ensureFn = sliceBetween("ensure_tf_ready() {", "\nacquire_archive_lock");
+const ensureFn = extractEnsureTfReadyBody(ship);
+
+function sliceBetweenIn(haystack, start, end) {
+  const a = haystack.indexOf(start);
+  assert.ok(a >= 0, `missing marker in ensure_tf_ready: ${start}`);
+  const b = end ? haystack.indexOf(end, a + start.length) : haystack.length;
+  assert.ok(b > a, `missing end marker after: ${start}`);
+  return haystack.slice(a, b);
+}
 
 test("ensure_tf_ready has distinct branches for rc 0,3,4,5,6 and a dedicated rc=2 fallback", () => {
   assert.match(ensureFn, /if \[\[ \$rc -eq 0 \]\]/);
@@ -33,11 +46,11 @@ test("ensure_tf_ready has distinct branches for rc 0,3,4,5,6 and a dedicated rc=
   assert.match(ensureFn, /if \[\[ \$rc -eq 4 \]\]/);
   assert.match(ensureFn, /build may be stuck on export compliance/);
 
-  const rc5 = sliceBetween("if [[ $rc -eq 5 ]]", "if [[ $rc -eq 6 ]]");
-  const rc6 = sliceBetween("if [[ $rc -eq 6 ]]", "if [[ $rc -eq 3 ]]");
-  const rc3 = sliceBetween("if [[ $rc -eq 3 ]]", "if [[ $rc -eq 4 ]]");
-  const rc4 = sliceBetween("if [[ $rc -eq 4 ]]", "# rc=2 is a usage error");
-  const rc2 = sliceBetween("# rc=2 is a usage error", "return 0\n}");
+  const rc5 = sliceBetweenIn(ensureFn, "if [[ $rc -eq 5 ]]", "if [[ $rc -eq 6 ]]");
+  const rc6 = sliceBetweenIn(ensureFn, "if [[ $rc -eq 6 ]]", "if [[ $rc -eq 3 ]]");
+  const rc3 = sliceBetweenIn(ensureFn, "if [[ $rc -eq 3 ]]", "if [[ $rc -eq 4 ]]");
+  const rc4 = sliceBetweenIn(ensureFn, "if [[ $rc -eq 4 ]]", "# rc=2 is a usage error");
+  const rc2 = sliceBetweenIn(ensureFn, "# rc=2 is a usage error", "return 0\n}");
 
   const needles = {
     5: "no internal TestFlight testers with access to all builds",
@@ -59,11 +72,22 @@ test("ensure_tf_ready has distinct branches for rc 0,3,4,5,6 and a dedicated rc=
   assert.match(rc6, /::warning title=TestFlight internal installability unverified::/);
   assert.doesNotMatch(rc5, /external TestFlight/);
   assert.doesNotMatch(rc6, /external installability/);
+
+  // Regression: a whole-file slice would bind rc=4 to an unrelated block (~line 802).
+  const bogusRc4 = ship.indexOf("if [[ $rc -eq 4 ]]");
+  const ensureStart = ship.indexOf("ensure_tf_ready() {");
+  const rc4InFn = ensureFn.indexOf("if [[ $rc -eq 4 ]]");
+  assert.ok(bogusRc4 < ensureStart, "ship script should contain an earlier rc=4 block outside ensure_tf_ready");
+  assert.ok(rc4InFn > 0, "ensure_tf_ready must contain its own rc=4 branch");
+  assert.notEqual(
+    ship.slice(bogusRc4, ship.indexOf("if [[ $rc -eq 4 ]]", bogusRc4 + 1)),
+    rc4,
+    "rc=4 assertions must come from ensure_tf_ready, not the first file match",
+  );
 });
 
 test("ensure_tf_ready runtime labels each mocked asc-api exit code distinctly", () => {
-  const fnBody = spawnSync("sed", ["-n", "/^ensure_tf_ready()/,/^}/p", shipPath], { encoding: "utf8" }).stdout;
-  assert.ok(fnBody.includes("ensure_tf_ready()"));
+  assert.ok(ensureFn.includes("ensure_tf_ready()"));
   for (const rc of [2, 3, 4, 5, 6]) {
     const script = `set -euo pipefail
 log(){ printf '%s\\n' "$*"; }
@@ -82,7 +106,7 @@ node(){
   echo "mock ensure-tf-ready rc=${rc}" >>"$LOG_DIR/ensure-tf-ready.err"
   return ${rc}
 }
-${fnBody}
+${ensureFn}
 ensure_tf_ready
 `;
     const run = spawnSync("bash", ["-c", script], { encoding: "utf8" });
