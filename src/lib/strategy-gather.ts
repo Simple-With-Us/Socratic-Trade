@@ -77,6 +77,7 @@ function withLastGoodWarning(
   const existingWarnings = Array.isArray(scan.warnings) ? scan.warnings : [];
   return {
     ...scan,
+    universeQuoteRecoverySource: undefined,
     warnings: [...existingWarnings, warning]
   };
 }

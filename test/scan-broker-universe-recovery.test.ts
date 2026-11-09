@@ -6,6 +6,7 @@ import {
   ALPACA_PAPER_DELAY_TOLERANCE_SEC,
   ALPACA_PAPER_EXPECTED_DELAY_SEC
 } from "../src/lib/alpaca-paper-quotes";
+import { BROKER_QUOTE_SYMBOL_CAP } from "../src/lib/inflight-deadline";
 import {
   clearMarketCache,
   scanMarket,
@@ -77,6 +78,47 @@ function stubEmptyNasdaqYahoo(): void {
   });
 }
 
+function tradierVenueQuote(symbol: string): BrokerQuote {
+  const now = Date.now();
+  return {
+    symbol,
+    price: 118.25,
+    bid: 118.2,
+    ask: 118.3,
+    volume: 1_200_000,
+    prevClose: 117,
+    change: 1.25,
+    changePct: 1.07,
+    asOf: new Date(now - 15 * 60 * 1000).toISOString(),
+    provider: "tradier",
+    fetchedAt: new Date(now).toISOString(),
+    venuePriceAuthoritative: true
+  };
+}
+
+function seedTradierSandboxUser(userId: string, accountId: string): void {
+  upsertConnectedAccount({
+    id: accountId,
+    userId,
+    broker: "tradier",
+    environment: "paper",
+    accountNumber: "VA123",
+    label: "Tradier sandbox",
+    isActive: true
+  });
+  const policy = getPolicy(userId, accountId);
+  setPolicy(
+    {
+      ...policy,
+      activeBroker: "tradier",
+      connectedAccountId: accountId,
+      accountNumber: "VA123"
+    },
+    userId,
+    accountId
+  );
+}
+
 function seedAlpacaPaperUser(userId: string, accountId: string): void {
   upsertConnectedAccount({
     id: accountId,
@@ -121,6 +163,76 @@ describe("recoverUniverseQuotesFromBroker", () => {
     expect(result.quotes).toHaveLength(2);
     expect(result.quotes[0]?.expectedDelaySec).toBe(ALPACA_PAPER_EXPECTED_DELAY_SEC);
     expect(mockGetEquityQuotes).toHaveBeenCalled();
+  });
+
+  it("returns usable Tradier sandbox quotes with movement fields", async () => {
+    const userId = "broker-recovery-tradier";
+    const accountId = `tr-${userId}`;
+    seedTradierSandboxUser(userId, accountId);
+    mockGetEquityQuotes.mockResolvedValue({
+      IBM: tradierVenueQuote("IBM")
+    });
+
+    const result = await recoverUniverseQuotesFromBroker({
+      symbols: ["IBM"],
+      positions: [],
+      userId,
+      connectedAccountId: accountId
+    });
+
+    expect(result.recoverySource).toBe("tradier");
+    expect(result.quotes).toHaveLength(1);
+    expect(result.quotes[0]?.intradayChangePct).toBe(1.07);
+    expect(result.quotes[0]?.volume).toBe(1_200_000);
+  });
+
+  it("fetches broker quote chunks with bounded concurrency", async () => {
+    const userId = "broker-recovery-parallel";
+    const accountId = `ap-parallel-${userId}`;
+    seedAlpacaPaperUser(userId, accountId);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const symbolCount = BROKER_QUOTE_SYMBOL_CAP * 3 + 2;
+    const symbols = Array.from({ length: symbolCount }, (_, i) => `SYM${i}`);
+
+    mockGetEquityQuotes.mockImplementation(async (_acct: string, chunk: string[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      inFlight -= 1;
+      return Object.fromEntries(chunk.map((symbol) => [symbol, liveDelayedPaperQuote(symbol)]));
+    });
+
+    const result = await recoverUniverseQuotesFromBroker({
+      symbols,
+      positions: [],
+      userId,
+      connectedAccountId: accountId
+    });
+
+    expect(result.quotes.length).toBe(symbolCount);
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(mockGetEquityQuotes.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("rethrows when the recovery signal is aborted", async () => {
+    const userId = "broker-recovery-abort";
+    const accountId = `ap-abort-${userId}`;
+    seedAlpacaPaperUser(userId, accountId);
+    const controller = new AbortController();
+    controller.abort(new DOMException("aborted", "AbortError"));
+
+    mockGetEquityQuotes.mockResolvedValue({ AAPL: liveDelayedPaperQuote("AAPL") });
+
+    await expect(
+      recoverUniverseQuotesFromBroker({
+        symbols: ["AAPL"],
+        positions: [],
+        userId,
+        connectedAccountId: accountId,
+        signal: controller.signal
+      })
+    ).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("fails closed when the broker returns no priced symbols", async () => {

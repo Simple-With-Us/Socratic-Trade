@@ -5,8 +5,14 @@ import {
   type AlpacaPaperAccountLike
 } from "./alpaca-paper-quotes";
 import { getConnectedAccount, getPolicy } from "./db";
-import { brokerAbortSignal, chunkBrokerSymbols } from "./inflight-deadline";
+import {
+  BROKER_UNIVERSE_RECOVERY_BUDGET_MS,
+  BROKER_UNIVERSE_RECOVERY_CONCURRENCY,
+  brokerAbortSignal,
+  chunkBrokerSymbols
+} from "./inflight-deadline";
 import { normalizeSymbol } from "./money";
+import { isAbortOrTimeoutError } from "./network-errors";
 import { cascadeFreshMaxAgeMs, isUsableBrokerQuote } from "./quotes-cascade";
 import type { BrokerQuote, EquityPosition, MarketQuote } from "./types";
 
@@ -26,14 +32,14 @@ function brokerQuoteToMarketQuote(
   const price = quote.price;
   if (!(typeof price === "number" && price > 0)) return undefined;
   const position = positions.find((p) => normalizeSymbol(p.symbol) === symbol);
-  const prevClose = quote.prevClose && quote.prevClose > 0 ? quote.prevClose : price;
+  const prevClose = quote.prevClose && quote.prevClose > 0 ? quote.prevClose : undefined;
   const intradayChangePct =
     quote.changePct ??
-    (prevClose > 0 ? Math.round(((price - prevClose) / prevClose) * 10_000) / 100 : 0);
+    (prevClose !== undefined && prevClose > 0
+      ? Math.round(((price - prevClose) / prevClose) * 10_000) / 100
+      : 0);
   const netChange =
-    quote.netChange ??
-    quote.change ??
-    (prevClose > 0 ? Math.round((price - prevClose) * 100) / 100 : undefined);
+    quote.netChange ?? quote.change ?? (prevClose !== undefined ? Math.round((price - prevClose) * 100) / 100 : undefined);
   const provider = quote.provider ?? "broker";
   return {
     symbol,
@@ -41,6 +47,7 @@ function brokerQuoteToMarketQuote(
     bid: quote.bid,
     ask: quote.ask,
     volume: quote.volume && quote.volume > 0 ? quote.volume : 0,
+    ...(prevClose !== undefined ? { prevClose } : {}),
     intradayChangePct,
     netChange: netChange ?? 0,
     sector: position?.sector,
@@ -77,12 +84,33 @@ function brokerInScope(broker: string, account: AlpacaPaperAccountLike): boolean
  * `delayed_sip` or Tradier sandbox).  Fail-closed when the broker returns no
  * usable quotes (staleness / excess delayed-tape lag).
  */
+function brokerRecoveryAbortSignal(input: {
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}): AbortSignal {
+  const parts: AbortSignal[] = [AbortSignal.timeout(BROKER_UNIVERSE_RECOVERY_BUDGET_MS)];
+  if (input.signal) parts.push(input.signal);
+  if (input.deadlineAt != null) {
+    const remaining = input.deadlineAt - Date.now();
+    if (remaining > 0) parts.push(AbortSignal.timeout(remaining));
+  }
+  if (parts.length === 1) return parts[0]!;
+  return AbortSignal.any(parts);
+}
+
+function throwIfBrokerRecoveryAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error("broker universe recovery aborted");
+}
+
 export async function recoverUniverseQuotesFromBroker(input: {
   symbols: string[];
   positions: EquityPosition[];
   userId: string;
   connectedAccountId?: string;
   signal?: AbortSignal;
+  deadlineAt?: number;
 }): Promise<BrokerUniverseScanRecovery> {
   const warnings: string[] = [];
   const requested = Array.from(new Set(input.symbols.map(normalizeSymbol).filter(Boolean)));
@@ -116,19 +144,30 @@ export async function recoverUniverseQuotesFromBroker(input: {
   try {
     const gateway = getBrokerGateway(policy, input.userId);
     const maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
-    const nowMs = Date.now();
     const merged: Record<string, BrokerQuote> = {};
-    const signal = brokerAbortSignal(input.signal);
+    const recoverySignal = brokerRecoveryAbortSignal(input);
+    const signal = brokerAbortSignal(recoverySignal);
 
-    for (const chunk of chunkBrokerSymbols(requested)) {
-      if (signal.aborted) break;
-      const batch = await gateway.getEquityQuotes(accountNumber, chunk, { signal });
-      for (const [rawSymbol, quote] of Object.entries(batch)) {
-        const symbol = normalizeSymbol(rawSymbol);
-        if (!symbol || !isUsableBrokerQuote(quote, nowMs, maxAgeMs)) continue;
-        merged[symbol] = quote;
+    const chunks = chunkBrokerSymbols(requested);
+    const concurrency = Math.min(BROKER_UNIVERSE_RECOVERY_CONCURRENCY, Math.max(1, chunks.length));
+    let chunkIndex = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (signal.aborted) return;
+        const index = chunkIndex++;
+        if (index >= chunks.length) return;
+        const chunk = chunks[index]!;
+        const nowMs = Date.now();
+        const batch = await gateway.getEquityQuotes(accountNumber, chunk, { signal });
+        for (const [rawSymbol, quote] of Object.entries(batch)) {
+          const symbol = normalizeSymbol(rawSymbol);
+          if (!symbol || !isUsableBrokerQuote(quote, nowMs, maxAgeMs)) continue;
+          merged[symbol] = quote;
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    throwIfBrokerRecoveryAborted(signal);
 
     const quotes: MarketQuote[] = [];
     for (const symbol of requested) {
@@ -146,6 +185,10 @@ export async function recoverUniverseQuotesFromBroker(input: {
     warnings.push(`Broker universe recovery returned no usable quotes from ${recoverySource}.`);
     return { quotes: [], warnings };
   } catch (error) {
+    if (input.signal?.aborted || isAbortOrTimeoutError(error)) throw error;
+    throwIfBrokerRecoveryAborted(
+      brokerRecoveryAbortSignal({ signal: input.signal, deadlineAt: input.deadlineAt })
+    );
     warnings.push(
       error instanceof Error
         ? `Broker universe recovery failed: ${error.message}`

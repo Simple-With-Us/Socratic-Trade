@@ -865,7 +865,7 @@ export async function runStrategyOnce(
       );
     }
     const brokerRecoverySource = gathered.baseMarketScan.universeQuoteRecoverySource;
-    if (brokerRecoverySource) {
+    if (brokerRecoverySource && !gathered.usedLastGood) {
       audit(
         "strategy_gather_broker_universe_recovery",
         {

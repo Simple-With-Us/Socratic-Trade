@@ -374,7 +374,8 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
           seed: options?.seedEnrichment,
           userId: options?.userId,
           connectedAccountId: options?.connectedAccountId,
-          signal: options?.signal
+          signal: options?.signal,
+          deadlineAt: options?.deadlineAt
         });
         quotes = [...quotes, ...recovered.quotes];
         warnings.push(...recovered.warnings);
@@ -415,7 +416,8 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
         seed: options?.seedEnrichment,
         userId: options?.userId,
         connectedAccountId: options?.connectedAccountId,
-        signal: options?.signal
+        signal: options?.signal,
+        deadlineAt: options?.deadlineAt
       });
       quotes = [...quotes, ...recovered.quotes];
       warnings.push(...recovered.warnings);
@@ -1669,6 +1671,7 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   userId?: string;
   connectedAccountId?: string;
   signal?: AbortSignal;
+  deadlineAt?: number;
 }): Promise<{
   quotes: MarketQuote[];
   warnings: string[];
@@ -1676,18 +1679,22 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   recoverySource?: string;
 }> {
   const requested = Array.from(input.allowed);
-  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions);
+  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
+    signal: input.signal,
+    deadlineAt: input.deadlineAt
+  });
   let quotes = quoteOnly.quotes;
   const warnings = [...quoteOnly.warnings];
   let recoverySource: string | undefined;
 
-  if (quotes.length === 0 && input.userId) {
+  if (quotes.length === 0 && input.userId && !input.signal?.aborted) {
     const brokerRecovery = await recoverUniverseQuotesFromBroker({
       symbols: requested,
       positions: input.positions,
       userId: input.userId,
       connectedAccountId: input.connectedAccountId,
-      signal: input.signal
+      signal: input.signal,
+      deadlineAt: input.deadlineAt
     });
     warnings.push(...brokerRecovery.warnings);
     if (brokerRecovery.quotes.length > 0) {
@@ -1716,10 +1723,15 @@ async function recoverQuotesWhenScreenerEmpty(input: {
 
 async function fetchAllowedSetMarketQuotes(
   symbols: string[],
-  positions: EquityPosition[]
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineAt?: number; userId?: string }
 ): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, { concurrency: 4 });
+  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, {
+    concurrency: 4,
+    userId: options?.userId,
+    signal: options?.signal
+  });
   const quotes: MarketQuote[] = [];
   const missing: string[] = [];
   for (const symbol of requested) {
@@ -1728,8 +1740,13 @@ async function fetchAllowedSetMarketQuotes(
     else missing.push(symbol);
   }
   const warnings: string[] = [];
-  if (missing.length > 0) {
-    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions);
+  if (missing.length > 0 && !options?.signal?.aborted) {
+    const remainingMs =
+      options?.deadlineAt != null ? Math.max(0, options.deadlineAt - Date.now()) : undefined;
+    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions, {
+      signal: options?.signal,
+      deadlineMs: remainingMs
+    });
     quotes.push(...chart.quotes);
     if (requested.length <= 8) warnings.push(...chart.warnings);
   }
@@ -1739,14 +1756,22 @@ async function fetchAllowedSetMarketQuotes(
   return { quotes, warnings };
 }
 
-async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPosition[]): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
+async function fetchQuoteOnlyMarketQuotes(
+  symbols: string[],
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineMs?: number; userId?: string }
+): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const quotes: MarketQuote[] = [];
   const unresolved: string[] = [];
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
   // Bounded pool, not Promise.all: firing one chart call per symbol at once
   // queued hundreds of requests behind the proxy gate, where each one's 5s
   // timer fired before a slot freed up — zero quotes (prod 2026-11-06).
-  const bySymbol = await fetchYahooFinanceChartQuotes(requested);
+  const bySymbol = await fetchYahooFinanceChartQuotes(requested, {
+    signal: options?.signal,
+    deadlineMs: options?.deadlineMs,
+    userId: options?.userId
+  });
   for (const symbol of requested) {
     const quote = bySymbol.get(symbol);
     if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
