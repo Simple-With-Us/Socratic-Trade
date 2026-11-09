@@ -12,6 +12,8 @@ type MobileAuthHandoff = {
   sessionToken: string;
   cookieName: KnownSessionCookieName;
   codeChallenge: string;
+  handoffNonce: string;
+  sessionId: string;
   expiresAt: number;
 };
 
@@ -62,10 +64,19 @@ function cleanExpired(now: number): void {
 export function createMobileAuthHandoff(input: {
   sessionToken: string;
   codeChallenge: string;
+  handoffNonce: string;
+  sessionId: string;
   cookieName?: string;
   now?: number;
 }): string | undefined {
-  if (!input.sessionToken || !hasValidCodeChallenge(input.codeChallenge)) return undefined;
+  if (
+    !input.sessionToken ||
+    !hasValidCodeChallenge(input.codeChallenge) ||
+    !input.handoffNonce ||
+    !input.sessionId
+  ) {
+    return undefined;
+  }
   const cookieName = input.cookieName ?? currentAuthjsSessionCookieName();
   if (!isKnownSessionCookieName(cookieName)) return undefined;
   const now = input.now ?? Date.now();
@@ -75,7 +86,9 @@ export function createMobileAuthHandoff(input: {
     sessionToken: input.sessionToken,
     cookieName,
     codeChallenge: input.codeChallenge,
-    expiresAt: now + HANDOFF_TTL_MS
+    handoffNonce: input.handoffNonce,
+    sessionId: input.sessionId,
+    expiresAt: now + HANDOFF_TTL_MS,
   });
   return code;
 }

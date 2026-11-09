@@ -32,7 +32,19 @@ import type { Provider } from "next-auth/providers";
 import { canonicalizeLegacyAuthEnv } from "../public-origin";
 import { isAppleWebAuthConfigured, resolveAppleClientSecret } from "./apple-web";
 import { normalizeAuthEmail, selectVerifiedGitHubEmail, type GitHubEmail } from "./github-email";
+import { userIdForEmail } from "./identity";
+import {
+  absoluteExpUnixSeconds,
+  createAuthServerSession,
+  touchAuthServerSession,
+  revokeAuthServerSession,
+} from "../db-auth-sessions";
 import { decodeSessionToken, encodeSessionToken } from "./session-token";
+import {
+  SESSION_JWT_ABS_EXP_CLAIM,
+  SESSION_JWT_SID_CLAIM,
+  SESSION_SLIDING_MAX_AGE_SEC,
+} from "./session-policy";
 
 type EmailProfile = Profile & {
   email?: string | null;
@@ -130,10 +142,17 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
     : {}),
   providers,
-  session: { strategy: "jwt" },
+  session: { strategy: "jwt", maxAge: SESSION_SLIDING_MAX_AGE_SEC },
   jwt: {
     encode: encodeSessionToken,
-    decode: decodeSessionToken
+    decode: decodeSessionToken,
+  },
+  events: {
+    async signOut(message) {
+      const token = "token" in message ? message.token : undefined;
+      const sid = token?.[SESSION_JWT_SID_CLAIM];
+      if (typeof sid === "string") revokeAuthServerSession(sid);
+    },
   },
   callbacks: {
     async redirect({ url, baseUrl }: { url: string; baseUrl: string }) {
@@ -194,6 +213,20 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       // Bind account recreation to an actual provider sign-in, not JWT rolling refresh. The
       // middleware forwards this trusted claim so a pre-deletion cookie cannot clear a tombstone.
       if (account?.provider) token.loginAt = Date.now();
+      if (account?.provider && email) {
+        const record = createAuthServerSession(userIdForEmail(email));
+        token[SESSION_JWT_SID_CLAIM] = record.id;
+        token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(record.absoluteExpiresAt);
+      } else if (typeof token[SESSION_JWT_SID_CLAIM] === "string") {
+        const touched = touchAuthServerSession(token[SESSION_JWT_SID_CLAIM]);
+        if (!touched) {
+          delete token[SESSION_JWT_SID_CLAIM];
+          delete token[SESSION_JWT_ABS_EXP_CLAIM];
+          delete token.email;
+        } else {
+          token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(touched.absoluteExpiresAt);
+        }
+      }
       return token;
     },
     // Expose display identity on the `session` object returned by `auth()`.

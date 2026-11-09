@@ -1,10 +1,20 @@
 import { NextResponse } from "next/server";
 import { jwtVerify, createRemoteJWKSet } from "jose";
-import { isEmailAllowed } from "../../../../../src/lib/auth/identity";
+import { isEmailAllowed, userIdForEmail } from "../../../../../src/lib/auth/identity";
 import { encodeSessionToken } from "../../../../../src/lib/auth/session-token";
 import { resolveAppleClientIds } from "../../../../../src/lib/auth/apple-client-id";
 import { APPLE_AUTH_MAX_BYTES, PayloadTooLargeError, readJsonWithLimit } from "../../../../../src/lib/bounded-body";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import { consumeAppleSignInNonce } from "@/lib/auth/apple-signin-nonce";
+import {
+  absoluteExpUnixSeconds,
+  createAuthServerSession,
+  slidingMaxAgeSeconds,
+} from "@/lib/db-auth-sessions";
+import {
+  SESSION_JWT_ABS_EXP_CLAIM,
+  SESSION_JWT_SID_CLAIM,
+} from "@/lib/auth/session-policy";
 
 // Module-scope JWKS: jose caches keys per resolver instance; recreate-per-request
 // re-fetches https://appleid.apple.com/auth/keys on every sign-in.
@@ -19,15 +29,25 @@ export async function POST(request: Request) {
     const body = await readJsonWithLimit(request, APPLE_AUTH_MAX_BYTES);
     const identityToken = (body as { identityToken?: unknown })?.identityToken;
     const name = (body as { name?: unknown })?.name;
+    const nonce = (body as { nonce?: unknown })?.nonce;
 
     if (!identityToken || typeof identityToken !== "string") {
       return NextResponse.json({ error: "Missing or invalid identityToken" }, { status: 400 });
     }
+    if (!nonce || typeof nonce !== "string") {
+      return NextResponse.json({ error: "Missing or invalid nonce" }, { status: 400 });
+    }
+    if (!consumeAppleSignInNonce(nonce)) {
+      return NextResponse.json({ error: "Invalid or expired nonce" }, { status: 401 });
+    }
 
     const { payload } = await jwtVerify(identityToken, APPLE_JWKS, {
       issuer: "https://appleid.apple.com",
-      audience: resolveAppleClientIds()
+      audience: resolveAppleClientIds(),
     });
+    if (payload.nonce !== nonce) {
+      return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
+    }
 
     const email = payload.email as string | undefined;
     if (!email) {
@@ -45,21 +65,29 @@ export async function POST(request: Request) {
     }
 
     const salt = process.env.NODE_ENV === "production" ? "__Secure-authjs.session-token" : "authjs.session-token";
+    const sessionRecord = createAuthServerSession(userIdForEmail(email));
 
     const sessionJwt = await encodeSessionToken({
-      token: { email, name: (typeof name === "string" ? name : undefined) ?? payload.email, loginAt: Date.now() },
+      token: {
+        email,
+        name: (typeof name === "string" ? name : undefined) ?? payload.email,
+        loginAt: Date.now(),
+        [SESSION_JWT_SID_CLAIM]: sessionRecord.id,
+        [SESSION_JWT_ABS_EXP_CLAIM]: absoluteExpUnixSeconds(sessionRecord.absoluteExpiresAt),
+      },
       secret: authSecret,
-      salt
+      salt,
+      maxAge: slidingMaxAgeSeconds(sessionRecord.absoluteExpiresAt),
     });
 
     const response = NextResponse.json({ success: true, email });
-    const maxAge = 30 * 24 * 60 * 60;
+    const maxAge = slidingMaxAgeSeconds(sessionRecord.absoluteExpiresAt);
     response.cookies.set(salt, sessionJwt, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge
+      maxAge,
     });
 
     return response;

@@ -18,7 +18,9 @@ describe("mobile OAuth exchange route", () => {
     const verifier = "v".repeat(43);
     const code = createMobileAuthHandoff({
       sessionToken: "session-secret",
-      codeChallenge: challenge(verifier)
+      codeChallenge: challenge(verifier),
+      handoffNonce: "nonce-abc",
+      sessionId: "00000000-0000-4000-8000-000000000001",
     });
     const response = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
       method: "POST",
@@ -46,6 +48,8 @@ describe("mobile OAuth exchange route", () => {
       sessionToken: legacyToken,
       cookieName: "next-auth.session-token",
       codeChallenge: challenge(verifier),
+      handoffNonce: "nonce-abc",
+      sessionId: "00000000-0000-4000-8000-000000000001",
     });
     const response = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
       method: "POST",
@@ -85,6 +89,8 @@ describe("mobile OAuth exchange route", () => {
       sessionToken: legacyToken,
       cookieName: "next-auth.session-token",
       codeChallenge: challenge(verifier),
+      handoffNonce: "nonce-abc",
+      sessionId: "00000000-0000-4000-8000-000000000001",
     });
 
     const response = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
@@ -103,6 +109,8 @@ describe("mobile OAuth exchange route", () => {
       sessionToken: "not-a-jwt",
       cookieName: "next-auth.session-token",
       codeChallenge: challenge(verifier),
+      handoffNonce: "nonce-abc",
+      sessionId: "00000000-0000-4000-8000-000000000001",
     });
     const response = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
       method: "POST",
