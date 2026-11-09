@@ -28,6 +28,7 @@ ST-2599 replaces stateless 30-day Auth.js JWTs with revocable server session row
 - Legacy JWTs without `sid` are backfilled into `auth_sessions` only on Auth.js JWT refresh (`jwt` callback), not on every `decodeSessionToken` (avoids orphan rows).
 - Shipped iOS web OAuth legacy path accepts `handoff_nonce=__legacy_compat__` with a real `sid` in the cookie (PKCE-only compat).
 - Shipped iOS builds without `handoff_nonce` / Apple server nonce use a logged legacy compat path until they send `x-socratic-mobile-session-hardening: 1` or the new fields (then enforcement is strict).
+- **Sign out everywhere** revokes only rows in `auth_sessions`. Legacy JWTs **without `sid`** are not server-backed until the next Auth.js refresh backfills them, so they survive revoke-all until `exp` (then vanish on their own).
 
 ## Verification State
 

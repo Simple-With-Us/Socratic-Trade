@@ -30,6 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
+import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
 import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
@@ -689,7 +690,13 @@ function SignOutEverywhereButton() {
   const [busy, setBusy] = useState(false);
 
   const run = async () => {
-    if (!window.confirm("Sign out everywhere? This ends every active session, including the iOS app.")) return;
+    if (
+      !window.confirm(
+        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     try {
       const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
