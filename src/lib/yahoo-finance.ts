@@ -347,7 +347,7 @@ export async function fetchYahooFinanceChartQuotes(
 
 export async function fetchYahooFinanceQuotesBatch(
   symbols: string[],
-  options?: { concurrency?: number; userId?: string }
+  options?: { concurrency?: number; userId?: string; signal?: AbortSignal }
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   const requested = symbols.length;
@@ -395,6 +395,7 @@ export async function fetchYahooFinanceQuotesBatch(
   const concurrency = Math.max(1, Math.min(options?.concurrency ?? 1, 4));
 
   for (let i = 0; i < chunks.length; i += concurrency) {
+    if (options?.signal?.aborted) break;
     if (isYahooV7AuthBlocked()) break;
     if (stats.v7ChunksAbort >= YAHOO_V7_ABORT_WAVE_BREAK) break;
     const wave = chunks.slice(i, i + concurrency);

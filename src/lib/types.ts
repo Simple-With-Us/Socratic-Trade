@@ -2345,6 +2345,11 @@ export interface MarketScan {
   cached?: boolean;
   warnings: string[];
   /**
+   * When the Nasdaq/Yahoo chain was empty, the broker tape that filled the universe
+   * (e.g. `alpaca-delayed_sip`, `tradier`).  Set only for that recovery path.
+   */
+  universeQuoteRecoverySource?: string;
+  /**
    * Honest fill/shortfall report for the candidate set — makes missing PE/EPS/news
    * and provider failures obvious on Scan/admin instead of silent dashes.
    */
