@@ -22,8 +22,10 @@ Production market scans were emptying when Yahoo v7 batch returned 401 (crumb wa
 ```bash
 npx tsc --noEmit
 npm run lint
-npm test -- test/yahoo-quote-fallback.test.ts test/yahoo-finance-fundamentals.test.ts
+npx vitest run test/yahoo-quote-fallback.test.ts
 ```
+
+Round 3 (`e17ac322`): `quoteVolume` null/empty → undefined (volumeHint preserved); `yahooSleepOrAborted` for cancel-safe retry backoff; `getYahooSessionCreds` returns `null` on caller cancel; chart 429/abort backoff also abort-aware. 22 tests in `yahoo-quote-fallback.test.ts` pass.
 
 ## Next Steps & Blockers
 
