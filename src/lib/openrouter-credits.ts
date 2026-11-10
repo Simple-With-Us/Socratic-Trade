@@ -209,6 +209,11 @@ async function fetchAllKeys(
     // pagination multiply the caller's budget — the health probe's maxWaitMs most of all.
     const remainingMs = deadlineAtMs - Date.now();
     if (remainingMs <= 0) {
+      // Deadline hit mid-pagination: pages already collected are real observations — return
+      // them for evaluation instead of discarding an exhaustion already seen (Kody, PR #5097).
+      if (keys.length > 0) {
+        return { ok: true, status: 200, keys };
+      }
       return { ok: false, status: 502, keys: [] };
     }
     const url = new URL(KEYS_URL);
@@ -219,10 +224,17 @@ async function fetchAllKeys(
     url.searchParams.set("limit", String(KEYS_PAGE_SIZE));
     const res = await fetchJson(url.toString(), key, fetcher, remainingMs);
     if (!res.ok) {
+      // Same partial-data rule as the deadline path: keep pages already collected.
+      if (keys.length > 0) {
+        return { ok: true, status: res.status, keys };
+      }
       return { ok: false, status: res.status, keys: [] };
     }
     const parsedKeys = KeysPayloadSchema.safeParse(res.data);
     if (!parsedKeys.success) {
+      if (keys.length > 0) {
+        return { ok: true, status: 200, keys };
+      }
       return { ok: false, status: 502, keys: [] };
     }
     const rows = parsedKeys.data.data;
@@ -470,7 +482,7 @@ export function formatOpenRouterCreditsExhaustedHint(
   // the operator to refill the account instead of raising the key's cap. Key-limit state is
   // surfaced separately via reasons/problemKeyLabels on the health payload.
   const accountLow =
-    status.reasons?.includes("account_low") ?? status.remainingUsd < status.thresholdUsd;
+    status.reasons?.includes("account_low") || status.remainingUsd < status.thresholdUsd;
   if (!accountLow) return undefined;
   const remaining = status.remainingUsd.toFixed(2);
   const floor = status.thresholdUsd.toFixed(2);
