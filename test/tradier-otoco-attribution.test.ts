@@ -22,6 +22,7 @@ import { reconcilePendingFills as reconcileFromStrategy } from "../src/lib/strat
 import { resetFillReconciliationStateForTests } from "../src/lib/fill-reconciliation";
 import {
   executionsFromTradierRow,
+  mapTradierBracketContainerRow,
   mapTradierBracketLegRow,
   resolveTradierBracketContainerState,
   tradierBracketParts,
@@ -41,6 +42,27 @@ beforeEach(() => {
 });
 
 describe("Tradier OTOCO attribution", () => {
+  it("omits bracket orderClass on leg-entry container and entry leg rows but keeps it on exit legs", () => {
+    const container: Record<string, unknown> = {
+      id: 88100,
+      class: "otoco",
+      tag: "st-ref-entry-class",
+      status: "open",
+      symbol: "MPC",
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88101, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88102, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88103, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    };
+    const legs = container.leg as Record<string, unknown>[];
+    expect(mapTradierBracketContainerRow(container).orderClass).toBeUndefined();
+    expect(mapTradierBracketLegRow(container, legs[0]).orderClass).toBeUndefined();
+    expect(mapTradierBracketLegRow(container, legs[1]).orderClass).toBe("otoco");
+    expect(mapTradierBracketLegRow(container, legs[2]).orderClass).toBe("otoco");
+  });
+
   it("inherit parentClientOrderId on flattened exit legs without copying tag onto clientOrderId", () => {
     const container: Record<string, unknown> = {
       id: 88100, class: "otoco", tag: "st-ref-attrib", status: "open", symbol: "MPC",
@@ -86,6 +108,76 @@ describe("Tradier OTOCO attribution", () => {
     const classified = classifyOrderRole(exitLeg, { ...ctx, bracketSiblingWorkingCount: 1 });
     expect(classified.role).not.toBe("external");
     expect(["bracket_stop_loss", "bracket_take_profit", "exit"]).toContain(classified.role);
+  });
+
+  it("classifies a resting OTOCO buy entry as entry, not a bracket exit leg", () => {
+    const lookup = { userId: "local", accountNumber: "VA-2" };
+    const refId = "st-ref-entry-role";
+    const createdAt = "2026-11-07T14:00:00.000Z";
+    getDb()
+      .prepare(
+        "INSERT INTO trade_proposals (id, user_id, run_id, account_number, created_at, proposal, decision, ref_id, order_id, status, trade_thesis_tag, entry_market_regime, symbol) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(
+        randomUUID(),
+        "local",
+        randomUUID(),
+        "VA-2",
+        createdAt,
+        JSON.stringify({ symbol: "MPC", side: "buy", type: "limit", quantity: 5 }),
+        JSON.stringify({ allowed: true, reasons: [] }),
+        refId,
+        "88100",
+        "placed",
+        "test",
+        "Neutral",
+        "MPC"
+      );
+    const container: Record<string, unknown> = {
+      id: 88100,
+      class: "otoco",
+      tag: refId,
+      status: "open",
+      symbol: "MPC",
+      create_date: createdAt,
+      leg: [
+        { id: 88101, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, create_date: createdAt },
+        { id: 88102, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: createdAt },
+        { id: 88103, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: createdAt }
+      ]
+    };
+    const legs = container.leg as Record<string, unknown>[];
+    const working = [
+      mapTradierBracketContainerRow(container),
+      mapTradierBracketLegRow(container, legs[0]),
+      mapTradierBracketLegRow(container, legs[1]),
+      mapTradierBracketLegRow(container, legs[2])
+    ];
+    const contexts = loadOrderRoleContexts(working, lookup);
+    const entryRole = classifyOrderRole(working[1], contexts.get("88101")!);
+    expect(entryRole.role).toBe("entry");
+    expect(entryRole.role).not.toBe("bracket_stop_loss");
+  });
+
+  it("carries parent attribution on leg-entry executions", () => {
+    const rows = executionsFromTradierRow({
+      id: 900,
+      class: "otoco",
+      tag: "st-ref-entry-parent",
+      status: "open",
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 901, class: "equity", symbol: "SLB", side: "buy", status: "open", quantity: 10, type: "limit", create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 902, class: "equity", symbol: "SLB", side: "sell", status: "open", quantity: 10, type: "limit", price: 45, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 903, class: "equity", symbol: "SLB", side: "sell", status: "open", quantity: 10, type: "stop", stop_price: 38, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    });
+    const entry = rows.find((row) => row.role === "entry")!;
+    expect(entry.order.id).toBe("901");
+    expect(entry.order.parentClientOrderId).toBe("st-ref-entry-parent");
+    expect(entry.order.parentOrderId).toBe("900");
+    expect(entry.order.orderClass).toBeUndefined();
+    expect(isAppPlacedBrokerOrder(entry.order, { userId: "local", accountNumber: "VA-1" })).toBe(false);
   });
 
   it("still ingests filled app bracket exit legs (listing owner) and carries parentClientOrderId on exit orders", () => {

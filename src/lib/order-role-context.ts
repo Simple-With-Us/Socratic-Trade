@@ -166,8 +166,8 @@ export function loadOrderRoleContexts(
     if (!attributionRef) continue;
     if (isAppMintedClientOrderPrefix(attributionRef)) continue;
     if (protectiveByOrderId.has(order.id)) continue;
-    if (clientOrderId && syntheticByRefId.has(clientOrderId)) continue;
-    if (replacementByOrderId.has(order.id) || (clientOrderId && replacementByRefId.has(clientOrderId))) continue;
+    if (syntheticByRefId.has(attributionRef)) continue;
+    if (replacementByOrderId.has(order.id) || replacementByRefId.has(attributionRef)) continue;
     needsAppPlaced.push({ id: order.id, clientOrderId: attributionRef });
   }
 
@@ -222,9 +222,12 @@ export function loadOrderRoleContexts(
   for (const order of orders) {
     const clientOrderId = order.clientOrderId?.trim();
     const parentClientOrderId = order.parentClientOrderId?.trim();
+    const attributionRef = clientOrderId || parentClientOrderId;
     const protectiveRow = protectiveByOrderId.get(order.id);
-    const syntheticRow = clientOrderId ? syntheticByRefId.get(clientOrderId) : undefined;
-    const replacementRow = replacementByOrderId.get(order.id) ?? (clientOrderId ? replacementByRefId.get(clientOrderId) : undefined);
+    const syntheticRow = attributionRef ? syntheticByRefId.get(attributionRef) : undefined;
+    const replacementRow =
+      replacementByOrderId.get(order.id) ??
+      (attributionRef ? replacementByRefId.get(attributionRef) : undefined);
 
     let appPlaced = false;
     if (protectiveRow || syntheticRow || replacementRow || isBracketOrderClass(order.orderClass)) {

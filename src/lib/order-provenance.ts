@@ -136,7 +136,6 @@ export function isContingentOrderLeg(
 ): boolean {
   if (String(order.state ?? "").trim().toLowerCase() === "held") return true;
   if (isBracketOrderClass(order.orderClass)) return true;
-  if (order.parentOrderId || order.parentClientOrderId) return true;
   // A nearby opposite-side bracket order is only a heuristic, not proof of
   // parentage. Automatic remediation must stay conservative, but a manually
   // confirmed replacement must not be blocked by an unrelated order.

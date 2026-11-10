@@ -1585,7 +1585,9 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
   const entry = parts.entry;
   return {
     ...order,
-    orderClass: tradierOrderClassFromContainerClass(cls),
+    /* Leg-entry shape surfaces the real entry as its own row; bracket class on the container
+       would pair it with exit siblings and misclassify the entry as an exit leg. */
+    ...(parts.entryIsLeg ? {} : { orderClass: tradierOrderClassFromContainerClass(cls) }),
     state: resolvedState,
     ...(parts.entryIsLeg && entry
       ? {
@@ -1597,9 +1599,24 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
 }
 
 /** Map one equity leg nested under an OTO/OTOCO/OCO container. Exit legs omit `tag` but inherit attribution. */
+function tradierBracketLegIsEntry(container: Record<string, unknown>, leg: Record<string, unknown>): boolean {
+  const parts = tradierBracketParts(container);
+  return Boolean(parts?.entryIsLeg && parts.entry && String(parts.entry.id) === String(leg.id));
+}
+
+function attachTradierBracketEntryLegAttribution(container: Record<string, unknown>, order: EquityOrder): EquityOrder {
+  return {
+    ...order,
+    parentOrderId: container.id != null ? String(container.id) : order.parentOrderId,
+    parentClientOrderId: optionalString(container.tag) ?? order.parentClientOrderId
+  };
+}
+
 export function mapTradierBracketLegRow(container: Record<string, unknown>, leg: Record<string, unknown>): EquityOrder {
   const order = mapTradierOrder(withContainerFallback(container, leg));
-  return attachTradierBracketLegAttribution(container, order);
+  return tradierBracketLegIsEntry(container, leg)
+    ? attachTradierBracketEntryLegAttribution(container, order)
+    : attachTradierBracketLegAttribution(container, order);
 }
 
 /**
@@ -1633,10 +1650,7 @@ export function tradierOrderLookupFromRow(row: Record<string, unknown>): BrokerO
   };
   const mapped = mapTradierOrder(view);
   return {
-    order: {
-      ...mapped,
-      orderClass: tradierOrderClassFromContainerClass(String(row.class ?? "").toLowerCase()) ?? mapped.orderClass
-    },
+    order: mapped,
     ...(entry.id !== undefined && entry.id !== null ? { entryLegId: String(entry.id) } : {}),
     exitLegs
   };
@@ -1669,7 +1683,16 @@ export function executionsFromTradierRow(row: Record<string, unknown>): BrokerEx
   if (parts) {
     const out: BrokerExecution[] = [];
     if (parts.entry && recognizedTradierSide(parts.entry.side)) {
-      out.push(withParent(mapTradierOrder(parts.entryIsLeg ? { ...parts.entry, tag: undefined } : row), "entry"));
+      if (parts.entryIsLeg) {
+        out.push(
+          withParent(
+            attachTradierBracketEntryLegAttribution(row, mapTradierOrder({ ...parts.entry, tag: undefined })),
+            "entry"
+          )
+        );
+      } else {
+        out.push(withParent(mapTradierBracketContainerRow(row), "entry"));
+      }
     }
     for (const exit of parts.exits) {
       if (recognizedTradierSide(exit.side)) {
@@ -1694,7 +1717,6 @@ export function executionsFromTradierRow(row: Record<string, unknown>): BrokerEx
 
 // Map a raw Tradier order object to our EquityOrder. State is stored RAW (broker-side.ts normalizes).
 export function mapTradierOrder(o: Record<string, unknown>): EquityOrder {
-  const orderClass = tradierOrderClassFromContainerClass(String(o.class ?? "").toLowerCase());
   return {
     id: String(o.id),
     symbol: fromTradierSymbol(String(o.symbol)),
@@ -1710,7 +1732,6 @@ export function mapTradierOrder(o: Record<string, unknown>): EquityOrder {
     createdAt: String(o.create_date),
     updatedAt: optionalString(o.transaction_date),
     clientOrderId: optionalString(o.tag),
-    ...(orderClass ? { orderClass } : {}),
     placedAgent: "tradier"
   };
 }
