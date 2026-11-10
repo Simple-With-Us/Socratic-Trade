@@ -111,6 +111,24 @@ function optionalPositive(value: unknown): number | undefined {
   return n !== undefined && n > 0 ? n : undefined;
 }
 
+function quoteVolume(value: unknown): number | undefined {
+  const n = optionalFinite(value);
+  return n !== undefined && n >= 0 ? n : undefined;
+}
+
+function yahooCombinedAbortSignal(local: AbortSignal, caller?: AbortSignal): AbortSignal {
+  if (!caller) return local;
+  if (caller.aborted) return caller;
+  if (local.aborted) return local;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([local, caller]);
+  return local;
+}
+
+function throwIfCallerAborted(callerSignal?: AbortSignal): void {
+  if (!callerSignal?.aborted) return;
+  throw callerSignal.reason ?? new DOMException("aborted", "AbortError");
+}
+
 /** Fields the keyless chart endpoint actually returns (today: 52-week range). */
 export function yahooFundamentalsFromRecord(row: Record<string, unknown>): Pick<
   YahooFinanceQuote,
@@ -142,7 +160,7 @@ export function yahooQuoteFromChartMeta(
     ?.trim();
   const prevCloseRaw = meta.chartPreviousClose ? Number(meta.chartPreviousClose) : NaN;
   const prevClose = Number.isFinite(prevCloseRaw) && prevCloseRaw > 0 ? prevCloseRaw : undefined;
-  const volume = Number(meta.regularMarketVolume ?? volumeHint ?? 0);
+  const volume = quoteVolume(meta.regularMarketVolume) ?? quoteVolume(volumeHint) ?? 0;
   const t = Number(meta.regularMarketTime);
   const asOf = Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : undefined;
   return {
@@ -242,10 +260,10 @@ export async function fetchYahooFinanceQuote(
       const meta = chartResult?.meta;
       if (!meta) return undefined;
       const volumeArr = chartResult?.indicators?.quote?.[0]?.volume;
-      const volumeHint = Number(volumeArr?.[0] ?? 0);
+      const volumeHint = quoteVolume(volumeArr?.[0]);
       return yahooQuoteFromChartMeta(
         meta as Record<string, unknown>,
-        Number.isFinite(volumeHint) ? volumeHint : undefined
+        volumeHint
       );
     } catch (error) {
       if (isAbortOrTimeoutError(error)) {
@@ -352,6 +370,7 @@ export async function fetchYahooFinanceQuotesBatch(
   const result = new Map<string, YahooFinanceQuote>();
   const requested = symbols.length;
   if (requested === 0) return result;
+  if (options?.signal?.aborted) return result;
 
   const stats = {
     v7Chunks: 0,
@@ -375,8 +394,9 @@ export async function fetchYahooFinanceQuotesBatch(
 
   let sessionCreds: Awaited<ReturnType<typeof getYahooSessionCreds>> | undefined;
   try {
-    sessionCreds = await getYahooSessionCreds(options?.userId);
-  } catch {
+    sessionCreds = await getYahooSessionCreds(options?.userId, options?.signal);
+  } catch (error) {
+    if (options?.signal?.aborted) return result;
     stats.v7SkippedNoSession = true;
     emitYahooQuoteTelemetry({
       kind: "v7_session_unavailable",
@@ -400,7 +420,9 @@ export async function fetchYahooFinanceQuotesBatch(
     if (stats.v7ChunksAbort >= YAHOO_V7_ABORT_WAVE_BREAK) break;
     const wave = chunks.slice(i, i + concurrency);
     const maps = await Promise.all(
-      wave.map((chunk) => fetchYahooQuoteChunk(chunk, sessionCreds!, options?.userId, stats))
+      wave.map((chunk) =>
+        fetchYahooQuoteChunk(chunk, sessionCreds!, options?.userId, stats, options?.signal)
+      )
     );
     for (const map of maps) {
       for (const [symbol, quote] of map) result.set(symbol, quote);
@@ -429,7 +451,8 @@ async function fetchYahooQuoteChunk(
   chunk: string[],
   creds: { cookie: string; crumb: string },
   userId: string | undefined,
-  stats: V7ChunkStats
+  stats: V7ChunkStats,
+  callerSignal?: AbortSignal
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   const cleanSymbols = chunk.map((s) => encodeURIComponent(s.toUpperCase().trim())).join(",");
@@ -438,16 +461,21 @@ async function fetchYahooQuoteChunk(
   stats.v7Chunks += 1;
 
   for (let attempt = 0; attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS; attempt++) {
+    throwIfCallerAborted(callerSignal);
     try {
       const response = await withProviderLimit("yahoo-finance", async () => {
+        throwIfCallerAborted(callerSignal);
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), YAHOO_V7_CHUNK_TIMEOUT_MS);
+        const onCallerAbort = (): void => controller.abort();
+        callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+        const signal = yahooCombinedAbortSignal(controller.signal, callerSignal);
         try {
           return await dataSourceFetch(
             url,
             {
               cache: "no-store",
-              signal: controller.signal,
+              signal,
               headers: {
                 "user-agent": YAHOO_SESSION_UA,
                 Cookie: creds.cookie,
@@ -458,6 +486,7 @@ async function fetchYahooQuoteChunk(
           );
         } finally {
           clearTimeout(timeout);
+          callerSignal?.removeEventListener("abort", onCallerAbort);
         }
       });
 
@@ -509,7 +538,7 @@ async function fetchYahooQuoteChunk(
         const hasRealSpread = !syntheticBid && !syntheticAsk;
         const bid = syntheticBid ? price * 0.999 : bidRaw;
         const ask = syntheticAsk ? price * 1.001 : askRaw;
-        const volume = Number(item.regularMarketVolume ?? 0);
+        const volume = quoteVolume(item.regularMarketVolume) ?? 0;
         const t = Number(item.regularMarketTime);
         const asOf = Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : undefined;
 
@@ -539,10 +568,12 @@ async function fetchYahooQuoteChunk(
       else emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
       return result;
     } catch (error) {
+      if (callerSignal?.aborted) return result;
       if (isAbortOrTimeoutError(error) && attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS - 1) {
         await new Promise((resolve) =>
           setTimeout(resolve, jitteredBackoffMs(attempt, 300, 1_500))
         );
+        throwIfCallerAborted(callerSignal);
         continue;
       }
       if (isAbortOrTimeoutError(error)) {

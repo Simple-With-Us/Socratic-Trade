@@ -373,6 +373,109 @@ describe("yahoo session handshake timeout", () => {
     expect(batch.size).toBe(0);
     expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_session_unavailable");
   }, YAHOO_SESSION_HANDSHAKE_TIMEOUT_MS * 2 + 5_000);
+
+  it("cancels an in-flight session handshake when the batch caller aborts", async () => {
+    const controller = new AbortController();
+    let handshakeStarted = false;
+    vi.stubGlobal("fetch", (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(request);
+      if (url.includes("fc.yahoo.com") || url.includes("/v1/test/getcrumb")) {
+        handshakeStarted = true;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+          }, { once: true });
+        });
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["AAPL"], { signal: controller.signal });
+    await vi.waitFor(() => expect(handshakeStarted).toBe(true));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).not.toBe("v7_session_unavailable");
+  });
+});
+
+describe("yahoo batch caller abort", () => {
+  it("cancels in-flight v7 chunk fetches when caller aborts mid-wave", async () => {
+    const controller = new AbortController();
+    let v7Started = false;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Promise<Response>((_resolve, reject) => {
+          v7Started = true;
+          controller.signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+          }, { once: true });
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(symbols(55), {
+      concurrency: 1,
+      signal: controller.signal
+    });
+    await vi.waitFor(() => expect(v7Started).toBe(true));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.v7ChunksAbort ?? 0).toBe(0);
+  });
+});
+
+describe("yahoo quote volume coercion", () => {
+  it("coerces non-numeric v7 volume strings to zero", async () => {
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: [{
+                symbol: "VOLX",
+                regularMarketPrice: 10,
+                bid: 9.9,
+                ask: 10.1,
+                regularMarketVolume: "N/A"
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batch = await fetchYahooFinanceQuotesBatch(["VOLX"]);
+    const quote = batch.get("VOLX");
+    expect(quote?.price).toBe(10);
+    expect(quote?.volume).toBe(0);
+    expect(Number.isNaN(quote?.volume)).toBe(false);
+  });
+
+  it("coerces non-numeric chart volume to zero", async () => {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("/v8/finance/chart/")) {
+        return new Response(
+          JSON.stringify({
+            chart: {
+              result: [{
+                meta: { regularMarketPrice: 12, regularMarketVolume: "N/A" },
+                indicators: { quote: [{ volume: ["n/a"] }] }
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const quote = await fetchYahooFinanceQuote("VOLY");
+    expect(quote?.price).toBe(12);
+    expect(quote?.volume).toBe(0);
+    expect(Number.isNaN(quote?.volume)).toBe(false);
+  });
 });
 
 describe("chart fallback bounded pool", () => {

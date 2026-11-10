@@ -40,29 +40,63 @@ export function __resetYahooSessionCredsForTests(): void {
   clearYahooSessionCredsCache();
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason ?? new DOMException("aborted", "AbortError");
+}
+
+function yahooCombinedAbortSignal(local: AbortSignal, caller?: AbortSignal): AbortSignal {
+  if (!caller) return local;
+  if (caller.aborted) return caller;
+  if (local.aborted) return local;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([local, caller]);
+  return local;
+}
+
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason ?? new DOMException("aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function sessionFetch(
   url: string,
   init: RequestInit,
-  userId?: string
+  userId?: string,
+  callerSignal?: AbortSignal
 ): Promise<Response> {
+  throwIfAborted(callerSignal);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), YAHOO_SESSION_HANDSHAKE_TIMEOUT_MS);
+  const signal = yahooCombinedAbortSignal(controller.signal, callerSignal);
   try {
-    return await dataSourceFetch(url, { ...init, signal: controller.signal }, { userId });
+    return await dataSourceFetch(url, { ...init, signal }, { userId });
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function fetchCreds(now: number, userId?: string): Promise<YahooSessionCreds> {
+async function fetchCreds(now: number, userId?: string, callerSignal?: AbortSignal): Promise<YahooSessionCreds> {
+  throwIfAborted(callerSignal);
   const cookieRes = await sessionFetch(
     "https://fc.yahoo.com",
     {
       headers: { "user-agent": YAHOO_SESSION_UA },
       redirect: "follow"
     },
-    userId
+    userId,
+    callerSignal
   );
+  throwIfAborted(callerSignal);
   const rawCookies: string[] =
     typeof (cookieRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === "function"
       ? (cookieRes.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
@@ -74,7 +108,8 @@ async function fetchCreds(now: number, userId?: string): Promise<YahooSessionCre
     {
       headers: { "user-agent": YAHOO_SESSION_UA, Cookie: cookie, accept: "text/plain" }
     },
-    userId
+    userId,
+    callerSignal
   );
   if (!crumbRes.ok) throw new Error(`Yahoo Finance crumb failed: ${crumbRes.status}`);
   const crumb = (await crumbRes.text()).trim();
@@ -86,16 +121,22 @@ async function fetchCreds(now: number, userId?: string): Promise<YahooSessionCre
 }
 
 /** Cookie + crumb pair for Yahoo v7/v10 endpoints; keyed by egress proxy. */
-export async function getYahooSessionCreds(userId?: string): Promise<YahooSessionCreds> {
+export async function getYahooSessionCreds(
+  userId?: string,
+  callerSignal?: AbortSignal
+): Promise<YahooSessionCreds> {
+  throwIfAborted(callerSignal);
   const now = Date.now();
   const cacheKey = proxyCacheKey(userId);
   const cached = yfCredsByProxy().get(cacheKey);
   if (cached && cached.expiresAt > now) return cached;
 
   try {
-    return await fetchCreds(now, userId);
-  } catch {
-    await new Promise((resolve) => setTimeout(resolve, YF_CREDS_RETRY_BACKOFF_MS));
-    return await fetchCreds(Date.now(), userId);
+    return await fetchCreds(now, userId, callerSignal);
+  } catch (error) {
+    throwIfAborted(callerSignal);
+    if (callerSignal?.aborted) throw error;
+    await abortableSleep(YF_CREDS_RETRY_BACKOFF_MS, callerSignal);
+    return await fetchCreds(Date.now(), userId, callerSignal);
   }
 }
