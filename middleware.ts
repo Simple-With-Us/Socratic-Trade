@@ -47,6 +47,7 @@ import { jwtVerify } from "jose/jwt/verify";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+  AUTHENTICATED_SESSION_SID_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES,
   stripClientIdentityHeaders,
   type AuthenticatedIdentitySource
@@ -515,6 +516,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   let trustedEmail: string | null = null;
   let identitySource: AuthenticatedIdentitySource | null = null;
   let sessionIssuedAt: number | null = null;
+  let authSessionId: string | undefined;
   let fromCf = false;
 
   // Source 1: Cloudflare Access header.
@@ -537,6 +539,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     if (!trustedEmail && identity?.email) {
       trustedEmail = identity.email;
       sessionIssuedAt = identity.loginAt ?? null;
+      authSessionId = identity.sessionId;
       identitySource = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
     } else if (
       trustedEmail &&
@@ -544,7 +547,10 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       identity.loginAt != null
     ) {
       sessionIssuedAt = identity.loginAt;
+      authSessionId = identity.sessionId;
       identitySource = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
+    } else if (identity?.sessionId) {
+      authSessionId = identity.sessionId;
     }
   }
 
@@ -628,6 +634,9 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (identitySource) headers.set(AUTHENTICATED_IDENTITY_SOURCE_HEADER, identitySource);
   if (sessionIssuedAt !== null) {
     headers.set(AUTHENTICATED_SESSION_ISSUED_AT_HEADER, new Date(sessionIssuedAt).toISOString());
+  }
+  if (authSessionId) {
+    headers.set(AUTHENTICATED_SESSION_SID_HEADER, authSessionId);
   }
   return withSecurityHeaders(NextResponse.next({ request: { headers } }));
 }
