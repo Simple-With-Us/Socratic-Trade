@@ -225,7 +225,7 @@ function mapTradierSideWrite(side: OrderSide): string {
 
 // Tradier `o.side` -> OrderSide (READ-BACK).
 function mapTradierSideRead(raw: unknown): OrderSide {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "buy":
       return "buy";
     case "sell":
@@ -262,7 +262,7 @@ function exitSideForEntry(entrySide: OrderSide): OrderSide {
 
 // Tradier `o.type` -> OrderType (READ-BACK).
 function mapTradierTypeRead(raw: unknown): OrderType {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "market":
       return "market";
     case "limit":
@@ -704,45 +704,38 @@ class TradierBrokerGateway implements BrokerGateway {
     // liveExitOrderCoverage then saw no exit and the synthetic-stop monitor double-sold.
     // Continue on the RAW page (any class). Do not stop when the equity filter drops a page.
     return this.trackHealth(async () => {
-      const all: Record<string, unknown>[] = [];
+      const all: EquityOrder[] = [];
       for (const o of await this.fetchRawOrderRows(accountNumber)) {
         const oClass = String(o.class ?? "").toLowerCase();
         if (oClass === "equity") {
-          all.push(o);
+          all.push(mapTradierOrder(o));
         } else if (["oto", "otoco", "oco", "multileg", "combo"].includes(oClass)) {
           // Keep the container for placement-reconciliation identity even when Tradier
           // omits top-level `side`.  Legs below still omit `tag` so they cannot steal
-          // the entry's clientOrderId.
-          if (o.symbol && (o.side || o.tag)) all.push(o);
+          // the entry's clientOrderId; parentClientOrderId carries attribution instead.
+          if (o.symbol && (o.side || o.tag)) all.push(mapTradierBracketContainerRow(o));
           const legField = o.leg ?? o.legs;
           if (legField) {
             for (const leg of arr<Record<string, unknown>>(legField)) {
               if (String(leg.class ?? "").toLowerCase() !== "equity") continue;
-              all.push({
-                symbol: o.symbol,
-                status: o.status,
-                create_date: o.create_date,
-                transaction_date: o.transaction_date,
-                duration: o.duration,
-                // Deliberately omitting `tag: o.tag` for exit legs so they don't usurp the entry leg's clientOrderId
-                ...leg
-              });
+              // Leg-entry shape: container row already carries the entry (id + tag for reconciliation).
+              if (tradierBracketLegIsEntry(o, leg)) continue;
+              all.push(mapTradierBracketLegRow(o, leg));
             }
           }
         }
       }
-      const scoped = fullHistory
+      return fullHistory
         ? all
-        : all.filter((o) => {
+        : all.filter((order) => {
             // Must match isLiveOrderState, not a hand-rolled subset. pending_cancel /
             // pending_replace still fill until Tradier confirms them dead. Dropping a
             // week-old GTC stop in that state hides it from liveExitOrderCoverage and
             // the synthetic-stop monitor (and account-drain) can stack a second exit.
-            if (isLiveOrderState(String(o.status ?? ""))) return true;
-            const createdMs = tradierOrderCreatedMs(o);
+            if (isLiveOrderState(order.state)) return true;
+            const createdMs = Date.parse(order.createdAt);
             return Number.isFinite(sinceMs) && Number.isFinite(createdMs) && createdMs >= sinceMs;
           });
-      return scoped.map((o) => mapTradierOrder(o));
     }, { retryTransient: true });
   }
 
@@ -1482,6 +1475,19 @@ function recognizedTradierSide(raw: unknown): OrderSide | undefined {
   return word === "buy" || word === "sell" || word === "sell_short" || word === "buy_to_cover" ? mapTradierSideRead(word) : undefined;
 }
 
+function recognizedTradierType(raw: unknown): OrderType | undefined {
+  const word = String(raw ?? "").trim().toLowerCase();
+  switch (word) {
+    case "market":
+    case "limit":
+    case "stop":
+    case "stop_limit":
+      return mapTradierTypeRead(word);
+    default:
+      return undefined;
+  }
+}
+
 function rawLegs(row: Record<string, unknown>): Record<string, unknown>[] {
   const legField = row.leg ?? row.legs;
   if (legField === undefined || legField === null) return [];
@@ -1542,6 +1548,112 @@ export function tradierBracketParts(row: Record<string, unknown>):
   return { entry: row, entryIsLeg: false, exits: equityLegsWithContainerFallback(row) };
 }
 
+function tradierOrderClassFromContainerClass(containerClass: string): string | undefined {
+  if (containerClass === "equity" || containerClass === "") return undefined;
+  if (containerClass === "otoco" || containerClass === "oto" || containerClass === "oco" || containerClass === "bracket") {
+    return containerClass;
+  }
+  return undefined;
+}
+
+/**
+ * Tradier can leave an OTOCO container at "open" while the day-TIF entry leg is already expired.
+ * Reconciliation and the listing must follow the entry leg's terminal state when nothing executed.
+ */
+export function resolveTradierBracketContainerState(
+  container: Record<string, unknown>,
+  parts: NonNullable<ReturnType<typeof tradierBracketParts>>
+): string {
+  const containerState = String(container.status ?? "").trim().toLowerCase();
+  const entry = parts.entry;
+  if (!entry) return containerState || "unknown";
+  const entryState = String(entry.status ?? "").trim().toLowerCase();
+  const entryExec = optionalNumber(entry.exec_quantity) ?? 0;
+  if (entryState && (isRejectedOrCanceledState(entryState) || entryState === "expired") && entryExec <= 0) {
+    return entryState;
+  }
+  if (entryExec > 0 || entryState === "filled" || entryState === "partially_filled") {
+    return entryState || containerState;
+  }
+  return containerState || entryState || "unknown";
+}
+
+function attachTradierBracketLegAttribution(container: Record<string, unknown>, order: EquityOrder): EquityOrder {
+  const containerClass = String(container.class ?? "").toLowerCase();
+  const orderClass = tradierOrderClassFromContainerClass(containerClass);
+  if (!orderClass) return order;
+  return {
+    ...order,
+    orderClass,
+    parentOrderId: container.id != null ? String(container.id) : order.parentOrderId,
+    parentClientOrderId: optionalString(container.tag) ?? order.parentClientOrderId
+  };
+}
+
+/** Map the container row kept in the flattened listing (id + tag for placement reconciliation). */
+export function mapTradierBracketContainerRow(container: Record<string, unknown>): EquityOrder {
+  const parts = tradierBracketParts(container);
+  const cls = String(container.class ?? "").toLowerCase();
+  const order = mapTradierOrder(container);
+  if (!parts || !["oto", "otoco", "oco"].includes(cls)) return order;
+  const resolvedState = resolveTradierBracketContainerState(container, parts);
+  const entry = parts.entry;
+  const base: EquityOrder = {
+    ...order,
+    /* Leg-entry shape surfaces the real entry as its own row; bracket class on the container
+       would pair it with exit siblings and misclassify the entry as an exit leg. */
+    ...(parts.entryIsLeg ? {} : { orderClass: tradierOrderClassFromContainerClass(cls) }),
+    state: resolvedState
+  };
+  if (parts.entryIsLeg && entry) {
+    const entryView = withContainerFallback(container, entry);
+    const entrySide = recognizedTradierSide(entryView.side);
+    const entryType = recognizedTradierType(entryView.type);
+    const baseType = recognizedTradierType(container.type) ?? recognizedTradierType(base.type) ?? base.type;
+    const mergedType = entryType ?? baseType;
+    const entryLimit = optionalNumber(entryView.price);
+    const entryStop = optionalNumber(entryView.stop_price);
+    const limitPrice = carriesLimitPrice(mergedType)
+      ? entryLimit ?? (carriesLimitPrice(baseType) ? base.limitPrice : undefined)
+      : undefined;
+    const stopPrice = carriesStopPrice(mergedType)
+      ? entryStop ?? (carriesStopPrice(baseType) ? base.stopPrice : undefined)
+      : undefined;
+    return {
+      ...base,
+      ...(entrySide !== undefined ? { side: entrySide } : {}),
+      ...(entryType !== undefined ? { type: entryType } : {}),
+      quantity: optionalNumber(entryView.quantity) ?? base.quantity,
+      limitPrice,
+      stopPrice,
+      filledQuantity: optionalNumber(entry.exec_quantity) ?? base.filledQuantity,
+      averagePrice: optionalNumber(entry.avg_fill_price) ?? base.averagePrice
+    };
+  }
+  return base;
+}
+
+/** Map one equity leg nested under an OTO/OTOCO/OCO container. Exit legs omit `tag` but inherit attribution. */
+function tradierBracketLegIsEntry(container: Record<string, unknown>, leg: Record<string, unknown>): boolean {
+  const parts = tradierBracketParts(container);
+  return Boolean(parts?.entryIsLeg && parts.entry && String(parts.entry.id) === String(leg.id));
+}
+
+function attachTradierBracketEntryLegAttribution(container: Record<string, unknown>, order: EquityOrder): EquityOrder {
+  return {
+    ...order,
+    parentOrderId: container.id != null ? String(container.id) : order.parentOrderId,
+    parentClientOrderId: optionalString(container.tag) ?? order.parentClientOrderId
+  };
+}
+
+export function mapTradierBracketLegRow(container: Record<string, unknown>, leg: Record<string, unknown>): EquityOrder {
+  const order = mapTradierOrder(withContainerFallback(container, leg));
+  return tradierBracketLegIsEntry(container, leg)
+    ? attachTradierBracketEntryLegAttribution(container, order)
+    : attachTradierBracketLegAttribution(container, order);
+}
+
 /**
  * The reconciliation view of one Tradier order row.  A plain order maps as-is.  A bracket container
  * maps to its ENTRY's state and execution under the CONTAINER's id and tag (the id the app stored at
@@ -1555,18 +1667,25 @@ export function tradierOrderLookupFromRow(row: Record<string, unknown>): BrokerO
   // otherwise turn it into a fabricated broker-originated BUY.
   const exitLegs = parts.exits
     .filter((leg) => recognizedTradierSide(leg.side))
-    .map((leg) => mapTradierOrder({ ...leg, tag: undefined }));
+    .map((leg) => attachTradierBracketLegAttribution(row, mapTradierOrder({ ...leg, tag: undefined })));
   const entry = parts.entry;
-  if (!parts.entryIsLeg || !entry) return { order: mapTradierOrder(row), exitLegs };
+  if (!parts.entryIsLeg || !entry) {
+    return {
+      order: mapTradierBracketContainerRow(row),
+      exitLegs
+    };
+  }
   const view: Record<string, unknown> = {
     ...entry,
     id: row.id,
     tag: row.tag,
     symbol: entry.symbol ?? row.symbol,
-    create_date: row.create_date ?? entry.create_date
+    create_date: row.create_date ?? entry.create_date,
+    status: resolveTradierBracketContainerState(row, parts)
   };
+  const mapped = mapTradierOrder(view);
   return {
-    order: mapTradierOrder(view),
+    order: mapped,
     ...(entry.id !== undefined && entry.id !== null ? { entryLegId: String(entry.id) } : {}),
     exitLegs
   };
@@ -1599,10 +1718,26 @@ export function executionsFromTradierRow(row: Record<string, unknown>): BrokerEx
   if (parts) {
     const out: BrokerExecution[] = [];
     if (parts.entry && recognizedTradierSide(parts.entry.side)) {
-      out.push(withParent(mapTradierOrder(parts.entryIsLeg ? { ...parts.entry, tag: undefined } : row), "entry"));
+      if (parts.entryIsLeg) {
+        out.push(
+          withParent(
+            attachTradierBracketEntryLegAttribution(row, mapTradierOrder({ ...parts.entry, tag: undefined })),
+            "entry"
+          )
+        );
+      } else {
+        out.push(withParent(mapTradierBracketContainerRow(row), "entry"));
+      }
     }
     for (const exit of parts.exits) {
-      if (recognizedTradierSide(exit.side)) out.push(withParent(mapTradierOrder({ ...exit, tag: undefined }), "exit"));
+      if (recognizedTradierSide(exit.side)) {
+        out.push(
+          withParent(
+            attachTradierBracketLegAttribution(row, mapTradierOrder({ ...exit, tag: undefined })),
+            "exit"
+          )
+        );
+      }
     }
     return out;
   }
