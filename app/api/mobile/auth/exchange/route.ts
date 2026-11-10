@@ -1,3 +1,4 @@
+import "server-only";
 import { NextResponse } from "next/server";
 import { sessionTokenForCurrentCookie } from "@/lib/auth/session-cookie-names";
 import { consumeMobileAuthHandoff } from "@/lib/mobile-auth-handoff";
@@ -29,13 +30,19 @@ export async function POST(request: Request) {
     }
 
     const authSecret = process.env.AUTH_SECRET;
-    if (handoff.sessionId !== LEGACY_MOBILE_SESSION_ID && authSecret) {
-      const payload = await decodeSessionToken({
-        token: handoff.sessionToken,
-        secret: authSecret,
-        salt: handoff.cookieName,
-      });
-      const sid = payload?.[SESSION_JWT_SID_CLAIM];
+    if (!authSecret) {
+      return NextResponse.json({ error: "Mobile authentication code is invalid or expired." }, { status: 401 });
+    }
+    const payload = await decodeSessionToken({
+      token: handoff.sessionToken,
+      secret: authSecret,
+      salt: handoff.cookieName,
+    });
+    if (!payload) {
+      return NextResponse.json({ error: "Mobile authentication code is invalid or expired." }, { status: 401 });
+    }
+    if (handoff.sessionId !== LEGACY_MOBILE_SESSION_ID) {
+      const sid = payload[SESSION_JWT_SID_CLAIM];
       if (typeof sid !== "string" || sid !== handoff.sessionId) {
         return NextResponse.json({ error: "Mobile authentication code is invalid or expired." }, { status: 401 });
       }

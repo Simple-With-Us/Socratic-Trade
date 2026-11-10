@@ -233,6 +233,7 @@ describe("mobile session hardening compat", () => {
   it("treats missing nonce as legacy unless the client declares hardening", () => {
     const base = new Request("https://socratictrade.com/api/mobile/auth-redirect");
     expect(mobileOAuthHandoffIsStrict(base, "")).toBe(false);
+    expect(mobileOAuthHandoffIsStrict(base, LEGACY_MOBILE_HANDOFF_NONCE)).toBe(false);
     expect(
       mobileOAuthHandoffIsStrict(
         new Request("https://socratictrade.com", {

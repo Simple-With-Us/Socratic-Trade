@@ -8,7 +8,15 @@ export const runtime = "nodejs";
 
 /** POST — revoke every server session for the signed-in user (sign out everywhere). */
 export async function POST(request: Request) {
-  const { email } = resolveRequestUser(request);
+  let email: string | undefined;
+  try {
+    email = resolveRequestUser(request).email;
+  } catch (err) {
+    if (err instanceof Error && /revoked|expired/i.test(err.message)) {
+      return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    }
+    throw err;
+  }
   if (!email) {
     return NextResponse.json({ error: "Authentication required." }, { status: 401 });
   }

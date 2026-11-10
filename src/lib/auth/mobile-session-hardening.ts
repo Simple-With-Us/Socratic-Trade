@@ -15,7 +15,7 @@ export function logMobileSessionHardeningCompat(route: string, detail: string): 
 }
 
 export function mobileOAuthHandoffIsStrict(request: Request, handoffNonce: string): boolean {
-  if (handoffNonce) return true;
+  if (handoffNonce && handoffNonce !== LEGACY_MOBILE_HANDOFF_NONCE) return true;
   if (clientDeclaresSessionHardening(request)) return true;
   return false;
 }

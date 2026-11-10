@@ -26,9 +26,16 @@ describe("mobile OAuth exchange route", () => {
   });
 
   it("returns no session credential in its JSON response and sets an HTTP-only cookie", async () => {
+    const secret = "test-secret-at-least-32-bytes-long!!";
+    vi.stubEnv("AUTH_SECRET", secret);
+    const sessionToken = await encodeSessionToken({
+      token: { email: "handoff@example.com" },
+      secret,
+      salt: "authjs.session-token",
+    });
     const verifier = "v".repeat(43);
     const code = createMobileAuthHandoff({
-      sessionToken: "session-secret",
+      sessionToken,
       codeChallenge: challenge(verifier),
       handoffNonce: LEGACY_MOBILE_HANDOFF_NONCE,
       sessionId: LEGACY_MOBILE_SESSION_ID,
@@ -41,7 +48,7 @@ describe("mobile OAuth exchange route", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ success: true });
     const setCookie = response.headers.get("set-cookie");
-    expect(setCookie).toContain("authjs.session-token=session-secret");
+    expect(setCookie).toContain("authjs.session-token=");
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=lax");
   });

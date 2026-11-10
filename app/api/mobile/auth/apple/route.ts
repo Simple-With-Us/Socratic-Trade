@@ -22,6 +22,7 @@ import {
   mobileAppleSignInIsStrict,
 } from "@/lib/auth/mobile-session-hardening";
 import {
+  AppleIdentityTokenClaimsSchema,
   AppleVerifiedEmailSchema,
   MobileAppleSignInBodySchema,
 } from "@/lib/auth/mobile-auth-schemas";
@@ -62,11 +63,15 @@ export async function POST(request: Request) {
       issuer: "https://appleid.apple.com",
       audience: resolveAppleClientIds(),
     });
-    if (strictApple && payload.nonce !== nonceValue) {
+    const claimsParsed = AppleIdentityTokenClaimsSchema.safeParse(payload);
+    if (!claimsParsed.success) {
+      return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
+    }
+    if (strictApple && claimsParsed.data.nonce !== nonceValue) {
       return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
     }
 
-    const emailParsed = AppleVerifiedEmailSchema.safeParse(payload.email);
+    const emailParsed = AppleVerifiedEmailSchema.safeParse(claimsParsed.data.email);
     if (!emailParsed.success) {
       return NextResponse.json({ error: "Apple token did not contain an email address." }, { status: 400 });
     }
