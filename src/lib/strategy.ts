@@ -48,7 +48,7 @@ import { loadCashFlowsForDrawdownBreaker } from "./risk-hwm";
 import { clearAccuracyDegradedMarker, evaluateAccuracyBreaker, getAccuracyDegradedMarker, setAccuracyDegradedMarker } from "./accuracy-breaker";
 import { refreshTradeLocksForRun } from "./apply-trade-locks";
 import { loadActiveOverlays } from "./apply-overlays";
-import { computeSignalAttribution, pricePosition52w } from "./market";
+import { computeSignalAttribution, pricePosition52w, SCAN_QUOTES_UNAVAILABLE_CODE } from "./market";
 import { deriveMetrics } from "./derived-metrics";
 import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
@@ -855,7 +855,25 @@ export async function runStrategyOnce(
           runId,
           userId,
           lastGoodAt: gathered.lastGoodAt,
-          reason: STRATEGY_GATHER_TIMEOUT_MESSAGE
+          reason:
+            gathered.lastGoodReason === "quotes_unavailable"
+              ? SCAN_QUOTES_UNAVAILABLE_CODE
+              : STRATEGY_GATHER_TIMEOUT_MESSAGE
+        },
+        userId,
+        connectedAccountId
+      );
+    }
+    const brokerRecoverySource = gathered.baseMarketScan.universeQuoteRecoverySource;
+    if (brokerRecoverySource && !gathered.usedLastGood) {
+      audit(
+        "strategy_gather_broker_universe_recovery",
+        {
+          runId,
+          userId,
+          recoverySource: brokerRecoverySource,
+          returnedQuotes: gathered.baseMarketScan.returnedQuotes,
+          scannedSymbols: gathered.baseMarketScan.scannedSymbols
         },
         userId,
         connectedAccountId
