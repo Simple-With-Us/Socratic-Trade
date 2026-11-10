@@ -246,7 +246,18 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
 
     const payload = coverageAudits[0]!.payload as { emptyDocTypes?: string[]; requestedDocTypes?: string[] };
     expect(payload.emptyDocTypes).toEqual(["10-k"]);
-    expect(payload.requestedDocTypes).toEqual(["10-k", "10-q", "8-k", "document-summary"]);
+    // filing_narrative widens with the corpus (2026-09-27): DEF 14A, S-1, ownership and 13F
+    // holdings are ingested now, so the coverage receipt has to name them as requested doc types.
+    expect(payload.requestedDocTypes).toEqual([
+      "10-k",
+      "10-q",
+      "8-k",
+      "def 14a",
+      "s-1",
+      "13f-holdings",
+      "insider-filing",
+      "document-summary"
+    ]);
 
     const cases = listSocraticDecisionCases("local", { runId: result.runId });
     expect(cases.length).toBeGreaterThanOrEqual(1);

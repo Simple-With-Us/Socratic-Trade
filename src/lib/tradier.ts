@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { z } from "zod";
 import type {
   AccountCapabilities,
   BrokerageAccount,
@@ -11,17 +12,32 @@ import type {
   Portfolio,
   ReviewedOrder,
   BrokerGateway,
+  BrokerExecution,
+  BrokerOrderLookup,
   EquityOrderInput,
+  GetEquityOrdersOptions,
   OptionPosition
 } from "./types";
-import { normalizeSymbol } from "./money";
-import { isRejectedOrCanceledState } from "./broker-side";
+import { normalizeSymbol, roundCents } from "./money";
+import { isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { logApiHealth } from "./db-health";
-import { fetchDailyOHLC } from "./history";
-// Reuse Alpaca's keyless-Yahoo quote floor and the shared pre-trade notional semantics verbatim —
-// they are broker-agnostic helpers exported from ./alpaca (no Alpaca SDK behavior involved).
-import { fillMissingQuotesWithClose, estimateReviewNotional } from "./alpaca";
+import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
+import { estimateReviewNotional } from "./alpaca";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import { mergeAccountCapabilities } from "./venue-contract";
+import { normalizeVenueOrder } from "./venue-normalization";
+import { BROKER_ORDER_PAGE_CAP, TRADIER_BROKER_IO_DEADLINE_MS, brokerAbortSignal, equityOrdersDefaultSinceIso, withDeadline } from "./inflight-deadline";
+import {
+  TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE,
+  TRADIER_TRANSIENT_ATTEMPTS,
+  isTradierSandboxOpenDeferral,
+  isTradierTransientServerError,
+  sleepMs,
+  tradierNow,
+  tradierTransientBackoffMs
+} from "./tradier-transient";
 
 /**
  * Tradier broker gateway. Hand-rolled REST (single Bearer token, no SDK), mirroring the Alpaca
@@ -44,18 +60,99 @@ export function getTradierGateway(userId: string = "local", connectedAccountId?:
   return new TradierBrokerGateway(userId, connectedAccountId);
 }
 
-/** In-process throttle for order-capability probes (scheduler ticks every few seconds). */
-const tradierProbeCache = new Map<string, { at: number; ok: boolean; reason?: string }>();
-const TRADIER_PROBE_TTL_MS = 2 * 60_000;
+/**
+ * In-process throttle for order-capability probes (scheduler ticks every 60s).
+ *
+ * Classification (production evidence, litestream-runtime.log 2026-08-29..2026-09-07): 1,364
+ * "Tradier order capability probe failed" events over 9 days, all landing in the generic
+ * connectivity/auth fallback below because the structured-rejection and 5xx regexes didn't
+ * match Tradier's actual wording ("HTTP 400: Unexpected server error" has "server" between
+ * "unexpected" and "error", so the old `/unexpected error/i` alternative never matched; a
+ * timeout/AbortError also fell through the same way). `category` now records WHICH bucket a
+ * failure landed in and `streak` counts consecutive same-category results so the TTL can back
+ * off exponentially instead of re-probing (and re-warning) every single 60s tick for a
+ * condition that has not changed. This does not change `ok`/`reason` for any input this
+ * gateway already classified — same isHealthy verdict, just far fewer probes and log lines.
+ */
+type TradierProbeCategory =
+  | "capability_ok" // structured OMS rejection (margin/PDT/etc.) or a clean preview accept
+  | "server_error" // Tradier-side 5xx / backend / "unexpected (server) error"
+  | "timeout" // caller-side abort or Tradier request timeout
+  | "connectivity" // dead socket / DNS / reset — network-layer, not Tradier's application logic
+  | "unclassified"; // none of the above matched — kept distinct so an unrecognized new Tradier
+  // error string is still visible as its own category instead of hiding inside "connectivity"
+const tradierProbeCache = new Map<
+  string,
+  { at: number; ok: boolean; reason?: string; category: TradierProbeCategory; streak: number }
+>();
+const TRADIER_PROBE_BASE_TTL_MS = 2 * 60_000;
+/** Ceiling so a stuck/restricted account is still re-verified roughly hourly, never truly forever —
+ *  the account could get re-enabled and this must eventually notice without a redeploy. */
+const TRADIER_PROBE_MAX_TTL_MS = 60 * 60_000;
+
+/** Exponential backoff on the SAME consecutive (ok, category) pair: 2m, 4m, 8m, ... capped at 1h. */
+function tradierProbeTtlMs(streak: number): number {
+  const doublings = Math.max(0, Math.min(streak, 5)); // 2m * 2^5 = 64m, already above the 60m cap
+  return Math.min(TRADIER_PROBE_BASE_TTL_MS * 2 ** doublings, TRADIER_PROBE_MAX_TTL_MS);
+}
+
+/**
+ * One order row.  A record, not `z.unknown()`: `findOrderIdByTag` reads `tag` and `id`.
+ * Values stay unknown because Tradier mixes strings and numbers on the same keys.
+ * The row is not a required-field object.  A page of other orders often has no `tag`,
+ * and rejecting that page would hide our own row and allow another POST.
+ */
+const TradierOrderRowSchema = z.record(z.string(), z.unknown());
+
+/**
+ * Listing `order` is an array, one object, the string "null", or null.
+ * A bare `z.record` rejects the array.  That would turn a live multi-order page into a
+ * tag miss and the caller would POST again.
+ */
+const TradierOrderCollectionSchema = z.union([
+  z.array(z.union([TradierOrderRowSchema, z.null()])),
+  TradierOrderRowSchema,
+  z.string(),
+  z.null()
+]);
+
+/**
+ * Tradier GET /accounts/:account/orders envelope, validated at the HTTP boundary before anything
+ * is read off it.  Only `orders` is constrained.  The inner object uses `.passthrough()` so an
+ * added envelope field cannot fail the parse.  An empty listing is `orders: null` (or the string
+ * "null"), which is why `nullish` is required rather than `optional`.
+ */
+const TradierOrdersPageSchema = z.object({
+  orders: z
+    .union([
+      z.object({ order: TradierOrderCollectionSchema.optional() }).passthrough(),
+      z.string(),
+      z.null()
+    ])
+    .nullish()
+});
+
+/** GET /accounts/:account/orders/:id.  Extra envelope keys stay.  A bad shape is a stub, not a throw. */
+const TradierPlacedOrderSchema = z
+  .object({
+    order: z.union([TradierOrderRowSchema, z.array(TradierOrderRowSchema), z.string(), z.null()]).nullish()
+  })
+  .passthrough();
 
 // Tradier envelopes wrap collections as { orders: { order: [...] } }, collapse a lone element to a
 // bare object { orders: { order: {...} } }, and report empty as null or the string "null". Normalize
 // any of those to a plain array so per-row mapping is uniform.
 function arr<T>(x: unknown): T[] {
   if (x === null || x === undefined) return [];
-  if (typeof x === "string") return x.trim().toLowerCase() === "null" ? [] : [];
+    if (typeof x === "string") return x.trim().toLowerCase() === "null" ? [] : [];
   if (Array.isArray(x)) return x as T[];
   return [x as T];
+}
+
+function tradierOrderCreatedMs(order: Record<string, unknown>): number {
+  const raw = order.create_date ?? order.transaction_date ?? order.created_at;
+  const parsed = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
+  return Number.isFinite(parsed) ? parsed : NaN;
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -79,22 +176,6 @@ function positiveNumber(value: unknown): number | undefined {
 function optionalString(value: unknown): string | undefined {
   if (value === null || value === undefined || value === "") return undefined;
   return String(value);
-}
-
-function optionalIso(value: unknown): string | undefined {
-  if (value === null || value === undefined || value === "") return undefined;
-  // Tradier quote payloads use millisecond epoch numbers for fields like trade_date and
-  // bid_date; Date.parse(String(1757948508561)) returns NaN, so handle numeric values
-  // as direct epoch milliseconds.
-  let time: number;
-  if (typeof value === "number") {
-    time = value;
-  } else if (typeof value === "string" && /^\d+$/.test(value.trim())) {
-    time = Number(value.trim());
-  } else {
-    time = Date.parse(String(value));
-  }
-  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
 // Tradier's valid extended-hours windows (https://docs.tradier.com/docs/orders):
@@ -144,7 +225,7 @@ function mapTradierSideWrite(side: OrderSide): string {
 
 // Tradier `o.side` -> OrderSide (READ-BACK).
 function mapTradierSideRead(raw: unknown): OrderSide {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "buy":
       return "buy";
     case "sell":
@@ -156,6 +237,15 @@ function mapTradierSideRead(raw: unknown): OrderSide {
     default:
       return "buy";
   }
+}
+
+/** Tradier `price` is legal only on limit-family orders; `stop` only on stop-family orders. */
+function carriesLimitPrice(type: OrderType): boolean {
+  return type === "limit" || type === "stop_limit";
+}
+
+function carriesStopPrice(type: OrderType): boolean {
+  return type === "stop_market" || type === "stop_limit";
 }
 
 // OrderType -> Tradier `type` (WRITE). Tradier's wire word for a stop-market is "stop".
@@ -172,7 +262,7 @@ function exitSideForEntry(entrySide: OrderSide): OrderSide {
 
 // Tradier `o.type` -> OrderType (READ-BACK).
 function mapTradierTypeRead(raw: unknown): OrderType {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "market":
       return "market";
     case "limit":
@@ -236,19 +326,21 @@ function capsFromProfile(account: Record<string, unknown>): AccountCapabilities 
   // Tradier IRAs report type "margin" even though they cannot short.
   // Short selling is only valid for non-IRA margin accounts.
   const isIra = accountType === "traditional_ira" || accountType === "roth_ira";
-  return {
+  return mergeAccountCapabilities("tradier", {
     equityTrading: true,
     shortSelling: isMargin && !isIra,
     optionsTrading: optionsLevel !== undefined ? optionsLevel > 0 : false,
     optionsLevel,
+    optionsOrders: false,
     futuresTrading: false,
     cryptoTrading: false,
     marginEnabled: isMargin,
     accountType
-  };
+  });
 }
 
 class TradierBrokerGateway implements BrokerGateway {
+  readonly ordersListIncludesTerminal = true;
   private token: string;
   private baseUrl: string;
   private label: string;
@@ -334,7 +426,7 @@ class TradierBrokerGateway implements BrokerGateway {
       }
       body = form.toString();
     }
-    const response = await fetch(url, { method, headers, body });
+    const response = await fetch(url, { method, headers, body, signal: brokerAbortSignal(undefined, TRADIER_BROKER_IO_DEADLINE_MS) });
     let parsed: unknown = undefined;
     const text = await response.text();
     if (text) {
@@ -350,7 +442,7 @@ class TradierBrokerGateway implements BrokerGateway {
     // Tradier returns 200 with an { errors: { error: [...] } } envelope for validation failures.
     if (parsed && typeof parsed === "object" && "errors" in (parsed as Record<string, unknown>)) {
       const msg = formatTradierError(parsed);
-      if (msg) throw new Error(msg);
+      if (msg) throw new Error(`Tradier HTTP 422: ${msg}`);
     }
     return parsed as T;
   }
@@ -358,23 +450,63 @@ class TradierBrokerGateway implements BrokerGateway {
   // Wrap a call for the admin connections-health page ("tradier-broker"), mirroring Alpaca's
   // trackHealth. logApiHealth swallows its own errors; the broker call is never affected by a
   // logging failure.
-  private async trackHealth<T>(fn: () => Promise<T>): Promise<T> {
+  //
+  // `retryTransient` is opt-IN (default false, unlike Alpaca's opt-out) — the safe default for a
+  // gateway whose call sites are a mix of reads and money-moving writes is to retry nothing unless
+  // a call site explicitly proves itself idempotent. Only GET reads and the side-effect-free
+  // preview probe (probeOrderCapability) opt in. placeEquityOrder / placeOptionOrder / the bracket
+  // POST / cancelEquityOrder never do: a dead keep-alive socket after Tradier already accepted the
+  // write would make a retry a genuine second order attempt, or a cancel-of-already-cancelled 400
+  // that the caller would misread as failure (same class of risk Alpaca's trackHealth documents for
+  // createOrder). HTTP 400 "Unexpected server error" is a separate, sentence-only retry inside
+  // postOrderToleratingTransientServerError: it looks up the tag before any second POST and again
+  // before giving up, and does not use this flag.
+  private async trackHealth<T>(
+    fn: () => Promise<T>,
+    opts?: { deadlineMs?: number; retryTransient?: boolean }
+  ): Promise<T> {
     const start = Date.now();
-    try {
-      const result = await fn();
-      logApiHealth({ service: "tradier-broker", ok: true, latencyMs: Date.now() - start, keySource: this.keySource, userId: this.userId });
-      return result;
-    } catch (err) {
-      logApiHealth({
-        service: "tradier-broker",
-        ok: false,
-        latencyMs: Date.now() - start,
-        errorText: err instanceof Error ? err.message : String(err),
-        keySource: this.keySource,
-        userId: this.userId
-      });
-      throw err;
+    const attempts = opts?.retryTransient ? 2 : 1;
+    const runOnce = () => {
+      const call = fn();
+      return opts?.deadlineMs != null
+        ? withDeadline(call, opts.deadlineMs, "Tradier broker call timed out")
+        : call;
+    };
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const result = await runOnce();
+        logApiHealth({ service: "tradier-broker", ok: true, latencyMs: Date.now() - start, keySource: this.keySource, userId: this.userId });
+        return result;
+      } catch (err) {
+        lastErr = err;
+        // Tradier's keep-alive pool can hand back a socket the origin already closed
+        // (UND_ERR_SOCKET / "other side closed" / bare "fetch failed"). One retry on a fresh
+        // connection recovers a read; the first miss is not logged so a recovered blip cannot
+        // feed the connections-health consecutive-failure streak. A caller-side abort/timeout is
+        // never retried here — isAbortOrTimeoutError takes priority so a budget timeout doesn't
+        // also eat a retry slot.
+        if (
+          attempt + 1 < attempts &&
+          !isAbortOrTimeoutError(err) &&
+          isTransientNetworkError(err)
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+          continue;
+        }
+        logApiHealth({
+          service: "tradier-broker",
+          ok: false,
+          latencyMs: Date.now() - start,
+          errorText: err instanceof Error ? err.message : String(err),
+          keySource: this.keySource,
+          userId: this.userId
+        });
+        throw err;
+      }
     }
+    throw lastErr;
   }
 
   async getAccounts(): Promise<BrokerageAccount[]> {
@@ -394,7 +526,7 @@ class TradierBrokerGateway implements BrokerGateway {
           capabilities: capsFromProfile(account)
         } satisfies BrokerageAccount;
       });
-    });
+    }, { retryTransient: true });
   }
 
   async getPortfolio(accountNumber: string): Promise<Portfolio> {
@@ -480,7 +612,7 @@ class TradierBrokerGateway implements BrokerGateway {
         optionMarketValue,
         cash: totalCash
       };
-    });
+    }, { retryTransient: true });
   }
 
   async getEquityPositions(accountNumber: string): Promise<EquityPosition[]> {
@@ -524,7 +656,7 @@ class TradierBrokerGateway implements BrokerGateway {
           industry: undefined
         } satisfies EquityPosition;
       });
-    });
+    }, { retryTransient: true });
   }
 
   async getOptionPositions(accountNumber: string): Promise<OptionPosition[]> {
@@ -560,43 +692,128 @@ class TradierBrokerGateway implements BrokerGateway {
           marketValue: Number(marketValue.toFixed(2))
         } satisfies OptionPosition;
       });
-    });
+    }, { retryTransient: true });
   }
 
-  async getEquityOrders(accountNumber: string): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: GetEquityOrdersOptions): Promise<EquityOrder[]> {
+    const fullHistory = options?.fullHistory === true;
+    const sinceMs = options?.since ? Date.parse(options.since) : Date.parse(equityOrdersDefaultSinceIso());
+    // Always walk up to 50 pages. Tradier defaults to 25 rows/page, newest first, with no
+    // status=open split (unlike Alpaca). A 5-page default (#2886) stopped after ~125 recent
+    // rows — often option/combo activity — and hid a later-page GTC equity protective stop.
+    // liveExitOrderCoverage then saw no exit and the synthetic-stop monitor double-sold.
+    // Continue on the RAW page (any class). Do not stop when the equity filter drops a page.
     return this.trackHealth(async () => {
-      const all: Record<string, unknown>[] = [];
-      const seen = new Set<string>();
-      for (let page = 1; page <= 50; page++) {
-        const body = await this.request<{ orders?: { order?: unknown } | string }>("GET", `/accounts/${accountNumber}/orders`, {
-          query: { page, includeTags: "true" }
-        });
-        const ordersField = typeof body.orders === "object" && body.orders ? (body.orders as Record<string, unknown>).order : undefined;
-        const rows = arr<Record<string, unknown>>(ordersField);
-        if (rows.length === 0) break; // genuinely no more pages
-        // Pagination continuation is decided on the RAW page (ALL classes), NOT the post-equity-filter
-        // count. A mixed equity+options account can have a page holding only option/combo rows sitting
-        // BEFORE a later page that carries a resting protective EQUITY exit; breaking as soon as a page
-        // yields zero *equity* rows would stop before that exit, hiding it from liveExitOrderCoverage
-        // and letting the synthetic-stop monitor place a DUPLICATE. Advance while the raw page adds any
-        // NEW order id (of any class); stop only on an empty page or a page that is entirely duplicates
-        // (the guard against a pager that repeats its last page unboundedly, up to the 50-page cap).
-        let newThisPage = 0;
-        for (const o of rows) {
-          const id = String(o.id);
-          if (seen.has(id)) continue;
-          seen.add(id);
-          newThisPage += 1;
-          // Only EQUITY-class rows are RETURNED: mapping an option/combo as an EquityOrder coerces
-          // option sides/types (buy_to_open, debit) into equity-looking orders on the underlying,
-          // polluting dashboard/coverage state. A multi-leg OTOCO/OCO/OTO container is not itself
-          // class "equity", so its resting equity stop/limit legs are surfaced from its `leg` array.
-          for (const eq of equityRowsFromTradierOrder(o)) all.push(eq);
+      const all: EquityOrder[] = [];
+      for (const o of await this.fetchRawOrderRows(accountNumber)) {
+        const oClass = String(o.class ?? "").toLowerCase();
+        if (oClass === "equity") {
+          all.push(mapTradierOrder(o));
+        } else if (["oto", "otoco", "oco", "multileg", "combo"].includes(oClass)) {
+          // Keep the container for placement-reconciliation identity even when Tradier
+          // omits top-level `side`.  Legs below still omit `tag` so they cannot steal
+          // the entry's clientOrderId; parentClientOrderId carries attribution instead.
+          if (o.symbol && (o.side || o.tag)) all.push(mapTradierBracketContainerRow(o));
+          const legField = o.leg ?? o.legs;
+          if (legField) {
+            for (const leg of arr<Record<string, unknown>>(legField)) {
+              if (String(leg.class ?? "").toLowerCase() !== "equity") continue;
+              // Leg-entry shape: container row already carries the entry (id + tag for reconciliation).
+              if (tradierBracketLegIsEntry(o, leg)) continue;
+              all.push(mapTradierBracketLegRow(o, leg));
+            }
+          }
         }
-        if (newThisPage === 0) break; // fully-duplicate page — done
       }
-      return all.map((o) => mapTradierOrder(o));
-    });
+      return fullHistory
+        ? all
+        : all.filter((order) => {
+            // Must match isLiveOrderState, not a hand-rolled subset. pending_cancel /
+            // pending_replace still fill until Tradier confirms them dead. Dropping a
+            // week-old GTC stop in that state hides it from liveExitOrderCoverage and
+            // the synthetic-stop monitor (and account-drain) can stack a second exit.
+            if (isLiveOrderState(order.state)) return true;
+            const createdMs = Date.parse(order.createdAt);
+            return Number.isFinite(sinceMs) && Number.isFinite(createdMs) && createdMs >= sinceMs;
+          });
+    }, { retryTransient: true });
+  }
+
+  // Walk the RAW order listing (every class), up to 50 pages, deduped by id.  Pagination continues
+  // on the raw page, never on a post-filter count: a page holding only option/combo rows can sit in
+  // front of a later page that carries a resting protective EQUITY exit (see getEquityOrders).
+  // NOTE: Tradier documents this listing as the CURRENT market session's orders (plus whatever is
+  // still working).  A filled or canceled order from an earlier session is not in it — use
+  // getEquityOrder for broker truth on a known id.
+  private async fetchRawOrderRows(accountNumber: string): Promise<Record<string, unknown>[]> {
+    const maxPages = BROKER_ORDER_PAGE_CAP;
+    const rows: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    for (let page = 1; page <= maxPages; page++) {
+      const body = await this.request<{ orders?: { order?: unknown } | string }>("GET", `/accounts/${accountNumber}/orders`, {
+        query: { page, includeTags: "true" }
+      });
+      const ordersField = typeof body.orders === "object" && body.orders ? (body.orders as Record<string, unknown>).order : undefined;
+      const pageRows = arr<Record<string, unknown>>(ordersField);
+      if (pageRows.length === 0) break; // genuinely no more pages
+      let newThisPage = 0;
+      for (const o of pageRows) {
+        const id = String(o.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        newThisPage += 1;
+        rows.push(o);
+      }
+      if (newThisPage === 0) break; // fully-duplicate page — done
+    }
+    return rows;
+  }
+
+  /**
+   * Broker truth for ONE order id (`GET /accounts/{account}/orders/{id}`), independent of the
+   * current-session listing.  This is what lets a receipt placed on an earlier session, or a
+   * bracket CONTAINER id the flattened listing never matches, reconcile at all.  A bracket
+   * container comes back as its entry leg's execution under the container's id, plus its exit
+   * legs (see tradierOrderLookupFromRow).  `undefined` only on a definitive not-found; transport
+   * and server failures throw so the caller never mistakes an outage for absence.
+   */
+  async getEquityOrder(accountNumber: string, orderId: string): Promise<BrokerOrderLookup | undefined> {
+    const id = String(orderId ?? "").trim();
+    // Never interpolate an unusable id into the request path (Tradier ids are numeric).
+    if (!/^[A-Za-z0-9_-]+$/.test(id) || id === "undefined") return undefined;
+    // A definitive not-found is Tradier ANSWERING, so it is caught INSIDE trackHealth and logged as
+    // a healthy call.  Letting it reach trackHealth as a failure made five old-id lookups in a row
+    // (one budgeted backfill pass over receipts Tradier no longer serves) trip the tradier-broker
+    // consecutive-failure streak: a "connection failed" push, a Sentry capture, and a red Connections
+    // row while the broker was fine.  Transport and server failures still throw and still count.
+    const body = await this.trackHealth(
+      async () => {
+        try {
+          return await this.request<{ order?: unknown }>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(id)}`, {
+            query: { includeTags: "true" }
+          });
+        } catch (error) {
+          if (isTradierOrderNotFound(error)) return TRADIER_ORDER_NOT_FOUND;
+          throw error;
+        }
+      },
+      { retryTransient: true }
+    );
+    if (body === TRADIER_ORDER_NOT_FOUND) return undefined;
+    const row = body?.order;
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      // A 200 without an order object is not proof the order does not exist — surface it.
+      throw new Error(`Tradier order lookup for ${id} returned no order object.`);
+    }
+    return tradierOrderLookupFromRow(row as Record<string, unknown>);
+  }
+
+  /** Executed-order view of the current listing with bracket roles intact (see BrokerExecution). */
+  async listRecentExecutions(accountNumber: string): Promise<BrokerExecution[]> {
+    return this.trackHealth(async () => {
+      const rows = await this.fetchRawOrderRows(accountNumber);
+      return rows.flatMap((row) => executionsFromTradierRow(row));
+    }, { retryTransient: true });
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
@@ -618,10 +835,12 @@ class TradierBrokerGateway implements BrokerGateway {
       try {
         // Tradier equity symbols use dots (BRK.B); our canonical is hyphenated, so convert on the wire.
         const wireSymbols = canonicalSymbols.map((s) => toTradierSymbol(s));
-        const body = await this.trackHealth(() =>
-          this.request<{ quotes?: { quote?: unknown } | string }>("GET", "/markets/quotes", {
-            query: { symbols: wireSymbols.join(","), greeks: "false" }
-          })
+        const body = await this.trackHealth(
+          () =>
+            this.request<{ quotes?: { quote?: unknown } | string }>("GET", "/markets/quotes", {
+              query: { symbols: wireSymbols.join(","), greeks: "false" }
+            }),
+          { retryTransient: true }
         );
         const quotesField = typeof body.quotes === "object" && body.quotes ? (body.quotes as Record<string, unknown>).quote : undefined;
         for (const q of arr<Record<string, unknown>>(quotesField)) {
@@ -630,26 +849,42 @@ class TradierBrokerGateway implements BrokerGateway {
           const close = optionalNumber(q.close);
           const ask = optionalNumber(q.ask);
           const bid = optionalNumber(q.bid);
+          const selected = selectObservedQuotePrice({ last, bid, ask });
+          if (selected.price === undefined) continue;
+          const prevClose = optionalNumber(q.prevclose);
+          const open = optionalNumber(q.open);
+          const high = optionalNumber(q.high);
+          const low = optionalNumber(q.low);
+          const change = optionalNumber(q.change);
+          const changePct = optionalNumber(q.change_percentage);
+          const bidSize = optionalNumber(q.bidsize);
+          const askSize = optionalNumber(q.asksize);
+          const companyName = optionalString(q.description);
+          const asOf = providerObservationIso(selected.basis === "last" ? q.trade_date : q.bid_date ?? q.ask_date);
           quotes[symbol] = {
             symbol,
-            price: last ?? close ?? ask ?? bid ?? 0,
+            price: selected.price,
             bid,
             ask,
             volume: optionalNumber(q.volume),
-            asOf: optionalIso(q.trade_date ?? q.bid_date),
-            provider: "tradier"
+            ...(asOf ? { asOf } : {}),
+            provider: "tradier",
+            ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
+            ...(open !== undefined && open > 0 ? { open } : {}),
+            ...(high !== undefined && high > 0 ? { high } : {}),
+            ...(low !== undefined && low > 0 ? { low } : {}),
+            ...(close !== undefined && close > 0 ? { close } : {}),
+            ...(change !== undefined ? { change } : {}),
+            ...(changePct !== undefined ? { changePct } : {}),
+            ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
+            ...(askSize !== undefined && askSize > 0 ? { askSize } : {}),
+            ...(companyName ? { companyName } : {})
           };
         }
       } catch (error) {
         console.warn(`[tradier] getEquityQuotes failed for ${canonicalSymbols.join(",")}:`, error instanceof Error ? error.message : error);
       }
     }
-    // Keyless Yahoo daily-close floor for any symbol Tradier left unpriced — identical to Alpaca.
-    await fillMissingQuotesWithClose(quotes, canonicalSymbols, async (symbol) => {
-      const bars = await fetchDailyOHLC(symbol, Date.now(), this.userId);
-      const lastBar = bars && bars.length ? bars[bars.length - 1] : undefined;
-      return lastBar && typeof lastBar.close === "number" ? { price: lastBar.close, asOf: lastBar.time != null ? String(lastBar.time) : undefined } : undefined;
-    });
     for (const [canonical, aliases] of aliasesByCanonical) {
       const quote = quotes[canonical];
       if (!quote) continue;
@@ -674,7 +909,133 @@ class TradierBrokerGateway implements BrokerGateway {
     return { estimatedNotional, alerts, raw: { tradier: true } };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  /**
+   * Sandbox quotes are 15 minutes delayed.  Refuse equity, bracket, and option
+   * POSTs until 16 minutes after the regular open (9:46am ET).  Live Tradier
+   * is not deferred.
+   */
+  private assertSandboxOrderWindowOpen(): void {
+    if (isTradierSandboxOpenDeferral(this.environment, tradierNow())) {
+      throw new Error(TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE);
+    }
+  }
+
+  /**
+   * POST an order.  On HTTP 400 "Unexpected server error", wait out the
+   * backoff, then look up our tag before any second POST.  The last refusal
+   * looks up immediately, with no further POST.  A hit means that request
+   * landed despite the error body, so we return that id.  A clean miss
+   * retries until the budget is spent.  A failed lookup does not send
+   * another POST and does not claim the order was absent.  Any other error,
+   * including a real 400, fails on the first attempt.
+   * The whole sequence is one trackHealth call so a recovered blip is not a
+   * tradier-broker hard failure.
+   */
+  private async postOrderToleratingTransientServerError<T extends { order?: Record<string, unknown> }>(
+    accountNumber: string,
+    tag: string,
+    form: Record<string, string | number | undefined>
+  ): Promise<T> {
+    return this.trackHealth(async () => {
+      let last: unknown;
+      for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+        try {
+          return await this.request<T>("POST", `/accounts/${accountNumber}/orders`, { form });
+        } catch (error) {
+          last = error;
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!isTradierTransientServerError(msg)) throw error;
+          // The listing can lag the accept.  Sleep before the lookup that
+          // gates the next POST, so a just-landed tag is visible before we
+          // send another order.  The final attempt does not sleep again.
+          if (attempt + 1 < TRADIER_TRANSIENT_ATTEMPTS) {
+            await sleepMs(tradierTransientBackoffMs(attempt));
+          }
+          const landed = await this.orderBodyForLandedTag<T>(accountNumber, tag);
+          if (landed) return landed;
+          if (attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+        }
+      }
+      throw last;
+    });
+  }
+
+  /**
+   * After a transient refusal, ask whether our tag is already on the book.
+   * A hit returns the live order body.  A clean miss returns undefined so the
+   * caller may POST again.  A lookup that throws must not be retried as a
+   * fresh order and must not be classified as a safe `not_placed`.
+   */
+  private async orderBodyForLandedTag<T>(accountNumber: string, tag: string): Promise<T | undefined> {
+    let existing: string | undefined;
+    try {
+      existing = await this.findOrderIdByTag(accountNumber, tag);
+    } catch {
+      throw new Error(TRADIER_TAG_LOOKUP_UNVERIFIED_MESSAGE);
+    }
+    if (!existing) return undefined;
+    // The tag hit proves the POST landed, but the hardcoded `{ status: "pending" }`
+    // stub dropped exec_quantity / avg_fill_price, so an order that FILLED inside the
+    // lookup+backoff window was booked as unfilled at the proposal price — exactly the
+    // P&L corruption the equity path warns about below.  Re-read the order for the
+    // broker's real state.  A failed re-read must NOT rethrow: that would surface as a
+    // retryable placement failure and risk a duplicate POST of an order we already know
+    // is live, so fall back to the id-only stub instead.
+    return this.fetchPlacedOrderBody<T>(accountNumber, existing);
+  }
+
+  /**
+   * Broker truth for an order id we already know exists.  Returns the real order body so the
+   * caller's `status` / `exec_quantity` / `avg_fill_price` mapping sees the broker's state, not a
+   * stub.  A 404 or any transport failure falls back to the minimal `{ id, status: "pending" }`
+   * shape rather than throwing — the order IS on the book (that is why we are here), so failing
+   * the placement would be strictly worse than reporting a conservative pending state.
+   */
+  private async fetchPlacedOrderBody<T>(accountNumber: string, orderId: string): Promise<T> {
+    const stub = { order: { id: orderId, status: "pending" } } as unknown as T;
+    if (!/^[A-Za-z0-9_-]+$/.test(orderId)) return stub;
+    try {
+      const body = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders/${encodeURIComponent(orderId)}`, {
+        query: { includeTags: "true" }
+      });
+      const parsed = TradierPlacedOrderSchema.safeParse(body);
+      // A 200 with no usable order object is not proof of anything — keep the stub.
+      if (!parsed.success) return stub;
+      const row = parsed.data.order;
+      if (!row || typeof row !== "object" || Array.isArray(row)) return stub;
+      return { ...parsed.data, order: { ...row, id: row.id ?? orderId } } as T;
+    } catch {
+      return stub;
+    }
+  }
+
+  /**
+   * One page of the current listing.  A just-accepted order is on page 1.
+   *
+   * The envelope is an EXTERNAL boundary, so it is parsed before anything is read off it.  A
+   * drifted/garbled response is a clean MISS (no tag match) rather than a throw: throwing here
+   * would abort placement on the transient-error path we are specifically trying to survive.
+   * Each row is a string-keyed record.  A null sibling is skipped so it cannot throw and abort
+   * a page that still contains our tag.
+   */
+  private async findOrderIdByTag(accountNumber: string, tag: string): Promise<string | undefined> {
+    const raw: unknown = await this.request<unknown>("GET", `/accounts/${accountNumber}/orders`, {
+      query: { includeTags: "true", page: 1 }
+    });
+    const parsed = TradierOrdersPageSchema.safeParse(raw);
+    if (!parsed.success) return undefined;
+    const ordersField =
+      parsed.data.orders && typeof parsed.data.orders === "object" ? parsed.data.orders.order : undefined;
+    for (const row of arr<Record<string, unknown>>(ordersField)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      if (String(row.tag ?? "") === tag && row.id != null && String(row.id) !== "") return String(row.id);
+    }
+    return undefined;
+  }
+
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
+    const input = normalizeVenueOrder(rawInput, "tradier", this.userId) as typeof rawInput;
     // WHOLE-SHARE resolution: Tradier has no notional field AND no broker-side notional cap, so WE
     // size a dollar order into shares at an anchor price and must not overspend the budget. Never
     // default to 1 — a $500 order must not become 500 shares.
@@ -728,8 +1089,8 @@ class TradierBrokerGateway implements BrokerGateway {
         "quantity[0]": String(wholeQty),
         "type[0]": mapTradierTypeWrite(input.type)
       };
-      if (input.limitPrice != null) bracketForm["price[0]"] = input.limitPrice;
-      if (input.stopPrice != null) bracketForm["stop[0]"] = input.stopPrice;
+      if (input.limitPrice != null && carriesLimitPrice(input.type)) bracketForm["price[0]"] = roundCents(input.limitPrice);
+      if (input.stopPrice != null && carriesStopPrice(input.type)) bracketForm["stop[0]"] = roundCents(input.stopPrice);
 
       let legIndex = 1;
       if (hasTakeProfit) {
@@ -737,7 +1098,7 @@ class TradierBrokerGateway implements BrokerGateway {
         bracketForm[`side[${legIndex}]`] = exitSide;
         bracketForm[`quantity[${legIndex}]`] = String(wholeQty);
         bracketForm[`type[${legIndex}]`] = "limit";
-        bracketForm[`price[${legIndex}]`] = input.bracketTakeProfit;
+        bracketForm[`price[${legIndex}]`] = roundCents(input.bracketTakeProfit!);
         legIndex += 1;
       }
       if (hasStopLoss) {
@@ -745,14 +1106,16 @@ class TradierBrokerGateway implements BrokerGateway {
         bracketForm[`side[${legIndex}]`] = exitSide;
         bracketForm[`quantity[${legIndex}]`] = String(wholeQty);
         bracketForm[`type[${legIndex}]`] = input.bracketStopLimit != null ? "stop_limit" : "stop";
-        bracketForm[`stop[${legIndex}]`] = input.bracketStopLoss;
-        if (input.bracketStopLimit != null) bracketForm[`price[${legIndex}]`] = input.bracketStopLimit;
+        bracketForm[`stop[${legIndex}]`] = roundCents(input.bracketStopLoss!);
+        if (input.bracketStopLimit != null) bracketForm[`price[${legIndex}]`] = roundCents(input.bracketStopLimit);
       }
 
       let bracketBody: { order?: Record<string, unknown> };
       try {
-        bracketBody = await this.trackHealth(() =>
-          this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form: bracketForm })
+        bracketBody = await this.postOrderToleratingTransientServerError(
+          input.accountNumber,
+          sanitizeTag(input.refId),
+          bracketForm
         );
       } catch (error) {
         throw new Error(`Tradier bracket order failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -784,14 +1147,14 @@ class TradierBrokerGateway implements BrokerGateway {
       duration: durationFor(input),
       tag: sanitizeTag(input.refId)
     };
-    if (input.limitPrice != null) form.price = input.limitPrice;
-    if (input.stopPrice != null) form.stop = input.stopPrice;
+    // A market order carries no price/stop (and a stop carries no price): a stray limitPrice/stopPrice
+    // on the input (e.g. a market cover still wearing the proposal's limit) must never reach Tradier.
+    if (input.limitPrice != null && carriesLimitPrice(input.type)) form.price = input.limitPrice;
+    if (input.stopPrice != null && carriesStopPrice(input.type)) form.stop = input.stopPrice;
 
     let body: { order?: Record<string, unknown> };
     try {
-      body = await this.trackHealth(() =>
-        this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${input.accountNumber}/orders`, { form })
-      );
+      body = await this.postOrderToleratingTransientServerError(input.accountNumber, sanitizeTag(input.refId), form);
     } catch (error) {
       throw new Error(`Tradier order failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -826,56 +1189,98 @@ class TradierBrokerGateway implements BrokerGateway {
 
   /**
    * Side-effect-free order-path probe: submit a 1-share limit PREVIEW. A 200 with a structured
-   * validation/BP error means the OMS is reachable (ok). HTTP 5xx / "backend" / "unexpected error"
-   * means paper/live OMS is down — the case that was burning strategy LLM runs on VA93389646.
-   * Throttled to once per 2 minutes per account so the scheduler tick does not hammer Tradier.
+   * validation/BP error means the OMS is reachable (ok). HTTP 5xx / "backend" / "unexpected
+   * (server) error" means paper/live OMS is down — the case that was burning strategy LLM runs
+   * on a live Tradier account. Base throttle is once per 2 minutes per account; a failing probe backs off
+   * exponentially (see tradierProbeTtlMs) so a sustained condition does not re-probe (and the
+   * caller does not re-warn) every single 60s scheduler tick — see tradierProbeCache doc comment.
+   * `retryTransient: true` is safe here specifically because `preview: "true"` makes this call
+   * side-effect-free; a retried real order placement elsewhere in this file never opts in.
    */
   async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
     const key = `${this.baseUrl}|${accountNumber}`;
     const cached = tradierProbeCache.get(key);
-    if (cached && Date.now() - cached.at < TRADIER_PROBE_TTL_MS) {
-      return { ok: cached.ok, reason: cached.reason };
+    if (cached) {
+      // Back off only FAILED probes (2026-09-07 fix). Exponential backoff applied to a healthy
+      // streak too would let a stale "ok" result ride all the way to the 60-minute ceiling; if
+      // the order path then actually went down, checkBrokerHealth could keep accepting that
+      // stale success for up to an hour instead of catching it within the intended 2-minute
+      // base window. Successful results always use the base TTL; only a failing streak backs off.
+      const ttlMs = cached.ok ? TRADIER_PROBE_BASE_TTL_MS : tradierProbeTtlMs(cached.streak);
+      if (Date.now() - cached.at < ttlMs) {
+        return { ok: cached.ok, reason: cached.reason };
+      }
     }
+    const remember = (ok: boolean, category: TradierProbeCategory, reason?: string): { ok: boolean; reason?: string } => {
+      const streak = cached && cached.ok === ok && cached.category === category ? cached.streak + 1 : 0;
+      tradierProbeCache.set(key, { at: Date.now(), ok, reason, category, streak });
+      return { ok, reason };
+    };
     try {
-      await this.trackHealth(() =>
-        this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
-          form: {
-            class: "equity",
-            symbol: "AAPL",
-            side: "buy",
-            quantity: "1",
-            type: "limit",
-            duration: "day",
-            price: "1.00",
-            preview: "true"
+      await this.trackHealth(
+        async () => {
+          let last: unknown;
+          for (let attempt = 0; attempt < TRADIER_TRANSIENT_ATTEMPTS; attempt++) {
+            try {
+              await this.request<{ order?: Record<string, unknown> }>("POST", `/accounts/${accountNumber}/orders`, {
+                form: {
+                  class: "equity",
+                  symbol: "AAPL",
+                  side: "buy",
+                  quantity: "1",
+                  type: "limit",
+                  duration: "day",
+                  price: "1.00",
+                  preview: "true"
+                }
+              });
+              return;
+            } catch (error) {
+              last = error;
+              const msg = error instanceof Error ? error.message : String(error);
+              if (!isTradierTransientServerError(msg) || attempt + 1 >= TRADIER_TRANSIENT_ATTEMPTS) throw error;
+              await sleepMs(tradierTransientBackoffMs(attempt));
+            }
           }
-        })
+          throw last;
+        },
+        { retryTransient: true }
       );
       // Preview accepted with result — OMS up.
-      tradierProbeCache.set(key, { at: Date.now(), ok: true });
-      return { ok: true };
+      return remember(true, "capability_ok");
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      // 5xx / backend / "unexpected error" OR "unexpected server error" — Tradier has been seen
+      // to answer with BOTH wordings; the old `/unexpected error/i` alternative alone missed the
+      // "server" variant entirely, which is why this bucket previously undercounted and nearly
+      // every real server-side failure fell through to the generic "unclassified" branch below.
+      const isServerError = /HTTP 5\d\d|\bbackend\b|unexpected\s+(?:server\s+)?error|OmsUnavailable|OmsInternalError/i.test(msg);
       // Structured OMS rejections prove the order path is alive (account just can't afford /
       // validate this probe). Treat as healthy order capability.
       if (
         /buying power|InitialMargin|MaintenanceMargin|OrderQuantity|LimitPrice|IncorrectOrder|not enough|day.?trad|margin|AccountDisabled|TradingDenied|AssetTrading|pdt/i.test(
           msg
         ) &&
-        !/HTTP 5\d\d|backend|unexpected error|OmsUnavailable|OmsInternal/i.test(msg)
+        !isServerError
       ) {
-        tradierProbeCache.set(key, { at: Date.now(), ok: true });
-        return { ok: true };
+        return remember(true, "capability_ok");
       }
-      if (/HTTP 5\d\d|backend|unexpected error|OmsUnavailable|OmsInternalError/i.test(msg)) {
+      if (isServerError) {
         const reason = `Tradier order path unavailable: ${msg.slice(0, 220)}`;
-        tradierProbeCache.set(key, { at: Date.now(), ok: false, reason });
-        return { ok: false, reason };
+        return remember(false, "server_error", reason);
       }
-      // Connectivity / auth failures — cannot place.
+      if (isAbortOrTimeoutError(error)) {
+        const reason = `Tradier order capability probe timed out: ${msg.slice(0, 220)}`;
+        return remember(false, "timeout", reason);
+      }
+      if (isTransientNetworkError(error)) {
+        const reason = `Tradier order capability probe failed (network): ${msg.slice(0, 220)}`;
+        return remember(false, "connectivity", reason);
+      }
+      // Unrecognized failure shape — kept as its own category rather than folded into
+      // "connectivity" so a genuinely new Tradier error string stays visible as such.
       const reason = `Tradier order capability probe failed: ${msg.slice(0, 220)}`;
-      tradierProbeCache.set(key, { at: Date.now(), ok: false, reason });
-      return { ok: false, reason };
+      return remember(false, "unclassified", reason);
     }
   }
 
@@ -899,6 +1304,57 @@ class TradierBrokerGateway implements BrokerGateway {
     };
   }
 
+  async placeOptionOrder(input: {
+    accountNumber: string;
+    occSymbol: string;
+    intent: "buy_to_open" | "sell_to_close" | "buy_to_close" | "sell_to_open";
+    quantity: number;
+    type: "market" | "limit";
+    limitPrice?: number;
+    timeInForce?: import("./types").TimeInForce;
+    refId: string;
+  }): Promise<ExecutedOrder> {
+    this.assertSandboxOrderWindowOpen();
+    const { parseOccSymbol } = await import("./option-orders");
+    const parsed = parseOccSymbol(input.occSymbol);
+    const underlying = parsed?.underlyingSymbol ?? input.occSymbol.slice(0, 4);
+
+    const form: Record<string, string> = {
+      class: "option",
+      symbol: underlying,
+      option_symbol: input.occSymbol,
+      side: input.intent,
+      quantity: String(Math.max(1, Math.round(input.quantity))),
+      type: input.type === "limit" ? "limit" : "market",
+      duration: input.timeInForce === "gtc" ? "gtc" : "day",
+      tag: input.refId
+    };
+    if (input.type === "limit" && input.limitPrice != null) {
+      form.price = input.limitPrice.toFixed(2);
+    }
+
+    const body = await this.postOrderToleratingTransientServerError<{ order?: Record<string, unknown> }>(
+      input.accountNumber,
+      input.refId,
+      form
+    );
+
+    const id = body.order?.id ?? body.order?.order_id ?? input.refId;
+    const state = String(body.order?.status ?? "pending");
+    return {
+      orderId: String(id),
+      refId: input.refId,
+      state,
+      filledQuantity: input.quantity,
+      averagePrice: input.limitPrice,
+      raw: body
+    };
+  }
+
+  async cancelOptionOrder(accountNumber: string, orderId: string): Promise<ExecutedOrder> {
+    return this.cancelEquityOrder(accountNumber, orderId);
+  }
+
   // Identifies and cancels a bracket's (otoco/oto) still-resting sibling legs given the ORIGINAL
   // entry order's own container ID. Reuses equityRowsFromTradierOrder — the SAME leg-flattening
   // helper getEquityOrders already relies on for coverage — so this shares its exact (and, per that
@@ -918,14 +1374,16 @@ class TradierBrokerGateway implements BrokerGateway {
   async cancelBracketSiblingLegs(accountNumber: string, originalOrderId: string): Promise<{ cancelledOrderIds: string[] }> {
     let body: { order?: Record<string, unknown> };
     try {
-      body = await this.trackHealth(() =>
-        this.request<{ order?: Record<string, unknown> }>("GET", `/accounts/${accountNumber}/orders/${originalOrderId}`)
+      body = await this.trackHealth(
+        () =>
+          this.request<{ order?: Record<string, unknown> }>("GET", `/accounts/${accountNumber}/orders/${originalOrderId}`),
+        { retryTransient: true }
       );
     } catch (error) {
       // "Order gone" means nothing to tear down, safe to resolve as done — Tradier surfaces this
       // TWO ways: a genuine HTTP 404 (this.request's `!response.ok` branch), or a 200 response with
       // its own `{errors: {error: "not found"}}` validation envelope (this.request's second throw
-      // path, which carries no HTTP-status prefix at all — see formatTradierError). Any OTHER
+      // path, prefixed as `Tradier HTTP 422:` — see formatTradierError). Any OTHER
       // failure (network, rate-limit, 5xx, an unrelated validation error) is transient/real and must
       // propagate so reconcilePendingBracketTeardowns' bounded-retry sweep actually retries it,
       // instead of the row being silently and permanently dropped on the first hiccup.
@@ -989,6 +1447,307 @@ export function equityRowsFromTradierOrder(row: Record<string, unknown>): Record
     });
   }
   return out;
+}
+
+// A definitive "this order id does not exist" from Tradier: a real HTTP 404, or a 200 carrying its
+// own `{errors: {error: "... not found"}}` envelope that names the order.  Anything else (network,
+// rate limit, 5xx, an unrelated validation error) is NOT absence and must propagate.
+function isTradierOrderNotFound(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^Tradier HTTP 404\b/.test(message)) return true;
+  // request() always prefixes `Tradier HTTP <status>:` at the start of error.message (see request()).
+  const body422 = message.match(/^Tradier HTTP 422:\s*(.*)$/s)?.[1];
+  if (body422 !== undefined) {
+    if (/^not found\b/i.test(body422)) return true;
+    if (/^order[^.]{0,40}not found/i.test(body422)) return true;
+  }
+  return false;
+}
+
+/** getEquityOrder's in-band "Tradier answered: no such order" marker (see getEquityOrder). */
+const TRADIER_ORDER_NOT_FOUND: unique symbol = Symbol("tradier-order-not-found");
+
+// The raw Tradier side word, only when it is one Tradier actually uses.  mapTradierSideRead maps an
+// unknown or missing side to "buy", which is fine for display but would fabricate a BUY if a
+// broker-originated fill were booked from it.
+function recognizedTradierSide(raw: unknown): OrderSide | undefined {
+  const word = String(raw ?? "").trim().toLowerCase();
+  return word === "buy" || word === "sell" || word === "sell_short" || word === "buy_to_cover" ? mapTradierSideRead(word) : undefined;
+}
+
+function recognizedTradierType(raw: unknown): OrderType | undefined {
+  const word = String(raw ?? "").trim().toLowerCase();
+  switch (word) {
+    case "market":
+    case "limit":
+    case "stop":
+    case "stop_limit":
+      return mapTradierTypeRead(word);
+    default:
+      return undefined;
+  }
+}
+
+function rawLegs(row: Record<string, unknown>): Record<string, unknown>[] {
+  const legField = row.leg ?? row.legs;
+  if (legField === undefined || legField === null) return [];
+  return arr<Record<string, unknown>>(legField);
+}
+
+function isEquityLeg(leg: Record<string, unknown>): boolean {
+  return String(leg.class ?? "").toLowerCase() === "equity";
+}
+
+function withContainerFallback(row: Record<string, unknown>, leg: Record<string, unknown>): Record<string, unknown> {
+  return {
+    // Container-level fallbacks first, overlaid by the leg's own fields (leg wins).  Execution
+    // fields (exec_quantity / avg_fill_price) are never inherited — a leg only carries its own.
+    symbol: row.symbol,
+    status: row.status,
+    create_date: row.create_date,
+    transaction_date: row.transaction_date,
+    duration: row.duration,
+    ...leg
+  };
+}
+
+function equityLegsWithContainerFallback(row: Record<string, unknown>): Record<string, unknown>[] {
+  return rawLegs(row).filter(isEquityLeg).map((leg) => withContainerFallback(row, leg));
+}
+
+/**
+ * Split a Tradier OTO/OTOCO container into its entry and its exit legs.  Two response shapes are in
+ * circulation and neither is verified against a live multi-leg account, so both are handled:
+ *  - LEG-ENTRY shape: the `leg` array carries every leg the order was placed with (Tradier's
+ *    indexed `symbol[0..n]` form), so leg 0 is the entry and the rest are its exits.  Recognized
+ *    by the TOTAL leg count alone (every class, otoco = 3, oto = 2): the container-entry shape
+ *    holds one leg fewer, so the count is unambiguous.  Sides are deliberately NOT consulted.  An
+ *    earlier side check (leg 0 opening, the rest closing) sent an owner's sell-first OTOCO, a
+ *    stock-plus-option OTO, and any side word Tradier spells differently to the container-entry
+ *    branch, which then booked the container's mirrored execution AND leg 0's own execution: the
+ *    same shares twice.  A non-equity leg 0 leaves the bracket with no equity entry.
+ *  - CONTAINER-ENTRY shape (the one getEquityOrders / cancelBracketSiblingLegs assume): the
+ *    container's own top-level fields are the entry and `leg` holds only the exits.
+ * Returns undefined for anything that is not an OTO/OTOCO container.
+ */
+export function tradierBracketParts(row: Record<string, unknown>):
+  | { entry: Record<string, unknown> | undefined; entryIsLeg: boolean; exits: Record<string, unknown>[] }
+  | undefined {
+  const cls = String(row.class ?? "").toLowerCase();
+  if (cls !== "oto" && cls !== "otoco") return undefined;
+  const legs = rawLegs(row);
+  const fullLegCount = cls === "otoco" ? 3 : 2;
+  if (legs.length === fullLegCount) {
+    const [first, ...rest] = legs;
+    return {
+      entry: isEquityLeg(first) ? withContainerFallback(row, first) : undefined,
+      entryIsLeg: true,
+      exits: rest.filter(isEquityLeg).map((leg) => withContainerFallback(row, leg))
+    };
+  }
+  return { entry: row, entryIsLeg: false, exits: equityLegsWithContainerFallback(row) };
+}
+
+function tradierOrderClassFromContainerClass(containerClass: string): string | undefined {
+  if (containerClass === "equity" || containerClass === "") return undefined;
+  if (containerClass === "otoco" || containerClass === "oto" || containerClass === "oco" || containerClass === "bracket") {
+    return containerClass;
+  }
+  return undefined;
+}
+
+/**
+ * Tradier can leave an OTOCO container at "open" while the day-TIF entry leg is already expired.
+ * Reconciliation and the listing must follow the entry leg's terminal state when nothing executed.
+ */
+export function resolveTradierBracketContainerState(
+  container: Record<string, unknown>,
+  parts: NonNullable<ReturnType<typeof tradierBracketParts>>
+): string {
+  const containerState = String(container.status ?? "").trim().toLowerCase();
+  const entry = parts.entry;
+  if (!entry) return containerState || "unknown";
+  const entryState = String(entry.status ?? "").trim().toLowerCase();
+  const entryExec = optionalNumber(entry.exec_quantity) ?? 0;
+  if (entryState && (isRejectedOrCanceledState(entryState) || entryState === "expired") && entryExec <= 0) {
+    return entryState;
+  }
+  if (entryExec > 0 || entryState === "filled" || entryState === "partially_filled") {
+    return entryState || containerState;
+  }
+  return containerState || entryState || "unknown";
+}
+
+function attachTradierBracketLegAttribution(container: Record<string, unknown>, order: EquityOrder): EquityOrder {
+  const containerClass = String(container.class ?? "").toLowerCase();
+  const orderClass = tradierOrderClassFromContainerClass(containerClass);
+  if (!orderClass) return order;
+  return {
+    ...order,
+    orderClass,
+    parentOrderId: container.id != null ? String(container.id) : order.parentOrderId,
+    parentClientOrderId: optionalString(container.tag) ?? order.parentClientOrderId
+  };
+}
+
+/** Map the container row kept in the flattened listing (id + tag for placement reconciliation). */
+export function mapTradierBracketContainerRow(container: Record<string, unknown>): EquityOrder {
+  const parts = tradierBracketParts(container);
+  const cls = String(container.class ?? "").toLowerCase();
+  const order = mapTradierOrder(container);
+  if (!parts || !["oto", "otoco", "oco"].includes(cls)) return order;
+  const resolvedState = resolveTradierBracketContainerState(container, parts);
+  const entry = parts.entry;
+  const base: EquityOrder = {
+    ...order,
+    /* Leg-entry shape surfaces the real entry as its own row; bracket class on the container
+       would pair it with exit siblings and misclassify the entry as an exit leg. */
+    ...(parts.entryIsLeg ? {} : { orderClass: tradierOrderClassFromContainerClass(cls) }),
+    state: resolvedState
+  };
+  if (parts.entryIsLeg && entry) {
+    const entryView = withContainerFallback(container, entry);
+    const entrySide = recognizedTradierSide(entryView.side);
+    const entryType = recognizedTradierType(entryView.type);
+    const baseType = recognizedTradierType(container.type) ?? recognizedTradierType(base.type) ?? base.type;
+    const mergedType = entryType ?? baseType;
+    const entryLimit = optionalNumber(entryView.price);
+    const entryStop = optionalNumber(entryView.stop_price);
+    const limitPrice = carriesLimitPrice(mergedType)
+      ? entryLimit ?? (carriesLimitPrice(baseType) ? base.limitPrice : undefined)
+      : undefined;
+    const stopPrice = carriesStopPrice(mergedType)
+      ? entryStop ?? (carriesStopPrice(baseType) ? base.stopPrice : undefined)
+      : undefined;
+    return {
+      ...base,
+      ...(entrySide !== undefined ? { side: entrySide } : {}),
+      ...(entryType !== undefined ? { type: entryType } : {}),
+      quantity: optionalNumber(entryView.quantity) ?? base.quantity,
+      limitPrice,
+      stopPrice,
+      filledQuantity: optionalNumber(entry.exec_quantity) ?? base.filledQuantity,
+      averagePrice: optionalNumber(entry.avg_fill_price) ?? base.averagePrice
+    };
+  }
+  return base;
+}
+
+/** Map one equity leg nested under an OTO/OTOCO/OCO container. Exit legs omit `tag` but inherit attribution. */
+function tradierBracketLegIsEntry(container: Record<string, unknown>, leg: Record<string, unknown>): boolean {
+  const parts = tradierBracketParts(container);
+  return Boolean(parts?.entryIsLeg && parts.entry && String(parts.entry.id) === String(leg.id));
+}
+
+function attachTradierBracketEntryLegAttribution(container: Record<string, unknown>, order: EquityOrder): EquityOrder {
+  return {
+    ...order,
+    parentOrderId: container.id != null ? String(container.id) : order.parentOrderId,
+    parentClientOrderId: optionalString(container.tag) ?? order.parentClientOrderId
+  };
+}
+
+export function mapTradierBracketLegRow(container: Record<string, unknown>, leg: Record<string, unknown>): EquityOrder {
+  const order = mapTradierOrder(withContainerFallback(container, leg));
+  return tradierBracketLegIsEntry(container, leg)
+    ? attachTradierBracketEntryLegAttribution(container, order)
+    : attachTradierBracketLegAttribution(container, order);
+}
+
+/**
+ * The reconciliation view of one Tradier order row.  A plain order maps as-is.  A bracket container
+ * maps to its ENTRY's state and execution under the CONTAINER's id and tag (the id the app stored at
+ * placement), with its exit legs alongside so their executions can be booked too.
+ */
+export function tradierOrderLookupFromRow(row: Record<string, unknown>): BrokerOrderLookup {
+  const parts = tradierBracketParts(row);
+  if (!parts) return { order: mapTradierOrder(row) };
+  // Exit legs are BOOKED from this view (bookBracketExitLegs), so a leg without a recognized side
+  // word is dropped here exactly as executionsFromTradierRow drops it: mapTradierSideRead would
+  // otherwise turn it into a fabricated broker-originated BUY.
+  const exitLegs = parts.exits
+    .filter((leg) => recognizedTradierSide(leg.side))
+    .map((leg) => attachTradierBracketLegAttribution(row, mapTradierOrder({ ...leg, tag: undefined })));
+  const entry = parts.entry;
+  if (!parts.entryIsLeg || !entry) {
+    return {
+      order: mapTradierBracketContainerRow(row),
+      exitLegs
+    };
+  }
+  const view: Record<string, unknown> = {
+    ...entry,
+    id: row.id,
+    tag: row.tag,
+    symbol: entry.symbol ?? row.symbol,
+    create_date: row.create_date ?? entry.create_date,
+    status: resolveTradierBracketContainerState(row, parts)
+  };
+  const mapped = mapTradierOrder(view);
+  return {
+    order: mapped,
+    ...(entry.id !== undefined && entry.id !== null ? { entryLegId: String(entry.id) } : {}),
+    exitLegs
+  };
+}
+
+/**
+ * Every EQUITY execution a raw listing row contributes, with its bracket role.  Rows whose side is
+ * not a recognized Tradier side word are dropped (never booked as a default "buy").
+ *  - class equity: one `single`.
+ *  - OTO/OTOCO: the entry (the leg, or the container itself in the container-entry shape) as
+ *    `entry`, each exit leg as `exit`, all carrying the container id and tag.  Never both the
+ *    container and its own entry leg (see tradierBracketParts).
+ *  - OCO: every equity leg is an `exit` (an OCO only ever closes).
+ *  - multileg/combo: each equity leg as a `single` under its container.
+ */
+export function executionsFromTradierRow(row: Record<string, unknown>): BrokerExecution[] {
+  const cls = String(row.class ?? "").toLowerCase();
+  if (cls === "equity") {
+    return recognizedTradierSide(row.side) ? [{ order: mapTradierOrder(row), role: "single" }] : [];
+  }
+  const parentOrderId = row.id !== undefined && row.id !== null ? String(row.id) : undefined;
+  const parentClientOrderId = optionalString(row.tag);
+  const withParent = (order: EquityOrder, role: BrokerExecution["role"]): BrokerExecution => ({
+    order,
+    role,
+    ...(parentOrderId ? { parentOrderId } : {}),
+    ...(parentClientOrderId ? { parentClientOrderId } : {})
+  });
+  const parts = tradierBracketParts(row);
+  if (parts) {
+    const out: BrokerExecution[] = [];
+    if (parts.entry && recognizedTradierSide(parts.entry.side)) {
+      if (parts.entryIsLeg) {
+        out.push(
+          withParent(
+            attachTradierBracketEntryLegAttribution(row, mapTradierOrder({ ...parts.entry, tag: undefined })),
+            "entry"
+          )
+        );
+      } else {
+        out.push(withParent(mapTradierBracketContainerRow(row), "entry"));
+      }
+    }
+    for (const exit of parts.exits) {
+      if (recognizedTradierSide(exit.side)) {
+        out.push(
+          withParent(
+            attachTradierBracketLegAttribution(row, mapTradierOrder({ ...exit, tag: undefined })),
+            "exit"
+          )
+        );
+      }
+    }
+    return out;
+  }
+  if (cls === "oco" || cls === "multileg" || cls === "combo") {
+    const role: BrokerExecution["role"] = cls === "oco" ? "exit" : "single";
+    return equityLegsWithContainerFallback(row)
+      .filter((leg) => recognizedTradierSide(leg.side))
+      .map((leg) => withParent(mapTradierOrder({ ...leg, tag: undefined }), role));
+  }
+  return [];
 }
 
 // Map a raw Tradier order object to our EquityOrder. State is stored RAW (broker-side.ts normalizes).

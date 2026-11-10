@@ -2,17 +2,17 @@
 
 /** Settings — GLOBAL-ONLY since the 2026-07-10 IA restructure: everything here
  *  is either ALL YOUR ACCOUNTS (event notifications, delivery channels, scan
- *  shape, learning review, typed confirmation, boot behavior — user-level,
- *  overlaid on every account), THIS BROWSER (appearance), OPERATOR (admin
- *  links), REFERENCE (glossary), or DANGER (deletion). Nothing account-scoped
- *  lives here: per-account config (models, prompt, weights) belongs to
- *  Strategy (/console/strategy) and Guardrails (/console/guardrails,
+ *  shape, learning review, daily LLM budget, typed confirmation, boot behavior
+ *  — user-level, overlaid on every account), THIS BROWSER (appearance),
+ *  OPERATOR (admin links), REFERENCE (glossary), or DANGER (deletion). Nothing
+ *  account-scoped lives here: per-account config (models, prompt, weights)
+ *  belongs to Strategy (/console/strategy) and Guardrails (/console/guardrails,
  *  including tax treatment). The one-time-setup half of the old Settings page
  *  — broker connections and API keys — split out to Connections
  *  (/console/connections) in the 2026-07-16 IA restructure; a 3-line hash
  *  safety net below redirects any old #brokers/#api-keys bookmark there.
  *  Sub-sections live in sibling modules (delivery/danger/help/sharing/
- *  learning-review) with their fetch helpers in ./lib. */
+ *  learning-review / llm-budget) with their fetch helpers in ./lib. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -21,6 +21,8 @@ import type { NotificationEventType } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPE_LABELS } from "@/lib/dashboard-ui";
 import { savePolicy, setAutoResume, ConsoleApiError } from "../lib/api";
+import { resolveSourceFeatureNumberCommit } from "../lib/number-commit";
+import { loginProviderLabel } from "../lib/labels";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useAutoSave } from "../lib/useAutoSave";
 import { useConsoleData } from "../lib/useConsoleData";
@@ -28,6 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
+import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
 import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
@@ -35,6 +38,9 @@ import { AccountDeletionCard } from "./danger";
 import { DeliveryChannelsCard } from "./delivery";
 import { HelpGlossaryCard } from "./help";
 import { LearningReviewCard } from "./learning-review";
+import { LegalCard } from "./legal";
+import { LlmBudgetCard } from "./llm-budget";
+import { ProxyCard } from "./proxy";
 import { DataSharingCard } from "./sharing";
 import {
   fetchSourceFeatures,
@@ -50,12 +56,14 @@ const SETTINGS_TOC: ReadonlyArray<{ id: string; label: string }> = [
   { id: "notifications", label: "Notifications" },
   { id: "delivery", label: "Delivery" },
   { id: "sharing", label: "Sharing" },
+  { id: "legal", label: "Legal" },
   { id: "learning-review", label: "Learning review" },
+  { id: "llm-budget", label: "AI budget" },
   { id: "scan-shape", label: "Scan shape" },
   { id: "data-sources", label: "Data sources" },
   { id: "confirmation", label: "Confirmation" },
   { id: "boot", label: "Boot" },
-  { id: "you", label: "You" },
+  { id: "you", label: "Account" },
   { id: "appearance", label: "Display" },
   { id: "glossary", label: "Glossary" },
   { id: "danger", label: "Danger" }
@@ -81,6 +89,7 @@ const EVENT_HINT: Record<NotificationEventType, string> = {
   proposal_withdrawn: "the strategist took an idea back",
   limit_order_stale: "a limit order has been working too long",
   provider_degraded: "a data provider is failing",
+  liveness_warning: "the trading liveness check degraded",
   budget_alert: "a usage budget threshold was crossed",
   learning_review: "the daily learning review posted its findings",
   deterministic_bear_veto: "the rule-based bear check vetoed a trade idea",
@@ -91,9 +100,18 @@ const EVENT_HINT: Record<NotificationEventType, string> = {
   storage_warning: "the server's database storage crossed a warning threshold",
   autonomy_halted_on_boot: "a restart halted trading autonomy until you re-arm it",
   option_alert: "an option contract changed status or expired",
-  earningscalls_entitlement_blocked: "the EarningsCalls transcript program paused on a plan-entitlement problem",
-  risk_advisory: "a risk guardrail was breached but the agent is still in control (advisory)",
-  protective_exit_failing: "a synthetic protective exit keeps failing and is still retrying"
+  earningscalls_entitlement_blocked: "the EarningsCalls.dev transcript program paused on a plan-entitlement problem",
+  roic_status_advisory: "the ROIC.ai transcript program status and limits (advisory)",
+  risk_advisory: "a risk guardrail was breached; nothing was blocked or changed (advisory)",
+  protective_exit_failing: "a synthetic protective exit keeps failing and is still retrying",
+  signal_health: "the AI's confidence signal is losing predictive power against matured outcomes (advisory)",
+  lookahead_leak: "the weekly lookahead audit found decision inputs that differ when replayed from point-in-time data (advisory)",
+  // Not shown in the list below — the daily watchlist digest has its own dedicated toggle in
+  // Delivery (settings/delivery.tsx, notification_prefs.watchlistDigestEnabled) and is delivered
+  // via notify() directly rather than through this enabledEvents gate, so an entry here would be
+  // a second, non-functional on/off switch. Kept in the map only so NOTIFICATION_EVENT_TYPES stays
+  // exhaustively labeled.
+  watchlist_digest: "your daily watchlist digest sends (configured in Delivery, below)"
 };
 
 /** Sticky horizontal jump chips for the long Settings page (UX PR-B4).
@@ -252,6 +270,9 @@ export default function SettingsPage() {
         <div id="sharing" className={SECTION_SCROLL_MT}>
           <DataSharingCard />
         </div>
+        <div id="legal" className={SECTION_SCROLL_MT}>
+          <LegalCard />
+        </div>
         {/* learningReviewEnabled/Mode/Model are USER-level policy fields
             (USER_LEVEL_POLICY_FIELDS in db-profiles): the review runs once per
             user per day over user-level learned context, so its config overlays
@@ -261,6 +282,9 @@ export default function SettingsPage() {
         <div id="learning-review" className={SECTION_SCROLL_MT}>
           <LearningReviewCard />
         </div>
+        <div id="llm-budget" className={SECTION_SCROLL_MT}>
+          <LlmBudgetCard />
+        </div>
         <div id="scan-shape" className={SECTION_SCROLL_MT}>
           <ScanShapeCard />
         </div>
@@ -268,6 +292,9 @@ export default function SettingsPage() {
         <div id="data-sources" className={SECTION_SCROLL_MT}>
           <div id="fmp-features" className="contents">
             <DataSourcesCard />
+          </div>
+          <div className="mt-4">
+            <ProxyCard />
           </div>
         </div>
         {/* requireTypedConfirmation is a USER-level policy field
@@ -288,7 +315,7 @@ export default function SettingsPage() {
       {/* ── THIS BROWSER ── */}
       <section className="flex flex-col gap-4">
         <div className="flex items-center gap-2">
-          <Chip tone="muted" title="Settings tagged THIS BROWSER are stored in this browser only. They change how the console looks here, not how the strategy trades.">
+          <Chip tone="muted" title="Settings tagged THIS BROWSER are stored in this browser only.  They change how the console looks here, not how the strategy trades.">
             THIS BROWSER
           </Chip>
           <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
@@ -350,7 +377,7 @@ function AdvancedActionConfirmationCard() {
         next ? "Typed confirmation on" : "Typed confirmation off",
         next
           ? "Approving a broker order, replacing a live order, and loosening a guardrail ask you to type the phrase first."
-          : "Those are now ordinary one-click actions. Winding down (which sells) and account deletion still confirm."
+          : "Those are now ordinary one-click actions.  Winding down (which sells) and account deletion still confirm."
       );
     } catch (error) {
       toast.push("neg", "Couldn't save", error instanceof ConsoleApiError ? error.message : String(error));
@@ -362,7 +389,7 @@ function AdvancedActionConfirmationCard() {
     <Card title="Advanced action confirmation">
       <Field
         label="Type a phrase to confirm high-impact live actions"
-        hint="One switch for your whole login — it applies across every account you connect. On: approving a broker order, replacing a live order at market, and loosening a guardrail on a live account each ask you to type a short phrase (e.g. APPROVE LIVE NVDA) first. Off: they are one click. Winding down (which SELLS) and deleting an account always keep their own typed confirmation regardless."
+        hint="One switch for your whole login — it applies across every account you connect.  On: approving a broker order, replacing a live order at market, and loosening a guardrail on a live account each ask you to type a short phrase (e.g. APPROVE LIVE NVDA) first. Off: they are one click.  Winding down (which SELLS) and deleting an account always keep their own typed confirmation regardless."
       >
         <div className="flex items-center gap-3">
           <Toggle
@@ -526,7 +553,8 @@ function EventNotificationsCard() {
         one you&apos;re viewing. Where they go (webhook URL, push/email/SMS) is configured in Delivery channels, below.
       </p>
       <div className="grid gap-1.5 sm:grid-cols-2">
-        {NOTIFICATION_EVENT_TYPES.map((type) => {
+        {/* watchlist_digest is deliberately excluded — see the EVENT_HINT comment above. */}
+        {NOTIFICATION_EVENT_TYPES.filter((type) => type !== "watchlist_digest").map((type) => {
           const on = events.includes(type);
           const hint = EVENT_HINT[type];
           return (
@@ -589,7 +617,7 @@ function ScanShapeCard() {
             id="scan-limit"
             value={String(candidateLimit ?? "")}
             emptyValue={0}
-            title="How many top-ranked symbols get full enrichment (fundamentals, news, technicals) each run. More = wider view, slower and costlier runs. Saves when you click away."
+            title="How many top-ranked symbols get full enrichment (fundamentals, news, technicals) each run.  More = wider view, slower and costlier runs.  Saves when you click away."
             onValueChange={(parsed) => setDraft((d) => ({ ...d, marketScanCandidateLimit: parsed }))}
             onBlur={() => commitNumber("marketScanCandidateLimit", candidateLimit, policy.marketScanCandidateLimit)}
           />
@@ -599,7 +627,7 @@ function ScanShapeCard() {
             id="scan-reserve"
             value={String(outlierReserve ?? "")}
             emptyValue={0}
-            title="Of the candidate slots, how many are held for symbols that rank below the cutoff but carry a notable web signal (news spike, unusual activity). Saves when you click away."
+            title="Of the candidate slots, how many are held for symbols that rank below the cutoff but carry a notable web signal (news spike, unusual activity).  Saves when you click away."
             onValueChange={(parsed) => setDraft((d) => ({ ...d, marketScanOutlierReserve: parsed }))}
             onBlur={() => commitNumber("marketScanOutlierReserve", outlierReserve, policy.marketScanOutlierReserve)}
           />
@@ -621,14 +649,16 @@ function BootBehaviorCard() {
     <Card title="After a restart">
       <div
         className="flex items-center justify-between gap-4 rounded-control px-1.5 py-1 transition-colors hover:bg-[color:var(--con-surface-2)]"
-        title="Controls what happens to Running accounts when the server process restarts. Off keeps the safety net: a human must start trading again."
+        title="Controls what happens to Running and auto-paused accounts when the server restarts or deploys.  Off keeps the safety net: a human must start trading again."
       >
         <div>
           <div className="text-[length:var(--con-fs-sm)] font-semibold">Auto-resume on boot</div>
           <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-            Off (recommended): whenever the server restarts, any Running account is stopped until a person starts it
-            again — a restored backup or crash-loop can never silently resume trading. Turning this ON removes that
-            safety net.
+            Off (recommended): whenever the server restarts or deploys, any Running account is stopped until a person
+            starts it again — a restored backup or crash-loop can never silently resume trading.  An account the app
+            auto-paused for a broker problem loses its auto-resume too, and stays stopped after the broker
+            recovers.  Turning this on removes that safety net: Running accounts keep running, and auto-paused
+            accounts start again by themselves once the broker recovers.
           </p>
         </div>
         <Toggle
@@ -655,12 +685,49 @@ function BootBehaviorCard() {
 
 // ── You ──────────────────────────────────────────────────────────────────────
 
+function SignOutEverywhereButton() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (
+      !window.confirm(
+        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
+      if (!res.ok) throw new Error(`Request failed (${res.status}).`);
+      window.location.href = "/login";
+    } catch (err) {
+      toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="con-btn con-btn-outline"
+      disabled={busy}
+      onClick={() => void run()}
+      title="Revoke every server session for this account, then return to sign in."
+    >
+      Sign out everywhere
+    </button>
+  );
+}
+
 function YouCard() {
   const { snapshot } = useConsoleData();
   if (!snapshot?.currentUser) return null;
   const user = snapshot.currentUser;
   return (
-    <Card title="You">
+    <Card title="Account">
       <div className="flex flex-wrap items-center gap-2 text-[length:var(--con-fs-sm)]">
         <span className="font-semibold" title="The signed-in user every ALL YOUR ACCOUNTS setting belongs to.">
           {user.name ?? user.email ?? user.userId}
@@ -668,34 +735,44 @@ function YouCard() {
         {user.email && user.name && <span className="text-[color:var(--con-faint)]">{user.email}</span>}
         {user.isAdmin && (
           <Chip tone="accent" title="This login has operator/admin rights on the server.">
-            admin
+            ADMIN
           </Chip>
         )}
         {user.loginProvider && (
           <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]" title="Which identity provider authenticated this session.">
-            via {user.loginProvider}
+            via {loginProviderLabel(user.loginProvider)}
           </span>
         )}
+      </div>
+      <div className="mt-3">
+        <SignOutEverywhereButton />
       </div>
     </Card>
   );
 }
 
 // ── All accounts: Data sources + per-user feature knobs ──────────────────────
-//
-// Owner 2026-08-06: FMP module toggles stay visible (even if disproportionate for
-// barely-active FMP). SEC / RAG / transcript / web-source knobs that used to be
-// Infisical-only are selectable here (user override → env → default).
 
-const GROUP_ORDER = ["fmp", "sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
+const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
 
+/** Decides what a "Data sources" number row's blur should persist, given the
+ *  raw text just typed and the row's last committed value. Returns null when
+ *  nothing should be written to the server: blank/unparseable text reverts to
+ *  the last committed value instead of silently saving a fallback (these rows
+ *  used to PATCH the row's default straight to the server on the very next
+ *  keystroke after clearing the field), and an unchanged value is a no-op. */
 function DataSourcesCard() {
   const toast = useToast();
   const [rows, setRows] = useState<SourceFeatureRow[] | null>(null);
   const [groups, setGroups] = useState<Record<string, { title: string; blurb: string }>>({});
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<import("../lib/useAutoSave").AutoSaveStatus>("idle");
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Raw in-progress text for number rows, keyed by row id — commit-on-blur (see
+  // commitNumberRow below), matching every other numeric field in the console
+  // instead of PATCHing the server on every keystroke.
+  const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -725,34 +802,66 @@ function DataSourcesCard() {
 
   const saveOne = async (id: string, value: boolean | number | string | null) => {
     setBusy(id);
+    setSaveStatus("saving");
+    setRows((cur) =>
+      (cur ?? []).map((row) => {
+        if (row.id !== id) return row;
+        if (value === null) {
+          return { ...row, value: row.defaultValue, source: "default" as const };
+        }
+        return { ...row, value, source: "user" as const };
+      })
+    );
     try {
       await patchSourceFeatures({ [id]: value });
       await load();
-      toast.push("pos", "Source setting saved", id);
+      setSaveStatus("saved");
     } catch (err) {
+      setSaveStatus("error");
       toast.push("neg", "Could not save", err instanceof ConsoleApiError ? err.message : String(err));
+      await load();
     } finally {
       setBusy(null);
     }
+  };
+
+  // Commits a number row's typed text on blur. Blank or unparseable text
+  // reverts to the row's last committed value instead of silently persisting
+  // a fallback (an emptied field used to write the row's default straight to
+  // the server on the very next keystroke).
+  const commitNumberRow = async (row: SourceFeatureRow) => {
+    const raw = numberDrafts[row.id];
+    setNumberDrafts((d) => {
+      if (!(row.id in d)) return d;
+      const copy = { ...d };
+      delete copy[row.id];
+      return copy;
+    });
+    if (raw === undefined) return;
+    const next = resolveSourceFeatureNumberCommit(raw, Number(row.value));
+    if (next === null) return;
+    await saveOne(row.id, next);
   };
 
   return (
     <Card
       title="Data sources"
       action={
-        <a
-          href="/console/connections#api-keys"
-          className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)] underline-offset-2 hover:underline"
-          title="Open Connections to add provider keys and plan tiers."
-        >
-          Manage keys →
-        </a>
+        <span className="flex items-center gap-2">
+          <SaveStatus status={saveStatus} />
+          <a
+            href="/console/connections#api-keys"
+            className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)] underline-offset-2 hover:underline"
+            title="Open Connections to add provider keys and plan tiers."
+          >
+            Manage keys →
+          </a>
+        </span>
       }
     >
       <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        Per-user feature knobs for data planes that used to be hidden in Infisical. Values you set here
-        override server env for your account; leave unset to follow env/default. API keys and plan tiers
-        still live on{" "}
+        Turn data features on or off for your account.  Values you set here override the current
+        default; leave a row unset to keep it.  API keys and plan tiers still live on{" "}
         <a href="/console/connections#api-keys" className="font-semibold text-[color:var(--con-accent)] underline-offset-2 hover:underline">
           Connections
         </a>
@@ -776,13 +885,8 @@ function DataSourcesCard() {
         <Toggle
           checked={showAdvanced}
           onChange={setShowAdvanced}
-          label="Show advanced knobs"
+          label="Show Advanced Features"
         />
-        {/* Keep this list in sync with the `advanced: true` knob labels in
-            src/lib/source-settings-catalog.ts — it names what the toggle reveals. */}
-        <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          Multi-query retrieval, HyDE passages, SEC backfill worker, transcript storage rights, etc.
-        </span>
       </div>
 
       <div className="flex flex-col gap-4">
@@ -804,13 +908,15 @@ function DataSourcesCard() {
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-[length:var(--con-fs-sm)] font-semibold">{row.label}</span>
                         <Chip
-                          tone={row.source === "user" ? "pos" : row.source === "env" ? "accent" : "muted"}
+                          tone={row.source === "user" ? "pos" : row.source === "server" ? "info" : row.source === "env" ? "accent" : "muted"}
                           title={
                             row.source === "user"
                               ? "You overrode this for your account"
-                              : row.source === "env"
-                                ? "Following server Infisical/env"
-                                : "Catalog default"
+                              : row.source === "server"
+                                ? "Server-level override set by the operator in Admin > Operations"
+                                : row.source === "env"
+                                  ? "Using the server default"
+                                  : "Catalog default"
                           }
                         >
                           {row.source}
@@ -831,22 +937,20 @@ function DataSourcesCard() {
                         <Toggle
                           checked={Boolean(row.value)}
                           disabled={busy !== null}
+                          busy={busy === row.id}
                           onChange={(on) => void saveOne(row.id, on)}
                           label={row.label}
                         />
                       ) : row.type === "number" ? (
                         <RawNumInput
                           className="w-24"
-                          value={String(row.value)}
-                          emptyValue={Number(row.defaultValue) || 0}
+                          value={numberDrafts[row.id] ?? String(row.value)}
+                          emptyValue={Number(row.value) || 0}
                           min={row.min}
                           max={row.max}
                           disabled={busy === row.id}
-                          onValueChange={(n) => {
-                            // Debounce-ish: only persist when value actually changes (avoids
-                            // intermediate keystrokes that equal the previous commit after parse).
-                            if (Number.isFinite(n) && n !== Number(row.value)) void saveOne(row.id, n);
-                          }}
+                          onValueChange={(_n, raw) => setNumberDrafts((d) => ({ ...d, [row.id]: raw }))}
+                          onBlur={() => void commitNumberRow(row)}
                           aria-label={row.label}
                         />
                       ) : null}

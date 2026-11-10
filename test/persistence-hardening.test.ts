@@ -49,6 +49,32 @@ describe("runMigrations — versioned schema migrations", () => {
     db.close();
   });
 
+  it("safely handles tableExists and columnExists for missing and present tables/columns", async () => {
+    const { tableExists, columnExists } = await import("../src/lib/db");
+    const db = new RawDatabase(":memory:");
+
+    expect(tableExists(db, "non_existent_table")).toBe(false);
+    expect(columnExists(db, "non_existent_table", "col")).toBe(false);
+
+    db.exec("CREATE TABLE test_table (id TEXT PRIMARY KEY, alpha INTEGER);");
+    expect(tableExists(db, "test_table")).toBe(true);
+    expect(columnExists(db, "test_table", "id")).toBe(true);
+    expect(columnExists(db, "test_table", "alpha")).toBe(true);
+    expect(columnExists(db, "test_table", "beta")).toBe(false);
+    db.close();
+  });
+
+  it("applies all versioned migrations cleanly on a blank database without baseline tables", async () => {
+    const { applyVersionedMigrations, getSchemaVersion, getDb } = await import("../src/lib/db");
+    const blankDb = new RawDatabase(":memory:");
+    expect(Number(blankDb.pragma("user_version", { simple: true }))).toBe(0);
+
+    // Issue #2964: All migrations must execute without throwing "no such table" errors on an empty schema
+    expect(() => applyVersionedMigrations(blankDb)).not.toThrow();
+    expect(getSchemaVersion(blankDb)).toBe(getSchemaVersion(getDb()));
+    blankDb.close();
+  });
+
   it("recovers a legacy v49 database missing SEC insider transactions before v50 alters it", async () => {
     const { applyVersionedMigrations, getDb } = await import("../src/lib/db");
     const db = getDb();
@@ -68,7 +94,7 @@ describe("runMigrations — versioned schema migrations", () => {
       upsertConnectedAccount
     } = await import("../src/lib/db");
     const db = getDb();
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
     upsertConnectedAccount({
       id: "legacy-product-test",
@@ -83,7 +109,7 @@ describe("runMigrations — versioned schema migrations", () => {
     // DELETE catches missing account/user columns as well as proving the account itself is removed.
     db.pragma("user_version = 24");
     expect(() => applyVersionedMigrations(db)).not.toThrow();
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
     expect(listConnectedAccounts("local").some((account) => account.broker === "test")).toBe(false);
   });
@@ -101,7 +127,7 @@ describe("runMigrations — versioned schema migrations", () => {
 
     db.pragma("user_version = 25");
     applyVersionedMigrations(db);
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
 
     const migrated = JSON.parse((db.prepare("SELECT value FROM user_settings WHERE id = ?").get("cap-default") as { value: string }).value);
@@ -148,7 +174,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 29");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
     expect(db.prepare(`
       SELECT state, attempt_token, ledger_authority FROM vector_ingest_commits WHERE id = ?
@@ -195,7 +221,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 31");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
     expect(db.prepare(`
       SELECT id, state, attempt_token, lease_expires_at
@@ -273,7 +299,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.pragma("user_version = 32");
     applyVersionedMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(71);
+    expect(getSchemaVersion(db)).toBe(102);
 
     expect(db.prepare(`
       SELECT commit_id FROM vector_document_heads
@@ -315,7 +341,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.prepare("INSERT INTO strategy_profiles (policy) VALUES (?)").run(JSON.stringify({ maxDailyNotional: 500 }));
     db.pragma("user_version = 25");
 
-    expect(applyVersionedMigrations(db)).toBe(71);
+    expect(applyVersionedMigrations(db)).toBe(102);
 
 
     for (const json of [
@@ -359,7 +385,7 @@ describe("runMigrations — versioned schema migrations", () => {
     db.prepare("INSERT INTO strategy_profiles (policy) VALUES (?)").run(JSON.stringify({ maxDailyNotional: 500 }));
     db.pragma("user_version = 26");
 
-    expect(applyVersionedMigrations(db)).toBe(71);
+    expect(applyVersionedMigrations(db)).toBe(102);
 
 
     for (const json of [
@@ -409,7 +435,7 @@ describe("runMigrations — versioned schema migrations", () => {
     `);
     db.pragma("user_version = 27");
 
-    expect(applyVersionedMigrations(db)).toBe(71);
+    expect(applyVersionedMigrations(db)).toBe(102);
 
     expect(db.prepare(`
       SELECT status, COUNT(*) AS count
@@ -446,7 +472,7 @@ describe("runMigrations — versioned schema migrations", () => {
       .run("unrelated:setting", JSON.stringify(now), now);
     db.pragma("user_version = 39");
 
-    expect(applyVersionedMigrations(db)).toBe(71);
+    expect(applyVersionedMigrations(db)).toBe(102);
 
     // v40 purges legacy broker-minimum cooldown keys; later migrations (v58) may seed
     // unrelated settings such as earningscalls_burst_pending — assert the purge, not a frozen key set.
@@ -492,7 +518,7 @@ describe("runMigrations — versioned schema migrations", () => {
     ).run(now);
     db.pragma("user_version = 45");
 
-    expect(applyVersionedMigrations(db)).toBe(71);
+    expect(applyVersionedMigrations(db)).toBe(102);
 
     expect(
       db.prepare(
@@ -518,7 +544,7 @@ describe("runMigrations — versioned schema migrations", () => {
     // Legacy v52 on-disk DB gains the table when versioned migrations re-run.
     const legacy = new RawDatabase(":memory:");
     legacy.pragma("user_version = 52");
-    expect(applyVersionedMigrations(legacy)).toBe(71);
+    expect(applyVersionedMigrations(legacy)).toBe(102);
     expect(
       legacy.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'socratic_coach_note_archive'").get()
     ).toBeTruthy();
@@ -551,7 +577,7 @@ describe("encryption-key boot guard", () => {
       environment: "paper",
       accountNumber: "PA-TEST",
       label: "Test",
-      apiKey: "super-secret-key",
+      apiKey: "super-s-key",
       isActive: true
     });
     expect(hasEncryptedCredentials(db)).toBe(true);

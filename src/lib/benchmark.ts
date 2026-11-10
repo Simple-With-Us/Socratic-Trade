@@ -1,25 +1,39 @@
 // SPY-benchmark equity-curve scoreboard.
 //
 // Compares the account's equity curve (from portfolio_snapshots) to SPY over the same window —
-// the honest "are we beating the market net of cost" readout. Both series are normalized to 100
-// at the first common date so they overlay on one axis. SPY daily closes come from the same
-// key-free history cascade every chart uses (fetchDailyOHLC). Never fabricates: if there isn't
-// enough history or SPY can't be fetched, returns null and the UI degrades to "—".
+// the honest "are we beating the market net of cost" readout. Two series share the same knots:
+//   - TWR indexes (both start at 100) for manager-skill % tiles.
+//   - Same-cash dollars: a shadow S&P book that starts with the same equity, grows with SPY
+//     each sub-period, with that day's verified deposit/withdrawal applied at the START of the
+//     sub-period (the same convention the account TWR uses).
+// SPY daily closes come from the same key-free history cascade every chart uses (fetchDailyOHLC).
+// Never fabricates: if there isn't enough history or SPY can't be fetched, returns null and the
+// UI degrades to "—".
 //
-// Deposits/withdrawals: no broker transfer ledger exists in this app, so external cash flows are
-// INFERRED per snapshot gap (deposits +, withdrawals −, paper resets, ACH). See cash-flows.ts.
+// Deposits/withdrawals: prefer the broker transfer ledger when present; otherwise INFERRED per
+// snapshot gap (deposits +, withdrawals −, paper resets, ACH). See cash-flows.ts.
+// A transfer is recorded on that day's snapshot (the last snapshot of the calendar day) and is
+// treated as arriving at the START of that day's sub-period by both the account TWR and the shadow.
 //
-// Multi-period time-weighted return (TWR) — the GIPS-style method the owner described:
+// Multi-period time-weighted return (TWR) — the GIPS-style method:
 //   Split the overall window into back-to-back sub-periods at each deposit/withdrawal.
-//   Sub-period account growth = V_end / (V_start + flow_at_end)  (flow is the external cash
-//   that lands on the end snapshot; 0 when no transfer that day).
+//   Sub-period account growth = V_end / (V_start + flow)  (flow is the external cash recorded on
+//   the end snapshot, treated as arriving at the START of the sub-period; 0 when no transfer
+//   that day).  The shadow below uses the same start-of-day convention (ST-4589).
 //   Sub-period SPY growth = SPY_end / SPY_start over the same calendar dates.
 //   Chain: overall = ∏(1 + r_i) − 1 for account and for SPY independently.
 // So "$100 for 10 days then $10 for 100 days" weights each regime's market performance by
 // geometric linking, not by simple (end−start−flows)/start which overweights the big balance.
 //
+// Same-cash shadow (dollars):
+//   shadow_0 = first equity.  Each later day: shadow = (shadow + verified flow) * SPY_factor.
+//   dollarExcess = last account equity − last shadow.  That is "what you would have had if
+//   the same cash had tracked the S&P."
+//
 // excessReturnPct = accountTWR − spyTWR (percentage points).
 
+import { resolveExternalCashFlows } from "./broker-cash-flows";
+import type { AlpacaAccountActivity } from "./alpaca-account-insights";
 import { fetchDailyOHLC } from "./history";
 // The external-cash-flow math lives in its own dependency-free module: the console's client
 // components need it, and reaching it through this file dragged history.ts + the db barrel into
@@ -27,6 +41,7 @@ import { fetchDailyOHLC } from "./history";
 import { inferExternalCashFlows, isInferredFlowUnverified, isoDate, round2 } from "./cash-flows";
 import type {
   BenchmarkComparison,
+  BenchmarkDollarPoint,
   BenchmarkSeriesPoint,
   BenchmarkSubPeriod,
   BenchmarkUnavailability,
@@ -99,13 +114,19 @@ export function normalizeAgainstBenchmark(
 
   const equityIndex: BenchmarkSeriesPoint[] = [];
   const benchmarkIndex: BenchmarkSeriesPoint[] = [];
+  const accountEquitySeries: BenchmarkDollarPoint[] = [];
+  const shadowBenchmarkSeries: BenchmarkDollarPoint[] = [];
   const subPeriods: BenchmarkSubPeriod[] = [];
 
   // Both series start at 100 on the first aligned date.
   let accountIndex = 100;
   let spyIndex = 100;
+  // Same-cash S&P shadow starts with the same dollars that were in the account.
+  let shadow = aligned[0].equity;
   equityIndex.push({ date: aligned[0].date, index: 100 });
   benchmarkIndex.push({ date: aligned[0].date, index: 100 });
+  accountEquitySeries.push({ date: aligned[0].date, value: round2(aligned[0].equity) });
+  shadowBenchmarkSeries.push({ date: aligned[0].date, value: round2(shadow) });
 
   let flowsApplied = 0;
   let netExternalFlows = 0;
@@ -129,8 +150,9 @@ export function normalizeAgainstBenchmark(
     }
 
     // ── Account sub-period (flow-neutral TWR) ──────────────────────────────
-    // V_end / (V_start + external_flow_at_end). Deposit (+): larger denominator so the
-    // injected cash is not counted as a gain. Withdrawal (−): smaller denominator so the
+    // V_end / (V_start + external_flow): the flow is treated as arriving at the START of the
+    // sub-period, the same convention the shadow uses below. Deposit (+): larger denominator so
+    // the injected cash is not counted as a gain. Withdrawal (−): smaller denominator so the
     // cash leaving is not counted as a loss.
     let accountFactor = 1;
     if (flow !== 0) {
@@ -162,6 +184,15 @@ export function normalizeAgainstBenchmark(
     equityIndex.push({ date: cur.date, index: round2(accountIndex) });
     benchmarkIndex.push({ date: cur.date, index: round2(spyIndex) });
 
+    // Apply today's verified flow at the START of the sub-period, then grow it with SPY — the
+    // same convention as the account factor above, so a flow day is graded consistently on both
+    // sides (ST-4589). Unverified inferred transfers are already zeroed. A withdrawal larger than
+    // the shadow floors at 0 below (never negative / NaN).
+    shadow = (shadow + flow) * spyFactor;
+    if (!Number.isFinite(shadow) || shadow < 0) shadow = 0;
+    accountEquitySeries.push({ date: cur.date, value: round2(cur.equity) });
+    shadowBenchmarkSeries.push({ date: cur.date, value: round2(shadow) });
+
     // Record every sub-period that either has a flow or is a material market move — and always
     // when a flow lands, so the UI can show "between transfers" segments. Snap quiet flat days
     // into coarser segments? Keep every step for honesty; callers may aggregate.
@@ -190,9 +221,14 @@ export function normalizeAgainstBenchmark(
   // recompute factors from endpoints). Keep every flow boundary as a hard cut.
   const coalesced = coalesceSubPeriods(subPeriods);
 
+  const lastAccountEquity = aligned[aligned.length - 1]!.equity;
   return {
     equityIndex,
     benchmarkIndex,
+    accountEquitySeries,
+    shadowBenchmarkSeries,
+    shadowValue: round2(shadow),
+    dollarExcess: round2(lastAccountEquity - shadow),
     accountReturnPct,
     benchmarkReturnPct,
     excessReturnPct: round2(accountReturnPct - benchmarkReturnPct),
@@ -268,13 +304,109 @@ export function coalesceSubPeriods(periods: BenchmarkSubPeriod[]): BenchmarkSubP
 /** Result of the SPY comparison with an honest "why not" when it cannot be computed. */
 export interface SpyBenchmarkResult {
   comparison: BenchmarkComparison | null;
-  /** Present whenever `comparison` is null, naming the reason (feed failure vs young account). */
-  unavailable?: BenchmarkUnavailability;
+  /** Present whenever `comparison` is null, naming the reason (feed failure vs young account).
+   *  Carries the machine-readable feed facts (`lastCloseDate`, `staleDays`, `stale`,
+   *  `fellBackToStaleCache`) alongside the human `detail`, so a consumer never has to parse prose
+   *  to tell "the feed is dead" from "the account is young". */
+  unavailable?: BenchmarkUnavailability & BenchmarkFeedFacts;
+  /** `ok` only when a real comparison was computed. Optional because the two deadline/catch
+   *  fallbacks in src/lib/dashboard.ts hand-build this shape; absent means "unknown", and the safe
+   *  read for a consumer is "no comparison" — never a 0.00%. */
+  status?: "ok" | "unavailable";
+  /** True when the SPY series itself is frozen/short — the feed died, as opposed to the account
+   *  being too young to compare. Present on both outcomes so a consumer can flag the feed. */
+  stale?: boolean;
+  /** What the history cascade actually returned, on BOTH outcomes. Diagnostic only — the comparison
+   *  numbers are never derived from it. */
+  feed?: BenchmarkFeedDiagnostic;
+}
+
+/** Machine-readable facts about the benchmark series, never prose-only. */
+export interface BenchmarkFeedFacts {
+  /** Newest usable close date in the series (undefined when the cascade returned nothing usable). */
+  lastCloseDate?: string;
+  /** Calendar days between the newest close and the reference clock. 0 on a fresh series. */
+  staleDays?: number;
+  /** True when the series is older than BENCHMARK_STALE_GRACE_DAYS. */
+  stale?: boolean;
+  /** Provenance stamped on the newest bar by the history cascade (e.g. "yahoo-finance"). */
+  source?: string;
+  /** When that bar was FETCHED. A recent `fetchedAt` on an old close date is the exact signature of
+   *  the history module's stale-local-cache fallback: the fetch "succeeded", the data did not. */
+  fetchedAt?: string;
+  /** True when the newest bar came from that stale-cache fallback — i.e. every live provider in the
+   *  cascade returned null. See the staleness note on computeSpyBenchmarkDetailed for why the error
+   *  itself is unrecoverable here. */
+  fellBackToStaleCache?: boolean;
+}
+
+/** Full per-call feed diagnostic — the same facts `unavailable` carries, plus the bar count and a
+ *  `detail` sentence. Always populated by computeSpyBenchmarkDetailed, on success and failure alike. */
+export interface BenchmarkFeedDiagnostic extends BenchmarkFeedFacts {
+  symbol: string;
+  /** Bars the history cascade returned, before the finite-close filter. */
+  bars: number;
+  /** Human sentence naming the failure; safe to render verbatim. */
+  detail?: string;
 }
 
 /** Calendar-day lag allowed between the last benchmark close and the account window's end before
- *  the series counts as stale (covers weekends/holidays + a same-day snapshot vs yesterday's close). */
+ *  the series counts as stale (covers weekends/holidays + a same-day snapshot vs yesterday's close).
+ *  ALSO the lag allowed between the last close and the wall clock before the series counts as stale
+ *  on its own (see `assessBenchmarkSeriesAge`) — a frozen feed is stale whether or not the account's
+ *  own snapshots happened to move. */
 export const BENCHMARK_STALE_GRACE_DAYS = 5;
+
+/** Provenance stamps the history cascade puts on bars it fell back to when EVERY live provider
+ *  failed (src/lib/history.ts, the stale-fallback branch): `history-cache-eod-stale` for the local
+ *  SQLite EOD cache, `imported-eod-stale` for the imported-EOD series (perf-17).  It re-stamps
+ *  `fetchedAt` with "now" while the bar DATES stay frozen, so the stamp is the only in-band signal
+ *  that the series is cached history rather than a live quote. */
+const STALE_CACHE_BAR_SOURCES: ReadonlySet<string> = new Set(["history-cache-eod-stale", "imported-eod-stale"]);
+
+/** Newest usable close in a series (undefined when nothing usable), by date order. */
+function newestClose(closes: Array<{ date: string; close: number }>): { date: string; close: number } | undefined {
+  let newest: { date: string; close: number } | undefined;
+  for (const c of closes) {
+    if (!Number.isFinite(c.close) || c.close <= 0) continue;
+    if (!newest || c.date > newest.date) newest = { date: c.date, close: c.close };
+  }
+  return newest;
+}
+
+/**
+ * Pure staleness gate on the wall clock, independent of the account's equity window (#2557 follow-up,
+ * 2026-09-25 review: the SPY series was stale since Jul 24 and the card just went blank).
+ *
+ * The original gate compared the newest close against the account window's END. That works while the
+ * account keeps taking snapshots and misses the case that actually bit: a dormant account whose
+ * snapshots froze the same week the feed died, where lastEquityDate and lastCloseDate are both months
+ * old and the gate passes — leaving a comparison whose every sub-period is 0.00% and whose "vs SPY"
+ * line silently re-prints the account number. A dead feed is not a flat market, so it is judged
+ * against `now` as well. Returns the unavailability, or null when the series is fresh. Exported for
+ * direct unit testing.
+ */
+export function assessBenchmarkSeriesAge(
+  closes: Array<{ date: string; close: number }>,
+  now: number = Date.now(),
+  benchmarkSymbol = "SPY"
+): (BenchmarkUnavailability & BenchmarkFeedFacts) | null {
+  const usable = closes.filter((c) => Number.isFinite(c.close) && c.close > 0);
+  if (usable.length < 2) return null; // short/empty series is `no-bars` — a different verdict.
+  const last = newestClose(usable);
+  if (!last) return null;
+  const lagMs = now - Date.parse(`${last.date}T00:00:00Z`);
+  if (!Number.isFinite(lagMs)) return null;
+  const staleDays = Math.max(0, Math.floor(lagMs / 86_400_000));
+  if (staleDays <= BENCHMARK_STALE_GRACE_DAYS) return null;
+  return {
+    reason: "stale-series",
+    detail: `${benchmarkSymbol} newest close is ${last.date}, ${staleDays} calendar days behind the reference clock (grace ${BENCHMARK_STALE_GRACE_DAYS}d)`,
+    lastCloseDate: last.date,
+    staleDays,
+    stale: true
+  };
+}
 
 /**
  * Pure staleness gate (#2557): a benchmark series whose last close predates the account window's
@@ -318,25 +450,47 @@ export function assessBenchmarkSeries(
  *
  * Synthetic fill-only curves (no real portfolio snapshots) are refused — those start at a fake
  * $100 equity base and are not comparable to SPY for an account holding real capital.
+ *
+ * WHY THE FEED GOES STALE (2026-09-25 review: "SPY stale since Jul 24", diagnosed here, not guessed).
+ * `fetchDailyOHLC` (src/lib/history.ts) is a cascade: local SQLite EOD cache → imported EOD →
+ * congress.trade → Tradier → Alpaca → Robinhood → Massive → ROIC → Tiingo → Yahoo → Marketstack.
+ * Every one of those per-source fetchers wraps its HTTP call in `try { … } catch { recordProviderCall(
+ * source, { ok: false }); return null; }` — the error is reduced to a boolean metric and DISCARDED.
+ * When the whole cascade returns null, the cascade does not return null to its caller: it returns
+ * the last local EOD cache, re-stamped with `fetchedAt = now` and `source = "history-cache-eod-stale"`,
+ * and writes one `eod_cache_stale` audit row whose payload is a fixed sentence with no provider
+ * names. So the caller cannot tell WHICH provider died, and the bar DATES never advance. That frozen
+ * series is what makes the benchmark blank and (before the wall-clock gate below) what made
+ * `alphaPct` disappear from every thesis row in src/lib/performance.ts.
+ *
+ * The two knobs this function can honestly turn without touching history.ts: (1) judge the series
+ * against the WALL CLOCK as well as the account window, so a feed frozen alongside a dormant account
+ * is caught instead of rendering a flat 0.00% "vs SPY"; (2) hand the caller the machine-readable
+ * feed facts (newest close, its age, its provenance, whether it came off the stale-cache fallback) so
+ * the blank says WHY. The provider error itself is NOT recoverable here — it was discarded upstream.
+ * Making it actionable means recording per-source failures in the history.ts cascade.
  */
 export async function computeSpyBenchmarkDetailed(
   equityCurve: EquityCurvePoint[],
   userId?: string,
   now: number = Date.now(),
-  fills?: FillEvent[]
+  fills?: FillEvent[],
+  brokerActivities?: AlpacaAccountActivity[]
 ): Promise<SpyBenchmarkResult> {
   if (!equityCurve || equityCurve.length < 2) {
-    return { comparison: null, unavailable: { reason: "insufficient-history" } };
+    return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
   }
-  // Refuse synthetic paper curves (`syntheticPaperCurve` uses equity = 100 + realized with no cash
-  // fields). IMPORTANT: do not let a single live tip (which has cash) "upgrade" a synthetic
-  // history into a real TWR — that made $100-base fill curves + $100k tip read as +tens of %
-  // "account return" on paper/sandbox accounts. Require ≥2 real snapshot points.
+  // Defense in depth against fabricated-equity curves (getPerformanceSummary no longer builds one
+  // when there are no persisted portfolio snapshots, but this filter stays as a second guard for
+  // any caller that hands in a hand-built curve without cash/positionsValue). IMPORTANT: do not
+  // let a single live tip (which has cash) "upgrade" a curve with no real snapshots into a real
+  // TWR — that made $100-base fill curves + $100k tip read as +tens of % "account return" on
+  // paper/sandbox accounts. Require ≥2 real snapshot points.
   const realCurve = equityCurve.filter(
-    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number"
+    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number" || p.brokerHistory === true
   );
   if (realCurve.length < 2) {
-    return { comparison: null, unavailable: { reason: "insufficient-history" } };
+    return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };
   }
   // Prefer the real-snapshot sub-curve (includes a live tip when present).
   equityCurve = realCurve;
@@ -345,17 +499,60 @@ export async function computeSpyBenchmarkDetailed(
     bars = await fetchDailyOHLC("SPY", now, userId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { comparison: null, unavailable: { reason: "fetch-failed", detail: message.slice(0, 200) } };
+    return {
+      comparison: null,
+      unavailable: { reason: "fetch-failed", detail: message.slice(0, 200) },
+      status: "unavailable",
+      stale: false
+    };
   }
   if (!bars || bars.length < 2) {
     return {
       comparison: null,
-      unavailable: { reason: "no-bars", detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` }
+      unavailable: { reason: "no-bars", detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` },
+      status: "unavailable",
+      stale: false,
+      feed: { symbol: "SPY", bars: bars?.length ?? 0, staleDays: 0, stale: false, detail: `SPY history cascade returned ${bars?.length ?? 0} bar(s)` }
     };
   }
   const closes = bars
     .map((b) => ({ date: isoDate(b.time), close: b.close }))
     .filter((b): b is { date: string; close: number } => b.date != null && Number.isFinite(b.close));
+
+  // Feed facts first, so EVERY return below can carry them. `newestClose` reads the same finite-close
+  // filter as the gates, and `source`/`fetchedAt` come off the newest BAR (not the newest close) so
+  // the stale-cache fallback signature survives a merged series.
+  const lastBar = bars[bars.length - 1];
+  const newest = newestClose(closes);
+  const barSource = typeof lastBar?.source === "string" ? lastBar.source : undefined;
+  const barFetchedAt = typeof lastBar?.fetchedAt === "string" ? lastBar.fetchedAt : undefined;
+  const staleDays = newest
+    ? Math.max(0, Math.floor((now - Date.parse(`${newest.date}T00:00:00Z`)) / 86_400_000))
+    : 0;
+  const feed: BenchmarkFeedDiagnostic = {
+    symbol: "SPY",
+    bars: bars.length,
+    ...(newest ? { lastCloseDate: newest.date } : {}),
+    staleDays,
+    ...(barSource ? { source: barSource } : {}),
+    ...(barFetchedAt ? { fetchedAt: barFetchedAt } : {}),
+    fellBackToStaleCache: barSource !== undefined && STALE_CACHE_BAR_SOURCES.has(barSource),
+    stale: staleDays > BENCHMARK_STALE_GRACE_DAYS
+  };
+
+  // Wall-clock gate FIRST: a series that is months old is a dead feed no matter what the account
+  // window says. The account-window gate below can only catch it when the account kept moving.
+  const ageVerdict = assessBenchmarkSeriesAge(closes, now, "SPY");
+  if (ageVerdict) {
+    const detail = `${ageVerdict.detail}${barSource ? ` (source: ${barSource})` : ""}`;
+    return {
+      comparison: null,
+      unavailable: { ...ageVerdict, detail, ...feedFacts(feed) },
+      status: "unavailable",
+      stale: true,
+      feed: { ...feed, detail }
+    };
+  }
 
   // Staleness gate BEFORE computing: a series frozen before the account window would print
   // 0.00% for every sub-period (the live 2026-08-06 failure — stale local bars fallback).
@@ -364,16 +561,36 @@ export async function computeSpyBenchmarkDetailed(
     .filter((d): d is string => d != null)
     .sort();
   if (equityDates.length >= 2) {
-    const lastBar = bars[bars.length - 1];
-    const seriesSource = typeof lastBar?.source === "string" ? lastBar.source : undefined;
-    const stale = assessBenchmarkSeries(closes, equityDates[0], equityDates[equityDates.length - 1], "SPY", seriesSource);
-    if (stale) return { comparison: null, unavailable: stale };
+    const stale = assessBenchmarkSeries(closes, equityDates[0], equityDates[equityDates.length - 1], "SPY", barSource);
+    if (stale) {
+      return {
+        comparison: null,
+        unavailable: { ...stale, lastCloseDate: feed.lastCloseDate, staleDays: feed.staleDays, stale: false, ...feedFacts(feed) },
+        status: "unavailable",
+        stale: false,
+        feed: { ...feed, detail: stale.detail }
+      };
+    }
   }
 
-  const flows = inferExternalCashFlows(equityCurve, fills ?? []);
+  const { flows, source } = resolveExternalCashFlows({ equityCurve, fills, brokerActivities });
   const comparison = normalizeAgainstBenchmark(equityCurve, closes, "SPY", flows.size > 0 ? flows : undefined);
-  if (!comparison) return { comparison: null, unavailable: { reason: "insufficient-overlap" } };
-  return { comparison };
+  if (!comparison) {
+    return { comparison: null, unavailable: { reason: "insufficient-overlap" }, status: "unavailable", stale: false, feed };
+  }
+  if (source === "broker" && flows.size > 0) comparison.cashFlowAdjusted = true;
+  return { comparison, status: "ok", stale: false, feed };
+}
+
+/** The subset of a feed diagnostic that can be spread onto an `unavailable` object. */
+function feedFacts(feed: BenchmarkFeedDiagnostic): BenchmarkFeedFacts {
+  return {
+    ...(feed.lastCloseDate ? { lastCloseDate: feed.lastCloseDate } : {}),
+    staleDays: feed.staleDays,
+    ...(feed.source ? { source: feed.source } : {}),
+    ...(feed.fetchedAt ? { fetchedAt: feed.fetchedAt } : {}),
+    ...(feed.fellBackToStaleCache ? { fellBackToStaleCache: true } : {})
+  };
 }
 
 /** Back-compat wrapper: the comparison alone (null on any failure). Prefer the detailed variant. */
@@ -381,7 +598,8 @@ export async function computeSpyBenchmark(
   equityCurve: EquityCurvePoint[],
   userId?: string,
   now: number = Date.now(),
-  fills?: FillEvent[]
+  fills?: FillEvent[],
+  brokerActivities?: AlpacaAccountActivity[]
 ): Promise<BenchmarkComparison | null> {
-  return (await computeSpyBenchmarkDetailed(equityCurve, userId, now, fills)).comparison;
+  return (await computeSpyBenchmarkDetailed(equityCurve, userId, now, fills, brokerActivities)).comparison;
 }

@@ -50,19 +50,24 @@ vi.mock("../src/lib/db", () => ({
 }));
 
 // Spy on the usage metering so we can assert a cache HIT is not metered as a real Voyage call.
-vi.mock("../src/lib/rag-metering", () => ({
-  estimateVoyageDispatchCost: vi.fn(() => 0),
-  estimateRagDispatchCost: vi.fn(() => 0),
-  meterEmbed: mocks.meterEmbed,
-  meterPineconeQuery: vi.fn(),
-  meterPineconeUpsert: vi.fn(),
-  meterRerank: vi.fn(),
-  recordRagUsage: vi.fn(),
-  // Merged retrieveContextDetailed → rankPool consults these R5 telemetry helpers; default-off keeps them inert.
-  retrievalTelemetryEnabled: vi.fn(() => false),
-  recordRetrievalQuality: vi.fn(),
-  hashQuery: vi.fn((q: string) => q)
-}));
+// Keep the real `approxTokens` export — query embed now packs through embed-request-pack,
+// which uses the same estimator as rag_usage.  A missing export threw before voyage.embed.
+vi.mock("../src/lib/rag-metering", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/rag-metering")>();
+  return {
+    ...actual,
+    estimateVoyageDispatchCost: vi.fn(() => 0),
+    estimateRagDispatchCost: vi.fn(() => 0),
+    meterEmbed: mocks.meterEmbed,
+    meterPineconeQuery: vi.fn(),
+    meterPineconeUpsert: vi.fn(),
+    meterRerank: vi.fn(),
+    recordRagUsage: vi.fn(),
+    retrievalTelemetryEnabled: vi.fn(() => false),
+    recordRetrievalQuality: vi.fn(),
+    hashQuery: vi.fn((q: string) => q)
+  };
+});
 
 beforeEach(() => {
   pinRagQualityFlagsOff();

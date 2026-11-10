@@ -69,8 +69,10 @@ function expectedTelemetryKey(kind: string, sourceId: string): string {
 }
 
 describe("usage-monitor-push", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     push.__resetUsageMonitorState();
+    const { resetPeerLaneBackoffForTests } = await import("../src/lib/peer-lane-backoff");
+    resetPeerLaneBackoffForTests();
     process.env.USAGE_MONITOR_BASE_URL = BASE;
     process.env.USAGE_INGEST_TOKEN = TOKEN;
     process.env.USAGE_MONITOR_ENV = "test";
@@ -88,6 +90,14 @@ describe("usage-monitor-push", () => {
     delete process.env.USAGE_MONITOR_CALLVOLUME_MAX_KEYS;
     delete process.env.USAGE_MONITOR_PUSH_TIMEOUT_MS;
     delete process.env.USAGE_MONITOR_FLUSH_MS;
+  });
+
+  it("widens the flush delay when UM p50 is the 6.9s prod shape (#2550)", async () => {
+    const { recordPeerLaneSample, PEER_LANE_USAGE_MONITOR } = await import("../src/lib/peer-lane-backoff");
+    expect(push.usageMonitorFlushDelayMs()).toBe(2000);
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, 6900);
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, 7100);
+    expect(push.usageMonitorFlushDelayMs()).toBe(8000);
   });
 
   it("is a no-op when unconfigured (no network calls)", async () => {
@@ -172,6 +182,22 @@ describe("usage-monitor-push", () => {
     );
     expect((vol!.metadata as Record<string, unknown>).successes).toBe(2);
     expect((vol!.metadata as Record<string, unknown>).failures).toBe(1);
+  });
+
+  it("keeps congress-read call-volume on its own lane and ACKs the persisted window", async () => {
+    const captured: CapturedRequest[] = [];
+    push.__setUsageMonitorFetch(makeFetchStub(captured));
+    push.recordProviderCall("massive", { ok: true, service: "market-data" });
+    push.recordProviderCall("massive", { ok: true, service: "market-data", label: "congress-read" });
+    await push.flushUsageMonitor();
+
+    const massive = captured[0]!.body.events.filter((event) => event.provider === "massive");
+    expect(massive).toHaveLength(2);
+    const peer = massive.find((event) => (event.metadata as Record<string, unknown>).label === "congress-read");
+    const own = massive.find((event) => (event.metadata as Record<string, unknown>).label == null);
+    expect(peer?.requests).toBe(1);
+    expect(own?.requests).toBe(1);
+    expect(push.loadPersistedCallVolumeWindows()).toEqual([]);
   });
 
   it("tags Pinecone RAG volume as credits and scopes call-volume by key lane", async () => {
@@ -280,7 +306,7 @@ describe("usage-monitor-push", () => {
     expect(event.occurredAt).toBe(row.created_at);
   });
 
-  it("uses one durable RAG ledger identity and timestamp for persistence and delivery", async () => {
+  it("persists RAG usage locally and does not live-push it (rollup replay owns delivery)", async () => {
     const captured: CapturedRequest[] = [];
     push.__setUsageMonitorFetch(makeFetchStub(captured));
     recordRagUsage({
@@ -297,10 +323,96 @@ describe("usage-monitor-push", () => {
       .prepare(
         "SELECT id, created_at FROM rag_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT 1"
       )
-      .get("telemetry-rag-user") as { id: string; created_at: string };
-    const event = captured[0]!.body.events[0]!;
-    expect(event.eventId).toBe(expectedTelemetryKey("rag", row.id));
-    expect(event.occurredAt).toBe(row.created_at);
+      .get("telemetry-rag-user") as { id: string; created_at: string } | undefined;
+    expect(row).toBeDefined();
+    // Control: the same stub and flush lane do deliver a non-RAG event, so the RAG assertion below
+    // cannot pass because delivery is dead.
+    recordLlmUsage({
+      provider: "openai",
+      model: "openai/gpt-4o-mini",
+      context: "rag-live-push-control",
+      userId: "local",
+      keySource: "operator",
+      promptTokens: 1,
+      completionTokens: 1,
+    });
+    await push.flushUsageMonitor();
+    expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "llm")).not.toHaveLength(0);
+    // Live and replay both sending per-row events was most of the monitor's RAG volume.
+    expect(captured.flatMap((c) => c.body.events).filter((e) => e.service === "rag")).toHaveLength(0);
+  });
+
+  it("builds a Qdrant rollup event as request volume and leaves other providers' shape alone", async () => {
+    const window = { windowStart: "2026-07-11T18:00:00.000Z", windowEnd: "2026-07-11T18:10:00.000Z" };
+    const qdrant = await push.createRagRollupUsageMonitorEvent({
+      ...window,
+      provider: "qdrant",
+      operation: "upsert",
+      userId: "local",
+      requests: 3,
+      tokensIn: 0,
+      tokensOut: 140,
+      batchCount: 140,
+      costUsd: 0.5, // never reported for Qdrant, even if a cost were present
+    });
+    expect(qdrant).toMatchObject({
+      service: "rag",
+      provider: "qdrant",
+      label: "upsert",
+      unit: "request",
+      requests: 3,
+      metricType: "usage",
+      occurredAt: window.windowStart,
+      windowStart: window.windowStart,
+      windowEnd: window.windowEnd,
+      metadata: { batchCount: 140, recordCount: 140 },
+    });
+    expect(qdrant.quantity).toBeUndefined();
+    expect(qdrant.costUsd).toBeUndefined();
+    expect(["request", "call", "token", "credit", "usd", "page", "job", "document", "row", "byte"])
+      .toContain(qdrant.unit);
+    // The idempotency key is the same pure function of window and group as for every provider.
+    const again = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "qdrant", operation: "upsert", userId: "local", requests: 3,
+      tokensIn: 0, tokensOut: 140, batchCount: 140,
+    });
+    expect(again.eventId).toBe(qdrant.eventId);
+
+    const voyage = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "voyage", operation: "embed", model: "voyage-finance-2", userId: "local",
+      requests: 2, tokensIn: 240, tokensOut: 0, batchCount: 2, costUsd: 0.003,
+    });
+    expect(voyage).toMatchObject({ unit: "token", quantity: 240, costUsd: 0.003, metricType: "cost", requests: 2 });
+    expect(voyage.metadata).toMatchObject({ batchCount: 2 });
+    expect((voyage.metadata as Record<string, unknown>).recordCount ?? null).toBeNull();
+
+    const pinecone = await push.createRagRollupUsageMonitorEvent({
+      ...window, provider: "pinecone", operation: "query", userId: "local",
+      requests: 1, tokensIn: 5, tokensOut: 8, batchCount: 1,
+    });
+    expect(pinecone).toMatchObject({ unit: "credit", quantity: 5, metadata: { recordCount: 8 } });
+  });
+
+  it("builds a per-row Qdrant event as one request, never as tokens", async () => {
+    const event = await push.createRagUsageMonitorEvent({
+      provider: "qdrant",
+      operation: "upsert",
+      userId: "local",
+      sourceEventId: "rag-usage-row-1",
+      occurredAt: "2026-07-11T18:03:00.000Z",
+      tokensIn: 0,
+      tokensOut: 140,
+      batchCount: 140,
+    });
+    expect(event).toMatchObject({
+      provider: "qdrant",
+      unit: "request",
+      requests: 1,
+      metricType: "usage",
+      metadata: { batchCount: 140, recordCount: 140 },
+    });
+    expect(event.quantity).toBeUndefined();
+    expect(event.costUsd).toBeUndefined();
   });
 
   it("replays the same source identity with a stable key and occurredAt", async () => {
@@ -895,6 +1007,54 @@ describe("usage-monitor-push", () => {
       );
       expect(ok).toBe(false); // batch as a whole was rejected; the caller skips the named row
       expect(collisions).toEqual(["socratic-trade:llm:cafe"]);
+    });
+
+    it("live flush drops the named 409 row, retries the rest, and does not trip the breaker", async () => {
+      const { deriveUsageTelemetryV2IdempotencyKey } = await import("@jaywedgeworth22/congress-trading-shared");
+      const poisonSource = "live-collision-poison";
+      const okSource = "live-collision-sibling";
+      const poisonEventId = expectedTelemetryKey("llm", poisonSource);
+      const poisonV2Key = await deriveUsageTelemetryV2IdempotencyKey({
+        producerId: "socratic-trade",
+        eventId: poisonEventId,
+      });
+
+      let calls = 0;
+      push.__setUsageMonitorFetch((async (_url: unknown, init?: RequestInit) => {
+        calls += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as { events: Array<{ eventId: string }> };
+        if (body.events.some((e) => e.eventId === poisonEventId)) {
+          return new Response(
+            JSON.stringify({ error: `Idempotency key collision for "${poisonV2Key}". Event content differs from the stored event.` }),
+            { status: 409, headers: { "content-type": "application/json" } }
+          );
+        }
+        return ack(body.events.length);
+      }) as unknown as typeof fetch);
+
+      push.pushLlmUsage({
+        sourceEventId: poisonSource,
+        provider: "openai",
+        userId: "local",
+        keySource: "operator",
+        totalTokens: 1,
+      });
+      push.pushLlmUsage({
+        sourceEventId: okSource,
+        provider: "anthropic",
+        userId: "local",
+        keySource: "operator",
+        totalTokens: 2,
+      });
+      await push.flushUsageMonitor();
+      expect(calls).toBe(1);
+      expect(push.__usageMonitorDebugState().breaker.consecutiveFailures).toBe(0);
+      expect(push.__usageMonitorDebugState().queueDepth).toBe(1);
+
+      await push.flushUsageMonitor();
+      expect(calls).toBe(2);
+      expect(push.__usageMonitorDebugState().queueDepth).toBe(0);
+      expect(push.__usageMonitorDebugState().breaker.consecutiveFailures).toBe(0);
     });
   });
 });

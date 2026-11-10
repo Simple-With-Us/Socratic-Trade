@@ -1,9 +1,10 @@
+import { codeCliReady } from "./code-cli";
+import { llmRouteFor } from "./llm-route";
 // db-api-keys.ts — field-level encryption, user API keys, connected accounts,
 // synthetic stops, watchlist, price alerts, notify prefs, chat turns, memory,
 // and the catch-all listUsers helper.
+import "server-only";
 import crypto from "crypto";
-import { existsSync, readFileSync } from "fs";
-import { resolve } from "path";
 import { getDb, audit } from "./db";
 import { normalizeSymbol } from "./money";
 import { registerPlanTierLookup } from "./provider-tier-plan";
@@ -24,38 +25,15 @@ import type {
   WatchlistItem
 } from "./types";
 import { STOP_PLAN_STYLES } from "./types";
+import { invalidateDashboardSnapshotCache } from "./dashboard-snapshot-cache";
 
 // ── Field-Level Encryption ──────────────────────────────────────────────────
 
-// Load .env.local and local development secrets files for local system development (production uses Infisical)
-if (process.env.NODE_ENV !== "test" && !process.env.VITEST && process.env.NODE_ENV !== "production" && !process.env.COOLIFY_PROD_PHASE2) {
-  const envPaths = [
-    resolve(process.cwd(), ".env.local"),
-    "/Users/jay/.secrets/global-api-keys.env",
-    "/Users/jay/.secrets/global-api-keys"
-  ];
-  for (const envPath of envPaths) {
-    try {
-      if (existsSync(envPath)) {
-        const content = readFileSync(envPath, "utf8");
-        for (const line of content.split("\n")) {
-          const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-          if (match && match[1]) {
-            const key = match[1];
-            if (!process.env[key]) {
-              let value = match[2] || "";
-              if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
-              if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
-              process.env[key] = value;
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignore error
-    }
-  }
-}
+// No secrets file is loaded here.  Dev reads `process.env` only;  run `npm run dev:secrets`
+// (the Infisical runner) to get keys, which resolves the bootstrap machine identity from
+// `process.env` or the macOS login Keychain (service `socratic-trade-bootstrap`) in
+// scripts/infisical-bootstrap-env.mjs.  The retired flat key file must not
+// be read (owner, 2026-10-18, OPS-818).
 
 const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
@@ -269,8 +247,10 @@ const API_KEY_ENV_MAP: Record<string, string> = {
   gemini: "GEMINI_API_KEY",
   mistral: "MISTRAL_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
+  meta: "META_API_KEY",
   moonshot: "MOONSHOT_API_KEY",
   kimi: "MOONSHOT_API_KEY",
+  minimax: "MINIMAX_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
   finnhub: "FINNHUB_API_KEY",
   fmp: "FMP_API_KEY",
@@ -324,12 +304,18 @@ const API_KEY_SERVICE_ALIASES: Record<string, string> = {
   mistral_api_key: "mistral",
   deepseek: "deepseek",
   deepseek_api_key: "deepseek",
+  meta: "meta",
+  meta_api_key: "meta",
+  meta_model_api_key: "meta",
+  model_api_key: "meta",
   moonshot: "moonshot",
   moonshot_api_key: "moonshot",
   moonshotai: "moonshot",
   moonshotai_api_key: "moonshot",
   kimi: "moonshot",
   kimi_api_key: "moonshot",
+  minimax: "minimax",
+  minimax_api_key: "minimax",
   openrouter: "openrouter",
   openrouter_api_key: "openrouter",
   marketstack_api_key: "marketstack",
@@ -624,10 +610,22 @@ export const LOCAL_USER = "local";
 // Side-effect on module load after LOCAL_USER + DELETED_KEY_TOMBSTONE + getUserApiKey exist.
 registerPlanTierLookup((service) => {
   try {
-    const row = getUserApiKey(LOCAL_USER, service);
-    if (!row || row.apiKey === DELETED_KEY_TOMBSTONE) return null;
-    // ENV_PLAN_TIER_MARKER rows are valid plan declarations for env-backed keys.
-    return row.planTier ?? null;
+    const fromRow = (userId: string): string | null => {
+      const row = getUserApiKey(userId, service);
+      if (!row || row.apiKey === DELETED_KEY_TOMBSTONE) return null;
+      return row.planTier ?? null;
+    };
+    const localTier = fromRow(LOCAL_USER);
+    if (localTier) return localTier;
+    // Connections saves under the logged-in user id.  Scheduler/quota lookups used
+    // to only read "local", so an Individual ROIC pick looked saved in Settings
+    // but still ran as Free (2 quarters / 5 rpm).
+    for (const userId of listUsers()) {
+      if (userId === LOCAL_USER) continue;
+      const tier = fromRow(userId);
+      if (tier) return tier;
+    }
+    return localTier;
   } catch {
     return null;
   }
@@ -669,7 +667,7 @@ export function resolveApiKeyWithSource(service: string, userId?: string): { key
   const canonical = normalizeApiKeyService(service);
   const envVar = apiKeyEnvVarForService(canonical);
 
-  // FMP keys must never resolve in Socratic.Trade product code (owner: FMP is CT-only).
+  // FMP keys must never resolve in Socratic-Trade product code (owner: FMP is CT-only).
   // Admin Connections may still show a retired catalog row; storage POST is rejected.
   if (canonical === "fmp" || canonical.startsWith("fmp")) {
     return { source: "none", envVar, service: canonical };
@@ -684,14 +682,14 @@ export function resolveApiKeyWithSource(service: string, userId?: string): { key
     }
   }
 
-  const envKey = envVar ? process.env[envVar] : undefined;
+  const envKey = envVar ? process.env[envVar]?.trim() : undefined;
 
   // 2. shared-operator-infra: global env fallback first, then fallback to `local` user's key.
   if (credTierForService(canonical) === "shared-operator-infra") {
-    // Check global env key first.
+    // Check global env key first.  Trim so Infisical/Coolify trailing newlines cannot 401.
     if (envKey) return { key: envKey, source: "env", envVar, service: canonical };
 
-    // Fall back to the Socratic.Trade owner's ('local') key as the system default, since background
+    // Fall back to the Socratic-Trade owner's ('local') key as the system default, since background
     // jobs and global operations run off these keys.
     if (userId !== "local") {
       const localKey = getUserApiKey("local", canonical);
@@ -820,6 +818,10 @@ export function resolveAlpacaMarketData(userId?: string): { apiKey?: string; sec
     const connectedKeyOnly = resolveConnectedAlpacaMarketData(userId, false);
     if (connectedKeyOnly) userKeyOnly = { ...connectedKeyOnly, source: "user" };
 
+    const ownLive = getUserApiKey(userId, "alpaca_api_key")?.apiKey ?? getUserApiKey(userId, "apca_api_key_id")?.apiKey;
+    const ownLiveSecret = getUserApiKey(userId, "alpaca_secret_key")?.apiKey ?? getUserApiKey(userId, "apca_api_secret_key")?.apiKey;
+    if (ownLive && ownLiveSecret) return { apiKey: ownLive, secretKey: ownLiveSecret, source: "user" };
+
     const own = getUserApiKey(userId, "alpaca_paper_api_key")?.apiKey;
     const ownSecret = getUserApiKey(userId, "alpaca_paper_secret_key")?.apiKey;
     if (own && ownSecret) return { apiKey: own, secretKey: ownSecret, source: "user" };
@@ -830,8 +832,13 @@ export function resolveAlpacaMarketData(userId?: string): { apiKey?: string; sec
   if (localConnected) return { ...localConnected, source: "env" };
   const localConnectedKeyOnly = resolveConnectedAlpacaMarketData(LOCAL_USER, false);
 
-  const opKey = getUserApiKey(LOCAL_USER, "alpaca_paper_api_key")?.apiKey ?? process.env.ALPACA_PAPER_API_KEY?.trim();
-  const opSecret = getUserApiKey(LOCAL_USER, "alpaca_paper_secret_key")?.apiKey ?? process.env.ALPACA_PAPER_SECRET_KEY?.trim();
+  // Check live market data credentials first for real-time SIP/IEX feeds
+  const liveKey = process.env.ALPACA_LIVE_API_KEY?.trim() ?? process.env.APCA_API_KEY_ID?.trim() ?? process.env.ALPACA_API_KEY?.trim();
+  const liveSecret = process.env.ALPACA_LIVE_SECRET_KEY?.trim() ?? process.env.APCA_API_SECRET_KEY?.trim() ?? process.env.ALPACA_SECRET_KEY?.trim();
+  if (liveKey && liveSecret) return { apiKey: liveKey, secretKey: liveSecret, source: "env" };
+
+  const opKey = getUserApiKey(LOCAL_USER, "alpaca_api_key")?.apiKey ?? getUserApiKey(LOCAL_USER, "alpaca_paper_api_key")?.apiKey ?? process.env.ALPACA_PAPER_API_KEY?.trim();
+  const opSecret = getUserApiKey(LOCAL_USER, "alpaca_secret_key")?.apiKey ?? getUserApiKey(LOCAL_USER, "alpaca_paper_secret_key")?.apiKey ?? process.env.ALPACA_PAPER_SECRET_KEY?.trim();
   if (userKeyOnly) return userKeyOnly;
   if (localConnectedKeyOnly) return { ...localConnectedKeyOnly, source: "env" };
   if (opKey && opSecret) return { apiKey: opKey, secretKey: opSecret, source: "env" };
@@ -929,8 +936,14 @@ export function maskApiKeyPreview(key: string | undefined | null): string | unde
  * caller can attribute usage/cost PER ATTACHED key. A non-`local` tenant only reaches the env key
  * when the failover is enabled.
  */
-export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "openrouter", userId?: string): { key?: string; source: LlmKeySource; keyRef?: string } {
+export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter", userId?: string): { key?: string; source: LlmKeySource; keyRef?: string } {
   const canonical = normalizeApiKeyService(service);
+  if (userId && (canonical === "meta" || canonical === "minimax") && llmRouteFor(canonical, userId) === "code-cli") {
+    // This sentinel is a capability marker, never an API credential. Endpoint + shared fetch
+    // re-check owner/config independently. An unavailable CLI must not become a paid API call.
+    if (!codeCliReady(userId)) return { source: "none" };
+    return { key: "code-cli-no-provider-key", source: "user", keyRef: "code-cli" };
+  }
   if (userId) {
     const userKey = getUserApiKey(userId, canonical);
     if (userKey?.apiKey === DELETED_KEY_TOMBSTONE) return { source: "none" };
@@ -951,7 +964,7 @@ export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "
 
   if (process.env.NODE_ENV === "test" && !envKey) {
     if (canonical === "openrouter") {
-      const fallbacks = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "META_API_KEY", "MOONSHOT_API_KEY"];
+      const fallbacks = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "META_API_KEY", "MOONSHOT_API_KEY", "MINIMAX_API_KEY"];
       for (const f of fallbacks) {
         if (process.env[f]) {
           envKey = process.env[f];
@@ -969,7 +982,7 @@ export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "
 }
 
 /** Every LLM provider `resolveLlmCredential` understands. The single source of truth for "is an LLM connected". */
-export const LLM_PROVIDER_SERVICES = ["openai", "anthropic", "xai", "gemini", "mistral", "deepseek", "meta", "moonshot", "openrouter"] as const;
+export const LLM_PROVIDER_SERVICES = ["openai", "anthropic", "xai", "gemini", "mistral", "deepseek", "meta", "moonshot", "minimax", "openrouter"] as const;
 export type LlmProviderService = (typeof LLM_PROVIDER_SERVICES)[number];
 
 /**
@@ -992,7 +1005,9 @@ const LOCAL_ENV_MIGRATION_SERVICES = [
   "gemini",
   "mistral",
   "deepseek",
+  "meta",
   "moonshot",
+  "minimax",
   "openrouter",
   "alpaca_paper_api_key",
   "alpaca_paper_secret_key",
@@ -1015,7 +1030,9 @@ const ALL_SERVICE_ENV_VARS: Record<string, string[]> = {
   gemini: ["GEMINI_API_KEY"],
   mistral: ["MISTRAL_API_KEY"],
   deepseek: ["DEEPSEEK_API_KEY"],
+  meta: ["META_API_KEY"],
   moonshot: ["MOONSHOT_API_KEY", "KIMI_API_KEY", "MOONSHOTAI_API_KEY"],
+  minimax: ["MINIMAX_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
   alpaca_paper_api_key: ["ALPACA_PAPER_API_KEY"],
   alpaca_paper_secret_key: ["ALPACA_PAPER_SECRET_KEY"],
@@ -1048,15 +1065,41 @@ export function purgeProcessEnvUserKeys(): void {
 }
 
 /**
+ * Native Gemini / DeepSeek keys must not be auto-copied from Infisical/Coolify env onto the
+ * primary Connections account. Production strategy/Red Team already prefer OpenRouter when that
+ * key exists; env-seeded native rows kept reappearing after the owner deleted them because every
+ * deploy re-injected GEMINI_API_KEY / DEEPSEEK_API_KEY and migrate treated a delete-tombstone as
+ * empty. Env values (if present) are still purged below so they cannot silently serve after a
+ * delete. A user who actually pastes a native key keeps it.
+ */
+const DO_NOT_AUTO_SEED_FROM_ENV = new Set(["gemini", "deepseek"]);
+
+/**
  * One-time, idempotent migration of the operator's env broker/LLM keys into the `local` user's
  * per-user key store. Safe to call repeatedly (only seeds a service `local` doesn't already have a
- * key for) and on every boot. Returns which services were seeded. Call from the server boot hook,
- * NOT the hot resolver path. Shared-tier keys (market data, RAG, macro) are NOT migrated — they stay
- * a global env fallback for all users.
+ * key for) and on every boot. Never overwrites a delete tombstone. Returns which services were
+ * seeded (and which env-seeded Gemini/DeepSeek ghosts were tombstoned). Call from the server boot
+ * hook, NOT the hot resolver path. Shared-tier keys (market data, RAG, macro) are NOT migrated —
+ * they stay a global env fallback for all users.
  */
-export function migrateLocalEnvCredentials(): { migrated: string[] } {
+export function migrateLocalEnvCredentials(): { migrated: string[]; tombstoned: string[] } {
   const migrated: string[] = [];
+  const tombstoned: string[] = [];
+
+  for (const svc of DO_NOT_AUTO_SEED_FROM_ENV) {
+    const row = getUserApiKey(LOCAL_USER, svc);
+    if (row && row.apiKey !== DELETED_KEY_TOMBSTONE && row.label === "migrated from env") {
+      try {
+        deleteUserApiKey(LOCAL_USER, svc);
+        tombstoned.push(svc);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
   for (const svc of LOCAL_ENV_MIGRATION_SERVICES) {
+    if (DO_NOT_AUTO_SEED_FROM_ENV.has(svc)) continue;
     const vars = ALL_SERVICE_ENV_VARS[svc] ?? (API_KEY_ENV_MAP[svc] ? [API_KEY_ENV_MAP[svc]] : []);
     let envVal: string | undefined;
     for (const v of vars) {
@@ -1067,7 +1110,10 @@ export function migrateLocalEnvCredentials(): { migrated: string[] } {
       }
     }
     const currentKey = getUserApiKey(LOCAL_USER, svc)?.apiKey;
-    if (envVal && (!currentKey || currentKey === DELETED_KEY_TOMBSTONE)) {
+    // A delete tombstone is a user decision. Coolify re-injects env on every deploy; do not
+    // treat "__DISABLED__" as "missing" and write the env value back onto Connections.
+    if (currentKey === DELETED_KEY_TOMBSTONE) continue;
+    if (envVal && !currentKey) {
       try {
         upsertUserApiKey(LOCAL_USER, svc, envVal, "migrated from env");
         migrated.push(svc);
@@ -1078,7 +1124,7 @@ export function migrateLocalEnvCredentials(): { migrated: string[] } {
   }
   // Purge process.env of all user-providable and LLM keys post-migration
   purgeProcessEnvUserKeys();
-  return { migrated };
+  return { migrated, tombstoned };
 }
 
 // ── Connected accounts ──────────────────────────────────────────────────────
@@ -1095,7 +1141,7 @@ export function listConnectedAccounts(userId: string = "local"): ConnectedAccoun
   return rows.map(r => ({
     id: String(r.id),
     userId: String(r.user_id),
-    broker: String(r.broker) as "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier",
+    broker: String(r.broker) as ConnectedAccount["broker"],
     environment: String(r.environment) as "live" | "paper",
     accountNumber: r.account_number != null ? String(r.account_number) : undefined,
     label: String(r.label),
@@ -1104,6 +1150,12 @@ export function listConnectedAccounts(userId: string = "local"): ConnectedAccoun
     capabilities: parseCapabilities(r.capabilities),
     isActive: r.is_active === 1,
     isDraining: r.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: r.parked === 1,
+    parkedReason: r.parked_reason != null ? String(r.parked_reason) : undefined,
+    parkedAt: r.parked_at != null ? String(r.parked_at) : undefined,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at)
   }));
@@ -1117,7 +1169,7 @@ export function getActiveConnectedAccount(userId: string = "local"): ConnectedAc
   return {
     id: String(row.id),
     userId: String(row.user_id),
-    broker: String(row.broker) as "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier",
+    broker: String(row.broker) as ConnectedAccount["broker"],
     environment: String(row.environment) as "live" | "paper",
     accountNumber: row.account_number != null ? String(row.account_number) : undefined,
     label: String(row.label),
@@ -1128,6 +1180,12 @@ export function getActiveConnectedAccount(userId: string = "local"): ConnectedAc
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -1157,7 +1215,7 @@ export function getConnectedAccountByBroker(broker: ConnectedAccount["broker"], 
   return {
     id: String(row.id),
     userId: String(row.user_id),
-    broker: String(row.broker) as "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier",
+    broker: String(row.broker) as ConnectedAccount["broker"],
     environment: String(row.environment) as "live" | "paper",
     accountNumber: row.account_number != null ? String(row.account_number) : undefined,
     label: String(row.label),
@@ -1168,9 +1226,24 @@ export function getConnectedAccountByBroker(broker: ConnectedAccount["broker"], 
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
+}
+
+/** Ops/heal lookup: resolve a connected account by id across users, with decrypted keys. */
+export function findConnectedAccountById(id: string): ConnectedAccount | undefined {
+  const row = getDb()
+    .prepare("SELECT user_id FROM connected_accounts WHERE id = ? LIMIT 1")
+    .get(id) as { user_id?: unknown } | undefined;
+  if (!row || row.user_id == null) return undefined;
+  return getConnectedAccount(id, String(row.user_id));
 }
 
 // Fetch a specific connected account by id (scoped to the owning user), with decrypted
@@ -1183,7 +1256,7 @@ export function getConnectedAccount(id: string, userId: string = "local"): Conne
   return {
     id: String(row.id),
     userId: String(row.user_id),
-    broker: String(row.broker) as "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier",
+    broker: String(row.broker) as ConnectedAccount["broker"],
     environment: String(row.environment) as "live" | "paper",
     accountNumber: row.account_number != null ? String(row.account_number) : undefined,
     label: String(row.label),
@@ -1194,6 +1267,12 @@ export function getConnectedAccount(id: string, userId: string = "local"): Conne
     capabilities: parseCapabilities(row.capabilities),
     isActive: row.is_active === 1,
     isDraining: row.is_draining === 1,
+    // Review rank 8: a deliberate park, with the decision that caused it. Read the columns
+    // defensively (a row written before the migration has neither) so an un-migrated database
+    // degrades to "not parked" rather than throwing inside an account mapper.
+    parked: row.parked === 1,
+    parkedReason: row.parked_reason != null ? String(row.parked_reason) : undefined,
+    parkedAt: row.parked_at != null ? String(row.parked_at) : undefined,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at)
   };
@@ -1229,6 +1308,7 @@ export function upsertConnectedAccount(account: Omit<ConnectedAccount, "createdA
           base_url = COALESCE(excluded.base_url, connected_accounts.base_url),
           capabilities = COALESCE(excluded.capabilities, connected_accounts.capabilities),
           is_active = excluded.is_active,
+          is_draining = 0,
           updated_at = excluded.updated_at
          WHERE connected_accounts.user_id = excluded.user_id`
       )
@@ -1278,11 +1358,21 @@ export function renameConnectedAccount(id: string, label: string, userId: string
 export function setActiveConnectedAccount(id: string, userId: string = "local"): void {
   const db = getDb();
   db.transaction(() => {
-    const exists = db.prepare("SELECT id FROM connected_accounts WHERE id = ? AND user_id = ?").get(id, userId);
-    if (!exists) throw new Error("Connected account not found.");
+    const row = db
+      .prepare("SELECT id, is_draining FROM connected_accounts WHERE id = ? AND user_id = ?")
+      .get(id, userId) as { id: string; is_draining: number } | undefined;
+    if (!row) throw new Error("Connected account not found.");
+    if (row.is_draining === 1) {
+      throw new Error("This account is disconnected and being wound down — it can no longer be made active."); // Guard: prevent reactivation of draining account
+    }
     db.prepare("UPDATE connected_accounts SET is_active = 0 WHERE user_id = ?").run(userId);
     db.prepare("UPDATE connected_accounts SET is_active = 1 WHERE id = ? AND user_id = ?").run(id, userId);
   })();
+  // Drop every cached snapshot for this user.  The next dashboard/mobile
+  // read must assemble against the new active pointer — a 10s stale hit
+  // (or an in-flight compute for the previous account) is why iOS looked
+  // like it refused to switch to Alpaca Paper after Tradier Sandbox.
+  invalidateDashboardSnapshotCache(userId);
 }
 
 export function purgeConnectedAccount(id: string, userId: string = "local"): boolean {
@@ -1736,7 +1826,7 @@ export function markPriceAlertTriggered(id: string, userId: string, triggeredPri
 
 // ── Notification preferences ──────────────────────────────────────────────────
 
-const NOTIFY_CHANNEL_IDS: readonly NotifyChannelId[] = ["push", "webhook", "email", "sms", "pushover"];
+const NOTIFY_CHANNEL_IDS: readonly NotifyChannelId[] = ["push", "webhook", "email", "sms", "pushover", "apns"];
 
 function isNotifyChannelId(value: unknown): value is NotifyChannelId {
   return typeof value === "string" && (NOTIFY_CHANNEL_IDS as readonly string[]).includes(value);
@@ -1746,11 +1836,13 @@ export function getNotifyPrefs(userId: string = "local"): NotifyPrefs {
   const row = getDb().prepare("SELECT * FROM notification_prefs WHERE user_id = ?").get(userId) as
     | { user_id: string; channels: string; push_target: string; pushover_target: string; webhook_url: string; email: string; phone: string;
         pushover_app_token?: string; twilio_account_sid?: string; twilio_auth_token?: string; twilio_from?: string;
+        watchlist_digest_enabled?: number;
         updated_at: string | null }
     | undefined;
   if (!row) {
     return { userId, channels: [], pushTarget: "", pushoverTarget: "", webhookUrl: "", email: "", phone: "",
-      pushoverAppTokenSet: false, twilioAccountSidSet: false, twilioAuthTokenSet: false, twilioFromSet: false, updatedAt: null };
+      pushoverAppTokenSet: false, twilioAccountSidSet: false, twilioAuthTokenSet: false, twilioFromSet: false,
+      watchlistDigestEnabled: false, updatedAt: null };
   }
   let channels: NotifyChannelId[] = [];
   try {
@@ -1771,6 +1863,7 @@ export function getNotifyPrefs(userId: string = "local"): NotifyPrefs {
     twilioAccountSidSet: Boolean(row.twilio_account_sid),
     twilioAuthTokenSet: Boolean(row.twilio_auth_token),
     twilioFromSet: Boolean(row.twilio_from),
+    watchlistDigestEnabled: row.watchlist_digest_enabled === 1,
     updatedAt: row.updated_at
   };
 }
@@ -1793,7 +1886,8 @@ export function getNotifyPrefsSecrets(userId: string = "local"): NotifyPrefsSecr
 export function setNotifyPrefs(
   userId: string,
   partial: { channels?: unknown; pushTarget?: unknown; pushoverTarget?: unknown; webhookUrl?: unknown; email?: unknown; phone?: unknown;
-             pushoverAppToken?: unknown; twilioAccountSid?: unknown; twilioAuthToken?: unknown; twilioFrom?: unknown }
+             pushoverAppToken?: unknown; twilioAccountSid?: unknown; twilioAuthToken?: unknown; twilioFrom?: unknown;
+             watchlistDigestEnabled?: unknown }
 ): NotifyPrefs {
   const next: NotifyPrefs = { ...getNotifyPrefs(userId), userId };
   if (Array.isArray(partial.channels)) {
@@ -1804,14 +1898,15 @@ export function setNotifyPrefs(
   if (typeof partial.webhookUrl === "string") next.webhookUrl = partial.webhookUrl.trim();
   if (typeof partial.email === "string") next.email = partial.email.trim();
   if (typeof partial.phone === "string") next.phone = partial.phone.trim();
+  if (typeof partial.watchlistDigestEnabled === "boolean") next.watchlistDigestEnabled = partial.watchlistDigestEnabled;
   next.updatedAt = new Date().toISOString();
   getDb()
     .prepare(
-      `INSERT INTO notification_prefs (user_id, channels, push_target, pushover_target, webhook_url, email, phone, updated_at)
-       VALUES (@userId, @channels, @pushTarget, @pushoverTarget, @webhookUrl, @email, @phone, @updatedAt)
+      `INSERT INTO notification_prefs (user_id, channels, push_target, pushover_target, webhook_url, email, phone, watchlist_digest_enabled, updated_at)
+       VALUES (@userId, @channels, @pushTarget, @pushoverTarget, @webhookUrl, @email, @phone, @watchlistDigestEnabled, @updatedAt)
        ON CONFLICT(user_id) DO UPDATE SET
          channels = excluded.channels, push_target = excluded.push_target, pushover_target = excluded.pushover_target, webhook_url = excluded.webhook_url,
-         email = excluded.email, phone = excluded.phone, updated_at = excluded.updated_at`
+         email = excluded.email, phone = excluded.phone, watchlist_digest_enabled = excluded.watchlist_digest_enabled, updated_at = excluded.updated_at`
     )
     .run({
       userId,
@@ -1821,6 +1916,7 @@ export function setNotifyPrefs(
       webhookUrl: next.webhookUrl,
       email: next.email,
       phone: next.phone,
+      watchlistDigestEnabled: next.watchlistDigestEnabled ? 1 : 0,
       updatedAt: next.updatedAt
     });
 
@@ -1859,6 +1955,7 @@ interface RawChatTurnRow {
   redacted: number;
   model: string | null;
   client_turn_id: string | null;
+  connected_account_id: string | null;
   created_at: string;
 }
 
@@ -1881,6 +1978,7 @@ function mapChatTurn(row: RawChatTurnRow): ChatTurn {
     redacted: row.redacted === 1,
     model: row.model ?? null,
     clientTurnId: row.client_turn_id ?? null,
+    connectedAccountId: row.connected_account_id ?? null,
     createdAt: row.created_at
   };
 }
@@ -1888,9 +1986,9 @@ function mapChatTurn(row: RawChatTurnRow): ChatTurn {
 export function insertChatTurn(turn: ChatTurn): ChatTurn {
   getDb()
     .prepare(
-      "INSERT INTO chat_turns (id, user_id, role, text, citations, intent, redacted, model, client_turn_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO chat_turns (id, user_id, role, text, citations, intent, redacted, model, client_turn_id, connected_account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(turn.id, turn.userId, turn.role, turn.text, JSON.stringify(turn.citations), turn.intent ?? null, turn.redacted ? 1 : 0, turn.model ?? null, turn.clientTurnId ?? null, turn.createdAt);
+    .run(turn.id, turn.userId, turn.role, turn.text, JSON.stringify(turn.citations), turn.intent ?? null, turn.redacted ? 1 : 0, turn.model ?? null, turn.clientTurnId ?? null, turn.connectedAccountId ?? null, turn.createdAt);
   return turn;
 }
 
@@ -1902,12 +2000,32 @@ export function findChatTurnByClientId(userId: string, clientTurnId: string): Ch
   return row ? mapChatTurn(row) : null;
 }
 
-export function listChatTurns(userId: string, limit: number = 100): ChatTurn[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM chat_turns WHERE user_id = ? ORDER BY created_at ASC, rowid ASC")
-    .all(userId) as RawChatTurnRow[];
+export function listChatTurns(userId: string, limit: number = 100, connectedAccountId?: string | null): ChatTurn[] {
+  let rows: RawChatTurnRow[];
+  if (connectedAccountId !== undefined) {
+    rows = getDb()
+      .prepare("SELECT * FROM chat_turns WHERE user_id = ? AND (connected_account_id = ? OR connected_account_id IS NULL) ORDER BY created_at ASC, rowid ASC")
+      .all(userId, connectedAccountId) as RawChatTurnRow[];
+  } else {
+    rows = getDb()
+      .prepare("SELECT * FROM chat_turns WHERE user_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(userId) as RawChatTurnRow[];
+  }
   const mapped = rows.map(mapChatTurn);
   return limit > 0 && mapped.length > limit ? mapped.slice(mapped.length - limit) : mapped;
+}
+
+/**
+ * EVERY user's chat turns, most recent `limit` across the whole table, in chronological order.
+ * Unscoped by design and therefore admin-only: the sole caller is the requireAdmin-gated
+ * `/api/admin/transcript`. Ordinary per-caller reads must keep using `listChatTurns(userId, ...)`.
+ */
+export function listAllChatTurns(limit: number = 100): ChatTurn[] {
+  const n = Math.max(1, Number(limit) || 1);
+  const rows = getDb()
+    .prepare("SELECT * FROM chat_turns ORDER BY created_at DESC, rowid DESC LIMIT ?")
+    .all(n) as RawChatTurnRow[];
+  return rows.map(mapChatTurn).reverse();
 }
 
 /** Keep only the most recent `keep` turns for a user (FIFO cap); returns rows deleted. */
@@ -2312,7 +2430,7 @@ function trackOpenBracketOrder(accountNumber: string, symbol: string, userId: st
  * fixed/atr family entirely (a real style change to trailing/none/default, or the position closes),
  * never on a same-style scale-in (see trackOpenBracketOrder's doc comment for why). Never throws.
  */
-function enqueueTeardownForAllOpenBrackets(accountNumber: string, symbol: string, userId: string): void {
+export function enqueueTeardownForAllOpenBrackets(accountNumber: string, symbol: string, userId: string): void {
   try {
     const rows = getDb()
       .prepare(`SELECT order_id FROM position_stop_plan_open_brackets WHERE user_id = ? AND account_number = ? AND symbol = ?`)

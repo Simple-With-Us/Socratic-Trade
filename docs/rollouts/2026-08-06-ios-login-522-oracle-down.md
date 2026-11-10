@@ -1,5 +1,7 @@
 # 2026-08-06 — iOS login 522 + Oracle host hard-down
 
+> **2026-09-22 [MM] archaeology note:** historical reference to the iOS bundle ID `trade.socratic.app` is kept verbatim as it was live at rollout time.  Renamed on 2026-09-22 to `com.socratictrade.ios` (PR forthcoming).  The Apple capability / provisioning steps in this rollout still apply — only the bundle ID string changes.  See `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+
 ## Context & Objective
 
 Owner reported native iOS sign-in failures on the Socratic Trade login screen:
@@ -18,8 +20,8 @@ Confirmed **fleet-wide origin outage**, not an iOS OAuth code bug:
 | UptimeRobot `congress.trade` | **DOWN** (522) |
 | UptimeRobot `usage.jays.services` | **DOWN** (522) |
 | UptimeRobot `host.jays.services` | **DOWN** first (~41m) — Coolify control plane |
-| Public IP `141.148.182.224` | ICMP timeout |
-| Tailscale `usage-monitor-oracle` (`100.97.154.2`) | **offline**, last seen ~30m |
+| Public IP `<ORACLE_IP_RETIRED>` | ICMP timeout |
+| Tailscale `usage-monitor-oracle` (`<TAILSCALE_IP_RETIRED>`) | **offline**, last seen ~30m |
 | SSH via Tailscale | connect timeout |
 | OCI API (pem + fingerprint from secrets bak) | **401 NotAuthenticated** — cannot SOFTRESET |
 
@@ -57,7 +59,7 @@ returns 522 / error interstitial (often described as “Access block”).
 ## Next Steps & Blockers
 
 1. **Owner (required):** Oracle Cloud Console → Compute → instance for
-   `usage-monitor-oracle` / `141.148.182.224` in **us-phoenix-1** → **Reboot**
+   `usage-monitor-oracle` / `<ORACLE_IP_RETIRED>` in **us-phoenix-1** → **Reboot**
    (SOFTRESET) or Stop/Start.
 2. After host returns: verify Tailscale online, `host.jays.services`, then
    `https://socratictrade.com/api/health`, then re-try iOS Sign in with Apple / Google / GitHub.

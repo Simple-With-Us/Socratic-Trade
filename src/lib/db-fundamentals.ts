@@ -1,24 +1,51 @@
 /**
  * Durable market-field store.
  *
- * Two layers:
- * 1. `historical_fundamentals` — append-only numeric PIT history (existing).
- * 2. `symbol_field_latest` — latest known value for EVERY field on EVERY symbol
- *    ever seen, each row carrying its own `as_of` and `fetched_at` timestamps.
+ * Three layers:
+ * 1. `historical_fundamentals` — append-only numeric PIT history (existing). Its `effective_at`
+ *    is ambiguous (poll time vs. the fact's true reporting date is not distinguished, there is no
+ *    `form`/restatement column, and it has never had a reader — see the file's write-only history).
+ *    Deliberately NOT retrofitted into a revision chain: bolting `form`/supersession semantics onto
+ *    a row shape that was never designed for them risks silently changing meaning for whatever future
+ *    caller finally reads it. `fundamental_revisions` below is the clean-slate replacement for the
+ *    fields that need real point-in-time correctness.
+ * 2. `symbol_field_latest` — latest known value for EVERY field on EVERY symbol ever seen, each row
+ *    carrying its own `as_of` and `fetched_at` timestamps.
+ * 3. `fundamental_revisions` — the point-in-time REVISION CHAIN for SEC-XBRL-derived GAAP facts
+ *    (today: `debtToEquity`, `revenueGrowth`; future EPS/revenue fields can reuse the same shape).
+ *    Mirrors the `sec_filings`/`learned_context` `superseded_by` idiom: a later filing for the same
+ *    (symbol, field, fiscal_period_end) marks the prior LIVE row's `superseded_by` instead of
+ *    overwriting it, so a restated value never erases what the app actually knew before the
+ *    restatement. See `recordFundamentalRevision` / `getFundamentalAsOf` below.
  *
  * The latest store is SHARED (no user_id): public market data (PE, sector,
  * volume, headlines, …) is not account-private. Symbols that leave the
  * universe or a given day's scan keep their last known fields forever until a
- * newer observation overwrites them field-by-field.
+ * newer observation overwrites them field-by-field. `fundamental_revisions` is
+ * GLOBAL market data for the same reason (SEC filings are public-company
+ * facts, not account-private) — deliberately exempt from
+ * DELETE_TABLES_BY_USER_ID, same class as `sec_filings`/`symbol_field_latest`.
  *
  * Strategy-run audits deliberately strip the full MarketScan for size; this
  * table is the durable recovery path so interactive scans, other users, and
  * later strategy runs can still read the most recent per-field data.
+ *
+ * PIT SAFETY CONTRACT: `getFundamentalAsOf` is the ONLY reader in this module safe to use when
+ * evaluating a HISTORICAL decision (a backtest, a lookahead audit, a replay — anything asking "what
+ * did we know as of date X"). `getSymbolFieldLatest`, `getSymbolFieldLatestBySymbol`,
+ * `getSymbolLatestPrices`, and `marketQuoteSummariesFromFieldStore` all answer "what do we know RIGHT
+ * NOW" — feeding any of them into a historical-decision evaluation leaks the future (a later
+ * restatement, or simply a newer scan's overwrite, would silently apply to an old decision date).
+ * Only `debtToEquity`/`revenueGrowth` have a revision chain today; every other field still has NO
+ * point-in-time-safe reader — that gap is real and must be surfaced honestly, not papered over by
+ * reaching for the latest-value store.
  */
 
+import "server-only";
 import { getDb } from "./db";
 import type { Database } from "better-sqlite3";
 import { normalizeSymbol } from "./money";
+import { envFlagOn } from "./rag/env-flag";
 
 export interface HistoricalFundamentalRecord {
   symbol: string;
@@ -60,6 +87,158 @@ export function recordHistoricalFundamentals(
   });
 
   insertMany(records);
+}
+
+// ── fundamental_revisions: point-in-time revision chain (SEC-XBRL GAAP facts) ─────────────────
+
+/**
+ * One SEC-XBRL point-in-time fact for a derived field, before it is attributed to a symbol/
+ * provider (see `FundamentalRevisionRecord` for the full writer input). Produced by
+ * `parseCompanyFacts` in data-providers.ts and threaded through `SymbolEnrichment.revisions` so
+ * `CascadingEnrichmentProvider.enrich`'s SEC-XBRL branch can persist the raw revision chain, not
+ * just the winning scalar it publishes to `symbol_field_latest`.
+ */
+export interface FundamentalRevisionFact {
+  field: string;
+  fiscalPeriodEnd: string;
+  value: number;
+  /** SEC form that carried this fact (e.g. "10-K", "10-K/A", "10-Q", "10-Q/A"). */
+  form: string;
+  /** SEC EDGAR `filed` date (YYYY-MM-DD) — when this specific fact became known, NOT the
+   *  fiscal period it describes. This is the timestamp `getFundamentalAsOf` filters on. */
+  filedAt: string;
+}
+
+export interface FundamentalRevisionRecord extends FundamentalRevisionFact {
+  symbol: string;
+  provider: string;
+}
+
+/**
+ * Record one point-in-time revision fact. Mirrors the `sec_filings`/`learned_context`
+ * `superseded_by` idiom: inserting a NEW revision for the same (symbol, field,
+ * fiscal_period_end) marks every currently-LIVE prior row in that group `superseded_by` the new
+ * row's own `filed_at` — there is no synthetic id, and symbol/field/fiscal_period_end are already
+ * fixed within the group, so the successor's `filed_at` alone is enough to look it back up. The
+ * superseded row is NEVER deleted or overwritten — it stays queryable for anyone auditing what the
+ * app knew before the restatement. `superseded_by` is a pure audit annotation: `getFundamentalAsOf`
+ * does not filter on it, so a superseded row still participates correctly in AS-OF queries dated
+ * before its successor's `filed_at`.
+ *
+ * Idempotent: re-recording the same (symbol, field, fiscal_period_end, filed_at) fact (e.g. a
+ * later scan re-observing the same SEC filing) is a no-op — INSERT OR IGNORE on the composite PK.
+ */
+export function recordFundamentalRevision(
+  record: FundamentalRevisionRecord,
+  database: Database = getDb()
+): void {
+  const symbol = normalizeSymbol(record.symbol);
+  const field = String(record.field ?? "").trim();
+  const fiscalPeriodEnd = String(record.fiscalPeriodEnd ?? "").trim();
+  const filedAt = String(record.filedAt ?? "").trim();
+  const form = String(record.form ?? "").trim();
+  const provider = String(record.provider ?? "").trim() || "unknown";
+  if (!symbol || !field || !fiscalPeriodEnd || !filedAt || !form) return;
+  if (typeof record.value !== "number" || !Number.isFinite(record.value)) return;
+
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO fundamental_revisions
+      (symbol, field, fiscal_period_end, value, form, filed_at, provider, superseded_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+  `);
+  const groupFiledAts = database.prepare(`
+    SELECT filed_at FROM fundamental_revisions
+    WHERE symbol = ? AND field = ? AND fiscal_period_end = ?
+    ORDER BY filed_at ASC
+  `);
+  const setSupersededBy = database.prepare(`
+    UPDATE fundamental_revisions
+    SET superseded_by = ?
+    WHERE symbol = ? AND field = ? AND fiscal_period_end = ? AND filed_at = ?
+  `);
+
+  const run = database.transaction(() => {
+    const result = insert.run(
+      symbol,
+      field,
+      fiscalPeriodEnd,
+      record.value,
+      form,
+      filedAt,
+      provider,
+      new Date().toISOString()
+    );
+    // Only re-chain when this row is genuinely new — a re-recorded (idempotent) fact must not
+    // re-run the sweep (harmless either way, but pointless work).
+    if (result.changes > 0) {
+      // Recompute the whole (symbol, field, fiscal_period_end) chain by filed_at ascending rather
+      // than only re-pointing predecessors of the new row: SEC companyfacts array order is not
+      // contractual, so an earlier-filed revision can legitimately arrive AFTER a later-filed one
+      // already exists. Re-pointing only "filed_at < new" leaves that out-of-order case with two
+      // live (superseded_by NULL) rows — this full re-sort guarantees exactly the newest filed_at
+      // row is ever live, independent of insertion order.
+      const group = groupFiledAts.all(symbol, field, fiscalPeriodEnd) as Array<{ filed_at: string }>;
+      for (let i = 0; i < group.length; i++) {
+        const nextFiledAt = group[i + 1]?.filed_at ?? null;
+        setSupersededBy.run(nextFiledAt, symbol, field, fiscalPeriodEnd, group[i]!.filed_at);
+      }
+    }
+  });
+  run();
+}
+
+/**
+ * Opt-in strict as-of mode (mirrors `asOfStrictEnabled()` / VECTOR_ASOF_STRICT in vector-db.ts).
+ * OFF by default — set FUNDAMENTALS_ASOF_STRICT=on to make `getFundamentalAsOf` fail closed
+ * (return `undefined`) instead of falling back to `symbol_field_latest` when no revision row
+ * covers the requested date. A per-call `options.strict` always overrides this default.
+ */
+export function fundamentalsAsOfStrictEnabled(): boolean {
+  return envFlagOn("FUNDAMENTALS_ASOF_STRICT", false);
+}
+
+/**
+ * Point-in-time read: the value of `field` for `symbol` AS KNOWN on `asOf` (ISO date/datetime,
+ * compared lexicographically against `filed_at` — both are ISO-formatted so this is safe).
+ * Picks the most recent fiscal period whose filing was known by `asOf`, then the most recent
+ * filing within that period (a same-period restatement filed by `asOf` wins over the original).
+ *
+ * THIS is the PIT-safe reader — see the file header's PIT SAFETY CONTRACT. Do not substitute
+ * `getSymbolFieldLatest`/`marketQuoteSummariesFromFieldStore` for a historical decision; they
+ * answer "what do we know right now," not "what did we know as of `asOf`."
+ *
+ * - Lenient (default, `strict` omitted or false and FUNDAMENTALS_ASOF_STRICT unset/off): no
+ *   revision row covers `asOf` -> falls back to `symbol_field_latest` (today's non-PIT behavior),
+ *   so a field with no revision history yet (or not SEC-XBRL-derived at all) never blocks a live
+ *   decision.
+ * - Strict (`options.strict === true`, or FUNDAMENTALS_ASOF_STRICT=on and `options.strict` unset):
+ *   no revision row covers `asOf` -> returns `undefined`. Never guesses.
+ */
+export function getFundamentalAsOf(
+  symbol: string,
+  field: string,
+  asOf: string,
+  options: { strict?: boolean } = {},
+  database: Database = getDb()
+): number | undefined {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (!normalizedSymbol || !field || !asOf) return undefined;
+
+  const row = database
+    .prepare(
+      `SELECT value FROM fundamental_revisions
+       WHERE symbol = ? AND field = ? AND filed_at <= ?
+       ORDER BY fiscal_period_end DESC, filed_at DESC
+       LIMIT 1`
+    )
+    .get(normalizedSymbol, field, asOf) as { value: number } | undefined;
+  if (row) return row.value;
+
+  const strict = options.strict ?? fundamentalsAsOfStrictEnabled();
+  if (strict) return undefined;
+
+  const latest = getSymbolFieldLatest([normalizedSymbol], database).find((r) => r.field === field);
+  return typeof latest?.value === "number" && Number.isFinite(latest.value) ? latest.value : undefined;
 }
 
 /**
@@ -236,14 +415,17 @@ export function recordsFromEnrichmentMap(
   merged: Record<string, object>,
   fallbackFetchedAt: string = new Date().toISOString()
 ): SymbolFieldLatestRecord[] {
+  // analystBySource is intentionally NOT in META — persist as JSON for nightly congress-share counts.
   const META = new Set([
     "sources",
     "fieldObservations",
     "providerFailures",
     "fieldDates",
-    "analystBySource",
     "shortPercentOfFloatSecondary",
-    "shortInterestDisagreement"
+    "shortInterestDisagreement",
+    // Raw PIT revision facts (see fundamental_revisions / recordFundamentalRevision) — persisted
+    // separately by CascadingEnrichmentProvider.enrich's SEC-XBRL branch, never as a scalar field.
+    "revisions"
   ]);
   const out: SymbolFieldLatestRecord[] = [];
 

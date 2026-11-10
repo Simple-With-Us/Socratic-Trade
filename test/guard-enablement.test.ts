@@ -47,7 +47,10 @@ describe("mergePolicy — tuning deep-merge (db-profiles runtime copy)", () => {
       riskReceipts: true,
       volTargeting: true,
       targetPortfolioVolPct: 25,
-      portfolioHeatBudgetPct: 10
+      portfolioHeatBudgetPct: 10,
+      // Owner ruling 2026-09-24 (board 687a5fb4): deRiskExitsOnAdversaryUnavailable default
+      // flipped ON — see test/model-defaults-derisk-exits.test.ts for dedicated coverage.
+      deRiskExitsOnAdversaryUnavailable: true
     });
   });
 
@@ -156,7 +159,7 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
     expect(drawdownAudits.length).toBeGreaterThanOrEqual(2); // one receipt per breaching run
   }, 150_000);
 
-  it("delivers even when the stored enabledEvents list predates risk_advisory (force-inject regression)", async () => {
+  it("does NOT deliver when the user has risk_advisory switched off — real toggle, no force-include (owner ruling 2026-08-12)", async () => {
     process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", zeroProposalFetchStub());
 
@@ -185,10 +188,12 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
       riskRules: { ...DEFAULT_POLICY.riskRules, maxDrawdownPct: 20 },
-      // Simulate an account whose stored notification preferences were saved BEFORE the
-      // risk_advisory event type existed: mergePolicy lets this explicit list win wholesale, so
-      // without the send-site force-inject the advisory is recorded as skipped ("Notification
-      // type is disabled.") and never reaches a push channel.
+      // The user explicitly turned risk_advisory off in Settings. Before the owner's 2026-08-12
+      // "ALL toggles must be real" ruling, the drawdown-advisory send site force-injected
+      // risk_advisory into the effective enabledEvents regardless, silently overriding this
+      // forever. That pattern is removed (a one-time migration — db.ts migration 78 — backfills
+      // any LEGACY stored array that predates the event type instead), so an explicit, deliberate
+      // opt-out like this one must now be honored and stay honored.
       notificationSettings: { webhookUrl: "", enabledEvents: ["fill", "block"] }
     });
 
@@ -198,9 +203,6 @@ describe("advisory drawdown-breaker notification (dedup per user/account/source/
 
     const advisories = listNotificationEvents("local", 100).filter((e) => e.type === "risk_advisory");
     expect(advisories).toHaveLength(1);
-    // The send was ATTEMPTED, not dropped by the enabledEvents filter. (Status may still be
-    // "skipped" in this channel-less test env with the no-channels-configured reason — that is a
-    // delivery outcome, not a filter drop.)
-    expect(advisories[0].error).not.toBe("Notification type is disabled.");
+    expect(advisories[0].error).toBe("Notification type is disabled.");
   }, 150_000);
 });

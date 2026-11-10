@@ -15,6 +15,9 @@ import { fmtMoney, fmtPct } from "../lib/format";
 import { Chip, Dash, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
+// Owner copy rule (docs/FLEET-UI-COPY.md "Money"): compact suffixes are
+// lowercase ($1.2m, not $1.2M) — Intl always emits uppercase K/M/B/T, so
+// every call site below lowercases the formatted result.
 const compactNum = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
 /** "Label\nSource: <provider>\nReceived <time>" — provenance strictly from the
@@ -94,7 +97,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "symbol",
     label: "Symbol",
-    headerTitle: "Ticker symbol — click one to open the drilldown with a price chart and key stats. Hover a row for the company name.",
+    headerTitle: "Ticker symbol — click one to open the drilldown with a price chart and key stats.  Hover a row for the company name.",
     align: "left",
     sortValue: (q) => q.symbol,
     render: (q) => (
@@ -132,7 +135,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
     id: "score",
     label: "Score",
     headerTitle:
-      "Composite 0–100 scan score — a weighted blend of liquidity, momentum, value, quality, volatility, sentiment and diversification factors, computed by the scanner (weights are configurable in strategy settings). Higher = ranked more attractive this run.",
+      "Composite 0–100 scan score — a weighted blend of liquidity, momentum, value, quality, volatility, sentiment and diversification factors, computed by the scanner (weights are configurable in strategy settings).  Higher = ranked more attractive this run.",
     num: true,
     align: "center",
     sortValue: (q) => q.score,
@@ -151,7 +154,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "price",
     label: "Price",
-    headerTitle: "Last traded price (may be delayed). Hover a cell for the provider(s) that supplied it.",
+    headerTitle: "Last traded price (may be delayed).  Hover a cell for the provider(s) that supplied it.",
     num: true,
     align: "right",
     sortValue: (q) => q.price,
@@ -161,7 +164,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "change",
     label: "Chg",
-    headerTitle: "Intraday change — percent move vs the prior session's close. Green up, red down.",
+    headerTitle: "Intraday change — percent move vs the prior session's close.  Green up, red down.",
     num: true,
     align: "center",
     sortValue: (q) => q.intradayChangePct,
@@ -180,7 +183,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
     num: true,
     align: "center",
     sortValue: (q) => (q.volume > 0 ? q.volume : undefined),
-    render: (q) => (q.volume > 0 ? compactNum.format(q.volume) : <Dash />),
+    render: (q) => (q.volume > 0 ? compactNum.format(q.volume).toLowerCase() : <Dash />),
     cellTitle: (q) => fieldTitle("Share volume", q.sources?.volume, q.asOf)
   },
   {
@@ -213,7 +216,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "epsGrowth",
     label: "EPS gr",
-    headerTitle: "Earnings-per-share growth, year over year. Positive = earnings expanding.",
+    headerTitle: "Earnings-per-share growth, year over year.  Positive = earnings expanding.",
     num: true,
     align: "center",
     sortValue: (q) => q.epsGrowth,
@@ -249,7 +252,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "sentiment",
     label: "News",
-    headerTitle: "News sentiment score 0–100 (50 = neutral), scored from recent headlines. Hover a cell for the headlines behind the number.",
+    headerTitle: "News sentiment score 0–100 (50 = neutral), scored from recent headlines.  Hover a cell for the headlines behind the number.",
     align: "center",
     sortValue: (q) => q.sentiment,
     render: (q) => (typeof q.sentiment === "number" ? <SentimentChip value={q.sentiment} /> : <Dash />),
@@ -258,7 +261,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "insiderSentiment",
     label: "Insiders",
-    headerTitle: "Insider sentiment score 0–100 (50 = neutral), derived from SEC Form 4 insider transaction disclosures. Hover a cell for details.",
+    headerTitle: "Insider sentiment score 0–100 (50 = neutral), derived from SEC Form 4 insider transaction disclosures.  Hover a cell for details.",
     align: "center",
     sortValue: (q) => q.insiderSentiment,
     render: (q) => (typeof q.insiderSentiment === "number" ? <SentimentChip value={q.insiderSentiment} /> : <Dash />),
@@ -267,7 +270,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
   {
     id: "analystScore",
     label: "Rating",
-    headerTitle: "Analyst consensus 0–100, blended across providers (Strong Buy = 100 … Strong Sell = 0). Hover a cell for the per-provider breakdown.",
+    headerTitle: "Analyst consensus 0–100, blended across providers (Strong Buy = 100 … Strong Sell = 0).  Hover a cell for the per-provider breakdown.",
     align: "center",
     sortValue: (q) => q.analystScore,
     render: (q) => (q.analystRating ? <RatingChip label={q.analystRating} score={q.analystScore} /> : <Dash />),
@@ -277,7 +280,7 @@ export const SCAN_COLUMNS: ScanColumn[] = [
     id: "senateTrades",
     label: "Congress",
     headerTitle:
-      "Congressional trading composite score and disclosures (Conviction, Consensus, Skill, Flow, Freshness). Hover or tap a cell for full details.",
+      "Congressional trading composite score and disclosures (Conviction, Consensus, Skill, Flow, Freshness).  Hover or tap a cell for full details.",
     num: true,
     align: "center",
     sortValue: (q) => q.congressCompositeSignedScore ?? q.congressCompositeScore ?? q.senateTrades,

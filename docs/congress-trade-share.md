@@ -1,12 +1,18 @@
 # Sharing market data with congress.trade (App A)
 
-**Status:** implemented (2026-06-22), **OFF by default**. See
+**Status:** implemented (2026-06-22); **prod Infisical `CONGRESS_SHARE_ENABLED=on` 2026-08-13**
+(still requires `CONGRESS_TRADE_TOKEN`).  Code default remains off for local.  See
 `src/lib/congress-share.ts`, `app/api/admin/congress-share/route.ts`, and the
 hooks in `src/lib/market.ts` (after-scan) and `src/lib/scheduler.ts` (nightly).
 
 **Shared contract package (2026-06-30):** outbound import payload types, origin tags, API path constants,
 and runtime Zod schemas are imported from `@jaywedgeworth22/congress-trading-shared`, with local App B
 code retaining only mapping logic and operational gates.
+
+**Share envelope version (2026-10-23, ST-3853):** since `@jaywedgeworth22/congress-trading-shared`
+v2.9.0 the sender stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every outbound import POST body
+(and App A resolves it with `resolveSharePayloadSchemaVersion`, warning on unsupported versions
+without rejecting the payload).
 
 **2026-06-25 additions (all default-OFF):**
 - **Numeric analyst price targets** — `fundamentals[]`/`analyst[]` already ride the
@@ -24,6 +30,16 @@ code retaining only mapping logic and operational gates.
   (no-echo guard). The local cache feeds an opt-in `fetchDailyOHLC` tier
   (`SECURITIES_IMPORT_HISTORY_TIER_ENABLED`, density-guarded by
   `SECURITIES_IMPORT_MIN_BARS`). See the 2026-06-25 rollout note.
+  Each push carries `x-push-id`.  The response is an idempotent receipt:
+  that id, a delivered ack, a consumed ack, and `health`.  A retry of an
+  `ok` receipt with the same payload returns that body and does not write the
+  cache again.  The same ok id with a different payload is rejected with 409.
+  A non-ok receipt is replaced on the next attempt with the same id.  `health`
+  is `ok` only when the id and both acks are present.  A missing ack is
+  audited (`peer_push_ack_missing`), recorded on the `congress-inbound-push`
+  health lane, and paged on the first occurrence.  The latest receipt is
+  `congressInboundPush` on `GET /api/ops/snapshot`.  See
+  `docs/rollouts/2026-10-15-ct-push-receipt.md`.
 
 ## Why
 
@@ -53,9 +69,10 @@ The data App A wants comes from App B's **other** sources:
 | `prices[].closes`, `currentPrice` | `fetchDailyOHLC()` (`src/lib/history.ts`) — Massive → Tradier → Marketstack → Yahoo → Stooq cascade. |
 | `spx` | `fetchDailyOHLC("^GSPC")`. |
 
-App A only needs the **data**, not FMP-sourced data, so forwarding App B's
-Yahoo/Massive/Tradier-sourced closes still conserves App A's FMP quota. The
-trigger therefore shifts from "after each FMP call" to **(a)** an after-scan refs
+App A only needs the **data**, not a particular vendor.  Forwarding App B's
+Yahoo/Massive/Tradier-sourced closes keeps CT on the peer price path and off a
+second Massive hop (ST retired direct FMP/Quiver/UW on 2026-08-04).  The trigger
+therefore shifts from "after each paid-vendor call" to **(a)** an after-scan refs
 hook and **(b)** a nightly daily-close/SPX batch.
 
 ## What gets sent, and when
@@ -71,10 +88,14 @@ hook and **(b)** a nightly daily-close/SPX batch.
    most once per UTC day): collects the **union of every user's watchlist symbols
    + policy-universe symbols** (the same set the filing-ingest job uses), fetches
    each ticker's daily closes (reusing the history cache) plus the `^GSPC` series,
-   and POSTs them as `prices` + `spx` in capped chunks.
+   and POSTs them as `prices` + `spx` in capped chunks.  On scheduled runs it also
+   POSTs `fundamentals[]` + `analyst[]` for that universe from the durable
+   `symbol_field_latest` store (`buildFundamentalsAndAnalystImport`), so App A's
+   fundamentals/analyst streams stay fresh even when the scan hook is throttled or
+   scan candidates lack slow enrichment on a given run.
 
-`refs` come from the scan hook; the nightly batch sends `prices` + `spx`. This
-matches the "scan refs + nightly prices" split chosen for this work.
+`refs` come from the scan hook; the nightly batch sends `prices` + `spx` plus
+insider/short-volume and (when enabled) fundamentals/analyst from the field store.
 
 **Round-2 additions (2026-06-22):** the nightly batch also forwards App B's two highest-fit datasets,
 sourced from its cached web-sources and built by `buildInsiderImport()` / `buildShortVolumeImport()`:
@@ -116,6 +137,29 @@ applied** — App A's tables don't exist until then, and pushing those rows earl
   for diagnosis.
 - A persisted marker (`congress-share:lastDailyRunDate`) makes the nightly batch
   idempotent per UTC day.
+- **Auth circuit breaker** (prod incident 2026-09-07, 3,096 silent HTTP 401s over 9 days): an
+  HTTP 401/403 from App A means the shared bearer token is wrong on one side — a permanent
+  condition until an operator rotates/resyncs it, not a transient blip. This trips a durable
+  breaker (`CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS`, default 6h) that short-circuits every
+  subsequent call — the scan-hook, the rest of an in-flight nightly batch, and the ENTIRE
+  collection phase (App A price-needs, OHLC fetches, screener refs) of the next nightly run —
+  with no network call, until the cooldown elapses. Every absorbed call still replays into
+  `api_health_log` (service `congress-share`) so the existing 5-consecutive-failure Sentry/
+  degraded-health threshold is still reached at the caller's normal cadence. The breaker stores a
+  non-secret fingerprint of the token that tripped it and auto-clears the moment
+  `CONGRESS_TRADE_TOKEN` is resynced to a different value, so an operator fix does not have to
+  wait out the rest of the cooldown. Once the cooldown elapses, exactly one caller's real probe is
+  allowed through (an atomic durable claim serializes overlapping callers); success clears the
+  breaker, a repeat 401/403 re-trips it for another full cooldown. A non-auth failure (5xx/
+  timeout/network) never trips the auth breaker.  A separate in-memory upstream breaker
+  (`CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES`, default 3 exhausted calls,
+  `CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS`, default 10 minutes) holds repeated HTTP 500
+  and network failures.  While it is cooling, import POSTs and the token probe skip the network
+  with no health replay, and the nightly run returns before price-needs and OHLC.  Price-needs
+  500s do not count toward it.  The token probe is `GET /api/export/capabilities` (same bearer,
+  no D1 scan).  `GET /api/export/price-needs?limit=0` is not a cheap probe: App A rewrites a
+  non-positive limit to 500 and always runs unbounded summary SQL, and an uncaught D1/CPU error
+  from that handler is HTTP 500.
 
 ## Congressional price-needs (performance vs S&P)
 
@@ -162,6 +206,7 @@ sent, responses, autoEnabled }`, where `responses` carries App A's per-POST
 | `CONGRESS_SHARE_CONCURRENCY` | `4` | Parallel history fetches in the nightly batch. |
 | `CONGRESS_SHARE_REF_TTL_MS` | `21600000` (6h) | Per-symbol scan-refs throttle. |
 | `CONGRESS_SHARE_TIMEOUT_MS` | `15000` | Per-POST timeout. |
+| `CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS` | `21600000` (6h) | Auth circuit-breaker cooldown after an HTTP 401/403 (see Safety / gating above). |
 
 ## Reverse direction (App A pulls App B — implemented 2026-07-31)
 
@@ -173,10 +218,15 @@ the same `APP_B_INGEST_TOKEN` bearer as `/api/admin/securities/import`
   `PriceSeries` envelope: `{ ticker, closes: [{date, close, volume?}, ...], currentPrice,
   currentPriceDate }`. Closes are DESCENDING (closes[0] = latest); `from`/`to` optional, inclusive
   (default ~1y back → today); `currentPrice` is the newest close of the FULL series
-  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }` — never an
-  error status, so App A only treats genuine non-200s as "try the fallback provider".
+  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }`.
+  App A treats that 200 as "this source has nothing" and only tries the next provider on non-200.
+  A series whose newest close is older than the latest completed US equity session is HTTP 502
+  `{ ok: false, error: "stale" }`.  An empty 200 would suppress that fallback.  The nightly push
+  drops that ticker and the S&P series instead of POSTing them, and writes a
+  `congress_share_stale_price_withheld` audit row.
 - `GET /api/market/spx?from=&to=` → `{ closes: [...] }` DESCENDING, from SPY daily bars (the
-  benchmark convention App A already uses).
+  benchmark convention App A already uses).  No bars is 200 `{ closes: [] }`.  A stale SPY tail
+  is the same 502.
 
 Bars come from the canonical `fetchDailyOHLC` cascade (Massive keyed first, ~30min in-process
 cache) — see `src/lib/market-read.ts` and `docs/rollouts/2026-07-31-market-read-routes.md`.

@@ -19,7 +19,7 @@ import {
   type CatalogField,
   type DataCategory
 } from "./data-catalog";
-import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
+import { resolveEnrichmentCoverageReport } from "./db-enrichment-coverage";
 import { getSymbolFieldLatestBySymbol } from "./db-fundamentals";
 import { normalizeSymbol } from "./money";
 
@@ -228,7 +228,7 @@ export function buildDataCompletenessReport(explicitUniverse?: string[]): DataCo
   const universeCount = universe.length;
   const accessionIndex = loadRagAccessionIndex();
   const chunkCounts = loadChunkCountsBySymbol();
-  const cascade = getLastEnrichmentCoverageReport();
+  const cascade = resolveEnrichmentCoverageReport();
   const durable = universeCount > 0 ? getSymbolFieldLatestBySymbol(universe) : {};
 
   const fieldRows: FieldCompletenessRow[] = [];
@@ -306,7 +306,7 @@ export function buildDataCompletenessReport(explicitUniverse?: string[]): DataCo
           method: "cascade_report",
           provenanceRequired: true,
           sourceIds,
-          notes: "From last cascade coverage report (in-memory; not durable)."
+          notes: "From last cascade coverage report (durable store or in-memory from current process)."
         });
         continue;
       }

@@ -1,3 +1,10 @@
+// SERVER-ONLY BOUNDARY.  This module resolves connected accounts, reads the
+// trading policy, and calls broker gateways — it carries credential-bearing
+// code and MUST never be pulled into a browser bundle.  `server-only` makes
+// that boundary fail loudly at build time instead of shipping secrets to the
+// client.  Every importer is server-side (src/lib/*, app/api/*); no client
+// component may import this module.
+import "server-only";
 import {
   getPolicy,
   getConnectedAccount,
@@ -8,10 +15,25 @@ import {
 } from "./db";
 import { getBrokerGateway } from "./broker";
 import { DEFAULT_POLICY } from "./defaults";
-import { AlpacaSnapshotEnrichmentProvider, fetchWithRetry } from "./data-providers";
-import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
+import { AlpacaSnapshotEnrichmentProvider, apiKeyFingerprint, fetchWithRetry } from "./data-providers";
+import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { normalizeSymbol } from "./money";
-import type { BrokerQuote, ConnectedAccount, TradingPolicy } from "./types";
+import {
+  isDelayedYahooFallbackQuote,
+  isYahooFallbackProvider
+} from "./quote-delayed-fallback";
+import { upsertSymbolFieldLatest, type SymbolFieldLatestRecord } from "./db-fundamentals";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import { isMarketOpen } from "./market-calendar";
+import {
+  alpacaPaperFeedForAccount,
+  alpacaSnapshotCacheIdentity,
+  delayedTapeStatus,
+  isAlpacaPaperAccount,
+  isFutureProviderStamp
+} from "./alpaca-paper-quotes";
+import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
 /**
  * Helper to extract the first valid number from fields on an object.
@@ -27,6 +49,444 @@ function firstNumber(obj: any, keys: string[]): number | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Quote fields whose per-field provenance is tracked through
+ * `mergeBrokerQuoteFields` (Codex P1 review on #3449).
+ */
+const PROVENANCE_TRACKED_FIELDS = [
+  "price",
+  "bid",
+  "ask",
+  "bidSize",
+  "askSize",
+  "volume",
+  "prevClose",
+  "open",
+  "high",
+  "low",
+  "close",
+  "vwap",
+  "change",
+  "changePct",
+  "netChange",
+  "companyName"
+] as const;
+
+/**
+ * Positive-valued fields (price, book, size, volume, OHLC, vwap): treat 0 as missing
+ * so a secondary provider can backfill. Change metrics may legitimately be 0.
+ * Strings (companyName) use nullish presence.
+ */
+function fieldHasUsableValue(field: (typeof PROVENANCE_TRACKED_FIELDS)[number], quote: BrokerQuote): boolean {
+  const v = quote[field];
+  if (v == null) return false;
+  if (field === "companyName") return typeof v === "string" && v.length > 0;
+  if (field === "change" || field === "changePct" || field === "netChange") {
+    return typeof v === "number" && Number.isFinite(v);
+  }
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+/** Coalesce numeric quote fields: prefer a positive primary, else positive secondary; change metrics allow 0. */
+function coalesceQuoteNumber(
+  primary: number | undefined,
+  secondary: number | undefined,
+  opts: { allowZero?: boolean } = {}
+): number | undefined {
+  const ok = (v: number | undefined): v is number =>
+    typeof v === "number" && Number.isFinite(v) && (opts.allowZero ? true : v > 0);
+  if (ok(primary)) return primary;
+  if (ok(secondary)) return secondary;
+  return undefined;
+}
+
+function stampFieldProvenance(
+  primary: BrokerQuote,
+  secondary: BrokerQuote
+): Record<string, QuoteFieldProvenance> {
+  const prov: Record<string, QuoteFieldProvenance> = {
+    ...(secondary.fieldProvenance ?? {}),
+    ...(primary.fieldProvenance ?? {})
+  };
+  for (const field of PROVENANCE_TRACKED_FIELDS) {
+    const winner = fieldHasUsableValue(field, primary)
+      ? primary
+      : fieldHasUsableValue(field, secondary)
+        ? secondary
+        : undefined;
+    if (!winner) continue;
+    // Retain an existing per-field receipt when the winner is itself a previously
+    // coalesced quote — do not overwrite with the quote-level provider/timestamps
+    // (Codex P1 review on #3449: repeated merges must keep each field's supplier).
+    const existing = winner.fieldProvenance?.[field];
+    if (existing) {
+      prov[field] = existing;
+    } else {
+      prov[field] = {
+        provider: winner.provider,
+        asOf: winner.asOf,
+        fetchedAt: winner.fetchedAt
+      };
+    }
+  }
+  return prov;
+}
+
+/**
+ * A quote is "field-complete" for cascade purposes when it carries the core
+ * session fields the cascade exists to coalesce: a usable price, a two-sided
+ * book, the previous close, and the session OHLC (Codex P1 review on #3449 —
+ * a fresh broker/Alpaca price missing prevClose/OHLC must not stop the
+ * cascade before Finnhub/Tiingo/Yahoo can backfill them).  VWAP is deliberately
+ * excluded: it is effectively single-provider (Alpaca), so requiring it would
+ * force every non-Alpaca symbol through all seven levels on every refresh,
+ * conflicting with the quota-protection review finding.  A fresh but
+ * field-incomplete quote stays pending; later levels backfill the gaps.
+ */
+export function isCascadeFieldComplete(quote: BrokerQuote): boolean {
+  const positive = (v: unknown): v is number => typeof v === "number" && v > 0;
+  return (
+    positive(quote.price) &&
+    positive(quote.bid) &&
+    positive(quote.ask) &&
+    positive(quote.prevClose) &&
+    positive(quote.open) &&
+    positive(quote.high) &&
+    positive(quote.low)
+  );
+}
+
+/**
+ * Merges fields between an existing quote and an incoming quote.
+ *
+ * Rules:
+ * 1. If target is venue-authoritative (e.g. Tradier paper sandbox), target's
+ *    price, asOf, provider, and venuePriceAuthoritative flag are preserved.
+ *    Missing descriptive fields (prevClose, open, high, low, vwap, bid, ask, etc.)
+ *    are backfilled from incoming.
+ * 2. If incoming is venue-authoritative and target is not, incoming takes precedence.
+ * 3. Otherwise, the quote with a valid price and fresher `asOf` wins the primary
+ *    price and provider, while missing fields are backfilled from the other quote.
+ */
+export function mergeBrokerQuoteFields(
+  target?: BrokerQuote,
+  incoming?: BrokerQuote
+): BrokerQuote | undefined {
+  if (!target && !incoming) return undefined;
+  if (!target) return incoming ? { ...incoming } : undefined;
+  if (!incoming) return { ...target };
+
+  // Case 1: Target is venuePriceAuthoritative
+  if (target.venuePriceAuthoritative && !incoming.venuePriceAuthoritative) {
+    return {
+      ...incoming,
+      ...target,
+      price: target.price,
+      asOf: target.asOf,
+      provider: target.provider,
+      fetchedAt: target.fetchedAt ?? incoming.fetchedAt,
+      venuePriceAuthoritative: true,
+      bid: coalesceQuoteNumber(target.bid, incoming.bid),
+      ask: coalesceQuoteNumber(target.ask, incoming.ask),
+      volume: coalesceQuoteNumber(target.volume, incoming.volume),
+      prevClose: coalesceQuoteNumber(target.prevClose, incoming.prevClose),
+      open: coalesceQuoteNumber(target.open, incoming.open),
+      high: coalesceQuoteNumber(target.high, incoming.high),
+      low: coalesceQuoteNumber(target.low, incoming.low),
+      close: coalesceQuoteNumber(target.close, incoming.close),
+      vwap: coalesceQuoteNumber(target.vwap, incoming.vwap),
+      change: coalesceQuoteNumber(target.change, incoming.change, { allowZero: true }),
+      changePct: coalesceQuoteNumber(target.changePct, incoming.changePct, { allowZero: true }),
+      bidSize: coalesceQuoteNumber(target.bidSize, incoming.bidSize),
+      askSize: coalesceQuoteNumber(target.askSize, incoming.askSize),
+      companyName: target.companyName ?? incoming.companyName,
+      netChange: coalesceQuoteNumber(target.netChange, incoming.netChange, { allowZero: true }),
+      fieldProvenance: stampFieldProvenance(target, incoming)
+    };
+  }
+
+  // Case 2: Incoming is venuePriceAuthoritative
+  if (incoming.venuePriceAuthoritative && !target.venuePriceAuthoritative) {
+    return {
+      ...target,
+      ...incoming,
+      price: incoming.price,
+      asOf: incoming.asOf,
+      provider: incoming.provider,
+      fetchedAt: incoming.fetchedAt ?? target.fetchedAt,
+      venuePriceAuthoritative: true,
+      bid: coalesceQuoteNumber(incoming.bid, target.bid),
+      ask: coalesceQuoteNumber(incoming.ask, target.ask),
+      volume: coalesceQuoteNumber(incoming.volume, target.volume),
+      prevClose: coalesceQuoteNumber(incoming.prevClose, target.prevClose),
+      open: coalesceQuoteNumber(incoming.open, target.open),
+      high: coalesceQuoteNumber(incoming.high, target.high),
+      low: coalesceQuoteNumber(incoming.low, target.low),
+      close: coalesceQuoteNumber(incoming.close, target.close),
+      vwap: coalesceQuoteNumber(incoming.vwap, target.vwap),
+      change: coalesceQuoteNumber(incoming.change, target.change, { allowZero: true }),
+      changePct: coalesceQuoteNumber(incoming.changePct, target.changePct, { allowZero: true }),
+      bidSize: coalesceQuoteNumber(incoming.bidSize, target.bidSize),
+      askSize: coalesceQuoteNumber(incoming.askSize, target.askSize),
+      companyName: incoming.companyName ?? target.companyName,
+      netChange: coalesceQuoteNumber(incoming.netChange, target.netChange, { allowZero: true }),
+      fieldProvenance: stampFieldProvenance(incoming, target)
+    };
+  }
+
+  // Case 3: General case (neither or both are venue-authoritative)
+  const targetTime = target.asOf ? new Date(target.asOf).getTime() : 0;
+  const incomingTime = incoming.asOf ? new Date(incoming.asOf).getTime() : 0;
+  const targetHasPrice = typeof target.price === "number" && target.price > 0;
+  const incomingHasPrice = typeof incoming.price === "number" && incoming.price > 0;
+
+  const preferIncoming =
+    (!targetHasPrice && incomingHasPrice) ||
+    (incomingHasPrice && incomingTime > targetTime);
+
+  const primary = preferIncoming ? incoming : target;
+  const secondary = preferIncoming ? target : incoming;
+
+  const hasBid = typeof primary.bid === "number" && primary.bid > 0;
+  const hasAsk = typeof primary.ask === "number" && primary.ask > 0;
+
+  return {
+    ...secondary,
+    ...primary,
+    bid: coalesceQuoteNumber(primary.bid, secondary.bid),
+    ask: coalesceQuoteNumber(primary.ask, secondary.ask),
+    volume: coalesceQuoteNumber(primary.volume, secondary.volume),
+    prevClose: coalesceQuoteNumber(primary.prevClose, secondary.prevClose),
+    open: coalesceQuoteNumber(primary.open, secondary.open),
+    high: coalesceQuoteNumber(primary.high, secondary.high),
+    low: coalesceQuoteNumber(primary.low, secondary.low),
+    close: coalesceQuoteNumber(primary.close, secondary.close),
+    vwap: coalesceQuoteNumber(primary.vwap, secondary.vwap),
+    change: coalesceQuoteNumber(primary.change, secondary.change, { allowZero: true }),
+    changePct: coalesceQuoteNumber(primary.changePct, secondary.changePct, { allowZero: true }),
+    bidSize: coalesceQuoteNumber(primary.bidSize, secondary.bidSize),
+    askSize: coalesceQuoteNumber(primary.askSize, secondary.askSize),
+    companyName: primary.companyName ?? secondary.companyName,
+    netChange: coalesceQuoteNumber(primary.netChange, secondary.netChange, { allowZero: true }),
+    syntheticBid: hasBid ? primary.syntheticBid : secondary.syntheticBid,
+    syntheticAsk: hasAsk ? primary.syntheticAsk : secondary.syntheticAsk,
+    syntheticSpread:
+      hasBid && hasAsk
+        ? primary.syntheticSpread
+        : (primary.syntheticSpread ?? secondary.syntheticSpread),
+    delayedFallback: primary.delayedFallback ?? (preferIncoming ? secondary.delayedFallback : undefined),
+    fieldProvenance: stampFieldProvenance(primary, secondary)
+  };
+}
+
+export async function fetchFinnhubQuote(
+  symbol: string,
+  apiKey: string,
+  keySource: string = "env",
+  userId?: string,
+  signal?: AbortSignal
+): Promise<BrokerQuote | undefined> {
+  // Paced through the provider limiter like every other Finnhub call site —
+  // the cascade must not burst past Finnhub's quota (Codex P1 review on #3449).
+  const res = await withProviderLimit("finnhub", () =>
+    fetchWithRetry(
+      `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(apiKey)}`,
+      { signal },
+      { service: "finnhub", keySource, userId }
+    )
+  );
+  if (!res.ok) return undefined;
+  const parsed = parseFinnhubQuote(symbol, await res.json());
+  return parsed ? { ...parsed, fetchedAt: new Date().toISOString() } : undefined;
+}
+
+/** Finnhub `/quote`: current price is `c`.  Previous close `pc` is not the price. */
+export function parseFinnhubQuote(symbol: string, payload: unknown): BrokerQuote | undefined {
+  const q = (payload ?? {}) as Record<string, unknown>;
+  const selected = selectObservedQuotePrice({ last: firstNumber(q, ["c"]) });
+  if (selected.price === undefined) return undefined;
+  const pc = firstNumber(q, ["pc"]);
+  const o = firstNumber(q, ["o"]);
+  const h = firstNumber(q, ["h"]);
+  const l = firstNumber(q, ["l"]);
+  const d = firstNumber(q, ["d"]);
+  const dp = firstNumber(q, ["dp"]);
+  const asOf = providerObservationIso(firstNumber(q, ["t"]));
+  return {
+    symbol,
+    price: selected.price,
+    prevClose: typeof pc === "number" && pc > 0 ? pc : undefined,
+    open: typeof o === "number" && o > 0 ? o : undefined,
+    high: typeof h === "number" && h > 0 ? h : undefined,
+    low: typeof l === "number" && l > 0 ? l : undefined,
+    change: typeof d === "number" ? d : undefined,
+    changePct: typeof dp === "number" ? dp : undefined,
+    ...(asOf ? { asOf } : {}),
+    provider: "finnhub"
+  };
+}
+
+export async function fetchTiingoQuote(
+  symbol: string,
+  apiKey: string,
+  keySource: string = "env",
+  userId?: string,
+  signal?: AbortSignal
+): Promise<BrokerQuote | undefined> {
+  const ticker = symbol.toLowerCase();
+  // Admit against the shared "tiingo" quota bucket (the same lane history.ts and
+  // the Tiingo enrichment provider draw from) and disable in-call retries: every
+  // upstream attempt must be independently reserved and metered instead of hiding
+  // an uncounted retry inside one logical call (Codex P1 review on #3449).
+  const credKey = await apiKeyFingerprint(apiKey);
+  if (admitProviderRequests("tiingo", credKey, 1) < 1) return undefined;
+  const res = await fetchWithRetry(
+    `https://api.tiingo.com/iex/${encodeURIComponent(ticker)}?token=${encodeURIComponent(apiKey)}`,
+    {
+      headers: { Authorization: `Token ${apiKey}`, Accept: "application/json" },
+      signal
+    },
+    { service: "tiingo", keySource, userId, retries: 0 }
+  );
+  if (!res.ok) return undefined;
+  const parsed = parseTiingoIexQuote(symbol, await res.json());
+  return parsed ? { ...parsed, fetchedAt: new Date().toISOString() } : undefined;
+}
+
+/**
+ * Tiingo IEX row.  Last print, then the two-sided mid.  `prevClose` and
+ * `bidSize` are not the price.  No observation time means no `asOf`.
+ * `fetchedAt` is applied by the fetch wrapper, not here.
+ */
+export function parseTiingoIexQuote(symbol: string, payload: unknown): BrokerQuote | undefined {
+  const arr = Array.isArray(payload) ? payload : [payload];
+  if (arr.length === 0 || !arr[0] || typeof arr[0] !== "object") return undefined;
+  const q = arr[0] as Record<string, unknown>;
+  const bid = firstNumber(q, ["bidPrice"]);
+  const ask = firstNumber(q, ["askPrice"]);
+  const selected = selectObservedQuotePrice({
+    last: firstNumber(q, ["tngoLast", "lastPrice", "last"]),
+    bid,
+    ask
+  });
+  if (selected.price === undefined) return undefined;
+  const bidSize = firstNumber(q, ["bidSize"]);
+  const askSize = firstNumber(q, ["askSize"]);
+  const volume = firstNumber(q, ["volume"]);
+  const prevClose = firstNumber(q, ["prevClose"]);
+  const open = firstNumber(q, ["open"]);
+  const high = firstNumber(q, ["high"]);
+  const low = firstNumber(q, ["low"]);
+  const asOf = providerObservationIso(
+    selected.basis === "last" ? q.lastSaleTimestamp ?? q.timestamp : q.quoteTimestamp ?? q.timestamp
+  );
+  let change: number | undefined;
+  let changePct: number | undefined;
+  if (prevClose && prevClose > 0) {
+    change = Math.round((selected.price - prevClose) * 100) / 100;
+    changePct = Math.round(((selected.price - prevClose) / prevClose) * 10000) / 100;
+  }
+  return {
+    symbol,
+    price: selected.price,
+    bid: typeof bid === "number" && bid > 0 ? bid : undefined,
+    ask: typeof ask === "number" && ask > 0 ? ask : undefined,
+    bidSize: typeof bidSize === "number" && bidSize > 0 ? bidSize : undefined,
+    askSize: typeof askSize === "number" && askSize > 0 ? askSize : undefined,
+    volume: typeof volume === "number" && volume > 0 ? volume : undefined,
+    prevClose: typeof prevClose === "number" && prevClose > 0 ? prevClose : undefined,
+    open: typeof open === "number" && open > 0 ? open : undefined,
+    high: typeof high === "number" && high > 0 ? high : undefined,
+    low: typeof low === "number" && low > 0 ? low : undefined,
+    change,
+    changePct,
+    ...(asOf ? { asOf } : {}),
+    provider: "tiingo"
+  };
+}
+
+/** ROIC profile price.  The profile has no observation timestamp. */
+export function roicProfileQuote(symbol: string, profile: unknown): BrokerQuote | undefined {
+  const p = (Array.isArray(profile) ? profile[0] : profile) as Record<string, unknown> | undefined;
+  if (!p || typeof p !== "object") return undefined;
+  const price = firstNumber(p, ["price"]);
+  if (!(typeof price === "number" && price > 0)) return undefined;
+  const companyName = typeof p.companyName === "string" ? p.companyName : undefined;
+  return {
+    symbol,
+    price,
+    ...(companyName ? { companyName } : {}),
+    provider: "roic"
+  };
+}
+
+export function syncQuotesToFieldStore(quotes: Record<string, BrokerQuote>): void {
+  try {
+    const nowIso = new Date().toISOString();
+    const records: SymbolFieldLatestRecord[] = [];
+    const isFiniteNumber = (v: unknown): v is number =>
+      typeof v === "number" && Number.isFinite(v);
+    // Persist each field with ITS OWN provenance (recorded by
+    // mergeBrokerQuoteFields), falling back to the merged quote's single
+    // provider/asOf/fetchedAt only when no per-field receipt exists
+    // (Codex P1 review on #3449).
+    const pushField = (
+      symbol: string,
+      quote: BrokerQuote,
+      field: string,
+      value: unknown,
+      valid: (v: unknown) => boolean,
+      normalize?: (v: never) => unknown
+    ): void => {
+      if (!valid(value)) return;
+      const prov = quote.fieldProvenance?.[field];
+      const observationAsOf = prov?.asOf ?? quote.asOf;
+      // Price, bid, and ask are quote clocks.  A row with no provider
+      // observation is skipped instead of stamped with the fetch time.
+      if ((field === "price" || field === "bid" || field === "ask") && !observationAsOf) return;
+      records.push({
+        symbol,
+        field,
+        valueJson: JSON.stringify(normalize ? normalize(value as never) : value),
+        source: prov?.provider ?? quote.provider ?? "quote-cascade",
+        asOf: observationAsOf ?? quote.fetchedAt ?? nowIso,
+        fetchedAt: prov?.fetchedAt ?? quote.fetchedAt ?? nowIso
+      });
+    };
+    for (const [symbol, quote] of Object.entries(quotes)) {
+      if (!quote) continue;
+      pushField(symbol, quote, "price", quote.price, isFiniteNumber);
+      pushField(symbol, quote, "bid", quote.bid, isFiniteNumber);
+      pushField(symbol, quote, "ask", quote.ask, isFiniteNumber);
+      pushField(symbol, quote, "bidSize", quote.bidSize, isFiniteNumber);
+      pushField(symbol, quote, "askSize", quote.askSize, isFiniteNumber);
+      pushField(symbol, quote, "volume", quote.volume, isFiniteNumber);
+      pushField(symbol, quote, "prevClose", quote.prevClose, isFiniteNumber);
+      pushField(symbol, quote, "vwap", quote.vwap, isFiniteNumber);
+      pushField(symbol, quote, "open", quote.open, isFiniteNumber);
+      pushField(symbol, quote, "high", quote.high, isFiniteNumber);
+      pushField(symbol, quote, "low", quote.low, isFiniteNumber);
+      pushField(symbol, quote, "close", quote.close, isFiniteNumber);
+      pushField(symbol, quote, "change", quote.change, isFiniteNumber);
+      pushField(symbol, quote, "changePct", quote.changePct, isFiniteNumber);
+      pushField(symbol, quote, "netChange", quote.netChange, isFiniteNumber);
+      pushField(
+        symbol,
+        quote,
+        "companyName",
+        quote.companyName,
+        (v): v is string => typeof v === "string" && v.trim().length > 0,
+        (v: string) => v.trim()
+      );
+    }
+    if (records.length > 0) {
+      upsertSymbolFieldLatest(records);
+    }
+  } catch {
+    // Non-blocking sync; do not fail quote resolution if DB write fails
+  }
 }
 
 /**
@@ -49,62 +509,266 @@ export function cascadeFreshMaxAgeMs(maxQuoteAgeSec?: number | null): number {
  * Missing/unparseable asOf is NEVER treated as fresh — continue the cascade.
  * Venue-authoritative quotes are handled separately (always acceptable when priced).
  */
+export function isTwoSidedLiveNbbo(quote: {
+  bid?: number;
+  ask?: number;
+  syntheticSpread?: boolean;
+  syntheticBid?: boolean;
+  syntheticAsk?: boolean;
+}): boolean {
+  if (quote.syntheticSpread || quote.syntheticBid || quote.syntheticAsk) {
+    return false;
+  }
+  // A crossed book (bid > ask) is malformed — never treat it as a live NBBO,
+  // even though both sides are positive (Codex P2 review).
+  if (
+    typeof quote.bid === "number" &&
+    typeof quote.ask === "number" &&
+    quote.ask < quote.bid
+  ) {
+    return false;
+  }
+  return (
+    typeof quote.bid === "number" &&
+    quote.bid > 0 &&
+    typeof quote.ask === "number" &&
+    quote.ask > 0
+  );
+}
+
+/**
+ * A two-sided book that may age by FETCH time rather than last-print time.
+ * Restricted to verified real-time venues: delayed tapes (Yahoo cascade feeds,
+ * secondary Tradier-paper books) age by market time instead, so a delayed quote
+ * can never masquerade as live via a fresh fetch stamp (Codex P1 reviews).
+ */
+function isVerifiedRealtimeBook(quote: {
+  bid?: number;
+  ask?: number;
+  syntheticSpread?: boolean;
+  syntheticBid?: boolean;
+  syntheticAsk?: boolean;
+  venueDelayedTape?: boolean;
+  provider?: string;
+}): boolean {
+  if (quote.venueDelayedTape) return false;
+  // Tradier prints age by the provider timestamp.  A fresh fetch must not
+  // promote that tape to a live book.
+  if (quote.provider === "tradier" || quote.provider?.startsWith("tradier")) return false;
+  if (isYahooFallbackProvider(quote.provider)) return false;
+  return isTwoSidedLiveNbbo(quote);
+}
+
 export function isQuoteFresh(
-  quote: { asOf?: string; venuePriceAuthoritative?: boolean },
+  quote: {
+    asOf?: string;
+    venuePriceAuthoritative?: boolean;
+    bid?: number;
+    ask?: number;
+    fetchedAt?: string;
+    provider?: string;
+    venueDelayedTape?: boolean;
+    syntheticSpread?: boolean;
+    syntheticBid?: boolean;
+    syntheticAsk?: boolean;
+    expectedDelaySec?: number;
+    delayToleranceSec?: number;
+  },
   nowMs: number,
   maxAgeMs: number = cascadeFreshMaxAgeMs()
 ): boolean {
+  const asOfMs = quote.asOf ? new Date(quote.asOf).getTime() : Number.NaN;
+  // Unknown age is stale, including a venue-authoritative quote with no
+  // provider observation.  fetchedAt is not a substitute.
+  if (!quote.asOf || Number.isNaN(asOfMs)) return false;
+  // Delayed tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+  // ~900s).  The expected delay is the venue, not a broken cascade — but the
+  // tape is only usable when BOTH independent checks pass:
+  //   (a) fresh retrieval (`fetchedAt` recent), and
+  //   (b) the asOf age has not run beyond expected + tolerance (excess lag).
+  // A missing asOf was already rejected above, so "excess" is a real feed
+  // problem, never a way to silently ignore an old timestamp.
+  if (typeof quote.expectedDelaySec === "number" && Number.isFinite(quote.expectedDelaySec)) {
+    const status = delayedTapeStatus(quote, nowMs, maxAgeMs);
+    return status.usable;
+  }
   if (quote.venuePriceAuthoritative) return true;
-  if (!quote.asOf) return false;
-  const asOfMs = new Date(quote.asOf).getTime();
-  if (Number.isNaN(asOfMs)) return false;
+  // Two-sided broker NBBO fetched just now is live even when last-print `asOf` is old
+  // (quiet names / IEX last trade sitting still).  Age the fetch, not the last print.
+  // Delayed tapes (Yahoo, secondary Tradier paper) and crossed books are excluded:
+  // they age by market time so delay never masquerades as freshness.
+  if (isVerifiedRealtimeBook(quote) && quote.fetchedAt) {
+    const fetchedMs = new Date(quote.fetchedAt).getTime();
+    if (!Number.isNaN(fetchedMs)) {
+      const fetchAgeMs = nowMs - fetchedMs;
+      if (fetchAgeMs < 0 || fetchAgeMs <= maxAgeMs) return true;
+    }
+  }
   const ageMs = nowMs - asOfMs;
   if (ageMs < 0) return true; // clock skew / future stamp — accept
   return ageMs <= maxAgeMs;
 }
 
 /**
+ * Broker tape the cascade should keep now.  Last-session close stays in
+ * `bestQuotes` for the end-of-cascade fallback — it must not stop Level 2/3.
+ * After #3031, an IEX 0-print filled by `fillMissingQuotesWithClose` was tagged
+ * `session-close` and treated as usable, so RTH names never reached snapshots
+ * or Yahoo and were sized at yesterday's close.
+ */
+export function isUsableBrokerQuote(
+  quote: {
+    asOf?: string;
+    venuePriceAuthoritative?: boolean;
+    bid?: number;
+    ask?: number;
+    fetchedAt?: string;
+    provider?: string;
+    price?: number;
+    syntheticSpread?: boolean;
+    syntheticBid?: boolean;
+    syntheticAsk?: boolean;
+  },
+  nowMs: number,
+  maxAgeMs: number = cascadeFreshMaxAgeMs()
+): boolean {
+  return isQuoteFresh(quote, nowMs, maxAgeMs);
+}
+
+/**
  * Age (seconds) used by the policy staleness gate.
  *
  * - Real-time quotes: age of trade-time `asOf` (true market freshness).
+ * - Live two-sided NBBO broker quotes: age of `fetchedAt` if recent (active book).
  * - Venue-authoritative delayed feeds (Tradier sandbox): age of `fetchedAt` (snapshot
  *   freshness). The ~15m trade-time delay is the venue, not a broken cascade.
  */
 export function quoteAgeSecForStalenessGate(
-  quote: { asOf?: string; venuePriceAuthoritative?: boolean; fetchedAt?: string } | undefined,
+  quote: {
+    asOf?: string;
+    venuePriceAuthoritative?: boolean;
+    fetchedAt?: string;
+    delayedFallback?: boolean;
+    provider?: string;
+    bid?: number;
+    ask?: number;
+    syntheticSpread?: boolean;
+    syntheticBid?: boolean;
+    syntheticAsk?: boolean;
+    expectedDelaySec?: number;
+    delayToleranceSec?: number;
+  venueDelayedTape?: boolean;
+  } | undefined,
   nowMs: number
-): { ageSec?: number; missing: boolean; venueDelayed: boolean } {
-  if (!quote) return { missing: true, venueDelayed: false };
+): {
+  ageSec?: number;
+  missing: boolean;
+  venueDelayed: boolean;
+  delayedFallback: boolean;
+  /** Seconds the tape lags beyond expected delay + tolerance (>0 = broken feed). */
+  excessDelaySec?: number;
+  /** True when the quote belongs to a tape with a documented expected delay. */
+  expectedDelayedTape?: boolean;
+  /**
+   * True when the market session was open at evaluation time.  False on a
+   * delayed tape means the market was shut: the old print is expected, NOT
+   * excess lag, but the tape is still not tradable.
+   */
+  marketSessionOpen?: boolean;
+} {
+  if (!quote) return { missing: true, venueDelayed: false, delayedFallback: false };
   const venueDelayed = quote.venuePriceAuthoritative === true;
-  const stamp = venueDelayed ? quote.fetchedAt ?? quote.asOf : quote.asOf;
-  if (!stamp) return { missing: true, venueDelayed };
-  const asOfMs = new Date(stamp).getTime();
-  if (Number.isNaN(asOfMs)) return { missing: true, venueDelayed };
+  const delayedFallback = isDelayedYahooFallbackQuote(quote, nowMs);
+  const asOfMs = quote.asOf ? new Date(quote.asOf).getTime() : Number.NaN;
+  // No parseable provider observation.  Do not age fetchedAt in its place.
+  if (!quote.asOf || Number.isNaN(asOfMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
+  // A provider stamp AHEAD of the wall clock is BAD DATA, not fresh data.
+  // Fail closed (missing) instead of handing the gate a negative age, which
+  // would sail through every "age <= max" comparison.
+  if (isFutureProviderStamp(asOfMs, nowMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
+  const liveNbbo = isVerifiedRealtimeBook(quote);
+  // Venue-delayed tape and delayed Yahoo fallback: age the FETCH snapshot, not the
+  // expected ~15m print.  A just-fetched delayed Yahoo quote is not a broken cascade.
+  // Real-time two-sided NBBO broker quotes: also age fetchedAt if available and valid.
+  // Delayed tapes (Yahoo cascade feeds, secondary Tradier paper) age by market time.
+  const useFetchedAt =
+    venueDelayed ||
+    delayedFallback ||
+    (liveNbbo && typeof quote.fetchedAt === "string" && !Number.isNaN(new Date(quote.fetchedAt).getTime()));
+  const stamp = useFetchedAt ? quote.fetchedAt ?? quote.asOf : quote.asOf;
+  if (!stamp) return { missing: true, venueDelayed, delayedFallback };
+  const stampMs = new Date(stamp).getTime();
+  if (Number.isNaN(stampMs)) return { missing: true, venueDelayed, delayedFallback };
+  // Same fail-closed rule for the fetch stamp: a `fetchedAt` ahead of the wall
+  // clock is not a fresh retrieval.
+  if (isFutureProviderStamp(stampMs, nowMs)) {
+    return { missing: true, venueDelayed, delayedFallback };
+  }
+  // Excess delay is reported INDEPENDENTLY of the age stamp above: for a
+  // tape with a documented expected delay it is how far the asOf lag runs
+  // BEYOND expected + tolerance.  A positive value means the observation is
+  // beyond the delayed-tape window — during RTH that can be an illiquid last
+  // print OR excess tape lag, and either way the fetch-age stamp above must
+  // never paper over it.
+  //
+  // The market session decides how that lag is READ: while the market is
+  // closed there are no prints at all, so an old asOf is expected and is NOT
+  // reported as excess (it is reported as a closed session instead).  The
+  // caller still fails closed on a closed-session tape.
+  const tapeStatus = delayedTapeStatus(quote, nowMs, cascadeFreshMaxAgeMs(), isMarketOpen(new Date(nowMs)));
   return {
-    ageSec: Math.round((nowMs - asOfMs) / 1000),
+    ageSec: Math.round((nowMs - stampMs) / 1000),
     missing: false,
-    venueDelayed
+    venueDelayed,
+    delayedFallback,
+    ...(tapeStatus.delayed
+      ? {
+          excessDelaySec: tapeStatus.excessDelaySec,
+          expectedDelayedTape: true,
+          marketSessionOpen: tapeStatus.marketSessionOpen
+        }
+      : {})
   };
 }
 
 /**
  * How this connected account should resolve execution prices.
  *
- * - `venue_delayed`: Tradier paper/sandbox — the paper OMS fills against Tradier's ~15m
- *   delayed tape. Use that price; never overlay fresher Alpaca/Yahoo.
- * - `realtime`: everything else (Alpaca paper/live, Tradier production, Robinhood, …).
+ * - `venue_delayed`: Tradier paper/sandbox AND Alpaca PAPER — the paper OMS
+ *   fills against the venue's own ~15m delayed tape. Use that price; never
+ *   overlay fresher Alpaca/Yahoo. Alpaca PAPER trades on Alpaca's
+ *   `delayed_sip` feed (see `alpaca-paper-quotes.ts`).
+ * - `venue_locked`: Tradier live.  The fill uses the Tradier quote.  Later
+ *   cascade levels do not replace it.  The quote is not stamped
+ *   venue-authoritative, so a real asOf still hits the staleness gate.
+ * - `realtime`: everything else (Alpaca LIVE, Robinhood, …).
  */
-export type VenueQuoteMode = "realtime" | "venue_delayed";
+export type VenueQuoteMode = "realtime" | "venue_delayed" | "venue_locked";
 
 export function resolveVenueQuoteMode(
   policy: Pick<TradingPolicy, "activeBroker" | "connectedAccountId"> | null | undefined,
   userId: string
 ): VenueQuoteMode {
-  if (policy?.activeBroker !== "tradier") return "realtime";
+  const activeBroker = policy?.activeBroker;
+  // Only Alpaca and Tradier have a venue-delayed tape.  Everything else
+  // (Robinhood, E*Toro, Public, Webull, Kalshi, the test gateway, …) stays
+  // on the real-time cascade — unchanged.
+  if (activeBroker !== "alpaca" && activeBroker !== "tradier") return "realtime";
   const acct =
-    (policy.connectedAccountId ? getConnectedAccount(policy.connectedAccountId, userId) : undefined) ??
+    (policy?.connectedAccountId ? getConnectedAccount(policy.connectedAccountId, userId) : undefined) ??
     getActiveConnectedAccount(userId);
+  // Alpaca PAPER: the connected account trades on Alpaca's `delayed_sip` tape.
+  // ACCOUNT SCOPED — the connected account row decides, never a global env
+  // var, so a live Alpaca account (or any other broker) is unaffected.
+  if (activeBroker === "alpaca") {
+    return isAlpacaPaperAccount(acct) ? "venue_delayed" : "realtime";
+  }
   if (acct?.broker === "tradier" && acct.environment === "paper") return "venue_delayed";
+  if (acct?.broker === "tradier") return "venue_locked";
   return "realtime";
 }
 
@@ -134,9 +798,11 @@ export function policyStubForConnectedAccount(account: ConnectedAccount): Tradin
  * 1a. Active Broker Gateway (account the user is operating)
  * 1b. EVERY other connected broker for this user (market data only — not fill venue)
  * 2. Alpaca Snapshots API (any Alpaca key on the user)
- * 3. Yahoo Finance Batch API
- * 4. Yahoo Finance Single Quote API
- * 5. ROIC.ai Profile API
+ * 3. Finnhub Real-time Quote API
+ * 4. Tiingo IEX Real-time Quote API
+ * 5. Yahoo Finance Batch API
+ * 6. Yahoo Finance Single Quote API
+ * 7. ROIC.ai Profile API (fallback-only; it carries no asOf)
  *
  * Real-time venues: accept when trade-time is within `policy.maxQuoteAgeSec` (default 120s).
  * Venue-delayed (Tradier sandbox paper): accept the *active* broker quote as authoritative
@@ -146,14 +812,27 @@ export function policyStubForConnectedAccount(account: ConnectedAccount): Tradin
  * Market data is USER-scoped (all connected brokers share one cascade), not duplicated
  * per trading account.
  */
+function throwIfCascadeAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new Error("Quote cascade cancelled.");
+}
+
 export async function fetchFreshQuotesCascade(
   symbols: string[],
   userId: string,
   accountNumber?: string,
-  connectedAccountId?: string
+  connectedAccountId?: string,
+  options?: { signal?: AbortSignal; skipActiveBroker?: boolean }
 ): Promise<Record<string, BrokerQuote>> {
+  const signal = options?.signal;
+  throwIfCascadeAborted(signal);
   const nowMs = Date.now();
   const fetchedAtIso = new Date(nowMs).toISOString();
+  // Stamp each quote when its fetch COMPLETES, not when the cascade started: a
+  // quote obtained after a slow broker wait must not arrive already aged by that
+  // wait (Codex P2 review).  fetchedAtIso remains as a last-resort fallback.
+  const stampIngest = (): string => new Date().toISOString();
   const normalizedSymbols = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
   const result: Record<string, BrokerQuote> = {};
 
@@ -168,66 +847,123 @@ export async function fetchFreshQuotesCascade(
 
   const updateBestQuote = (symbol: string, quote: BrokerQuote) => {
     const existing = bestQuotes[symbol];
-    if (!existing) {
-      bestQuotes[symbol] = quote;
-      return;
-    }
-    // Never demote a venue-authoritative quote in favor of a fresher external print.
-    if (existing.venuePriceAuthoritative && !quote.venuePriceAuthoritative) return;
-    if (quote.venuePriceAuthoritative && !existing.venuePriceAuthoritative) {
-      bestQuotes[symbol] = quote;
-      return;
-    }
-    // Prefer newer asOf; if equal timestamps, prefer a provider that is not an explicit delayed tag
-    const existingTime = existing.asOf ? new Date(existing.asOf).getTime() : 0;
-    const newTime = quote.asOf ? new Date(quote.asOf).getTime() : 0;
-    if (newTime > existingTime) {
-      bestQuotes[symbol] = quote;
+    const merged = existing ? mergeBrokerQuoteFields(existing, quote)! : quote;
+    bestQuotes[symbol] = merged;
+    if (result[symbol]) {
+      result[symbol] = mergeBrokerQuoteFields(result[symbol], quote)!;
     }
   };
 
   let maxAgeMs = cascadeFreshMaxAgeMs();
 
+  // Accept-and-stop gate (Codex P1 review on #3449): a quote stops the cascade
+  // only when it is BOTH fresh and field-complete.  Fresh-but-incomplete quotes
+  // stay pending so later levels can backfill the missing fields; the merged
+  // best quote is what gets accepted.  (The venue-authoritative Level 1a path
+  // keeps its unconditional accept — the active execution venue's price is
+  // authoritative by owner rule.)
+  const acceptIfComplete = (symbol: string, quote: BrokerQuote): void => {
+    const merged = bestQuotes[symbol] ?? quote;
+    // Judge freshness at accept time, not cascade start (Cluster B Q4): a
+    // quote fetched after a slow Level-1 wait must not be aged by that wait.
+    if (isQuoteFresh(merged, Date.now(), maxAgeMs) && isCascadeFieldComplete(merged)) {
+      result[symbol] = merged;
+    }
+  };
+
   const ingestBrokerQuotes = (
     brokerQuotes: Record<string, BrokerQuote>,
-    opts: { venueDelayed: boolean; providerTag: string }
+    opts: { venueDelayed: boolean; delayedTape?: boolean; providerTag: string }
   ) => {
     for (const symbol of [...pendingSymbols]) {
       const quote = brokerQuotes[symbol] ?? brokerQuotes[normalizeSymbol(symbol)];
       if (!quote) continue;
       const resolvedPrice = quote.price ?? (quote.bid && quote.ask ? (quote.bid + quote.ask) / 2 : undefined);
       if (!(typeof resolvedPrice === "number" && resolvedPrice > 0)) continue;
+      const ingestAt = stampIngest();
       let normalizedQuote: BrokerQuote = {
         ...quote,
         price: resolvedPrice,
-        provider: quote.provider ?? opts.providerTag
+        provider: quote.provider ?? opts.providerTag,
+        fetchedAt: quote.fetchedAt ?? ingestAt,
+        // Secondary delayed-tape books (Tradier paper, Alpaca PAPER
+        // `delayed_sip`) are kept for fallback but must never be promoted to
+        // real-time by a fresh fetch stamp (Codex P1 review), and must never
+        // masquerade as the ACTIVE execution venue's authoritative tape.
+        ...(opts.delayedTape
+          ? {
+              venueDelayedTape: true as const,
+              venuePriceAuthoritative: false,
+              expectedDelaySec: undefined,
+              delayToleranceSec: undefined
+            }
+          : {})
       };
       if (opts.venueDelayed) {
-        normalizedQuote = stampVenueAuthoritative(normalizedQuote, fetchedAtIso);
+        // DELAYED-TAPE USABILITY (Kody review on PR #5005).  A venue-delayed
+        // tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+        // ~900s) may only become the AUTHORITATIVE venue price when it is
+        // actually usable: a FRESH retrieval AND no lag beyond
+        // `expectedDelaySec + delayToleranceSec` (`isQuoteFresh` → the
+        // delayed-tape rules).
+        //
+        // The expected ~900s print itself stays ACCEPTED — the delay is the
+        // venue, not staleness.  What is refused is a tape running beyond its
+        // SLA (excess delay) or a stale retrieval.  The closed-session nuance
+        // is NOT applied here: the policy staleness gate owns that honest
+        // "session closed" reason (`quote_delayed_tape_session_closed`), while
+        // this path only decides whether the tape may be called authoritative.
+        //
+        // Quotes with NO documented delay (e.g. the Tradier sandbox tape) keep
+        // the owner rule: the active execution venue's price is authoritative.
+        const documentedDelay =
+          typeof normalizedQuote.expectedDelaySec === "number" &&
+          Number.isFinite(normalizedQuote.expectedDelaySec);
+        if (documentedDelay && !isQuoteFresh(normalizedQuote, nowMs, maxAgeMs)) {
+          // UNUSABLE delayed tape: do NOT accept it as the authoritative venue
+          // price.  The observation is kept (the gate/UI can then report WHY
+          // it was refused) but it is explicitly NOT venue-authoritative, and
+          // it is not accepted here.  A symbol the delayed tape could not
+          // price stays missing — no realtime overlay may fill it on the
+          // execution path.
+          updateBestQuote(symbol, { ...normalizedQuote, venuePriceAuthoritative: false });
+          continue;
+        }
+        normalizedQuote = stampVenueAuthoritative(normalizedQuote, ingestAt);
         updateBestQuote(symbol, normalizedQuote);
         result[symbol] = normalizedQuote;
       } else {
         updateBestQuote(symbol, normalizedQuote);
-        if (isQuoteFresh(normalizedQuote, nowMs, maxAgeMs)) {
-          result[symbol] = normalizedQuote;
-        }
+        // Secondary (delayed-tape) broker books get the same field-completeness
+        // gate as the other levels (Codex P1 review on #3449).
+        acceptIfComplete(symbol, normalizedQuote);
       }
     }
     pendingSymbols = pendingSymbols.filter((s) => !result[s]);
   };
 
   // --- LEVEL 1a: Active Broker Gateway ---
+  throwIfCascadeAborted(signal);
   let venueMode: VenueQuoteMode = "realtime";
+  let venueBroker: string | undefined;
   let activeConnectedId: string | undefined;
+  let activeAccount: ConnectedAccount | undefined;
   try {
     const policy = getPolicy(userId, connectedAccountId);
     maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
     venueMode = resolveVenueQuoteMode(policy, userId);
+    venueBroker = policy.activeBroker ? String(policy.activeBroker) : undefined;
     activeConnectedId = policy.connectedAccountId;
+    activeAccount =
+      (activeConnectedId ? getConnectedAccount(activeConnectedId, userId) : undefined) ??
+      getActiveConnectedAccount(userId);
     const activeAccountNum = accountNumber ?? policy.accountNumber;
-    if (activeAccountNum && policy.activeBroker) {
+    // skipActiveBroker: the caller already hit this broker directly (e.g. the dashboard
+    // fallback after its own gateway call timed out) — do not issue a duplicate call to
+    // the same broker while it is degraded (Codex P1 review).
+    if (activeAccountNum && policy.activeBroker && !options?.skipActiveBroker) {
       const gateway = getBrokerGateway(policy, userId);
-      const brokerQuotes = await gateway.getEquityQuotes(activeAccountNum, pendingSymbols);
+      const brokerQuotes = await gateway.getEquityQuotes(activeAccountNum, pendingSymbols, { signal });
       ingestBrokerQuotes(brokerQuotes, {
         venueDelayed: venueMode === "venue_delayed",
         providerTag: String(policy.activeBroker)
@@ -236,8 +972,25 @@ export async function fetchFreshQuotesCascade(
   } catch (error) {
     console.warn("[quotes-cascade] Level 1a (active broker) failed:", error instanceof Error ? error.message : error);
   }
+  // Tradier trades price off Tradier.  Paper and live both stop here so
+  // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
+  //
+  // Only venue-PRICED symbols are locked (Cluster B Q5): symbols the venue
+  // could not price at all stay pending for the external levels below.
+  // Lock ONLY when the venue tape was actually attempted (L1a ran).  With
+  // `skipActiveBroker` the caller already hit the broker itself and L1a never
+  // ran, so filtering here would drop every fallback and leave the caller
+  // with an empty result (Sentry thread on pendingSymbols).
+  //
+  // Q5 applies to Tradier only.  Alpaca PAPER stays fail-closed: a symbol its
+  // delayed feed cannot price is missing, never a fresher secondary print.
+  if (venueMode !== "realtime" && !options?.skipActiveBroker) {
+    pendingSymbols =
+      venueBroker === "tradier" ? pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]) : [];
+  }
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
+  throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0) {
     try {
       for (const account of listConnectedAccounts(userId)) {
@@ -246,11 +999,20 @@ export async function fetchFreshQuotesCascade(
         if (accountNumber && account.accountNumber && account.accountNumber === accountNumber) continue;
         if (!account.accountNumber) continue;
         try {
+          throwIfCascadeAborted(signal);
           const stub = policyStubForConnectedAccount(account);
           const gateway = getBrokerGateway(stub, userId);
-          const brokerQuotes = await gateway.getEquityQuotes(account.accountNumber, pendingSymbols);
+          const brokerQuotes = await gateway.getEquityQuotes(account.accountNumber, pendingSymbols, { signal });
+          // A secondary paper account's book is a ~15m delayed tape (Tradier
+          // sandbox, Alpaca PAPER `delayed_sip`): keep it for fallback but never
+          // let a fresh fetch stamp promote it to real-time and stop the cascade
+          // ahead of Alpaca/Yahoo (Codex P1 review).
+          const delayedTape =
+            (account.broker === "tradier" && account.environment === "paper") ||
+            isAlpacaPaperAccount(account);
           ingestBrokerQuotes(brokerQuotes, {
             venueDelayed: false,
+            delayedTape,
             providerTag: `${account.broker}-connected`
           });
         } catch (err) {
@@ -269,11 +1031,25 @@ export async function fetchFreshQuotesCascade(
   // Fresher external quotes would mis-price paper fills against a delayed OMS.
 
   // --- LEVEL 2: Alpaca Snapshots API ---
+  throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0 && allowExternal) {
     try {
       const alpacaData = resolveAlpacaMarketData(userId);
       if (alpacaData.apiKey && alpacaData.secretKey) {
-        const provider = new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId);
+        // ACCOUNT-SCOPED TAPE: the Alpaca snapshot enrichment must read the
+        // SAME feed the operating account trades on.  For the connected Alpaca
+        // PAPER account that is `delayed_sip` (~900s expected delay); every other
+        // account keeps the global feed.  The cache identity keeps the tapes
+        // from contaminating each other.
+        const cascadeFeed = alpacaPaperFeedForAccount(activeAccount);
+        const cascadeCacheIdentity = alpacaSnapshotCacheIdentity(activeAccount?.id, cascadeFeed);
+        const provider = new AlpacaSnapshotEnrichmentProvider(
+          alpacaData.apiKey,
+          alpacaData.secretKey,
+          alpacaData.source,
+          userId,
+          cascadeFeed ? { feed: cascadeFeed, cacheIdentity: cascadeCacheIdentity } : undefined
+        );
         const enrichment = await provider.enrich(pendingSymbols);
         for (const symbol of pendingSymbols) {
           const data = enrichment[symbol];
@@ -285,14 +1061,33 @@ export async function fetchFreshQuotesCascade(
                 price: resolvedPrice,
                 bid: data.bid,
                 ask: data.ask,
+                bidSize: data.bidSize,
+                askSize: data.askSize,
                 volume: data.volume,
+                prevClose: data.prevClose,
+                open: data.open,
+                high: data.high,
+                low: data.low,
+                vwap: data.vwap,
+                netChange: data.netChange,
+                change: data.netChange,
+                changePct: data.intradayChangePct,
+                companyName: data.companyName,
                 asOf: data.asOf,
-                provider: "alpaca-snapshot"
+                provider: "alpaca-snapshot",
+                fetchedAt: stampIngest(),
+                // DELAYED-TAPE METADATA: the account-scoped `delayed_sip`
+                // snapshot carries the documented ~900s expected delay, so the
+                // consumer ages it with the delayed-tape rules instead of the
+                // realtime-stale bar.  Absent for every other feed.
+                ...(data.expectedDelaySec !== undefined && {
+                  expectedDelaySec: data.expectedDelaySec,
+                  delayToleranceSec: data.delayToleranceSec,
+                  venuePriceAuthoritative: data.venuePriceAuthoritative
+                })
               };
               updateBestQuote(symbol, q);
-              if (isQuoteFresh(q, nowMs, maxAgeMs)) {
-                result[symbol] = q;
-              }
+              acceptIfComplete(symbol, q);
             }
           }
         }
@@ -303,7 +1098,60 @@ export async function fetchFreshQuotesCascade(
     }
   }
 
-  // --- LEVEL 3: Yahoo Finance Batch API ---
+  // --- LEVEL 3: Finnhub Real-time Quote API ---
+  throwIfCascadeAborted(signal);
+  if (pendingSymbols.length > 0 && allowExternal) {
+    try {
+      const finnhub = resolveApiKeyWithSource("finnhub", userId);
+      if (finnhub.key) {
+        await Promise.all(
+          pendingSymbols.map(async (symbol) => {
+            try {
+              const q = await fetchFinnhubQuote(symbol, finnhub.key!, finnhub.source, userId, signal);
+              if (q) {
+                updateBestQuote(symbol, q);
+                acceptIfComplete(symbol, q);
+              }
+            } catch (err) {
+              console.warn(`[quotes-cascade] Level 3 (Finnhub) fetch failed for ${symbol}:`, err);
+            }
+          })
+        );
+        pendingSymbols = pendingSymbols.filter((s) => !result[s]);
+      }
+    } catch (error) {
+      console.warn("[quotes-cascade] Level 3 (Finnhub) fetch failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  // --- LEVEL 4: Tiingo IEX Real-time Quote API ---
+  throwIfCascadeAborted(signal);
+  if (pendingSymbols.length > 0 && allowExternal) {
+    try {
+      const tiingo = resolveApiKeyWithSource("tiingo", userId);
+      if (tiingo.key) {
+        await Promise.all(
+          pendingSymbols.map(async (symbol) => {
+            try {
+              const q = await fetchTiingoQuote(symbol, tiingo.key!, tiingo.source, userId, signal);
+              if (q) {
+                updateBestQuote(symbol, q);
+                acceptIfComplete(symbol, q);
+              }
+            } catch (err) {
+              console.warn(`[quotes-cascade] Level 4 (Tiingo) fetch failed for ${symbol}:`, err);
+            }
+          })
+        );
+        pendingSymbols = pendingSymbols.filter((s) => !result[s]);
+      }
+    } catch (error) {
+      console.warn("[quotes-cascade] Level 4 (Tiingo) fetch failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  // --- LEVEL 5: Yahoo Finance Batch API ---
+  throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0 && allowExternal) {
     try {
       const yahooBatch = await fetchYahooFinanceQuotesBatch(pendingSymbols);
@@ -318,31 +1166,39 @@ export async function fetchFreshQuotesCascade(
               bid: data.bid,
               ask: data.ask,
               volume: data.volume,
+              prevClose: data.prevClose,
+              open: data.open,
+              high: data.high,
+              low: data.low,
+              change: data.change,
+              changePct: data.changePct,
+              companyName: data.companyName,
               asOf: data.asOf,
               provider: "yahoo-finance-batch",
               syntheticBid: data.syntheticBid,
               syntheticAsk: data.syntheticAsk,
-              syntheticSpread: data.syntheticSpread
+              syntheticSpread: data.syntheticSpread,
+              fetchedAt: stampIngest()
             };
             updateBestQuote(symbol, q);
-            if (isQuoteFresh(q, nowMs, maxAgeMs)) {
-              result[symbol] = q;
-            }
+            acceptIfComplete(symbol, q);
           }
         }
       }
       pendingSymbols = pendingSymbols.filter((s) => !result[s]);
     } catch (error) {
-      console.warn("[quotes-cascade] Level 3 (Yahoo Finance Batch) fetch failed:", error instanceof Error ? error.message : error);
+      console.warn("[quotes-cascade] Level 5 (Yahoo Finance Batch) fetch failed:", error instanceof Error ? error.message : error);
     }
   }
 
-  // --- LEVEL 4: Yahoo Finance Single Quote API ---
+  // --- LEVEL 6: Yahoo Finance Single Quote API ---
+  throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0 && allowExternal) {
     try {
-      const singleResults = await Promise.all(
-        pendingSymbols.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const)
-      );
+      // Bounded pool, not Promise.all: the unbounded fan-out queued behind the
+      // proxy gate and aborted on its own 5s timers (prod 2026-11-06) — the
+      // same bug as market.ts fetchQuoteOnlyMarketQuotes.
+      const singleResults = await fetchYahooFinanceChartQuotes(pendingSymbols, { userId, signal });
       for (const [symbol, quote] of singleResults) {
         if (quote) {
           const resolvedPrice = quote.price ?? (quote.bid && quote.ask ? (quote.bid + quote.ask) / 2 : undefined);
@@ -353,26 +1209,33 @@ export async function fetchFreshQuotesCascade(
               bid: quote.bid,
               ask: quote.ask,
               volume: quote.volume,
+              prevClose: quote.prevClose,
+              open: quote.open,
+              high: quote.high,
+              low: quote.low,
+              change: quote.change,
+              changePct: quote.changePct,
+              companyName: quote.companyName,
               asOf: quote.asOf,
               provider: "yahoo-finance-single",
               syntheticBid: quote.syntheticBid,
               syntheticAsk: quote.syntheticAsk,
-              syntheticSpread: quote.syntheticSpread
+              syntheticSpread: quote.syntheticSpread,
+              fetchedAt: stampIngest()
             };
             updateBestQuote(symbol, q);
-            if (isQuoteFresh(q, nowMs, maxAgeMs)) {
-              result[symbol] = q;
-            }
+            acceptIfComplete(symbol, q);
           }
         }
       }
       pendingSymbols = pendingSymbols.filter((s) => !result[s]);
     } catch (error) {
-      console.warn("[quotes-cascade] Level 4 (Yahoo Finance Single Chart) fetch failed:", error instanceof Error ? error.message : error);
+      console.warn("[quotes-cascade] Level 6 (Yahoo Finance Single Chart) fetch failed:", error instanceof Error ? error.message : error);
     }
   }
 
-  // --- LEVEL 5: ROIC.ai Profile API ---
+  // --- LEVEL 7: ROIC.ai Profile API ---
+  throwIfCascadeAborted(signal);
   if (pendingSymbols.length > 0 && allowExternal) {
     try {
       const roic = resolveApiKeyWithSource("roic", userId);
@@ -382,49 +1245,52 @@ export async function fetchFreshQuotesCascade(
             try {
               const res = await fetchWithRetry(
                 `https://api.roic.ai/v2/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(roic.key!)}`,
-                {},
+                { signal },
                 { service: "roic", keySource: roic.source, userId }
               );
               if (res.ok) {
                 const profile = await res.json();
-                const p = Array.isArray(profile) ? profile[0] : profile;
-                if (p && typeof p === "object") {
-                  const price = firstNumber(p, ["price"]);
-                  if (typeof price === "number" && price > 0) {
-                    const q: BrokerQuote = {
-                      symbol,
-                      price,
-                      asOf: new Date().toISOString(),
-                      provider: "roic"
-                    };
-                    updateBestQuote(symbol, q);
-                    if (isQuoteFresh(q, nowMs, maxAgeMs)) {
-                      result[symbol] = q;
-                    }
-                  }
+                const parsed = roicProfileQuote(symbol, profile);
+                if (parsed) {
+                  const q: BrokerQuote = { ...parsed, fetchedAt: stampIngest() };
+                  updateBestQuote(symbol, q);
+                  acceptIfComplete(symbol, q);
                 }
               }
             } catch (err) {
-              console.warn(`[quotes-cascade] Level 5 (ROIC) fetch failed for ${symbol}:`, err);
+              console.warn(`[quotes-cascade] Level 7 (ROIC) fetch failed for ${symbol}:`, err);
             }
           })
         );
         pendingSymbols = pendingSymbols.filter((s) => !result[s]);
       }
     } catch (error) {
-      console.warn("[quotes-cascade] Level 5 (ROIC) fetch failed:", error instanceof Error ? error.message : error);
+      console.warn("[quotes-cascade] Level 7 (ROIC) fetch failed:", error instanceof Error ? error.message : error);
     }
   }
+
+  // Persist only accepted (fresh/venue-authoritative) quotes as latest
+  // (Cluster B Q3): stale fallback quotes below are returned to the caller
+  // but must not be written to symbol_field_latest as if they were latest.
+  syncQuotesToFieldStore(result);
 
   // --- FALLBACK ---
   // For any symbols that could not be resolved to a fresh quote (e.g. during market close / weekend),
   // fall back to the freshest quote found across any level (even if older than the freshness bar).
-  // Prefer venue-authoritative when present.
+  // Prefer venue-authoritative when present.  Yahoo on this path is delayed fallback:
+  // stamp it so approval cards say so, and keep trading (owner 2026-08-18).
   for (const symbol of normalizedSymbols) {
     if (!result[symbol]) {
       const best = bestQuotes[symbol];
       if (best) {
-        result[symbol] = best;
+        const fallback: BrokerQuote = {
+          ...best,
+          fetchedAt: best.fetchedAt ?? fetchedAtIso
+        };
+        if (isYahooFallbackProvider(best.provider)) {
+          fallback.delayedFallback = true;
+        }
+        result[symbol] = fallback;
       }
     }
   }

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Owner-directed evaluation sweep of Socratic.Trade after Codex/Antigravity changes, run from
+Owner-directed evaluation sweep of Socratic-Trade after Codex/Antigravity changes, run from
 isolated worktree branch `claude/adoring-hopper-4ff51e`. No product source changed in this lane;
 the deliverable is a synthesized, adversarially-verified findings + action document handed to
 MONET, plus two side-fixes that landed in adjacent repos/infra.
@@ -46,7 +46,7 @@ trading system.
 - Congress.Trade `Shared package pin check` false-positive: PR #450 (MERGED). `git+ssh` vs
   `git+https` transport for the same shared commit; fixed by normalizing the ref after `#`.
   See `Congress.Trade/docs/rollouts/2026-07-15-pin-check-transport-normalize.md`.
-- `agent-sync-push` pm2 crash-loop (`MODULE_NOT_FOUND: ws`, ~877k restarts) repaired: reinstalled
+- `ag***-s**c-push` pm2 crash-loop (`MODULE_NOT_FOUND: ws`, ~877k restarts) repaired: reinstalled
   deps, added `.janitor-keep` to stop the disk-janitor reaping its `node_modules`, restarted.
 
 ## Files

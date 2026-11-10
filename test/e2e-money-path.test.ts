@@ -178,7 +178,7 @@ describe("E2E money-path integration test", () => {
     stubFetchE2E();
     await setupBrokerLiveAutonomous("E2E Live");
     const { runStrategyOnce } = await import("../src/lib/strategy");
-    const { listAudit } = await import("../src/lib/db");
+    const { getProposal, listAudit } = await import("../src/lib/db");
 
     const result = await runStrategyOnce("local", { manual: false });
 
@@ -186,6 +186,8 @@ describe("E2E money-path integration test", () => {
 
     const aaplProposal = result.proposals.find((p) => p.proposal.symbol === "AAPL");
     expect(aaplProposal).toBeDefined();
+    expect(aaplProposal?.id).toEqual(expect.any(String));
+    expect(getProposal(aaplProposal!.id!, "local")?.id).toBe(aaplProposal!.id);
 
     // The Test broker completes synchronously, so result.proposals keeps the terminal `filled`
     // truth instead of collapsing it back to the less-specific `placed` state.

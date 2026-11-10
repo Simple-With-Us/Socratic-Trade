@@ -1,7 +1,9 @@
-import { normalizeOpenRouterModelId } from "./llm-provider";
+import { normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
+import { canonicalModelId } from "./model-identity";
 
 const AVAILABILITY_CACHE_TTL_MS = 5 * 60 * 1_000;
-const AVAILABILITY_TIMEOUT_MS = 5_000;
+/** 5s was too tight: every 2026-08-13 scheduled rotation timed out on /models/user. */
+const AVAILABILITY_TIMEOUT_MS = 12_000;
 
 type AvailabilityResult =
   | { status: "available"; modelIds: ReadonlySet<string> }
@@ -31,30 +33,64 @@ function abortAfter(ms: number): { signal: AbortSignal; cancel: () => void } {
  * preferences/guardrails, which is the relevant distinction from merely having an OpenRouter key.
  * Errors are deliberately returned as unavailable: rotation must not select an unknown model.
  */
-export async function getOpenRouterUserModelAvailability(key: string, keyRef?: string): Promise<AvailabilityResult> {
-  if (process.env.NODE_ENV === "test") return { status: "not_checked" };
-  const cacheKey = keyRef || "anonymous-key";
+function cachedAvailability(cacheKey: string, allowStale: boolean): CachedAvailability | undefined {
   const cached = availabilityCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return { status: "available", modelIds: cached.modelIds };
+  if (!cached) return undefined;
+  if (allowStale || cached.expiresAt > Date.now()) return cached;
+  return undefined;
+}
+
+/**
+ * `fetchImpl` is an injectable fetcher (defaults to the global `fetch`) so a test can drive the
+ * live catalog deterministically — with a fake 200/404/network-error response — without ever
+ * reaching the real OpenRouter API.  Passing an explicit `fetchImpl` also SKIPS the
+ * `NODE_ENV === "test"` short-circuit below: the short-circuit exists to keep the vitest suite
+ * network-free by default, and an injected fetcher already guarantees that, so a test that
+ * wants to exercise this function's real parsing/caching/error-handling logic can opt in
+ * explicitly instead of always getting the canned `{status:"not_checked"}` reply.
+ */
+export async function getOpenRouterUserModelAvailability(
+  key: string,
+  keyRef?: string,
+  fetchImpl?: typeof fetch
+): Promise<AvailabilityResult> {
+  if (process.env.NODE_ENV === "test" && !fetchImpl) return { status: "not_checked" };
+  const doFetch = fetchImpl ?? fetch;
+  const cacheKey = keyRef || "anonymous-key";
+  const fresh = cachedAvailability(cacheKey, false);
+  if (fresh) return { status: "available", modelIds: fresh.modelIds };
 
   const timeout = abortAfter(AVAILABILITY_TIMEOUT_MS);
   try {
-    const response = await fetch(modelsUserUrl(), {
+    const response = await doFetch(modelsUserUrl(), {
       headers: { Authorization: `Bearer ${key}` },
       cache: "no-store",
       signal: timeout.signal
     });
-    if (!response.ok) return { status: "unavailable", reason: `http_${response.status}` };
+    if (!response.ok) {
+      const stale = cachedAvailability(cacheKey, true);
+      if (stale) return { status: "available", modelIds: stale.modelIds };
+      return { status: "unavailable", reason: `http_${response.status}` };
+    }
     const payload = (await response.json().catch(() => undefined)) as { data?: Array<{ id?: unknown }> } | undefined;
     const ids = new Set(
       Array.isArray(payload?.data)
-        ? payload.data.filter((model) => typeof model.id === "string").map((model) => normalizeOpenRouterModelId(model.id as string))
+        ? payload.data
+            .filter((model) => typeof model.id === "string")
+            .map((model) => (model.id as string).trim())
+            .filter(Boolean)
         : []
     );
-    if (ids.size === 0) return { status: "unavailable", reason: "empty_model_list" };
+    if (ids.size === 0) {
+      const stale = cachedAvailability(cacheKey, true);
+      if (stale) return { status: "available", modelIds: stale.modelIds };
+      return { status: "unavailable", reason: "empty_model_list" };
+    }
     availabilityCache.set(cacheKey, { expiresAt: Date.now() + AVAILABILITY_CACHE_TTL_MS, modelIds: ids });
     return { status: "available", modelIds: ids };
   } catch (error) {
+    const stale = cachedAvailability(cacheKey, true);
+    if (stale) return { status: "available", modelIds: stale.modelIds };
     return { status: "unavailable", reason: error instanceof DOMException && error.name === "AbortError" ? "timeout" : "network_error" };
   } finally {
     timeout.cancel();
@@ -66,6 +102,30 @@ export function clearOpenRouterUserModelAvailabilityCache(): void {
   availabilityCache.clear();
 }
 
+/**
+ * True when the catalog/wire id is the same OpenRouter model class as a listed
+ * `/models/user` row.  Exact normalized id still wins.  `~` on latest aliases
+ * is optional.  Alias/version pairs also match (`claude-haiku-4.5` ↔
+ * `~anthropic/claude-haiku-latest`, `gemini-flash-latest` ↔
+ * `google/gemini-3.7-flash`, vendor prefix optional) so a successful user-list
+ * that returns tildes or dated slugs cannot empty the rotation pool.
+ */
+function availabilityKeys(model: string): string[] {
+  const trimmed = model.trim();
+  const normalized = normalizeOpenRouterModelId(trimmed);
+  return [...new Set([trimmed, normalized, stripOpenRouterTilde(trimmed), stripOpenRouterTilde(normalized)])];
+}
+
 export function isOpenRouterModelAvailable(model: string, modelIds: ReadonlySet<string>): boolean {
-  return modelIds.has(normalizeOpenRouterModelId(model));
+  const listed = new Set<string>();
+  for (const id of modelIds) {
+    for (const key of availabilityKeys(id)) listed.add(key);
+  }
+  if (availabilityKeys(model).some((key) => listed.has(key))) return true;
+  const family = canonicalModelId(model);
+  if (!family) return false;
+  for (const id of modelIds) {
+    if (canonicalModelId(id) === family) return true;
+  }
+  return false;
 }

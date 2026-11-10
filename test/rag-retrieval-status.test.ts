@@ -54,6 +54,20 @@ vi.mock("../src/lib/db", () => ({
   getInternalSetting: vi.fn()
 }));
 
+// P1 fix (2026-09-07): asserts retrieveContextDetailed itself emits the dense-recall-degraded
+// signal on a genuine lookup_failed — this is the shared path every production caller uses (see
+// test/rag-production-path-contract.test.ts), unlike search-fusion.ts's retrieveFusedContext
+// wrapper which has no production caller at all.
+const sentryMetricsMocks = vi.hoisted(() => ({
+  logError: vi.fn(),
+  logWarn: vi.fn(),
+  recordEmbedFailure: vi.fn()
+}));
+vi.mock("../src/lib/sentry-metrics", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return { ...actual, ...sentryMetricsMocks };
+});
+
 // Mocked so `budget_skipped` is deterministic without touching the real ledger/DB — every OTHER
 // test in this file explicitly sets this back to `false` (the "under budget" default).
 vi.mock("../src/lib/llm-budget", () => ({
@@ -133,6 +147,11 @@ describe("typed retrieval-status receipt (RetrievalStatus)", () => {
     expect(status).toBe("budget_skipped");
     expect(mocks.embed).not.toHaveBeenCalled(); // no Voyage embed spend
     expect(mocks.query).not.toHaveBeenCalled(); // no Pinecone query spend
+    // P2 fix (2026-09-07): a deliberate budget skip is not a provider/lookup failure — must not
+    // flood Sentry or inflate the embed-failure metric (a persistently exhausted daily budget
+    // would otherwise emit on every retrieval).
+    expect(sentryMetricsMocks.logError).not.toHaveBeenCalled();
+    expect(sentryMetricsMocks.recordEmbedFailure).not.toHaveBeenCalled();
   });
 
   it("no_keys -> lookup_failed: missing Pinecone/Voyage key returns [] with status lookup_failed", async () => {
@@ -147,6 +166,24 @@ describe("typed retrieval-status receipt (RetrievalStatus)", () => {
     expect(chunks).toEqual([]);
     expect(status).toBe("lookup_failed");
     expect(mocks.query).not.toHaveBeenCalled(); // no Pinecone call was ever attempted
+    // P1 fix (2026-09-07): retrieveContextDetailed emits the degraded signal itself, unconditionally
+    // (not gated behind the caller supplying its own onStatus) — see reportRetrievalStatus.
+    expect(sentryMetricsMocks.recordEmbedFailure).toHaveBeenCalledWith(expect.any(String), "dense-recall-lookup-failed");
+    expect(sentryMetricsMocks.logError).toHaveBeenCalledWith(
+      "rag.dense_recall_degraded",
+      expect.objectContaining({ symbol: "AAPL", userId: "local", reason: "lookup_failed" })
+    );
+  });
+
+  it("lookup_failed is reported even when the caller omits onStatus entirely", async () => {
+    const { retrieveContextDetailed } = await freshVectorDb();
+    mocks.resolveApiKey.mockImplementation(() => undefined);
+    const chunks = await retrieveContextDetailed("query", "AAPL", 3, "local");
+    expect(chunks).toEqual([]);
+    expect(sentryMetricsMocks.logError).toHaveBeenCalledWith(
+      "rag.dense_recall_degraded",
+      expect.objectContaining({ symbol: "AAPL", reason: "lookup_failed" })
+    );
   });
 
   it("thrown pipeline error -> lookup_failed: a rejecting Pinecone query hits the outer catch", async () => {

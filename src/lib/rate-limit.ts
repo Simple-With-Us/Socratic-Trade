@@ -10,6 +10,8 @@
 //   - INTERNAL ERROR inside the limiter → fail OPEN: never block a legitimate request because the limiter
 //     itself threw. `rateLimit()` swallows its own errors and allows the request.
 
+import { z } from "zod";
+
 export interface RateLimitOptions {
   /** Max number of allowed requests within the window. */
   limit: number;
@@ -117,6 +119,22 @@ export function rateLimit(key: string, options: RateLimitOptions, now: number = 
   }
 }
 
+/** Zod schema for Cloudflare's overwritten connecting-IP header (IPv4 or IPv6). */
+export const TrustedCloudflareClientIpSchema = z.union([z.ipv4(), z.ipv6()]);
+export type TrustedCloudflareClientIp = z.infer<typeof TrustedCloudflareClientIpSchema>;
+
+/**
+ * Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted
+ * client address. Returns null when the header is missing or fails Zod IP validation so
+ * callers can answer HTTP 400 rather than keying the limiter on a forged / fallback string.
+ */
+export function trustedCloudflareClientIp(req: Request): TrustedCloudflareClientIp | null {
+  const parsed = TrustedCloudflareClientIpSchema.safeParse(
+    req.headers.get("cf-connecting-ip")?.trim()
+  );
+  return parsed.success ? parsed.data : null;
+}
+
 /** Sensible defaults for the route classes we guard. Override per-route as needed. */
 export const RATE_LIMITS = {
   /** OAuth start/callback: a handful per minute is plenty for an interactive login dance. */
@@ -129,10 +147,22 @@ export const RATE_LIMITS = {
   /** Market scan: read-only but fans out to several data providers (Yahoo, Massive, broker quotes),
    *  so a tight-loop refresh can hammer upstreams. 30/min covers manual refreshes with headroom. */
   scan: { limit: 30, windowMs: 60_000 },
+  /** Weekly screens read: cache / value-only, cheap. */
+  weeklyDigest: { limit: 30, windowMs: 60_000 },
+  /** Weekly screens refresh: grouped daily + per-symbol OHLC.  Keep this tight. */
+  weeklyDigestRefresh: { limit: 6, windowMs: 60_000 },
   /** Paid strategy tuning performs a full LLM review; contain retries and compromised-session spend. */
   strategyTuning: { limit: 10, windowMs: 60_000 },
   /** Peer reads from App A (congress.trade) */
-  peerRead: { limit: 120, windowMs: 60_000 }
+  peerRead: { limit: 120, windowMs: 60_000 },
+  /** Inbound congress.trade webhook pushes (App A -> App B). */
+  congressWebhook: { limit: 120, windowMs: 60_000 },
+  /** Inbound congress.trade securities gap-fill import (App A -> App B; ~130+ chunked POSTs/nightly). */
+  securitiesImport: { limit: 600, windowMs: 60_000 },
+  /** Failed bearer on securities import — cap audit rows from internet credential stuffing. */
+  securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
+  /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
+  congressWebhookUnauth: { limit: 60, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**

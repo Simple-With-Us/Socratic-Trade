@@ -23,10 +23,9 @@ describe("process.env API key purging", () => {
       migrateLocalEnvCredentials();
       expect(process.env.GEMINI_API_KEY).toBeUndefined();
       expect(process.env.DEEPSEEK_API_KEY).toBeUndefined();
-      expect(resolveApiKeyWithSource("gemini", LOCAL_USER)).toMatchObject({
-        key: "test-gemini-key",
-        source: "user"
-      });
+      // Gemini/DeepSeek env values are purged, not copied onto Connections.
+      expect(resolveApiKeyWithSource("gemini", LOCAL_USER).source).toBe("none");
+      expect(resolveApiKeyWithSource("deepseek", LOCAL_USER).source).toBe("none");
     } finally {
       delete process.env.GEMINI_API_KEY;
       delete process.env.DEEPSEEK_API_KEY;

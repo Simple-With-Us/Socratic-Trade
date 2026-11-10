@@ -11,9 +11,8 @@
 //   - Pinecone: serverless — metered by Read/Write Units; rows store units, not dollars.
 
 import crypto from "crypto";
-import { audit, getDb } from "./db";
+import { audit, getDb, getInternalSetting, setInternalSetting } from "./db";
 import { recordPineconeWriteUnits } from "./pinecone-monthly-pace";
-import { pushRagUsage } from "./usage-monitor-push";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -124,7 +123,7 @@ function estimateRagCost(
 // ── Approximate token counting ───────────────────────────────────────────────
 
 /** Crude token estimate from UTF-8 text length (Voyage uses a tokenizer; this is still approximate). */
-function approxTokens(texts: string[]): number {
+export function approxTokens(texts: string[]): number {
   return texts.reduce((sum, t) => sum + Math.max(1, Math.ceil(Buffer.byteLength(t, "utf8") / 4)), 0);
 }
 
@@ -178,20 +177,12 @@ export function recordRagUsage(entry: RagUsageEntry): void {
         cost ?? null,
         occurredAt
       );
-    // Fire-and-forget forward to the API Usage Monitor (no-op unless configured; never throws).
-    pushRagUsage({
-      sourceEventId: usageId,
-      occurredAt,
-      provider,
-      operation: entry.operation,
-      model: entry.model,
-      userId,
-      tokensIn,
-      tokensOut,
-      batchCount,
-      costUsd: cost,
-      providerRequestId: entry.providerRequestId,
-    });
+    // No live push to the API Usage Monitor.  RAG rows reach it only through the replay lane's
+    // closed 10-minute windows (usage-monitor-replay.ts):  one summed row per provider, operation,
+    // user and model instead of one per call.  Self-hosted Qdrant is rolled up as call volume
+    // only (unit "request", requests = rows, no quantity or cost, record count in metadata),
+    // because its token columns hold a record count and it has no cost.  Live plus replay both
+    // sending per-row events was most of the ~8,000 rows a day this family produced.
   } catch {
     /* ledger is best-effort; never break the caller */
   }
@@ -210,7 +201,8 @@ export function meterEmbed(
   model?: string,
   userId?: string,
   provider: RagEmbedRerankProvider = "openrouter",
-  providerRequestId?: string
+  providerRequestId?: string,
+  batchCount?: number
 ): void {
   const tokens = approxTokens(texts);
   recordRagUsage({
@@ -221,7 +213,7 @@ export function meterEmbed(
       model ||
       (provider === "openrouter" ? "baai/bge-m3" : "BAAI/bge-m3"),
     tokensIn: tokens,
-    batchCount: texts.length,
+    batchCount: batchCount ?? texts.length,
     providerRequestId
   });
 }
@@ -335,6 +327,89 @@ export function getRagUsageSummary(opts: { sinceIso?: string } = {}): RagUsageRo
     batchCount: Number(r.batch_count),
     costEstUsd: Number(r.cost_est_usd)
   }));
+}
+
+export const DEFAULT_RAG_MAX_DAILY_INGEST_POINTS = 150_000;
+
+/** Internal watermark: audit the Qdrant daily-point gate skip at most once per UTC day. */
+export const RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY = "rag:ingestPointsGateLastAuditDay";
+
+export function ragMaxDailyIngestPoints(): number {
+  const configured = Number(process.env.RAG_MAX_DAILY_INGEST_POINTS ?? process.env.QDRANT_MAX_DAILY_INGEST_POINTS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_RAG_MAX_DAILY_INGEST_POINTS;
+}
+
+/**
+ * ISO deferral target when the rolling 24h Qdrant point fuse is spent.
+ * Mirrors the Pinecone daily-WU fuse park (1h) used by SecIngest / incremental lanes.
+ */
+export function ragIngestPointsBudgetDeferUntil(nowMs: number = Date.now()): string {
+  return new Date(nowMs + 60 * 60_000).toISOString();
+}
+
+/**
+ * ISO deferral target when the rolling 24h text embed budget (RAG_INGEST_MAX_TEXTS_PER_DAY)
+ * is spent.  Parks producers for 1h — matching the Qdrant point and Pinecone WU fuse
+ * conventions — so they retry once a slice of the 24h window has rolled.
+ */
+export function ragIngestTextBudgetDeferUntil(nowMs: number = Date.now()): string {
+  return new Date(nowMs + 60 * 60_000).toISOString();
+}
+
+/**
+ * Audit that the Qdrant daily-point gate skipped work, at most once per UTC day.
+ * Producers still park/defer on every call; this only stops audit_events / console spam
+ * (Datadog showed ~148k daily-budget skip warns when the fuse was spent).
+ */
+export function auditRagIngestPointsGateSkip(
+  payload: { operation: string; attempted: number; until: string; used?: number; limit?: number },
+  userId: string = "local"
+): void {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    if (getInternalSetting<string>(RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY) === day) return;
+    setInternalSetting(RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY, day);
+    console.warn(
+      `[rag-metering] Qdrant daily point ingest fuse spent — parking producers until ${payload.until}` +
+        (payload.used != null && payload.limit != null ? ` (used ${payload.used}/${payload.limit})` : "") +
+        ` [${payload.operation} attempted=${payload.attempted}]`
+    );
+    audit("rag_ingest_points_gate_skip", payload, userId);
+  } catch {
+    // audit is best-effort; the gate result itself is the caller's signal
+  }
+}
+
+/**
+ * Total vector points upserted in the rolling 24-hour window, optionally scoped to a provider.
+ */
+export function usedRagUpsertPointsLast24h(userId: string = "local", provider?: string): number {
+  try {
+    const sinceIso = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const query = provider
+      ? "SELECT COALESCE(SUM(batch_count), 0) AS total FROM rag_usage WHERE user_id = ? AND operation = 'upsert' AND provider = ? AND created_at >= ?"
+      : "SELECT COALESCE(SUM(batch_count), 0) AS total FROM rag_usage WHERE user_id = ? AND operation = 'upsert' AND created_at >= ?";
+    const params = provider ? [userId, provider, sinceIso] : [userId, sinceIso];
+    const row = getDb().prepare(query).get(...params) as { total: number } | undefined;
+    return Number(row?.total ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Verifies that the rolling 24-hour vector point ingestion budget has headroom.
+ * Defaults to enabled, fail-open on DB errors.
+ */
+export function hasRagIngestPointsBudget(userId: string = "local", requested: number = 1, provider?: string): boolean {
+  if (process.env.RAG_INGEST_POINTS_BUDGET_ENABLED === "off" || process.env.RAG_INGEST_POINTS_BUDGET_ENABLED === "false") {
+    return true;
+  }
+  const used = usedRagUpsertPointsLast24h(userId, provider);
+  const limit = ragMaxDailyIngestPoints();
+  return used + requested <= limit;
 }
 
 // ── R5: consolidated per-retrieval distribution telemetry ───────────────────

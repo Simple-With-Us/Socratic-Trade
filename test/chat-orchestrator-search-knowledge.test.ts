@@ -111,6 +111,7 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
       5,
       "local",
       expect.objectContaining({
+        asOf: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
         minRelevanceScore: expect.any(Number),
         dedupeSimilarity: expect.any(Number)
       })
@@ -155,5 +156,20 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
     const results = await deps.searchKnowledge({ query: "q" }, "local");
     expect(results).toEqual([]);
     expect(mocks.retrieveContextDetailed).not.toHaveBeenCalled();
+  });
+
+  it("forwards a parseable as_of and defaults asOf to now when omitted", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([]);
+    const deps = orchestrator.buildProductionDeps();
+
+    await deps.searchKnowledge({ query: "q", ticker: "AAPL", as_of: "2026-05-01T12:00:00.000Z" }, "local");
+    expect(mocks.retrieveContextDetailed.mock.calls[0]![4]).toEqual(
+      expect.objectContaining({ asOf: "2026-05-01T12:00:00.000Z" })
+    );
+
+    mocks.retrieveContextDetailed.mockClear();
+    await deps.searchKnowledge({ query: "q", ticker: "AAPL" }, "local");
+    const asOf = mocks.retrieveContextDetailed.mock.calls[0]![4].asOf as string;
+    expect(Date.parse(asOf)).toBeGreaterThan(Date.parse("2026-01-01T00:00:00.000Z"));
   });
 });

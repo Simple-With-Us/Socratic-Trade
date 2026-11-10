@@ -1,6 +1,7 @@
 // db-profiles.ts — strategy profiles (create/read/update/delete/activate),
 // plus mergePolicy / normalizeScoringWeights helpers used only by this module
 // and the re-exported getPolicy / setPolicy / getStrategyPrompt / setStrategyPrompt.
+import "server-only";
 import crypto from "crypto";
 import { getDb, audit } from "./db";
 import { getInternalSetting, getUserSetting, setInternalSetting, setUserSetting } from "./db-settings";
@@ -390,12 +391,13 @@ function copyPolicyConfigToActiveAccount(
   if (!account) return;
   // PR #7: propagate strategy CONFIG (prompt/weights/caps) to the active account,
   // but NEVER arm or disarm it as a side-effect of a library-profile edit — preserve
-  // the account's own run-state (systemState). This mirrors applyProfileToAccount's
-  // per-account autonomy guard; arming stays an explicit per-account action. peekPolicy
-  // is read-only (no seeding) and returns the fail-closed floor for a fresh account.
-  const currentState = peekPolicy(userId, account.id).systemState;
+  // the account's own run-state (systemState) and authority mode (strategyAuthority).
+  // This mirrors applyProfileToAccount's per-account autonomy guard; arming stays an
+  // explicit per-account action. peekPolicy is read-only (no seeding) and returns the
+  // fail-closed floor for a fresh account.
+  const current = peekPolicy(userId, account.id);
   writeAccountStrategyState(userId, account.id, {
-    policy: { ...policy, systemState: currentState },
+    policy: { ...policy, systemState: current.systemState, strategyAuthority: current.strategyAuthority },
     prompt,
     scoringWeights,
     derivedFromProfileId
@@ -724,9 +726,10 @@ export function assertConnectedAccountOwnedByUser(userId: string, connectedAccou
  * `derived_from_profile_id` so the provenance is recorded. Copy, not link — later edits to the
  * library profile do not retro-mutate the account.
  *
- * SAFETY: the target account's current run-state (`systemState`) is preserved. Applying a strategy
- * is a config change; it must never arm autonomy on a halted account (nor disarm an active one),
- * mirroring the per-account autonomy-opt-in guard from PR 1.
+ * SAFETY: the target account's current run-state (`systemState`) and authority mode
+ * (`strategyAuthority`) are preserved. Applying a strategy is a config change; it must
+ * never arm autonomy on a halted account (nor disarm an active one), and must never flip
+ * Autopilot on or off — mirroring the per-account autonomy-opt-in guard from PR 1.
  */
 export function applyProfileToAccount(
   profileId: string,
@@ -740,12 +743,13 @@ export function applyProfileToAccount(
   // of the URL/body it supplies.
   assertConnectedAccountOwnedByUser(userId, connectedAccountId);
 
-  const currentState = getPolicy(userId, connectedAccountId).systemState;
+  const current = getPolicy(userId, connectedAccountId);
   const scoringWeights = normalizeScoringWeights(profile.policy.scoringWeights);
   const policy = mergePolicy({
     ...profile.policy,
     scoringWeights,
-    systemState: currentState,
+    systemState: current.systemState,
+    strategyAuthority: current.strategyAuthority,
     activeProfileId: profile.id
   });
   writeAccountStrategyState(userId, connectedAccountId, {
@@ -849,8 +853,9 @@ function writeImportedAccountStrategyState(
  *  - Identity fields (`ACCOUNT_IDENTITY_POLICY_FIELDS`) are stripped — `getPolicy` always overwrites
  *    them from the target account's own row after read, but a stale source-account id must never sit
  *    in the target's stored JSON in the meantime.
- *  - The target's own `systemState` (active/halted/close_only/liquidating) is preserved — importing
- *    settings is a config change, never an arm/disarm side effect, mirroring `applyProfileToAccount`.
+ *  - The target's own `systemState` (active/halted/close_only/liquidating) and `strategyAuthority`
+ *    (propose/decide) are preserved — importing settings is a config change, never an arm/disarm or
+ *    Autopilot flip side effect, mirroring `applyProfileToAccount`.
  *
  * PROVENANCE DECISION: `derived_from_profile_id` is carried over from the SOURCE account's own value
  * (including clearing it to NULL when the source has none), rather than preserved from whatever the
@@ -890,13 +895,14 @@ export function importAccountSettings(
   // peekPolicy (not getPolicy): read-only, never seeds/writes — we are about to write the target's
   // row ourselves right below, mirroring copyPolicyConfigToActiveAccount's same "about to overwrite
   // it anyway" use of peekPolicy.
-  const targetSystemState = peekPolicy(userId, targetConnectedAccountId).systemState;
+  const targetPolicy = peekPolicy(userId, targetConnectedAccountId);
 
   const cleaned = stripIdentityFields(stripUserFields(sourcePolicyRaw));
   const policy = mergePolicy({
     ...cleaned,
     scoringWeights: sourceScoringWeights,
-    systemState: targetSystemState,
+    systemState: targetPolicy.systemState, // Guard: preserve target lifecycle state
+    strategyAuthority: targetPolicy.strategyAuthority, // Guard: preserve target autonomy
     activeProfileId: derivedFromProfileId ?? undefined
   });
 

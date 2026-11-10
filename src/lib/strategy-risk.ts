@@ -1,15 +1,18 @@
 import { avgReturnCorrelation, correlationProfile } from "./correlation";
 import { audit } from "./db";
 import { ExecutionAccount } from "./execution-mode";
+import { deriveVenueContract } from "./venue-contract";
 import { fractionalKellySuggestion } from "./kelly";
 import { isRiskOffFilterRegime, regimeFromLabel } from "./market-regime";
 import { normalizeSymbol } from "./money";
 import { ThesisRegimeStat, ThesisStat, PrefetchedFills, getThesisScorecard, getThesisRegimeScorecard, ConfidenceCalibrationStat, getConfidenceCalibration, MIN_CLOSED_LOTS_FOR_WEIGHT_SHIFT, calibratedConviction } from "./performance";
 import { estimateNotional, applyOpeningOrderHeadroom } from "./policy";
+import { degradedCoreInputs } from "./proposal-phase-guard";
 import { accountEquity } from "./risk-breaker";
+import { signalHealthDriftActive } from "./signal-health";
 import { bracketWholeShareMinimum, brokerLabel, brokerMinimumDollarNotional, estimateOpeningProposalNotional, formatWholeDollars, openingPolicyNotionalCap, openingRiskCapacity } from "./strategy";
 import { StressPositionInput, stressScenario } from "./stress-scenario";
-import { PolicyDecision, TradingPolicy, ApprovedEscalation, TradeProposal, EquityPosition, OrderSide, MarketQuote, MarketFactorBreakdown, FillSource, MarketScan, Portfolio, StopPlanStyle } from "./types";
+import { PolicyDecision, TradingPolicy, ApprovedEscalation, TradeProposal, EquityPosition, OrderSide, MarketQuote, MarketFactorBreakdown, FillSource, MarketScan, Portfolio, StopPlanStyle, STOP_PLAN_FALLBACK_STOP_PCT } from "./types";
 import { PortfolioHeatResult, volTargetScale, positionRiskUsd } from "./vol-targeting";
 
 export function shouldEscalateDecision(decision: PolicyDecision, policy: TradingPolicy): boolean {
@@ -89,8 +92,7 @@ export async function mapWithConcurrency<T>(items: readonly T[], limit: number, 
   await Promise.all(runners);
 }
 export function allowedProposalSides(policy: TradingPolicy, account?: ExecutionAccount): OrderSide[] {
-  const shortAllowed = policy.shortSellingEnabled === true && account?.capabilities?.shortSelling === true;
-  return shortAllowed ? ["buy", "sell", "short", "cover"] : ["buy", "sell"];
+  return deriveVenueContract(policy, account).sides;
 }
 export function deterministicBearFilter(
   proposals: TradeProposal[],
@@ -423,6 +425,31 @@ export async function applyRiskReceipts(
 
   return out;
 }
+/**
+ * Stop distance as a PERCENT of entry, for the equal-risk cap. Prefers the stop the order will
+ * actually carry, so the cap reflects real risk rather than a policy average:
+ *
+ *  1. `proposal.stopPrice` against `proposal.referencePrice` — the concrete order.
+ *  2. `policy.riskRules.stopLossPct` — the configured distance the app places.
+ *  3. `STOP_PLAN_FALLBACK_STOP_PCT` — the SAME shared fallback the rest of the codebase uses when an
+ *     account runs with no configured stop (`synthetic-stops.ts`, `broker-protective-stops.ts`).
+ *
+ * Falls back rather than returning 0 because a 0 distance would make `budget ÷ fraction` infinite
+ * and silently disable the cap, which is the exact failure a risk cap must not have. Returns 0 only
+ * when a stop was configured at a non-positive distance, which the caller treats as "skip the cap".
+ */
+function resolveStopDistancePct(proposal: TradeProposal, policy: TradingPolicy): number {
+  const ref = proposal.referencePrice;
+  const stop = proposal.stopPrice;
+  if (typeof ref === "number" && Number.isFinite(ref) && ref > 0 && typeof stop === "number" && Number.isFinite(stop) && stop > 0) {
+    const distancePct = (Math.abs(ref - stop) / ref) * 100;
+    if (distancePct > 0) return distancePct;
+  }
+  const configured = policy.riskRules?.stopLossPct;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
+  return STOP_PLAN_FALLBACK_STOP_PCT;
+}
+
 export function applyDeterministicSizing(
   proposal: TradeProposal,
   policy: TradingPolicy,
@@ -503,17 +530,106 @@ export function applyDeterministicSizing(
   const corrobWinRate = policy.tuning?.corroborationWinRatePct ?? 58;
   const corrobEdge = policy.tuning?.corroborationEdgePct ?? 0;
   const corroborated = winRate >= corrobWinRate && avgReturn > corrobEdge;
-  const conviction = corroborated ? rawConviction : Math.min(rawConviction, convictionCap);
+  const uncorroboratedConviction = corroborated ? rawConviction : Math.min(rawConviction, convictionCap);
   const convictionCapBinds = !corroborated && rawConviction > convictionCap;
+
+  // Degraded-data confidence cap (receipts ladder): when the proposal's CORE scan inputs were
+  // observably degraded (degradedCoreInputs reads only the symbol's own quote off the marketScan
+  // already in scope — an honest signal at this seam, never an invented proxy), cap confidence's
+  // UPSIDE contribution exactly like the uncorroborated cap above and compose AFTER it. Same knob
+  // semantics too (`?? default`; 1 never binds; explicit 0 removes the contribution). No marketScan
+  // → no claim, no cap. When it BINDS, a kind-prefixed dataAdjustments receipt (below) names which
+  // inputs were degraded — a visible haircut, never a silent one.
+  const degradedCap = policy.tuning?.confidenceCapDataDegraded ?? 0.7;
+  const degradedInputs = degradedCoreInputs(proposal.symbol, marketScan);
+  const conviction = degradedInputs.length > 0 ? Math.min(uncorroboratedConviction, degradedCap) : uncorroboratedConviction;
+  const degradedCapBinds = degradedInputs.length > 0 && uncorroboratedConviction > degradedCap;
+  const degradedCapReceipt = degradedCapBinds
+    ? `confidence_capped_degraded_data: AI conviction capped to ${degradedCap} for sizing (was ${uncorroboratedConviction.toFixed(2)}).  Degraded core inputs: ${degradedInputs.join("; ")}.`
+    : null;
+  if (degradedCapBinds) {
+    audit(
+      "sizing_degraded_data_cap_applied",
+      { symbol: normalizeSymbol(proposal.symbol), side: proposal.side, cap: degradedCap, preCapConviction: Number(uncorroboratedConviction.toFixed(4)), degradedInputs },
+      userId,
+      policy.connectedAccountId
+    );
+  }
+
+  // Signal-health auto-throttle (opt-in — policy.tuning.signalHealthAutoThrottle, default OFF):
+  // while a CONFIRMED confidence-drift alarm is active (signal-health.ts: declining rolling rank
+  // IC of confidenceScore vs matured outcomes), cap confidence's UPSIDE contribution at the SAME
+  // convictionCapUncorroborated value even when the thesis is corroborated — a decaying confidence
+  // signal shouldn't ride realized-edge corroboration past the cap. Composes AFTER the caps above;
+  // off (default) the alarm only notifies/logs and sizing is byte-identical to today. The drift
+  // read fails OPEN to inactive (settings-store failure must never shrink or abort sizing).
+  const driftAlarm: ReturnType<typeof signalHealthDriftActive> =
+    policy.tuning?.signalHealthAutoThrottle === true ? signalHealthDriftActive(userId) : { active: false, horizons: [] };
+  const throttledConviction = driftAlarm.active ? Math.min(conviction, convictionCap) : conviction;
+  const throttleBinds = driftAlarm.active && conviction > convictionCap;
+  const throttleReceipt = throttleBinds
+    ? `confidence_capped_signal_drift: AI conviction capped to ${convictionCap} for sizing (was ${conviction.toFixed(2)}).  Signal-health drift alarm active for ${driftAlarm.horizons.join("+")}${driftAlarm.detectedAt ? ` since ${driftAlarm.detectedAt.slice(0, 10)}` : ""} with the auto-throttle enabled.`
+    : null;
+  if (throttleBinds) {
+    audit(
+      "sizing_signal_health_throttle_applied",
+      { symbol: normalizeSymbol(proposal.symbol), side: proposal.side, cap: convictionCap, preCapConviction: Number(conviction.toFixed(4)), horizons: driftAlarm.horizons },
+      userId,
+      policy.connectedAccountId
+    );
+  }
 
   // Edge-aware Kelly-lite: scale by win rate AND conviction AND the realized EDGE.
   // A thesis that wins often but with no/negative expectancy shouldn't get full size;
   // one with a proven positive edge earns more. This uses the learned shrunk avg return
   // so a handful of lucky trades can't inflate sizing.
   const edgeFactor = avgReturn > 1 ? 1 : avgReturn >= 0 ? 0.7 : avgReturn > -1 ? 0.5 : 0.3;
-  const rawMultiplier = (winRate / 100) * conviction * edgeFactor;
+  const rawMultiplier = (winRate / 100) * throttledConviction * edgeFactor;
 
-  // Volatility-targeting sizing (opt-in, default off): taper the Kelly-lite multiplier by
+  // Operator per-thesis dial (policy.tuning.thesisSizeMultipliers), applied on top of the learned
+  // edge factor rather than replacing it. The learned path above is DERIVED from realized stats and
+  // already shrinks a weak thesis on its own; this exists for the case it cannot cover — parking a
+  // thesis whose sample is too thin or too regime-specific for its edgeFactor to be trustworthy
+  // (the 2026-09-25 performance review's "Value-Quality, 25 lots, -$79.18, the most consistent
+  // negative thesis in the data" is the motivating case).
+  //
+  // Clamped to [0, 1] so a misconfigured value can only ever SHRINK a position. A knob that could
+  // inflate sizing on a typo is not a knob anyone should leave in a policy file. Unset, a
+  // non-finite, or out-of-range value is ignored and sizes exactly as before.
+  const thesisKey = proposal.tradeThesisTag?.trim();
+  const configuredThesisMultiplier = thesisKey ? policy.tuning?.thesisSizeMultipliers?.[thesisKey] : undefined;
+  const thesisScale =
+    typeof configuredThesisMultiplier === "number" && Number.isFinite(configuredThesisMultiplier)
+      ? Math.min(1, Math.max(0, configuredThesisMultiplier))
+      : 1;
+  // An operator writing an explicit 0 for this thesis means "stop trading this". It is honoured as
+  // written and is NOT raised to `sizingFloorPct` below: the floor exists to stop the sizer emitting
+  // dust, but silently sizing a parked thesis at the floor would make the dial lie. The
+  // `avgReturn < 0` branch already takes exactly this hard-zero path, so this is the same rule
+  // reached by configuration instead of by learned stats.
+  //
+  // Safe in practice: a 0-notional order cannot reach a broker — the small-account/broker-minimum
+  // guards reject it — so honouring the zero degrades to "proposal never places", which is the
+  // intent, with no possibility of an accidental fill.
+  const thesisParked = thesisScale === 0;
+  if (thesisScale < 1) {
+    audit(
+      "sizing_thesis_multiplier_applied",
+      {
+        symbol: normalizeSymbol(proposal.symbol),
+        thesisTag: thesisKey,
+        configured: configuredThesisMultiplier,
+        applied: thesisScale,
+        rawMultiplier
+      },
+      userId,
+      policy.connectedAccountId
+    );
+  }
+
+  // Volatility-targeting sizing (default ON since the 2026-07-28 owner-approved guard enablement:
+  // DEFAULT_POLICY.tuning.volTargeting = true, targetPortfolioVolPct = 25; a per-account
+  // `volTargeting: false` turns it off): taper the Kelly-lite multiplier by
   // targetVol/realizedVol (never up, floored at 0.25) BEFORE the floor/ceiling clamp below, so it
   // composes with (and stays bounded by) the existing sizingFloorPct/sizingCeilingPct clamps exactly
   // like every other input to `multiplier`. The realized-vol number itself is surfaced in the
@@ -526,7 +642,14 @@ export function applyDeterministicSizing(
     volScaleApplies && typeof realizedVol === "number"
       ? volTargetScale(realizedVol, targetVol as number)
       : 1;
-  const multiplier = rawMultiplier * volScale;
+  const multiplier = rawMultiplier * volScale * thesisScale;
+  // Honest receipt, same convention as volTargetNote: say what was applied and why, not just that
+  // a number came out smaller. Silent shrinkage is indistinguishable from a bug in the log.
+  const thesisNote =
+    thesisScale < 1
+      ? `\n\n[Sizing] Thesis ${thesisKey} held to ${(thesisScale * 100).toFixed(0)}% size by policy.tuning.thesisSizeMultipliers (configured ${configuredThesisMultiplier}).` +
+        (thesisParked ? " An explicit 0 parks this thesis: the sizing floor does not override it." : "")
+      : "";
   const volTargetNote =
     typeof realizedVol === "number"
       ? `\n\n[Sizing] Realized vol ${realizedVol.toFixed(1)}%${typeof targetVol === "number" && targetVol > 0
@@ -548,11 +671,15 @@ export function applyDeterministicSizing(
 
   const minLotsForSizing = policy.tuning?.minClosedLotsForWeightShift ?? 20;
   const unproven = sampleTrades < minLotsForSizing;
-  const boundedMultiplier = unproven
-    ? floor
-    : avgReturn < 0
-      ? 0
-      : Math.max(floor, Math.min(ceiling, multiplier));
+  // `thesisParked` is declared alongside `thesisScale` above; see its comment for why an explicit 0
+  // bypasses the floor.
+  const boundedMultiplier = thesisParked
+    ? 0
+    : unproven
+      ? floor
+      : avgReturn < 0
+        ? 0
+        : Math.max(floor, Math.min(ceiling, multiplier));
 
   // Fractional-Kelly sizing on realized payoff (downside-dispersion-aware, advisory). Runs BESIDE
   // the Kelly-lite heuristic above (never replaces it): computes a suggested multiplier from the
@@ -638,6 +765,63 @@ export function applyDeterministicSizing(
   let targetNotional = advisedNotional && advisedNotional > 0
     ? Math.min(Math.floor(advisedNotional), openingSizingCap)
     : Math.min(fallbackNotional, openingSizingCap);
+
+  // Equal-risk sizing (opt-in, default off): cap the DOLLAR risk one position may carry, as a % of
+  // account equity, so size = risk budget ÷ stop distance. Everything upstream sizes to a NOTIONAL,
+  // which means a name whose stop sits further from entry silently risks proportionally more — and
+  // the 2026-09-25 performance review found exactly that shape: 4 lots accounted for 70% of the
+  // account's total loss, and Insider-Accumulation was positive in PERCENT while negative in DOLLARS
+  // purely because its losing positions were the bigger ones. A notional cap cannot see that; a
+  // dollar-risk cap can.
+  //
+  // Applied BEFORE the ADV cap and the minimum raises below, and re-asserted after the bracket-minimum
+  // raise (a preference-based raise that must not silently undo a risk cap). The broker-dollar
+  // minimum is a HARD constraint and is left to win, with an audit if it breaches the cap — refusing
+  // to trade is the owner's call, not this function's.
+  const stopDistancePct = resolveStopDistancePct(proposal, policy);
+  const maxRiskPct = policy.tuning?.maxPositionRiskPctOfEquity;
+  const equityForRisk = accountEquity(portfolio);
+  const riskBudgetUsd =
+    typeof maxRiskPct === "number" && Number.isFinite(maxRiskPct) && maxRiskPct > 0 && equityForRisk > 0
+      ? (equityForRisk * maxRiskPct) / 100
+      : 0;
+  // risk = notional × stopFraction, so the notional that exactly spends the budget is budget ÷ fraction.
+  // Guard the division: a zero/unknown stop distance must skip the cap entirely rather than collapse
+  // every order to zero (the same reason `positionRiskUsd` returns 0 for a non-positive stop).
+  const equalRiskCap = riskBudgetUsd > 0 && stopDistancePct > 0 ? riskBudgetUsd / (stopDistancePct / 100) : 0;
+  let equalRiskNote = "";
+  const applyEqualRiskCap = () => {
+    if (equalRiskCap > 0 && targetNotional > 0 && targetNotional > equalRiskCap) {
+      equalRiskNote =
+        (equalRiskNote ? equalRiskNote : "") +
+        `\n\n[Sizing] Equal-risk cap: trimmed ${formatWholeDollars(targetNotional)} → ${formatWholeDollars(equalRiskCap)} so a ${stopDistancePct.toFixed(1)}% stop risks at most ${formatWholeDollars(riskBudgetUsd)} (${maxRiskPct}% of equity).`;
+      targetNotional = Math.floor(equalRiskCap);
+    }
+  };
+  if (riskBudgetUsd > 0 && stopDistancePct > 0) {
+    const before = targetNotional;
+    applyEqualRiskCap();
+    if (targetNotional < before) {
+      // Deliberately NOT clamping `effectiveOpeningCap` here. The risk cap is a DOLLAR budget, not a
+      // capacity constraint: it says how much this order may be, not how much the account may
+      // deploy. Clamping capacity here would also suppress the bracket-minimum raise below, which
+      // would leave the re-assertion after it untested and the interaction untested. Letting the
+      // raise happen and then losing to the re-assertion is the behaviour actually worth pinning.
+      audit(
+        "sizing_equal_risk_capped",
+        {
+          symbol: normalizeSymbol(proposal.symbol),
+          from: before,
+          to: targetNotional,
+          stopDistancePct,
+          riskBudgetUsd: Number(riskBudgetUsd.toFixed(2)),
+          maxPositionRiskPctOfEquity: maxRiskPct
+        },
+        userId,
+        policy.connectedAccountId
+      );
+    }
+  }
 
   // Market-impact (ADV) cap: keep the order from sizing into a name far past what the tape can
   // absorb. ADV is approximated by the latest scan daily $-volume (price × volume) since the app
@@ -734,6 +918,13 @@ export function applyDeterministicSizing(
     }
   }
 
+  // Re-assert the equal-risk cap AFTER the bracket raise above. That raise exists only so Alpaca can
+  // place a NATIVE whole-share bracket — a convenience, not a risk requirement — so it must not be
+  // allowed to quietly push an order back above the configured dollar-risk budget. The cost is that
+  // such an order loses its broker bracket and places unbracketed, which is the right way round: the
+  // risk budget wins, the bracket does not.
+  if (riskBudgetUsd > 0 && stopDistancePct > 0) applyEqualRiskCap();
+
   // Broker-dollar-minimum floor: Robinhood (and potentially other brokers) reject
   // dollar-based/fractional orders below a hard minimum notional (Robinhood: $1).
   // Raise the sized notional to at least that floor when capacity allows, so
@@ -763,6 +954,25 @@ export function applyDeterministicSizing(
   ) {
     brokerMinNote = `\n\n[Sizing] Raised ${formatWholeDollars(targetNotional)} to ${formatWholeDollars(brokerMinDollar)} to meet ${brokerLabel(policy)}'s minimum dollar-based order size.`;
     targetNotional = brokerMinDollar;
+    // The broker minimum is a HARD constraint, so unlike the bracket raise it is allowed to win over
+    // the equal-risk cap. But "allowed to win" is not "fine to do silently": record the breach so an
+    // owner can see that a real risk budget was exceeded, and why. Only reachable when the budget
+    // itself is smaller than a broker minimum, which is a misconfiguration worth surfacing, not a
+    // routine trim.
+    if (equalRiskCap > 0 && brokerMinDollar > equalRiskCap) {
+      audit(
+        "sizing_equal_risk_breached_by_broker_minimum",
+        {
+          symbol: normalizeSymbol(proposal.symbol),
+          budgetNotional: Math.floor(equalRiskCap),
+          brokerMinDollar,
+          riskBudgetUsd: Number(riskBudgetUsd.toFixed(2)),
+          maxPositionRiskPctOfEquity: maxRiskPct
+        },
+        userId,
+        policy.connectedAccountId
+      );
+    }
   }
 
   // Visibility: when the conviction cap actually BINDS (uncorroborated thesis whose raw AI
@@ -784,10 +994,19 @@ export function applyDeterministicSizing(
 
   return {
     ...proposal,
+    ...(degradedCapReceipt || throttleReceipt
+      ? {
+          dataAdjustments: [
+            ...(proposal.dataAdjustments ?? []),
+            ...(degradedCapReceipt ? [degradedCapReceipt] : []),
+            ...(throttleReceipt ? [throttleReceipt] : [])
+          ]
+        }
+      : {}),
     dollarAmount: targetNotional,
     quantity: undefined, // Override any LLM-guessed quantity to force notional routing
     rationale: proposal.rationale + advisedSizeNote + fallbackSizeNote + bracketMinNote + brokerMinNote + (unproven
       ? ` — EXPLORATORY floor: thesis has ${sampleTrades} closed lot${sampleTrades === 1 ? "" : "s"} (< ${minLotsForSizing}); held to minimum size until validated.`
-      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(conviction * 100)}% AI conviction.`) + capNote + advCapNote + volTargetNote + heatNote + kellyNote
+      : ` from ${winRate}% win rate, ${avgReturn}% avg edge, and ${Math.round(throttledConviction * 100)}% AI conviction.`) + capNote + advCapNote + equalRiskNote + volTargetNote + heatNote + kellyNote + thesisNote
   };
 }

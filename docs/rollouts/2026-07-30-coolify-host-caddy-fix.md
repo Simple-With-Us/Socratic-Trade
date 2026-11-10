@@ -9,8 +9,8 @@ The user reported two issues:
 2. Admin top bar had redundant elements (`Go Back` button on left, `ADMIN` badge, and `Server Stats` label next to app title).
 
 ## 2. Changes Made
-- **Server Infrastructure (Caddy on Oracle Cloud `141.148.182.224`)**:
-  - Updated `/etc/usage-monitor/Caddyfile` for `host.jays.services` to proxy to `coolify:8080` on the container bridge network rather than the stale/unreachable IP `100.97.154.2:8000`.
+- **Server Infrastructure (Caddy on Oracle Cloud `<ORACLE_IP_RETIRED>`)**:
+  - Updated `/etc/usage-monitor/Caddyfile` for `host.jays.services` to proxy to `coolify:8080` on the container bridge network rather than the stale/unreachable IP `<TAILSCALE_IP_RETIRED>:8000`.
   - Removed `tls internal` to allow Caddy and Cloudflare edge proxying to manage public SSL certificates without 521/525 handshake errors.
   - Restarted `oracle-caddy-1` container to apply changes.
 - **Admin Layout (`app/admin/layout.tsx`)**:

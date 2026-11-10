@@ -235,3 +235,40 @@ describe("fill notification body — pending_reconciliation placeholder guard", 
     expect(embed.fields).toContainEqual({ name: "Notional", value: "$400.00", inline: true });
   });
 });
+
+// risk_advisory is emitted by both agent-originated advisories (e.g. the drawdown breaker in
+// advisory mode) AND owner-initiated actions (e.g. a manual order cancel that would leave dust
+// below the broker minimum — app/api/orders/cancel). The shared tail must read honestly for
+// both instead of claiming "the agent is still in control" when the owner acted directly.
+describe("risk_advisory notification body — neutral advisory tail", () => {
+  it("ends with 'nothing was blocked or changed' for an agent-originated drawdown advisory", async () => {
+    const body = await directBody("risk_advisory", "Accuracy breaker degraded (advisory)", {
+      reason: "Hit rate 28% over the last 12 closed trades (floor 40%).",
+      drawdownPct: 4.25,
+      equity: 96100,
+      highWaterMark: 100400
+    });
+    expect(body).toContain("Hit rate 28% over the last 12 closed trades (floor 40%).");
+    expect(body).toContain("Drawdown: 4.25% from the equity high-water mark");
+    expect(body.endsWith("Advisory only — nothing was blocked or changed.")).toBe(true);
+    expect(body).not.toContain("the agent is still in control");
+  });
+
+  it("uses the same tail for an owner-initiated cancel-dust advisory", async () => {
+    const body = await directBody("risk_advisory", "Cancel would leave unplaceable dust", {
+      reason: "Canceling this working order would leave 0.4 shares below the broker minimum."
+    });
+    expect(body).toBe(
+      "Canceling this working order would leave 0.4 shares below the broker minimum.\nAdvisory only — nothing was blocked or changed."
+    );
+    expect(body).not.toContain("the agent is still in control");
+  });
+
+  it("Discord fallback copy uses the same neutral tail when no reason is supplied", async () => {
+    const embed = await discordEmbed("risk_advisory", "Accuracy breaker degraded (advisory)", {});
+    expect(embed.description).toBe(
+      "A risk guardrail threshold was breached (advisory — nothing was blocked or changed)."
+    );
+    expect(embed.description).not.toContain("the agent is still in control");
+  });
+});

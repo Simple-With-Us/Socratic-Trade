@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { accountReadinessForSnapshot, connectedAccountAgenticFallback } from "../src/lib/dashboard";
+import { getAccountsTimeoutMessage } from "../src/lib/inflight-deadline";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { BrokerageAccount, ConnectedAccount, TradingPolicy } from "../src/lib/types";
 
@@ -78,6 +79,19 @@ describe("accountReadinessForSnapshot", () => {
     expect(readiness.ok).toBe(false);
     expect(readiness.reason).toContain("Reconnect Robinhood OAuth");
     expect(readiness.detail).toContain("No Robinhood MCP access token");
+  });
+
+  it("still fail-closes Run once after the getAccounts retry budget is exhausted", () => {
+    const readiness = accountReadinessForSnapshot({
+      policy: policy(),
+      activeAccount: connectedAccount(),
+      liveAccounts: [],
+      brokerAccountReadError: getAccountsTimeoutMessage()
+    });
+
+    expect(readiness.ok).toBe(false);
+    expect(readiness.detail).toBe(getAccountsTimeoutMessage());
+    expect(readiness.detail).not.toMatch(/after 6000ms\.$/);
   });
 
   it("blocks Alpaca when broker account enumeration fails", () => {

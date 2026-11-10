@@ -3,6 +3,7 @@
 **Date:** 2026-08-04  
 **Author:** GROK (session review → implementation program)  
 **Status:** Waves A–E **COMPLETE on main** (2026-08-05, closeout #2448). Wave F remains owner-gated optional.  
+**Current clients (2026-08-20):** the `/mobile` PWA UI is retired (#2801).  Live surfaces are `/console` (desktop + phone widths) and native iOS.  Treat Wave D / D1 "PWA as control remote" below as the August 4 program record, not current product truth.
 **Source review:** Owner-requested top-to-bottom web + iOS + PWA review (2026-08-04 session)  
 **Related priors:**  
 - `docs/reviews/2026-07-05-ui-audit-and-design-system-unification.md`  
@@ -16,7 +17,7 @@
 
 ## Goal
 
-Make Socratic.Trade **more intuitive, faster-feeling, and aesthetically coherent** across:
+Make Socratic-Trade **more intuitive, faster-feeling, and aesthetically coherent** across:
 
 1. **Web console** (`/console/*`) — primary operator desk  
 2. **Public / marketing** (`/welcome`, `/login`, landing)  
@@ -433,7 +434,7 @@ Visual: desktop Thesis + Proposals; phone 390 width; iOS simulator Home + Propos
 
 ## How to claim a slice
 
-1. Poll agent-sync; read this doc + live board.  
+1. Poll ag***-s**c; read this doc + live board.  
 2. Move the matching Planned row → In Progress with your tag + branch (do not pre-assign unclaimed slices to other agents).  
 3. Implement in `~/apps/trading-<you>` worktree only.  
 4. Update rollout note for that slice; mirror effort board; land via `scripts/land.sh`.  

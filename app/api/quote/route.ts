@@ -1,105 +1,54 @@
 import { NextResponse } from "next/server";
-import { getEnrichmentProvider, type SymbolEnrichment } from "@/lib/data-providers";
+import { enrichYahooFinanceSymbol, getEnrichmentProvider, type SymbolEnrichment } from "@/lib/data-providers";
+import {
+  composeOnDemandQuote,
+  enrichmentHasValues,
+  fastQuoteEnrichment,
+  loadDurableQuoteSeed,
+  persistOnDemandQuote
+} from "@/lib/on-demand-quote";
 import { resolveRequestUser } from "@/lib/request-user";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { runQuoteEnrichmentSingleFlight } from "@/lib/quote-singleflight";
-import { fetchYahooFinanceQuote, type YahooFinanceQuote } from "@/lib/yahoo-finance";
+import {
+  CASCADE_BUDGET_MS,
+  LIVE_CASCADE_OVERLAY_GRACE_MS,
+  YAHOO_SUMMARY_GRACE_MS,
+  startCascadeBudget,
+  withinBudget
+} from "@/lib/quote-cascade-budget";
+import { fetchYahooFinanceQuote } from "@/lib/yahoo-finance";
+import { fetchFreshQuotesCascade, isQuoteFresh } from "@/lib/quotes-cascade";
+import type { BrokerQuote } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 // On-demand single-symbol quote + fundamentals fetch for the console symbol drilldown
-// (app/console/ui/symbol-drilldown.tsx), used ONLY when the last market scan didn't
-// know the symbol — e.g. a recently traded or currently held name outside the scan
-// universe. Read-only; consumes the SAME provider cascade the scan uses
-// (src/lib/data-providers.ts getEnrichmentProvider), scoped to one symbol so it stays
-// fast, and rides each provider's own internal short-TTL cache — no new cache infra
-// here. Deliberately does NOT compute a composite score or factor breakdown: those
-// rank a symbol against the scan's candidate universe and would be fabricated for a
-// symbol fetched outside a scan run.
+// (app/console/ui/symbol-drilldown.tsx) and the iOS SymbolInfoSheet. Used when the last
+// market scan didn't know the symbol — or when the sheet needs a live refresh.
+//
+// Four layers, started together:
+// 1. Durable store — last saved PE/EPS/div/52w (the "see / save / update" path).
+// 2. Keyless Yahoo chart — identity + price/volume + 52-week range (already on meta).
+// 3. Yahoo quoteSummary only — PE/EPS/div/beta without waiting for paid/scarce waves.
+// 4. Full provider cascade — wins extra fields when it finishes in time.
+//
+// Deliberately does NOT compute a composite score or factor breakdown: those rank a
+// symbol against the scan's candidate universe and would be fabricated for a symbol
+// fetched outside a scan run.
+//
+// Yahoo chart + quoteSummary grace (YAHOO_SUMMARY_GRACE_MS) is the HTTP floor.  The live
+// cascade gets only a brief overlay window (LIVE_CASCADE_OVERLAY_GRACE_MS) once the chart
+// resolves — the response never waits for the full cascade.  The 6s CASCADE_BUDGET_MS
+// still aborts Wave C, but the response does not wait for it when the floor is already
+// returnable.
 
 const SYMBOL_RE = /^[A-Z][A-Z0-9.\-]{0,9}$/;
-const CASCADE_BUDGET_MS = 6_000;
 
 type EnrichmentOutcome =
   | { status: "ready"; data: SymbolEnrichment }
   | { status: "failed"; error: unknown };
 type BudgetedOutcome = EnrichmentOutcome | { status: "timed-out" };
-
-/** The keyless chart quote is the bounded floor for a valid ticker. It supplies
- * current identity/price/volume while the richer provider cascade runs through
- * its normal caches, quota accounting, and field arbitration. Synthetic chart
- * bid/ask values are deliberately omitted: they are not real quoted spreads. */
-function fastQuoteEnrichment(quote: YahooFinanceQuote | undefined): SymbolEnrichment {
-  if (!quote) return {};
-  const intradayChangePct =
-    quote.prevClose > 0
-      ? Math.round(((quote.price - quote.prevClose) / quote.prevClose) * 10_000) / 100
-      : undefined;
-  return {
-    ...(quote.companyName ? { companyName: quote.companyName } : {}),
-    price: quote.price,
-    ...(quote.volume > 0 ? { volume: quote.volume } : {}),
-    ...(intradayChangePct !== undefined ? { intradayChangePct } : {}),
-    ...(quote.asOf ? { asOf: quote.asOf } : {}),
-    sources: {
-      ...(quote.companyName ? { companyName: "yahoo-finance" } : {}),
-      price: "yahoo-finance",
-      ...(quote.volume > 0 ? { volume: "yahoo-finance" } : {}),
-      ...(intradayChangePct !== undefined ? { intradayChangePct: "yahoo-finance" } : {}),
-      ...(quote.asOf ? { asOf: "yahoo-finance" } : {})
-    }
-  };
-}
-
-/** Rich fundamentals fill holes, while the freshest timestamped price family wins. */
-function mergeOnDemandEnrichment(
-  fast: SymbolEnrichment,
-  rich: SymbolEnrichment
-): SymbolEnrichment {
-  // Provider records generally omit missing fields, but tolerate an explicit
-  // `undefined` without letting it erase a valid fast-floor value.
-  const definedRich = Object.fromEntries(
-    Object.entries(rich).filter(([key, value]) => key !== "sources" && value !== undefined)
-  ) as SymbolEnrichment;
-  const fastAsOf = Date.parse(fast.asOf ?? "");
-  const richAsOf = Date.parse(rich.asOf ?? "");
-  const useRichCurrent = rich.price !== undefined
-    && (fast.price === undefined || (Number.isFinite(richAsOf) && (!Number.isFinite(fastAsOf) || richAsOf >= fastAsOf)));
-  const current = useRichCurrent ? rich : fast;
-  const currentFields = {
-    ...(current.price !== undefined ? { price: current.price } : {}),
-    ...(current.volume !== undefined ? { volume: current.volume } : {}),
-    ...(current.intradayChangePct !== undefined ? { intradayChangePct: current.intradayChangePct } : {}),
-    ...(current.asOf !== undefined ? { asOf: current.asOf } : {})
-  };
-  const currentSources = Object.fromEntries(
-    ["price", "volume", "intradayChangePct", "asOf"]
-      .filter((field) => current.sources?.[field as keyof typeof current.sources] !== undefined)
-      .map((field) => [field, current.sources?.[field as keyof typeof current.sources]])
-  ) as SymbolEnrichment["sources"];
-  return {
-    ...fast,
-    ...definedRich,
-    ...currentFields,
-    sources: { ...fast.sources, ...rich.sources, ...currentSources }
-  };
-}
-
-function withinBudget(promise: Promise<EnrichmentOutcome>, budgetMs: number): Promise<BudgetedOutcome> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      settled = true;
-      resolve({ status: "timed-out" });
-    }, budgetMs);
-    void promise.then((outcome) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(outcome);
-    });
-  });
-}
 
 export async function GET(request: Request) {
   const raw = new URL(request.url).searchParams.get("symbol") ?? "";
@@ -114,41 +63,152 @@ export async function GET(request: Request) {
   const limited = enforceRateLimit(userId, "quote", { limit: 60, windowMs: 60_000 });
   if (limited) return limited;
 
-  // Start both reads together. The rich path remains the canonical provider cascade
-  // (including its caches, request quotas, circuit breaker, and provenance). The
-  // keyless single-quote path is a bounded identity/quote floor, so one slow optional
-  // provider can no longer turn a valid ticker into a chart-only drawer.
-  const richPromise: Promise<EnrichmentOutcome> = runQuoteEnrichmentSingleFlight(
-    `${userId}:${symbol}`,
-    async () => (await getEnrichmentProvider(userId).enrich([symbol]))[symbol] ?? {}
-  )
-    .then((data) => ({ status: "ready" as const, data }))
-    .catch((error) => ({ status: "failed" as const, error }));
-  const fastPromise = fetchYahooFinanceQuote(symbol)
-    .then((quote): EnrichmentOutcome =>
-      quote
-        ? { status: "ready", data: fastQuoteEnrichment(quote) }
-        : { status: "failed", error: new Error("no current quote returned") }
+  const budget = startCascadeBudget(CASCADE_BUDGET_MS);
+  try {
+    const richPromise: Promise<EnrichmentOutcome> = runQuoteEnrichmentSingleFlight(
+      `${userId}:${symbol}`,
+      async () =>
+        (await getEnrichmentProvider(userId).enrich([symbol], { signal: budget.signal }))[symbol] ?? {}
     )
-    .catch((error) => ({ status: "failed" as const, error }));
+      .then((data) => ({ status: "ready" as const, data }))
+      .catch((error) => ({ status: "failed" as const, error }));
+    // Capture rich as soon as it settles so a fast cascade still merges, without holding
+    // the HTTP response for the 6s Wave C budget when Yahoo already has a floor.
+    let richPeek: EnrichmentOutcome | { status: "timed-out" } = { status: "timed-out" };
+    void richPromise.then(
+      (outcome) => {
+        richPeek = outcome;
+      },
+      (error) => {
+        richPeek = { status: "failed", error };
+      }
+    );
+    const fastPromise: Promise<EnrichmentOutcome> = (async (): Promise<EnrichmentOutcome> => {
+      const yahooQuotePromise = fetchYahooFinanceQuote(symbol, { userId }).catch(() => undefined);
+      const liveQuotePromise = (async (): Promise<BrokerQuote | undefined> => {
+        if (!userId) return undefined;
+        try {
+          const quotes = await fetchFreshQuotesCascade([symbol], userId, undefined, undefined, { signal: budget.signal });
+          const q = quotes[symbol];
+          // Validate cascade freshness instead of relying solely on the Yahoo-specific
+          // delayedFallback flag: a stale fallback (e.g. provider "session-close") must
+          // not overlay a newer Yahoo price (Codex P2 review).
+          return q && typeof q.price === "number" && q.price > 0 && isQuoteFresh(q, Date.now()) ? q : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
 
-  const [fast, rich] = await Promise.all([
-    fastPromise,
-    withinBudget(richPromise, CASCADE_BUDGET_MS)
-  ]);
-  const fastData = fast.status === "ready" ? fast.data : {};
-  const richData = rich.status === "ready" ? rich.data : {};
-  const enrichment = mergeOnDemandEnrichment(fastData, richData);
+      // Keep the live cascade off the bounded Yahoo floor: once the chart resolves,
+      // give the cascade only a brief overlay window instead of awaiting it in full
+      // (Codex P1 / Sentry HIGH review).  A slow broker can no longer hold the
+      // response through its 16s first wait / 30s I/O deadline.
+      const yahooQuote = await yahooQuotePromise;
+      let liveQuote: BrokerQuote | undefined;
+      if (yahooQuote) {
+        liveQuote = await Promise.race([
+          liveQuotePromise,
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), LIVE_CASCADE_OVERLAY_GRACE_MS))
+        ]);
+        if (liveQuote === undefined) {
+          // The floor is returnable — stop the still-running cascade so scarce
+          // providers do not keep spending after the response is fixed.
+          budget.abort(new Error("yahoo floor ready"));
+        }
+      } else {
+        // No Yahoo floor: the cascade is the only price source, so wait for it.
+        liveQuote = await liveQuotePromise;
+      }
+      if (liveQuote && typeof liveQuote.price === "number" && yahooQuote) {
+        const livePrice = liveQuote.price;
+        const base = fastQuoteEnrichment(yahooQuote);
+        // prevClose is undefined when Yahoo omitted it — never substitute the live
+        // price, which would fabricate a 0% intraday change (Sentry review).
+        const yahooPrevClose = yahooQuote.prevClose;
+        const intradayChangePct =
+          typeof yahooPrevClose === "number" && yahooPrevClose > 0
+            ? Math.round(((livePrice - yahooPrevClose) / yahooPrevClose) * 10_000) / 100
+            : base.intradayChangePct;
+        return {
+          status: "ready",
+          data: {
+            ...base,
+            price: livePrice,
+            ...(liveQuote.volume && liveQuote.volume > 0 ? { volume: liveQuote.volume } : {}),
+            ...(intradayChangePct !== undefined ? { intradayChangePct } : {}),
+            asOf: liveQuote.asOf ?? liveQuote.fetchedAt ?? base.asOf,
+            sources: {
+              ...base.sources,
+              price: liveQuote.provider ?? "quotes-cascade",
+              ...(liveQuote.asOf ? { asOf: liveQuote.provider ?? "quotes-cascade" } : {})
+            }
+          }
+        };
+      }
+      if (yahooQuote) {
+        return { status: "ready", data: fastQuoteEnrichment(yahooQuote) };
+      }
+      if (liveQuote) {
+        return {
+          status: "ready",
+          data: {
+            price: liveQuote.price,
+            ...(liveQuote.volume && liveQuote.volume > 0 ? { volume: liveQuote.volume } : {}),
+            asOf: liveQuote.asOf ?? liveQuote.fetchedAt,
+            sources: {
+              price: liveQuote.provider ?? "quotes-cascade",
+              ...(liveQuote.asOf ? { asOf: liveQuote.provider ?? "quotes-cascade" } : {})
+            }
+          }
+        };
+      }
+      return { status: "failed", error: new Error("no current quote returned") };
+    })().catch((error) => ({ status: "failed" as const, error }));
+    const yahooPromise: Promise<EnrichmentOutcome> = enrichYahooFinanceSymbol(symbol)
+      .then((data) => ({ status: "ready" as const, data }))
+      .catch((error) => ({ status: "failed" as const, error }));
 
-  if (fast.status === "ready" || rich.status === "ready") {
-    return NextResponse.json({ symbol, ...enrichment });
+    const [durable, fast] = await Promise.all([loadDurableQuoteSeed(symbol), fastPromise]);
+    const yahoo = await withinBudget(yahooPromise, YAHOO_SUMMARY_GRACE_MS);
+    // One extra tick so a fast cascade's then-handler can populate richPeek before we peek.
+    await Promise.resolve();
+    const fastData = fast.status === "ready" ? fast.data : {};
+    const yahooData = yahoo.status === "ready" ? yahoo.data : {};
+    const floorReady =
+      fast.status === "ready"
+      || enrichmentHasValues(durable)
+      || (yahoo.status === "ready" && enrichmentHasValues(yahooData));
+
+    let rich: BudgetedOutcome;
+    if (floorReady) {
+      rich = richPeek;
+      budget.abort(new Error("yahoo floor ready"));
+    } else {
+      rich = await withinBudget(richPromise, CASCADE_BUDGET_MS, budget.signal);
+    }
+    const richData = rich.status === "ready" ? rich.data : {};
+    const enrichment = composeOnDemandQuote([durable, fastData, yahooData, richData]);
+
+    const hasLiveQuote =
+      fast.status === "ready"
+      || (yahoo.status === "ready" && enrichmentHasValues(yahooData))
+      || (rich.status === "ready" && enrichmentHasValues(richData));
+    // Yahoo (+ durable) floor is already returnable, or rich finished inside the budget — abort any
+    // still-running cascade work so scarce providers do not keep spending after the response is fixed.
+    if (hasLiveQuote || enrichmentHasValues(durable)) {
+      budget.abort(new Error("yahoo floor ready"));
+      persistOnDemandQuote(symbol, enrichment);
+      return NextResponse.json({ symbol, ...enrichment });
+    }
+
+    const error = rich.status === "failed" ? rich.error : fast.error;
+    const message = rich.status === "timed-out" && yahoo.status === "timed-out"
+      ? "quote fetch timed out"
+      : error instanceof Error
+        ? error.message
+        : "quote fetch failed";
+    return NextResponse.json({ symbol, error: message }, { status: 502 });
+  } finally {
+    budget.clear();
   }
-
-  const error = rich.status === "failed" ? rich.error : fast.error;
-  const message = rich.status === "timed-out"
-    ? "quote fetch timed out"
-    : error instanceof Error
-      ? error.message
-      : "quote fetch failed";
-  return NextResponse.json({ symbol, error: message }, { status: 502 });
 }

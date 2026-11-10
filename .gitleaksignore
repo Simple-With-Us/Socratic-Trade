@@ -46,3 +46,63 @@ f4e99900d93a8d341202a29bf6f5fa7feb5b6e81:test/api-key-preview.test.ts:generic-ap
 # Fake test key fixture in test/wisesheets-provider.test.ts on PR #2365 introducing commit.
 # Fixed in later commit to test_wisesheets_key; fingerprint suppresses original commit scan finding.
 d79d3dfa3bd26ed2414373c2f7e3f492d5c99724:test/wisesheets-provider.test.ts:generic-api-key:44
+
+# PR #2708 / grok/apns-send: generic-api-key on a COMMENT that lists env var names
+# (APNS p8 / private-key / private-key-b64). No secret — the line is documentation
+# of which process-env names loadApnsConfig reads. Hosted gitleaks still scans the
+# introducing commit even after the comment is reworded.
+385278f804749693c6582cb0db0a57ae507454fe:src/lib/apns.ts:generic-api-key:23
+
+# PR #2990 / deepseek/handoff-note: generic-api-key on a Playwright recipe that
+# inlined a repeating hex alphabet as ENCRYPTION_KEY. Current file uses env
+# names only. Hosted gitleaks still scans the introducing commit.
+a632fe0938aeb4de158a3d8dfd7b39bec1aaffd9:docs/handoffs/2026-08-21-mobile-web-handoff.md:generic-api-key:46
+
+# Schedule-only FPs on main 654b5d73 (Security run 34141235959). Push gitleaks on
+# the same SHA (34138297048) was SUCCESS because push scans the push range;
+# schedule runs `gitleaks detect` over full history (`git log -p -U0 --full-history --all`).
+# Fingerprints copied from that failing schedule log. Do not invent hashes.
+#
+# Historical test-only ENCRYPTION_KEY fixture on commit 435d94a4:
+# playwright.config.ts:42 used `"0123456789abcdef".repeat(4)` so the smoke DB
+# could boot. Current tree no longer has that literal at line 42.
+435d94a4bc02929c23af9ccc5b3a97122d6a4ad3:playwright.config.ts:generic-api-key:42
+#
+# PR #4707 intermediate commit 636ef4d0: admin config briefly used the same throwaway
+# ENCRYPTION_KEY literal as smoke; removed in 938ef2e0 (hash fixture). False positive.
+636ef4d041846ccd65dcd2aa4207bb01a818dcd9:playwright.admin.config.ts:generic-api-key:40
+#
+# Historical fake OPENROUTER_KEY fixture on commit a9b01e00. Same file:line is
+# already ignored for 1ea0caa9 and f4e99900; schedule still flags this older
+# introducing commit. Current tree uses a mock-key-v1-... fixture, not a live key.
+a9b01e00bc3f40cde150beec62fcb9c8a470c656:test/api-key-preview.test.ts:generic-api-key:19
+#
+# Historical LOGO_DEV_TOKEN assignment in a rollout note on commit e700b9f1
+# (docs/rollouts/2026-06-21-logo-dev-toggle.md:17). Documented generic-api-key
+# false positive; not a product-code secret.
+e700b9f17d03d872c4f7d16da683323e246aa5e5:docs/rollouts/2026-06-21-logo-dev-toggle.md:generic-api-key:17
+
+# AFC-459 revision 2: a fake PEM envelope in scripts/ios-fleet/test-asc-credentials.sh
+# on the commits that introduced the masked-preview test. The body is
+# "SYNTHETICBADBODYHERE", which is not a key, and the line carries the inline
+# gitleaks:allow marker from the next commit. The PR squash-merges, so the
+# intermediate commits never reach main.
+5d3cad958d38669a47e421db87211e1718fb4533:scripts/ios-fleet/test-asc-credentials.sh:private-key:290
+d5374aa25268b18ee49f363f4209ff534ca48506:scripts/ios-fleet/test-asc-credentials.sh:private-key:288
+
+# ST #4930 (ST-4579): generic-api-key false positive. Line 102 of the fake
+# Infisical CLI in scripts/test-ios-stage-asc-key.sh compares $secret_project
+# with the Fleet-OPS Infisical project ID, the same plaintext FLEET_ASC_PROJECT_ID
+# literal ios-ship.yml uses. It is a project identifier, not a credential, and
+# grants no access on its own. Independently verified by BF-Deployer
+# (Zulip msg 634719697). This entry covers only that PR commit. The final tree
+# no longer matches the rule and carries inline gitleaks:allow markers on both
+# literals, so the push scan of the squash commit on main stays clean (Kody 4369915728).
+35732f84d8ba880bd3f4a2206dc1b6fd2291047d:scripts/test-ios-stage-asc-key.sh:generic-api-key:102
+
+# Restore commit c9526e22 on PR #5119 (Nov 9).  3bdaea63 was an empty-tree commit
+# by GB-DEPLOYER that removed every file, and c9526e22 put back the exact tree of
+# 07c0b991.  These lines are unchanged from main; they are flagged only because the
+# restore commit re-adds them.  The PR merges through the queue as one change.
+c9526e22b4b4e1c3808f7e1214879d30488da543:.env.example:generic-api-key:33
+c9526e22b4b4e1c3808f7e1214879d30488da543:docs/rollouts/2026-06-21-logo-dev-toggle.md:generic-api-key:17

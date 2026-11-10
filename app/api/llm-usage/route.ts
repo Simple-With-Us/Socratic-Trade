@@ -25,6 +25,11 @@ export async function GET(request: Request) {
     sinceDays,
     operatorFallbackEnabled: llmOperatorFallbackEnabled(),
     totalCostUsd: rows.reduce((s, r) => s + r.costUsd, 0),
+    // Cost provenance split, so the page can label an estimate as an estimate instead of adding it
+    // to a billed figure and presenting the sum as fact.  `billed` is the transport's own
+    // `usage.cost` (OpenRouter); `estimated` is the hand-maintained price table.
+    billedCostUsd: rows.reduce((s, r) => s + r.billedCostUsd, 0),
+    estimatedCostUsd: rows.reduce((s, r) => s + r.estimatedCostUsd, 0),
     operatorFundedCostUsd: serverFailoverRows.reduce((s, r) => s + r.costUsd, 0),
     operatorFundedTenants: serverFailoverRows.length > 0 ? [userId] : [],
     rows

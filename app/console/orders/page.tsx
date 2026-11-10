@@ -8,7 +8,9 @@
  *  and a short history of finished orders. Everything renders only what the
  *  snapshot actually has — missing data is "—", never invented. */
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { ORDER_ROLE_LABELS, type OrderRole } from "@/lib/order-role";
 import type { EquityOrder, EquityPosition } from "@/lib/types";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, EM_DASH, SENTENCE_GAP } from "../lib/format";
@@ -18,6 +20,7 @@ import { Ago, Btn, Card, Chip, Dash, Empty, SignedText, type ChipTone } from "..
 import { SymbolButton } from "../ui/symbol-drilldown";
 import { CancelOrderSheet } from "./cancel-sheet";
 import { ReplaceMarketSheet } from "./replace-market-sheet";
+import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
 import {
   closingOrderPnl,
   deriveOpenOrders,
@@ -108,7 +111,7 @@ function deriveOrderRowView(
       ? `Becomes available once the order has been working ${row.thresholdMinutes} minutes without filling (your policy's stale threshold) — currently ${fmtMinutes(row.ageMinutes)}.`
       : "Stale-limit detection is disabled (policy stale threshold is 0), so the server refuses market replacements."
     : halted
-      ? "Start the system first — replacing places a NEW order, which the server refuses while everything is stopped. Cancelling stays available."
+      ? "Start the system first — replacing places a NEW order, which the server refuses while everything is stopped.  Cancelling stays available."
       : noAccount
         ? "Market replacement needs a broker-backed Paper or Live account; no account is connected."
         : `Cancel this stale ${orderTypeLabel(order.type)} order and submit the remaining ${fmtQty(row.remaining)} shares as a market order${live ? " — typed broker confirmation required" : ""}.`;
@@ -146,7 +149,7 @@ function OrderPriceInfo({ view }: { view: ReturnType<typeof deriveOrderRowView> 
       {view.limitGapPct !== undefined && (
         <span
           className="block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-          title="How far the latest known price sits from the resting limit price. Positive = market above the limit."
+          title="How far the latest known price sits from the resting limit price.  Positive = market above the limit."
         >
           {fmtPct(view.limitGapPct, 1, true)} vs limit
         </span>
@@ -186,7 +189,7 @@ function OrderRowActions({
         size="sm"
         variant="dangerOutline"
         onClick={onCancel}
-        title="Ask the broker to cancel this order. Risk-reducing — allowed even while the system is stopped; fills that already happened stand."
+        title="Ask the broker to cancel this order.  Risk-reducing — allowed even while the system is stopped; fills that already happened stand."
         className="max-lg:min-h-10"
         align="right"
       >
@@ -226,6 +229,40 @@ function stateTone(state: string | undefined): ChipTone {
   return STATE_TONE[String(state ?? "").trim().toLowerCase()] ?? "muted";
 }
 
+/** Tone for the order-role badge — see src/lib/order-role.ts's classifyOrderRole. A protective
+ *  stop (fixed or trailing) is the "correct behavior at rest" case the badge exists for, so it
+ *  gets the calm info tone rather than a warning; bracket_stop_loss and replacement get warn
+ *  since both mean "something is actively guarding against loss right now". */
+const ROLE_TONE: Record<OrderRole, ChipTone> = {
+  protective_stop: "info",
+  trailing_stop: "info",
+  bracket_take_profit: "pos",
+  bracket_stop_loss: "warn",
+  entry: "accent",
+  exit: "accent",
+  synthetic_stop: "info",
+  replacement: "warn",
+  external: "muted"
+};
+
+/** Role badge + one-sentence whyResting, shared by the desktop row and the mobile card. Renders
+ *  nothing when the order carries no `role` (e.g. the snapshot couldn't resolve an account
+ *  number to classify against) — never a placeholder badge for missing data. `flex-wrap` keeps
+ *  the badge and its explanation from overflowing at ~390px widths. */
+function OrderRoleBadge({ order, className }: { order: EquityOrder; className?: string }) {
+  if (!order.role) return null;
+  return (
+    <div className={cx("flex flex-wrap items-center gap-1.5", className)}>
+      <Chip tone={ROLE_TONE[order.role]} title={order.whyResting ?? ORDER_ROLE_LABELS[order.role]}>
+        {ORDER_ROLE_LABELS[order.role]}
+      </Chip>
+      {order.whyResting && (
+        <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{order.whyResting}</span>
+      )}
+    </div>
+  );
+}
+
 function isExit(side: string): boolean {
   return side === "sell" || side === "cover";
 }
@@ -251,6 +288,15 @@ function executedText(order: EquityOrder): string | undefined {
 }
 
 export default function OrdersPage() {
+  return (
+    <Suspense fallback={null}>
+      <OrdersPageInner />
+    </Suspense>
+  );
+}
+
+function OrdersPageInner() {
+  const searchParams = useSearchParams();
   const { snapshot, refresh } = useConsoleData();
   const [replaceRow, setReplaceRow] = useState<OpenOrderRow | null>(null);
   const [cancelRow, setCancelRow] = useState<OpenOrderRow | null>(null);
@@ -267,6 +313,20 @@ export default function OrdersPage() {
     [snapshot, nowMs]
   );
   const history = useMemo(() => (snapshot ? terminalOrders(snapshot.orders ?? [], 20) : []), [snapshot]);
+  const focusedSymbol = readSymbolQuery(searchParams.get("symbol"));
+  const firstFocusedOpenId = useMemo(() => {
+    if (!focusedSymbol) return undefined;
+    return rows.find((row) => row.order.symbol.toUpperCase() === focusedSymbol)?.order.id;
+  }, [rows, focusedSymbol]);
+  const firstFocusedHistoryId = useMemo(() => {
+    if (!focusedSymbol || firstFocusedOpenId) return undefined;
+    return history.find((order) => order.symbol.toUpperCase() === focusedSymbol)?.id;
+  }, [history, focusedSymbol, firstFocusedOpenId]);
+
+  useEffect(() => {
+    if (!focusedSymbol) return;
+    scrollDeepLinkTarget([symbolElementId(focusedSymbol, "card"), symbolElementId(focusedSymbol)]);
+  }, [focusedSymbol, firstFocusedOpenId, firstFocusedHistoryId]);
 
   if (!snapshot) return null;
 
@@ -300,7 +360,7 @@ export default function OrdersPage() {
           size="sm"
           onClick={() => void doRefresh()}
           disabled={refreshing}
-          title="Fetch the latest orders from the broker now. The console also refreshes automatically every 15 seconds."
+          title="Fetch the latest orders from the broker now.  The console also refreshes automatically every 15 seconds."
         >
           {refreshing ? "Refreshing…" : "Refresh"}
         </Btn>
@@ -326,18 +386,18 @@ export default function OrdersPage() {
             filling.
           </span>{" "}
           <span className="text-[color:var(--con-muted)]">
-            The market may have moved away from the limit price. Review each: keep waiting, cancel, or replace the
+            The market may have moved away from the limit price.  Review each: keep waiting, cancel, or replace the
             remainder at market.
           </span>
         </div>
       )}
 
-      <Card title={`Open orders (${rows.length})`} padded={false}>
+      <Card title={`Open Orders (${rows.length})`} padded={false}>
         {rows.length === 0 ? (
           <Empty>
             {noAccount
               ? "No working orders — connect a broker Paper or Live account first. Working orders appear once an account is active."
-              : "No working orders at the broker. When you or the strategy place a limit or stop order, it appears here until it fills, expires, or is cancelled."}
+              : "No working orders at the broker.  When you or the strategy place a limit or stop order, it appears here until it fills, expires, or is cancelled."}
           </Empty>
         ) : (
           <>
@@ -347,26 +407,26 @@ export default function OrdersPage() {
                   <tr>
                     <th title="Ticker — click a symbol to open its price history and details.">Symbol</th>
                     <th title="Order direction: buy, sell, short, or cover.">Side</th>
-                    <th title="Order type. Limit and stop-limit orders can sit unfilled and go stale; market orders execute immediately.">
+                    <th title="Order type.  Limit and stop-limit orders can sit unfilled and go stale; market orders execute immediately.">
                       Type
                     </th>
-                    <th className="num" title="Order size as the broker holds it: share quantity, or an approximate dollar amount for notional orders. Partial fills show how much already executed.">
+                    <th className="num" title="Order size as the broker holds it: share quantity, or an approximate dollar amount for notional orders.  Partial fills show how much already executed.">
                       Size
                     </th>
-                    <th className="num" title="Resting limit price and/or stop trigger price the broker holds for this order. '—' when the broker reported neither (e.g. a market order).">
+                    <th className="num" title="Resting limit price and/or stop trigger price the broker holds for this order.  '—' when the broker reported neither (e.g. a market order).">
                       Limit / Stop
                     </th>
-                    <th className="num" title="Latest price this app has for the symbol: this account's OWN held mark (from the same snapshot as the order) when the symbol is currently held, else the most recent market scan (can be minutes old), else the durable per-symbol store's last-known price (age-tagged; can be hours or days old). '—' only when none is available. Where the order has a limit price, the gap between this price and the limit is shown underneath.">
+                    <th className="num" title="Latest price this app has for the symbol: this account's OWN held mark (from the same snapshot as the order) when the symbol is currently held, else the most recent market scan (can be minutes old), else the durable per-symbol store's last-known price (age-tagged; can be hours or days old).  '—' only when none is available.  Where the order has a limit price, the gap between this price and the limit is shown underneath.">
                       Last price
                     </th>
-                    <th title="Time-in-force: how long the order stays working. DAY/GFD expires at market close; GTC rests until cancelled.">
+                    <th title="Time-in-force: how long the order stays working.  DAY/GFD expires at market close; GTC rests until cancelled.">
                       TIF
                     </th>
                     <th
                       title={
                         thresholdMinutes > 0
-                          ? `How long the order has been working. Limit/stop-limit orders older than your ${thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.`
-                          : "How long the order has been working. Stale-limit detection is disabled (policy stale threshold is 0)."
+                          ? `How long the order has been working.  Limit/stop-limit orders older than your ${thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.`
+                          : "How long the order has been working.  Stale-limit detection is disabled (policy stale threshold is 0)."
                       }
                     >
                       Age
@@ -392,6 +452,7 @@ export default function OrdersPage() {
                       halted={halted}
                       noAccount={noAccount}
                       live={live}
+                      focused={row.order.id === firstFocusedOpenId}
                       onReplace={() => setReplaceRow(row)}
                       onCancel={() => setCancelRow(row)}
                     />
@@ -411,6 +472,7 @@ export default function OrdersPage() {
                   halted={halted}
                   noAccount={noAccount}
                   live={live}
+                  focused={row.order.id === firstFocusedOpenId}
                   onReplace={() => setReplaceRow(row)}
                   onCancel={() => setCancelRow(row)}
                 />
@@ -420,7 +482,7 @@ export default function OrdersPage() {
         )}
       </Card>
 
-      <Card title="Recent finished orders" padded={false}>
+      <Card title="Recent Finished Orders" padded={false}>
         {history.length === 0 ? (
           <Empty>
             {noAccount
@@ -436,7 +498,7 @@ export default function OrdersPage() {
                     <th title="Ticker — click a symbol to open its price history and details.">Symbol</th>
                     <th title="Order direction: buy, sell, short, or cover.">Side</th>
                     <th title="Order type as placed.">Type</th>
-                    <th title="Time-in-force as placed. DAY/GFD expires at market close; GTC rests until cancelled.">TIF</th>
+                    <th title="Time-in-force as placed.  DAY/GFD expires at market close; GTC rests until cancelled.">TIF</th>
                     <th className="num" title="Order size: share quantity or approximate dollar amount.">Size</th>
                     <th className="num" title="Average price the broker reports for the executed part; '—' when nothing executed.">
                       Avg fill
@@ -447,7 +509,11 @@ export default function OrdersPage() {
                 </thead>
                 <tbody>
                   {history.map((order) => (
-                    <tr key={order.id}>
+                    <tr
+                      key={order.id}
+                      id={order.id === firstFocusedHistoryId ? symbolElementId(order.symbol.toUpperCase()) : undefined}
+                      className={order.id === firstFocusedHistoryId ? DEEP_LINK_FOCUS_CLASS : undefined}
+                    >
                       <td>
                         <SymbolButton symbol={order.symbol} />
                       </td>
@@ -489,7 +555,11 @@ export default function OrdersPage() {
             </div>
             <div className="flex flex-col gap-2 px-2 pb-3 pt-2 lg:hidden">
               {history.map((order) => (
-                <FinishedOrderCard key={order.id} order={order} />
+                <FinishedOrderCard
+                  key={order.id}
+                  order={order}
+                  focused={order.id === firstFocusedHistoryId}
+                />
               ))}
             </div>
             <p className="px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
@@ -517,16 +587,20 @@ interface OrderRowProps {
   halted: boolean;
   noAccount: boolean;
   live: boolean;
+  focused?: boolean;
   onReplace: () => void;
   onCancel: () => void;
 }
 
-function OpenOrderTr({ row, quotes, positions, fallbackPrices, companyName, halted, noAccount, live, onReplace, onCancel }: OrderRowProps) {
+function OpenOrderTr({ row, quotes, positions, fallbackPrices, companyName, halted, noAccount, live, focused, onReplace, onCancel }: OrderRowProps) {
   const view = deriveOrderRowView(row, quotes, positions, fallbackPrices, halted, noAccount, live);
   const order = view.order;
 
   return (
-    <tr className={row.stale ? "bg-[color:var(--con-warn-soft)]" : undefined}>
+    <tr
+      id={focused ? symbolElementId(order.symbol.toUpperCase()) : undefined}
+      className={cx(row.stale && "bg-[color:var(--con-warn-soft)]", focused && DEEP_LINK_FOCUS_CLASS)}
+    >
       <td>
         <SymbolButton symbol={order.symbol} />
         {companyName && (
@@ -596,7 +670,7 @@ function OpenOrderTr({ row, quotes, positions, fallbackPrices, companyName, halt
           <Chip
             tone="warn"
             className="ml-1.5"
-            title={`Working ${fmtMinutes(row.ageMinutes)} without filling — past your ${row.thresholdMinutes}-minute stale threshold. Heuristic, not an error: the market has likely moved away from the limit price, so it may never fill. You can keep waiting, cancel, or replace the remainder at market.`}
+            title={`Working ${fmtMinutes(row.ageMinutes)} without filling — past your ${row.thresholdMinutes}-minute stale threshold.  Heuristic, not an error: the market has likely moved away from the limit price, so it may never fill.  You can keep waiting, cancel, or replace the remainder at market.`}
           >
             stale {fmtMinutes(row.ageMinutes)}
           </Chip>
@@ -606,6 +680,7 @@ function OpenOrderTr({ row, quotes, positions, fallbackPrices, companyName, halt
         <Chip tone={stateTone(order.state)} title="The order's state as last reported by the broker.">
           {readableState(order.state)}
         </Chip>
+        <OrderRoleBadge order={order} className="mt-1 max-w-[220px]" />
       </td>
       <td className="num con-num" title="Estimated realized P/L if this order's unfilled remainder closed right now at the last known price.">
         {view.estPnl ? (
@@ -628,14 +703,16 @@ function OpenOrderTr({ row, quotes, positions, fallbackPrices, companyName, halt
  *  laid out as a card: symbol/side/status up top, the load-bearing fields
  *  (size, limit/stop, last price, age) in a small grid, actions at the
  *  bottom. Shown lg:hidden while the table above is hidden below lg. */
-function OpenOrderCard({ row, quotes, positions, fallbackPrices, companyName, halted, noAccount, live, onReplace, onCancel }: OrderRowProps) {
+function OpenOrderCard({ row, quotes, positions, fallbackPrices, companyName, halted, noAccount, live, focused, onReplace, onCancel }: OrderRowProps) {
   const view = deriveOrderRowView(row, quotes, positions, fallbackPrices, halted, noAccount, live);
   const order = view.order;
   return (
     <div
+      id={focused ? symbolElementId(order.symbol.toUpperCase(), "card") : undefined}
       className={cx(
         "con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3",
-        row.stale && "bg-[color:var(--con-warn-soft)]"
+        row.stale && "bg-[color:var(--con-warn-soft)]",
+        focused && DEEP_LINK_FOCUS_CLASS
       )}
     >
       <div className="flex items-start justify-between gap-2">
@@ -655,6 +732,7 @@ function OpenOrderCard({ row, quotes, positions, fallbackPrices, companyName, ha
           </Chip>
         </div>
       </div>
+      <OrderRoleBadge order={order} />
       <div className="grid grid-cols-2 gap-2 text-[length:var(--con-fs-sm)]">
         <div className="rounded-control bg-[color:var(--con-surface-2)] px-1.5 py-0.5" title="Order size as the broker holds it; partial fills shown underneath.">
           <div className="flex justify-between items-baseline gap-0.5">
@@ -710,8 +788,8 @@ function OpenOrderCard({ row, quotes, positions, fallbackPrices, companyName, ha
           className="rounded-control bg-[color:var(--con-surface-2)] px-1.5 py-0.5"
           title={
             row.thresholdMinutes > 0
-              ? `How long the order has been working. Limit/stop-limit orders older than your ${row.thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.`
-              : "How long the order has been working. Stale-limit detection is disabled (policy stale threshold is 0)."
+              ? `How long the order has been working.  Limit/stop-limit orders older than your ${row.thresholdMinutes}-minute policy threshold with an unfilled remainder are flagged stale.`
+              : "How long the order has been working.  Stale-limit detection is disabled (policy stale threshold is 0)."
           }
         >
           <div className="flex justify-between items-baseline gap-0.5">
@@ -747,9 +825,15 @@ function OpenOrderCard({ row, quotes, positions, fallbackPrices, companyName, ha
 
 /** Mobile counterpart to the finished-orders table row — read-only, so no
  *  actions row. */
-function FinishedOrderCard({ order }: { order: EquityOrder }) {
+function FinishedOrderCard({ order, focused }: { order: EquityOrder; focused?: boolean }) {
   return (
-    <div className="con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3">
+    <div
+      id={focused ? symbolElementId(order.symbol.toUpperCase(), "card") : undefined}
+      className={cx(
+        "con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3",
+        focused && DEEP_LINK_FOCUS_CLASS
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
         <SymbolButton symbol={order.symbol} />
         <Chip tone={stateTone(order.state)} title="Final state the broker reported for this order.">

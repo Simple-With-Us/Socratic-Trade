@@ -5,6 +5,7 @@ import Security
 enum MobileAPIError: Error, LocalizedError {
     case unauthorized(statusCode: Int)
     case serverError(statusCode: Int, message: String?)
+    case scanQuotesUnavailable(MarketScanResponse)
     case network(Error)
     case decoding(Error)
 
@@ -13,19 +14,59 @@ enum MobileAPIError: Error, LocalizedError {
         case .unauthorized:
             return "Your session expired.  Sign in again."
         case .serverError(let statusCode, let message):
-            // Cloudflare edge codes when the origin (socratictrade.com backend) is unreachable.
+            // Cloudflare 521-523: origin unreachable.  Keep the reason, drop the vendor and code.
             if (521...523).contains(statusCode) {
-                return "Socratic Trade servers are unreachable right now (Cloudflare \(statusCode)).  Try again in a few minutes."
+                return "Socratic Trade is unreachable right now.  Try again in a few minutes."
             }
             if let message, !message.isEmpty {
-                return "\(message) (\(statusCode))"
+                return message
             }
-            return "The server returned an error (\(statusCode)).  Try again."
-        case .network(let error):
-            return "Network error: \(error.localizedDescription)"
+            return "Something went wrong.  Try again."
+        case .scanQuotesUnavailable(let scan):
+            let reasons = scan.warnings
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !reasons.isEmpty {
+                return reasons.joined(separator: "  ")
+            }
+            return "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
+        case .network(let underlying):
+            if Self.isUserCancellation(underlying) { return nil }
+            return Self.userFacingNetworkMessage(for: underlying) ?? "Couldn't reach Socratic Trade"
         case .decoding:
-            return "The app could not read the latest server response."
+            return "Couldn’t load your workspace.  Try again."
         }
+    }
+
+    /// True when the failure is user- or task-initiated cancellation (no alert copy).
+    static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        if case MobileAPIError.network(let underlying) = error {
+            return isUserCancellation(underlying)
+        }
+        return false
+    }
+
+    /// Maps URLSession failures to short, accurate copy.  Returns nil for user-cancelled work.
+    static func userFacingNetworkMessage(for error: Error) -> String? {
+        if isUserCancellation(error) { return nil }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return nil
+            case .timedOut:
+                return "Server is slow, still trying"
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "Check your connection"
+            default:
+                return "Couldn't reach Socratic Trade"
+            }
+        }
+        if case MobileAPIError.network(let underlying) = error {
+            return userFacingNetworkMessage(for: underlying)
+        }
+        return nil
     }
 }
 
@@ -46,11 +87,36 @@ struct SSEFrameAccumulator {
 }
 
 struct MobileAPIClient {
+    /// The one origin this app talks to.  Shared so the push coordinator (which cannot be
+    /// handed the store's client) targets the same host — and therefore the same
+    /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
+    static let productionBaseURL = URL(string: "https://socratictrade.com")!
+
     let baseURL: URL
     var session: URLSession = .shared
 
     func snapshot() async throws -> MobileSnapshot {
-        try await get("/api/mobile/snapshot")
+        let (snap, _) = try await snapshotData()
+        return snap
+    }
+
+    func snapshotData(
+        timeout: TimeInterval = 30,
+        captureFailures: Bool = true
+    ) async throws -> (MobileSnapshot, Data) {
+        var req = request(path: "/api/mobile/snapshot")
+        // A shared URL cache can replay the previous account after a switch or sign-out.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = timeout
+        // Retrying callers pass captureFailures: false and report only the terminal
+        // failure, so a recovered transient does not mint a Sentry issue per attempt.
+        let data = try await successfulResponseData(for: req, captureFailures: captureFailures)
+        do {
+            let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
+            return (snap, data)
+        } catch {
+            throw MobileAPIError.decoding(error)
+        }
     }
 
     func submit(
@@ -72,6 +138,164 @@ struct MobileAPIClient {
         ])
         let envelope: CommandEnvelope = try await send(request)
         return envelope.command
+    }
+
+    func chatHistory() async throws -> [ChatTurn] {
+        let envelope: ChatHistoryResponse = try await get("/api/chat-history")
+        return envelope.turns
+    }
+
+    func sendChat(message: String, model: String?, clientTurnId: String) async throws -> ChatReply {
+        var body: [String: Any] = [
+            "message": message,
+            "clientTurnId": clientTurnId
+        ]
+        if let model, !model.isEmpty {
+            body["model"] = model
+        }
+        return try await sendJSON("/api/chat", method: "POST", body: body, timeout: 90)
+    }
+
+    func clearChatHistory() async throws {
+        var request = request(path: "/api/chat-history", method: "DELETE")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [:])
+        _ = try await successfulResponseData(for: request)
+    }
+
+    func chatProviders() async throws -> [String: Bool] {
+        let envelope: ChatProvidersResponse = try await get("/api/chat/providers")
+        return envelope.providers
+    }
+
+    /// Interactive market scan — GET `/api/scan`.  The server budget is 35s.
+    /// Client wait is longer so a late seed/200 is not dropped as a dead table.
+    /// A 503 `scan_quotes_unavailable` body still carries scanned/quotes/warnings
+    /// so Scan can show the abort instead of "No Candidates."
+    static let marketScanTimeout: TimeInterval = 50
+
+    func marketScan() async throws -> MarketScanResponse {
+        var req = request(path: "/api/scan")
+        req.timeoutInterval = Self.marketScanTimeout
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: req.url?.absoluteString ?? "/api/scan")
+            throw MobileAPIError.network(error)
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode == 503 {
+            if let failed = try? JSONDecoder().decode(MarketScanResponse.self, from: data),
+               (failed.scannedSymbols ?? 0) > 0 || !failed.warnings.isEmpty {
+                throw MobileAPIError.scanQuotesUnavailable(failed)
+            }
+        }
+        try Self.requireSuccess(response, body: data)
+        do {
+            return try JSONDecoder().decode(MarketScanResponse.self, from: data)
+        } catch {
+            throw MobileAPIError.decoding(error)
+        }
+    }
+
+    func marketScanRequest() -> URLRequest {
+        var req = request(path: "/api/scan")
+        req.timeoutInterval = Self.marketScanTimeout
+        return req
+    }
+
+    func fullPolicy() async throws -> FullPolicy {
+        try await get("/api/policy")
+    }
+
+    func sourceFeatures() async throws -> SourceFeaturesResponse {
+        try await get("/api/settings/source-features")
+    }
+
+    func patchSourceFeatures(_ settings: [String: Any]) async throws -> SourceFeaturesResponse {
+        let _: SourceFeaturesPatchAck = try await sendJSON(
+            "/api/settings/source-features",
+            method: "PATCH",
+            body: ["settings": settings]
+        )
+        return try await sourceFeatures()
+    }
+
+    func llmBudget() async throws -> LlmBudgetResponse {
+        try await get("/api/settings/llm-budget")
+    }
+
+    func patchLlmBudget(_ body: [String: Any]) async throws -> LlmBudgetResponse {
+        try await sendJSON("/api/settings/llm-budget", method: "PATCH", body: body)
+    }
+
+    /// On-demand single-symbol quote + fundamentals for `SymbolInfoSheet` — GET
+    /// `/api/quote?symbol=...`, the same on-demand provider cascade the web console drilldown
+    /// falls back to for a symbol outside the last market scan.
+    func symbolQuote(_ symbol: String) async throws -> SymbolQuoteInfo {
+        var components = URLComponents(url: baseURL.appending(path: "/api/quote"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "symbol", value: symbol)]
+        guard let url = components?.url else {
+            throw MobileAPIError.network(URLError(.badURL))
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        return try await send(request)
+    }
+
+    /// Current-account exit contract + other-account size/direction for the ticker sheet.
+    func symbolDesk(_ symbol: String) async throws -> SymbolDeskInfo {
+        var components = URLComponents(url: baseURL.appending(path: "/api/symbol-desk"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "symbol", value: symbol)]
+        guard let url = components?.url else {
+            throw MobileAPIError.network(URLError(.badURL))
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        return try await send(request)
+    }
+
+    /// Session-authed APNs token registration.  The response body is not consumed: the only
+    /// thing the app needs to know is whether the server accepted the token, which is the
+    /// status code.
+    func registerPushToken(_ registration: PushRegistrationRequest) async throws {
+        var request = request(path: "/api/mobile/push/register", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: registration.jsonBody)
+        _ = try await successfulResponseData(for: request)
+    }
+
+    /// Sign-out counterpart.  Sends the token so the server drops the exact row rather than
+    /// every token the session's user owns — signing out of one device must not silence
+    /// another one the same owner is still signed in on.
+    func unregisterPushToken(_ token: String) async throws {
+        var request = request(path: "/api/mobile/push/register", method: "DELETE")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
+        _ = try await successfulResponseData(for: request)
+    }
+
+    func acknowledgeNotifications(ids: [String]) async throws -> Int {
+        let envelope: AcknowledgeNotificationsResponse = try await sendJSON(
+            "/api/notifications/ack",
+            method: "POST",
+            body: ["ids": ids]
+        )
+        return envelope.acknowledged
+    }
+
+    func acceptAppConsent() async throws {
+        var request = request(path: "/api/mobile/consent", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["accepted": true])
+        _ = try await successfulResponseData(for: request)
     }
 
     func accountDeletionPreview() async throws -> AccountDeletionRequest {
@@ -131,6 +355,7 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
         try Self.requireSuccess(response, body: nil)
@@ -145,9 +370,10 @@ struct MobileAPIClient {
                     onEvent()
                 }
             }
-        } catch is CancellationError {
+            } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
     }
@@ -196,12 +422,50 @@ struct MobileAPIClient {
         return request
     }
 
-    private func get<T: Decodable>(_ path: String) async throws -> T {
-        try await send(request(path: path))
+    private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                var req = request(path: path)
+                req.timeoutInterval = timeout
+                return try await send(req, captureFailures: false)
+            } catch let error as MobileAPIError {
+                let shouldRetry = {
+                    if case .network = error { return true }
+                    if case .serverError(let statusCode, _) = error, statusCode >= 500 { return true }
+                    return false
+                }()
+                if shouldRetry, attempt < retries {
+                    attempt += 1
+                    let delayMs = UInt64(150_000_000 * (1 << attempt)) // 300ms, 600ms backoff
+                    try await Task.sleep(nanoseconds: delayMs)
+                    continue
+                }
+                if case .network(let underlying) = error {
+                    SentryTelemetry.captureAPIFailure(error: underlying, endpoint: path)
+                }
+                throw error
+            } catch {
+                throw error
+            }
+        }
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let data = try await successfulResponseData(for: request)
+    private func sendJSON<T: Decodable>(
+        _ path: String,
+        method: String,
+        body: [String: Any],
+        timeout: TimeInterval = 30
+    ) async throws -> T {
+        var request = request(path: path, method: method)
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
+    }
+
+    private func send<T: Decodable>(_ request: URLRequest, captureFailures: Bool = true) async throws -> T {
+        let data = try await successfulResponseData(for: request, captureFailures: captureFailures)
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -209,7 +473,7 @@ struct MobileAPIClient {
         }
     }
 
-    private func successfulResponseData(for request: URLRequest) async throws -> Data {
+    private func successfulResponseData(for request: URLRequest, captureFailures: Bool = true) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -217,6 +481,9 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if captureFailures {
+                SentryTelemetry.captureAPIFailure(error: error, endpoint: request.url?.absoluteString ?? "")
+            }
             throw MobileAPIError.network(error)
         }
         try Self.requireSuccess(response, body: data)
@@ -241,7 +508,7 @@ struct MobileAPIClient {
     private static func serverMessage(from data: Data?) -> String? {
         guard let data, !data.isEmpty else { return nil }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return object["error"] as? String ?? object["message"] as? String
+            return object["message"] as? String ?? object["error"] as? String
         }
         // Cloudflare often returns plain text like "error code: 522" when origin is down.
         if let text = String(data: data, encoding: .utf8)?
@@ -258,6 +525,10 @@ struct MobileAPIClient {
 struct AppleLoginResponse: Decodable {
     let success: Bool
     let email: String?
+}
+
+private struct AcknowledgeNotificationsResponse: Decodable {
+    let acknowledged: Int
 }
 
 private struct WebAuthExchangeResponse: Decodable {

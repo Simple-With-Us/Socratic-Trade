@@ -6,7 +6,7 @@
  */
 
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { getDb } from "../src/lib/db";
+import { deleteUserApiKey, getDb, upsertUserApiKey } from "../src/lib/db";
 import { AnthropicLLM, chatProviderForModel, getLLM, llmForModel, MockLLM, OpenAILLM } from "../src/lib/chat/llm";
 import { buildSystem, DISCLAIMER, SYSTEM_PROMPT } from "../src/lib/chat/prompt";
 import type { LlmRunArgs, ToolSchema } from "../src/lib/chat/types";
@@ -87,6 +87,15 @@ describe("OpenAILLM — ChatLLM contract", () => {
 
     const apiKey = transport.mock.calls[0][1];
     expect(apiKey).toBe("sk-my-key");
+  });
+
+  it("passes abortSignal as the third argument to transport", async () => {
+    const transport = vi.fn().mockResolvedValue(chatResponse("ok"));
+    const llm = new OpenAILLM("sk-test", "openai/gpt-4o-mini", transport);
+    const controller = new AbortController();
+    await llm.run({ ...baseArgs, abortSignal: controller.signal });
+
+    expect(transport.mock.calls[0][2]).toBe(controller.signal);
   });
 
   it("includes OpenAI tools array when tool schemas are provided", async () => {
@@ -355,7 +364,7 @@ describe("chatProviderForModel — model name → provider", () => {
     expect(chatProviderForModel("deepseek-v4-flash")).toBe("deepseek");
     expect(chatProviderForModel("deepseek-v4-pro")).toBe("deepseek");
     expect(chatProviderForModel("gpt-5.4-mini")).toBe("openai");
-    expect(chatProviderForModel("o4-mini")).toBe("openai");
+    expect(chatProviderForModel("gpt-5.6-terra")).toBe("openai");
   });
 });
 
@@ -370,6 +379,18 @@ describe("llmForModel — multi-provider routing", () => {
     getDb();
   });
 
+  // Review finding llm-12: llmForModel now checks an OpenRouter credential FIRST for every model
+  // (matching the strategy engine's universal OpenRouter-first precedence in resolveLlmEndpoint).
+  // With the operator failover on (needed by withOnlyKey()'s env-var tests below),
+  // resolveLlmCredential's NODE_ENV=test shim (db-api-keys.ts) lets an "openrouter" credential
+  // borrow ANY single native-provider ENV VAR present — useful for OTHER suites that want to
+  // exercise OpenRouter routing without an explicit OPENROUTER_API_KEY, but it would defeat a test
+  // that specifically wants to prove native-provider isolation with no OpenRouter key in play.
+  // withOnlyKey() sets real env vars (so it IS subject to that shim — this is fine for the tests
+  // below that only assert `toBeInstanceOf(OpenAILLM)`, since OpenRouter serves through OpenAILLM
+  // too); withUserKey() instead writes straight to the per-user DB store, which resolveLlmCredential
+  // checks before the operator-fallback/shim path even runs, so it stays immune to the shim and is
+  // used wherever a test's whole point is "this provider's key only, nothing else in play".
   function withOnlyKey(present: (typeof KEYS)[number] | null, fn: () => void) {
     const saved: Record<string, string | undefined> = {};
     for (const k of KEYS) {
@@ -387,13 +408,25 @@ describe("llmForModel — multi-provider routing", () => {
     }
   }
 
+  /** Store a provider's key directly in the per-user store — bypasses env vars and the operator
+   *  failover entirely, so a userId resolves that provider's credential regardless of the
+   *  LLM_OPERATOR_FALLBACK=off setting above (per-user store is checked before the failover). */
+  function withUserKey(userId: string, service: "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek", fn: () => void) {
+    upsertUserApiKey(userId, service, `key-for-${service}`);
+    try {
+      fn();
+    } finally {
+      deleteUserApiKey(userId, service);
+    }
+  }
+
   it("returns MockLLM for an empty or 'mock' model", () => {
     expect(llmForModel("", "u_mock")).toBeInstanceOf(MockLLM);
     expect(llmForModel("mock", "u_mock")).toBeInstanceOf(MockLLM);
   });
 
   it("routes claude-* to AnthropicLLM with an Anthropic key", () => {
-    withOnlyKey("ANTHROPIC_API_KEY", () => {
+    withUserKey("u_anthropic", "anthropic", () => {
       expect(llmForModel("claude-haiku-4-5", "u_anthropic")).toBeInstanceOf(AnthropicLLM);
     });
   });
@@ -407,11 +440,14 @@ describe("llmForModel — multi-provider routing", () => {
   });
 
   it("does NOT borrow another provider's key — a non-OpenAI model with only an OpenAI key is MockLLM", () => {
-    withOnlyKey("OPENAI_API_KEY", () => {
+    // withUserKey (DB-backed), not withOnlyKey (env-backed): this test's whole point is that an
+    // OpenAI credential must not serve a Gemini/Mistral/Anthropic/xAI model, so it must stay immune
+    // to the NODE_ENV=test OpenRouter-borrow shim explained above — an env var would trip it.
+    withUserKey("u_gem2", "openai", () => {
       expect(llmForModel("gemini-2.5-flash", "u_gem2")).toBeInstanceOf(MockLLM);
-      expect(llmForModel("mistral-large-2512", "u_mis2")).toBeInstanceOf(MockLLM);
-      expect(llmForModel("claude-sonnet-4-6", "u_ant2")).toBeInstanceOf(MockLLM);
-      expect(llmForModel("xai/grok-4.3", "u_xai2")).toBeInstanceOf(MockLLM);
+      expect(llmForModel("mistral-large-2512", "u_gem2")).toBeInstanceOf(MockLLM);
+      expect(llmForModel("claude-sonnet-4-6", "u_gem2")).toBeInstanceOf(MockLLM);
+      expect(llmForModel("xai/grok-4.3", "u_gem2")).toBeInstanceOf(MockLLM);
     });
   });
 

@@ -27,15 +27,18 @@ type CacheEntry<T> = {
 const cache = new Map<string, CacheEntry<unknown>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
-/** Read a non-expired entry, or undefined. */
-export function getCachedDashboardSnapshot<T>(key: string, now = Date.now()): T | undefined {
+/** Last value for `key`, including after the soft TTL.  The happy path must not serve it. */
+export function peekDashboardSnapshot<T>(key: string, now = Date.now()): { value: T; fresh: boolean } | undefined {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
   if (!entry) return undefined;
-  if (entry.expiresAt <= now) {
-    cache.delete(key);
-    return undefined;
-  }
-  return entry.value;
+  return { value: entry.value, fresh: entry.expiresAt > now };
+}
+
+/** Read a non-expired entry, or undefined.  Expired rows stay so a later timeout can serve them. */
+export function getCachedDashboardSnapshot<T>(key: string, now = Date.now()): T | undefined {
+  const peeked = peekDashboardSnapshot<T>(key, now);
+  if (!peeked?.fresh) return undefined;
+  return peeked.value;
 }
 
 /** Store a snapshot under key with the given TTL. */

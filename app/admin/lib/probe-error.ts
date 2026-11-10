@@ -46,7 +46,7 @@ export function describeProbeStatus(status: number, audience: ProbeErrorAudience
   if (status >= 500) {
     return {
       rawLabel,
-      message: "The server had a problem loading this data. Try refreshing.",
+      message: "The server had a problem loading this data.  Try refreshing.",
       shortMessage: "Server error"
     };
   }
@@ -57,7 +57,7 @@ export function describeProbeStatus(status: number, audience: ProbeErrorAudience
 export function describeProbeNetworkError(): ProbeErrorDescription {
   return {
     rawLabel: "network error",
-    message: "Couldn't reach the server to load this data. Check your connection and try again.",
+    message: "Couldn't reach the server to load this data.  Check your connection and try again.",
     shortMessage: "Request failed"
   };
 }

@@ -20,6 +20,8 @@
 
 import { audit, deleteInternalSetting, getInternalSetting, setInternalSetting } from "./db";
 import { alertStorageWarning } from "./db-health";
+import { pineconeMonthlyWuBudget } from "./pinecone-monthly-pace";
+import { isPineconeTrialActive } from "./pinecone-trial-window";
 
 /** Internal-settings key holding the ISO instant writes may resume (first day of next month UTC). */
 export const PINECONE_WU_EXHAUSTED_UNTIL_KEY = "pinecone:wuExhaustedUntil";
@@ -27,15 +29,20 @@ export const PINECONE_WU_EXHAUSTED_UNTIL_KEY = "pinecone:wuExhaustedUntil";
 const PINECONE_WU_GATE_AUDIT_DAY_KEY = "pinecone:wuGateLastAuditDay";
 
 /**
- * True only for Pinecone's MONTHLY write-unit exhaustion (e.g. "You've reached your write unit
- * limit for the current month (2000000). ... Status: 429."). Deliberately narrow: per-second
- * rate limits, read-unit limits, and other 429s must keep their ordinary retry behavior —
- * only the calendar-month quota is unwinnable before the reset date.
+ * True only for Pinecone's MONTHLY write-unit exhaustion.
+ *
+ * Pinecone's documented body is:
+ *   "You've reached your write unit limit for the current month (2000000).
+ *    To continue writing data, upgrade your plan."
+ * The HTTP status is 429.  The SDK sometimes copies "Status: 429" into the message and
+ * sometimes does not.  Requiring 429 in the *body* let the official text fall through to
+ * hourly "Pinecone connection failed" + usage-limit pages while the Standard trial has
+ * no monthly cap.  Per-second 429s (no monthly-quota phrase) stay out of this matcher.
  */
 export function isPineconeWuExhaustedError(message: string | null | undefined): boolean {
   if (!message) return false;
-  if (!/write unit limit for the current month/i.test(message)) return false;
-  return /\b429\b/.test(message) || /rate.?limit|too many requests/i.test(message);
+  if (/write unit limit for the current month/i.test(message)) return true;
+  return /write units?/i.test(message) && /\b(?:2|5)000000\b/.test(message) && /(?:current|this) month/i.test(message);
 }
 
 /** First day of the NEXT UTC month after `fromMs`, as an ISO instant (the quota reset moment). */
@@ -44,13 +51,64 @@ export function firstDayOfNextMonthUtc(fromMs: number = Date.now()): string {
   return new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)).toISOString();
 }
 
+/** Monthly write-unit number from Pinecone's 429 text, or null when the message has no count. */
+export function pineconeWuLimitFromMessage(message: string | null | undefined): number | null {
+  if (!message) return null;
+  const match = message.match(/current month \((\d+)\)/i);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function clearWuBreakerMarker(reason: string, operation?: string | null): void {
+  try {
+    const existing = getInternalSetting<string>(PINECONE_WU_EXHAUSTED_UNTIL_KEY);
+    if (!existing) return;
+    deleteInternalSetting(PINECONE_WU_EXHAUSTED_UNTIL_KEY);
+    audit(
+      "pinecone_wu_breaker_cleared",
+      { reason, operation: operation ?? null, hadUntil: existing },
+      "local"
+    );
+    console.log(`[pinecone-wu-breaker] Marker cleared — ${reason}; vector ingest resumed.`);
+  } catch {
+    // never throw from a success / trial-clear path
+  }
+}
+
 /**
  * The active marker's expiry ISO, or null when the breaker is inactive (never tripped, cleared,
  * or expired — expiry IS the auto-resume: an expired marker gates nothing). Never throws;
  * fails open (writes proceed) on any storage error.
+ *
+ * A Standard trial has no Starter 2M monthly write cap. A leftover marker from the pre-trial
+ * Starter 429 (or a mis-attributed 2M error) must not keep parking writes — the gate runs
+ * BEFORE any upsert, so `notePineconeWriteSuccess` can never clear it.
  */
+function shouldIgnoreMonthlyWuWall(nowMs: number, message?: string): boolean {
+  const budget = pineconeMonthlyWuBudget(nowMs);
+  // Budget off: never park on a Starter 2M 429.
+  if (budget <= 0) return true;
+  // Vendor said 2M but the app budget is 5M (Builder week): not our wall.
+  if (message) {
+    const limit = pineconeWuLimitFromMessage(message);
+    if (limit != null && limit < budget) return true;
+    // isPineconeWuExhaustedError also matches official text with no "(N)" count.
+    // That shape is the leftover Starter wall, not a Builder 5M exhaustion.
+    // After the calendar snap the budget is 1.6M — honor the numberless 429.
+    if (limit == null && isPineconeTrialActive(nowMs)) return true;
+  }
+  return false;
+}
+
 export function pineconeWuExhaustedUntil(nowMs: number = Date.now()): string | null {
   try {
+    if (shouldIgnoreMonthlyWuWall(nowMs)) {
+      clearWuBreakerMarker(
+        isPineconeTrialActive(nowMs) ? "standard-trial-active" : "monthly-wu-budget-off"
+      );
+      return null;
+    }
     const until = getInternalSetting<string>(PINECONE_WU_EXHAUSTED_UNTIL_KEY);
     if (!until || typeof until !== "string") return null;
     const expiry = Date.parse(until);
@@ -74,12 +132,21 @@ export async function tripPineconeWuBreaker(
   nowMs: number = Date.now()
 ): Promise<{ tripped: boolean; until: string }> {
   try {
+    if (shouldIgnoreMonthlyWuWall(nowMs, input.message)) {
+      clearWuBreakerMarker(
+        isPineconeTrialActive(nowMs)
+          ? "standard-trial-ignores-monthly-wu-429"
+          : "monthly-wu-budget-off",
+        input.operation ?? null
+      );
+      return { tripped: false, until: firstDayOfNextMonthUtc(nowMs) };
+    }
     const active = pineconeWuExhaustedUntil(nowMs);
     if (active) return { tripped: false, until: active };
     const until = firstDayOfNextMonthUtc(nowMs);
     setInternalSetting(PINECONE_WU_EXHAUSTED_UNTIL_KEY, until);
-    const limitMatch = input.message.match(/current month \((\d+)\)/i);
-    const limitLabel = limitMatch ? `(${(Number(limitMatch[1]) / 1_000_000).toString()}M)` : "(monthly quota)";
+    const limit = pineconeWuLimitFromMessage(input.message);
+    const limitLabel = limit != null ? `(${(limit / 1_000_000).toString()}M)` : "(monthly quota)";
     const resumeDate = until.slice(0, 10);
     audit(
       "pinecone_wu_breaker_tripped",
@@ -117,15 +184,7 @@ const PINECONE_WRITE_OP_RE = /upsert|commit|update|delete|erase|purge/i;
 export function notePineconeWriteSuccess(operation?: string): void {
   try {
     if (operation !== undefined && !PINECONE_WRITE_OP_RE.test(operation)) return;
-    const existing = getInternalSetting<string>(PINECONE_WU_EXHAUSTED_UNTIL_KEY);
-    if (!existing) return;
-    deleteInternalSetting(PINECONE_WU_EXHAUSTED_UNTIL_KEY);
-    audit(
-      "pinecone_wu_breaker_cleared",
-      { reason: "pinecone-write-succeeded", operation: operation ?? null, hadUntil: existing },
-      "local"
-    );
-    console.log("[pinecone-wu-breaker] Marker cleared — a Pinecone write succeeded; vector ingest resumed.");
+    clearWuBreakerMarker("pinecone-write-succeeded", operation ?? null);
   } catch {
     // never throw from a success path
   }

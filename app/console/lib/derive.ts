@@ -17,12 +17,17 @@ import type {
   TradingPolicy,
   Portfolio
 } from "@/lib/types";
+import { autonomyStatusLabel } from "@/lib/autonomy-labels";
 import { resolveDailyOpeningCap, type DailyOpeningCapMode } from "@/lib/policy-caps";
 import { isRunAllowedNow, nextMarketOpenHint, previousTradingDayStart } from "@/lib/market-hours";
 // NOT from "@/lib/benchmark" — that file imports history.ts → the db barrel, and this module is
 // imported by every "use client" console component, so the whole server graph followed it into
 // the browser bundle. @/lib/cash-flows is the dependency-free extraction of the same function.
 import { inferExternalCashFlows, isInferredFlowUnverified } from "@/lib/cash-flows";
+import { REALITY_PAPER_WORD } from "@/lib/guardrail-copy";
+import { centralTradingDayKey } from "@/lib/trading-day";
+import type { FillEvent } from "@/lib/types";
+import { dayKey, SENTENCE_GAP, startOfCentralDay } from "./format";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
 
@@ -32,9 +37,9 @@ export interface RealityInfo {
   mode?: ExecutionMode;
   tone: RealityTone;
   /** The load-bearing word. */
-  word: "NO ACCOUNT" | "PAPER" | "BROKERAGE";
+  word: "NO ACCOUNT" | typeof REALITY_PAPER_WORD | "BROKERAGE";
   /** The load-bearing qualifier next to the word. */
-  phrase: "nothing connected yet" | "broker practice account" | "live orders";
+  phrase: "nothing connected yet" | "broker-provided practice account" | "live orders";
   /** One-sentence honest clarification. */
   clarification: string;
   account?: ConnectedAccount;
@@ -50,10 +55,10 @@ export function realityForMode(mode: ExecutionMode | undefined): Pick<RealityInf
       return {
         mode,
         tone: "paper",
-        word: "PAPER",
-        phrase: "broker practice account",
+        word: REALITY_PAPER_WORD,
+        phrase: "broker-provided practice account",
         clarification:
-          "Same broker-mediated trading path as live — practice dollars at the broker. Useful for reps and system training; live is the primary focus."
+          "Same broker-mediated trading path as a brokerage account — practice dollars at the broker."
       };
     case "broker/live":
       return {
@@ -71,7 +76,7 @@ export function realityForMode(mode: ExecutionMode | undefined): Pick<RealityInf
         // Not "no account connected" — the banner renders "WORD · phrase", and
         // repeating the word's meaning made it a tautology.
         phrase: "nothing connected yet",
-        clarification: "Connect a broker account before the app can place orders. Prefer live when ready; paper is for training reps."
+        clarification: "Connect a broker account before the app can place orders."
       };
   }
 }
@@ -93,20 +98,27 @@ export function realityForAccount(account: ConnectedAccount): Pick<RealityInfo, 
 // ── Run-state / authority words ──────────────────────────────────────────────
 
 /** The one shared run-state vocabulary. Every surface that names the run state
- *  (console chrome StateChip, Guardrails Autonomy panel, PWA header) MUST render
+ *  (console chrome StateChip, Guardrails Autonomy panel, iOS) MUST render
  *  one of these words via deriveStateInfo — never a private systemState→label
- *  map, which is how the PWA once said "Running" while the console said
- *  "Paused · market closed" for the same account. */
+ *  map, which is how the retired PWA once said "Running" while the console said
+ *  "Paused · market closed" for the same account.
+ *
+ *  Autopilot is NOT a run-state word.  It is the auto-decide authority label
+ *  (strategyAuthority === "decide").  Autonomy on + ask-first is Running/Active. */
 export type RunStateWord = "Running" | "Paused · market closed" | "Exit-only" | "Winding down" | "Stopped";
 
 export interface StateInfo {
   state: SystemState;
   /** State-only vocabulary word — no authority suffix (see RunStateWord). */
   word: RunStateWord;
-  /** Compound plain-words label, e.g. "Running · Ask-first". */
+  /** Human chip: Autopilot only when the account is auto-deciding; Running when
+   *  autonomy is on but still ask-first. */
   label: string;
   /** One-line honest explanation. */
   detail: string;
+  /** Why a halted account is halted and whether it starts again by itself (server-computed, lane h5).
+   *  Absent when the snapshot does not say. */
+  cause?: string;
   tone: "pos" | "warn" | "neg" | "muted";
   /** Only meaningful when state === "active" — whether the market (per current session + the
    *  account's extended-hours policy) is open right now. undefined for every other state (those
@@ -123,7 +135,6 @@ export function deriveStateInfo(
   policy: Pick<TradingPolicy, "systemState" | "strategyAuthority"> & { runDuringExtendedHours?: boolean },
   now: Date = new Date()
 ): StateInfo {
-  const authority = policy.strategyAuthority === "decide" ? "Autopilot" : "Ask-first";
   switch (policy.systemState) {
     case "active": {
       // undefined ≠ false: a payload that doesn't carry runDuringExtendedHours (older snapshot
@@ -134,16 +145,15 @@ export function deriveStateInfo(
       const marketOpen =
         policy.runDuringExtendedHours === undefined ? undefined : isRunAllowedNow(policy.runDuringExtendedHours, now);
       if (marketOpen === false) {
+        const authority = policy.strategyAuthority === "decide" ? "Autopilot" : "Ask-first";
         return {
           state: "active",
           word: "Paused · market closed",
-          label: "Paused · market closed",
+          label: `${authority} · market closed`,
           detail:
-            `Scheduled runs pause while the market is closed and resume automatically once it reopens ` +
-            `(next open ${nextMarketOpenHint(now, policy.runDuringExtendedHours === true)}). ` +
-            (policy.strategyAuthority === "decide"
-              ? "Autonomous placement is paused too — nothing places itself outside market hours."
-              : "Every trade still waits for your approval once runs resume."),
+            `${authority} is still on.  Scheduled runs wait for the next open ` +
+            `(${nextMarketOpenHint(now, policy.runDuringExtendedHours === true)}).  ` +
+            "Stop Agent turns them off.  The market being closed is not the same as the agent being stopped.",
           tone: "muted",
           marketOpen: false
         };
@@ -151,11 +161,11 @@ export function deriveStateInfo(
       return {
         state: "active",
         word: "Running",
-        label: `Running · ${authority}`,
+        label: autonomyStatusLabel("active", policy.strategyAuthority),
         detail:
           policy.strategyAuthority === "decide"
             ? "The strategy runs on schedule and may place orders itself, inside your guardrails."
-            : "The strategy runs on schedule. Every trade waits for your approval.",
+            : "The strategy runs on schedule.  Every trade waits for your approval.",
         tone: policy.strategyAuthority === "decide" ? "warn" : "pos",
         ...(marketOpen === undefined ? {} : { marketOpen: true })
       };
@@ -165,7 +175,7 @@ export function deriveStateInfo(
         state: "close_only",
         word: "Exit-only",
         label: "Exit-only",
-        detail: "No new buys. Protective exits keep working. This is the state circuit breakers set.",
+        detail: "The agent will not open new risk.  Protective exits keep working.  Approving an opening places it anyway.",
         tone: "warn"
       };
     case "liquidating":
@@ -173,7 +183,7 @@ export function deriveStateInfo(
         state: "liquidating",
         word: "Winding down",
         label: "Winding down",
-        detail: "Only sell orders, until the account is in cash. This sells things.",
+        detail: "Only sell orders, until the account is in cash.  This sells things.",
         tone: "warn"
       };
     default:
@@ -182,10 +192,39 @@ export function deriveStateInfo(
         word: "Stopped",
         label: "Stopped",
         detail:
-          "Nothing trades — no buys, no sells, and this app's automatic stops are paused too. Broker-held brackets keep resting at the broker. Nothing is sold.",
+          "Nothing trades — no buys, no sells, and this app's automatic stops are paused too.  Broker-held brackets keep resting at the broker.  Nothing is sold.",
         tone: "neg"
       };
   }
+}
+
+/**
+ * Fold the server's halt cause (DashboardSnapshot.haltCause, lane h5) into the run-state display.
+ * The run-state WORD stays "Stopped" (shared vocabulary); only the chip label, tone, and the `cause`
+ * sentence change.  A broker auto-pause is amber, not red: the app will lift it by itself.
+ */
+export function withHaltCause(info: StateInfo, cause: DashboardSnapshot["haltCause"]): StateInfo {
+  if (info.state !== "halted" || !cause) return info;
+  if (cause.kind === "broker_auto_pause") {
+    return { ...info, label: "Stopped · auto-paused", tone: "warn", cause: cause.summary };
+  }
+  if (cause.kind === "restart") {
+    return { ...info, label: "Stopped · by restart", cause: cause.summary };
+  }
+  if (cause.kind === "breaker") {
+    return { ...info, label: "Stopped · breaker", cause: cause.summary };
+  }
+  if (cause.kind === "auto_pause_lost") {
+    return { ...info, label: "Stopped · by app", cause: cause.summary };
+  }
+  return { ...info, cause: cause.summary };
+}
+
+/** Tooltip text for a run-state chip: the halt cause (when there is one) ahead of the state detail,
+ *  with the owner's two-space sentence gap kept visible in rendered HTML (SENTENCE_GAP). */
+export function stateChipTitle(info: StateInfo): string {
+  const text = info.cause ? `${info.cause}  ${info.detail}` : info.detail;
+  return text.replace(/ {2}/g, SENTENCE_GAP);
 }
 
 export function authorityWord(policy: TradingPolicy): "Ask-first" | "Autopilot" {
@@ -261,14 +300,7 @@ export function deriveProtection(
   if (base.label === "Broker stop") {
     return { ...base, detail: `Per-position plan: ${planLabel} (pins this position's stop, overriding the account's own default distance/trailing choice). ${base.detail}` };
   }
-  // A short position with short selling turned off: every enforcement layer (synthetic monitor,
-  // proactive risk exits, broker-protective-stops) skips shorts entirely while shortSellingEnabled is
-  // off, regardless of any per-position plan — a "Fixed"/"ATR"/"Trailing plan" label here would show
-  // active protection for a short the app has deliberately stopped managing (Codex review, PR #1371).
-  // Preserve deriveBaseProtection's muted/unsafe state instead of building an active plan label.
-  if (position.quantity < 0 && !policy.shortSellingEnabled) {
-    return { ...base, detail: `Per-position plan: ${planLabel} (would pin this position's stop, but it never takes effect while short selling is off). ${base.detail}` };
-  }
+
   // Otherwise, build the label/tone from the PLAN itself, never from the account-wide base label's
   // CONTENT — that label describes whatever mechanism the ACCOUNT happens to have configured (e.g.
   // "App stop −8%" for a flat stop), which may be an entirely different mechanism than what this
@@ -298,18 +330,11 @@ function deriveBaseProtection(
   if (hasWorkingClosingStop(orders, position.symbol, isShort)) {
     return {
       label: "Broker stop",
-      detail: "A stop order is resting at the broker. It keeps protecting even if this app is down or stopped.",
+      detail: "A stop order is resting at the broker.  It keeps protecting even if this app is down or stopped.",
       tone: "pos"
     };
   }
   const rules = policy.riskRules;
-  if (isShort && !policy.shortSellingEnabled) {
-    return {
-      label: null,
-      detail: "Short position, but short selling is off in policy — the app's stop monitor skips it, and no closing broker stop order is resting.",
-      tone: "muted"
-    };
-  }
   const baseStopPct = isShort
     ? rules.shortStopLossPct && rules.shortStopLossPct > 0
       ? rules.shortStopLossPct
@@ -329,13 +354,13 @@ function deriveBaseProtection(
     if (policy.systemState === "halted") {
       return {
         label: `${word} · paused`,
-        detail: "App-managed stop rules are configured but paused while the system is Stopped. They resume when you start or switch to Exit-only.",
+        detail: "App-managed stop rules are configured but paused while the system is Stopped.  They resume when you start or switch to Exit-only.",
         tone: "warn"
       };
     }
     return {
       label: word,
-      detail: `Managed by this app on its scheduler tick${isShort ? " (exits with a buy-to-cover)" : ""}. It requires the app to be running and pauses if you Stop everything.`,
+      detail: `Managed by this app on its scheduler tick${isShort ? " (exits with a buy-to-cover)" : ""}.  It requires the app to be running and pauses if you Stop everything.`,
       tone: "pos"
     };
   }
@@ -346,25 +371,63 @@ function deriveBaseProtection(
   };
 }
 
-/** Count of open short positions the app has deliberately stopped managing because
- *  shortSellingEnabled is off: every enforcement layer (synthetic stop monitor,
- *  proactive risk exits, broker-protective-stops) skips shorts entirely while the
- *  toggle is off — see the muted/unsafe branch in deriveBaseProtection above. This
- *  only surfaces that existing state as a number for banners; it never gates or
- *  acts. 0 whenever short selling is on (all shorts managed) or no shorts are held. */
+export type UnmanagedShortReason = "shorts_disabled" | "broker_unprotected" | "stops_disabled";
+
+/** Count of open shorts the app will not protect with a broker-held buy-stop.
+ *  Alpaca resting stops or synthetic app monitors protect open shorts; only
+ *  non-Alpaca venues or brokerStopsForShorts: false are unmanaged. */
 export function deriveUnmanagedShortCount(
   positions: EquityPosition[] | undefined,
-  policy: Pick<TradingPolicy, "shortSellingEnabled">
+  policy: Pick<TradingPolicy, "shortSellingEnabled" | "brokerStopsForShorts" | "activeBroker"> & {
+    riskRules?: { stopLossPct?: number; shortStopLossPct?: number; trailingStopPct?: number };
+    positionStopPlans?: Record<string, PositionStopPlan>;
+  }
 ): number {
-  if (policy.shortSellingEnabled) return 0;
-  return (positions ?? []).filter((p) => p.quantity < 0).length;
+  return deriveUnmanagedShorts(positions, policy).count;
+}
+
+export function deriveUnmanagedShorts(
+  positions: EquityPosition[] | undefined,
+  policy: Pick<TradingPolicy, "shortSellingEnabled" | "brokerStopsForShorts" | "activeBroker"> & {
+    riskRules?: { stopLossPct?: number; shortStopLossPct?: number; trailingStopPct?: number };
+    positionStopPlans?: Record<string, PositionStopPlan>;
+  }
+): { count: number; reason: UnmanagedShortReason | null } {
+  const shorts = (positions ?? []).filter((p) => p.quantity < 0);
+  if (shorts.length === 0) return { count: 0, reason: null };
+  const alpaca = policy.activeBroker === "alpaca" || policy.activeBroker === "alpaca-mcp";
+  if (!alpaca && policy.activeBroker) return { count: shorts.length, reason: "broker_unprotected" };
+  if (policy.brokerStopsForShorts === false) return { count: shorts.length, reason: "stops_disabled" };
+
+  if (policy.riskRules) {
+    const stopLoss = policy.riskRules.stopLossPct ?? 0;
+    const shortStop = policy.riskRules.shortStopLossPct ?? 0;
+    const trail = policy.riskRules.trailingStopPct ?? 0;
+    const hasGlobalStop = stopLoss > 0 || shortStop > 0 || trail > 0;
+    const hasPlans = policy.positionStopPlans && Object.keys(policy.positionStopPlans).length > 0;
+    if (!hasGlobalStop && !hasPlans) {
+      return { count: shorts.length, reason: "stops_disabled" };
+    }
+  }
+
+  return { count: 0, reason: null };
 }
 
 /** Advisory banner copy for unmanaged shorts — shared verbatim by the Home
  *  positions card and the Guardrails Short selling panel so the two surfaces
  *  can never drift. Null when there is nothing to say. */
-export function unmanagedShortNotice(count: number): string | null {
+export function unmanagedShortNotice(count: number, reason: UnmanagedShortReason = "shorts_disabled"): string | null {
   if (count <= 0) return null;
+  if (reason === "broker_unprotected") {
+    return count === 1
+      ? "1 short position has no broker-held buy-stop — live shorts are Alpaca-only.  Close it or move it to Alpaca for resting cover protection."
+      : `${count} short positions have no broker-held buy-stop — live shorts are Alpaca-only.  Close them or move them to Alpaca for resting cover protection.`;
+  }
+  if (reason === "stops_disabled") {
+    return count === 1
+      ? "1 short position is unmanaged because broker-held short buy-stops are off — turn them on, or close it."
+      : `${count} short positions are unmanaged because broker-held short buy-stops are off — turn them on, or close them.`;
+  }
   return count === 1
     ? "1 short position is unmanaged while short selling is off — enable shorting to resume protection, or close it."
     : `${count} short positions are unmanaged while short selling is off — enable shorting to resume protection, or close them.`;
@@ -383,31 +446,68 @@ export interface DayPnl {
    *  compared across a real gap (e.g. a July 7 baseline read on July 17), not just "yesterday". */
   isStaleBaseline: boolean;
   cashFlowAdjusted?: boolean;
+  /** When external flows came from the broker activity ledger vs equity inference. */
+  cashFlowSource?: "broker" | "inferred";
 }
 
-/** Change in equity vs the last persisted snapshot before today (local time)
+export interface DayPnlBrokerHints {
+  /** Prior session close equity from the broker (e.g. Alpaca last_equity). */
+  priorCloseEquity?: number;
+  /** Net external flow today from broker activities (deposit +, withdrawal −). */
+  todayBrokerFlow?: number;
+  cashFlowSource?: "broker" | "inferred";
+}
+
+function fillsForDay(fills: FillEvent[] | undefined, dayStartMs: number, nowMs: number): FillEvent[] {
+  if (!fills?.length) return [];
+  return fills.filter((f) => {
+    const t = new Date(f.filledAt).getTime();
+    return Number.isFinite(t) && t > dayStartMs && t <= nowMs;
+  });
+}
+
+/** Change in equity vs the last persisted snapshot before today (Central time)
  *  in the current mode's bucket. Null when there is no prior-day snapshot or
  *  no current equity — render "—", never invent. `now` is injectable for tests. */
 export function deriveDayPnl(
   performance: PerformanceSummary | undefined,
   mode: ExecutionMode | undefined,
   portfolio: Pick<Portfolio, "totalMarketValue" | "cash"> | undefined,
-  now: Date = new Date()
+  now: Date = new Date(),
+  brokerHints?: DayPnlBrokerHints
 ): DayPnl | null {
   const currentEquity = portfolio?.totalMarketValue;
   if (!performance || typeof currentEquity !== "number" || !Number.isFinite(currentEquity)) return null;
   const curve = mode === "broker/live" ? performance.liveEquityCurve : performance.paperEquityCurve;
   if (!curve || curve.length === 0) return null;
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayStart = startOfCentralDay(now).getTime();
   let baseline: EquityCurvePoint | undefined;
   for (const point of curve) {
     const t = new Date(point.timestamp).getTime();
     if (Number.isFinite(t) && t < todayStart) baseline = point;
   }
-  if (!baseline || !Number.isFinite(baseline.equity) || baseline.equity === 0) return null;
+  if (!baseline || !Number.isFinite(baseline.equity) || baseline.equity === 0) {
+    if (!(typeof brokerHints?.priorCloseEquity === "number" && brokerHints.priorCloseEquity > 0)) return null;
+    baseline = {
+      timestamp: new Date(todayStart - 86_400_000).toISOString(),
+      equity: brokerHints.priorCloseEquity,
+      source: mode === "broker/live" ? "live" : "paper"
+    };
+  }
+  const baselineEquity =
+    typeof brokerHints?.priorCloseEquity === "number" && Number.isFinite(brokerHints.priorCloseEquity) && brokerHints.priorCloseEquity > 0
+      ? brokerHints.priorCloseEquity
+      : baseline.equity;
+  if (!Number.isFinite(baselineEquity) || baselineEquity === 0) return null;
 
+  const todayKey = centralTradingDayKey(now);
   let flow = 0;
-  if (portfolio && typeof portfolio.cash === "number" && typeof baseline.cash === "number") {
+  let cashFlowSource: "broker" | "inferred" | undefined = brokerHints?.cashFlowSource;
+
+  if (typeof brokerHints?.todayBrokerFlow === "number" && Number.isFinite(brokerHints.todayBrokerFlow)) {
+    flow = brokerHints.todayBrokerFlow;
+    cashFlowSource = "broker";
+  } else if (portfolio && typeof portfolio.cash === "number" && typeof baseline.cash === "number") {
     const fakeCurrent: EquityCurvePoint = {
       timestamp: now.toISOString(),
       equity: currentEquity,
@@ -415,30 +515,29 @@ export function deriveDayPnl(
       cash: portfolio.cash,
       positionsValue: currentEquity - portfolio.cash
     };
-    const flowMap = inferExternalCashFlows([baseline, fakeCurrent], []);
-    // Sum any flows found in the map (there should only be at most 1, keyed by fakeCurrent date)
-    for (const v of flowMap.values()) flow += v;
-    // #2557 sanity bound: an inferred transfer must reconcile against the equity move it
-    // supposedly caused. A phantom flow (e.g. a mid-day snapshot glitch read as a $36.5k
-    // withdrawal) must not fabricate day P&L — fall back to the raw equity delta.
-    if (flow !== 0 && isInferredFlowUnverified(flow, baseline.equity, currentEquity)) flow = 0;
+    const baselineMs = new Date(baseline.timestamp).getTime();
+    const dayFills = fillsForDay(performance.fills, baselineMs, now.getTime());
+    const flowMap = inferExternalCashFlows([baseline, fakeCurrent], dayFills);
+    flow = flowMap.get(todayKey) ?? 0;
+    cashFlowSource = "inferred";
+    if (flow !== 0 && isInferredFlowUnverified(flow, baselineEquity, currentEquity)) flow = 0;
   }
 
-  const pnl = currentEquity - baseline.equity - flow;
-  const pctBase = baseline.equity + flow;
+  const pnl = currentEquity - baselineEquity - flow;
+  const pctBase = baselineEquity + flow;
   const pct = pctBase > 0 ? (pnl / pctBase) * 100 : 0;
 
-  const baselineDay = new Date(baseline.timestamp);
-  const baselineDayStart = new Date(baselineDay.getFullYear(), baselineDay.getMonth(), baselineDay.getDate()).getTime();
+  const baselineDayStart = startOfCentralDay(new Date(baseline.timestamp)).getTime();
   const priorSessionStart = previousTradingDayStart(now).getTime();
   const isStaleBaseline = Number.isFinite(baselineDayStart) && baselineDayStart < priorSessionStart;
   return {
     pnl,
     pct,
     baselineAt: baseline.timestamp,
-    baselineEquity: baseline.equity,
+    baselineEquity,
     isStaleBaseline,
-    ...(Math.abs(flow) > 0.01 ? { cashFlowAdjusted: true } : {})
+    ...(Math.abs(flow) > 0.01 ? { cashFlowAdjusted: true } : {}),
+    ...(cashFlowSource ? { cashFlowSource } : {})
   };
 }
 
@@ -460,7 +559,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       id: "pending",
       tone: "accent",
       title: `${pending} trade ${pending === 1 ? "idea is" : "ideas are"} waiting for you`,
-      detail: "Nothing happens until you approve or reject each one. Doing nothing lets them expire.",
+      detail: "Nothing happens until you approve or reject each one.  Doing nothing lets them expire.",
       href: "/console/approvals"
     });
   }
@@ -471,7 +570,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       tone: "neg",
       title: "The strategy is stopped",
       detail:
-        "No runs, no orders — and this app's automatic stops are paused. Broker-held brackets keep resting. Approving or rejecting proposals is refused while stopped.",
+        "No runs, no orders — and this app's automatic stops are paused.  Broker-held brackets keep resting.  Approving or rejecting proposals is refused while stopped.",
       href: "/console/guardrails"
     });
   } else if (state === "close_only") {
@@ -479,7 +578,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       id: "close-only",
       tone: "warn",
       title: "Exit-only mode",
-      detail: "No new buys will happen. Protective sells still work. A circuit breaker or a person set this.",
+      detail: "The agent will not open new risk.  Protective sells still work.  Approving an opening places it anyway.",
       href: "/console/activity"
     });
   } else if (state === "liquidating") {
@@ -496,7 +595,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       tone: "warn",
       title: "Setup: add an LLM key",
       detail:
-        "Strategy runs need OpenRouter (or another configured LLM key) so Green/Red teams can propose and debate. Market data, positions, and guardrails still work without it.",
+        "Strategy runs need OpenRouter (or another configured LLM key) so Green/Red teams can propose and debate.  Market data, positions, and guardrails still work without it.",
       href: "/console/connections#api-keys"
     });
   }
@@ -507,7 +606,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       tone: "accent",
       title: "Setup: connect a broker account",
       detail:
-        "Connect Alpaca or Robinhood (live preferred when ready; paper is fine for training reps). The app cannot place orders without a connected account.",
+        "Connect Alpaca or Robinhood (live preferred when ready; paper is fine for training reps).  The app cannot place orders without a connected account.",
       href: "/console/connections"
     });
   }
@@ -517,7 +616,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       id: "setup-models",
       tone: "warn",
       title: "Setup: choose Green team model",
-      detail: "Strategy → Models — pick the model that writes trade ideas. Red team is optional; blank means you are the sole adversary.",
+      detail: "Strategy → Models — pick the model that writes trade ideas.  Red team is optional; blank means you are the sole adversary.",
       href: "/console/strategy"
     });
   }
@@ -537,8 +636,8 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
       tone: "neg",
       title: `${failed.length} order ${failed.length === 1 ? "intent" : "intents"} awaiting reconciliation`,
       detail:
-        "A broker call failed or its response was lost. The durable intent was recorded before the call, so it cannot double-place — the broker-truth sweep will resolve it. Do not retry manually.",
-      href: "/console/activity"
+        "A broker call failed or its response was lost. The durable intent was recorded before the call, so it cannot double-place — the broker-truth sweep will resolve it.  Do not retry manually.",
+      href: "/console/activity?tab=alerts"
     });
   }
   const activeAccount = activeConnectedAccount(snapshot);
@@ -565,7 +664,7 @@ export function deriveAttention(snapshot: DashboardSnapshot): AttentionItem[] {
         tone: "neg",
         title,
         detail,
-        href: "/console/activity"
+        href: "/console/activity?tab=alerts"
       });
     }
   }
@@ -648,7 +747,7 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
       title: "Connect a broker",
       detail: hasBroker
         ? `${snapshot.connectedAccounts.length} account${snapshot.connectedAccounts.length === 1 ? "" : "s"} connected.`
-        : "Connect Alpaca or Robinhood (live when ready; paper is fine for training). The app cannot place orders without a connected account.",
+        : "Connect Alpaca or Robinhood (live when ready; paper is fine for training).  The app cannot place orders without a connected account.",
       complete: hasBroker,
       href: hasBroker ? undefined : "/console/connections#brokers",
       ctaLabel: hasBroker ? undefined : "Open Connections"
@@ -706,7 +805,7 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
       title: "Run once → review Proposals",
       detail: hasRunOnce
         ? "At least one strategy run or proposal is on the record."
-        : "Use Run once in the top bar to generate the first decision trace, then open Proposals to approve or reject.",
+        : "Use Run Once in the top bar to generate the first decision trace, then open Proposals to approve or reject.",
       complete: hasRunOnce,
       // No deep-link to empty Proposals: the action is chrome Run once, not this row.
       href: undefined,
@@ -758,6 +857,9 @@ export function deriveSpend(snapshot: DashboardSnapshot): SpendInfo {
 }
 
 export interface MarkToMarketInfo {
+  /** GROSS cost basis (sum of |averageCost × quantity| across open positions) — the capital
+   *  actually committed, long and short alike. NOT the net signed basis, which nets a short
+   *  against a long and can hide real capital at risk (and a real return) behind zero. */
   costBasis: number;
   marketValue: number;
   unrealizedPnl: number;
@@ -770,14 +872,22 @@ export interface MarkToMarketInfo {
 export function deriveMarkToMarket(snapshot: DashboardSnapshot): MarkToMarketInfo | null {
   const positions = snapshot.positions ?? [];
   if (positions.length === 0 && !snapshot.portfolio) return null;
-  const costBasis = positions.reduce((sum, position) => sum + position.averageCost * position.quantity, 0);
+  // Net signed basis is what makes unrealizedPnl correct for both longs and shorts (a short's
+  // negative quantity keeps marketValue − basis netting to the real gain/loss). But a book with
+  // offsetting long/short basis can net toward zero — or negative — capital even though real
+  // capital IS committed on both sides. Reported `costBasis` (and the %) use GROSS (sum of
+  // |basis|) — the capital actually at risk, matching positions.tsx's per-row Math.abs(costBasis)
+  // convention — so a short-heavy book's real return is never hidden behind a `costBasis <= 0`
+  // guard (perf-15).
+  const netCostBasis = positions.reduce((sum, position) => sum + position.averageCost * position.quantity, 0);
+  const grossCostBasis = positions.reduce((sum, position) => sum + Math.abs(position.averageCost * position.quantity), 0);
   const marketValue = positions.reduce((sum, position) => sum + (Number.isFinite(position.marketValue) ? position.marketValue : 0), 0);
-  const unrealizedPnl = marketValue - costBasis;
+  const unrealizedPnl = marketValue - netCostBasis;
   return {
-    costBasis,
+    costBasis: grossCostBasis,
     marketValue,
     unrealizedPnl,
-    unrealizedPct: costBasis > 0 ? (unrealizedPnl / costBasis) * 100 : undefined,
+    unrealizedPct: grossCostBasis > 0 ? (unrealizedPnl / grossCostBasis) * 100 : undefined,
     positionsValue: snapshot.portfolio?.equityMarketValue ?? marketValue,
     cash: snapshot.portfolio?.cash,
     buyingPower: snapshot.portfolio?.buyingPower
@@ -911,15 +1021,8 @@ export function deriveRiskUtilization(snapshot: DashboardSnapshot): RiskUtilizat
 
 export function selectEquityWindow(points: EquityCurvePoint[], now = new Date()): { points: EquityCurvePoint[]; label: string } {
   if (points.length < 2) return { points, label: "Equity" };
-  const sameDay = (iso: string) => {
-    const date = new Date(iso);
-    return (
-      date.getFullYear() === now.getFullYear() &&
-      date.getMonth() === now.getMonth() &&
-      date.getDate() === now.getDate()
-    );
-  };
+  const sameDay = (iso: string) => dayKey(iso) === dayKey(now.toISOString());
   const intraday = points.filter((point) => sameDay(point.timestamp));
-  if (intraday.length >= 2) return { points: intraday, label: "Intraday mark-to-market" };
-  return { points: points.slice(-24), label: "Recent equity" };
+  if (intraday.length >= 2) return { points: intraday, label: "Intraday Mark-to-Market" };
+  return { points: points.slice(-24), label: "Recent Equity" };
 }

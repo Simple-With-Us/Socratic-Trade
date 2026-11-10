@@ -3,12 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  evaluateDataProviderHonesty,
+  isDataProvidersDegraded,
   isProviderTierCheckDue,
   probeFmpTier,
   probeMassiveTier,
   runProviderTierCheck,
-  getProviderTierStatus
+  getProviderTierStatus,
+  tierChangeMessage
 } from "../src/lib/provider-tier";
+import { registerPlanTierLookupForTests } from "../src/lib/provider-tier-plan";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-provtier-${randomUUID()}.db`)}`;
@@ -107,14 +111,118 @@ describe("isProviderTierCheckDue", () => {
   });
 });
 
+describe("data-provider honesty", () => {
+  const at = "2026-08-13T12:00:00.000Z";
+
+  it("free + expected-free is not degraded (history_cap_blocked is expected)", () => {
+    const observed = {
+      tier: "free" as const,
+      at,
+      reason: "plan-access probe: ~2.5y blocked",
+      signal: "history_cap_blocked" as const
+    };
+    expect(evaluateDataProviderHonesty("massive", observed, "free")).toEqual(
+      expect.objectContaining({ degraded: false, cause: "ok" })
+    );
+    expect(evaluateDataProviderHonesty("massive", observed, "unknown")).toEqual(
+      expect.objectContaining({ degraded: false, cause: "ok" })
+    );
+    expect(evaluateDataProviderHonesty("massive", observed, null)).toEqual(
+      expect.objectContaining({ degraded: false, cause: "ok" })
+    );
+    expect(isDataProvidersDegraded({ massive: observed }, { massive: "free" })).toBe(false);
+  });
+
+  it("paid-but-capped is degraded (configured plan should allow the ~2.5y window)", () => {
+    const observed = {
+      tier: "free" as const,
+      at,
+      reason: "plan-access probe: ~2.5y blocked HTTP 403",
+      signal: "history_cap_blocked" as const
+    };
+    for (const plan of ["starter", "developer", "advanced"] as const) {
+      const honesty = evaluateDataProviderHonesty("massive", observed, plan);
+      expect(honesty.degraded).toBe(true);
+      expect(honesty.cause).toBe("tier_mismatch");
+    }
+    expect(isDataProvidersDegraded({ massive: observed }, { massive: "starter" })).toBe(true);
+  });
+
+  it("probe failure is degraded (provider is not working)", () => {
+    const observed = {
+      tier: "unknown" as const,
+      at,
+      reason: "recent probe network/timeout error",
+      signal: "probe_error" as const
+    };
+    const honesty = evaluateDataProviderHonesty("massive", observed, "free");
+    expect(honesty.degraded).toBe(true);
+    expect(honesty.cause).toBe("probe_failure");
+    expect(isDataProvidersDegraded({ massive: observed }, { massive: "free" })).toBe(true);
+    expect(isDataProvidersDegraded({ massive: observed }, { massive: "starter" })).toBe(true);
+  });
+
+  it("a lower paid SKU that still matches the probe is healthy", () => {
+    const observed = {
+      tier: "paid" as const,
+      at,
+      reason: "plan-access probe: ~2.5y fetched",
+      signal: "history_depth_confirmed" as const
+    };
+    expect(evaluateDataProviderHonesty("massive", observed, "starter").degraded).toBe(false);
+    expect(evaluateDataProviderHonesty("massive", observed, "advanced").degraded).toBe(false);
+    expect(isDataProvidersDegraded({ massive: observed }, { massive: "starter" })).toBe(false);
+  });
+
+  it("does not treat leftover FMP free rows as degraded", () => {
+    const observed = {
+      tier: "free" as const,
+      at,
+      reason: "legacy",
+      signal: "premium_gated_error" as const
+    };
+    expect(evaluateDataProviderHonesty("fmp", observed, "premium").degraded).toBe(false);
+    expect(isDataProvidersDegraded({ fmp: observed }, { fmp: "premium" })).toBe(false);
+  });
+
+  it("does not lapse-alert when the configured plan is free and the probe agrees", () => {
+    const msg = tierChangeMessage(
+      "massive",
+      "paid",
+      { tier: "free", reason: "history cap", signal: "history_cap_blocked" },
+      "free"
+    );
+    expect(msg).toBeNull();
+  });
+
+  it("lapse-alerts when a paid configured plan is capped", () => {
+    const msg = tierChangeMessage(
+      "massive",
+      "paid",
+      { tier: "free", reason: "history cap HTTP 403", signal: "history_cap_blocked" },
+      "starter"
+    );
+    expect(msg?.title).toMatch(/not working at the paid starter plan/i);
+  });
+});
+
 describe("runProviderTierCheck", () => {
   beforeEach(() => {
     process.env.MASSIVE_API_KEY = "massive-test";
     process.env.FMP_API_KEY = "fmp-test";
+    registerPlanTierLookupForTests((service) => (service === "massive" ? "starter" : null));
   });
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env.MASSIVE_API_KEY;
     delete process.env.FMP_API_KEY;
+    const { getUserApiKey, LOCAL_USER } = await import("../src/lib/db");
+    registerPlanTierLookupForTests((service) => {
+      try {
+        return getUserApiKey(LOCAL_USER, service)?.planTier ?? null;
+      } catch {
+        return null;
+      }
+    });
   });
 
   it("persists Massive tier and records a provider_degraded alert on a lapse (FMP probe retired)", async () => {
@@ -122,7 +230,7 @@ describe("runProviderTierCheck", () => {
     // Massive → free (old window empty). FMP is never probed from this app.
     const fetcher = (async (u: string) => {
       if (u.includes("financialmodelingprep.com")) {
-        throw new Error("FMP must not be probed from Socratic.Trade");
+        throw new Error("FMP must not be probed from Socratic-Trade");
       }
       return jsonRes({ results: isOld(u) ? [] : [{ c: 9 }] });
     }) as unknown as typeof fetch;
@@ -137,14 +245,34 @@ describe("runProviderTierCheck", () => {
 
     const events = listNotificationEvents("local", 50).filter((e) => e.type === "provider_degraded");
     expect(events.length).toBeGreaterThanOrEqual(1);
-    expect(events.some((e) => e.title.toLowerCase().includes("lapsed"))).toBe(true);
+    expect(events.some((e) => /not working at the paid starter plan/i.test(e.title))).toBe(true);
+  });
+
+  it("does not lapse-alert when Settings already says free and the probe agrees", async () => {
+    registerPlanTierLookupForTests((service) => (service === "massive" ? "free" : null));
+    const { listNotificationEvents, getDb } = await import("../src/lib/db");
+    getDb().prepare("DELETE FROM notification_events").run();
+    const fetcher = (async (u: string) => {
+      if (u.includes("financialmodelingprep.com")) {
+        throw new Error("FMP must not be probed from Socratic-Trade");
+      }
+      return jsonRes({ results: isOld(u) ? [] : [{ c: 9 }] });
+    }) as unknown as typeof fetch;
+
+    await runProviderTierCheck({ userId: "local", fetcher });
+    expect(getProviderTierStatus("local").massive?.tier).toBe("free");
+    const events = listNotificationEvents("local", 50).filter((e) => e.type === "provider_degraded");
+    expect(events).toHaveLength(0);
   });
 
   it("alerts again when a Massive key is restored to paid (change in either direction)", async () => {
-    const { listNotificationEvents } = await import("../src/lib/db");
+    const { listNotificationEvents, setInternalSetting } = await import("../src/lib/db");
+    setInternalSetting("providerTier:status:local", {
+      massive: { tier: "free", at: new Date().toISOString(), reason: "prior cap", signal: "history_cap_blocked" }
+    });
     const fetcher = (async (u: string) => {
       if (u.includes("financialmodelingprep.com")) {
-        throw new Error("FMP must not be probed from Socratic.Trade");
+        throw new Error("FMP must not be probed from Socratic-Trade");
       }
       return jsonRes({ results: [{ c: 9 }] }); // both windows return data → paid
     }) as unknown as typeof fetch;

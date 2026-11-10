@@ -5,6 +5,7 @@
  * Deliberately DB-/vector-db-free (envFlagOn only) so the route can import it without pulling
  * the Pinecone stack into cold admin paths.
  */
+import { isAppleWebAuthConfigured } from "./auth/apple-web";
 import { envFlagOn, type EnvSource } from "./rag/env-flag";
 import { landingPageEnabled } from "./landing-page";
 
@@ -63,28 +64,27 @@ export function listDormantFeatureStatus(env: EnvSource = process.env): DormantF
       id: "vector-asof-strict",
       flag: "VECTOR_ASOF_STRICT",
       enabled: flagOn("VECTOR_ASOF_STRICT", false, env),
-      readyToEnable: false,
+      readyToEnable: true,
       defaultWhenUnset: "off",
-      blocker: "Needs as_of_epoch_ms coverage proof on the live index before fail-closed undated drops.",
-      note: "Fail-closed PIT filter. Keep off until undated/un-epoch'd inventory is acceptable."
+      note: flagOn("VECTOR_ASOF_STRICT", false, env)
+        ? "ON: dated retrieval is fail-closed (undated chunks drop). Live desk omits asOf and is unchanged."
+        : "OFF: dated retrieval keeps undated chunks. Coverage receipt 2026-08-16 was 13076/13076 epoch'd."
     },
     {
       id: "rag-multiquery",
       flag: "RAG_MULTIQUERY",
       enabled: flagOn("RAG_MULTIQUERY", false, env),
-      readyToEnable: false,
+      readyToEnable: true,
       defaultWhenUnset: "off",
-      blocker: "Paid embed/query amplification — need cost canary + run-budget headroom first.",
-      note: "Facet sub-queries per filings pass. Pair with RAG_RUN_BUDGET_ENABLED (already on)."
+      note: "Facet sub-queries per filings pass. Paid OpenRouter/bge-m3 + RAG_RUN_BUDGET_ENABLED is the guardrail. Settings and Infisical both drive the runtime flag."
     },
     {
       id: "rag-hyde",
       flag: "RAG_HYDE",
       enabled: flagOn("RAG_HYDE", false, env),
-      readyToEnable: false,
+      readyToEnable: true,
       defaultWhenUnset: "off",
-      blocker: "Requires RAG_MULTIQUERY on; adds an LLM draft call per pass.",
-      note: "Highest cost retrieval tier. Enable only after MULTIQUERY value proof."
+      note: "Requires RAG_MULTIQUERY on; adds one cheap LLM draft (gpt-5.4-mini) per pass. Enable with MULTIQUERY on paid embed."
     },
     {
       id: "rag-embed-disclosures",
@@ -98,10 +98,28 @@ export function listDormantFeatureStatus(env: EnvSource = process.env): DormantF
       id: "sec8k-full-body",
       flag: "WEB_SOURCE_SEC8K_FULL_BODY",
       enabled: flagOn("WEB_SOURCE_SEC8K_FULL_BODY", false, env),
-      readyToEnable: false,
+      readyToEnable: true,
       defaultWhenUnset: "off",
-      blocker: "Needs FTS/corpus budget headroom + backlog health visibility before always-on.",
-      note: "Full 8-K body ingest into RAG. Limit via WEB_SOURCE_SEC8K_FULL_BODY_LIMIT."
+      note: "Full 8-K body ingest into RAG. Bounded by WEB_SOURCE_SEC8K_FULL_BODY_LIMIT (default 5) and WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS (default 12s, cap 60s). Uses adaptive FTS-mirror batching — do not raise the budget without watching [slow-sync] logs."
+    },
+    {
+      id: "congress-share-outbound",
+      flag: "CONGRESS_SHARE_ENABLED",
+      enabled: flagOn("CONGRESS_SHARE_ENABLED", false, env),
+      readyToEnable: true,
+      defaultWhenUnset: "off",
+      note: "Automatic outbound share to congress.trade. Also requires CONGRESS_TRADE_TOKEN (CT INGEST_TOKEN). Nightly batch + after-scan refs. Fundamentals stay on CONGRESS_SHARE_FUNDAMENTALS_ENABLED."
+    },
+    {
+      id: "apple-web-signin",
+      flag: "AUTH_APPLE_ID + AUTH_APPLE_SECRET",
+      enabled: isAppleWebAuthConfigured(env),
+      readyToEnable: isAppleWebAuthConfigured(env),
+      defaultWhenUnset: "off",
+      blocker: isAppleWebAuthConfigured(env)
+        ? undefined
+        : "Needs Apple Services ID + client-secret JWT (or TEAM_ID + KEY_ID + SIWA .p8 PEM) in Infisical. Not ASC/APNs keys.",
+      note: "Web Sign in with Apple on /login. Code path is live; prod stays dark until AUTH_APPLE_* is set."
     },
     {
       id: "sec-ingest-worker",
@@ -110,7 +128,7 @@ export function listDormantFeatureStatus(env: EnvSource = process.env): DormantF
       readyToEnable: false,
       defaultWhenUnset: "off",
       blocker: "Ops: seed jobs via /api/admin/sec-ingest and confirm queue/DLQ health first.",
-      note: "Background SEC backfill worker. Default off; admin seed is the canary."
+      note: "Background SEC backfill worker.  Default off; admin seed is the canary.  Env view only — an Admin > Operations override supersedes this; check there for the effective value."
     },
     {
       id: "fmp-transcripts",

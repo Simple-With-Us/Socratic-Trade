@@ -31,6 +31,30 @@ export function isNotPlacedStatus(status: string): boolean {
   return /^(blocked|rejected|failed|not_placed)$/i.test(status);
 }
 
+export type ProposalChipTone = "pos" | "warn" | "accent" | "muted";
+
+/** Chip tone for Home / latest-run proposal rows — uses lifecycle truth, not
+ *  a private subset of statuses. Failed/error/not-placed rows must never read
+ *  as green success. */
+export function proposalChipTone(status: string): ProposalChipTone {
+  if (isExecutedStatus(status)) return "pos";
+  if (isNotPlacedStatus(status) || /^error$/i.test(status) || /^rejected_by_broker$/i.test(status)) {
+    return "warn";
+  }
+  if (/^(pending|proposed|planned|placing|approved)$/i.test(status)) return "accent";
+  if (/^placed$/i.test(status)) return "accent";
+  if (/^observed$/i.test(status)) return "muted";
+  return "accent";
+}
+
+/** Whether the Home sheet may offer Approve for this row. Requires a real
+ *  trade_proposals id (approvable flag) and a status that is still awaiting
+ *  owner approval — never blocked/error/failed rows. */
+export function isProposalRowApprovable(approvable: boolean | undefined, status: string): boolean {
+  if (!approvable) return false;
+  return /^(pending|proposed)$/i.test(status);
+}
+
 /** The verb for an autonomous-action row, tense-matched to lifecycle status.
  *  - No side (a pure observation) → "Observed".
  *  - Executed status → past tense ("Bought").

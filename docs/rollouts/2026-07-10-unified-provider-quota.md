@@ -106,7 +106,7 @@ PR: #1310 (auto-merge armed on `verify`).
 
 - **Verify AV + Twelve Data + Tiingo go green on the next pre-market scan** (~08:00 UTC). The
   overnight market was closed, so the cascade hadn't reached these providers since the last deploy.
-- **Owner action (agents blocked):** whitelist the new prod box IP `135.181.192.190` on the
+- **Owner action (agents blocked):** whitelist the new prod box IP `<HETZNER_OLD_IP_RETIRED>` on the
   **congress.trade** Cloudflare zone — the box IP isn't whitelisted, so congress.trade 403s.
 - Alpha Vantage's per-minute cap is already handled by its serial ~1.1s pacer + the key pool's
   per-key 25/day exhaustion memory, so it is intentionally not double-gated by the quota.

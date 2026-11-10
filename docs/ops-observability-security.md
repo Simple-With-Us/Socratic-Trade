@@ -1,5 +1,8 @@
 # Ops Observability, Secrets, and Backup
 
+Cross-cutting security and reliability audit (auth, isolation, Litestream DR, alerting, spend):
+`docs/audits/2026-08-17-security-reliability.md` (2026-08-17, report-only).
+
 This app now has opt-in scaffolding for the seven selected tools:
 
 - **Infisical**: use `npm run dev:secrets`, `npm run build:secrets`, or
@@ -9,8 +12,8 @@ This app now has opt-in scaffolding for the seven selected tools:
   `INFISICAL_ENV`, `INFISICAL_PATH`, and a machine identity pair/token. Do not commit
   `.env.local`.
 - **Gitleaks**: `npm run gitleaks` runs a local secret scan. The GitHub Actions
-  Security workflow runs the pinned gitleaks action on the self-hosted runner
-  and clears stale macOS installer temp files before invoking the action.
+  Security workflow runs the pinned gitleaks action on GitHub-hosted
+  `ubuntu-latest` (self-hosted Mac / Oracle runner labels are retired).
 - **Sentry**: full Next.js coverage across all three runtimes, env-gated and off by
   default. Set `SENTRY_DSN` for the server + edge runtimes
   (`sentry.server.config.ts` / `sentry.edge.config.ts`, loaded via the instrumentation
@@ -19,21 +22,56 @@ This app now has opt-in scaffolding for the seven selected tools:
   `socratic-trade`); set the build-time secret `SENTRY_AUTH_TOKEN` to upload source maps
   for de-minified production stack traces. `app/global-error.tsx` reports root-layout
   render errors. The previous build-wrapper instability did not reproduce on
-  `@sentry/nextjs@10` + Next 16. Browser Session Replay is opt-in
-  (`NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=true`) and masks all text + blocks all media when on.
+  `@sentry/nextjs@10` + Next 16.  Browser Session Replay is opt-in and must be
+  `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=true` at **Coolify build time** (Next inlines
+  `NEXT_PUBLIC_*`); do not default Replay on in code.  When on: 1% session / 100%
+  on error, mask all text, block all media.  Browser envelopes tunnel through
+  same-origin `/monitoring` (`tunnelRoute`; middleware matcher excludes it).
+  Server continuous profiling (`@sentry/profiling-node`, `profileLifecycle: "trace"`)
+  is Node-only — not browser UI profiling.  Sparse `Sentry.logger` + Application
+  Metrics (`src/lib/sentry-metrics.ts`) cover `scheduler.tick`/`scheduler.overrun`,
+  `rag.rejected`, `embed.failed`, and `broker.call`.  LLM/embed HTTP is wrapped in
+  `gen_ai.*` spans (`src/lib/sentry-gen-ai.ts`) without prompt contents.  Runtime
+  `Sentry.init` (server/edge/browser) and the Langfuse OTel resource set
+  `release` / `service.version` from `resolveSentryRelease()` (same 40-char SHA
+  as `scripts/sentry-build-release.cjs`) so the Langfuse "LLM Generation" OTel
+  spans that arrive without an SDK name still have a release.  iOS Cocoa reads
+  `SENTRY_DSN` from Info.plist only (no hardcoded fallback).  TestFlight ship
+  loads that DSN from Infisical prod (`SENTRY_DSN`) with a GitHub Actions
+  `secrets.SENTRY_DSN` fallback, and sets `releaseName` to
+  `com.socratictrade.ios@{CFBundleShortVersionString}+{CFBundleVersion}`.
+  Datadog stays the log warehouse; do not dual-ship the access-log firehose.
   RAG provider failures, Pinecone index/metric checks, ingest budget trips, Pinecone Write
   Unit budget trips, malformed embedding rejections, and retrieval degradations are captured
   as warning/error events tagged `component=rag`, `rag.provider`, `rag.operation`, and
   `rag.key_source`; they stay no-op unless `SENTRY_DSN` is set.
+- **Datadog**: Logs + APM + browser RUM on the existing `us5.datadoghq.com` account
+  (`service:socratic-trade`).  Reuse `DD_API_KEY` / `DATADOG_API_KEY`, `DD_SITE`,
+  `DD_AGENT_HOST` / `DD_TRACE_AGENT_URL`, and the RUM application id + client token
+  (`NEXT_PUBLIC_DD_APPLICATION_ID` / `NEXT_PUBLIC_DD_CLIENT_TOKEN` or the
+  `DD_*` / `*_RUM_*` aliases).  Do not mint a new org, API key, or paid add-on.
+  Missing keys are a no-op (fail-closed) and must not crash boot.  Server logs ship
+  warn+ via the official HTTP intake; APM uses the host agent when
+  `DD_AGENT_HOST` is set, otherwise official `DD_TRACE_EXPERIMENTAL_EXPORTER=agentless`.
+  Coolify arms `NODE_OPTIONS --import ./scripts/datadog-preload.mjs` after Infisical
+  so `dd-trace` loads before Next.js.  Browser RUM boots from `instrumentation-client.ts`
+  and a hidden runtime `<DatadogRumBoot>` so Infisical tokens work without a rebuild.
+  Profiling, AppSec, and Session Replay stay off unless an existing opt-in flag is
+  already set.  Datadog does **not** replace Sentry or PagerDuty: Firefighter still
+  pages moderate+ from Sentry.  `/api/health` and `/api/live` stay independent of
+  Datadog.  Inertness is asserted by `test/datadog-inert.test.ts`.
 - **Sentry Crons scheduler heartbeat**: a dead/hung scheduler still returns 200 from
-  `/api/health`, so the scheduler tick can additionally report an "ok" check-in to the
-  Sentry Crons monitor `scheduler-tick` every 60s tick (`sendSentrySchedulerCheckIn` in
-  `src/lib/scheduler.ts`); Sentry alerts when check-ins stop. Opt-in — requires BOTH
-  `SENTRY_DSN` and `SENTRY_CRONS_ENABLED=1` — placed after the single-leader gate so idle
-  followers can't mask a dead leader, and fully try/catch-wrapped so monitoring can never
-  break trading. The monitor is auto-created via the upsert config on first check-in
-  (interval 1 minute, 5-minute checkin margin). Inertness is asserted by
-  `test/sentry-inert.test.ts`.
+  `/api/health`, so the leader tick opens an `in_progress` check-in on `scheduler-tick` and
+  closes `ok` / `error` when that body finishes (`sendSentrySchedulerCheckIn` in
+  `src/lib/scheduler.ts`).  A standalone `ok` at tick start is dishonest:  the 2026-08-31
+  hang had already checked in `ok` before the await froze.  Sentry alerts on missed
+  check-ins and on `in_progress` past `maxRuntime` 10 minutes.  The in-process watchdog
+  (15s poll, 2-minute budget) closes `error` and clears `__tickInFlight` sooner so Autopilot
+  can resume without a restart.  Opt-in — requires BOTH `SENTRY_DSN` and
+  `SENTRY_CRONS_ENABLED=1` — placed after the single-leader gate so idle followers can't
+  mask a dead leader, and fully try/catch-wrapped so monitoring can never break trading.
+  The monitor is auto-created via the upsert config on first check-in (interval 1 minute,
+  5-minute checkin margin).  Inertness is asserted by `test/sentry-inert.test.ts`.
 - **Scheduler and strategy ownership leases**: scheduler single-leader coordination is ON by
   default, including when `SCHEDULER_SINGLE_LEADER` is unset or empty; only an explicit
   `false`/`off`/`0`/`no` disables it. Each strategy/approval invocation owns its account-scoped
@@ -49,15 +87,17 @@ This app now has opt-in scaffolding for the seven selected tools:
   `STATUS.md` for the current runner policy.
 - **Audit hardening**: npm overrides pin transitive Axios and PostCSS to patched
   releases, and Vitest is on the current major so its Vite dependency is patched.
-- **Litestream**: continuous WAL replication of `data/app.db` to Cloudflare R2, run as
-  a PM2 sidecar (`litestream`) via `scripts/run-litestream.sh` against `litestream.yml`.
-  Restore with `scripts/litestream-restore.sh`. Full setup, monitoring, and DR steps are
-  in `docs/litestream.md`.
+- **Litestream**: production WAL replication runs **in the Coolify container** via
+  `litestream.coolify.yml` (live replica is Backblaze B2; R2 is the weekly cold
+  snapshot).  The Mac PM2 `litestream` sidecar against `litestream.yml` is retired
+  rollback/dev history — do not start it while Coolify runs `DB_BOOTSTRAP=live`.
+  Restore steps: `docs/litestream.md`.
 - **Playwright**: `npm run test:e2e` runs a browser smoke test against a production
   `next build && next start` server on `PLAYWRIGHT_PORT`, or against
-  `PLAYWRIGHT_BASE_URL` if one is supplied. If the Codex PM2 `next dev` preview is
-  running in the same worktree, stop it before build/e2e checks and restart it
-  afterward so both processes do not mutate `.next` at the same time.
+  `PLAYWRIGHT_BASE_URL` if one is supplied.  If a local `npm run dev` is running
+  in the same worktree, stop it before build/e2e checks and restart it afterward
+  so both processes do not mutate `.next` at the same time.  Per-agent PM2
+  preview lanes are retired.
 
 ## Local Setup
 
@@ -81,6 +121,9 @@ The telemetry path treats this as a financial application:
 
 - Sentry `sendDefaultPii` is disabled.
 - Sentry events run through `redactForTelemetry(...)`.
+- Datadog logs and RUM events run through `redactForTelemetry(...)`.  RUM uses
+  `defaultPrivacyLevel: "mask-user-input"`.  Session Replay stays off unless
+  `NEXT_PUBLIC_DD_SESSION_REPLAY_ENABLED=true` is already set on the existing account.
 - Langfuse does not capture full prompts or portfolio/account details unless
   `LANGFUSE_CAPTURE_IO=full` is explicitly set, and even then it redacts common
   credential/account keys and long strings.

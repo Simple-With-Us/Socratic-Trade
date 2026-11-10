@@ -62,6 +62,32 @@ describe("mobile account switch is view-only (PR #7)", () => {
     expect(db.getPolicy(u, b).systemState).toBe("halted");
   });
 
+  it("account.activate drops cached dashboard snapshots for that user", async () => {
+    const db = await import("../src/lib/db");
+    const cache = await import("../src/lib/dashboard-snapshot-cache");
+    const { queueMobileCommand, executeMobileCommandImmediately } = await import("../src/lib/mobile-api");
+
+    const u = `mobile-user-${randomUUID()}`;
+    const a = `a-${randomUUID()}`;
+    const b = `b-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: a, userId: u, broker: "tradier", environment: "paper", accountNumber: "SANDBOX-A", label: "Sandbox", isActive: true });
+    db.upsertConnectedAccount({ id: b, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-B", label: "Alpaca Paper", isActive: false });
+
+    cache.setCachedDashboardSnapshot(cache.dashboardSnapshotCacheKey(u, "SANDBOX-A"), { stale: true });
+    cache.setCachedDashboardSnapshot(cache.dashboardSnapshotCacheKey(u, "PA-B"), { stale: true });
+
+    const queued = queueMobileCommand({
+      userId: u,
+      commandType: "account.activate",
+      payload: { accountId: b },
+      idempotencyKey: `act-cache-${b}`
+    });
+    const completed = await executeMobileCommandImmediately(queued.command.id, u);
+    expect(completed.status).toBe("succeeded");
+    expect(cache.getCachedDashboardSnapshot(cache.dashboardSnapshotCacheKey(u, "SANDBOX-A"))).toBeUndefined();
+    expect(cache.getCachedDashboardSnapshot(cache.dashboardSnapshotCacheKey(u, "PA-B"))).toBeUndefined();
+  });
+
   it("account.activate completes immediately while strategy.run_once is still running", async () => {
     let releaseRun!: () => void;
     let markRunStarted!: () => void;

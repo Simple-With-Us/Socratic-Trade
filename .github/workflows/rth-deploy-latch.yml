@@ -1,0 +1,95 @@
+name: RTH Deploy Latch
+
+# Coolify still receives the GitHub push webhook.  The REAL block is the
+# Dockerfile latch (failed image build; last healthy container stays up).
+# This workflow is observability + an after-close drain so a weekday RTH
+# merge still ships without waiting for another human push.
+#
+# Do not name this workflow "Deploy" and do not add deploy.yml — that was
+# the retired Mac/PM2 publisher (test/sentry-ci-report-workflows.test.ts).
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # 21:20 UTC = 17:20 EDT / 16:20 EST — after the 16:00 ET cash close.
+    - cron: "20 21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rth-deploy-latch
+  cancel-in-progress: false
+
+jobs:
+  annotate:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Evaluate RTH latch
+        id: latch
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            CHANGED_FILES="$(git diff --name-only --no-renames "$BEFORE_SHA" "$GITHUB_SHA" || true)"
+            export CHANGED_FILES
+          fi
+          set +e
+          OUT="$(npx --yes tsx scripts/assert-rth-deploy-latch.ts 2>&1)"
+          RC=$?
+          set -e
+          echo "$OUT"
+          {
+            echo "rc=$RC"
+            echo "summary<<EOF"
+            echo "$OUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ] && [ "$RC" -ne 3 ]; then
+            exit "$RC"
+          fi
+      - name: Comment when Coolify will refuse the image build
+        if: ${{ steps.latch.outputs.rc == '2' || steps.latch.outputs.rc == '3' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.latch.outputs.summary }}
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -f body="${SUMMARY}
+
+          A refused image build must not swap the named container.  Keep consistent-name (no rolling / no dual Litestream writer).  Weekday RTH retries at 21:20 UTC; docs-only / image-noop is skipped on purpose so #2811 cannot 503 origin for ~34 minutes again."
+
+  drain:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Drain latched main onto Coolify
+        env:
+          # github.token cannot redeliver hooks (needs admin:repo_hooks).
+          # GH_PAT is the existing repo secret with that scope.  Coolify
+          # deploy-only token is the reliable fallback when redeliver fails.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          COOLIFY_DEPLOY_WEBHOOK_URL: ${{ secrets.COOLIFY_DEPLOY_WEBHOOK_URL }}
+          COOLIFY_DEPLOY: ${{ secrets.COOLIFY_DEPLOY }}
+          COOLIFY_ST_APP_UUID: ${{ secrets.COOLIFY_ST_APP_UUID }}
+          DEPLOY_VERIFY_NO_FETCH: "1"
+        run: bash scripts/rth-deploy-drain.sh origin/main

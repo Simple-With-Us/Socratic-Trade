@@ -7,6 +7,7 @@ export default function GlobalError({ error, reset }: { error: Error & { digest?
   useEffect(() => {
     // No-op when Sentry was not initialized (NEXT_PUBLIC_SENTRY_DSN unset).
     Sentry.captureException(error);
+    void import("@/lib/datadog-rum").then(({ captureRumError }) => captureRumError(error));
   }, [error]);
 
   const message = error.message?.trim() || "The workspace failed to render.";

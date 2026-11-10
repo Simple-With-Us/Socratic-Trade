@@ -1,3 +1,4 @@
+import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { LANE_WAITS, withAccountMutation } from "@/lib/account-mutation";
 import { getBrokerGateway } from "@/lib/broker";
 import { emitDashboardEvent } from "@/lib/events";
@@ -73,6 +74,7 @@ export async function POST(request: Request) {
       at: new Date().toISOString(),
       detail: { orderId, action: "replace_market", replacementOrderId: result.replacementOrderId }
     });
+    invalidateDashboardSnapshotCache(userId, policy.accountNumber);
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof MarketReplaceConfirmationError) {

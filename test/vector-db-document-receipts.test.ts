@@ -279,6 +279,31 @@ describe("storeDocument receipt transaction", () => {
       undefined,
       { userId: "local", providerAuthority, ledgerAuthority: otherLedgerAuthority }
     )).toEqual([]);
+    // Fail closed on an UNKNOWN authority, not just a wrong one.  With nothing to compare
+    // `metadata.provider_authority` / `receipt.providerAuthority` against there is no way to prove
+    // a managed record belongs to this deployment's index, so none is admissible — while unrelated
+    // legacy/direct records still pass.  (Qdrant read cutover, #3138/#3158 follow-up.)
+    const legacyDirectMatch = {
+      id: "sec-filings:AAPL:10-k:2026:chunk-1",
+      metadata: { symbol: "AAPL", scope: "shared", tenant_scope: "shared:operator", userId: "local" },
+      score: 0.4
+    };
+    for (const missingAuthority of [
+      undefined,
+      { userId: "local", ledgerAuthority },
+      { userId: "local", providerAuthority: "", ledgerAuthority }
+    ]) {
+      expect(filterMatchesForCommittedReceipts(
+        [{ ...committedRecord, score: 0.9 }],
+        undefined,
+        missingAuthority
+      )).toEqual([]);
+      expect(filterMatchesForCommittedReceipts(
+        [legacyDirectMatch],
+        undefined,
+        missingAuthority
+      )).toEqual([legacyDirectMatch]);
+    }
 
     // INSERT OR IGNORE must not turn a stale/conflicting prior occurrence into a false completion.
     db.prepare("UPDATE chunk_occurrences SET content_hash = 'stale-conflict'").run();
@@ -293,6 +318,58 @@ describe("storeDocument receipt transaction", () => {
     expect(db.prepare("SELECT state FROM vector_ingest_commits WHERE id = ?").get(commit.id))
       .toEqual({ state: "committed" });
     warn.mockRestore();
+  });
+
+  it("attributes a LOCAL SQLite receipt fault to local contention, not to the vector store", async () => {
+    // The receipt/finalize seams rethrow as `new Error("document-…-failed", { cause: sqliteError })`,
+    // so the raw SQLite text is only reachable through the CAUSE. Before this was walked, a local
+    // write-lock fault surfaced as an error-level "RAG vector store failed" Sentry event blaming
+    // Pinecone — the same mislabel class as the 2026-08-09 "Pinecone connection failed / database
+    // is locked" pushes. Control flow is unaffected: the caller still gets the same wrapper error.
+    //
+    // The trigger raises the literal SQLITE_BUSY message text rather than holding a real write
+    // lock, for the reason this repo already documents in local-db-fault-classification.test.ts:
+    // a genuine held lock would also block the classifier's own audit write.
+    const { getDb } = await import("../src/lib/db");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    const db = getDb();
+    db.prepare("DELETE FROM audit_events WHERE kind = 'local_db_contention'").run();
+    db.exec(`
+      CREATE TRIGGER fail_test_local_db_lock
+      BEFORE INSERT ON chunk_occurrences
+      BEGIN
+        SELECT RAISE(ABORT, 'database is locked');
+      END;
+    `);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failed = await storeDocument({
+        text: "Local contention probe: the receipt write is the thing that fails here.",
+        doc_id: "LOCAL-DB-FAULT-PROBE:NVDA:2026:Q2",
+        ticker: "NVDA",
+        title: "NVDA local-fault probe",
+        doc_type: "earnings-transcript",
+        source: "fmp-earnings-transcript",
+        published_at: "2026-05-20T20:00:00.000Z",
+        acceptance_datetime: "2026-05-21T01:00:00.000Z"
+      });
+      expect(failed.error).toBe("document-receipt-write-failed");
+
+      const row = db
+        .prepare("SELECT payload FROM audit_events WHERE kind = 'local_db_contention' ORDER BY rowid DESC LIMIT 1")
+        .get() as { payload: string } | undefined;
+      expect(row).toBeDefined();
+      const payload = JSON.parse(row!.payload) as { lane: string; operation: string; reason: string };
+      expect(payload.lane).toBe("vector-store");
+      expect(payload.operation).toBe("storeContexts");
+      // The RAW SQLite text, not the opaque "document-receipt-write-failed" wrapper label.
+      expect(payload.reason).toContain("database is locked");
+    } finally {
+      db.exec("DROP TRIGGER fail_test_local_db_lock");
+      warn.mockRestore();
+      consoleError.mockRestore();
+    }
   });
 
   it("does not create a pending commit for whitespace-only input", async () => {
@@ -538,6 +615,42 @@ describe("storeDocument receipt transaction", () => {
     expect(db.prepare(`
       SELECT COUNT(DISTINCT vector_id) AS count FROM chunk_occurrences WHERE commit_id = ?
     `).get(commit.id)).toEqual({ count: 2 });
+  });
+
+  it("parks storeDocument before a commit when the rolling-24h write fuse is already spent", async () => {
+    const { getDb } = await import("../src/lib/db");
+    const { meterPineconeUpsert } = await import("../src/lib/rag-metering");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    const db = getDb();
+    db.exec("DELETE FROM rag_usage");
+    mocks.embed.mockClear();
+    mocks.upsert.mockClear();
+    process.env.RAG_INGEST_BUDGET_ENABLED = "off";
+    process.env.RAG_PINECONE_WRITE_BUDGET_ENABLED = "on";
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "10";
+    meterPineconeUpsert(1, "local", 10);
+
+    const accession = `SEC-WU-SPENT:${randomUUID()}`;
+    const stored = await storeDocument({
+      text: `${randomUUID()} already-at-cap transcript body for fuse park`,
+      doc_id: accession,
+      ticker: "MSFT",
+      title: "MSFT fuse-spent 10-Q",
+      doc_type: "10-q",
+      source: "sec-edgar",
+      published_at: "2026-07-14T12:00:00.000Z"
+    }, "local", { maxTokens: 36, overlapRatio: 0 });
+
+    expect(stored).toMatchObject({
+      indexed: 0,
+      skipped: true,
+      documentComplete: false
+    });
+    expect(stored.writeUnitBudgetSkipped).toBeGreaterThan(0);
+    expect(mocks.embed).not.toHaveBeenCalled();
+    expect(mocks.upsert).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM vector_ingest_commits WHERE accession = ?").get(accession))
+      .toEqual({ count: 0 });
   });
 
   it("requires the complete provider vector set before reconciliation can finalize a commit", async () => {

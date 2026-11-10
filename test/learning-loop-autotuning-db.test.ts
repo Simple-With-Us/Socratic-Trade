@@ -286,7 +286,7 @@ describe("execution-cost in the learner — item 8", () => {
 
   it("a simulated paper BUY fill's price reflects execution cost (default ON), so downstream P&L is net-of-cost", async () => {
     const account = `COST-${randomUUID()}`;
-    // Default execution-cost model ON (1 bps base, no spread/vol here) → buy fills a hair ABOVE the quote.
+    // Default execution-cost model ON (20 bps base, no spread/vol here) → buy fills ABOVE the quote.
     const fill = recordFillFromProposal({
       accountNumber: account,
       source: "paper",
@@ -298,9 +298,9 @@ describe("execution-cost in the learner — item 8", () => {
       marketScan: marketScanWithQuote("AAPL", 100),
       status: "filled"
     });
-    // price = 100 * (1 + 0.0001) = 100.01 — strictly worse than the 100 quote for a buy.
+    // price = 100 * (1 + 0.002) = 100.2 — strictly worse than the 100 quote for a buy.
     expect(fill.price).toBeGreaterThan(100);
-    expect(fill.price).toBeCloseTo(100.01, 3);
+    expect(fill.price).toBeCloseTo(100.2, 3);
 
     // The closed-lot return the learner reads is computed from THIS cost-adjusted entry price, so the
     // certified edge is net of cost. Close the lot at exactly the quote and confirm the realized return is
@@ -322,7 +322,7 @@ describe("execution-cost in the learner — item 8", () => {
     // sell (exit of a long) receives DOWN by the base cost → strictly below the raw 100 quote.
     const sell = applyPaperExitCost(100, "sell", "paper");
     expect(sell).toBeLessThan(100);
-    expect(sell).toBeCloseTo(99.99, 3);
+    expect(sell).toBeCloseTo(99.8, 3);
     // cover (exit of a short) pays UP → strictly above.
     const cover = applyPaperExitCost(100, "cover", "paper");
     expect(cover).toBeGreaterThan(100);

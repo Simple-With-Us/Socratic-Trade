@@ -1,8 +1,12 @@
 import "./globals.css";
 import type { Metadata, Viewport } from "next";
+import { lato } from "./fonts/lato";
 import { ThemeProvider, themeInitScript } from "./ui/theme";
-import { Toaster } from "sonner";
+import { ThemedToaster } from "./ui/toaster";
 import { GlobalErrorToasts } from "./ui/global-error-toasts";
+import { pwaUnregisterScript } from "@/lib/pwa-unregister";
+import { resolvePublicRumConfig } from "@/lib/datadog-env";
+import { DatadogRumBoot } from "./ui/datadog-rum-boot";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://socratictrade.com"),
@@ -11,17 +15,14 @@ export const metadata: Metadata = {
     template: "%s · Socratic Trade"
   },
   description:
-    "Socratic Trade is an autonomous market-reasoning system that forms theses, acts within delegated authority, shows its evidence and dissent, and learns from outcomes. Not investment advice.",
+    "Socratic Trade is an autonomous market-reasoning system that forms theses, acts within delegated authority, shows its evidence and dissent, and learns from outcomes.  Not investment advice.",
   applicationName: "Socratic Trade",
-  manifest: "/manifest.webmanifest",
-  appleWebApp: {
-    capable: true,
-    title: "Socratic Trade",
-    statusBarStyle: "default"
-  },
+  // PWA retired: no web-app manifest and no standalone Add-to-Home-Screen.
+  appleWebApp: false,
   icons: {
     icon: [
-      { url: "/icon.png", type: "image/png" },
+      { url: "/icons/icon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon.png", type: "image/png", sizes: "1024x1024" },
       { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
       { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" }
     ],
@@ -41,12 +42,12 @@ export const metadata: Metadata = {
     url: "/",
     title: "Socratic Trade",
     description:
-      "Autonomous market reasoning with visible theses, evidence, dissent, actions, and outcome learning. Not investment advice."
+      "Autonomous market reasoning with visible theses, evidence, dissent, actions, and outcome learning.  Not investment advice."
   },
   twitter: {
     card: "summary_large_image",
     title: "Socratic Trade",
-    description: "Autonomous market reasoning with visible decisions and outcome learning. Not investment advice."
+    description: "Autonomous market reasoning with visible decisions and outcome learning.  Not investment advice."
   },
   // Default = NOINDEX. Only allow indexing when explicitly opted in (the app is private by default).
   robots:
@@ -65,16 +66,20 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // lato.variable puts --font-lato on <html>, so both globals.css (--font-sans) and console.css
+  // (--con-font-lato) can resolve it — the console mounts deep inside <body>, not here.
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className={lato.variable} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        <script dangerouslySetInnerHTML={{ __html: pwaUnregisterScript }} />
       </head>
       <body>
         <ThemeProvider>
           {children}
+          <DatadogRumBoot config={resolvePublicRumConfig()} />
           <GlobalErrorToasts />
-          <Toaster theme="system" position="bottom-right" />
+          <ThemedToaster />
         </ThemeProvider>
       </body>
     </html>

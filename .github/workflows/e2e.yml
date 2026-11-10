@@ -1,7 +1,11 @@
 name: Playwright Smoke
 
-# Playwright Smoke — NOT a required merge check (ruleset: verify only). PR trigger removed
-# 2026-07-21 to unclog the self-hosted runner queue; still runs on main / nightly / manual.
+# Playwright Smoke — NOT a required merge check (ruleset: verify only).
+# PR trigger was removed 2026-07-21 to unclog the self-hosted runner queue, then
+# restored 2026-09-27 as a NARROW path-filtered trigger: only PRs that touch
+# Playwright-owned files run it (test/e2e/**, playwright.config.ts, lockfiles,
+# this workflow). UI PRs that don't touch those paths still skip it, preserving
+# the 2026-07-21 queue-protection rationale. Still runs on main / nightly / manual.
 
 on:
   # smoke is NOT a required status check (ruleset requires only `verify`). Running it on
@@ -14,6 +18,11 @@ on:
     # Nightly full-browser baseline now that smoke no longer runs on every PR.
     - cron: "17 9 * * *"
   workflow_dispatch:
+    inputs:
+      update-visual-baselines:
+        description: "Regenerate the Playwright visual baselines IN CI (visual.spec.ts --update-snapshots, CI browser + production build) and upload them as the visual-baselines artifact — download and commit the PNGs to refresh committed baselines."
+        type: boolean
+        default: false
 
 concurrency:
   group: e2e-${{ github.workflow }}-${{ github.ref }}
@@ -32,7 +41,7 @@ jobs:
     outputs:
       docs-only: ${{ steps.check.outputs.docs_only }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
         with:
           # Classify only needs the two endpoint trees. Full-history fetches can
@@ -75,8 +84,14 @@ jobs:
           echo "Changed files:"
           echo "$changed_files"
           non_docs="$(printf '%s\n' "$changed_files" | grep -Ev '(^|/)[^/]+\.md$|^docs/' || true)"
+          # docs/benchmarks/* is bundled at build time (app/api/llm-usage/model-stats/route.ts) — not
+          # safe to skip smoke when only those JSON files change.
+          benchmarks_changed="$(printf '%s\n' "$changed_files" | grep -E '^docs/benchmarks/' || true)"
+          if [ -n "$benchmarks_changed" ]; then
+            non_docs="$(printf '%s\n%s' "$non_docs" "$benchmarks_changed" | sed '/^$/d' | sort -u)"
+          fi
           if [ -z "$non_docs" ]; then
-            echo "All changed files are documentation-class (*.md or docs/**) — docs-only fast path applies."
+            echo "All changed files are documentation-class (*.md or docs/**, excluding build-imported docs/benchmarks/) — docs-only fast path applies."
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
           else
             echo "Non-documentation files changed — running full smoke:"
@@ -113,17 +128,17 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
-            echo "::error::Fork PRs cannot run this job (it installs deps with a private-repo deploy key secret)."
+            echo "::error::Fork PRs cannot run this job."
             exit 1
           fi
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
-                echo "::error::Bot PRs cannot run package installs with this secret (untrusted bot: $actor)."
+                echo "::error::Bot PRs cannot run this job (untrusted bot: $actor)."
                 exit 1
                 ;;
             esac
@@ -131,12 +146,12 @@ jobs:
       - name: Docs-only short-circuit
         if: needs.classify.outputs.docs-only == 'true'
         run: echo "docs-only diff — smoke skipped by path filter"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: needs.classify.outputs.docs-only != 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: needs.classify.outputs.docs-only != 'true'
         with:
-          node-version: 24
+          node-version: 26
       # Long-lived socratic-ci workspaces have lost the tree between checkout and
       # npm install when a concurrent job's clean step overlapped (ENOENT package.json
       # on the 2026-07-26 scheduled smoke). Same re-checkout boundary as ci.yml
@@ -146,25 +161,25 @@ jobs:
         run: rm -rf ./* ./.git || true
       - name: Refresh checkout before package operations
         if: needs.classify.outputs.docs-only != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Assert package.json present
         if: needs.classify.outputs.docs-only != 'true'
         run: |
           set -euo pipefail
           if [ ! -f package.json ]; then
-            echo "::error::package.json missing after refresh checkout — refusing to run npm install on an empty workspace."
+            echo "::error::package.json missing after refresh checkout — refusing to run npm ci on an empty workspace."
             ls -la
             exit 1
           fi
       - name: Install dependencies
         if: needs.classify.outputs.docs-only != 'true'
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit
       # Cache the Playwright browser download (chromium, ~130MB) keyed on the lockfile
       # (which pins the playwright version). On a hit, the install step below skips the
       # multi-minute download and only re-applies system deps.
       - name: Cache Playwright browsers
         if: needs.classify.outputs.docs-only != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('package.json') }}
@@ -174,13 +189,13 @@ jobs:
         if: needs.classify.outputs.docs-only != 'true'
         shell: bash
         run: |
-          # GitHub-hosted ubuntu-latest: install Chromium + OS deps.
-          npx playwright install --with-deps chromium
+          # GitHub-hosted ubuntu-latest: install Chromium and WebKit + OS deps.
+          npx playwright install --with-deps chromium webkit
       # Restore Next.js's incremental build cache so the playwright webServer's
       # `npm run build` reuses prior compilation output instead of a cold build.
       - name: Restore Next.js build cache
         if: needs.classify.outputs.docs-only != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: .next/cache
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-${{ hashFiles('src/**', 'app/**') }}
@@ -188,5 +203,36 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('package.json') }}-
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
-        if: needs.classify.outputs.docs-only != 'true'
-        run: npm run test:e2e
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines != true
+        run: |
+          npm run test:e2e
+          export PLAYWRIGHT_AUTH_SECRET="$(openssl rand -hex 32)"
+          npm run test:e2e:admin
+      # Baseline regeneration lives in CI (not on a dev laptop/VM) because the
+      # committed PNGs must match the CI browser + production build byte for byte:
+      # local runs use a different Chromium build, different system fonts, and
+      # `next dev`, and that drift alone fails the 1% pixel budget. Dispatch the
+      # workflow with update-visual-baselines=true, download the visual-baselines
+      # artifact, and commit the PNGs.
+      - name: Regenerate visual baselines (CI browser, production build)
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        run: npx playwright test test/e2e/visual.spec.ts --update-snapshots
+      - name: Upload regenerated visual baselines
+        if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines-${{ github.run_attempt }}
+          path: test/e2e/visual.spec.ts-snapshots/
+          retention-days: 14
+      # Visual regression failures are pixel diffs — the report and traces are
+      # the only way to see what changed. Upload on failure for PR review.
+      - name: Upload Playwright results on failure
+        if: failure() && needs.classify.outputs.docs-only != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-results-${{ github.run_attempt }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14

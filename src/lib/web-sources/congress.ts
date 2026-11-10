@@ -21,7 +21,7 @@
 // is App A's wire format; `coerceCongressTrade()` converts between them.
 
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "../db";
-import { congressAsCongressSourceEnabled, getCongressTradeClient } from "../api-clients/congress";
+import { CongressTradeAuthError, congressAsCongressSourceEnabled, readCongressRetractionsPage, readCongressTransactionsPage } from "../api-clients/congress";
 import { normalizeSymbol } from "../money";
 import {
   assertOperationLeaseOwnership,
@@ -42,6 +42,9 @@ import {
 } from "./http";
 
 const DATASET_KEY = "webSource:congress:dataset";
+/** Separate from the dataset so a rewrite of the trade list cannot drop the poll cursor. */
+export const CONGRESS_CURSOR_SETTING_KEY = "webSource:congress:cursor";
+export const CONGRESS_RETRACT_CURSOR_SETTING_KEY = "webSource:congress:retractCursor";
 const ATTEMPT_KEY = "webSource:congress:lastAttempt";
 const DEFAULT_TTL_MS = 24 * 60 * 60_000; // daily; congressional disclosures trickle in every day
 const DEFAULT_RETRY_BACKOFF_MS = 60 * 60_000; // wait 1h before retrying after a failed/empty scrape
@@ -386,7 +389,7 @@ export function aggregateCongressSignals(
       windowDays: window,
       lastTradedAt: list[0]?.tradedAt,
       lastDisclosedAt: list[0]?.disclosedAt,
-      bulletin: buildBulletin(symbol, buyMembers, sellMembers, buyCount, sellCount, window)
+      bulletin: buildBulletin(symbol, buyMembers, sellMembers, buyCount, sellCount, window, list)
     };
   }
   return out;
@@ -410,16 +413,44 @@ function buildBulletin(
   sellMembers: string[],
   buyCount: number,
   sellCount: number,
-  window: number
+  window: number,
+  trades: CongressTrade[]
 ): string {
   const names = (m: string[]) => m.slice(0, 3).join(", ") + (m.length > 3 ? `, +${m.length - 3} more` : "");
+  let base = "";
   if (buyCount > 0 && sellCount === 0) {
-    return `Congress: ${buyMembers.length} member(s) disclosed BUYS of ${symbol} in the last ${window}d (${names(buyMembers)}); no sells.`;
+    base = `Congress: ${buyMembers.length} member(s) disclosed BUYS of ${symbol} in the last ${window}d (${names(buyMembers)}); no sells.`;
+  } else if (sellCount > 0 && buyCount === 0) {
+    base = `Congress: ${sellMembers.length} member(s) disclosed SELLS of ${symbol} in the last ${window}d (${names(sellMembers)}); no buys.`;
+  } else if (buyCount === 0 && sellCount === 0) {
+    // Exchange-only window: no member buy or sell exists, so the mixed-activity branch below
+    // would render "mixed activity ... 0 buy(s) by  vs 0 sell(s) by ." — both wrong (it is not
+    // mixed) and malformed (names([]) is the empty string, leaving a dangling "by "). The
+    // exchange-count and latency/competitor clauses appended after this block still carry the
+    // real signal, so we only need the leading sentence to stop asserting a direction.
+    base = `Congress: no member buy or sell disclosures for ${symbol} in the last ${window}d.`;
+  } else {
+    base = `Congress: mixed activity on ${symbol} in last ${window}d — ${buyCount} buy(s) by ${names(buyMembers)} vs ${sellCount} sell(s) by ${names(sellMembers)}.`;
   }
-  if (sellCount > 0 && buyCount === 0) {
-    return `Congress: ${sellMembers.length} member(s) disclosed SELLS of ${symbol} in the last ${window}d (${names(sellMembers)}); no buys.`;
+
+  // Include latency/competitor discovery info for LLM insights.
+  const latencies = trades
+    .filter((t) => t.latencyProbeDelayMs !== undefined)
+    .slice(0, 3); // cap to 3 most recent
+
+  if (latencies.length > 0) {
+    const details = latencies
+      .map((t) => `latency: ${t.latencyProbeDelayMs}ms, health: ${t.latencyProbeHealth ?? "unknown"}, provider_pub: ${t.providerPublishedAt ?? "N/A"}`)
+      .join("; ");
+    base += ` (Competitor tracking stats for latest trades: ${details})`;
   }
-  return `Congress: mixed activity on ${symbol} in last ${window}d — ${buyCount} buy(s) by ${names(buyMembers)} vs ${sellCount} sell(s) by ${names(sellMembers)}.`;
+
+  const exchangeCount = trades.filter((t) => t.side === "exchange").length;
+  if (exchangeCount > 0) {
+    base += `  Also ${exchangeCount} exchange disclosure(s) (not counted as buy or sell).`;
+  }
+
+  return base;
 }
 
 /** Read the cached dataset and build signals for the given symbols (no network). */
@@ -528,19 +559,58 @@ export async function fetchCapitolTrades(): Promise<CongressTrade[]> {
 // ── Refresh orchestration ────────────────────────────────────────────────────
 
 function tradeKey(t: CongressTrade): string {
+  if (t.id) return `id:${t.id}`;
+  if (t.docId && t.rowKey) return `doc:${t.docId}|row:${t.rowKey}`;
   return `${t.symbol}|${t.member}|${t.side}|${t.tradedAt}|${t.amountLow ?? ""}`;
 }
 
+/**
+ * Collapse rows that share a key.  An identity-keyed row (`id:` or `doc:|row:`,
+ * i.e. a Congress.Trade transaction) keeps the LATEST copy: callers pass prior
+ * rows first and incoming rows last, so a corrected row replaces the stale
+ * copy.  A keyless row (scraped adapters) keeps the FIRST copy, so adapter
+ * order still sets source preference (Senate eFD ahead of Apify and Capitol
+ * Trades).  The surviving row keeps the position of the key's first appearance.
+ */
 function dedupeTrades(trades: CongressTrade[]): CongressTrade[] {
-  const seen = new Set<string>();
-  const out: CongressTrade[] = [];
+  const byKey = new Map<string, CongressTrade>();
   for (const t of trades) {
     const key = tradeKey(t);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(t);
+    const identityKeyed = key.startsWith("id:") || key.startsWith("doc:");
+    if (identityKeyed || !byKey.has(key)) byKey.set(key, t);
   }
-  return out;
+  return Array.from(byKey.values());
+}
+
+function withinRetention(t: CongressTrade, cutoff: number): boolean {
+  const ts = Date.parse(t.disclosedAt ?? t.tradedAt);
+  return Number.isFinite(ts) && ts >= cutoff; // keep only parseable + within-retention rows
+}
+
+/**
+ * Merge incoming Congress.Trade rows into the prior window: latest copy wins,
+ * retracted ids are dropped, and the result is pruned to APP_A_RETENTION_DAYS.
+ * Shared by the push path (upsertCongressTrades) and the incremental pull poll.
+ *
+ * A retracted id is dropped from `incoming` too.  The poll reads transactions
+ * first and retractions second, and CT's retraction feed only serves
+ * retractions that are still open (a revive sets revived_at and hides it), so
+ * a retraction read in this poll is newer than any copy of the row read
+ * before it.  A revived row comes back on a later poll under the same id with
+ * a new cursor_seq, after its retraction closed.  (The two cursors are
+ * independent sequences, so they cannot be compared directly.)
+ */
+function mergeCongressWindow(
+  prior: CongressTrade[],
+  incoming: CongressTrade[],
+  now: number,
+  retractedIds: ReadonlySet<string> = new Set()
+): CongressTrade[] {
+  const cutoff = now - APP_A_RETENTION_DAYS * 24 * 60 * 60_000;
+  const notRetracted = (t: CongressTrade) => !(t.id && retractedIds.has(t.id));
+  const keptPrior = retractedIds.size === 0 ? prior : prior.filter(notRetracted);
+  const keptIncoming = retractedIds.size === 0 ? incoming : incoming.filter(notRetracted);
+  return dedupeTrades([...keptPrior, ...keptIncoming]).filter((t) => withinRetention(t, cutoff));
 }
 
 export function retryBackoffMs(): number {
@@ -611,6 +681,7 @@ async function refreshCongressUnlocked(
     return { id: "congress", ok: true, recordCount: ds?.recordCount ?? 0, sources: ds?.sources ?? [], fetchedAt: ds?.fetchedAt ?? "", skipped: true };
   }
   assertOperationLeaseOwnership(operationLeaseClaim);
+  resetAppAPollState();
 
   // Record the attempt up front so a failure backs off (retryBackoffMs) instead of
   // re-firing every tick; the dataset's fetchedAt still only advances on success.
@@ -620,16 +691,88 @@ async function refreshCongressUnlocked(
   const sources: string[] = [];
   const warnings: string[] = [];
 
-  // When App A (congress.trade) is the configured source of truth, pull from it and skip the
-  // local scrapers entirely (it IS the authority on congressional disclosures). Otherwise run
-  // App B's own adapter cascade.
+  // A rejected Congress.Trade credential is a CONFIGURATION failure, not a
+  // transient outage: the retractions feed would stay dead and retracted rows
+  // would keep feeding the congress signal forever.  It is re-thrown after the
+  // dataset write (so the new disclosures still land) instead of being
+  // downgraded to a warning that reads like a merely degraded refresh.
+  let credentialError: CongressTradeAuthError | null = null;
+  const finish = (result: import("./types").WebSourceRefreshResult): import("./types").WebSourceRefreshResult => {
+    if (credentialError) throw credentialError;
+    return result;
+  };
+
+  // Quiver's direct API is retired, so it cannot fill senateTrades.
+  // When Congress.Trade is the source and it returns trades, do not also scrape
+  // Senate eFD. A throw, or an empty result that is not a successful incremental
+  // poll, falls back to the free eFD PTR scrape (agreement cookie + HTML).
+  // Otherwise run App B's own adapter cascade, which already starts at eFD.
   const adapters = congressAsCongressSourceEnabled()
-    ? [{ id: "congress-trade", run: () => fetchAppACongressTrades(now) }]
+    ? []
     : [
         { id: "senate-efd", run: () => scrapeSenateEfd(now) },
         { id: "apify-congress", run: () => fetchApifyCongress(now) },
         { id: "capitol-trades", run: fetchCapitolTrades }
       ];
+
+  if (congressAsCongressSourceEnabled()) {
+    let appATrades: CongressTrade[] = [];
+    let appAFailed = false;
+    try {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      appATrades = await fetchAppACongressTrades(now);
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+    } catch (error) {
+      throwIfOperationLeaseCancelled(operationLeaseSignal);
+      appAFailed = true;
+      warnings.push(`congress-trade: ${error instanceof Error ? error.message : "failed"}`);
+    }
+    if (!appAFailed && appAPollState.reachedServer) {
+      try {
+        await fetchAppARetractions();
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+      } catch (error) {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        if (error instanceof CongressTradeAuthError) {
+          // Missing/rejected credential: fail loudly, naming the variable.
+          credentialError = error;
+        } else {
+          // A retractions outage must not block new trades.  Ids already read this
+          // poll still apply; the cursor only advances to what was read.
+          warnings.push(`congress-trade retractions: ${error instanceof Error ? error.message : "failed"}`);
+        }
+      }
+    }
+    if (!appAFailed && appAPollState.reachedServer && appAPollState.incremental && (appATrades.length > 0 || appAPollState.retractedIds.size > 0)) {
+      // An incremental poll returns only rows after the stored cursor.  Merge
+      // them into the existing window; replacing it would drop every older row.
+      return finish(persistIncrementalCongressPoll(now, appATrades, warnings, operationLeaseClaim));
+    }
+    if (appAPollState.retractedIds.size > 0) {
+      // Backfill (full window) path: a row read live and then retracted before
+      // the retractions page must not survive, because the retract cursor
+      // advances with this write.  Same rule as mergeCongressWindow.
+      appATrades = appATrades.filter((t) => !(t.id && appAPollState.retractedIds.has(t.id)));
+    }
+    if (appATrades.length > 0) {
+      collected.push(...appATrades);
+      sources.push("congress-trade");
+    } else if (!(appAPollState.reachedServer && appAPollState.cursor > 0)) {
+      if (warnings.length === 0) warnings.push("congress-trade: empty");
+      try {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        const efd = await scrapeSenateEfd(now);
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        if (efd.length > 0) {
+          collected.push(...efd);
+          sources.push("senate-efd");
+        }
+      } catch (error) {
+        throwIfOperationLeaseCancelled(operationLeaseSignal);
+        warnings.push(`senate-efd: ${error instanceof Error ? error.message : "failed"}`);
+      }
+    }
+  }
 
   for (const adapter of adapters) {
     throwIfOperationLeaseCancelled(operationLeaseSignal);
@@ -649,17 +792,65 @@ async function refreshCongressUnlocked(
   assertOperationLeaseOwnership(operationLeaseClaim);
   const fetchedAt = new Date(now).toISOString();
   if (collected.length === 0) {
-    // Don't overwrite a good prior dataset with nothing on a transient outage.
     const prior = getCongressDataset();
+    // A successful empty incremental poll is not an outage.  Keep the prior
+    // rows and refresh fetchedAt so the TTL still applies.  The cursor moves
+    // only after that write.
+    if (appAPollState.reachedServer && appAPollState.cursor > 0 && prior && prior.trades.length > 0) {
+      // The retractions this poll read must be applied to the dataset we are
+      // about to write: persistAppACursor() advances the retract cursor, and a
+      // retraction consumed without being applied would leave the retracted row
+      // in the dataset feeding the congress signal, with no re-read to fix it.
+      const trades =
+        appAPollState.retractedIds.size > 0
+          ? mergeCongressWindow(prior.trades, [], now, appAPollState.retractedIds)
+          : prior.trades;
+      const dataset: CongressDataset = { ...prior, trades, fetchedAt, recordCount: trades.length };
+      assertOperationLeaseOwnership(operationLeaseClaim);
+      setInternalSetting(DATASET_KEY, dataset);
+      persistAppACursor();
+      audit("web_source_refresh", { id: "congress", ok: true, recordCount: dataset.recordCount, sources: prior.sources, warnings });
+      return finish({ id: "congress", ok: true, recordCount: dataset.recordCount, sources: prior.sources, fetchedAt, warning: warnings.join("; ") || undefined });
+    }
+    if (appAPollState.reachedServer && appAPollState.cursor > 0) persistAppACursor();
+    // Don't overwrite a good prior dataset with nothing on a transient outage.
     audit("web_source_refresh", { id: "congress", ok: false, recordCount: 0, warnings });
-    return { id: "congress", ok: false, recordCount: prior?.recordCount ?? 0, sources: prior?.sources ?? [], fetchedAt: prior?.fetchedAt ?? "", warning: warnings.join("; ") || "no records" };
+    return finish({ id: "congress", ok: false, recordCount: prior?.recordCount ?? 0, sources: prior?.sources ?? [], fetchedAt: prior?.fetchedAt ?? "", warning: warnings.join("; ") || "no records" });
   }
 
   const trades = dedupeTrades(collected);
   const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
   assertOperationLeaseOwnership(operationLeaseClaim);
   setInternalSetting(DATASET_KEY, dataset);
+  persistAppACursor();
   audit("web_source_refresh", { id: "congress", ok: true, recordCount: trades.length, sources, warnings });
+  return finish({ id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined });
+}
+
+function persistIncrementalCongressPoll(
+  now: number,
+  incoming: CongressTrade[],
+  warnings: string[],
+  operationLeaseClaim: OperationLeaseClaim
+): import("./types").WebSourceRefreshResult {
+  const prior = getCongressDataset();
+  const trades = mergeCongressWindow(prior?.trades ?? [], incoming, now, appAPollState.retractedIds);
+  const sources = Array.from(new Set([...(prior?.sources ?? []), "congress-trade"]));
+  const fetchedAt = new Date(now).toISOString();
+  const dataset: CongressDataset = { trades, fetchedAt, sources, recordCount: trades.length };
+  assertOperationLeaseOwnership(operationLeaseClaim);
+  setInternalSetting(DATASET_KEY, dataset);
+  persistAppACursor();
+  audit("web_source_refresh", {
+    id: "congress",
+    ok: true,
+    recordCount: trades.length,
+    sources,
+    warnings,
+    incremental: true,
+    incoming: incoming.length,
+    retracted: appAPollState.retractedIds.size
+  });
   return { id: "congress", ok: true, recordCount: trades.length, sources, fetchedAt, warning: warnings.join("; ") || undefined };
 }
 
@@ -713,13 +904,14 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
   const symbol = normalizeSymbol(pickStr(o, ["symbol", "ticker", "asset", "assetTicker", "issuerTicker"]) ?? "");
   if (!symbol) return null;
 
-  // App A's /api/transactions uses single-letter SEC codes: P=purchase(buy), S / S_partial=sale(sell);
-  // other codes (E exchange, G gift, …) are intentionally ignored. Also accept word forms from
-  // other sources.
+  // App A's /api/transactions uses single-letter codes: P/B buy, S / S_partial sell, E exchange.
+  // Gifts and other codes stay dropped.  Key order stays side, type, transactionType,
+  // txType, action so a bare SSE frame is read from `type` before `txType`.
   const sideRaw = (pickStr(o, ["side", "type", "transactionType", "txType", "action"]) ?? "").toLowerCase();
-  let side: "buy" | "sell" | undefined;
-  if (sideRaw === "p" || /(buy|purchase|acqui)/.test(sideRaw)) side = "buy";
+  let side: CongressTrade["side"] | undefined;
+  if (sideRaw === "p" || sideRaw === "b" || /(buy|purchase|acqui)/.test(sideRaw)) side = "buy";
   else if (sideRaw === "s" || sideRaw.startsWith("s_") || /(sell|sale|dispos)/.test(sideRaw)) side = "sell";
+  else if (sideRaw === "e" || sideRaw === "exchange" || /\bexchange\b/.test(sideRaw)) side = "exchange";
   if (!side) return null;
 
   const now = Date.now();
@@ -739,9 +931,13 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
   if (!anchor) return null;
 
   // Match the senate prefix (senate/senator) at the START — substring .includes("sen") would
-  // misclassify "representative". Anything else (house/rep/unknown) → house.
+  // misclassify "representative".  "exec..." stays executive.  Anything else → house.
   const chamberRaw = (pickStr(o, ["chamber", "house", "body"]) ?? "").toLowerCase();
-  const chamber: "senate" | "house" = chamberRaw.startsWith("sen") ? "senate" : "house";
+  const chamber: CongressTrade["chamber"] = chamberRaw.startsWith("exec")
+    ? "executive"
+    : chamberRaw.startsWith("sen")
+      ? "senate"
+      : "house";
 
   const trade: CongressTrade = {
     symbol,
@@ -749,39 +945,210 @@ export function coerceCongressTrade(raw: unknown): CongressTrade | null {
     chamber,
     side,
     tradedAt: anchor,
-    disclosedAt: disclosedAt ?? tradedAt,
     source: APP_A_SOURCE
   };
+  if (disclosedAt) trade.disclosedAt = disclosedAt;
   const amountLow = pickNum(o, ["amountLow", "amount_min", "minAmount", "sizeRangeLow", "valueLow", "amountMin"]);
   const amountHigh = pickNum(o, ["amountHigh", "amount_max", "maxAmount", "sizeRangeHigh", "valueHigh", "amountMax"]);
   if (amountLow !== undefined) trade.amountLow = amountLow;
   if (amountHigh !== undefined) trade.amountHigh = amountHigh;
   const owner = pickStr(o, ["owner", "ownerType", "holder"]);
   if (owner) trade.owner = owner;
+  const id = pickStr(o, ["id"]);
+  if (id) trade.id = id;
+  const docId = pickStr(o, ["docId", "doc_id"]);
+  if (docId) trade.docId = docId;
+  const rowKey = pickStr(o, ["rowKey", "row_key"]);
+  if (rowKey) trade.rowKey = rowKey;
+  const party = pickStr(o, ["party"]);
+  if (party) trade.party = party;
+  const bioguideId = pickStr(o, ["bioguideId", "bioguide_id"]);
+  if (bioguideId) trade.bioguideId = bioguideId;
+  const pdfUrl = pickStr(o, ["pdfUrl", "pdf_url"]);
+  if (pdfUrl) trade.pdfUrl = pdfUrl;
+  const disclosureLagDays = pickNum(o, ["disclosureLagDays", "disclosure_lag_days"]);
+  if (disclosureLagDays !== undefined) trade.disclosureLagDays = disclosureLagDays;
+  const stockActStatus = pickStr(o, ["stockActStatus", "stock_act_status"]);
+  if (stockActStatus) trade.stockActStatus = stockActStatus;
+  const priceAtTrade = pickNum(o, ["priceAtTrade", "price_at_trade"]);
+  if (priceAtTrade !== undefined) trade.priceAtTrade = priceAtTrade;
+  const spxAtTrade = pickNum(o, ["spxAtTrade", "spx_at_trade"]);
+  if (spxAtTrade !== undefined) trade.spxAtTrade = spxAtTrade;
+  const priceAtFiling = pickNum(o, ["priceAtFiling", "price_at_filing"]);
+  if (priceAtFiling !== undefined) trade.priceAtFiling = priceAtFiling;
+  const spxAtFiling = pickNum(o, ["spxAtFiling", "spx_at_filing"]);
+  if (spxAtFiling !== undefined) trade.spxAtFiling = spxAtFiling;
+
+  applyPayloadLatency(trade, o);
+  const latencyProbeHealth = pickStr(o, ["latencyProbeHealth"]);
+  if (latencyProbeHealth) trade.latencyProbeHealth = latencyProbeHealth;
+  const latencyProbeDelayMs = pickNum(o, ["latencyProbeDelayMs"]);
+  if (latencyProbeDelayMs !== undefined) trade.latencyProbeDelayMs = latencyProbeDelayMs;
+  const providerPublishedAt = pickStr(o, ["providerPublishedAt"]);
+  if (providerPublishedAt) trade.providerPublishedAt = providerPublishedAt;
+
   return trade;
 }
 
+function applyPayloadLatency(trade: CongressTrade, o: Record<string, unknown>): void {
+  const latency = o.latency;
+  if (!latency || typeof latency !== "object" || Array.isArray(latency)) return;
+  const lat = latency as Record<string, unknown>;
+  const status = pickStr(lat, ["status"]);
+  const provider = pickStr(lat, ["provider"]);
+  if (status) trade.latencyProbeHealth = status;
+  else if (provider) trade.latencyProbeHealth = provider;
+  const deltaSec = pickNum(lat, ["providerDeltaSec"]);
+  if (deltaSec !== undefined) trade.latencyProbeDelayMs = deltaSec * 1000;
+  const published = pickStr(lat, ["providerPublishedAt"]);
+  if (published) trade.providerPublishedAt = published;
+}
+
 /**
- * Pull the rolling congressional window from App A's public /api/transactions feed. App A's feed is
- * oldest-first by `cursor_seq`, so we bound it server-side with `from=<window start>` (the documented
- * rolling-window param) and page forward via `cursor` until the window is exhausted. Without `from`
- * a recent-window pull would have to walk all historical rows to reach today's disclosures.
+ * Per-poll state for the Congress.Trade pull.  Pinned on globalThis: Next.js can
+ * load two copies of this module in one process (server bundle + route handler),
+ * and a module-level `let` would then split the poll state — the retraction ids
+ * read by one copy would be invisible to the copy that writes the dataset, so a
+ * retracted row would keep scoring.  One shared object keeps them in step.
+ */
+interface CongressAppAPollState {
+  /** True when the last poll's transactions request reached Congress.Trade. */
+  reachedServer: boolean;
+  /** Highest transactions cursor the last poll read. */
+  cursor: number;
+  /** True when the last poll started from a stored cursor (rows after it only). */
+  incremental: boolean;
+  /** Transaction ids the last poll's retractions page named (fetchAppARetractions). */
+  retractedIds: Set<string>;
+  /** Highest retractions cursor seen by the last poll (persisted after the dataset write). */
+  retractCursor: number;
+}
+
+const congressPollHost = globalThis as unknown as { __congressAppAPollState?: CongressAppAPollState };
+const appAPollState: CongressAppAPollState =
+  congressPollHost.__congressAppAPollState ??
+  (congressPollHost.__congressAppAPollState = {
+    reachedServer: false,
+    cursor: 0,
+    incremental: false,
+    retractedIds: new Set<string>(),
+    retractCursor: 0
+  });
+
+function resetAppAPollState(): void {
+  appAPollState.reachedServer = false;
+  appAPollState.cursor = 0;
+  appAPollState.incremental = false;
+  // Clear the shared instance in place — replacing the Set would leave other
+  // module copies holding the old one.
+  appAPollState.retractedIds.clear();
+  appAPollState.retractCursor = 0;
+}
+
+const APP_A_RETRACT_MAX_PAGES = 20;
+const APP_A_RETRACT_PAGE_SIZE = 500;
+
+function readStoredRetractCursor(): number {
+  const raw = getInternalSetting<number | string>(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function persistAppARetractCursor(): void {
+  if (appAPollState.retractCursor > readStoredRetractCursor()) setInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY, appAPollState.retractCursor);
+}
+
+/**
+ * Pull retracted transaction ids from Congress.Trade's
+ * /api/transactions/retractions?since=<cursor> into appAPollState.retractedIds.
+ * The endpoint ships in the CT follow-up to Congress.Trade#2867; until then it
+ * 404s and this is a no-op.  The cursor only advances when the dataset write
+ * succeeds (persistAppARetractCursor).
+ */
+export async function fetchAppARetractions(): Promise<string[]> {
+  const ids: string[] = [];
+  let since = readStoredRetractCursor();
+  appAPollState.retractCursor = since;
+  for (let page = 0; page < APP_A_RETRACT_MAX_PAGES; page++) {
+    const res = await readCongressRetractionsPage({ since, limit: APP_A_RETRACT_PAGE_SIZE });
+    if (!res) break;
+    for (const r of res.retractions) {
+      ids.push(r.txId);
+      appAPollState.retractedIds.add(r.txId);
+    }
+    if (res.cursor > appAPollState.retractCursor) appAPollState.retractCursor = res.cursor;
+    if (res.retractions.length === 0 || !(res.cursor > since)) break;
+    since = res.cursor;
+  }
+  return ids;
+}
+
+function readStoredCursor(): number {
+  const raw = getInternalSetting<number | string>(CONGRESS_CURSOR_SETTING_KEY);
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function persistAppACursor(): void {
+  if (!appAPollState.reachedServer || !(appAPollState.cursor > 0)) return;
+  if (appAPollState.cursor > readStoredCursor()) setInternalSetting(CONGRESS_CURSOR_SETTING_KEY, appAPollState.cursor);
+  persistAppARetractCursor();
+}
+
+function rowCursorSeq(raw: unknown): number | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const n = Number((raw as { cursorSeq?: unknown }).cursorSeq);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Pull congressional disclosures from App A's public /api/transactions feed.
+ * The first backfill sends `from` alone (then `from` plus `since` to page that
+ * window; offset is capped, so since is the pager).  Once a cursor is stored,
+ * later polls send `since` alone.
  */
 export async function fetchAppACongressTrades(now: number = Date.now()): Promise<CongressTrade[]> {
+  resetAppAPollState();
   const out: CongressTrade[] = [];
-  const from = new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10);
-  let since: string | undefined;
+  const stored = readStoredCursor();
+  const backfill = stored <= 0;
+  const from = backfill
+    ? new Date(now - (windowDays() + 7) * 24 * 60 * 60_000).toISOString().slice(0, 10)
+    : undefined;
+  appAPollState.incremental = !backfill;
+  let since: string | undefined = backfill ? undefined : String(stored);
   for (let page = 0; page < APP_A_MAX_PAGES; page++) {
-    const client = getCongressTradeClient();
-    const res = await client.getTransactions({ from, limit: APP_A_PAGE_SIZE, ...(since ? { since } : {}) }).catch(e => { console.error("getTransactions error:", e); return null; });
-    if (!res || res.transactions.length === 0) break;
+    const res = await readCongressTransactionsPage({
+      limit: APP_A_PAGE_SIZE,
+      ...(from ? { from } : {}),
+      ...(since ? { since } : {})
+    }).catch(e => { console.error("getTransactions error:", e); return null; });
+    if (!res) break;
+    appAPollState.reachedServer = true;
+    if (res.transactions.length === 0) {
+      if (res.cursor > appAPollState.cursor) appAPollState.cursor = res.cursor;
+      break;
+    }
+    let consumed = appAPollState.cursor;
+    let stoppedEarly = false;
     for (const raw of res.transactions) {
+      const rowCursor = rowCursorSeq(raw);
+      if (rowCursor !== undefined && rowCursor > consumed) consumed = rowCursor;
       const t = coerceCongressTrade(raw);
       if (t) out.push(t);
-      if (out.length >= APP_A_MAX_TRADES) return out;
+      if (out.length >= APP_A_MAX_TRADES) {
+        stoppedEarly = true;
+        break;
+      }
     }
-    const next = res.cursor === undefined || res.cursor === null ? undefined : String(res.cursor);
-    if (!next || next === since) break; // no more pages / no forward progress
+    if (stoppedEarly) {
+      if (consumed > appAPollState.cursor) appAPollState.cursor = consumed;
+      return out;
+    }
+    const pageCursor = Math.max(res.cursor, consumed);
+    if (pageCursor > appAPollState.cursor) appAPollState.cursor = pageCursor;
+    const next = pageCursor > 0 ? String(pageCursor) : undefined;
+    if (!next || next === since) break;
     since = next;
   }
   return out;
@@ -790,21 +1157,29 @@ export async function fetchAppACongressTrades(now: number = Date.now()): Promise
 /**
  * Merge externally-received congressional trades (push webhook / SSE) into the persisted dataset,
  * deduped and pruned to APP_A_RETENTION_DAYS. Returns how many net-new rows landed. Idempotent:
- * re-sending the same trades is a no-op (dedupeTrades keeps the first occurrence).
+ * re-sending the same trades is a no-op, and a re-sent id replaces the stored copy (latest wins).
+ * `added` counts net-new rows and `replaced` counts stored rows a changed copy overwrote.
  */
-export function upsertCongressTrades(incoming: CongressTrade[], now: number = Date.now()): { added: number; total: number } {
+export function upsertCongressTrades(
+  incoming: CongressTrade[],
+  now: number = Date.now()
+): { added: number; replaced: number; total: number } {
   const clean = incoming.filter((t): t is CongressTrade => Boolean(t && t.symbol && t.side && t.tradedAt));
   const prior = getCongressDataset();
-  if (clean.length === 0) return { added: 0, total: prior?.recordCount ?? 0 };
-  // `added` = distinct incoming keys not already present, computed BEFORE retention pruning so the
-  // count is accurate even when pruning drops unrelated old prior rows.
-  const priorKeys = new Set((prior?.trades ?? []).map(tradeKey));
-  const added = new Set(clean.map(tradeKey).filter((k) => !priorKeys.has(k))).size;
-  const cutoff = now - APP_A_RETENTION_DAYS * 24 * 60 * 60_000;
-  const merged = dedupeTrades([...(prior?.trades ?? []), ...clean]).filter((t) => {
-    const ts = Date.parse(t.disclosedAt ?? t.tradedAt);
-    return Number.isFinite(ts) && ts >= cutoff; // keep only parseable + within-retention rows
-  });
+  if (clean.length === 0) return { added: 0, replaced: 0, total: prior?.recordCount ?? 0 };
+  // `added` = distinct incoming keys not already present; `replaced` = identity-keyed incoming rows
+  // whose stored copy differs (a corrected disclosure re-sent under the same id).  Both are computed
+  // BEFORE retention pruning so the counts are accurate even when pruning drops unrelated old rows.
+  const priorByKey = new Map((prior?.trades ?? []).map((t) => [tradeKey(t), t] as const));
+  const latestIncoming = new Map(clean.map((t) => [tradeKey(t), t] as const));
+  let added = 0;
+  let replaced = 0;
+  for (const [key, t] of latestIncoming) {
+    const stored = priorByKey.get(key);
+    if (!stored) added++;
+    else if ((key.startsWith("id:") || key.startsWith("doc:")) && JSON.stringify(stored) !== JSON.stringify(t)) replaced++;
+  }
+  const merged = mergeCongressWindow(prior?.trades ?? [], clean, now);
   const sources = Array.from(new Set([...(prior?.sources ?? []), APP_A_SOURCE]));
   const dataset: CongressDataset = {
     trades: merged,
@@ -813,5 +1188,21 @@ export function upsertCongressTrades(incoming: CongressTrade[], now: number = Da
     recordCount: merged.length
   };
   setInternalSetting(DATASET_KEY, dataset);
-  return { added, total: merged.length };
+  return { added, replaced, total: merged.length };
+}
+
+/**
+ * Remove retracted Congress.Trade rows by transaction id (push `trade.retract`).
+ * Does not touch fetchedAt, so the pull TTL is unchanged.  Returns how many
+ * rows were removed.
+ */
+export function removeCongressTradesById(ids: readonly string[]): { removed: number; total: number } {
+  const prior = getCongressDataset();
+  const drop = new Set(ids.map((id) => id.trim()).filter(Boolean));
+  if (!prior || drop.size === 0) return { removed: 0, total: prior?.recordCount ?? 0 };
+  const kept = prior.trades.filter((t) => !(t.id && drop.has(t.id)));
+  const removed = prior.trades.length - kept.length;
+  if (removed === 0) return { removed: 0, total: prior.trades.length };
+  setInternalSetting(DATASET_KEY, { ...prior, trades: kept, recordCount: kept.length });
+  return { removed, total: kept.length };
 }

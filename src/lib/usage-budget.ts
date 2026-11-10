@@ -30,8 +30,15 @@ import { audit } from "./db";
 import { createDurableMap } from "./durable-state";
 import type { TradingPolicy } from "./types";
 import { resolveOpenAiModel } from "./llm-request";
+import { modelCredentialService } from "./llm-provider";
+import { catalogEntryFor } from "./llm-model-catalog";
 import { usageMonitorBaseUrl, usageMonitorToken, usageMonitorEnabled } from "./usage-monitor-push";
 import { alertUsageLimitHit } from "./usage-limit-alerts";
+import {
+  PEER_LANE_USAGE_MONITOR,
+  recordPeerLaneSample,
+  shouldDeferPeerRefresh,
+} from "./peer-lane-backoff";
 
 // ── Contract (subset of the monitor's GET /api/budget-status response) ──────────
 
@@ -104,9 +111,15 @@ function ttlMs(): number {
 }
 
 function timeoutMs(): number {
-  // Kept short: the enforce path awaits this at run entry, so a hung monitor must not stall a
+  // Bounded: the enforce path awaits this at run entry, so a hung monitor must not stall a
   // scheduled cycle for long. Fail-open returns null after the timeout (no enforcement).
-  return numEnv("USAGE_BUDGET_TIMEOUT_MS", 2500);
+  //
+  // 8000, not the original 2500 (2026-08-12): this is a cross-internet call to usage.jays.services
+  // and 2.5s aborted healthy-but-slow responses often enough to be a top "usage-monitor connection
+  // failed" source. The health-lane re-probe for this exact host already uses 8000
+  // (health-lane-reprobe.ts), so the two agree now instead of the probe passing while the real
+  // read times out. Overridable via USAGE_BUDGET_TIMEOUT_MS.
+  return numEnv("USAGE_BUDGET_TIMEOUT_MS", 8000);
 }
 
 function alertCooldownMs(): number {
@@ -198,21 +211,29 @@ async function fetchBudgetStatus(fetchImpl: typeof fetch = fetch): Promise<Budge
       signal: controller.signal,
       cache: "no-store",
     });
+    const latencyMs = Date.now() - start;
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, latencyMs);
     logApiHealth({
       service: "usage-monitor",
       ok: res.ok,
-      latencyMs: Date.now() - start,
+      latencyMs,
       errorText: res.ok ? undefined : `budget-status HTTP ${res.status}`,
     });
     if (!res.ok) return null;
     const json = await res.json().catch(() => null);
     return parseBudgetStatus(json);
   } catch (err) {
+    // Soft: this read is explicitly FAIL-OPEN (the catch returns null and the caller does not
+    // enforce), so an abort/network blip changes no behavior and must not page at level=error.
+    // The row is still stored ok=0, so Admin Connections shows the lane honestly.
+    const latencyMs = Date.now() - start;
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, latencyMs);
     logApiHealth({
       service: "usage-monitor",
       ok: false,
-      latencyMs: Date.now() - start,
+      latencyMs,
       errorText: err instanceof Error ? err.message : String(err),
+      soft: true,
     });
     return null;
   } finally {
@@ -229,9 +250,19 @@ export async function getBudgetStatusCached(opts: { force?: boolean; fetchImpl?:
   const now = Date.now();
   const cached = cacheHost.__usageBudgetCache;
   if (!opts.force && cached && now - cached.fetchedAt < ttlMs()) return cached.status;
+  // #2550: a 7s UM must not stall a strategy run. Serve stale cache (or fail-open
+  // null) and skip the network while the peer-lane p50 is slow.
+  if (!opts.force && shouldDeferPeerRefresh(PEER_LANE_USAGE_MONITOR, now)) {
+    return cached?.status ?? null;
+  }
   const status = await fetchBudgetStatus(opts.fetchImpl);
   if (status) cacheHost.__usageBudgetCache = { status, fetchedAt: now };
   return status; // null on failure → fail-open
+}
+
+/** Test-only: drop the in-process budget cache so tests do not leak across files. */
+export function resetUsageBudgetCacheForTests(): void {
+  delete cacheHost.__usageBudgetCache;
 }
 
 // ── Forecast-aware alert level ───────────────────────────────────────────────────
@@ -331,65 +362,95 @@ export async function checkBudgetAndAlert(
 
 // ── Phase 2: enforcement (model downgrade / cycle skip) ─────────────────────────
 
-/** Provider a model routes to — mirrors resolveLlmEndpoint's prefix logic. */
-function providerForModel(model: string | null | undefined): string {
-  const m = (model ?? "").toLowerCase();
-  if (/^(claude|anthropic)/.test(m)) return "anthropic";
-  if (/^grok/.test(m)) return "xai";
-  if (/^gemini/.test(m)) return "gemini";
-  if (/^(mistral|ministral|magistral|codestral|devstral|pixtral|open-mistral|open-mixtral)/.test(m)) return "mistral";
-  if (/^openrouter\//.test(m)) return "openrouter";
-  if (/^deepseek/.test(m)) return "deepseek";
-  return "openai";
-}
-
-const CHEAPER_MODEL: Record<string, string> = {
-  // OpenAI
-  "gpt-5.6": "gpt-5.6-terra",
-  "gpt-5.6-sol": "gpt-5.6-terra",
-  "gpt-5.6-terra": "gpt-5.6-luna",
-  "gpt-5.6-luna": "gpt-5.4-mini",
-  "gpt-5.5": "gpt-5.4-mini",
-  "gpt-5.4": "gpt-5.4-mini",
-  "gpt-5.4-mini": "gpt-5.4-nano",
-  "gpt-4o": "gpt-5.4-mini",
-  "gpt-4.1": "gpt-4.1-mini",
-  "o1": "o1-mini",
-  "o1-preview": "o1-mini",
-  // (no o3-mini → o4-mini: identically priced in MODEL_PRICE_PER_M, so it saves nothing)
+/** Every arrow must land on a strictly cheaper list price than the row the key is actually served
+ *  as (test/usage-budget.test.ts checks this against MODEL_PRICE_PER_M).  Exported for that test. */
+export const CHEAPER_MODEL: Record<string, string> = {
+  // OpenAI — 2026-11-04: four classes (Astra, Sol, Terra, Luna).  Downgrade chain:
+  //   gpt-6-astra -> gpt-6.1-sol -> gpt-6.1-terra -> gpt-6-luna (no further OpenAI downgrade)
+  // The chain stops at luna: there is no cheaper OpenAI tier left in the catalog, so any further
+  // downgrade attempt falls out to a skip/cycle-skip rather than a bogus tier.  Retired and
+  // historical ids (gpt-6-astra-pro, gpt-5.6-sol/luna, and the 2026-09-18 removals) stay keyed so
+  // a persisted older selection downgrades to a valid, cheaper catalog row instead of failing closed.
+  "gpt-6-astra": "gpt-6.1-sol",
+  "gpt-6.1-sol": "gpt-6.1-terra",
+  "gpt-6.1-terra": "gpt-6-luna",
+  "gpt-6-luna": "gpt-6-luna", // already at the bottom of the curated OpenAI chain
+  "gpt-6-astra-pro": "gpt-6.1-sol",
+  "gpt-5.6": "gpt-6.1-terra",
+  "gpt-5.6-sol": "gpt-6.1-terra",
+  "gpt-5.6-terra": "gpt-6-luna",
+  "gpt-5.6-luna": "gpt-6-luna",
+  "gpt-5.5": "gpt-6-luna",
+  "gpt-5.4": "gpt-6-luna",
+  "gpt-mini-latest": "gpt-6-luna",
+  "gpt-5.4-mini": "gpt-6-luna",
+  "gpt-5.4-nano": "gpt-6-luna",
+  "gpt-4o": "gpt-6-luna",
+  "gpt-4.1": "gpt-6-luna",
+  "o1": "gpt-6-luna",
+  "o1-preview": "gpt-6-luna",
   // Anthropic
-  "claude-fable-5": "claude-sonnet-5",
-  "claude-opus-5": "claude-sonnet-5",
-  "claude-sonnet-5": "claude-haiku-4.5",
-  "claude-opus-4-8": "claude-sonnet-4-6",
-  "claude-sonnet-4-6": "claude-haiku-4-5",
-  // xAI
-  "grok-4.5": "grok-build-latest",
-  "grok-4.3": "grok-build-0.1",
+  "claude-fable-latest": "claude-sonnet-latest",
+  "claude-opus-latest": "claude-sonnet-latest",
+  "claude-sonnet-latest": "claude-haiku-latest",
+  "claude-fable-5": "claude-sonnet-latest",
+  "claude-opus-5": "claude-sonnet-latest",
+  "claude-sonnet-5": "claude-haiku-latest",
+  "claude-opus-4-8": "claude-sonnet-latest",
+  "claude-sonnet-4-6": "claude-haiku-latest",
+  // xAI: no entry.  grok-latest is the only xAI catalog row; the old target grok-build-0.1 left the
+  // catalog 2026-09-18, so an over-budget Grok run skips rather than "downgrading" to a removed id.
+  // Meta / Muse (OpenRouter).  The Code CLI-only Wonder contributor ids have no downgrade: their
+  // cost is unknown and their route is not the API route a cheaper model would use.
+  // muse-spark-1.3-contributor ($0.10/$0.20) has no entry either: it is the cheapest Muse row.
+  // PRIVACY RULE: an automatic downgrade never lands on a -contributor row (Meta trains on those
+  // prompts and completions) unless the source is itself a contributor row — no owner consent is
+  // asked here.  The retired non-contributor Muse rows (muse-spark-1.3, muse-glimmer-30b,
+  // muse-wonder-1.0) therefore have NO entry: no non-contributor Muse row is offered, so over
+  // budget means skip, as for Grok.  test/usage-budget.test.ts enforces the rule over the map.
+  // MiniMax
+  "minimax-m3": "minimax-m3.1-flash",
   // Gemini
   "gemini-pro-latest": "gemini-flash-latest",
   "gemini-flash-latest": "gemini-flash-lite-latest",
-  "gemini-3.1-pro-preview": "gemini-3.5-flash",
-  "gemini-3.5-flash": "gemini-3.1-flash-lite",
-  "gemini-2.5-pro": "gemini-2.5-flash",
-  "gemini-2.5-flash": "gemini-2.5-flash-lite",
-  // Mistral
+  "gemini-3.1-pro-preview": "gemini-flash-latest",
+  "gemini-3.7-flash": "gemini-flash-lite-latest",
+  "gemini-3.6-flash": "gemini-flash-lite-latest",
+  "gemini-3.5-flash": "gemini-flash-lite-latest",
+  "gemini-2.5-pro": "gemini-flash-latest",
+  "gemini-2.5-flash": "gemini-flash-lite-latest",
+  // Mistral.  Large 4 ($0.70/$2.10) is CHEAPER than Medium 3.5 ($1.50/$7.50), so Large goes
+  // straight to Small ($0.15/$0.60); Medium also goes to Small.
+  "mistral-large-latest": "mistral-small-latest",
   "mistral-medium-latest": "mistral-small-latest",
-  "mistral-large-2512": "mistral-medium-3-5",
+  "mistral-large-2512": "mistral-small-latest",
   "mistral-medium-3-5": "mistral-small-latest",
-  "mistral-large": "mistral-medium",
-  "mistral-medium": "mistral-small",
+  "mistral-large": "mistral-small-latest",
+  "mistral-medium": "mistral-small-latest",
   // DeepSeek
-  "deepseek-v4-pro": "deepseek-v4-flash",
-  "deepseek-reasoner": "deepseek-v4-flash",
+  "deepseek-pro-latest": "deepseek-flash-latest",
+  "deepseek-r1": "deepseek-flash-latest",
+  "deepseek-v4-pro": "deepseek-flash-latest",
+  "deepseek-reasoner": "deepseek-flash-latest",
 };
+
+// Owner rule 2026-09-24 (PR #3705 review): Claude Opus 5.5 never downgrades on budget
+// exhaustion -- the model chosen is the model used. Blocked up front so neither an exact
+// tier entry, the displaySlug fallback ("claude-opus-latest"), nor the versioned-prefix
+// fallback can route Opus 5.5 to Sonnet.
+const NO_DOWNGRADE_OPUS_55 = /^claude-opus-5[-.]5(?:$|[-.:_])/;
 
 /** A cheaper model in the same family, or undefined if none is known. */
 export function cheaperModel(model: string | null | undefined): string | undefined {
   if (!model) return undefined;
-  const parts = model.toLowerCase().split("/");
+  const raw = model.trim();
+  const parts = raw.toLowerCase().replace(/^~/, "").split("/");
   const prefix = parts.length > 1 ? parts.slice(0, -1).join("/") + "/" : "";
-  const key = parts[parts.length - 1];
+  const rawKey = parts[parts.length - 1];
+  if (NO_DOWNGRADE_OPUS_55.test(rawKey)) return undefined;
+  const entry = catalogEntryFor(raw);
+  // Keep explicitly configured historical tiers; resolve new catalog aliases before prefix fallback.
+  const key = CHEAPER_MODEL[rawKey] ? rawKey : (entry?.displaySlug ?? rawKey).toLowerCase();
 
   let cheaper: string | undefined;
   if (CHEAPER_MODEL[key]) {
@@ -440,7 +501,7 @@ export async function evaluateBudgetForRun(
     if (!usageBudgetEnforceEnabled() || !usageMonitorEnabled()) return NO_DECISION;
     const status = deps.status ?? (await getBudgetStatusCached({ fetchImpl: deps.fetchImpl }));
     if (!status) return NO_DECISION; // unknown → fail-open
-    return computeBudgetDecision(policy, status);
+    return computeBudgetDecision(policy, status, modelCredentialService(resolveOpenAiModel(policy), userId));
   } catch {
     return NO_DECISION; // fail-open
   }
@@ -456,7 +517,8 @@ export async function evaluateBudgetForRun(
  */
 function computeBudgetDecision(
   policy: { llmModel?: string | null; redTeamLlmModel?: string | null },
-  status: BudgetStatus
+  status: BudgetStatus,
+  primaryProvider: string
 ): BudgetRunDecision {
   // Resolve the models that will ACTUALLY serve this run, matching resolveLlmEndpoint. NO MODEL
   // DEFAULTS (owner directive 2026-07-07): both resolve to the user's explicit choices, or "" when
@@ -467,27 +529,10 @@ function computeBudgetDecision(
   if (!greenModel) return NO_DECISION;
   const redModel = policy.redTeamLlmModel?.trim() || "";
 
-  // Universal OpenRouter (#1703): strategy LLM spend is booked as provider "openrouter", while
-  // model ids remain family-native (gpt-*, claude-*, …). Prefer openrouter status when present;
-  // fall back to model-family name for older multi-provider monitor shapes. Summary.overBudget is
-  // only a fallback when NEITHER openrouter NOR the model family appear in the provider list —
-  // never treat alpaca/etc. exceeded as an LLM skip.
+  // Enforce only the provider selected by this user's actual credentials.  An unrelated
+  // provider's row or aggregate summary cannot make this run exceed its budget.
   const statusByProvider = new Map(status.providers.map((p) => [p.name.toLowerCase(), p.status]));
-  const familyProvider = providerForModel(greenModel);
-  let primaryProvider = familyProvider;
-  let primaryStatus = statusByProvider.get(familyProvider) ?? "ok";
-  if (statusByProvider.has("openrouter")) {
-    primaryProvider = "openrouter";
-    primaryStatus = statusByProvider.get("openrouter") ?? "ok";
-  } else if (!statusByProvider.has(familyProvider)) {
-    if (status.summary.overBudget) {
-      primaryProvider = "openrouter";
-      primaryStatus = "exceeded";
-    } else if (status.summary.warning) {
-      primaryProvider = "openrouter";
-      primaryStatus = "warning";
-    }
-  }
+  const primaryStatus = statusByProvider.get(primaryProvider) ?? "ok";
 
   if (primaryStatus !== "exceeded" && primaryStatus !== "warning") return NO_DECISION;
 
@@ -536,7 +581,7 @@ export async function previewBudgetDecision(
     if (!usageMonitorEnabled()) return NO_DECISION;
     const status = deps.status ?? (await getBudgetStatusCached({ fetchImpl: deps.fetchImpl }));
     if (!status) return NO_DECISION;
-    return computeBudgetDecision(policy, status);
+    return computeBudgetDecision(policy, status, modelCredentialService(resolveOpenAiModel(policy), userId));
   } catch {
     return NO_DECISION;
   }

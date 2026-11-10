@@ -15,6 +15,7 @@
 import { getPolicy, listUsers, listWatchlistSymbols, resolveAlpacaMarketData } from "../db";
 import { fetchDailyOHLC } from "../history";
 import { normalizeSymbol } from "../money";
+import { serverKnobBool } from "../server-knobs";
 import { submitMaterialEvent, triggerEngineEnabled } from "../triggers";
 
 const MAX_BACKOFF_MS = 60_000;
@@ -133,7 +134,8 @@ const state: StreamState =
   (globalForStream.__alpacaPriceStream = { started: false, closing: false, backoffMs: 1000, symbolToUsers: new Map(), watch: new Map() });
 
 export function alpacaPriceEventsEnabled(): boolean {
-  return ["1", "true", "on", "yes"].includes(String(process.env.STREAMS_ALPACA_PRICE_EVENTS_ENABLED ?? "").trim().toLowerCase());
+  // Server knob: Admin > Operations DB override > STREAMS_ALPACA_PRICE_EVENTS_ENABLED env > off.
+  return serverKnobBool("STREAMS_ALPACA_PRICE_EVENTS_ENABLED");
 }
 
 function maxSymbols(): number {
@@ -173,6 +175,12 @@ export function startAlpacaPriceEventProducer(): void {
 
 function connect(key: string, secret: string, symbols: string[]): void {
   if (state.closing) return;
+  if (!alpacaPriceEventsEnabled()) {
+    // Server-knob park: keep the single reconnect chain alive as a slow poll (capped by
+    // MAX_BACKOFF_MS) so flipping the knob back on resumes without a redeploy.
+    scheduleReconnect(key, secret, symbols);
+    return;
+  }
   let ws: WebSocket;
   try {
     ws = new WebSocket(dataWsUrl());
@@ -191,6 +199,16 @@ function connect(key: string, secret: string, symbols: string[]): void {
   };
 
   ws.onmessage = (event: MessageEvent) => {
+    if (!alpacaPriceEventsEnabled()) {
+      // Server-knob park: close on the first message after a flip off; onclose reconnects into
+      // the parked poll in connect().
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
     let payload: unknown;
     try {
       const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);

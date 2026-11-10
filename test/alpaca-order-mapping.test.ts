@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fromAlpacaSymbol, mapAlpacaOrder, mapAlpacaOrderType, parseAlpacaPosition, toAlpacaSymbol } from "../src/lib/alpaca";
+import { fromAlpacaSymbol, mapAlpacaOrder, mapAlpacaOrderType, mapAlpacaOrderTypeWrite, mcpWriteFailureAllowsRestFallback, parseAlpacaPosition, toAlpacaSymbol } from "../src/lib/alpaca";
 
 describe("mapAlpacaOrderType", () => {
   it("maps Alpaca raw order types to our OrderType union (no leaked raw values)", () => {
@@ -10,10 +10,40 @@ describe("mapAlpacaOrderType", () => {
     expect(mapAlpacaOrderType("trailing_stop")).toBe("stop_market");
   });
 
+  it("maps our stop_market union to Alpaca wire type stop on WRITE and keeps stop_limit", () => {
+    expect(mapAlpacaOrderTypeWrite("stop_market")).toBe("stop");
+    expect(mapAlpacaOrderTypeWrite("stop_limit")).toBe("stop_limit");
+    expect(mapAlpacaOrderTypeWrite("market")).toBe("market");
+    expect(mapAlpacaOrderTypeWrite("limit")).toBe("limit");
+  });
+
   it("falls back to market for unknown/absent types instead of leaking", () => {
     expect(mapAlpacaOrderType("bracket")).toBe("market");
     expect(mapAlpacaOrderType(undefined)).toBe("market");
     expect(mapAlpacaOrderType(null)).toBe("market");
+  });
+});
+
+describe("mcpWriteFailureAllowsRestFallback", () => {
+  it("allows REST fallback only for definite tool-not-found / 4xx-before-send", () => {
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP -32601 Method not found"))).toBe(true);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("unknown tool place_market_order"))).toBe(true);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 404"))).toBe(true);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 400"))).toBe(true);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 401"))).toBe(true);
+  });
+
+  it("refuses REST fallback for timeout, abort, 5xx, 409, and network errors", () => {
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 500"))).toBe(false);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 409"))).toBe(false);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("Alpaca MCP HTTP 429"))).toBe(false);
+    const timeout = new Error("The operation was aborted due to timeout");
+    timeout.name = "TimeoutError";
+    expect(mcpWriteFailureAllowsRestFallback(timeout)).toBe(false);
+    const abort = new Error("This operation was aborted");
+    abort.name = "AbortError";
+    expect(mcpWriteFailureAllowsRestFallback(abort)).toBe(false);
+    expect(mcpWriteFailureAllowsRestFallback(new Error("fetch failed"))).toBe(false);
   });
 });
 

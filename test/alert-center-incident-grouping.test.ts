@@ -126,4 +126,44 @@ describe("Alert Center incident grouping", () => {
 
     expect(rows.map((row) => row.event.id)).toEqual(["newer", "older"]);
   });
+
+  it("collapses congress.trade:sse flaps and same-lane title variants into one row (#2550)", async () => {
+    const { buildRows } = await load();
+    const rows = buildRows(
+      [
+        providerAlert({
+          id: "sse-1",
+          createdAt: "2026-08-06T00:00:00.000Z",
+          title: "congress.trade:sse connection failed",
+          payload: { service: "congress.trade:sse" },
+        }),
+        providerAlert({
+          id: "sse-2",
+          createdAt: "2026-08-06T06:00:00.000Z",
+          title: "congress.trade:sse connection failed",
+          payload: { service: "congress.trade:sse" },
+        }),
+        providerAlert({
+          id: "ct-1",
+          createdAt: "2026-08-06T01:00:00.000Z",
+          title: "congress.trade connection failed",
+          payload: { service: "congress.trade" },
+        }),
+        providerAlert({
+          id: "ct-2",
+          createdAt: "2026-08-06T07:00:00.000Z",
+          title: "congress.trade connection failed: timeout",
+          payload: { service: "congress.trade" },
+        }),
+      ],
+      {},
+      []
+    );
+
+    expect(rows).toHaveLength(2);
+    const sse = rows.find((row) => row.event.payload && (row.event.payload as { service?: string }).service === "congress.trade:sse");
+    const ct = rows.find((row) => row.event.payload && (row.event.payload as { service?: string }).service === "congress.trade");
+    expect(sse?.repeatCount).toBe(2);
+    expect(ct?.repeatCount).toBe(2);
+  });
 });

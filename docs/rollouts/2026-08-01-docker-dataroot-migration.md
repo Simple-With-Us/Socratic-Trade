@@ -2,7 +2,7 @@
 
 ## Context & objective
 
-Deploys on the Oracle prod box (141.148.182.224) kept wedging on ENOSPC —
+Deploys on the Oracle prod box (<ORACLE_IP_RETIRED>) kept wedging on ENOSPC —
 two incidents in one day (06:55 and 23:13 UTC, both `webpack.cache` write
 failures mid-build, the second leaving a zombie deployment that blocked the
 queue). Root disk was 73-92% with ~25 GB of Docker state on it. Owner

@@ -11,6 +11,7 @@ import {
   splitTextBySecItems,
   tradeHighlightChunksFromText
 } from "../src/lib/rag/document-summarizer";
+import { hashContent } from "../src/lib/rag/chunk";
 import { getDb } from "../src/lib/db";
 
 describe("Document Abstracts & Summarizer", () => {
@@ -70,6 +71,26 @@ describe("Document Abstracts & Summarizer", () => {
     expect(joined).toMatch(/litigation|investigation|impairment|risk/);
     // At least one highlight is tagged with a section label
     expect(chunks.some((c) => c.text.startsWith("["))).toBe(true);
+    expect(chunks.every((c) => !c.id.startsWith("hl:"))).toBe(true);
+  });
+
+  it("uses sourceChunks content_hash instead of synthetic hl: ids when known", () => {
+    const mdna =
+      "We raised full-year revenue guidance to 12% growth and expanded operating margins by 180 basis points year-over-year.";
+    const hash = hashContent(mdna);
+    const chunks = tradeHighlightChunksFromText("ignored", {
+      maxChunks: 1,
+      formHint: "10-K",
+      sections: [
+        {
+          itemCode: "7",
+          itemTitle: "Management's Discussion and Analysis",
+          text: mdna
+        }
+      ],
+      sourceChunks: [{ content_hash: hash, text: mdna, itemCode: "7", section: "7. Management's Discussion and Analysis" }]
+    });
+    expect(chunks[0]?.id).toBe(hash);
   });
 
   it("splitTextBySecItems finds 8-K item boundaries", () => {
@@ -249,5 +270,61 @@ describe("Document Abstracts & Summarizer", () => {
     const row = getDocumentAbstractByAccession(accession);
     expect(row?.modelUsed).toBe(DOCUMENT_HIGHLIGHT_MODEL);
     expect(row?.summaryText).toMatch(/35%|guidance|backlog/i);
+  });
+
+  it("model-stamp refresh does not wipe a later filing FTS row that reused a summarizer rowid", async () => {
+    const { insertDocumentChunkFts } = await import("../src/lib/db-learning");
+    const accession = "0000789019-24-000088";
+    const abstractId = `abstract:earnings-summary:MSFT:${accession}`;
+    await generateAndStoreDocumentAbstract({
+      ticker: "MSFT",
+      accessionOrEventId: accession,
+      sourceType: "earnings-summary",
+      headline: "MSFT stamp",
+      chunks: [
+        { id: "c1", text: "Azure cloud growth accelerated to 31% YoY with strong demand." },
+        { id: "c2", text: "Capital expenditure increased for AI infrastructure buildout." }
+      ]
+    });
+    getDb()
+      .prepare(
+        "UPDATE document_abstracts SET model_used = ? WHERE accession_or_event_id = ?"
+      )
+      .run("document-synthesizer-v1", accession);
+
+    insertDocumentChunkFts(
+      "victim-filing-hash",
+      "AAPL",
+      "sec-edgar",
+      "0000320193-26-000088",
+      "Item 1A Risk Factors written after the abstract FTS rows."
+    );
+
+    await generateAndStoreDocumentAbstract({
+      ticker: "MSFT",
+      accessionOrEventId: accession,
+      sourceType: "earnings-summary",
+      headline: "MSFT stamp",
+      chunks: [
+        { id: "c1", text: "Azure cloud growth accelerated to 31% YoY with strong demand." },
+        { id: "c2", text: "Capital expenditure increased for AI infrastructure buildout." }
+      ]
+    });
+
+    const victim = getDb()
+      .prepare("SELECT text FROM document_chunks_fts WHERE content_hash = ?")
+      .get("victim-filing-hash") as { text: string } | undefined;
+    expect(victim?.text).toMatch(/Risk Factors/);
+    const orphanIndex = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts_index
+         WHERE source = 'document-summarizer' AND accession = ?
+           AND content_hash NOT IN (
+             SELECT content_hash FROM document_chunks_fts
+             WHERE source = 'document-summarizer' AND accession = ?
+           )`
+      )
+      .get(abstractId, abstractId) as { n: number };
+    expect(orphanIndex.n).toBe(0);
   });
 });

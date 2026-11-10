@@ -4,9 +4,11 @@ import {
   asRecord,
   normalizeCoolifyResources,
   normalizeHetznerServerResponse,
+  readNonNegativeNumber,
   readPositiveNumber,
   readText,
 } from "@/lib/server-metrics-shapes";
+import { getActionRunners } from "@/lib/server-metrics-runners";
 import {
   SERVER_METRICS_CACHE_TTL_MS,
   SERVER_METRICS_FAILURE_RETRY_MS,
@@ -16,6 +18,8 @@ import {
   type ServerMetricsConfigurationState,
   type ServerMetricsMetricValue,
   type ServerMetricsPayload,
+  type ServerMetricsResourcesObservation,
+  type ServerMetricsUnobservedHostFact,
 } from "@/lib/server-metrics-runtime";
 import os from "os";
 import fs from "fs";
@@ -46,7 +50,7 @@ export async function GET(request: Request) {
   ].some(Boolean);
 
   if (!isRuntimeProduction && !hasAnyProviderConfiguration) {
-    return jsonResponse(localPayload(configuration.states));
+    return jsonResponse(await localPayload(configuration.states));
   }
 
   const cacheKey = [
@@ -138,58 +142,9 @@ function getDiskStats(): { diskTotalBytes?: number; diskFreeBytes?: number; disk
   return {};
 }
 
-async function getActionRunners(): Promise<Array<{ uuid: string; name: string; type: string; status: string }>> {
-  const token = readText(process.env.GH_TOKEN)
-    || readText(process.env.GITHUB_TOKEN)
-    || readText(process.env.GITHUB_MCP_TOKEN);
-
-  const defaultRunners = [
-    { uuid: "runner-socratic-ci", name: "socratic-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-    { uuid: "runner-socratic-ci-2", name: "socratic-ci-2 (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-    { uuid: "runner-congress-ci", name: "congress-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-    { uuid: "runner-shared-ci", name: "shared-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-    { uuid: "runner-usage-ci", name: "usage-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-    { uuid: "runner-github-runner", name: "github-runner (prod host)", type: "action-runner", status: "running:healthy" },
-  ];
-
-  if (!token) return defaultRunners;
-
-  try {
-    const response = await fetch("https://api.github.com/repos/jaywedgeworth22/Socratic.Trade/actions/runners", {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "User-Agent": "Socratic.Trade infrastructure monitor",
-      },
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!response.ok) return defaultRunners;
-    const json: unknown = await response.json().catch(() => undefined);
-    const rawRunners = asRecord(json)?.runners;
-    if (!Array.isArray(rawRunners)) return defaultRunners;
-
-    const liveRunners: Array<{ uuid: string; name: string; type: string; status: string }> = [];
-    for (const item of rawRunners) {
-      const rec = asRecord(item);
-      const name = readText(rec?.name);
-      const status = readText(rec?.status);
-      if (name) {
-        const isOnline = status === "online";
-        liveRunners.push({
-          uuid: `runner-${name}`,
-          name: `${name} (Hetzner runner)`,
-          type: "action-runner",
-          status: isOnline ? "running:healthy" : "offline:degraded",
-        });
-      }
-    }
-    return liveRunners.length > 0 ? liveRunners : defaultRunners;
-  } catch {
-    return defaultRunners;
-  }
-}
-
-function localPayload(configuration: ServerMetricsPayload["configuration"]): ServerMetricsPayload {
+async function localPayload(
+  configuration: ServerMetricsPayload["configuration"],
+): Promise<ServerMetricsPayload> {
   return {
     isProd: false,
     usesLocalHost: true,
@@ -199,7 +154,6 @@ function localPayload(configuration: ServerMetricsPayload["configuration"]): Ser
     configuration,
     hostInfo: {
       name: os.hostname(),
-      status: "running",
       os: `${os.type()} ${os.release()} (${os.arch()})`,
       cpus: os.cpus().length,
       memoryTotalBytes: os.totalmem(),
@@ -208,14 +162,19 @@ function localPayload(configuration: ServerMetricsPayload["configuration"]): Ser
       loadAvg: os.loadavg(),
       ...getDiskStats(),
     },
-    resources: [
-      { uuid: "runner-socratic-ci", name: "socratic-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-      { uuid: "runner-socratic-ci-2", name: "socratic-ci-2 (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-      { uuid: "runner-congress-ci", name: "congress-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-      { uuid: "runner-shared-ci", name: "shared-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-      { uuid: "runner-usage-ci", name: "usage-ci (ci-cpx32)", type: "action-runner", status: "running:healthy" },
-      { uuid: "runner-github-runner", name: "github-runner (prod host)", type: "action-runner", status: "running:healthy" },
-    ],
+    unobservedHostFacts: [],
+    // Coolify is never queried on this path, so the empty list below is the ABSENCE of a
+    // measurement, not a measurement of zero. The six invented "action-runner" rows that used
+    // to live here described machines that never existed.
+    resources: [],
+    resourcesObservation: {
+      state: "unavailable",
+      reason: "coolify-not-configured",
+      detail: "Coolify was not queried on this runtime, so the running services on this host "
+        + "are unknown.  This is a local development runtime with no infrastructure "
+        + "provider credentials configured.",
+    },
+    actionRunners: await getActionRunners(),
     metrics: emptyMetrics(),
     asOf: new Date().toISOString(),
   };
@@ -240,6 +199,7 @@ async function refreshRemoteMetrics(
       ...previous.payload,
       degraded: true,
       stale: true,
+      staleScope: "all",
       error: "Infrastructure providers are unavailable; showing the last successful snapshot.",
       warnings: uniqueStrings([
         ...(previous.payload.warnings ?? []),
@@ -267,6 +227,9 @@ async function refreshRemoteMetrics(
       asOf: previous.payload.asOf,
       degraded: true,
       stale: true,
+      // Only the metric SERIES is stale here; host facts, services and runners in this payload
+      // are current. One undifferentiated STALE chip made readers discount the fresh half too.
+      staleScope: "metrics",
       error: "Hetzner metrics are unavailable; showing the last successful metric series.",
       warnings: uniqueStrings([
         ...(result.payload.warnings ?? []),
@@ -331,7 +294,7 @@ async function loadRemoteMetrics(
   ) {
     const headers = {
       Authorization: `Bearer ${configuration.coolifyToken}`,
-      "User-Agent": "Socratic.Trade infrastructure monitor",
+      "User-Agent": "Socratic-Trade infrastructure monitor",
       Accept: "application/json",
     };
     const serverUrl = `https://host.jays.services/api/v1/servers/${configuration.coolifyServerUuid}`;
@@ -406,26 +369,43 @@ async function loadRemoteMetrics(
   );
 
   const actionRunners = await getActionRunners();
-  const allResources = [...normalizedResources.resources, ...actionRunners];
 
   const hostInfo = compactRecord({
-    name: normalizedHetzner.server.name ?? readText(coolifyServer?.name),
+    name: normalizedHetzner.server.name ?? coolifyHostName(coolifyServer),
     status: normalizedHetzner.server.status,
     os: readText(coolifyMeta?.os),
     cpus: coreCount,
     memoryTotalBytes: normalizedHetzner.server.memoryGb
       ? normalizedHetzner.server.memoryGb * 1024 * 1024 * 1024
       : readPositiveNumber(coolifyMeta?.memory_bytes),
-    memoryFreeBytes: readPositiveNumber(coolifyMeta?.memory_free_bytes),
-    uptimeSeconds: readPositiveNumber(coolifyMeta?.uptime_seconds),
+    // Non-negative, not positive: 0 bytes free is an active OOM condition and must not be
+    // laundered into "Utilization unavailable".
+    memoryFreeBytes: readNonNegativeNumber(coolifyMeta?.memory_free_bytes),
+    uptimeSeconds: readNonNegativeNumber(coolifyMeta?.uptime_seconds),
     serverType: normalizedHetzner.server.serverType,
     location: normalizedHetzner.server.location,
     ip: normalizedHetzner.server.ip,
   });
   if (!hostInfo.status) hostInfo.status = "unknown";
 
+  const resourcesObservation = describeResourcesObservation(
+    configuration.states.coolify,
+    coolifyResourcesFetch.payload !== undefined,
+  );
+
+  const unobservedHostFacts = describeUnobservedHostFacts({
+    coolifyState: configuration.states.coolify,
+    coolifyRead: coolifyServerFetch.payload !== undefined,
+    hostInfo,
+  });
+
   const finalWarnings = uniqueStrings(warnings);
-  const degraded = finalWarnings.length > 0;
+  // A runner read that FAILED is a provider error like any other. A runner read that was never
+  // attempted because no token is configured is a known gap rendered in place, not a fault, so
+  // it must not flip the header chip to DEGRADED forever.
+  const runnersErrored = actionRunners.state === "unavailable"
+    && actionRunners.reason !== "no-github-token";
+  const degraded = finalWarnings.length > 0 || runnersErrored;
   return {
     attemptedProviderReads,
     successfulProviderReads,
@@ -437,8 +417,15 @@ async function loadRemoteMetrics(
       stale: false,
       cacheAgeSeconds: 0,
       configuration: configuration.states,
+      monitoredTarget: compactRecord({
+        hetznerServerId: configuration.hetznerServerId,
+        coolifyServerUuid: configuration.coolifyServerUuid,
+      }) as ServerMetricsPayload["monitoredTarget"],
       hostInfo,
-      resources: allResources,
+      unobservedHostFacts,
+      resources: normalizedResources.resources,
+      resourcesObservation,
+      actionRunners,
       metrics: parsedMetrics.metrics,
       asOf: new Date(refreshedAt).toISOString(),
       ...(providerErrors.length > 0
@@ -447,6 +434,135 @@ async function loadRemoteMetrics(
       ...(finalWarnings.length > 0 ? { warnings: finalWarnings } : {}),
     },
   };
+}
+
+/**
+ * Coolify's own host entry on this box is named `localhost` with ip `host.docker.internal`
+ * (it is Coolify's self-reference, not a description of the monitored machine). Falling back to
+ * it made a Hetzner-metadata outage render as "Host Server: localhost" on the production admin
+ * panel — a plausible hostname standing in for a real failure.
+ */
+const COOLIFY_SELF_REFERENTIAL_HOST_NAMES = new Set(["localhost", "host.docker.internal"]);
+
+function coolifyHostName(coolifyServer: Record<string, unknown> | undefined): string | undefined {
+  const name = readText(coolifyServer?.name);
+  if (!name || COOLIFY_SELF_REFERENTIAL_HOST_NAMES.has(name.toLowerCase())) return undefined;
+  return name;
+}
+
+/**
+ * Decide whether the service list is a measurement or the absence of one.
+ *
+ * An empty `resources` array is produced identically by "Coolify is not configured", "the
+ * Coolify read failed" and "Coolify answered zero", and the card used to render all three as
+ * the confident sentence "coolify reported no services for this server". Only the third case
+ * is a measurement. The failed-read case is the one that matters: when Hetzner succeeds and
+ * only this read fails, `successfulProviderReads > 0`, so neither stale-cache branch fires and
+ * an otherwise fresh-looking page would assert an empty measurement it never took.
+ */
+function describeResourcesObservation(
+  coolifyState: ServerMetricsConfigurationState,
+  coolifyResourcesRead: boolean,
+): ServerMetricsResourcesObservation {
+  if (coolifyState === "missing") {
+    return {
+      state: "unavailable",
+      reason: "coolify-not-configured",
+      detail: "Coolify is not configured for this deployment, so no service list was "
+        + "requested.  Coolify is the only source wired for running services and containers.",
+    };
+  }
+  if (coolifyState === "partial") {
+    return {
+      state: "unavailable",
+      reason: "coolify-partially-configured",
+      detail: "Coolify configuration is incomplete, so no service list was requested.  Both "
+        + "an API token and a server UUID are required before this panel will query it.",
+    };
+  }
+  if (!coolifyResourcesRead) {
+    return {
+      state: "unavailable",
+      reason: "coolify-request-failed",
+      detail: "The Coolify resources endpoint could not be read on this refresh, so the "
+        + "services running on this host are unknown.  The provider error is listed in the "
+        + "warnings above.",
+    };
+  }
+  return { state: "known" };
+}
+
+/**
+ * Explain, per field, why a host fact this panel renders is blank.
+ *
+ * Memory utilization, uptime and OS come only from `coolifyServer.server_metadata`, which is
+ * `null` on the current Hetzner box because Coolify metrics collection is disabled for that
+ * server. Host filesystem capacity has no source at all on the remote path — Hetzner's `disk`
+ * metric series is I/O bandwidth, not capacity. Both used to render as a bare "Unavailable",
+ * which reads as an intermittent outage rather than a wiring gap.
+ */
+function describeUnobservedHostFacts(input: {
+  coolifyState: ServerMetricsConfigurationState;
+  coolifyRead: boolean;
+  hostInfo: Record<string, unknown>;
+}): ServerMetricsUnobservedHostFact[] {
+  const facts: ServerMetricsUnobservedHostFact[] = [];
+
+  const coolifyGap = (): { reason: ServerMetricsUnobservedHostFact["reason"]; why: string } => {
+    if (input.coolifyState !== "configured") {
+      return {
+        reason: "coolify-not-configured",
+        why: "Coolify is not fully configured for this deployment, and it is the only source "
+          + "wired for this value.",
+      };
+    }
+    if (!input.coolifyRead) {
+      return {
+        reason: "coolify-unavailable",
+        why: "The Coolify server record could not be read on this refresh, and it is the only "
+          + "source wired for this value.",
+      };
+    }
+    return {
+      reason: "coolify-server-metadata-absent",
+      why: "Coolify returned no server metadata for this host, which is what happens when its "
+        + "metrics collection is disabled for the server.",
+    };
+  };
+
+  if (input.hostInfo.memoryFreeBytes === undefined) {
+    const gap = coolifyGap();
+    facts.push({
+      field: "memoryUtilization",
+      reason: gap.reason,
+      detail: `Memory utilization is not measured.  ${gap.why}`,
+    });
+  }
+  if (input.hostInfo.uptimeSeconds === undefined) {
+    const gap = coolifyGap();
+    facts.push({
+      field: "uptime",
+      reason: gap.reason,
+      detail: `Host uptime is not measured.  ${gap.why}`,
+    });
+  }
+  if (input.hostInfo.os === undefined) {
+    const gap = coolifyGap();
+    facts.push({
+      field: "os",
+      reason: gap.reason,
+      detail: `The host operating system is not reported.  ${gap.why}`,
+    });
+  }
+  facts.push({
+    field: "diskCapacity",
+    reason: "not-collected-by-providers",
+    detail: "Host filesystem capacity is not collected by this panel.  Neither the Hetzner "
+      + "server API nor Coolify reports used and free disk for this host, and Hetzner's disk "
+      + "metric series measures I/O bandwidth rather than capacity.",
+  });
+
+  return facts;
 }
 
 function parseHetznerTimeSeries(timeSeries: unknown, coreCount: number | undefined): {
@@ -485,6 +601,15 @@ function parseHetznerTimeSeries(timeSeries: unknown, coreCount: number | undefin
     ?? "network.0.bandwidth.out";
 
   const rawCpu = getValues(cpuKey);
+  // UNVERIFIED TRANSFORM (flagged 2026-08-13, deliberately left unchanged).
+  // Every Hetzner CPU sample is divided by the core count before being plotted against a fixed
+  // yMax of 100. The only support for that is an uncited comment in Usage-Monitor claiming the
+  // series is an aggregate across cores; Hetzner documents `type=cpu` as percent of server CPU
+  // (0-100), which would make this an 8x under-report on this 8-core cx43 and keep the meter
+  // green through a saturation incident. Settling it needs one live sample, which needs the
+  // Hetzner token, so it was not guessed at here. See
+  // docs/rollouts/2026-08-13-honest-server-stats.md; the current behaviour is pinned by
+  // test/server-metrics.test.ts (raw 40, 4 cores, asserts 10).
   result.cpu = coreCount
     ? rawCpu.map((point) => ({ ...point, value: point.value / coreCount }))
     : [];
@@ -586,10 +711,14 @@ function uniqueStrings(values: string[]): string[] {
 
 function withCacheAge(payload: ServerMetricsPayload, now: number): ServerMetricsPayload {
   const asOf = Date.parse(payload.asOf);
-  return {
-    ...payload,
-    cacheAgeSeconds: Number.isFinite(asOf) ? Math.max(0, Math.floor((now - asOf) / 1000)) : 0,
-  };
+  // An unparseable timestamp means the age is genuinely unknown. Defaulting it to 0 presented
+  // a snapshot of unknown age as brand new, and the client hid the age suffix entirely.
+  if (!Number.isFinite(asOf)) {
+    const withoutAge: ServerMetricsPayload = { ...payload };
+    delete withoutAge.cacheAgeSeconds;
+    return withoutAge;
+  }
+  return { ...payload, cacheAgeSeconds: Math.max(0, Math.floor((now - asOf) / 1000)) };
 }
 
 function jsonResponse(payload: ServerMetricsPayload) {

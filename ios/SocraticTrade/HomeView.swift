@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct HomeView: View {
     @Binding var selectedTab: AppTab
@@ -10,8 +11,10 @@ struct HomeView: View {
             if readinessIncomplete {
                 ReadinessChecklistHero(
                     snapshot: snapshot,
-                    openSettings: { presentedSheet = .settings }
+                    openSettings: { presentedSheet = .settings },
+                    openGuardrails: { selectedTab = .guardrails }
                 )
+                .cardSpansAllColumns()
                 // Agent overview only during setup — once ready, ReadyHomeHero already
                 // shows account, state, and authority (duplicate card was pure noise).
                 AgentOverviewCard(snapshot: snapshot, showInlineReadiness: true)
@@ -19,41 +22,36 @@ struct HomeView: View {
                 ReadyHomeHero(snapshot: snapshot) {
                     selectedTab = .proposals
                 }
+                .cardSpansAllColumns()
             }
             StrategyControlsCard(snapshot: snapshot)
             PortfolioOverviewCard(snapshot: snapshot)
-            PerformanceOverviewCard(snapshot: snapshot)
+            PerformanceOverviewCard(snapshot: snapshot, selectedTab: $selectedTab)
+            DeskShortcutsCard(selectedTab: $selectedTab)
             ScheduleOverviewCard(snapshot: snapshot)
             HomeAttentionCard(snapshot: snapshot, selectedTab: $selectedTab)
         }
         .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    presentedSheet = .settings
-                } label: {
-                    Image(systemName: "person.crop.circle")
-                }
-                .accessibilityLabel("Account and settings")
-            }
-        }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .settings:
                 AccountSettingsView()
+                    .adaptiveWideSheet(phoneDetents: [.large])
             }
         }
     }
 }
 
-/// Incomplete setup: checklist hero with CTAs (Account & Settings / universe instructions).
+/// Incomplete setup: checklist hero with CTAs (Open Connections / Open Guardrails).
 private struct ReadinessChecklistHero: View {
     let snapshot: MobileSnapshot
     let openSettings: () -> Void
+    let openGuardrails: () -> Void
 
     private var needsAccount: Bool { !snapshot.readiness.hasAccount }
     private var needsUniverse: Bool { !snapshot.readiness.hasUniverse }
+    private var needsLlmKey: Bool { !(snapshot.readiness.hasLlmKey ?? true) }
 
     var body: some View {
         AppCard {
@@ -63,16 +61,16 @@ private struct ReadinessChecklistHero: View {
                         Circle()
                             .fill(AppPalette.accent.opacity(0.14))
                         Image(systemName: "checklist")
-                            .font(.title3.weight(.semibold))
+                            .font(.appTitle3.weight(.semibold))
                             .foregroundStyle(AppPalette.accent)
                     }
                     .frame(width: 44, height: 44)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Finish setup to trade")
-                            .font(.title3.weight(.bold))
-                        Text("Phone is a control remote — connect an account and symbol universe, then Run Once.")
-                            .font(.subheadline)
+                            .font(.appTitle3.weight(.bold))
+                        Text("Connect an account and a symbol universe, then tap Run Once.")
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -83,35 +81,74 @@ private struct ReadinessChecklistHero: View {
                         done: !needsAccount,
                         title: "Connect a broker account",
                         detail: needsAccount
-                            ? "Link Alpaca or Robinhood in the full desk, then select it here."
+                            ? DeskCopy.accountNeedsConnection
                             : (snapshot.readiness.activeConnectedAccount?.label ?? "Account ready")
                     )
                     ChecklistRow(
                         done: !needsUniverse,
                         title: "Add a symbol universe",
                         detail: needsUniverse
-                            ? "In Socratic.Trade console → Strategy, include an index or symbols."
+                            ? DeskCopy.universeNeedsIndex
                             : "Universe ready for strategy runs"
                     )
+                    if needsLlmKey {
+                        ChecklistRow(
+                            done: false,
+                            title: "Add an LLM API key",
+                            detail: "Use the website to provide an API key for the strategy agent."
+                        )
+                    }
                 }
 
                 if needsAccount {
-                    Button(action: openSettings) {
-                        Label("Account & Settings", systemImage: "person.crop.circle")
-                            .font(.body.weight(.semibold))
+                    Text("Broker connections must be configured on the website.")
+                        .font(.appBody)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ConsoleHandoffButton(
+                        title: DeskCopy.openConnectionsButton,
+                        systemImage: "link",
+                        url: ConsoleHandoff.connections
+                    )
+                } else if needsUniverse {
+                    Text(DeskCopy.universeRefreshAfterGuardrails)
+                        .font(.appCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(action: openGuardrails) {
+                        Label(DeskCopy.openGuardrailsButton, systemImage: "shield.checkered")
+                            .font(.appBody.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .frame(minHeight: 44)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(AppPalette.accent)
-                } else if needsUniverse {
-                    Text("Open the desktop console to edit Strategy universe (indices + extra symbols), then pull to refresh here.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
+    }
+}
+
+/// Opens a website console page that the phone cannot edit.  Those URLs are not AASA-claimed,
+/// so the tap leaves the app instead of looping back to a missing screen.
+private struct ConsoleHandoffButton: View {
+    @Environment(\.openURL) private var openURL
+    let title: String
+    let systemImage: String
+    let url: URL
+
+    var body: some View {
+        Button {
+            openURL(url)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.appBody.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .tint(AppPalette.accent)
+        .accessibilityHint("Opens the website in Safari")
     }
 }
 
@@ -124,12 +161,12 @@ private struct ChecklistRow: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: done ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(done ? AppPalette.positive : AppPalette.warning)
-                .font(.body.weight(.semibold))
+                .font(.appBody.weight(.semibold))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.appSubheadline.weight(.semibold))
                 Text(detail)
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -146,23 +183,21 @@ private struct ReadyHomeHero: View {
     let onReviewProposals: () -> Void
 
     private var usesLiveMetrics: Bool {
-        snapshot.readiness.activeConnectedAccount?.environment == "live"
+        AccountMetrics.usesLiveMetrics(environment: store.displayedActiveAccount(in: snapshot)?.environment)
     }
 
     private var openPnl: Double? {
-        guard let performance = snapshot.performance else { return nil }
-        return usesLiveMetrics ? performance.liveUnrealizedPnl : performance.paperUnrealizedPnl
+        let ledger = snapshot.performance.flatMap {
+            usesLiveMetrics ? $0.liveUnrealizedPnl : $0.paperUnrealizedPnl
+        }
+        return AccountMetrics.displayedUnrealized(positions: snapshot.positions, ledger: ledger)
     }
 
     private var pendingCount: Int { snapshot.pendingProposals.count }
 
-    private var stateColor: Color {
-        switch snapshot.readiness.systemState.lowercased() {
-        case "active": return AppPalette.positive
-        case "close_only", "liquidating": return AppPalette.warning
-        default: return AppPalette.negative
-        }
-    }
+    /// Console-shared run-state word — market-aware, so this pill can never claim
+    /// "Running" while the console says "Paused · market closed".
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -171,36 +206,46 @@ private struct ReadyHomeHero: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             // Paper-only badge — owner does not want "Live" called out (paper is still real capital).
-                            if snapshot.readiness.activeConnectedAccount?.environment.lowercased() == "paper" {
+                            if store.displayedActiveAccount(in: snapshot)?.environment.lowercased() == "paper" {
                                 StatusPill(
-                                    "PAPER",
-                                    color: AppPalette.accent.opacity(0.85),
+                                    DeskCopy.paperAccountWord,
+                                    color: AppPalette.accent.opacity(0.75),
                                     systemImage: "doc.text"
                                 )
                             }
-                            Text(snapshot.readiness.activeConnectedAccount?.label ?? "Ready")
-                                .font(.caption.weight(.semibold))
+                            Text(store.displayedActiveAccount(in: snapshot)?.label ?? "Ready")
+                                .font(.appCaption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                        Text(AppFormat.money(snapshot.portfolio?.totalMarketValue))
-                            .font(.largeTitle.weight(.bold))
-                            .foregroundStyle(AppPalette.accent)
-                            .minimumScaleFactor(0.7)
-                            .lineLimit(1)
+                        if snapshot.portfolio != nil {
+                            Text(AppFormat.money(snapshot.portfolio?.totalMarketValue))
+                                .font(.appLargeTitle.weight(.bold))
+                                .foregroundStyle(AppPalette.accent)
+                                .minimumScaleFactor(0.7)
+                                .lineLimit(1)
+                        } else {
+                            // A large-title em-dash reads as a stray bar when the broker
+                            // timed out.  Spell the wait instead.
+                            Text(DeskCopy.equityWaitingOnBroker)
+                                .font(.appTitle3.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .minimumScaleFactor(0.8)
+                                .lineLimit(2)
+                        }
                         Text("Equity")
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
                         StatusPill(
-                            snapshot.readiness.systemState.replacingOccurrences(of: "_", with: " ").capitalized,
-                            color: stateColor,
-                            systemImage: snapshot.readiness.systemState == "active" ? "bolt.fill" : "pause.fill"
+                            runState.rawValue,
+                            color: runState.pillColor,
+                            systemImage: runState.pillSystemImage
                         )
                         Text(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority))
-                            .font(.caption.weight(.medium))
+                            .font(.appCaption.weight(.medium))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -212,9 +257,8 @@ private struct ReadyHomeHero: View {
                         tint: pnlColor(openPnl)
                     )
                     MetricTile(
-                        title: "Proposals",
+                        title: "Proposals for Review",
                         value: "\(pendingCount)",
-                        detail: pendingCount == 0 ? "none waiting" : "Awaiting Review",
                         tint: pendingCount > 0 ? AppPalette.warning : AppPalette.accent
                     )
                 }
@@ -224,15 +268,25 @@ private struct ReadyHomeHero: View {
         }
     }
 
+    /// The hero spans every column, so its action would otherwise be drawn a full window wide.
+    /// The cap never binds on a phone — 520pt is wider than any phone card — so nothing about
+    /// the iPhone layout moves.
     @ViewBuilder
     private var primaryCTA: some View {
+        cta
+            .frame(maxWidth: ContentColumns.maximumActionWidth)
+            .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var cta: some View {
         if pendingCount > 0 {
             Button(action: onReviewProposals) {
                 Label(
                     pendingCount == 1 ? "Review 1 Proposal" : "Review \(pendingCount) Proposals",
                     systemImage: "checklist"
                 )
-                .font(.body.weight(.semibold))
+                .font(.appBody.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
             }
@@ -265,16 +319,11 @@ private enum HomeSheet: String, Identifiable {
 }
 
 private struct AgentOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
-    private var stateColor: Color {
-        switch snapshot.readiness.systemState.lowercased() {
-        case "active": return AppPalette.positive
-        case "close_only", "liquidating": return AppPalette.warning
-        default: return AppPalette.negative
-        }
-    }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -282,16 +331,16 @@ private struct AgentOverviewCard: View {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Socratic agent")
-                            .font(.title2.weight(.bold))
+                            .font(.appTitle2.weight(.bold))
                         Text(snapshot.readiness.activeConnectedAccount?.label ?? "No active account")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     StatusPill(
-                        snapshot.readiness.systemState.replacingOccurrences(of: "_", with: " ").capitalized,
-                        color: stateColor,
-                        systemImage: snapshot.readiness.systemState == "active" ? "bolt.fill" : "pause.fill"
+                        runState.rawValue,
+                        color: runState.pillColor,
+                        systemImage: runState.pillSystemImage
                     )
                 }
 
@@ -305,7 +354,7 @@ private struct AgentOverviewCard: View {
                         statusLabels
                     }
                 }
-                .font(.caption.weight(.medium))
+                .font(.appCaption.weight(.medium))
                 .foregroundStyle(.secondary)
 
                 if showInlineReadiness, !snapshot.readiness.hasAccount || !snapshot.readiness.hasUniverse {
@@ -313,7 +362,7 @@ private struct AgentOverviewCard: View {
                         Image(systemName: "exclamationmark.circle.fill")
                             .foregroundStyle(AppPalette.warning)
                         Text(readinessMessage)
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                     }
                 }
             }
@@ -322,7 +371,7 @@ private struct AgentOverviewCard: View {
 
     private var readinessMessage: String {
         if !snapshot.readiness.hasAccount {
-            return "Connect an account in Socratic.Trade, then select it in Account & Settings before running the agent."
+            return DeskCopy.accountNeedsConnectionInline
         }
         return "Add an index or symbol universe before requesting a strategy run."
     }
@@ -330,7 +379,7 @@ private struct AgentOverviewCard: View {
     @ViewBuilder
     private var statusLabels: some View {
         Label(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority), systemImage: "person.badge.shield.checkmark")
-        Label(snapshot.marketSession.capitalized, systemImage: "chart.line.uptrend.xyaxis")
+        Label(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot)), systemImage: "chart.line.uptrend.xyaxis")
     }
 }
 
@@ -348,49 +397,89 @@ private struct StrategyControlsCard: View {
         return ready && snapshot.pendingProposals.isEmpty
     }
 
+    private var plan: AgentControlPlan {
+        AgentControlPlan.from(
+            systemState: snapshot.readiness.systemState,
+            runState: store.deriveRunState(for: snapshot),
+            authority: snapshot.readiness.strategyAuthority,
+            snapshotStale: store.isSnapshotStale(),
+            ready: snapshot.readiness.hasAccount && snapshot.readiness.hasUniverse
+        )
+    }
+
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 14) {
-                SectionHeading(
-                    "Agent Controls",
-                    subtitle: heroOwnsRunOnce
-                        ? "Start scheduled autonomy or stop broker submissions.  Run Once is the primary button above."
-                        : "Every action is validated and executed by the backend."
-                )
+                SectionHeading("Agent Controls", subtitle: plan.statusTitle)
 
-                if heroOwnsRunOnce {
+                Text(plan.statusDetail)
+                    .font(.appSubheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !heroOwnsRunOnce {
+                    runOnceButton
+                }
+
+                if plan.primary == .stop {
+                    stopButton
+                    if plan.showStart {
+                        startButton
+                    }
+                    if plan.showCloseOnly || plan.showWindDown {
+                        DisclosureGroup("More Postures") {
+                            VStack(spacing: 10) {
+                                if plan.showCloseOnly { closeOnlyButton }
+                                if plan.showWindDown { windDownButton }
+                            }
+                            .padding(.top, 8)
+                        }
+                        .font(.appSubheadline.weight(.semibold))
+                    }
+                } else if plan.showStart {
                     startButton
+                    if let reason = plan.startDisabledReason, !plan.startEnabled {
+                        Text(reason)
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            if plan.showCloseOnly { closeOnlyButton }
+                            if plan.showWindDown { windDownButton }
+                        }
+                        VStack(spacing: 10) {
+                            if plan.showCloseOnly { closeOnlyButton }
+                            if plan.showWindDown { windDownButton }
+                        }
+                    }
+                    if plan.showStop {
+                        stopButton
+                    }
                 } else {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 10) {
-                            runOnceButton
-                            startButton
+                            if plan.showCloseOnly { closeOnlyButton }
+                            if plan.showWindDown { windDownButton }
                         }
                         VStack(spacing: 10) {
-                            runOnceButton
-                            startButton
+                            if plan.showCloseOnly { closeOnlyButton }
+                            if plan.showWindDown { windDownButton }
                         }
+                    }
+                    if plan.showStop {
+                        stopButton
                     }
                 }
 
-                CommandButton(
-                    "Stop Agent",
-                    systemImage: "stop.fill",
-                    isBusy: store.isBusy("strategy.stop"),
-                    role: .destructive
-                ) {
-                    submit("strategy.stop")
-                }
-                .tint(AppPalette.negative)
-
-                Text("Stop immediately halts future broker submissions.  A broker request already submitted before the halt may still complete; review existing orders under Assets.")
-                    .font(.caption)
+                Text("Exit Only stops the agent from opening new risk.  Protective exits keep working.  Approving an opening places it anyway.  Wind Down submits only sell orders until the account is in cash.  Stop Agent turns scheduled autonomy off without selling anything.")
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if snapshot.readiness.commandBacklog.queued + snapshot.readiness.commandBacklog.running > 0 {
                     Text("\(snapshot.readiness.commandBacklog.queued) queued · \(snapshot.readiness.commandBacklog.running) running")
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -415,24 +504,75 @@ private struct StrategyControlsCard: View {
 
     private var startButton: some View {
         CommandButton(
-            "Start Agent",
+            plan.startLabel,
             systemImage: "play.fill",
             isBusy: store.isBusy("strategy.start"),
-            isDisabled: !store.canSubmit("strategy.start")
+            isDisabled: !plan.startEnabled || !store.canSubmit("strategy.start"),
+            prominent: plan.primary != .stop
         ) {
             submit("strategy.start")
         }
     }
+
+    private var stopButton: some View {
+        CommandButton(
+            "Stop Agent",
+            systemImage: "stop.fill",
+            isBusy: store.isBusy("strategy.stop"),
+            role: .destructive,
+            prominent: plan.primary == .stop
+        ) {
+            submit("strategy.stop")
+        }
+        .tint(AppPalette.negative)
+    }
+
+    // Protective de-risk states (labels match AppFormat.commandLabels; the store always
+    // allows protective commands, same as Stop — no extra ceremony beyond existing controls).
+    private var closeOnlyButton: some View {
+        CommandButton(
+            "Exit Only",
+            systemImage: "arrow.down.right.circle",
+            isBusy: store.isBusy("strategy.close_only")
+        ) {
+            submit("strategy.close_only")
+        }
+        .tint(AppPalette.warning)
+    }
+
+    private var windDownButton: some View {
+        CommandButton(
+            "Wind Down",
+            systemImage: "tray.and.arrow.down",
+            isBusy: store.isBusy("strategy.liquidating")
+        ) {
+            submit("strategy.liquidating")
+        }
+        .tint(AppPalette.warning)
+    }
 }
 
 private struct PortfolioOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
+
+    private var isLive: Bool {
+        AccountMetrics.usesLiveMetrics(environment: store.displayedActiveAccount(in: snapshot)?.environment)
+    }
+
+    private var equityPoints: [EquityCurvePoint] {
+        if isLive {
+            return snapshot.performance?.liveEquityCurve ?? []
+        } else {
+            return snapshot.performance?.paperEquityCurve ?? []
+        }
+    }
 
     var body: some View {
         VStack(spacing: 10) {
             SectionHeading("Portfolio")
             if let portfolio = snapshot.portfolio {
-                LazyVGrid(columns: columns, spacing: 10) {
+                AppMetricGrid {
                     MetricTile(title: "Equity", value: AppFormat.money(portfolio.totalMarketValue))
                     MetricTile(title: "Buying Power", value: AppFormat.money(portfolio.buyingPower))
                     MetricTile(title: "Cash", value: AppFormat.money(portfolio.cash))
@@ -443,30 +583,89 @@ private struct PortfolioOverviewCard: View {
                         detailPlacement: .trailing
                     )
                 }
+
+                if !equityPoints.isEmpty {
+                    EquityChartView(points: equityPoints, title: "Performance Trend", isLive: isLive)
+                        .padding(.top, 4)
+                }
             } else {
                 EmptyStateCard(
                     title: "No portfolio available",
-                    message: "Select a connected account or retry when the broker is reachable.",
+                    message: DeskCopy.portfolioUnavailableMessage(
+                        hasConnectedAccount: snapshot.readiness.hasAccount
+                            || snapshot.readiness.activeConnectedAccount != nil
+                    ),
                     systemImage: "briefcase"
                 )
             }
         }
     }
+}
 
-    private var columns: [GridItem] {
-        [GridItem(.flexible()), GridItem(.flexible())]
+private struct DeskShortcutsCard: View {
+    @EnvironmentObject private var store: MobileStore
+    @Binding var selectedTab: AppTab
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Desk")
+                AppMetricGrid(minimumTileWidth: 150) {
+                    shortcut("Coach", systemImage: "bubble.left.and.bubble.right.fill", tab: .coach)
+                    shortcut("Scan", systemImage: "tablecells", tab: .scan)
+                    shortcut("Guardrails", systemImage: "shield.checkered", tab: .guardrails)
+                    shortcut("Results", systemImage: "chart.xyaxis.line", tab: .results)
+                    if store.snapshot?.currentUser?.isAdmin == true {
+                        shortcut("Admin", systemImage: "wrench.and.screwdriver", tab: .admin)
+                    }
+                }
+            }
+        }
+    }
+
+    private func shortcut(_ title: String, systemImage: String, tab: AppTab) -> some View {
+        Button {
+            selectedTab = tab
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.appSubheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .tint(AppPalette.accent)
     }
 }
 
 private struct PerformanceOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
+    @Binding var selectedTab: AppTab
 
     private var usesLiveMetrics: Bool {
-        snapshot.readiness.activeConnectedAccount?.environment == "live"
+        AccountMetrics.usesLiveMetrics(environment: store.displayedActiveAccount(in: snapshot)?.environment)
+    }
+
+    private var realized: Double? {
+        let ledger = snapshot.performance.flatMap {
+            usesLiveMetrics ? $0.liveRealizedPnl : $0.paperRealizedPnl
+        }
+        let hasFills = (snapshot.performance?.fills?.isEmpty == false)
+        return AccountMetrics.displayedRealized(ledger: ledger, hasFillHistory: hasFills)
+    }
+
+    private var unrealized: Double? {
+        let ledger = snapshot.performance.flatMap {
+            usesLiveMetrics ? $0.liveUnrealizedPnl : $0.paperUnrealizedPnl
+        }
+        return AccountMetrics.displayedUnrealized(positions: snapshot.positions, ledger: ledger)
     }
 
     private var accountSubtitle: String? {
-        guard let account = snapshot.readiness.activeConnectedAccount else {
+        if store.pendingAccountId != nil {
+            return "refreshing the selected account"
+        }
+        guard let account = store.displayedActiveAccount(in: snapshot) else {
             return "no active account"
         }
         // Paper only — never "live account" (owner: all accounts are real; paper is the exception).
@@ -478,18 +677,23 @@ private struct PerformanceOverviewCard: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            SectionHeading("Performance", subtitle: accountSubtitle)
+            HStack(alignment: .firstTextBaseline) {
+                SectionHeading("Performance", subtitle: accountSubtitle)
+                Spacer()
+                Button("See Results") { selectedTab = .results }
+                    .font(.appCaption.weight(.semibold))
+            }
             if let performance = snapshot.performance {
-                LazyVGrid(columns: columns, spacing: 10) {
+                AppMetricGrid {
                     MetricTile(
                         title: "Realized P&L",
-                        value: AppFormat.money(usesLiveMetrics ? performance.liveRealizedPnl : performance.paperRealizedPnl),
-                        tint: pnlColor(usesLiveMetrics ? performance.liveRealizedPnl : performance.paperRealizedPnl)
+                        value: AppFormat.money(realized),
+                        tint: pnlColor(realized)
                     )
                     MetricTile(
                         title: "Unrealized P&L",
-                        value: AppFormat.money(usesLiveMetrics ? performance.liveUnrealizedPnl : performance.paperUnrealizedPnl),
-                        tint: pnlColor(usesLiveMetrics ? performance.liveUnrealizedPnl : performance.paperUnrealizedPnl)
+                        value: AppFormat.money(unrealized),
+                        tint: pnlColor(unrealized)
                     )
                     MetricTile(
                         title: "Win Rate",
@@ -506,44 +710,76 @@ private struct PerformanceOverviewCard: View {
 
                 if let benchmark = performance.benchmark {
                     AppCard {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text("vs \(benchmark.benchmarkSymbol)")
-                                        .font(.caption)
+                                        .font(.appCaption)
                                         .foregroundStyle(.secondary)
                                     Text(AppFormat.percent(benchmark.excessReturnPct, signed: true))
-                                        .font(.headline)
+                                        .font(.appHeadline)
                                         .foregroundStyle(pnlColor(benchmark.excessReturnPct))
                                 }
                                 Spacer()
                                 Text("\(benchmark.points) observations")
-                                    .font(.caption)
+                                    .font(.appCaption)
                                     .foregroundStyle(.secondary)
                             }
                             Text(
                                 "You \(AppFormat.percent(benchmark.accountReturnPct, signed: true)) · \(benchmark.benchmarkSymbol) \(AppFormat.percent(benchmark.benchmarkReturnPct, signed: true))"
                             )
-                            .font(.caption)
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
-                            Text("account return minus \(benchmark.benchmarkSymbol) over the same window (cash flows neutralized).")
-                                .font(.caption2)
+                            if let shadowValue = benchmark.shadowValue, let dollarExcess = benchmark.dollarExcess {
+                                Text(
+                                    "Same cash in \(benchmark.benchmarkSymbol) \(AppFormat.money(shadowValue)).  You vs that \(dollarExcess > 0 ? "+" : "")\(AppFormat.money(dollarExcess))."
+                                )
+                                .font(.appCaption)
+                                .foregroundStyle(pnlColor(dollarExcess))
+                            }
+                            Text("Same deposits and withdrawals as this account, counted from the start of the day they land.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
+                                .font(.appCaption2)
                                 .foregroundStyle(.secondary)
+                            if let accountSeries = benchmark.accountEquitySeries,
+                               let shadowSeries = benchmark.shadowBenchmarkSeries,
+                               accountSeries.count >= 2,
+                               shadowSeries.count >= 2 {
+                                BenchmarkCompareChart(
+                                    account: accountSeries,
+                                    shadow: shadowSeries,
+                                    accountLabel: "You",
+                                    benchmarkLabel: benchmark.benchmarkSymbol
+                                )
+                                .padding(.top, 4)
+                            }
+                        }
+                    }
+                } else if let unavailable = performance.benchmarkUnavailable {
+                    AppCard {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("vs SPY")
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                            Text(
+                                unavailable.reason == "insufficient-history" ||
+                                    unavailable.reason == "insufficient-overlap"
+                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
+                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+                            )
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
             } else {
                 EmptyStateCard(
                     title: "No performance history",
-                    message: "Performance appears after the selected account has fills or portfolio snapshots.",
+                    message: "Performance appears after the selected account has fills or portfolio history.",
                     systemImage: "chart.xyaxis.line"
                 )
             }
         }
-    }
-
-    private var columns: [GridItem] {
-        [GridItem(.flexible()), GridItem(.flexible())]
     }
 
     private func pnlColor(_ value: Double?) -> Color {
@@ -555,12 +791,16 @@ private struct PerformanceOverviewCard: View {
 private struct ScheduleOverviewCard: View {
     let snapshot: MobileSnapshot
 
+    private var autonomyActive: Bool {
+        snapshot.policy.systemState == "active" || snapshot.readiness.systemState == "active"
+    }
+
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeading("Schedule")
-                LabeledContent("Last Run", value: AppFormat.relative(snapshot.scheduler.lastRunAt))
-                LabeledContent("Next Run", value: AppFormat.relative(snapshot.scheduler.nextRunAt))
+                LabeledContent("Last Run", value: AppFormat.lastRun(snapshot.scheduler.lastRunAt))
+                LabeledContent("Next Run", value: AppFormat.nextRun(snapshot.scheduler.nextRunAt, autonomyActive: autonomyActive))
                 LabeledContent(
                     "Cadence",
                     value: AppFormat.cadenceMinutesValue(snapshot.policy.runCadenceMinutes)
@@ -573,10 +813,6 @@ private struct ScheduleOverviewCard: View {
 private struct HomeAttentionCard: View {
     let snapshot: MobileSnapshot
     @Binding var selectedTab: AppTab
-
-    private var armedAlerts: Int {
-        snapshot.alerts.filter { $0.status == "armed" }.count
-    }
 
     private var commandsInFlight: Int {
         snapshot.readiness.commandBacklog.queued + snapshot.readiness.commandBacklog.running
@@ -595,13 +831,6 @@ private struct HomeAttentionCard: View {
                     selectedTab = .proposals
                 }
                 AttentionRow(
-                    title: "Armed Price Alerts",
-                    value: "\(armedAlerts)",
-                    emphasize: armedAlerts > 0
-                ) {
-                    selectedTab = .markets
-                }
-                AttentionRow(
                     title: "Open Orders",
                     value: "\(snapshot.orders.count)",
                     emphasize: snapshot.orders.count > 0
@@ -609,7 +838,7 @@ private struct HomeAttentionCard: View {
                     selectedTab = .markets
                 }
                 AttentionRow(
-                    title: "Commands in flight",
+                    title: "In Progress",
                     value: "\(commandsInFlight)",
                     emphasize: commandsInFlight > 0
                 ) {
@@ -636,7 +865,7 @@ private struct AttentionRow: View {
                     .fontWeight(emphasize ? .semibold : .regular)
                     .foregroundStyle(emphasize ? AppPalette.accent : .secondary)
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .font(.appCaption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
             .frame(minHeight: 44)
@@ -647,10 +876,11 @@ private struct AttentionRow: View {
     }
 }
 
-private struct AccountSettingsView: View {
+struct AccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var store: MobileStore
+    @EnvironmentObject private var push: PushNotificationCoordinator
 
     @State private var deleteIdentity = ""
     @State private var deletePhrase = ""
@@ -660,7 +890,12 @@ private struct AccountSettingsView: View {
             Form {
                 identitySection
                 accountsSection
+                alertsSection
                 policySection
+                GuardrailTighteningSection()
+                LlmBudgetSection()
+                DataSourcesSection()
+                legalSection
                 sessionSection
                 deletionSection
             }
@@ -670,7 +905,25 @@ private struct AccountSettingsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
+                // ONE keyboard accessory for the whole Form, not one per row.  Number pads
+                // have no Return key, so before this there was no way to dismiss them from
+                // the keyboard at all — and now that blur is the commit point, dismissing
+                // IS saving.  Resigning first responder is what SwiftUI's @FocusState
+                // watches, so this reaches every field in the Form without any of them
+                // knowing about it.
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        UIApplication.shared.sendAction(
+                            #selector(UIResponder.resignFirstResponder),
+                            to: nil,
+                            from: nil,
+                            for: nil
+                        )
+                    }
+                }
             }
+            .storeTransientAlerts()
         }
     }
 
@@ -689,14 +942,39 @@ private struct AccountSettingsView: View {
     @ViewBuilder
     private var accountsSection: some View {
         Section("Connected Accounts") {
+            if store.pendingAccountId != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        if store.isRefreshing || store.hasActiveCommandWork {
+                            ProgressView()
+                        }
+                        Text("Switching accounts — portfolio reload can take a few seconds.")
+                            .font(.appFootnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !store.isRefreshing && !store.hasActiveCommandWork {
+                        Button("Retry Portfolio Refresh") {
+                            Task { await store.load() }
+                        }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
             if let accounts = store.snapshot?.connectedAccounts, !accounts.isEmpty {
                 ForEach(accounts) { account in
                     ConnectedAccountSettingsRow(account: account)
                 }
             } else {
-                Text("No connected accounts.  Connect one in Socratic.Trade, then return here to select it.")
+                Text("No connected accounts.  Connect one on the website, then return here to select it.")
                     .foregroundStyle(.secondary)
+                Button {
+                    openURL(ConsoleHandoff.connections)
+                } label: {
+                    Label("Open Connections", systemImage: "link")
+                }
+                .accessibilityHint("Opens the website in Safari")
             }
+            Link("Open Connections", destination: URL(string: "https://socratictrade.com/console/connections")!)
         }
     }
 
@@ -705,20 +983,76 @@ private struct AccountSettingsView: View {
         Section("Current Policy") {
             LabeledContent("Authority", value: AppFormat.strategyAuthorityValue(store.snapshot?.policy.strategyAuthority))
             LabeledContent("Horizon", value: AppFormat.policyHorizonValue(store.snapshot?.policy.holdingHorizon))
-            LabeledContent("Max Order", value: AppFormat.money(store.snapshot?.policy.maxOrderNotional))
-            LabeledContent("Daily Cap", value: AppFormat.money(store.snapshot?.policy.maxDailyNotional))
+            LabeledContent("Indices", value: DeskCopy.joinedIndexList(store.snapshot?.policy.includedIndices))
+            LabeledContent("Max Order", value: PolicyTightening.Cap.maxOrderNotional.displayValue(in: store.snapshot?.policy))
+            LabeledContent("Daily Cap", value: PolicyTightening.Cap.maxDailyNotional.displayValue(in: store.snapshot?.policy))
             LabeledContent("Daily Orders", value: store.snapshot?.policy.maxDailyOrders.map(String.init) ?? "—")
+            NavigationLink {
+                GuardrailsView()
+            } label: {
+                Label("View Guardrails", systemImage: "shield.checkered")
+            }
+        }
+    }
+
+    /// Push state, stated plainly.  If the prompt was denied or the registration failed, this
+    /// says so — the app never implies alerts are arriving when they are not.
+    @ViewBuilder
+    private var alertsSection: some View {
+        Section {
+            LabeledContent("Push Alerts") {
+                Text(push.state.isWorking ? "On" : "Off")
+                    .foregroundStyle(push.state.isWorking ? AppPalette.positive : .secondary)
+            }
+            switch push.state {
+            case .notRequested, .unknown:
+                Button("Turn On Alerts") {
+                    Task { await push.requestAuthorization() }
+                }
+            case .denied:
+                Button("Open iOS Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                }
+            case .failed:
+                Button("Try Again") {
+                    Task { await push.registerIfAlreadyAuthorized() }
+                }
+            case .awaitingToken, .registered:
+                EmptyView()
+            }
+        } header: {
+            Text("Alerts")
+        } footer: {
+            Text(push.state.summary)
+        }
+        .task { await push.refreshState() }
+    }
+
+    @ViewBuilder
+    private var legalSection: some View {
+        Section {
+            LabeledContent("Notice", value: "Not investment advice.  You set authority.")
+            Link("Terms", destination: URL(string: "https://socratictrade.com/terms-and-conditions")!)
+            Link("Privacy", destination: URL(string: "https://socratictrade.com/privacy-policy")!)
+        } header: {
+            Text("Legal")
+        } footer: {
+            Text("After you accept, this notice stays dismissed until the terms change.  You can delete your account in the section below.")
         }
     }
 
     private var sessionSection: some View {
         Section {
             Button("Sign Out", role: .destructive) {
-                store.clearLocalSession()
-                dismiss()
+                Task {
+                    await store.signOut()
+                    dismiss()
+                }
             }
         } footer: {
-            Text("Signing out clears the app’s local Socratic.Trade session.  Broker and provider credentials remain on the backend.")
+            Text("Signing out only leaves this phone.  Broker and provider keys stay with your account.")
         }
     }
 
@@ -728,7 +1062,7 @@ private struct AccountSettingsView: View {
             if let deletion = store.deletionRequest {
                 ForEach(Array(deletion.steps.enumerated()), id: \.offset) { index, step in
                     Label(step, systemImage: "\(index + 1).circle")
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                 }
 
                 TextField(deletion.email ?? deletion.userId, text: $deleteIdentity)
@@ -757,7 +1091,7 @@ private struct AccountSettingsView: View {
         } header: {
             Text("Delete Account")
         } footer: {
-            Text("Reviewing is read-only and does not pause the agent.  Final confirmation prepares and deletes this app account, its server-stored secrets, proposals, fills, watchlists, alerts, and learned context.  Provider-side OAuth grants must be revoked separately.")
+            Text("Reviewing is read-only and does not pause the agent.  Final confirmation deletes this app account, saved keys, proposals, fills, watchlists, alerts, and learned context.  Revoke broker logins separately if you want those gone too.")
         }
     }
 
@@ -783,36 +1117,67 @@ private struct AccountSettingsView: View {
 
 private struct ConnectedAccountSettingsRow: View {
     @EnvironmentObject private var store: MobileStore
-    @State private var confirmingLiveActivation = false
 
     let account: ConnectedAccount
 
     private var operationID: String { "account.activate:\(account.id)" }
     private var canActivate: Bool { store.canSubmit("account.activate") }
 
+    /// Quiet sentence-case capability summary, e.g. "cash · margin · shorting · options L2".
+    private var capabilitiesLine: String? {
+        guard let capabilities = account.capabilities else { return nil }
+        var parts: [String] = []
+        if let accountType = capabilities.accountType, !accountType.isEmpty {
+            parts.append(AppFormat.accountTypeWord(accountType))
+        }
+        if capabilities.marginEnabled == true { parts.append("margin") }
+        if capabilities.shortSelling == true { parts.append("shorting") }
+        if capabilities.optionsTrading == true {
+            if let level = capabilities.optionsLevel {
+                parts.append("options L\(level)")
+            } else {
+                parts.append("options")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(account.label)
-                    .font(.body.weight(.medium))
+                    .font(.appBody.weight(.medium))
                 Text(AppFormat.accountBrokerEnvironmentLine(broker: account.broker, environment: account.environment))
-                    .font(.caption)
+                    .font(.appCaption)
                     .foregroundStyle(.secondary)
+                if let capabilitiesLine {
+                    Text(capabilitiesLine)
+                        .font(.appCaption2)
+                        .foregroundStyle(.secondary)
+                }
+                if account.isDraining == true {
+                    Text("draining — existing orders wind down before removal")
+                        .font(.appCaption2)
+                        .foregroundStyle(AppPalette.warning)
+                }
             }
             Spacer()
-            if account.isActive == true {
-                StatusPill("Active", color: AppPalette.positive, systemImage: "checkmark")
-            } else if store.isBusy(operationID) {
+            if store.isAccountActive(account) {
+                if store.pendingAccountId == account.id {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        StatusPill("Switching", color: AppPalette.accent, systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .accessibilityLabel("Switching to \(account.label)")
+                } else {
+                    StatusPill("Active", color: AppPalette.positive, systemImage: "checkmark")
+                }
+            } else if store.isBusy(operationID) || store.pendingAccountId == account.id {
                 ProgressView()
                     .accessibilityLabel("Switching to \(account.label)")
             } else {
                 Button("Use") {
-                    // Still confirm before switching to a non-paper brokerage account; wording avoids "Live".
-                    if account.environment.lowercased() != "paper" {
-                        confirmingLiveActivation = true
-                    } else {
-                        activate()
-                    }
+                    activate()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(AppPalette.accent)
@@ -822,12 +1187,6 @@ private struct ConnectedAccountSettingsRow: View {
                     ? "Switch the active account to \(account.label)"
                     : "Unavailable until the app loads account data")
             }
-        }
-        .alert("Use Brokerage Account?", isPresented: $confirmingLiveActivation) {
-            Button("Use Account", role: .destructive, action: activate)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Switch execution context to \(account.label) (\(AppFormat.accountBrokerEnvironmentLine(broker: account.broker, environment: account.environment))).  Future approved actions will target this account after backend validation.")
         }
     }
 
@@ -839,5 +1198,158 @@ private struct ConnectedAccountSettingsRow: View {
                 operationID: operationID
             )
         }
+    }
+}
+
+struct LlmBudgetSection: View {
+    @EnvironmentObject private var store: MobileStore
+
+    /// Named so the field that just LOST focus can be committed by name — `onChange` on a
+    /// `@FocusState` hands back the previous value, which is the one worth saving.
+    private enum BudgetField: String, Hashable {
+        case tokens = "tokenBudget"
+        case cost = "costBudgetUsd"
+    }
+
+    @State private var response: LlmBudgetResponse?
+    @State private var tokenText = ""
+    @State private var costText = ""
+    @State private var isLoading = false
+    @State private var isSaving = false
+    @State private var loadError: String?
+    @FocusState private var focusedField: BudgetField?
+
+    var body: some View {
+        Section {
+            if isLoading && response == nil {
+                HStack {
+                    ProgressView()
+                    Text("loading your daily AI budget")
+                        .foregroundStyle(.secondary)
+                }
+            } else if let loadError, response == nil {
+                Text(loadError)
+                    .foregroundStyle(AppPalette.negative)
+                Button("Retry") { Task { await load() } }
+            } else {
+                LabeledContent("Daily Token Cap") {
+                    TextField("blank = no cap", text: $tokenText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(isSaving)
+                        .focused($focusedField, equals: .tokens)
+                        // Same dead `.onSubmit` as the data-source rows: neither .numberPad
+                        // nor .decimalPad has a Return key.  Here an explicit Save Caps
+                        // button meant nothing was actually lost, but the field still
+                        // behaved differently from every other settings field in the app.
+                        .onSubmit { Task { await commit(.tokens) } }
+                }
+                LabeledContent("Daily Cost Cap") {
+                    TextField("blank = no cap", text: $costText)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                        .disabled(isSaving)
+                        .focused($focusedField, equals: .cost)
+                        .onSubmit { Task { await commit(.cost) } }
+                }
+                if let response {
+                    LabeledContent("Today") {
+                        Text("\(Int(response.today.tokens)) tokens · \(AppFormat.money(response.today.costUsd))")
+                            .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Cap") {
+                        Text(response.enforced ? "on" : "no cap")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Button("Save Caps") {
+                    Task { await saveBoth() }
+                }
+                .disabled(isSaving)
+                if let loadError, response != nil {
+                    Text(loadError)
+                        .font(.appCaption)
+                        .foregroundStyle(AppPalette.negative)
+                }
+            }
+        } header: {
+            Text("Daily AI Budget")
+        } footer: {
+            Text("Optional daily limit for model and research spend.  Leave a field blank for no cap.  When a cap is set, strategy, chat, and research pause for the rest of the day once spend reaches it.")
+        }
+        .task { await load() }
+        // Commit whichever field just lost focus.  Moving between the two fields commits
+        // the first, and the Form's keyboard "Done" resigns focus, which lands here too.
+        .onChange(of: focusedField) { previous, _ in
+            guard let previous else { return }
+            Task { await commit(previous) }
+        }
+    }
+
+    private func load() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            apply(try await store.fetchLlmBudget())
+            loadError = nil
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    private func saveBoth() async {
+        await commit(.tokens)
+        await commit(.cost)
+    }
+
+    private func text(for field: BudgetField) -> String {
+        field == .tokens ? tokenText : costText
+    }
+
+    private func serverValue(for field: BudgetField) -> Double? {
+        field == .tokens ? response?.tokenBudget : response?.costBudgetUsd
+    }
+
+    private func restore(_ field: BudgetField) {
+        let shown = NumberFieldEditor.display(serverValue(for: field))
+        if field == .tokens { tokenText = shown } else { costText = shown }
+    }
+
+    private func commit(_ field: BudgetField) async {
+        switch NumberFieldEditor.decide(
+            text: text(for: field),
+            serverValue: serverValue(for: field),
+            allowsEmpty: true
+        ) {
+        case .unchanged:
+            // Already what the server has.  This is what keeps Save Caps from re-sending
+            // a value a blur just saved, now that both paths exist.
+            return
+        case .revert:
+            loadError = "Enter a non-negative number, or leave the field blank."
+            restore(field)
+            return
+        case .patch(let parsed):
+            // `nil` is meaningful here — the placeholder says "blank = no cap" — so it has
+            // to reach the API as JSON null, not be skipped.
+            let payload: Any = parsed.map { $0 as Any } ?? NSNull()
+            isSaving = true
+            defer { isSaving = false }
+            do {
+                apply(try await store.patchLlmBudget([field.rawValue: payload]))
+                loadError = nil
+            } catch {
+                loadError = error.localizedDescription
+            }
+        }
+    }
+
+    private func apply(_ next: LlmBudgetResponse) {
+        response = next
+        // Never overwrite a field the owner is currently in.  Committing one field applies
+        // the whole response, and without this guard saving the token cap would wipe an
+        // unsaved cost cap out from under the cursor.
+        if focusedField != .tokens { tokenText = NumberFieldEditor.display(next.tokenBudget) }
+        if focusedField != .cost { costText = NumberFieldEditor.display(next.costBudgetUsd) }
     }
 }

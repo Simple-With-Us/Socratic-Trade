@@ -29,7 +29,7 @@ Cloudflare R2 objects as historic** until B2 is proven (do not delete R2 data).
   bucket `jays-socratic-trade-eu`, endpoint `https://s3.eu-central-003.backblazeb2.com`,
   region `eu-central-003`.
 
-### Host volume (`d83b1aykr03uwr32yhgzaiay-prod-app-data`)
+### Host volume (`<ST_COOLIFY_APP_UUID>-prod-app-data`)
 
 After live `PRAGMA integrity_check = ok`, removed forensic cutover copies (~9 GB):
 

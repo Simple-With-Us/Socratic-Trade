@@ -53,6 +53,13 @@
   --ring: color-mix(in oklab, var(--accent) 45%, transparent);
   --shadow: 0 12px 32px -8px rgba(15, 23, 34, 0.18), inset 0 1px 1px rgba(255, 255, 255, 0.6);
   --shadow-lg: 0 24px 60px -12px rgba(15, 23, 34, 0.28), inset 0 1px 1px rgba(255, 255, 255, 0.8);
+  /* Sign-in provider row — Google's Light theme, reused for GitHub and Apple so
+     the three buttons are one family.  iOS LoginView.providerFill uses the same
+     table.  Do not put the color Google G on --accent (explicit Google Don't). */
+  --login-provider-bg: #ffffff;
+  --login-provider-stroke: #747775;
+  --login-provider-ink: #1f1f1f;
+  --login-provider-apple-ink: #000000;
   /* Elevation utilities (.elev-*) and .skeleton/.boot-strip-glow/.scroll-fade-edge/
      .animate-pulse-fast were deleted 2026-07-16 as consumer-free (see
      docs/rollouts/2026-07-16-public-renderer-decision-legacy-primitives-slim.md);
@@ -85,7 +92,61 @@
   --ring: color-mix(in oklab, var(--accent) 50%, transparent);
   --shadow: 0 18px 45px -12px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.06);
   --shadow-lg: 0 30px 70px -15px rgba(0, 0, 0, 0.75), inset 0 1px 1px rgba(255, 255, 255, 0.08);
+  --login-provider-bg: #131314;
+  --login-provider-stroke: #8e918f;
+  --login-provider-ink: #e3e3e3;
+  --login-provider-apple-ink: #ffffff;
   color-scheme: dark;
+}
+
+/* Public login provider buttons.  Metrics match iOS LoginView (44pt tall, 10pt
+   radius, 20pt logo slot, 16pt leading pad, 12pt logo/title gap, 19pt title). */
+.login-provider-btn {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  height: 44px;
+  padding: 0 16px;
+  gap: 12px;
+  border-radius: 10px;
+  background: var(--login-provider-bg);
+  color: var(--login-provider-ink);
+  border: 1px solid var(--login-provider-stroke);
+  font-family: var(--font-sans);
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  box-shadow: none;
+}
+.login-provider-btn--apple {
+  color: var(--login-provider-apple-ink);
+}
+.login-provider-btn:hover {
+  opacity: 0.92;
+}
+.login-provider-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.login-provider-mark {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-provider-mark svg {
+  display: block;
+}
+.login-provider-mark--github svg {
+  /* Invertocat artwork is edge-to-edge in its 98x96 box; 1px optical inset
+     matches iOS GitHubMark so it does not read bigger than the G. */
+  width: 18px;
+  height: 18px;
 }
 
 @theme inline {
@@ -106,7 +167,13 @@
   --color-warn: var(--warn);
   --color-info: var(--info);
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", monospace;
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Lato is the product typeface, shared with the native iOS app. --font-lato is injected on
+     <html> by next/font/local (app/fonts/lato.ts) and already carries its own metric-matched
+     fallback stack, so the tail here is only for the case where that class is missing entirely.
+     This slot previously named "Inter", which was never actually loaded anywhere in the app —
+     no @font-face, no next/font, no file in public/ — so the site silently rendered in whatever
+     system UI font the device had. Lato is the first real webfont this stack has ever resolved. */
+  --font-sans: var(--font-lato), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-xl: 16px;
   --radius-2xl: 20px;
   /* Shared card/control radius canon (console values are canonical — console.css

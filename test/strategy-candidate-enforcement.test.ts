@@ -166,6 +166,8 @@ describe("strict marketScan.topCandidates opening boundary", () => {
     expect(rejection?.payload).toMatchObject({ runId: result.runId, symbol: "MSFT", side: "buy", candidates: ["AAPL"] });
 
     const schemaObj = (bullRequest as any)?.text?.format?.schema ?? (bullRequest as any)?.response_format?.json_schema?.schema;
+    const itemSchema = schemaObj?.properties?.proposals?.items;
+    expect(Object.keys(itemSchema?.properties ?? {}).sort()).toEqual([...(itemSchema?.required ?? [])].sort());
     const symbolSchema = schemaObj?.properties?.proposals?.items?.properties?.symbol;
     expect(symbolSchema?.enum).toEqual(["AAPL"]);
   }, 30_000);

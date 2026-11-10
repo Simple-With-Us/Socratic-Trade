@@ -2,9 +2,12 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { useState, useEffect, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { useState, useEffect, useId, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
+import { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 import { AnimatePresence, motion } from "motion/react";
+
+export { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
@@ -32,12 +35,12 @@ export function Card({
   if (collapsible && title) {
     return (
       <details className={cx("con-card con-disclosure", className)} open={defaultOpen}>
-        <summary className="focus:outline-none">
+        <summary>
           {/* Open: pt-3.5 pb-1 (tight bottom toward body). Collapsed: balanced
               py via .con-disclosure.con-card:not([open]) in console.css so
               one-line titles like "You're set" sit vertically centered. */}
           <div className="flex items-center gap-3 px-4 pt-3.5 pb-1">
-            <span className="con-card-title">{title}</span>
+            <h2 className="con-card-title">{title}</h2>
             {action && (
               <span className="ml-auto" onClick={(e) => e.preventDefault()}>{action}</span>
             )}
@@ -185,7 +188,18 @@ export function Dot({ tone = "muted", pulse }: { tone?: keyof typeof TONE_VAR; p
 
 // ── Meter ────────────────────────────────────────────────────────────────────
 
-export function Meter({ value, max, className }: { value: number; max?: number; className?: string }) {
+export function Meter({
+  value,
+  max,
+  className,
+  label
+}: {
+  value: number;
+  max?: number;
+  className?: string;
+  /** Accessible name for the progressbar. Required for AT; the visible caption sits beside the bar. */
+  label?: string;
+}) {
   const hasMax = typeof max === "number" && Number.isFinite(max) && max > 0;
   const rawRatio = hasMax ? Math.max(0, value / max!) : 0;
   const ratio = Math.min(1, rawRatio);
@@ -199,6 +213,7 @@ export function Meter({ value, max, className }: { value: number; max?: number; 
     <div
       className={cx("con-meter", tone, className)}
       role="progressbar"
+      aria-label={label}
       aria-valuenow={value}
       aria-valuemax={hasMax ? max : undefined}
       aria-valuetext={breached ? `${overagePct}% over` : undefined}
@@ -329,21 +344,25 @@ export function Toggle({
   checked,
   onChange,
   disabled,
+  busy,
   label
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
-  label?: string;
+  /** In-flight write — keeps the optimistic checked value visible and marks the switch busy. */
+  busy?: boolean;
+  label: string;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-busy={busy === true}
       aria-label={label}
       disabled={disabled}
-      className="con-toggle"
+      className={cx("con-toggle", busy && "opacity-70")}
       onClick={() => onChange(!checked)}
     />
   );
@@ -377,11 +396,12 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             title={opt.title}
             onClick={() => onChange(opt.value)}
-            className={
+            className={cx(
+              "con-segmented-btn",
               active
                 ? "rounded px-2 py-1 text-[length:var(--con-fs-xs)] font-bold text-[color:var(--con-fg)] bg-[color:var(--con-surface)]"
                 : "rounded px-2 py-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
-            }
+            )}
           >
             {opt.label}
           </button>
@@ -445,6 +465,7 @@ export function Tooltip({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -475,10 +496,19 @@ export function Tooltip({
       ? "left-0 translate-x-0"
       : "left-1/2 -translate-x-1/2";
 
+  const interactive = isInteractiveTooltipTrigger(children);
+
   return (
     <span
       ref={ref}
-      className={cx("group relative inline-flex cursor-pointer", className)}
+      className={cx(
+        "group relative inline-flex cursor-pointer",
+        !interactive &&
+          "rounded-[var(--con-radius-sm)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--con-accent)]",
+        className
+      )}
+      tabIndex={interactive ? undefined : 0}
+      aria-describedby={tooltipId}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
       onClick={() => setOpen((prev) => !prev)}
@@ -488,6 +518,9 @@ export function Tooltip({
       }}
     >
       {children}
+      <span id={tooltipId} className="sr-only">
+        {content}
+      </span>
       <AnimatePresence>
         {open && (
           <motion.div
@@ -496,6 +529,7 @@ export function Tooltip({
             exit={{ opacity: 0, y: 2, scale: 0.98 }}
             transition={{ duration: 0.15, ease: "easeOut" }}
             role="tooltip"
+            aria-hidden
             className={cx(
               "pointer-events-none absolute bottom-full z-[100] mb-2 w-max max-w-xs rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line",
               alignClass

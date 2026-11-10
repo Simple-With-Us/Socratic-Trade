@@ -118,6 +118,20 @@ describe("pinecone monthly write-unit pace guard", () => {
 
   // ── budget off = complete no-op ────────────────────────────────────────────
 
+  it("Standard trial keeps the monthly pace OFF even when env still holds the Starter 2M cap", async () => {
+    const { pineconeMonthlyWuBudget, pineconeBackfillPaceGate, recordPineconeWriteUnits } = await loadPace();
+    process.env.PINECONE_TRIAL_ENDS_AT = "2026-08-30T00:00:00.000Z";
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "2500000";
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "2000000";
+    recordPineconeWriteUnits(15_000_000, AUG_16_NOON);
+    expect(pineconeMonthlyWuBudget(AUG_16_NOON)).toBe(0);
+    const gate = await pineconeBackfillPaceGate("backfill", AUG_16_NOON);
+    expect(gate.throttled).toBe(false);
+    expect(mocks.alertStorageWarning).not.toHaveBeenCalled();
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+  });
+
   it("budget unset/0/garbage = OFF: never enabled, never exceeded, never throttles", async () => {
     const { assessPineconeWuPace, pineconeMonthlyWuBudget, pineconeBackfillPaceGate, recordPineconeWriteUnits } =
       await loadPace();

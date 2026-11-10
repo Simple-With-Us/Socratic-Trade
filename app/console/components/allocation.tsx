@@ -118,7 +118,7 @@ export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
               title={
                 hasSectorData
                   ? "Positions grouped by their sector, plus cash."
-                  : "Positions grouped by sector. No position carries sector data right now, so everything lands in one honest bucket."
+                  : "Positions grouped by sector.  No position carries sector data right now, so everything lands in one honest bucket."
               }
             >
               By sector

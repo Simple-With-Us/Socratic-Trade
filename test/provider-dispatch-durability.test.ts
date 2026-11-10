@@ -17,7 +17,9 @@ const {
   reconcileStaleProviderDispatches,
   reserveProviderDispatch,
   resolveStaleProviderDispatch,
-  settleProviderDispatch
+  settleProviderDispatch,
+  isProviderDispatchLeaseLostError,
+  ProviderDispatchLeaseLostError
 } = await import("../src/lib/db");
 const { getAccountDeletionBlockers } = await import("../src/lib/account-deletion");
 
@@ -324,5 +326,16 @@ describe("durable provider dispatch admission and usage truth", () => {
     });
     expect(reserveProviderDispatch({ ...base, estimatedCostUsd: 0.3 }))
       .toEqual({ admitted: false, reason: "cost_cap" });
+  });
+});
+
+describe("isProviderDispatchLeaseLostError", () => {
+  it("recognizes the typed error, the message, and a re-wrap, but not vendor HTTP", () => {
+    const lost = new ProviderDispatchLeaseLostError("attempt-1");
+    expect(isProviderDispatchLeaseLostError(lost)).toBe(true);
+    expect(isProviderDispatchLeaseLostError(lost.message)).toBe(true);
+    expect(isProviderDispatchLeaseLostError(new Error("query managed shared tier", { cause: lost }))).toBe(true);
+    expect(isProviderDispatchLeaseLostError(new Error("PineconeConnectionError: Request failed"))).toBe(false);
+    expect(isProviderDispatchLeaseLostError(undefined)).toBe(false);
   });
 });

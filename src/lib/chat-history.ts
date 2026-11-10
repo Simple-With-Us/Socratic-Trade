@@ -4,11 +4,17 @@
 // (NB: src/lib/history.ts is the unrelated OHLC price-history module.)
 
 import { randomUUID } from "crypto";
-import { clearChatTurns, insertChatTurn, listChatTurns, trimChatTurns } from "./db";
+import { clearChatTurns, insertChatTurn, listAllChatTurns, listChatTurns, trimChatTurns } from "./db";
 import type { ChatTurn, ChatTurnRole } from "./types";
 import { captureUserWriteEpoch, runWithUserWriteEpoch, type UserWriteEpoch } from "./user-write-fence";
 
 export const MAX_TURNS = 100;
+
+/**
+ * Cap for the admin-only cross-user read. Higher than `MAX_TURNS` because that constant is the
+ * per-user retention cap (`trimChatTurns`), while this window spans every user at once.
+ */
+export const MAX_ADMIN_TURNS = 500;
 
 type RedactionKind = "plain" | "keyed" | "bearer";
 
@@ -38,7 +44,7 @@ export function sanitizeTranscriptText(text: string): { text: string; redacted: 
 
 export function appendTurn(
   userId: string,
-  input: { role: ChatTurnRole; text: string; citations?: string[]; intent?: string | null; model?: string | null; clientTurnId?: string | null },
+  input: { role: ChatTurnRole; text: string; citations?: string[]; intent?: string | null; model?: string | null; clientTurnId?: string | null; connectedAccountId?: string | null },
   writeEpoch?: UserWriteEpoch
 ): ChatTurn {
   if (input.role !== "user" && input.role !== "assistant") throw new Error("role must be 'user' or 'assistant'");
@@ -53,6 +59,7 @@ export function appendTurn(
     redacted: sanitized.redacted,
     model: input.model ?? null,
     clientTurnId: input.clientTurnId ?? null,
+    connectedAccountId: input.connectedAccountId ?? null,
     createdAt: new Date().toISOString()
   };
   const epoch = writeEpoch ?? captureUserWriteEpoch(userId);
@@ -63,9 +70,19 @@ export function appendTurn(
   });
 }
 
-export function listTurns(userId: string, limit: number = MAX_TURNS): ChatTurn[] {
+export function listTurns(userId: string, limit: number = MAX_TURNS, connectedAccountId?: string | null): ChatTurn[] {
   const n = Math.max(1, Math.min(Number(limit) || MAX_TURNS, MAX_TURNS));
-  return listChatTurns(userId, n);
+  return listChatTurns(userId, n, connectedAccountId);
+}
+
+/**
+ * EVERY user's turns, newest `limit` across all users, chronological. Admin-only — the one caller is
+ * the requireAdmin-gated `/api/admin/transcript`, which backs the Admin > Chat Transcript page whose
+ * label promises "every chat turn". Never call this from a per-caller route; use `listTurns`.
+ */
+export function listAllTurns(limit: number = MAX_ADMIN_TURNS): ChatTurn[] {
+  const n = Math.max(1, Math.min(Number(limit) || MAX_ADMIN_TURNS, MAX_ADMIN_TURNS));
+  return listAllChatTurns(n);
 }
 
 export function clearTurns(userId: string): number {

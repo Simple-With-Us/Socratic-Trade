@@ -629,3 +629,46 @@ again), which would be materially different from tonight's "brief blip, unaffect
 Continue monitoring the gap trend specifically, not just kill/no-kill, and treat a gap under
 ~10 minutes as the trigger to stop deferring this to "daylight" and escalate to an active fix
 (most likely: clear the stuck B2 generation per next-step (2) above) regardless of local time.
+
+## Fix executed (2026-08-12 ~12:08am CT) — litestream reset run in production; leak appears resolved, monitoring continues
+
+The escalation trigger fired for real: kill gaps compressed to 5m35s then 12min (23:30:50 and
+23:36:26 CT), crossing the ~10-minute threshold set above. Owner approved proceeding.
+
+**What was done**, with the owner's explicit go-ahead:
+1. `docker stop -t 30` on the running ST container — clean graceful exit within the timeout, no
+   force-kill needed.
+2. Since the app's data volume is a named Docker volume with a real host path
+   (`/var/lib/docker/volumes/<ST_COOLIFY_APP_UUID>-prod-app-data/_data`), `litestream reset`'s
+   documented effect (delete local LTX metadata files, forcing a fresh snapshot on next sync —
+   never touches the database file or anything already in B2) was achieved directly via
+   `rm -rf .app.db-litestream/ltx` on that host path, rather than spinning up a temporary
+   container to invoke the binary. Before deleting: 500 files, 88MB (much smaller than the
+   43,130-files/5.9GB found ~8 hours earlier in this same investigation — this container had
+   already restarted several times since then, so some local backlog had been cycling, but the
+   underlying stuck-anchor problem persisted regardless of container restarts since the anchor
+   lives in the B2 replica's own state, not local state — see the root-cause section above).
+3. Coolify `start` (not `restart` — reuses the existing built image, no rebuild) brought the
+   container back up. Total outage for this step: ~6 minutes (00:08:03-00:09:14 CT), most of
+   which was the deliberate 30s graceful-stop wait plus Coolify's own container-swap sequencing.
+
+**Result, ~5 minutes post-restart:**
+- Litestream started cleanly — all four compaction-level monitors (1/2/3/9) initialized with zero
+  errors in the logs, no `checksum mismatch` on the first several sync cycles (previously this
+  error appeared within 2-3 minutes of every fresh container start, without exception, all night).
+- Memory: **374MiB (6.09% of the 6GB ceiling)** ~4 minutes after start. Every previous fresh
+  start this session had climbed into the multi-GB range by this point (the very first
+  root-cause-confirmation container hit 4.28GB of RSS in litestream alone within 8 minutes).
+- `litestream status` reports `ok` with a fresh, advancing local txid.
+
+**This is a strong early signal, not a confirmed fix.** Consistent with the standing rule from
+the correction sections above ("do not report this as resolved or stable without re-checking"),
+this section will be updated (not silently left as the last word) once enough real elapsed time
+has passed to say with confidence whether the stuck-anchor pattern is genuinely gone or whether
+it recurs — the fastest a problem showed up in any of tonight's fresh-start observations was
+under 10 minutes, so several hours of clean operation, spanning at least one level-9 daily
+snapshot cycle, would be the meaningful bar for "actually fixed." If it recurs, the next
+escalation step is inspecting the B2 bucket directly for the object at the (still unconfirmed)
+root cause of the checksum mismatch itself, which this action did not address — clearing local
+state unblocks litestream to build a *new* clean generation from scratch; it does not explain
+*why* the old generation's uploads were failing integrity checks in the first place.

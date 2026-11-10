@@ -87,4 +87,16 @@ describe("formatChunkWithProvenance", () => {
     expect(baseChunk.id).toBe("8-K:AAPL:0000320193-24-000123:1718000000");
     expect(out).not.toContain(baseChunk.id); // the header carries doc_type/section/date, not the id
   });
+
+  it("includes the bare SEC accession from metadata when present", () => {
+    const out = formatChunkWithProvenance(
+      {
+        ...baseChunk,
+        metadata: { accession: "AAPL:0000320193-24-000123:10-K" }
+      },
+      "AAPL"
+    );
+    expect(out.startsWith("[10-K · risk-factors · AAPL · 0000320193-24-000123 · 2026-02-01 · rel 0.82]")).toBe(true);
+    expect(out).not.toContain("AAPL:0000320193-24-000123:10-K");
+  });
 });

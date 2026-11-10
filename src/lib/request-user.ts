@@ -7,10 +7,13 @@
 // checks must additionally inspect middleware's identity-source provenance; see `auth/admin.ts`.
 
 import { DEV_USER_ID, userIdForEmail } from "./auth/identity";
+import { isAuthServerSessionActive } from "./db-auth-sessions";
+import { isLiveBootstrap } from "./auth-secret-guard";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES,
-  AUTHENTICATED_SESSION_ISSUED_AT_HEADER
+  AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+  AUTHENTICATED_SESSION_SID_HEADER,
 } from "./auth/strip-identity";
 import { resolveAuthenticatedAccountGeneration } from "./user-write-fence";
 
@@ -25,6 +28,20 @@ export interface ResolvedRequestUser {
   email?: string;
 }
 
+function assertIdentityAllowedInLiveBootstrap(
+  email: string | null,
+  identitySource: string | null
+): void {
+  if (!isLiveBootstrap()) return;
+  if (identitySource === AUTHENTICATED_IDENTITY_SOURCES.localFallback) {
+    throw new Error("Verified identity is required in live bootstrap (local fallback is not allowed).");
+  }
+  const normalized = email?.trim().toLowerCase();
+  if (!normalized || !normalized.includes("@")) {
+    throw new Error("Verified identity is required in live bootstrap (missing authenticated email).");
+  }
+}
+
 export function resolveRequestUserFromEmail(email: string | null): ResolvedRequestUser {
   const normalized = email?.trim().toLowerCase();
   if (normalized && normalized.includes("@")) return { userId: userIdForEmail(normalized), email: normalized };
@@ -32,9 +49,26 @@ export function resolveRequestUserFromEmail(email: string | null): ResolvedReque
 }
 
 export function resolveRequestUser(request: Request): ResolvedRequestUser {
-  const resolved = resolveRequestUserFromEmail(request.headers.get(AUTHENTICATED_EMAIL_HEADER));
+  const email = request.headers.get(AUTHENTICATED_EMAIL_HEADER);
   const identitySource = request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER);
+  assertIdentityAllowedInLiveBootstrap(email, identitySource);
+  // With the server subscription route enabled, no auth-unconfigured request may inherit
+  // the scheduler owner's legacy local id. Verify provenance before account mapping.
+  if (process.env.CODE_CLI_ENABLED === "true" && (!email?.trim().includes("@") ||
+    (identitySource !== AUTHENTICATED_IDENTITY_SOURCES.authJsSession
+    && identitySource !== AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess))) {
+    throw new Error("Verified identity required while Code CLI is enabled");
+  }
+  const resolved = resolveRequestUserFromEmail(email);
   const issuedAt = request.headers.get(AUTHENTICATED_SESSION_ISSUED_AT_HEADER);
+  const sessionSid = request.headers.get(AUTHENTICATED_SESSION_SID_HEADER)?.trim();
+  if (
+    identitySource === AUTHENTICATED_IDENTITY_SOURCES.authJsSession &&
+    sessionSid &&
+    !isAuthServerSessionActive(sessionSid)
+  ) {
+    throw new Error("Session revoked or expired.");
+  }
   if (
     identitySource === AUTHENTICATED_IDENTITY_SOURCES.authJsSession ||
     identitySource === AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess

@@ -325,7 +325,7 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "peg",
     label: "PEG",
     value: typeof m.peg === "number" ? m.peg.toFixed(2) : null,
-    title: `P/E divided by EPS-growth %. Under 1 = cheap for its growth; over 2.5 = expensive. ${pegReading} ${COMPUTED}`.trim(),
+    title: `P/E divided by EPS-growth %.  Under 1 = cheap for its growth; over 2.5 = expensive. ${pegReading} ${COMPUTED}`.trim(),
     tone: typeof m.peg === "number" ? (m.peg > 0 && m.peg < 1 ? "pos" : m.peg > 2.5 ? "neg" : undefined) : undefined
   });
 
@@ -343,7 +343,7 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "roe",
     label: "ROE",
     value: typeof m.roe === "number" ? `${m.roe.toFixed(1)}%` : null,
-    title: `Return on equity — provider-reported (trailing twelve months) when available, otherwise EPS ÷ book value per share. Higher = more efficient use of shareholder capital; 20%+ is excellent, negative means losses. ${COMPUTED}`,
+    title: `Return on equity — provider-reported (trailing twelve months) when available, otherwise EPS ÷ book value per share.  Higher = more efficient use of shareholder capital; 20%+ is excellent, negative means losses.  ${COMPUTED}`,
     tone: typeof m.roe === "number" ? (m.roe >= 0 ? "pos" : "neg") : undefined
   });
 
@@ -351,7 +351,7 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "payout",
     label: "Payout ratio",
     value: typeof m.payout === "number" ? `${m.payout.toFixed(0)}%` : null,
-    title: `Dividends ÷ EPS. Over 100% means the dividend exceeds earnings and may be unsustainable. ${
+    title: `Dividends ÷ EPS.  Over 100% means the dividend exceeds earnings and may be unsustainable. ${
       typeof m.payout === "number" ? (m.payout > 100 ? "This one currently exceeds earnings." : "This one is currently covered by earnings.") : ""
     } ${COMPUTED}`.trim(),
     tone: typeof m.payout === "number" && m.payout > 100 ? "neg" : undefined
@@ -361,7 +361,7 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "dollarVolM",
     label: "Daily $ volume",
     value: typeof m.dollarVolM === "number" ? formatDollarsM(m.dollarVolM) : null,
-    title: `Price × daily share volume — how much money trades in a day. Higher = easier to enter and exit without moving the price. ${
+    title: `Price × daily share volume — how much money trades in a day.  Higher = easier to enter and exit without moving the price. ${
       derived.volumeFromHistory ? "Share volume here comes from the latest daily price bar (the scan tier didn't carry it)." : ""
     } ${COMPUTED}`.trim()
   });
@@ -370,14 +370,14 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "spreadBps",
     label: "Bid-ask spread",
     value: typeof m.spreadBps === "number" ? `${m.spreadBps.toFixed(1)} bps` : null,
-    title: `(ask − bid) ÷ mid, in basis points — the cost of crossing the spread. Wide spreads favor limit orders. ${COMPUTED}`
+    title: `(ask − bid) ÷ mid, in basis points — the cost of crossing the spread.  Wide spreads favor limit orders.  ${COMPUTED}`
   });
 
   tiles.push({
     key: "grahamNumber",
     label: "Graham value",
     value: typeof m.grahamNumber === "number" ? `$${m.grahamNumber.toFixed(2)}` : null,
-    title: `Benjamin Graham's intrinsic-value estimate = √(22.5 × EPS × book value per share) — a conservative fair-value yardstick for profitable companies. Compare it to the current price. ${COMPUTED}`
+    title: `Benjamin Graham's intrinsic-value estimate = √(22.5 × EPS × book value per share) — a conservative fair-value yardstick for profitable companies.  Compare it to the current price.  ${COMPUTED}`
   });
 
   tiles.push({
@@ -398,14 +398,14 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
     key: "pctFromHigh",
     label: "% from 52w high",
     value: typeof m.pctFromHigh === "number" ? `${m.pctFromHigh.toFixed(1)}%` : null,
-    title: `(price − 52-week high) ÷ high. 0% = at the high (breakout zone); deeply negative = a large pullback. ${COMPUTED}`
+    title: `(price − 52-week high) ÷ high. 0% = at the high (breakout zone); deeply negative = a large pullback.  ${COMPUTED}`
   });
 
   tiles.push({
     key: "rr52w",
     label: "Reward:risk (52w)",
     value: typeof m.rr52w === "number" ? m.rr52w.toFixed(2) : null,
-    title: `(52w high − price) ÷ (price − 52w low). Above 1 = more room up to the high than down to the low. ${COMPUTED}`,
+    title: `(52w high − price) ÷ (price − 52w low).  Above 1 = more room up to the high than down to the low.  ${COMPUTED}`,
     tone: typeof m.rr52w === "number" ? (m.rr52w >= 1 ? "pos" : "neg") : undefined
   });
 
@@ -416,7 +416,7 @@ export function buildDerivedTiles(view: QuoteView, derived: DerivedResult): Deri
       typeof view.sectorRelStrength === "number"
         ? `${view.sectorRelStrength >= 0 ? "+" : ""}${view.sectorRelStrength.toFixed(2)}%`
         : null,
-    title: `Today's % move minus the average move of its sector among the scan candidates. Positive = outperforming its sector today. ${COMPUTED}`,
+    title: `Today's % move minus the average move of its sector among the scan candidates.  Positive = outperforming its sector today.  ${COMPUTED}`,
     tone: typeof view.sectorRelStrength === "number" ? (view.sectorRelStrength >= 0 ? "pos" : "neg") : undefined
   });
 
@@ -483,7 +483,7 @@ export function buildSignalChips(view: QuoteView): SignalChip[] {
       label: d <= 0 ? "Earnings imminent" : `Earnings in ${d} trading day${d === 1 ? "" : "s"}`,
       tone: d <= 7 ? "warn" : "muted",
       title: withProvenance(
-        "Trading days until the next scheduled earnings report. Prices can gap sharply on the report, so entries this close to earnings carry extra risk.",
+        "Trading days until the next scheduled earnings report.  Prices can gap sharply on the report, so entries this close to earnings carry extra risk.",
         view,
         "daysToEarnings"
       )
@@ -519,7 +519,7 @@ export function buildSignalChips(view: QuoteView): SignalChip[] {
       label: `Congress ${view.senateTrades > 0 ? "+" : ""}${view.senateTrades}`,
       tone: view.senateTrades > 0 ? "pos" : "neg",
       title: withProvenance(
-        "Net congressional trading from delayed public disclosures: distinct members buying minus members selling. Positive = net buying. Disclosures lag the trades by up to 45 days.",
+        "Net congressional trading from delayed public disclosures: distinct members buying minus members selling.  Positive = net buying.  Disclosures lag the trades by up to 45 days.",
         view,
         "senateTrades"
       )
@@ -536,12 +536,12 @@ export function buildSignalChips(view: QuoteView): SignalChip[] {
  *  weighted input of the composite — appended last. */
 const FACTOR_META: Record<string, { label: string; title: string; order: number }> = {
   value: { order: 0, label: "Value", title: "How cheap the stock looks: P/E bands (≤15 scores best) lifted or dinged by free-cash-flow yield. 0–100; higher = cheaper." },
-  momentum: { order: 1, label: "Momentum", title: "Price strength: today's move blended with the position in the 52-week range and, when available, bar-based technical reads (RSI/MACD/moving averages). Higher = stronger trend." },
-  quality: { order: 2, label: "Quality", title: "Business sturdiness: size/liquidity base adjusted by debt-to-equity (lower is better) and EPS growth (higher is better). Higher = sturdier fundamentals." },
+  momentum: { order: 1, label: "Momentum", title: "Price strength: today's move blended with the position in the 52-week range and, when available, bar-based technical reads (RSI/MACD/moving averages).  Higher = stronger trend." },
+  quality: { order: 2, label: "Quality", title: "Business sturdiness: size/liquidity base adjusted by debt-to-equity (lower is better) and EPS growth (higher is better).  Higher = sturdier fundamentals." },
   positioning: { order: 3, label: "Positioning", title: "Smart-money positioning: net congressional buying, insider open-market buying, and squeeze-level short interest. 50 = neutral; higher = accumulation." },
   sentiment: { order: 4, label: "Sentiment", title: "News tone from recent headlines, 0–100. 50 = neutral; higher = more positive coverage." },
-  liquidity: { order: 5, label: "Liquidity", title: "How easily a position trades, from daily share volume (or market cap as a proxy). Higher = cheaper to get in and out." },
-  volatility: { order: 6, label: "Volatility", title: "Price steadiness: penalizes large intraday swings and high beta. Higher = calmer, easier to size." },
+  liquidity: { order: 5, label: "Liquidity", title: "How easily a position trades, from daily share volume (or market cap as a proxy).  Higher = cheaper to get in and out." },
+  volatility: { order: 6, label: "Volatility", title: "Price steadiness: penalizes large intraday swings and high beta.  Higher = calmer, easier to size." },
   diversification: { order: 7, label: "Diversification", title: "Portfolio-concentration guard: 80 when this account holds no position in the name, 45 when it already does — steering the ranking toward names you don't already own." }
 };
 
@@ -673,8 +673,12 @@ export function withProvenance(base: string, view: QuoteView, field: keyof Enric
 
 const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
 
+// Owner copy rule (docs/FLEET-UI-COPY.md "Money"): compact suffixes are
+// lowercase ($1.2m, not $1.2M). Intl's compact notation always emits
+// uppercase K/M/B/T, so lowercase the whole formatted string — safe because
+// digits, "$", ".", and "-" have no case.
 export function fmtCompact(v: number | undefined): string | null {
-  return typeof v === "number" && Number.isFinite(v) ? compact.format(v) : null;
+  return typeof v === "number" && Number.isFinite(v) ? compact.format(v).toLowerCase() : null;
 }
 
 /** Display-normalize debt/equity the same way the legacy scan table does:

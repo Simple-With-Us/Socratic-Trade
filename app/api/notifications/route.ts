@@ -25,6 +25,7 @@ export async function POST(request: Request) {
     twilioAccountSid?: unknown;
     twilioAuthToken?: unknown;
     twilioFrom?: unknown;
+    watchlistDigestEnabled?: unknown;
     userId?: unknown;
   };
   const userId = resolveRequestUserId(request, body);

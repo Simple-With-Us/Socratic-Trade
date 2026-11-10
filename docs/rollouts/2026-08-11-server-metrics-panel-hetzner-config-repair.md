@@ -15,10 +15,10 @@ was deleted" claim back to the owner before being corrected.
 
 ### Config (Infisical, ST prod project)
 
-- `HETZNER_SERVER_ID`: `149429403` (stale, an older/different box) → `159792099` (verified via
-  `hostnamectl`/DMI on the live box: `Hardware Serial: 159792099`, matches UM's own hardcoded
+- `HETZNER_SERVER_ID`: `149429403` (stale, an older/different box) → `<HETZNER_SERVER_ID>` (verified via
+  `hostnamectl`/DMI on the live box: `Hardware Serial: <HETZNER_SERVER_ID>`, matches UM's own hardcoded
   fallback default in `src/lib/server-metrics.ts` exactly).
-- `COOLIFY_SERVER_UUID`: `qjil3u7uyektxzvn7alym82r` (stale) → `jxzqcs3h6g1wiipnnblhismp`
+- `COOLIFY_SERVER_UUID`: `qjil3u7uyektxzvn7alym82r` (stale) → `<HETZNER_COOLIFY_SERVER_UUID>`
   (verified: `GET /api/v1/servers` on the live Coolify instance returns exactly one server, this
   UUID).
 - `COOLIFY_SERVER_STATS`: the token stored in Infisical returned `401` when tested directly
@@ -68,7 +68,7 @@ was deleted" claim back to the owner before being corrected.
   stale: true, cacheAgeSeconds: 551`, warnings `Coolify ... 401`, `Hetzner ... 404` ×2. After
   fix (post-restart) — `degraded: false, stale: false, cacheAgeSeconds: 0`, `warnings: null`,
   `hostInfo` populated correctly (`ubuntu-16gb-nbg1-cx43`, 8 CPUs, 16 GB, `nbg1`,
-  `167.233.254.55`), 9 live resources including the three real Coolify apps
+  `<PROD_ORIGIN_IP>`), 9 live resources including the three real Coolify apps
   (`socratic-app`, `congress-trade`, `usage-monitor`).
 - Every token tested directly against `https://host.jays.services/api/v1/...` before and after
   each change, using `--oauth2-bearer` (never `Authorization: Bearer` literal, which the

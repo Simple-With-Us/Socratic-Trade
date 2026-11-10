@@ -35,7 +35,7 @@ disclosures lets the agent act on the same names *before* the copycats pile in.
   scrape targets; SEC fair-access UA via `SEC_EDGAR_USER_AGENT`), per-request
   `AbortController` timeouts, light retry on 429/5xx, a **sequential rate limiter**
   (`runRateLimited`) so a refresh can't burst a .gov host, and cookie-jar helpers.
-- **`congress.ts`** — congressional-trade ingestion. Adapters tried in order:
+- **`congress.ts`** — congressional-trade ingestion. When `CONGRESS_TRADE_AS_CONGRESS_SOURCE` is on (the default), Congress.Trade is tried first.  If it returns trades, Senate eFD is not scraped.  If it throws, or returns no trades and the poll was not a successful empty incremental cursor, the free Senate eFD scrape runs.  Quiver's direct API is retired and is not called.  When the flag is off, adapters run in this order:
   1. **Senate eFD** (`efdsearch.senate.gov`) — authoritative, free, no key.
      Validated live: GET `/search/` (CSRF + cookies) → POST `/search/home/`
      (accept terms; the Django CSRF token **rotates** here) → POST
@@ -55,11 +55,53 @@ disclosures lets the agent act on the same names *before* the copycats pile in.
      Senate). Best-effort + configurable (`WEB_SOURCE_CAPITOLTRADES_URL`, or set
      it to `off` to disable); their CDN/security layer has returned 503/429 from
      server-side fetches, so it's a tertiary fallback now that Apify covers the House.
-- **`sec.ts`** — SEC EDGAR insider (Form 4) ingestion. Reads the market-wide
-  "current Form 4" atom feed, resolves each filing's `index.json` → ownership XML,
-  and counts **only open-market discretionary** transactions: `P` (purchase) and
-  `S` (sale). Codes `M`/`A`/`F`/`G` (option exercise, grant, tax, gift) are NOT
-  trading signals and are ignored. Filings accumulate into a rolling window.
+### Durable FTS completion invariant (corrected 2026-09-09, PR #3202)
+
+SEC filing ingest mirrors chunk text into the `document_chunks_fts` FTS5 table, resuming
+across ticks so a large filing never pins the single Node event loop.  **The resume offset is
+derived from CONTENT, never from a row count.**
+
+`document_chunks_fts_index` is keyed `(content_hash, symbol, source, accession)`, so
+byte-identical chunks inside one filing — repeated table headers, boilerplate, empty sections
+— collapse onto ONE row.  A `COUNT(*)` of that table is therefore NOT the number of chunks
+mirrored, and using it as a positional offset into the chunk array stalls permanently at the
+first duplicate: the count can never reach the position, the same slice is re-mirrored on
+every tick forever, `mirror.complete` never becomes true, and `insertIngestedAccession` never
+runs.  That is exactly what caused the 2026-09-09 event-loop stall and the public 503
+(`docs/rollouts/2026-09-09-fts-mirror-nonconvergence.md`).
+
+The invariant now is:
+
+- **Resume** = the first chunk whose `content_hash` is not yet mirrored for that occurrence
+  (`ftsMirrorResumeOffset()`, `src/lib/db-learning.ts`).  Mirroring a chunk indexes its hash,
+  so the next resume is strictly greater — progress is monotonic and the loop always terminates.
+- **Mirrored** = the side-index key exists AND its `fts_rowid` still owns a live FTS row on
+  all four identity columns.  A key alone is not proof: FTS5 reuses the max rowid after a
+  DELETE, so an unpaired wipe of `document_chunks_fts` can leave keys pointing at nothing or at
+  a later filing's chunk (`ftsRowidStillOwnsOccurrence`).  A stale key must never mask absent
+  content, or the accession gets ledgered with text that was never indexed.
+- **Complete** = every distinct content hash of the filing satisfies the above.  Do not test
+  completeness with `COUNT(*) = chunk_count`; it under-reports every filing that repeats any
+  chunk text.  `docs/designs/2026-08-16-proposer-corpus-storage.md` item 11 is corrected to match.
+
+Occurrence lookups are served by `idx_document_chunks_fts_index_occurrence (symbol, source,
+accession)` (migration 88); without it the lookup cannot seek, because the table's only other
+index is a PK leading with `content_hash`.
+
+- **`sec.ts`** + **`insider-bulk.ts`** — SEC EDGAR insider (Form 4) ingestion.
+  The nightly refresh (`refreshDueWebSources`, insider TTL) downloads the quarterly
+  insider-transactions ZIP (current quarter and the quarter covering the prior 90
+  days) and merges the current Form 4 atom feed as a delta.  Only open-market `P`
+  and `S` count.  The score is dollar-weighted over 90 days: `100 * buyValue /
+  (buyValue + sellValue)`, which is `50 + 50 * (net / total)`.  Unpriced rows fall
+  back to shares, then to transaction counts.  Signals are cached by symbol on the
+  dataset.  The atom feed is uncapped unless `WEB_SOURCE_INSIDER_MAX_FILINGS` is
+  set above 0.  The old default cap of 60 filings and the 20-symbol watchlist
+  slice are gone.  The watchlist XML pass runs unless the current quarter's ZIP
+  downloaded.  A previous quarter alone is not coverage.  Bulk and XML rows for
+  one accession keep the larger dollar, share, and transaction totals, so an
+  unpriced XML body cannot erase ZIP prices.  Requests still use the SEC limiter.
+  Codes `M`/`A`/`F`/`G` are ignored.
 - **`fmp-transcripts.ts`** — default-off FMP earnings-call transcript discovery and body ingest.
   It requires both endpoint enablement and explicit storage/display-rights confirmation, uses the
   stable dates/body endpoints with header authentication, preserves first-content-observed time for
@@ -197,9 +239,14 @@ records completion under the active embed revision; scoped runs deliberately do 
 | `WEB_SOURCE_APIFY_TIMEOUT_MS` | 180000 | actor run-sync timeout |
 | `WEB_SOURCE_INSIDER` | `on` | `off` disables the SEC insider connector |
 | `WEB_SOURCE_INSIDER_TTL_MS` | 24h | refresh cadence |
-| `WEB_SOURCE_INSIDER_WINDOW_DAYS` | 30 | rolling window kept |
-| `WEB_SOURCE_INSIDER_MAX_FILINGS` | 30 | ownership XMLs parsed per refresh |
-| `SEC_EDGAR_USER_AGENT` | generic | SEC fair-access UA (set your contact) |
+| `WEB_SOURCE_INSIDER_WINDOW_DAYS` | 90 | dollar-weighted rolling window |
+| `WEB_SOURCE_INSIDER_MAX_FILINGS` | 0 | atom XML cap; 0 means uncapped. Bulk rows are never capped |
+| `WEB_SOURCE_INSIDER_WATCHLIST` | `on` | Form 4s for watchlist tickers when the current quarter ZIP did not load |
+| `WEB_SOURCE_13F` | `on` | official 13F-HR books for curated superinvestors |
+| `WEB_SOURCE_13F_TTL_MS` | 7d | 13F refresh cadence (incomplete `okFilers` stay due after 1h backoff) |
+| `WEB_SOURCE_ARK` | `on` | official ARK daily holdings CSVs |
+| `WEB_SOURCE_ARK_TTL_MS` | 24h | ARK refresh cadence (`recordCount` 0 stays due) |
+| `SEC_EDGAR_USER_AGENT` | `Socratic Trade research jay@socratic.trade` | SEC fair-access UA. Override with your own contact |
 | `WEB_SOURCE_FMP_TRANSCRIPTS` | `off` | enables transcript endpoint use; still requires rights confirmation |
 | `FMP_TRANSCRIPT_STORAGE_RIGHTS_CONFIRMED` | `off` | operator assertion that persistence, embedding, retrieval, and display are permitted |
 | `FMP_TRANSCRIPT_TTL_HOURS` | 24h | independent successful-refresh cadence |

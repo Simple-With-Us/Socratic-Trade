@@ -49,6 +49,18 @@ vi.mock("../src/lib/vector-db", () => ({
   storeContexts: async () => {}
 }));
 
+vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/approval-quote-scan")>();
+  return {
+    ...actual,
+    loadApprovalQuoteScan: async () =>
+      actual.buildApprovalQuoteScan(
+        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() } },
+        []
+      )
+  };
+});
+
 vi.mock("../src/lib/market", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/market")>();
   return {
@@ -388,6 +400,11 @@ describe("autonomous broker-minimum final-size Red review", () => {
 
     const row = listRecentProposals(ACCOUNT, 20, userId).find((candidate) => candidate.proposal.symbol === "AAPL");
     expect(row?.status).toBe("proposed");
+    // Audit of G3 (2026-09-29): the persisted run summary says WHY the card is held, not just how many.
+    expect(result.summary).toContain("Awaiting approval: 1 (Red Team review needed: 1).");
+    // lane G3: a final_size_red_team hold classifies as the "red_team_unavailable" holdReason
+    // bucket (see hold-reason.ts — it covers both "could not run" and "ran but needs a decision").
+    expect(row?.proposal.holdReason).toBe("red_team_unavailable");
     expect(row?.proposal.redTeamVerdict).toMatchObject({
       verdict: "reject",
       rejected: true,
@@ -480,6 +497,9 @@ describe("autonomous broker-minimum final-size Red review", () => {
     expect(row?.proposal.humanReviewReasons).toEqual([
       expect.objectContaining({ code: "rationale_collapse", title: "Rationale-diversity hold" })
     ]);
+    // lane G3: a standalone rationale_collapse hold (no Red-Team or policy-override code present)
+    // classifies as the "other" holdReason bucket — it is neither Red-Team- nor policy-related.
+    expect(row?.proposal.holdReason).toBe("other");
     expect(result.proposals[0]?.reasons.join(" ")).toContain("Rationale-diversity hold");
     expect(result.proposals[0]?.reasons.join(" ")).not.toContain("Red Team review unavailable");
     expect(listNotificationEvents(userId).find((event) => event.type === "pending_approval")?.title).toContain("Rationale-diversity hold");

@@ -1,18 +1,35 @@
-import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning } from "@/lib/db";
-import { HEALTH_REASON_CONSECUTIVE_FAILURES } from "@/lib/db-health";
+import { databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
+import { connectionHealthFailureClass, isHardStoppedHealthSummary } from "@/lib/db-health";
+import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
 import type { RagEmbedRerankProvider } from "@/lib/rag-metering";
-import { getProviderTierStatus } from "@/lib/provider-tier";
+import { qdrantConfigured, vectorReadBackend } from "@/lib/vector-store/qdrant-read";
+import { vectorWriteBackend } from "@/lib/vector-store/qdrant-write";
+import { getProviderTierStatus, isDataProvidersDegraded } from "@/lib/provider-tier";
+import { lookupRegisteredPlanTier } from "@/lib/provider-tier-plan";
+import { getLitestreamRemoteInventory } from "@/lib/litestream-remote-inventory";
+import { getR2WeeklyHealthStatus } from "@/lib/r2-cold-snapshot";
 import {
   assessLitestreamRuntimeHealth,
+  assessLitestreamTierFreshness,
+  defaultLitestreamRuntimeLogPath,
   defaultLitestreamStatePath,
   getLitestreamRuntimeHealth,
-  runtimeReleaseIdentity
+  LITESTREAM_PRODUCT_DISABLED_TIERS,
+  runtimeReleaseIdentity,
+  scanLitestreamRuntimeLogFile
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { getTradingLivenessSummary } from "@/lib/trading-liveness";
-import { getOpenRouterCreditStatus } from "@/lib/openrouter-credits";
+import { toPublicTradingLiveness } from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
+import { yieldEventLoop } from "@/lib/slow-sync-guard";
+import { safeErrorMessage } from "@/lib/telemetry-sanitize";
+import {
+  healthProbeDeps,
+  readWarmHealthSnapshot,
+  storeHealthSnapshot,
+  type HealthPayload
+} from "@/lib/health-probe-cache";
 import { statSync, statfsSync } from "fs";
 import { dirname } from "path";
 
@@ -28,8 +45,66 @@ function leaseOwnerWithoutPid(owner: string): string {
   return owner.replace(/^\d+:/, "");
 }
 
-// Real liveness probe (was an unconditional {ok:true}). A health check that can never fail is
-// worse than none for a system that can hold real positions — it hides outages. This probes:
+function projectHealthPayload(payload: HealthPayload, detailed: boolean): HealthPayload {
+  if (detailed) return payload;
+  const checks: Record<string, unknown> = { ...payload.checks };
+  const credits = checks.openrouterCredits;
+  if (credits && typeof credits === "object") {
+    const copy = { ...(credits as Record<string, unknown>) };
+    delete copy.remainingUsd;
+    delete copy.totalUsd;
+    delete copy.usedUsd;
+    delete copy.problemKeyLabels;
+    checks.openrouterCredits = copy;
+  }
+  const storage = checks.storage;
+  if (storage && typeof storage === "object") {
+    const copy = { ...(storage as Record<string, unknown>) };
+    delete copy.dbSizeBytes;
+    delete copy.walSizeBytes;
+    delete copy.freeBytes;
+    delete copy.totalBytes;
+    checks.storage = copy;
+  }
+  const lease = checks.schedulerLease;
+  if (lease && typeof lease === "object" && typeof (lease as { owner?: unknown }).owner === "string") {
+    checks.schedulerLease = {
+      ...(lease as Record<string, unknown>),
+      owner: leaseOwnerWithoutPid((lease as { owner: string }).owner)
+    };
+  }
+  const dependencies = checks.dependencies;
+  if (dependencies && typeof dependencies === "object") {
+    const stripped: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(dependencies as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") {
+        stripped[name] = entry;
+        continue;
+      }
+      const copy = { ...(entry as Record<string, unknown>) };
+      delete copy.lastFailure;
+      delete copy.failureClass;
+      stripped[name] = copy;
+    }
+    checks.dependencies = stripped;
+  }
+  return { ok: payload.ok, checks };
+}
+
+function jsonHealth(payload: HealthPayload, detailed: boolean): Response {
+  const projected = projectHealthPayload(payload, detailed);
+  return Response.json(projected, { status: projected.ok ? 200 : 503 });
+}
+
+// Rich public/ops probe — NOT the Coolify/Traefik backend probe.  A warm process
+// serves a memory snapshot (HEALTH_SNAPSHOT_TTL_MS, default 2s) and refreshes
+// it after the response, so this GET does not wait on SQLite or the OpenRouter
+// credit fetch.  The first request after boot still assembles inline.  Docker HEALTHCHECK
+// and any Coolify HTTP health path must use GET /api/live.  A 503 here (critical
+// Pinecone/RAG/Alpaca hard-stop) or a >5s response used to mark the named container
+// running:unhealthy while Next was up; Traefik then had no healthy backend
+// (2026-08-17 7:22-7:43pm CT after #2810).  UptimeRobot may still alert on this
+// route.  This probes:
 //   - DB reachability (the getInternalSetting read throws if SQLite is unwritable/locked), and
 //   - scheduler liveness (age of the last tick heartbeat; stale ⇒ autonomy/stops aren't running).
 // Returns 503 when a critical check fails so PM2/uptime tooling can act.
@@ -51,36 +126,66 @@ function leaseOwnerWithoutPid(owner: string): string {
 // boot interlock (see the trading-liveness note below).
 //
 // Failure mode worth knowing: authorizeOpsRequest fails closed on an UNCONFIGURED secret — with
-// neither OPS_DIAGNOSTIC_TOKEN nor ADMIN_REINDEX_TOKEN set it returns false for everyone, quietly,
-// so the operator sees the public view too. That is the same condition that already makes
-// /api/ops/snapshot unusable, so it is a token-provisioning problem, not a health-route one; the
-// full lease owner is still on /api/ready (session-gated, no ops token needed) either way.
-export async function GET(request: Request) {
+// OPS_DIAGNOSTIC_TOKEN unset it returns false for everyone, quietly, so the operator sees the
+// public view too.  ADMIN_REINDEX_TOKEN is not a fallback.  That is the same condition that
+// already makes /api/ops/snapshot unusable, so it is a token-provisioning problem, not a
+// health-route one; the full lease owner is still on /api/ready (session-gated, no ops token
+// needed) either way.
+//
+// External paging: HTTP 200/503 is liveness only (DB + pinecone / alpaca-broker hard-stops).
+// schedulerStale, tradingLiveness.degraded, and storage.litestreamTiersDegraded are JSON flags
+// that MUST stay 200 so a Coolify restart cannot "heal" them.  Page those with keyword/JSON
+// monitors — see docs/runbooks/uptime-health-json-monitors.md.
+async function assembleHealth(): Promise<HealthPayload> {
   const checks: Record<string, unknown> = {};
   let ok = true;
-  const detailed = authorizeOpsRequest(request);
+  // Always collect the operator fields.  GET projects them away for anonymous
+  // callers via projectHealthPayload so one snapshot serves both audiences.
 
   const release = runtimeReleaseIdentity();
   checks.release = release;
 
   let lastTick: string | undefined;
   try {
-    lastTick = getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
+    lastTick = healthProbeDeps.getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
     checks.db = "ok";
   } catch (error) {
     ok = false;
     checks.db = error instanceof Error ? error.message : "error";
   }
 
+  const schedulerStaleMs = 5 * 60_000;
   if (lastTick) {
     const ageMs = Date.now() - new Date(lastTick).getTime();
     checks.schedulerLastTick = lastTick;
     checks.schedulerAgeSeconds = Math.round(ageMs / 1000);
-    // The scheduler ticks every 60s; >5 min of silence is degraded (not a hard failure here —
-    // the process may legitimately be a non-scheduler instance).
-    if (ageMs > 5 * 60_000) checks.schedulerStale = true;
+    // Always emit the boolean so keyword/JSON monitors can key on `"schedulerStale":true`.
+    // Never 503s — a restart cannot write a fresher tick if the scheduler is the thing that died.
+    checks.schedulerStale = ageMs > schedulerStaleMs;
+    if (checks.schedulerStale) {
+      void alertStorageWarning("scheduler_stale", `Scheduler heartbeat is stale by ${Math.round(ageMs / 1000)} seconds.`);
+    }
   } else {
     checks.schedulerLastTick = null;
+    checks.schedulerAgeSeconds = null;
+    // No heartbeat after the process has been up long enough to have ticked once.
+    checks.schedulerStale = release.processUptimeSeconds > schedulerStaleMs / 1000;
+    if (checks.schedulerStale) {
+      void alertStorageWarning("scheduler_stale_boot", `Scheduler heartbeat is missing after ${release.processUptimeSeconds} seconds of uptime.`);
+    }
+  }
+
+  if (checks.schedulerStale) {
+    void alertLivenessWarning(
+      "scheduler_stale",
+      lastTick
+        ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
+        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`
+    );
+  } else {
+    // Recovery: reset the escalation episode clock so the next stale episode
+    // starts fresh instead of escalating immediately on old state.
+    void clearLivenessWarning("scheduler_stale");
   }
 
   // Scheduler lease state (additive; only meaningful when SCHEDULER_SINGLE_LEADER is on).
@@ -90,7 +195,7 @@ export async function GET(request: Request) {
     const lease = getLease();
     if (lease) {
       checks.schedulerLease = {
-        owner: detailed ? lease.owner : leaseOwnerWithoutPid(lease.owner),
+        owner: lease.owner,
         acquiredAt: lease.acquiredAt,
         expiresAt: lease.expiresAt,
         ageSeconds: Math.round(lease.ageMs / 1000),
@@ -103,13 +208,15 @@ export async function GET(request: Request) {
     // never let lease reporting break the liveness probe
   }
 
+  await yieldEventLoop();
+
   // Trading-liveness (handoff 6b.7): the heartbeat above proves the tick FUNCTION runs, not that
   // trading works — a scheduler that ticks while every run fails keeps this route green for hours.
   // Per active-autonomy account (policy.systemState === "active"), report the age of the most
   // recent COMPLETED strategy run and a consecutive-failed-runs count. `degraded`-only — NEVER
   // 503s (see trading-liveness.ts's header comment: a 503 here would trigger a container restart,
-  // which re-halts autonomy via the boot interlock — the exact loop 6b.1 fixed). Omitted entirely
-  // when there are zero active-autonomy accounts (nothing to be live about).
+  // which re-halts autonomy via the boot interlock — the exact loop 6b.1 fixed). Always emitted
+  // (zeros when there are no active-autonomy accounts) so JSON monitors can key the field.
   //
   // PUBLIC route (no requireAdmin): same convention as the dependencies section below — expose
   // ONLY a minimal aggregate, never the per-account rows. The full summary carries userId,
@@ -118,46 +225,87 @@ export async function GET(request: Request) {
   // ops-snapshot.ts). Here we fold it down to counts + the oldest age, which is enough for an
   // external uptime probe without leaking account identity.
   try {
-    const liveness = getTradingLivenessSummary();
-    if (liveness) {
-      const degradedCount = liveness.accounts.filter((a) => a.degraded).length;
-      const oldestCompletedRunAgeSeconds = liveness.accounts.reduce<number | null>((oldest, a) => {
-        if (a.lastCompletedRunAgeSeconds === null) return oldest;
-        return oldest === null ? a.lastCompletedRunAgeSeconds : Math.max(oldest, a.lastCompletedRunAgeSeconds);
-      }, null);
-      checks.tradingLiveness = {
-        activeAccounts: liveness.accounts.length,
-        degraded: degradedCount,
-        oldestCompletedRunAgeSeconds,
-        marketOpen: liveness.marketOpen
-      };
-      if (liveness.degraded) checks.tradingLivenessDegraded = true;
+    const liveness = await healthProbeDeps.getTradingLivenessSummary();
+    const publicLiveness = toPublicTradingLiveness(liveness);
+    // Always emit so `tradingLiveness.degraded` exists for JSON-path monitors even when
+    // every account is halted.  The boolean sibling is the unique keyword substring.
+    checks.tradingLiveness = publicLiveness;
+    checks.tradingLivenessDegraded = publicLiveness.degraded > 0;
+    
+    if (checks.tradingLivenessDegraded) {
+      // A fully-dark fleet has no active accounts to count, so the generic message would page
+      // "1 active account(s)" while zero are active — say what is actually wrong instead.
+      const fleetFullyDark =
+        publicLiveness.autonomyFullyDark &&
+        publicLiveness.autonomyActiveAccounts === 0 &&
+        publicLiveness.activeAccounts === 0;
+      // The alert/Sentry message carries the WHY (label, reasons, newest failed
+      // run summary) from the full summary. This never enters the public payload
+      // above, which stays identity-free.
+      const degradedDetail = (liveness?.accounts ?? [])
+        .filter((a) => a.degraded)
+        .slice(0, 3)
+        .map((a) => {
+          const reasons = a.degradedReasons.join(", ") || "degraded";
+          const latest = a.latestFailedRunSummary
+            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${safeErrorMessage(a.latestFailedRunSummary).slice(0, 200)}`
+            : "";
+          return `${a.label} (${reasons}${latest})`;
+        })
+        .join("; ");
+      const livenessMessage = fleetFullyDark
+        ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
+        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
+      void alertLivenessWarning("trading_liveness_degraded", livenessMessage);
+    } else if (liveness) {
+      // Recovery: reset the escalation episode clock.  Only a real healthy
+      // result counts: null means no active accounts or an unreadable
+      // summary, which says nothing about whether the episode ended.
+      void clearLivenessWarning("trading_liveness_degraded");
     }
   } catch {
-    // never let trading-liveness reporting break the liveness probe
+    checks.tradingLiveness = toPublicTradingLiveness(null);
+    checks.tradingLivenessDegraded = false;
   }
 
-  // Market-data paid-tier watchdog status (per the nightly provider-tier check). Surfaced here so the
-  // status/admin/health tool can show whether the Massive/FMP subscriptions are live; a key detected
-  // as "free" (lapsed sub) marks the section degraded but does NOT fail the liveness probe.
+  // Market-data tier honesty (nightly provider-tier check).  Surfaced so ops can see whether
+  // Massive is answering at the plan Settings says we paid for.  A deliberate downgrade to
+  // free or a lower paid SKU that MATCHES the configured plan is healthy — including Massive
+  // `history_cap_blocked` on a ~2.5y window when the configured tier is Stocks Basic.  Degrade
+  // only on a paid/expected mismatch or a probe failure.  Never 503s the liveness probe.
   try {
     const tiers = getProviderTierStatus();
     if (Object.keys(tiers).length > 0) {
       checks.dataProviders = tiers;
-      if (Object.values(tiers).some((t) => t?.tier === "free")) checks.dataProvidersDegraded = true;
+      const configuredPlans = {
+        massive: lookupRegisteredPlanTier("massive"),
+        fmp: lookupRegisteredPlanTier("fmp")
+      };
+      if (isDataProvidersDegraded(tiers, configuredPlans)) checks.dataProvidersDegraded = true;
     }
   } catch {
     // never let provider-tier reporting break the health probe
   }
 
-  // Surface Pinecone and embed-provider configuration status. Provider-aware
-  // (bge-m3-metering-gate, 2026-07-18): "RAG configured" means Pinecone plus the ACTIVE embed
-  // provider's key — a missing key is irrelevant unless that provider is the active one
-  // (`activeEmbeddingProvider`, honoring a RAG_EMBED_PROVIDER pin).
+  // Surface vector-store and embed-provider configuration status. After the Qdrant
+  // cutover, "RAG configured" means the ACTIVE read backend is reachable plus the
+  // active embed provider's key — a leftover Pinecone key is not required when
+  // Qdrant is serving (PD #116 leftover: public health still advertised pineconeConfigured
+  // and treated a missing Pinecone key as RAG-down). A selected write backend that
+  // throws (Qdrant chosen but not usable) clears the same aggregate.
   let ragEmbedProvider: RagEmbedRerankProvider | null = null;
   try {
     const pineconeKey = resolveApiKeyWithSource("pinecone");
     checks.pineconeConfigured = pineconeKey.source !== "none";
+    checks.qdrantConfigured = qdrantConfigured();
+    checks.ragVectorReadBackend = vectorReadBackend();
+    try {
+      checks.ragVectorWriteBackend = vectorWriteBackend();
+    } catch (error) {
+      checks.ragVectorWriteBackend = "misconfigured";
+      checks.ragVectorWriteBackendError = error instanceof Error ? error.message : String(error);
+      checks.ragConfigured = false;
+    }
 
     try {
       ragEmbedProvider = activeEmbeddingProvider();
@@ -170,13 +318,19 @@ export async function GET(request: Request) {
     }
     if (ragEmbedProvider) {
       const activeKeyConfigured = resolveApiKeyWithSource(ragEmbedProvider, "local").source !== "none";
-      if (pineconeKey.source === "none" || !activeKeyConfigured) {
+      const vectorStoreConfigured =
+        checks.ragVectorReadBackend === "qdrant"
+          ? checks.qdrantConfigured === true
+          : pineconeKey.source !== "none";
+      if (!vectorStoreConfigured || !activeKeyConfigured) {
         checks.ragConfigured = false;
       }
     }
   } catch {
     // do not break health check on key resolution
   }
+
+  await yieldEventLoop();
 
   // Surface every backend dependency from health summaries.
   //
@@ -185,26 +339,28 @@ export async function GET(request: Request) {
   // connections-health route). A `degraded` flag captures the soft/cold-start case without
   // failing liveness; the detailed reason text is deliberately omitted here.
   try {
-    const summaries = getServiceHealthSummaries();
-    const dependencies: Record<string, { ok: boolean; degraded?: boolean }> = {};
-    // "rag-embed"/"rag-rerank" (renamed 2026-07-19 from the historical "voyage"/"voyage-rerank"
-    // service names — see withRagApiHealth in vector-db.ts) are now provider-generic: they ALWAYS
-    // reflect whichever embed/rerank provider (Voyage, OpenRouter, SiliconFlow) is actually active,
-    // so they can be unconditionally critical rather than only "critical while Voyage happens to be
-    // the pin" (the old logic's gap — a dead OpenRouter/bge-m3 lane never failed liveness at all).
-    // Still excluded when RAG_EMBED_PROVIDER is pinned-but-keyless (`ragEmbedProviderError` set):
-    // that misconfiguration is already surfaced there, and 503ing the container on stale rag-embed/
-    // rag-rerank rows from BEFORE the mis-pin would just restart-loop without fixing anything.
-    const criticalServices = new Set(["pinecone", "alpaca-broker"]);
-    if (!checks.ragEmbedProviderError) {
-      criticalServices.add("rag-embed");
-      criticalServices.add("rag-rerank");
-    }
+    const summaries = healthProbeDeps.getServiceHealthSummaries();
+    const dependencies: Record<
+      string,
+      { ok: boolean; degraded?: boolean; lastFailure?: string | null; failureClass?: string | null }
+    > = {};
+    // Critical liveness is Alpaca plus the ACTIVE vector store. After the Qdrant
+    // cutover Pinecone is leftover telemetry, not a 503 (PD #116). A hard-stopped
+    // rag-embed/rag-rerank lane used to 503 this probe (bge-m3-metering-gate, 2026-07-18),
+    // which Coolify treats as container death: restart -> boot interlock re-halts autonomy.
+    // A dead embed cannot refill itself via restart, same as drained OpenRouter credits,
+    // so those lanes DEGRADE only (ok=false + degraded=true). Retrieval already fail-opens;
+    // ingest isolates per task. Still excluded from any 503 when RAG_EMBED_PROVIDER is
+    // pinned-but-keyless (`ragEmbedProviderError` set).
+    const criticalServices = new Set(["alpaca-broker"]);
+    if (vectorReadBackend() !== "qdrant") criticalServices.add("pinecone");
+    const softDegradeServices = new Set(["rag-embed", "rag-rerank"]);
     // Collapse (service, keySource) lanes to one entry per service. Prefer a CONFIGURED lane
     // (env/user) over a stale keySource:"none" lane so a service that later got a working key isn't
     // pinned failed forever by an old missing-key "none" lane (no future success is logged to "none").
     const configuredService = new Set<string>();
     for (const summary of summaries) {
+      if (summary.intentionalOff || isIntentionalOffHealthService(summary.service)) continue;
       if (summary.keySource === "env" || summary.keySource === "user") configuredService.add(summary.service);
     }
     // Configured lanes that are NOT hard-stopped (env OR user). Critical liveness must not 503
@@ -213,12 +369,15 @@ export async function GET(request: Request) {
     // every Coolify deploy (healthcheck requires HTTP 200 on /api/health).
     const configuredLaneHealthy = new Set<string>();
     for (const summary of summaries) {
+      if (summary.intentionalOff || isIntentionalOffHealthService(summary.service)) continue;
       if (summary.keySource !== "env" && summary.keySource !== "user") continue;
-      const hardStopped =
-        summary.stoppedWorking && summary.stoppedReason === HEALTH_REASON_CONSECUTIVE_FAILURES;
-      if (!hardStopped) configuredLaneHealthy.add(summary.service);
+      if (!isHardStoppedHealthSummary(summary)) configuredLaneHealthy.add(summary.service);
     }
     for (const summary of summaries) {
+      // Retired vendors (FMP, Quiver, UW) keep historical failure rows. Public health must
+      // not list them as live ok:false — that pages UptimeRobot / Pushover. FilingAPI is an
+      // optional live lane: missing/401 keys are soft-stamped in db-health, not retired.
+      if (summary.intentionalOff || isIntentionalOffHealthService(summary.service)) continue;
       const isGlobal = summary.keySource === "env" || summary.keySource === "none" || summary.keySource === null;
       if (!isGlobal) continue;
       // Ignore a stale "none"/null lane once the service has a real configured lane — otherwise it
@@ -229,36 +388,41 @@ export async function GET(request: Request) {
       // Only the HARD reason (>=5 consecutive failures) fails liveness. The SOFT heuristics
       // ("active this hour but no success yet") that a single cold-start 500 can trip mark the
       // service degraded but must NOT 503.
-      const hardStopped = summary.stoppedWorking && summary.stoppedReason === HEALTH_REASON_CONSECUTIVE_FAILURES;
+      const hardStopped = isHardStoppedHealthSummary(summary);
       const existing = dependencies[summary.service];
       // Prefer any healthy configured lane (including user keys not shown as "global" rows).
       const nextOk = !hardStopped || configuredLaneHealthy.has(summary.service);
       const nextDegraded =
         (summary.stoppedWorking && !hardStopped) ||
         (hardStopped && configuredLaneHealthy.has(summary.service)) ||
+        (hardStopped && softDegradeServices.has(summary.service)) ||
         undefined;
+      const failureClass = connectionHealthFailureClass(summary.lastFailureError);
+      const laneDetail = {
+        lastFailure: summary.lastFailureError,
+        failureClass
+      };
       if (existing) {
         // Merge lanes for the same service: hard-stopped only wins when no configured lane is healthy.
         dependencies[summary.service] = {
           ok: (existing.ok && nextOk) || configuredLaneHealthy.has(summary.service),
-          degraded: existing.degraded || nextDegraded || undefined
+          degraded: existing.degraded || nextDegraded || undefined,
+          lastFailure: existing.lastFailure ?? laneDetail.lastFailure,
+          failureClass: existing.failureClass ?? laneDetail.failureClass
         };
       } else {
-        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined };
+        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined, ...laneDetail };
       }
 
       // Hard-liveness deps: only app-unsafe/unusable dependencies 503 the public probe. Paid
       // market-data lanes (fmp/massive) degrade to Yahoo/others (the provider-tier section already
       // reports data-provider degradation), so they mark degraded but never fail liveness.
       //
-      // rag-embed/rag-rerank criticality (bge-m3-metering-gate 2026-07-18, lane rename 2026-07-19):
-      // these two lanes now gate liveness UNCONDITIONALLY (see the criticalServices comment above)
-      // because the lane itself is provider-generic — a hard-stopped rag-embed lane means whichever
-      // provider is actually active is down, which is always liveness-critical, not just when
-      // Voyage happens to be the pin. Historical "voyage"/"voyage-rerank" rows (pre-rename, or from
-      // recordMissingRagKey's still-literal-"voyage" missing-key path) are simply not in
-      // criticalServices and degrade this route rather than 503 it — consistent with treating them
-      // as legacy/informational once the real per-operation lane has taken over.
+      // rag-embed/rag-rerank (bge-m3-metering-gate 2026-07-18, lane rename 2026-07-19, soft-degrade
+      // 2026-08-18): these two lanes are provider-generic and still REPORTED (ok=false + degraded)
+      // when hard-stopped, but they never fail liveness. A 503 here restarts Docker and re-halts
+      // Green/Red via the boot interlock — a restart cannot revive a dead embed provider.
+      // Historical "voyage"/"voyage-rerank" rows stay informational, same as before.
       //
       // Env-lane hard-stop alone does NOT 503 when a user-keyed lane for the same service is
       // healthy (see configuredLaneHealthy) — otherwise bad Infisical env Alpaca keys block deploys
@@ -283,7 +447,11 @@ export async function GET(request: Request) {
   // USD FIGURES and key labels are operator-only. `ok` MUST stay the first serialized key: the
   // Uptime Robot keyword monitor matches `"openrouterCredits":{"ok":false`.
   try {
-    const credits = await getOpenRouterCreditStatus();
+    // Bound the public probe.  A cache-miss credits fetch used to wait the
+    // full 8s timeout and, stacked behind a busy scheduler tick, pushed
+    // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
+    // downtime with a false "OpenRouter credits low" on the same URL.
+    const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
     if (credits) {
       const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
       const existing = deps.openrouter;
@@ -294,16 +462,10 @@ export async function GET(request: Request) {
       checks.dependencies = deps;
       checks.openrouterCredits = {
         ok: credits.ok,
-        ...(detailed
-          ? {
-              remainingUsd: credits.remainingUsd,
-              totalUsd: credits.totalUsd,
-              usedUsd: credits.usedUsd,
-              ...(credits.problemKeyLabels?.length
-                ? { problemKeyLabels: credits.problemKeyLabels }
-                : {})
-            }
-          : {}),
+        remainingUsd: credits.remainingUsd,
+        totalUsd: credits.totalUsd,
+        usedUsd: credits.usedUsd,
+        ...(credits.problemKeyLabels?.length ? { problemKeyLabels: credits.problemKeyLabels } : {}),
         thresholdUsd: credits.thresholdUsd,
         keyLimitThresholdUsd: credits.keyLimitThresholdUsd,
         source: credits.source,
@@ -319,6 +481,8 @@ export async function GET(request: Request) {
   } catch {
     // never let the credit check break the health probe
   }
+
+  await yieldEventLoop();
 
   // Disk and database headroom check (purely advisory, never fails the health probe)
   try {
@@ -350,9 +514,10 @@ export async function GET(request: Request) {
     } catch {}
 
     const liveMode = process.env.DB_BOOTSTRAP === "live";
+    const litestreamStatePath = process.env.LITESTREAM_STATE_PATH?.trim() || defaultLitestreamStatePath(dbPath);
     const freshness = await getLitestreamRuntimeHealth({
       dbPath,
-      statePath: process.env.LITESTREAM_STATE_PATH?.trim() || defaultLitestreamStatePath(dbPath),
+      statePath: litestreamStatePath,
       // File metadata does not prove an R2 upload and may be expensive to scan. In live
       // mode the bounded IPC source is therefore the only accepted runtime signal.
       allowFileFallback: !liveMode
@@ -365,19 +530,75 @@ export async function GET(request: Request) {
       latestLocalActivityAtMs: latestLocalActivityAtMs || null
     });
 
+    // Per-compaction-level freshness. This is the gap the IPC `/list` signal above cannot see:
+    // it reports the database's overall last-sync time, which tracks level 0 and stays fresh
+    // even while a higher compaction level is silently wedged — exactly what happened in
+    // production on 2026-08-11 (level 1) and again on 2026-08-12 (level 2).
+    //
+    // Level 0 is read from local `ltx/0/` mtimes here and now. Levels 1/2/3/9 exist only in the
+    // remote replica, so they are graded from the snapshot the scheduler collects every 30
+    // minutes (src/lib/litestream-remote-inventory.ts) — this request performs NO S3/B2 calls
+    // and spawns nothing. Levels with no snapshot report an explicit "not-observable" reason.
+    const litestreamTiers = assessLitestreamTierFreshness(litestreamStatePath, {
+      remoteInventory: getLitestreamRemoteInventory(),
+      // L2/L3 are off in litestream.coolify.yml (single `levels:` entry = L1).
+      // Leftover replica objects at those levels must not page as a wedge.
+      disabledTiers: LITESTREAM_PRODUCT_DISABLED_TIERS
+    });
+
+    // A THIRD, independent signal: litestream's own log lines, captured to a local file by
+    // scripts/coolify-prod-start.sh (it tees the `litestream replicate` process's combined
+    // stdout/stderr so the app can read what litestream itself reports). Unlike the tier-freshness
+    // check above, this needs no S3/B2 credentials and does not depend on the remote LTX inventory
+    // — it still works even while every tier above reports "not-observable" (e.g. while the
+    // separate remote-inventory scheduler-wiring bug leaves litestreamTiers blind). A non-empty
+    // result here is direct evidence — litestream said "compaction failed" or "validation error
+    // detected" recently — so, unlike a not-observable tier, it is a real alarm, not a coverage
+    // gap: see the storageDegraded fold-in below.
+    const litestreamRuntimeLogPath = process.env.LITESTREAM_RUNTIME_LOG_PATH?.trim()
+      || defaultLitestreamRuntimeLogPath(dbPath);
+    const litestreamCompactionLogFindings = scanLitestreamRuntimeLogFile(litestreamRuntimeLogPath);
+
     // Byte counts are operator-only (see the header comment); every litestream/backup-continuity
     // field below stays public because the credential-less deploy-verify runbook reads exactly
     // those, and `storageDegraded` (computed from the raw numbers, not from this object) keeps the
     // disk/WAL thresholds visible to an anonymous monitor without publishing the capacity itself.
     checks.storage = {
-      ...(detailed ? { dbSizeBytes, walSizeBytes, freeBytes, totalBytes } : {}),
+      dbSizeBytes,
+      walSizeBytes,
+      freeBytes,
+      totalBytes,
       litestreamAgeSeconds,
       litestreamState,
       litestreamStatus: freshness.state === "known" ? freshness.status : null,
       litestreamLastSyncAt: freshness.state === "known" ? freshness.lastSyncAt : null,
       litestreamTimestampState: freshness.state === "known" ? freshness.timestampState : null,
       litestreamSource: freshness.source,
-      litestreamDegradedReasons: litestreamAssessment.reasons
+      litestreamDegradedReasons: litestreamAssessment.reasons,
+      litestreamTiers: litestreamTiers.tiers,
+      // Deliberately NOT folded into `litestreamDegradedReasons` above: that array is typed
+      // `LitestreamDegradationReason[]` and is produced solely by assessLitestreamRuntimeHealth
+      // grading the IPC daemon signal. Tier verdicts are a different assessor with different
+      // evidence, so they travel in their own flat, greppable pair — an external keyword monitor
+      // can be pointed at `litestreamTiersDegraded` without either signal muddying the other.
+      litestreamTiersDegraded: litestreamTiers.degraded,
+      litestreamTierDegradedReasons: litestreamTiers.degradedReasons,
+      // How much of the five-level breakdown is actually covered right now. Published so an
+      // external monitor can distinguish "all five levels healthy" from "we can see one level
+      // and are blind to four" — the state that silently held for a day before 2026-08-12.
+      litestreamTierCoverage: {
+        observed: litestreamTiers.observedTiers,
+        notObservable: litestreamTiers.notObservableTiers,
+        remoteInventoryState: litestreamTiers.remoteInventoryState,
+        remoteInventoryCollectedAt: litestreamTiers.remoteInventoryCollectedAt
+      },
+      // Count only — the matched log lines themselves go to the (operator-only) alert, not this
+      // world-readable body, since litestream's own error text could echo bucket/path detail.
+      litestreamCompactionLogFailureCount: litestreamCompactionLogFindings.length,
+      // Weekly R2 cold snapshot (second-provider DR). Local setting only — no R2 I/O on this
+      // path. Public so Usage Monitor fleet backup (and humans) can see "R2 weekly is fine".
+      // Deliberately NOT folded into storageDegraded / 503 (same contract as UM backup layers).
+      r2Weekly: getR2WeeklyHealthStatus(),
     };
 
     // Thresholds:
@@ -385,7 +606,7 @@ export async function GET(request: Request) {
     const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
     const walLarge = walSizeBytes > 500 * 1024 * 1024;
 
-    if (diskLow || walLarge || litestreamAssessment.degraded) {
+    if (diskLow || walLarge || litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
       checks.storageDegraded = true;
 
       // Send a one-shot needs-attention notification/alert via the notifier if not sent recently
@@ -406,10 +627,62 @@ export async function GET(request: Request) {
           void alertStorageWarning("litestream_sync_time_invalid", "Litestream reported an invalid or materially future last-sync timestamp.");
         }
       }
+      for (const tier of litestreamTiers.tiers) {
+        if (tier.state === "known" && tier.degraded) {
+          const where = tier.source === "local-ltx" ? "local LTX cache" : "remote replica";
+          void alertStorageWarning(
+            `litestream_tier_${tier.tier}_stale`,
+            `Litestream "${tier.label}" (level ${tier.tier}) has not produced a new LTX file in the ${where} for ${Math.round(tier.ageSeconds / 60)} minutes (threshold ${Math.round(tier.thresholdSeconds / 60)} min), while level 0 kept advancing.`
+          );
+        } else if (tier.state === "empty" && tier.degraded) {
+          // Distinct alert key from `_stale`: a level that holds NOTHING states a different fact
+          // than one that stopped advancing, and the two should dedupe separately.
+          void alertStorageWarning(
+            `litestream_tier_${tier.tier}_empty_wedged`,
+            `Litestream "${tier.label}" (level ${tier.tier}) holds zero objects in the remote replica.  ${tier.detail}`
+          );
+        }
+      }
+      if (litestreamCompactionLogFindings.length > 0) {
+        const sample = litestreamCompactionLogFindings[0];
+        void alertStorageWarning(
+          "litestream_compaction_log_failure",
+          `Litestream's own runtime log reports ${litestreamCompactionLogFindings.length} recent "${sample.marker}" line(s) — direct evidence a compaction or validation pass is failing, independent of the per-tier freshness check. Sample: ${sample.line}`
+        );
+      }
+    }
+
+    // Losing sight of a backup tier is not itself a backup failure, so it does NOT flip
+    // storageDegraded — but in production it does mean the wedge detector is blind, which is
+    // what went unnoticed for a day before 2026-08-12. Alert once, separately, and honestly.
+    if (
+      liveMode
+      && litestreamTiers.notObservableTiers > 0
+      && litestreamTiers.remoteInventoryState !== "ok"
+      && litestreamTiers.remoteInventoryState !== "partial"
+    ) {
+      void alertStorageWarning(
+        "litestream_tier_coverage_blind",
+        `Litestream per-level backup monitoring is blind to ${litestreamTiers.notObservableTiers} of ${litestreamTiers.tiers.length} compaction levels (replica inventory: ${litestreamTiers.remoteInventoryState}). A wedged compaction at those levels would not be detected.`
+      );
     }
   } catch {
-    // never let storage monitoring break the health probe
+    // never let storage monitoring break the health probe — still emit the monitor field
+    if (!checks.storage || typeof checks.storage !== "object") {
+      checks.storage = { litestreamTiersDegraded: false };
+    } else if (!("litestreamTiersDegraded" in (checks.storage as object))) {
+      (checks.storage as { litestreamTiersDegraded: boolean }).litestreamTiersDegraded = false;
+    }
   }
 
-  return Response.json({ ok, checks }, { status: ok ? 200 : 503 });
+  return { ok, checks };
+}
+
+export async function GET(request: Request) {
+  const detailed = authorizeOpsRequest(request);
+  const warm = readWarmHealthSnapshot(assembleHealth);
+  if (warm) return jsonHealth(warm, detailed);
+  const payload = await assembleHealth();
+  storeHealthSnapshot(payload);
+  return jsonHealth(payload, detailed);
 }

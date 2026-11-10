@@ -67,18 +67,26 @@ describe("pinecone monthly write-unit breaker", () => {
     getDb().prepare("DELETE FROM api_health_log").run();
     mocks.alertStorageWarning.mockClear();
     mocks.storeDocument.mockReset();
+    // Breaker only parks when an app monthly budget is configured.  0 = pay-as-you-go.
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "2000000";
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+    delete process.env.PINECONE_MONTHLY_WU_BUDGET;
   });
 
   it("detects ONLY the monthly WU exhaustion error shape", async () => {
     const { isPineconeWuExhaustedError } = await loadBreaker();
     expect(isPineconeWuExhaustedError(PROD_WU_ERROR)).toBe(true);
     expect(isPineconeWuExhaustedError("you've reached your WRITE UNIT LIMIT FOR THE CURRENT MONTH — rate limited")).toBe(true);
-    // Month-quota text without any 429/rate-limit signal: not the breaker's condition.
-    expect(isPineconeWuExhaustedError("You've reached your write unit limit for the current month (2000000).")).toBe(false);
+    // Official Pinecone body often omits "Status: 429" — HTTP status is 429, text is the quota phrase.
+    expect(isPineconeWuExhaustedError("You've reached your write unit limit for the current month (2000000).")).toBe(true);
+    expect(isPineconeWuExhaustedError(
+      "Request failed. You've reached your write unit limit for the current month. To continue writing data, upgrade your plan."
+    )).toBe(true);
     // Ordinary 429s (per-second rate limits, embed providers) must keep normal retry behavior.
     expect(isPineconeWuExhaustedError("HTTP 429 Too Many Requests")).toBe(false);
     expect(isPineconeWuExhaustedError("")).toBe(false);
@@ -140,6 +148,73 @@ describe("pinecone monthly write-unit breaker", () => {
     expect(await auditCount("pinecone_wu_gate_skip")).toBe(1);
   });
 
+  it("does not latch a Starter 2M monthly-WU 429 while the Standard trial is active", async () => {
+    process.env.PINECONE_TRIAL_ENDS_AT = "2026-08-30T00:00:00.000Z";
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "2500000";
+    const { tripPineconeWuBreaker, pineconeWuExhaustedUntil, PINECONE_WU_EXHAUSTED_UNTIL_KEY } =
+      await loadBreaker();
+    const { setInternalSetting } = await import("../src/lib/db");
+    setInternalSetting(PINECONE_WU_EXHAUSTED_UNTIL_KEY, "2026-09-01T00:00:00.000Z");
+    const augNow = Date.UTC(2026, 7, 17, 16, 0, 0);
+    expect(pineconeWuExhaustedUntil(augNow)).toBeNull();
+    const res = await tripPineconeWuBreaker({ message: PROD_WU_ERROR, operation: "upsert" }, augNow);
+    expect(res.tripped).toBe(false);
+    expect(pineconeWuExhaustedUntil(augNow)).toBeNull();
+    expect(mocks.alertStorageWarning).not.toHaveBeenCalled();
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+  });
+
+  it("does not trip a leftover 2M 429 while a 5M Builder budget is configured", async () => {
+    process.env.PINECONE_TRIAL_ENDS_AT = "2026-08-27T00:00:00.000Z";
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "5000000";
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "5000000";
+    const { tripPineconeWuBreaker, pineconeWuExhaustedUntil } = await loadBreaker();
+    const now = Date.UTC(2026, 7, 22, 12, 0, 0);
+    const twoM = await tripPineconeWuBreaker({ message: PROD_WU_ERROR, operation: "upsert" }, now);
+    expect(twoM.tripped).toBe(false);
+    expect(pineconeWuExhaustedUntil(now)).toBeNull();
+    expect(mocks.alertStorageWarning).not.toHaveBeenCalled();
+    const fiveM = await tripPineconeWuBreaker({
+      message: "You've reached your write unit limit for the current month (5000000). Status: 429.",
+      operation: "upsert"
+    }, now);
+    expect(fiveM.tripped).toBe(true);
+    expect(mocks.alertStorageWarning).toHaveBeenCalledTimes(1);
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+  });
+
+  it("does not trip numberless official monthly-quota text during the 5M Builder week", async () => {
+    process.env.PINECONE_TRIAL_ENDS_AT = "2026-08-27T00:00:00.000Z";
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "5000000";
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "5000000";
+    const { tripPineconeWuBreaker, pineconeWuExhaustedUntil, isPineconeWuExhaustedError } =
+      await loadBreaker();
+    const now = Date.UTC(2026, 7, 22, 12, 0, 0);
+    // Same official body the matcher already accepts — no "(2000000)" count to compare.
+    const numberless =
+      "Request failed. You've reached your write unit limit for the current month. To continue writing data, upgrade your plan.";
+    expect(isPineconeWuExhaustedError(numberless)).toBe(true);
+    const res = await tripPineconeWuBreaker({ message: numberless, operation: "upsert" }, now);
+    expect(res.tripped).toBe(false);
+    expect(pineconeWuExhaustedUntil(now)).toBeNull();
+    expect(mocks.alertStorageWarning).not.toHaveBeenCalled();
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+  });
+
+  it("does not trip or page when the app monthly budget is off (pay-as-you-go)", async () => {
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "0";
+    delete process.env.PINECONE_TRIAL_ENDS_AT;
+    delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
+    const { tripPineconeWuBreaker, pineconeWuExhaustedUntil } = await loadBreaker();
+    const res = await tripPineconeWuBreaker({ message: PROD_WU_ERROR, operation: "upsert" }, Date.UTC(2026, 8, 1));
+    expect(res.tripped).toBe(false);
+    expect(pineconeWuExhaustedUntil(Date.UTC(2026, 8, 1))).toBeNull();
+    expect(mocks.alertStorageWarning).not.toHaveBeenCalled();
+  });
+
   it("clears the marker eagerly on a successful Pinecone WRITE, but never on reads", async () => {
     const { tripPineconeWuBreaker, notePineconeWriteSuccess, pineconeWuExhaustedUntil } = await loadBreaker();
     await tripPineconeWuBreaker({ message: PROD_WU_ERROR }, Date.now());
@@ -179,6 +254,7 @@ describe("sec-ingest clean deferral under the WU breaker", () => {
     deleteInternalSetting("pinecone:wuGateLastAuditDay");
     mocks.storeDocument.mockReset();
     mocks.alertStorageWarning.mockClear();
+    process.env.PINECONE_MONTHLY_WU_BUDGET = "2000000";
   });
 
   async function makeRunningJobWithTask() {

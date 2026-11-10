@@ -11,10 +11,13 @@
  *  brokerage-account authority requires typing CONFIRM. Autonomy has its own
  *  ritual: Autopilot costs a typed word, going back to Ask-first is one tap. */
 
+import { GUARDRAILS_HEADER_SUFFIX } from "@/lib/guardrail-copy";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { toggleIncludedIndex } from "@/lib/index-universes";
-import type { IndexUniverse, OrderType, TaxationType, TradingPolicy } from "@/lib/types";
+import { formatIndexUniverseList, toggleIncludedIndex } from "@/lib/index-universes";
+import { getBrokerMarketHours } from "@/lib/market-hours";
+import type { OrderType, TaxationType, TradingPolicy } from "@/lib/types";
+import { mergeAccountCapabilities } from "@/lib/venue-contract-pure";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { savePolicy, ConsoleApiError, type PolicyPatchBody } from "../lib/api";
 import {
@@ -22,7 +25,7 @@ import {
   deriveReality,
   deriveRiskUtilization,
   deriveStateInfo,
-  deriveUnmanagedShortCount,
+  deriveUnmanagedShorts,
   unmanagedShortNotice,
   type UtilizationMeter
 } from "../lib/derive";
@@ -53,6 +56,7 @@ import {
   PANIC_BRAKE,
   PROTECTIVE_STOPS,
   SOCRATIC_OVERRIDE,
+  OPTIONS,
   SHORTS,
   TAX_RULES,
   TRIGGERS,
@@ -60,13 +64,12 @@ import {
   VOL_TARGETING
 } from "./field-defs";
 import { StopFlowDiagram } from "./stop-flow";
-
-function parseSymbols(text: string): string[] {
-  return text
-    .split(/[\s,]+/)
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean);
-}
+import {
+  buildUniverseExtraPatch,
+  discardAllDrafts,
+  emptyUniverseDraft,
+  type UniverseDraft
+} from "./universe-draft";
 
 function isIraTaxation(taxationType: TaxationType | undefined): boolean {
   return taxationType === "roth_ira" || taxationType === "traditional_ira";
@@ -132,7 +135,8 @@ function CapUtilization({
   band,
   kind,
   note,
-  daily
+  daily,
+  label
 }: {
   band: (UtilizationMeter & { symbol?: string }) | undefined;
   kind: "money" | "pct" | "count";
@@ -141,6 +145,7 @@ function CapUtilization({
    *  "Used $1,200 of $5,000 today" instead of the point-in-time "Current usage" wording
    *  used for exposure caps, which have no daily reset. */
   daily?: boolean;
+  label?: string;
 }) {
   const fmtUsed = (v: number) => (kind === "money" ? fmtMoney(v) : kind === "pct" ? fmtPct(v, 1) : fmtNum(v));
   const fmtLimit = (v: number) => (kind === "money" ? fmtMoneyWhole(v) : kind === "pct" ? fmtPct(v, 1) : fmtNum(v));
@@ -166,7 +171,7 @@ function CapUtilization({
           {band.pct !== undefined ? ` · ${fmtPct(band.pct, 1)}` : ""}
         </span>
       </div>
-      <Meter value={ratio} max={100} />
+      <Meter value={ratio} max={100} label={label ?? (daily ? "Used today" : "Current usage")} />
     </div>
   );
 }
@@ -192,13 +197,7 @@ export default function GuardrailsPage() {
 function AccountScopedGuardrailsPage() {
   const { snapshot } = useConsoleData();
   const draft = usePolicyDraft();
-  const [universeDraft, setUniverseDraft] = useState<{
-    includedIndices?: IndexUniverse[];
-    additionalSymbols?: string;
-    blocklist?: string;
-    permittedOrderTypes?: OrderType[];
-    sellToFundBuy?: string;
-  }>({});
+  const [universeDraft, setUniverseDraft] = useState<UniverseDraft>(emptyUniverseDraft);
 
   const reality = useMemo(() => (snapshot ? deriveReality(snapshot) : null), [snapshot]);
   if (!snapshot || !reality) return null;
@@ -206,34 +205,27 @@ function AccountScopedGuardrailsPage() {
   const risk = deriveRiskUtilization(snapshot);
   const exposure = deriveExposureUtilization(snapshot, policy);
   // Same advisory copy as the Home positions card (shared helper — never drifts).
-  const unmanagedShorts = unmanagedShortNotice(deriveUnmanagedShortCount(snapshot.positions, policy));
+  const unmanaged = deriveUnmanagedShorts(snapshot.positions, policy);
+  const unmanagedShorts = unmanagedShortNotice(unmanaged.count, unmanaged.reason ?? undefined);
 
   // Universe / arrays are replace-whole-value fields → extraPatch.
-  const extraPatch: PolicyPatchBody = {};
-  if (universeDraft.includedIndices && universeDraft.includedIndices.join() !== policy.includedIndices.join()) {
-    extraPatch.includedIndices = universeDraft.includedIndices;
-  }
-  if (universeDraft.additionalSymbols !== undefined && parseSymbols(universeDraft.additionalSymbols).join() !== (policy.additionalSymbols ?? []).join()) {
-    extraPatch.additionalSymbols = parseSymbols(universeDraft.additionalSymbols);
-  }
-  if (universeDraft.blocklist !== undefined && parseSymbols(universeDraft.blocklist).join() !== (policy.blocklist ?? []).join()) {
-    extraPatch.blocklist = parseSymbols(universeDraft.blocklist);
-  }
-  if (universeDraft.permittedOrderTypes && universeDraft.permittedOrderTypes.join() !== policy.permittedOrderTypes.join()) {
-    extraPatch.permittedOrderTypes = universeDraft.permittedOrderTypes;
-  }
-  if (universeDraft.sellToFundBuy !== undefined && universeDraft.sellToFundBuy !== (policy.sellToFundBuy ?? "off")) {
-    extraPatch.sellToFundBuy = universeDraft.sellToFundBuy;
-  }
+  const extraPatch: PolicyPatchBody = buildUniverseExtraPatch(universeDraft, policy);
+  const discardAll = () => discardAllDrafts(() => draft.clear(), setUniverseDraft);
 
   const indices = universeDraft.includedIndices ?? policy.includedIndices;
   const orderTypes = universeDraft.permittedOrderTypes ?? policy.permittedOrderTypes;
   const taxationType = activeConnectedAccount(snapshot)?.taxationType ?? policy.taxSettings?.taxationType ?? "taxable";
   const isIra = isIraTaxation(taxationType);
   const taxRuleDefs = TAX_RULES.filter((def) => {
-    if (isIra) return def.path === "taxSettings.iraWashSaleHandling";
+    if (isIra) {
+      return def.path === "taxSettings.iraWashSaleHandling" || def.path === "taxSettings.washSaleMinLossUsd";
+    }
     return def.path !== "taxSettings.iraWashSaleHandling";
   });
+  
+  const account = activeConnectedAccount(snapshot);
+  const broker = account?.broker ?? policy.activeBroker;
+  const caps = mergeAccountCapabilities(broker, account?.capabilities);
 
   return (
     <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
@@ -243,7 +235,7 @@ function AccountScopedGuardrailsPage() {
           {reality.word} · {reality.phrase}
         </Chip>
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          for {reality.account?.label ?? "no connected account"} — authority, caps, and hard execution constraints
+          for {reality.account?.label ?? "no connected account"} — {GUARDRAILS_HEADER_SUFFIX}
         </span>
       </div>
 
@@ -278,48 +270,127 @@ function AccountScopedGuardrailsPage() {
               draft={draft}
               hint="Choose one daily opening budget. Percent is the account-relative default; switching modes clears the other value before save."
             />
-            <CapUtilization band={risk.dailyNotional} kind="money" daily />
+            <CapUtilization band={risk.dailyNotional} kind="money" daily label="Max Spend Per Day" />
           </div>
           {ESSENTIALS.filter((def) => !ESSENTIAL_FIELD_PATHS.has(def.path) && !SCHEDULE_FIELD_PATHS.has(def.path)).map((def) => (
             <div key={def.path}>
               <PolicyFieldRow def={def} policy={policy} draft={draft} />
-              {def.path === "maxDailyOrders" && <CapUtilization band={risk.dailyOrders} kind="count" daily />}
+              {def.path === "maxDailyOrders" && <CapUtilization band={risk.dailyOrders} kind="count" daily label="Max Daily Orders" />}
             </div>
           ))}
           <div className="con-card-title pt-3">Schedule</div>
-          {ESSENTIALS.filter((def) => SCHEDULE_FIELD_PATHS.has(def.path)).map((def) => (
-            <div key={def.path}>
-              <PolicyFieldRow def={def} policy={policy} draft={draft} />
-            </div>
-          ))}
-          <div className="con-card-title pt-3">Short selling</div>
-          {unmanagedShorts && (
-            <p className="py-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
-              {unmanagedShorts}
-            </p>
+          {ESSENTIALS.filter((def) => SCHEDULE_FIELD_PATHS.has(def.path)).map((def) => {
+            const broker = activeConnectedAccount(snapshot)?.broker ?? policy.activeBroker;
+            const brokerHours = getBrokerMarketHours(broker);
+            const hint =
+              def.path === "permitExtendedHours"
+                ? `Permits the agent to place orders configured to fill outside regular market hours (${brokerHours.orderHoursHint}).`
+                : def.path === "runDuringExtendedHours"
+                  ? `Allows the system to run scheduled or event-triggered strategy scans during extended hours (${brokerHours.scanHoursHint}).`
+                  : undefined;
+            return (
+              <div key={def.path}>
+                <PolicyFieldRow def={def} policy={policy} draft={draft} hint={hint} />
+              </div>
+            );
+          })}
+          {broker !== "kalshi" && (
+            <>
+              <div className="con-card-title pt-3 flex items-center justify-between">
+                <span>Short selling</span>
+                {caps.shortSelling ? (
+                  <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-pos)]">Fully Supported</span>
+                ) : (
+                  <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">Disabled by Broker</span>
+                )}
+              </div>
+              {caps.shortSelling && (
+                <>
+                  {unmanagedShorts && (
+                    <p className="py-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
+                      {unmanagedShorts}
+                    </p>
+                  )}
+                  {SHORTS.map((def) => (
+                    <div key={def.path}>
+                      <PolicyFieldRow def={def} policy={policy} draft={draft} />
+                      {def.path === "maxShortExposurePct" && <CapUtilization band={exposure.shortPct} kind="pct" label="Max Short Exposure" />}
+                    </div>
+                  ))}
+                </>
+              )}
+
+              <div className="con-card-title pt-3 flex items-center justify-between">
+                <span>Options trading</span>
+                {caps.optionsTrading ? (
+                  <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-pos)]">Fully Supported</span>
+                ) : (
+                  <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">Disabled by Broker</span>
+                )}
+              </div>
+              {caps.optionsTrading && OPTIONS.map((def) => {
+                if (def.path !== "optionsTradingEnabled") return null;
+                return (
+                  <div key={def.path}>
+                    <PolicyFieldRow def={def} policy={policy} draft={draft} />
+                  </div>
+                );
+              })}
+
+              <div className="con-card-title pt-3 flex items-center justify-between">
+                <span>Macro Data</span>
+              </div>
+              {OPTIONS.map((def) => {
+                if (def.path !== "kalshiMacroEnabled") return null;
+                return (
+                  <div key={def.path}>
+                    <PolicyFieldRow def={def} policy={policy} draft={draft} />
+                  </div>
+                );
+              })}
+            </>
           )}
-          {SHORTS.map((def) => (
-            <div key={def.path}>
-              <PolicyFieldRow def={def} policy={policy} draft={draft} />
-              {def.path === "maxShortExposurePct" && <CapUtilization band={exposure.shortPct} kind="pct" />}
-            </div>
-          ))}
+          {broker === "kalshi" && (
+            <>
+              <div className="con-card-title pt-3">Event Contracts Trading</div>
+              <p className="mb-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                Fully Supported. This is a Kalshi event-contract account.
+              </p>
+              {OPTIONS.map((def) => {
+                if (def.path !== "eventContractsEnabled" && def.path !== "kalshiMacroEnabled") return null;
+                return (
+                  <div key={def.path}>
+                    <PolicyFieldRow def={def} policy={policy} draft={draft} />
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       </Card>
 
-      <Card title="Protective stops" collapsible defaultOpen>
-        <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          Every rule that exits a losing (or protects a winning) position, in one place. The diagram shows how they
-          compose for this account right now: each lane falls back left → right, trailing runs alongside, and the app
-          monitor backstops whatever the broker can&apos;t hold.
-        </p>
-        <StopFlowDiagram policy={policy} />
-        <div className="mt-3 divide-y divide-[color:var(--con-line)]">
-          {PROTECTIVE_STOPS.map((def) => (
-            <PolicyFieldRow key={def.path} def={def} policy={policy} draft={draft} />
-          ))}
-        </div>
-      </Card>
+      {broker !== "kalshi" && (
+        <Card title="Protective stops" collapsible defaultOpen>
+          <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            Every rule that exits a losing (or protects a winning) position, in one place. The diagram shows how they
+            compose for this account right now: each lane falls back left → right, trailing runs alongside, and the app
+            monitor backstops whatever the broker can&apos;t hold.
+          </p>
+          <StopFlowDiagram policy={policy} />
+          <div className="mt-3 divide-y divide-[color:var(--con-line)]">
+            {PROTECTIVE_STOPS.map((def) => {
+              const brokerHours = getBrokerMarketHours(broker);
+              const hint =
+                def.path === "allowExtendedHoursSyntheticStops"
+                  ? `Continues monitoring and executing synthetic stop-losses during extended hours (${brokerHours.syntheticStopHoursHint}).`
+                  : undefined;
+              return (
+                <PolicyFieldRow key={def.path} def={def} policy={policy} draft={draft} hint={hint} />
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {/* Tax treatment — account-scoped like the rest of this page; moved here from
           Strategy in the 2026-07-16 IA restructure, directly above the Advanced
@@ -349,13 +420,14 @@ function AccountScopedGuardrailsPage() {
               <CapUtilization
                 band={isBlank(policy.maxSymbolExposurePct) ? exposure.symbolNotional : exposure.symbolPct}
                 kind={isBlank(policy.maxSymbolExposurePct) ? "money" : "pct"}
+                label="Max In One Stock"
               />
             </div>
             {EXPOSURE.filter((def) => !EXPOSURE_FIELD_PATHS.has(def.path)).map((def) => (
               <div key={def.path}>
                 <PolicyFieldRow def={def} policy={policy} draft={draft} />
-                {def.path === "maxGrossExposurePct" && <CapUtilization band={exposure.grossPct} kind="pct" />}
-                {def.path === "maxNetExposurePct" && <CapUtilization band={exposure.netPct} kind="pct" />}
+                {def.path === "maxGrossExposurePct" && <CapUtilization band={exposure.grossPct} kind="pct" label="Max Gross Exposure" />}
+                {def.path === "maxNetExposurePct" && <CapUtilization band={exposure.netPct} kind="pct" label="Max Net Exposure" />}
               </div>
             ))}
           </AdvancedGroup>
@@ -416,7 +488,10 @@ function AccountScopedGuardrailsPage() {
           </AdvancedGroup>
           <AdvancedGroup title="Universe">
             <div className="py-2">
-              <div className="con-label">Base indices</div>
+              <div className="con-label">Indices</div>
+              <p className="mb-1.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-fg)]">
+                {formatIndexUniverseList(indices)}
+              </p>
               <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
                 {INDICES.map((idx) => {
                   const on = indices.includes(idx.id);
@@ -522,6 +597,7 @@ function AccountScopedGuardrailsPage() {
         defs={ALL_DEFS}
         reality={reality}
         extraPatch={Object.keys(extraPatch).length > 0 ? extraPatch : undefined}
+        onDiscard={discardAll}
       />
     </div>
   );
@@ -583,7 +659,7 @@ function AutonomyCard() {
     <Card title="Autonomy">
       <p className="mb-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
         Is the agent on, on what cadence, and can you run it now?{" "}
-        <strong className="font-semibold text-[color:var(--con-fg)]">Run once</strong> and Start/Stop live in the top
+        <strong className="font-semibold text-[color:var(--con-fg)]">Run Once</strong> and Start/Stop live in the top
         bar only (one control each — this panel explains state and blockers, it does not duplicate those buttons).
       </p>
 
@@ -660,7 +736,7 @@ function AutonomyCard() {
         </div>
       ) : (
         <p className="mb-4 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          Preflight looks clear for a manual Run once (LLM key + account readiness). Scheduled autonomy still depends
+          Preflight looks clear for a manual Run Once (LLM key + account readiness). Scheduled autonomy still depends
           on run state above.
         </p>
       )}
@@ -707,7 +783,7 @@ function AutonomyCard() {
           note={
             reality.tone === "live"
               ? "Autopilot lets Socratic Trade place orders in this brokerage account without per-trade approval, including approved Socratic overrides of owner-preference gates."
-              : "Autopilot lets Socratic Trade place broker-paper orders itself, including approved Socratic overrides of owner-preference gates."
+              : "Autopilot lets Socratic Trade place orders itself, including approved Socratic overrides of owner-preference gates."
           }
           onConfirm={() => void setAuthority("decide")}
         />

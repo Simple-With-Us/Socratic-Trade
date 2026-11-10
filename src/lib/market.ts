@@ -6,6 +6,7 @@ import { getSymbolWebSignals, setTechnicalWatchlist } from "./web-sources";
 import type { SymbolWebSignal } from "./web-sources";
 import { clearFundHoldingsCache, fetchBlackRockHoldingSymbols, isBlackRockHoldingUniverse } from "./fund-holdings";
 import { DEFAULT_SCORING_WEIGHTS } from "./defaults";
+import { enrichmentPlanForDeadline } from "./gather-budget";
 import { INDEX_UNIVERSES, isIndexMemberSymbol } from "./index-universes";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { normalizeSymbol } from "./money";
@@ -15,8 +16,9 @@ import {
   normalizeMarketScanCandidateLimit,
   normalizeMarketScanOutlierReserve
 } from "./scan-settings";
-import { fetchYahooFinanceQuote, type YahooFinanceQuote } from "./yahoo-finance";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
 import type {
+  BrokerQuote,
   EnrichmentFieldObservations,
   EnrichmentSources,
   EquityPosition,
@@ -31,6 +33,18 @@ import type {
   UniverseFloor
 } from "./types";
 import { stampFieldObservation } from "./evidence-facts";
+import {
+  fetchNasdaqScreenerResponse,
+  nasdaqScreenerUrl,
+  NASDAQ_SCREENER_TIMEOUT_MESSAGE,
+  NASDAQ_SCREENER_TIMEOUT_MS,
+  readNasdaqScreenerJson
+} from "./nasdaq-screener-fetch";
+import { fetchFallbackUniverseRows } from "./nasdaq-universe-fallback";
+import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
+import { recoverUniverseQuotesFromBroker } from "./scan-broker-universe-recovery";
+
+export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
 /**
  * A web signal worth pulling a below-cutoff name into the candidate set for.
@@ -91,18 +105,29 @@ function notableCongressAnalyticsScore(sig?: SymbolWebSignal): number {
 }
 
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
-const NASDAQ_SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=8000&offset=0";
+// Verified abort cause (prod d0359642, every scan since 2026-08-13T22:30Z):
+// fetchNasdaqScreener armed `setTimeout(() => controller.abort(), 8000)` with NO
+// reason and left it armed through `response.json()` of the 8000-row table.
+// abort() with no reason throws "This operation was aborted" — that is NOT the
+// 20s withScanDeadline (that message is "Interactive market scan deadline exceeded.").
+// nasdaq-quote / nasdaq-calendar already use BROWSER_UA because stub / bot UAs
+// hang on api.nasdaq.com (live-verified 2026-08-05). The screener still sent
+// "Mozilla/5.0". Coolify fetch+parse of ~7k rows can also land near 8s, so the
+// timer aborted the body read. Last good: 2026-08-13T16:15:45Z, 513 quotes.
 const DEFAULT_ENRICHMENT_POOL_MULTIPLIER = 5;
 const DEFAULT_ENRICHMENT_POOL_CAP = 500;
 const MAX_ENRICHMENT_POOL_MULTIPLIER = 10;
 const MAX_ENRICHMENT_POOL_CAP = 1_000;
 
-type RawNasdaqRow = Record<string, unknown>;
 type NasdaqExchange = "nasdaq" | "nyse";
 
 // Nasdaq screener is a public, unauthenticated endpoint — no user API key is
 // consumed, so this single shared cache is safe to serve to all users.
-let screenerCache = new Map<string, { expiresAt: number; rows: RawNasdaqRow[]; asOf?: string }>();
+// Rows are the parsed schema, not the raw JSON, so a drifted envelope is not cached.
+let screenerCache = new Map<string, { expiresAt: number; rows: NasdaqScreenerRow[]; asOf?: string }>();
+/** Last successful screener parse — served stale while a refresh runs or when live fetch fails. */
+let screenerLastGood = new Map<string, { rows: NasdaqScreenerRow[]; asOf?: string }>();
+const screenerRefreshInFlight = new Map<string, Promise<void>>();
 
 /**
  * True if a quote clears the universe floor. Each bound applies only when set (`> 0`); market-cap and
@@ -177,7 +202,8 @@ export function buildEnrichmentPreselectionPool(
   ranked: MarketQuote[],
   eventExtra: MarketQuote[],
   heldSymbols: Set<string>,
-  candidateLimit: number
+  candidateLimit: number,
+  poolCapOverride?: number
 ): MarketQuote[] {
   const multiplier = clampInteger(
     envNumber("MARKET_SCAN_ENRICHMENT_POOL_MULTIPLIER", DEFAULT_ENRICHMENT_POOL_MULTIPLIER),
@@ -189,7 +215,11 @@ export function buildEnrichmentPreselectionPool(
     candidateLimit,
     MAX_ENRICHMENT_POOL_CAP
   );
-  const targetSize = Math.min(ranked.length, Math.min(candidateLimit * multiplier, configuredCap));
+  const effectiveCap =
+    typeof poolCapOverride === "number" && Number.isFinite(poolCapOverride)
+      ? Math.max(candidateLimit, Math.min(configuredCap, Math.round(poolCapOverride)))
+      : configuredCap;
+  const targetSize = Math.min(ranked.length, Math.min(candidateLimit * multiplier, effectiveCap));
   const seen = new Set<string>();
   const add = (quote: MarketQuote, pool: MarketQuote[]) => {
     if (pool.length >= targetSize || seen.has(quote.symbol)) return;
@@ -221,6 +251,31 @@ function uniqueQuotesBySymbol(quotes: MarketQuote[]): MarketQuote[] {
   });
 }
 
+export const SCAN_QUOTES_UNAVAILABLE_CODE = "scan_quotes_unavailable";
+
+/** Thrown when the live screener and quote fallback both return nothing for a
+ *  non-empty universe and no usable audit seed remains. Callers must not turn
+ *  this into a 200 empty candidate table — that looks like "no names today." */
+export class ScanQuotesUnavailableError extends Error {
+  readonly code = SCAN_QUOTES_UNAVAILABLE_CODE;
+  readonly scannedSymbols: number;
+  readonly returnedQuotes = 0;
+  readonly warnings: string[];
+
+  constructor(input: { scannedSymbols: number; warnings: string[] }) {
+    super(
+      "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
+    );
+    this.name = "ScanQuotesUnavailableError";
+    this.scannedSymbols = input.scannedSymbols;
+    this.warnings = input.warnings;
+  }
+}
+
+export function isScanQuotesUnavailableError(error: unknown): error is ScanQuotesUnavailableError {
+  return error instanceof ScanQuotesUnavailableError;
+}
+
 export async function scanMarket(
   symbols: string[],
   positions: EquityPosition[],
@@ -237,6 +292,9 @@ export async function scanMarket(
     /** Slow-changing fields from the last completed strategy scan. Interactive
      * refreshes can reuse these locally while replacing price-family fields. */
     seedEnrichment?: Record<string, MarketQuoteSummary>;
+    deadlineAt?: number;
+    /** Connected account the scan operates for (account-scoped market-data tape). */
+    connectedAccountId?: string;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -250,7 +308,9 @@ export async function scanMarket(
     universeFloor: scanOptions.universeFloor,
     congressMultiplier: scanOptions.congressMultiplier,
     enrichmentMode: scanOptions.enrichmentMode,
-    seedEnrichment: scanOptions.seedEnrichment
+    seedEnrichment: scanOptions.seedEnrichment,
+    deadlineAt: scanOptions.deadlineAt,
+    connectedAccountId: scanOptions.connectedAccountId
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -277,14 +337,15 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     let quotes: MarketQuote[] = [];
     let cached = false;
     let breadthPct: number | undefined;
+    let quoteFallbackAttempted = false;
+    let universeQuoteRecoverySource: string | undefined;
     const universeSources = new Set<string>();
 
     try {
-      const result = await fetchNasdaqScreener(
-        options?.ttlMs ?? marketCacheTtlMs(),
-        undefined,
-        options?.signal
-      );
+      // 15s header budget + one transport retry live in the helper.  The scan
+      // deadline signal aborts that wait and the JSON body.  A deadline abort
+      // throws; it must not become a silent empty table.
+      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs(), undefined, options?.signal);
       cached = result.cached;
       const allQuotes = result.rows.flatMap((row) => toMarketQuote(row, positions, this.name, result.asOf));
       quotes = allQuotes.filter((quote) => allowed.has(quote.symbol));
@@ -302,16 +363,40 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       dynamicResult.sources.forEach((source) => universeSources.add(source));
       if (dynamicResult.cached) cached = true;
 
-      const returnedSymbols = new Set(quotes.map((quote) => quote.symbol));
-      const customSymbolsMissingFromScreener = Array.from(allowed)
-        .filter((symbol) => !returnedSymbols.has(symbol) && !isIndexMemberSymbol(symbol));
-      if (customSymbolsMissingFromScreener.length > 0) {
-        const quoteOnly = await fetchQuoteOnlyMarketQuotes(customSymbolsMissingFromScreener, positions);
-        quotes = [...quotes, ...quoteOnly.quotes];
-        warnings.push(...quoteOnly.warnings);
-        // The quote-only fallback DISPLAYS these Yahoo quotes; record its provider so MarketScan.source
-        // still lists Yahoo even if enrichment later contributes no accepted field for those rows.
-        for (const q of quoteOnly.quotes) if (q.provider) universeSources.add(q.provider);
+      if (quotes.length === 0 && allowed.size > 0) {
+        // Yahoo whole-set pricing, then broker universe recovery, then last-good
+        // seed (ST-4590).  Live Refresh of a 5k-name universe used to start
+        // Yahoo-only fallback and miss the interactive budget / edge 503.
+        quoteFallbackAttempted = true;
+        const recovered = await recoverQuotesWhenScreenerEmpty({
+          allowed,
+          positions,
+          seed: options?.seedEnrichment,
+          userId: options?.userId,
+          connectedAccountId: options?.connectedAccountId,
+          signal: options?.signal,
+          deadlineAt: options?.deadlineAt
+        });
+        quotes = [...quotes, ...recovered.quotes];
+        warnings.push(...recovered.warnings);
+        if (recovered.usedSeed) cached = true;
+        if (recovered.recoverySource) {
+          universeQuoteRecoverySource = recovered.recoverySource;
+          universeSources.add(recovered.recoverySource);
+        }
+        for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
+      } else {
+        const returnedSymbols = new Set(quotes.map((quote) => quote.symbol));
+        const customSymbolsMissingFromScreener = Array.from(allowed)
+          .filter((symbol) => !returnedSymbols.has(symbol) && !isIndexMemberSymbol(symbol));
+        if (customSymbolsMissingFromScreener.length > 0) {
+          const quoteOnly = await fetchQuoteOnlyMarketQuotes(customSymbolsMissingFromScreener, positions);
+          quotes = [...quotes, ...quoteOnly.quotes];
+          warnings.push(...quoteOnly.warnings);
+          // The quote-only fallback DISPLAYS these Yahoo quotes; record its provider so MarketScan.source
+          // still lists Yahoo even if enrichment later contributes no accepted field for those rows.
+          for (const q of quoteOnly.quotes) if (q.provider) universeSources.add(q.provider);
+        }
       }
       // Market breadth: % of the full screener that's advancing today — a free,
       // market-wide risk-on/risk-off gauge (computed from data we already fetched).
@@ -323,12 +408,36 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       warnings.push(error instanceof Error ? error.message : "Market data request failed.");
     }
 
-    if (quotes.length === 0 && options?.seedEnrichment) {
-      quotes = persistedMarketQuotes(options.seedEnrichment, positions);
-      cached = true;
+    if (quotes.length === 0 && allowed.size > 0 && !quoteFallbackAttempted) {
+      // Fetch throw / empty payload: seed first, Yahoo whole-set only if no seed.
+      const recovered = await recoverQuotesWhenScreenerEmpty({
+        allowed,
+        positions,
+        seed: options?.seedEnrichment,
+        userId: options?.userId,
+        connectedAccountId: options?.connectedAccountId,
+        signal: options?.signal,
+        deadlineAt: options?.deadlineAt
+      });
+      quotes = [...quotes, ...recovered.quotes];
+      warnings.push(...recovered.warnings);
+      if (recovered.usedSeed) cached = true;
+      if (recovered.recoverySource) {
+        universeQuoteRecoverySource = recovered.recoverySource;
+        universeSources.add(recovered.recoverySource);
+      }
+      for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
+    }
+
+    if (quotes.length === 0 && allowed.size === 0) {
       warnings.push(
-        "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
+        "This universe has no symbols.  Choose a base index or add symbols on Guardrails."
       );
+    } else if (quotes.length === 0) {
+      throw new ScanQuotesUnavailableError({
+        scannedSymbols: allowed.size,
+        warnings
+      });
     }
 
     // Universe floor: drop penny/illiquid index + dynamic-universe candidates before ranking. `allowed`
@@ -388,11 +497,24 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // on top field-by-field. Live cascade overwrites when it returns values. This is what keeps
     // PE/EPS/div visible after strategy_run audits omit the full MarketScan, and keeps yesterday's
     // symbols' last known fields available even if they are not in today's ranked set.
-    const provider = options?.enrichmentMode === "skip"
-      ? undefined
-      : getEnrichmentProvider(options?.userId);
+    const enrichPlan = enrichmentPlanForDeadline(options?.deadlineAt);
+    const skipLiveEnrich = options?.enrichmentMode === "skip" || enrichPlan.skipLiveEnrich;
+    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId, {
+      connectedAccountId: options?.connectedAccountId
+    });
     let rescoredRanked: MarketQuote[] = ranked;
-    const preselectionPool = buildEnrichmentPreselectionPool(ranked, eventExtra, heldSymbols, candidateLimit);
+    const preselectionPool = buildEnrichmentPreselectionPool(
+      ranked,
+      eventExtra,
+      heldSymbols,
+      candidateLimit,
+      enrichPlan.shrinkPoolToCandidates ? candidateLimit : undefined
+    );
+    if (provider && enrichPlan.shrinkPoolToCandidates) {
+      warnings.push(
+        "Enrichment pool shrunk to the ranked candidate cut to finish gather before the deadline."
+      );
+    }
     const seedBySymbol = await loadDurableEnrichmentSeed(
       preselectionPool.map((q) => q.symbol),
       options?.seedEnrichment
@@ -403,35 +525,56 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       return applyEnrichment(quote, persistedSlowEnrichment(prior));
     };
 
+    const applySeededPool = (): MarketQuote[] => {
+      const seededBySymbol = new Map(
+        preselectionPool.map((quote) => {
+          const enriched = applySeedBaseline(quote);
+          const factorBreakdown = scoreFactors(enriched, weights);
+          return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
+        })
+      );
+      return ranked
+        .map((quote) => seededBySymbol.get(quote.symbol) ?? quote)
+        .sort(compareMarketQuotes);
+    };
+
     if (preselectionPool.length > 0 && provider) {
       try {
-        // Seed first so cascade gaps never blank a field we already know.
-        const baselinePool = preselectionPool.map(applySeedBaseline);
-        const enrichment = await provider.enrich(baselinePool.map((quote) => quote.symbol));
-        const rescoredBySymbol = new Map(
-          baselinePool.map((quote) => {
-            const live = enrichment[quote.symbol];
-            const enriched = live ? applyEnrichment(quote, live) : quote;
-            const factorBreakdown = scoreFactors(enriched, weights);
-            return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
-          })
-        );
-        rescoredRanked = ranked
-          .map((quote) => rescoredBySymbol.get(quote.symbol) ?? applySeedBaseline(quote))
-          .sort(compareMarketQuotes);
+        if (options?.signal?.aborted) {
+          warnings.push(
+            "Live enrichment skipped after gather abort; using the ranked Nasdaq tape plus durable field-store values."
+          );
+          rescoredRanked = applySeededPool();
+        } else {
+          // Seed first so cascade gaps never blank a field we already know.
+          const baselinePool = preselectionPool.map(applySeedBaseline);
+          const enrichment = await provider.enrich(baselinePool.map((quote) => quote.symbol), {
+            signal: options?.signal,
+            deadlineAt: options?.deadlineAt
+          });
+          const rescoredBySymbol = new Map(
+            baselinePool.map((quote) => {
+              const live = enrichment[quote.symbol];
+              const enriched = live ? applyEnrichment(quote, live) : quote;
+              const factorBreakdown = scoreFactors(enriched, weights);
+              return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
+            })
+          );
+          rescoredRanked = ranked
+            .map((quote) => rescoredBySymbol.get(quote.symbol) ?? applySeedBaseline(quote))
+            .sort(compareMarketQuotes);
+        }
       } catch (error) {
-        warnings.push(error instanceof Error ? `Enrichment failed: ${error.message}` : "Enrichment failed.");
-        // Fall back to durable seed so a cascade throw never blanks the table.
-        const seededBySymbol = new Map(
-          preselectionPool.map((quote) => {
-            const enriched = applySeedBaseline(quote);
-            const factorBreakdown = scoreFactors(enriched, weights);
-            return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
-          })
-        );
-        rescoredRanked = ranked
-          .map((quote) => seededBySymbol.get(quote.symbol) ?? quote)
-          .sort(compareMarketQuotes);
+        // Abort during enrich used to rethrow and throw away today's ranked Nasdaq
+        // tape, forcing yesterday's last-good.  Keep the live ranks + durable seed.
+        if (options?.signal?.aborted) {
+          warnings.push(
+            "Live enrichment aborted; using the ranked Nasdaq tape plus durable field-store values."
+          );
+        } else {
+          warnings.push(error instanceof Error ? `Enrichment failed: ${error.message}` : "Enrichment failed.");
+        }
+        rescoredRanked = applySeededPool();
       }
     } else if (preselectionPool.length > 0) {
       // Skip mode (interactive) or no provider: still surface last-known per-field data.
@@ -452,7 +595,12 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
         warnings.push(
           `Slow fundamentals reuse the durable field store (${seedHits} names with last-known values; each field keeps its own as_of/fetched_at).`
         );
-      } else if (options?.enrichmentMode === "skip") {
+      }
+      if (enrichPlan.skipLiveEnrich && options?.enrichmentMode !== "skip") {
+        warnings.push(
+          "Live enrichment skipped to finish gather before the 8-minute deadline; using durable field-store values."
+        );
+      } else if (seedHits === 0 && options?.enrichmentMode === "skip") {
         warnings.push(
           "Deep fundamentals refresh is deferred for this interactive scan and no durable field-store rows were found yet; open a ticker for on-demand data or wait for a full enrichment run."
         );
@@ -642,6 +790,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       cacheTtlMs: options?.ttlMs ?? marketCacheTtlMs(),
       cached,
       warnings,
+      ...(universeQuoteRecoverySource ? { universeQuoteRecoverySource } : {}),
       dataCoverage
     };
 
@@ -795,11 +944,15 @@ function persistScanFieldsToStore(candidates: MarketQuote[], fetchedAt: string):
           const valueJson = mod.encodeFieldValue(value);
           if (!valueJson) continue;
           const obs = observations[field as keyof typeof observations];
-          const asOf =
+          const observationAsOf =
             (obs && typeof obs === "object" && ("asOf" in obs ? (obs as { asOf?: string }).asOf : undefined)) ||
-            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             (field === "asOf" && typeof value === "string" ? value : undefined) ||
-            quote.asOf ||
+            quote.asOf;
+          const quoteClock = field === "price" || field === "bid" || field === "ask";
+          if (quoteClock && !observationAsOf) continue;
+          const asOf =
+            observationAsOf ||
+            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             fetchedAt;
           const fieldFetched =
             (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
@@ -942,22 +1095,7 @@ export function scoreFactors(quote: MarketQuote, weights: ScoringWeights = DEFAU
 
 export function mergeQuoteData(
   scan: MarketScan,
-  quoteData: Record<
-    string,
-    {
-      bid?: number;
-      ask?: number;
-      price?: number;
-      volume?: number;
-      asOf?: string;
-      provider?: string;
-      venuePriceAuthoritative?: boolean;
-      fetchedAt?: string;
-      syntheticSpread?: boolean;
-      syntheticBid?: boolean;
-      syntheticAsk?: boolean;
-    }
-  >
+  quoteData: Record<string, Partial<BrokerQuote>>
 ): MarketScan {
   // When a merge accepts a real broker bid/ask/price/volume, refresh THAT field's provenance too.
   // Otherwise a "yahoo-finance-synthetic" tag from the quote-only fallback (toQuoteOnlyMarketQuote)
@@ -967,7 +1105,7 @@ export function mergeQuoteData(
   // sources.price, so the drilldown/table price tooltip would misattribute the shown value.
   const refreshSideProvenance = (
     base: EnrichmentSources | undefined,
-    extra: { bid?: number; ask?: number; price?: number; volume?: number; provider?: string; syntheticSpread?: boolean; syntheticBid?: boolean; syntheticAsk?: boolean }
+    extra: Partial<BrokerQuote>
   ): EnrichmentSources | undefined => {
     if (!extra.provider) return base;
     const usedBid = positiveNumber(extra.bid) !== undefined;
@@ -992,48 +1130,93 @@ export function mergeQuoteData(
   };
   const stampQuoteMergeObservations = (
     prior: EnrichmentFieldObservations | undefined,
-    extra: {
+    extra: Partial<BrokerQuote>,
+    resolved: {
       bid?: number;
       ask?: number;
       price?: number;
       volume?: number;
-      asOf?: string;
-      provider?: string;
-      fetchedAt?: string;
-      syntheticSpread?: boolean;
-      syntheticBid?: boolean;
-      syntheticAsk?: boolean;
-    },
-    resolved: { bid?: number; ask?: number; price?: number; volume?: number }
+      prevClose?: number;
+      vwap?: number;
+      bidSize?: number;
+      askSize?: number;
+    }
   ): EnrichmentFieldObservations | undefined => {
-    if (!extra.provider) return prior;
+    if (!extra.provider && !extra.fieldProvenance) return prior;
     const usedBid = positiveNumber(extra.bid) !== undefined;
     const usedAsk = positiveNumber(extra.ask) !== undefined;
     const usedPrice = positiveNumber(extra.price) !== undefined;
     const usedVol = !!(extra.volume && extra.volume > 0);
-    if (!usedBid && !usedAsk && !usedPrice && !usedVol) return prior;
-    const provider = extra.provider;
-    const asOf = extra.asOf;
-    const fetchedAt = extra.fetchedAt ?? extra.asOf ?? new Date().toISOString();
+    const usedPrevClose = positiveNumber(extra.prevClose) !== undefined;
+    const usedVwap = positiveNumber(extra.vwap) !== undefined;
+    const usedBidSize = positiveNumber(extra.bidSize) !== undefined;
+    const usedAskSize = positiveNumber(extra.askSize) !== undefined;
+    if (
+      !usedBid &&
+      !usedAsk &&
+      !usedPrice &&
+      !usedVol &&
+      !usedPrevClose &&
+      !usedVwap &&
+      !usedBidSize &&
+      !usedAskSize
+    ) {
+      return prior;
+    }
+    // Prefer cascade per-field receipts when present so a coalesced BrokerQuote does not
+    // attribute every observation to the quote-level price provider (Codex P1 on #3449).
+    const receiptFor = (field: string) => {
+      const receipt = extra.fieldProvenance?.[field];
+      const provider =
+        receipt?.provider ??
+        extra.provider ??
+        "unknown";
+      const asOf = receipt?.asOf ?? extra.asOf;
+      const fetchedAt = receipt?.fetchedAt ?? extra.fetchedAt ?? extra.asOf ?? new Date().toISOString();
+      return { provider, asOf, fetchedAt };
+    };
     const next: EnrichmentFieldObservations = { ...(prior ?? {}) };
     if (usedPrice && resolved.price !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("price");
       next.price = stampFieldObservation(resolved.price, provider, { asOf, fetchedAt });
     }
     if (usedBid && resolved.bid !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("bid");
       const bidSrc =
         (extra.syntheticBid ?? extra.syntheticSpread) ? `${provider}-synthetic` : provider;
       next.bid = stampFieldObservation(resolved.bid, bidSrc, { asOf, fetchedAt });
     }
     if (usedAsk && resolved.ask !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("ask");
       const askSrc =
         (extra.syntheticAsk ?? extra.syntheticSpread) ? `${provider}-synthetic` : provider;
       next.ask = stampFieldObservation(resolved.ask, askSrc, { asOf, fetchedAt });
     }
     if (usedVol && resolved.volume !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("volume");
       next.volume = stampFieldObservation(resolved.volume, provider, { asOf, fetchedAt });
     }
-    if (asOf) {
-      next.asOf = stampFieldObservation(asOf, provider, { asOf, fetchedAt });
+    if (usedPrevClose && resolved.prevClose !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("prevClose");
+      next.prevClose = stampFieldObservation(resolved.prevClose, provider, { asOf, fetchedAt });
+    }
+    if (usedVwap && resolved.vwap !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("vwap");
+      next.vwap = stampFieldObservation(resolved.vwap, provider, { asOf, fetchedAt });
+    }
+    if (usedBidSize && resolved.bidSize !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("bidSize");
+      next.bidSize = stampFieldObservation(resolved.bidSize, provider, { asOf, fetchedAt });
+    }
+    if (usedAskSize && resolved.askSize !== undefined) {
+      const { provider, asOf, fetchedAt } = receiptFor("askSize");
+      next.askSize = stampFieldObservation(resolved.askSize, provider, { asOf, fetchedAt });
+    }
+    const quoteAsOf = extra.asOf;
+    if (quoteAsOf) {
+      const provider = extra.provider ?? "unknown";
+      const fetchedAt = extra.fetchedAt ?? quoteAsOf;
+      next.asOf = stampFieldObservation(quoteAsOf, provider, { asOf: quoteAsOf, fetchedAt });
     }
     return next;
   };
@@ -1050,11 +1233,32 @@ export function mergeQuoteData(
       (extra.volume && extra.volume > 0 ? extra.volume : undefined) ??
       (quote.volume > 0 ? quote.volume : undefined) ??
       0;
+    const effectivePrice = usedPrice ?? quote.price;
+    const effectivePrevClose = positiveNumber(extra.prevClose) ?? positiveNumber(quote.prevClose);
+    let intradayChangePct = quote.intradayChangePct;
+    let netChange = quote.netChange;
+    if (effectivePrice !== undefined && effectivePrevClose !== undefined && effectivePrevClose > 0) {
+      intradayChangePct = Math.round(((effectivePrice - effectivePrevClose) / effectivePrevClose) * 10000) / 100;
+      netChange = Math.round((effectivePrice - effectivePrevClose) * 100) / 100;
+    } else if (extra.changePct !== undefined) {
+      intradayChangePct = extra.changePct;
+      netChange = extra.change ?? netChange;
+    }
     return {
       ...quote,
       bid: usedBid ?? quote.bid,
       ask: usedAsk ?? quote.ask,
-      price: usedPrice ?? quote.price,
+      bidSize: positiveNumber(extra.bidSize) ?? quote.bidSize,
+      askSize: positiveNumber(extra.askSize) ?? quote.askSize,
+      price: effectivePrice,
+      prevClose: effectivePrevClose ?? quote.prevClose,
+      open: positiveNumber(extra.open) ?? quote.open,
+      high: positiveNumber(extra.high) ?? quote.high,
+      low: positiveNumber(extra.low) ?? quote.low,
+      vwap: positiveNumber(extra.vwap) ?? quote.vwap,
+      companyName: extra.companyName ?? quote.companyName,
+      intradayChangePct,
+      netChange,
       // Use broker/Yahoo volume if the screener didn't supply it (NASDAQ tableonly has no volume field).
       volume,
       asOf: extra.asOf ?? quote.asOf,
@@ -1062,7 +1266,10 @@ export function mergeQuoteData(
       // Venue-delayed execution prices (Tradier sandbox) must survive the merge so policy ages
       // the snapshot, not the delayed trade print, and the cascade never re-overwrites them.
       venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+      expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+      delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
       fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
+      delayedFallback: extra.delayedFallback ?? quote.delayedFallback,
       // Carry synthetic bid/ask flags through from the broker/Yahoo quote. When a side had a real value
       // (usedBid/usedAsk), the flag reflects whether THAT value was synthetic. When the side wasn't
       // provided, the original quote's flag is preserved by the spread operator above.
@@ -1072,8 +1279,12 @@ export function mergeQuoteData(
       fieldObservations: stampQuoteMergeObservations(quote.fieldObservations, extra, {
         bid: usedBid ?? quote.bid,
         ask: usedAsk ?? quote.ask,
-        price: usedPrice ?? quote.price,
-        volume
+        bidSize: positiveNumber(extra.bidSize) ?? quote.bidSize,
+        askSize: positiveNumber(extra.askSize) ?? quote.askSize,
+        price: effectivePrice,
+        volume,
+        prevClose: effectivePrevClose,
+        vwap: positiveNumber(extra.vwap) ?? quote.vwap
       })
     };
   };
@@ -1090,16 +1301,40 @@ export function mergeQuoteData(
         extra && extra.volume && extra.volume > 0
           ? extra.volume
           : quote.volume;
+      const effectivePrice = usedPrice ?? quote.price;
+      const effectivePrevClose = positiveNumber(extra?.prevClose) ?? positiveNumber(quote.prevClose);
+      let intradayChangePct = quote.intradayChangePct;
+      let netChange = quote.netChange;
+      if (effectivePrice !== undefined && effectivePrevClose !== undefined && effectivePrevClose > 0) {
+        intradayChangePct = Math.round(((effectivePrice - effectivePrevClose) / effectivePrevClose) * 10000) / 100;
+        netChange = Math.round((effectivePrice - effectivePrevClose) * 100) / 100;
+      } else if (extra?.changePct !== undefined) {
+        intradayChangePct = extra.changePct;
+        netChange = extra.change ?? netChange;
+      }
       const merged: MarketQuoteSummary = {
         ...quote,
         bid: usedBid ?? quote.bid,
         ask: usedAsk ?? quote.ask,
-        price: usedPrice ?? quote.price,
+        bidSize: positiveNumber(extra?.bidSize) ?? quote.bidSize,
+        askSize: positiveNumber(extra?.askSize) ?? quote.askSize,
+        price: effectivePrice,
+        prevClose: effectivePrevClose ?? quote.prevClose,
+        open: positiveNumber(extra?.open) ?? quote.open,
+        high: positiveNumber(extra?.high) ?? quote.high,
+        low: positiveNumber(extra?.low) ?? quote.low,
+        vwap: positiveNumber(extra?.vwap) ?? quote.vwap,
+        companyName: extra?.companyName ?? quote.companyName,
+        intradayChangePct,
+        netChange,
         volume: volume ?? quote.volume,
         provider: extra?.provider ?? quote.provider,
         asOf: extra?.asOf ?? quote.asOf,
         venuePriceAuthoritative: extra?.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+        expectedDelaySec: extra?.expectedDelaySec ?? quote.expectedDelaySec,
+        delayToleranceSec: extra?.delayToleranceSec ?? quote.delayToleranceSec,
         fetchedAt: extra?.fetchedAt ?? quote.fetchedAt,
+        delayedFallback: extra?.delayedFallback ?? quote.delayedFallback,
         syntheticBid: usedBid ? bidSynthetic : quote.syntheticBid,
         syntheticAsk: usedAsk ? askSynthetic : quote.syntheticAsk,
         sources: extra ? refreshSideProvenance(quote.sources, extra) : quote.sources,
@@ -1107,8 +1342,12 @@ export function mergeQuoteData(
           ? stampQuoteMergeObservations(quote.fieldObservations, extra, {
               bid: usedBid ?? quote.bid,
               ask: usedAsk ?? quote.ask,
-              price: usedPrice ?? quote.price,
-              volume: volume ?? quote.volume
+              bidSize: positiveNumber(extra.bidSize) ?? quote.bidSize,
+              askSize: positiveNumber(extra.askSize) ?? quote.askSize,
+              price: effectivePrice,
+              volume: volume ?? quote.volume,
+              prevClose: effectivePrevClose,
+              vwap: positiveNumber(extra.vwap) ?? quote.vwap
             })
           : quote.fieldObservations
       };
@@ -1125,11 +1364,33 @@ export function mergeQuoteData(
       price,
       bid: positiveNumber(quote.bid),
       ask: positiveNumber(quote.ask),
+      bidSize: positiveNumber(quote.bidSize),
+      askSize: positiveNumber(quote.askSize),
+      prevClose: positiveNumber(quote.prevClose),
+      open: positiveNumber(quote.open),
+      high: positiveNumber(quote.high),
+      low: positiveNumber(quote.low),
+      vwap: positiveNumber(quote.vwap),
+      companyName: quote.companyName,
+      intradayChangePct: quote.changePct ?? (
+        positiveNumber(quote.prevClose) && price
+          ? Math.round(((price - quote.prevClose!) / quote.prevClose!) * 10000) / 100
+          : undefined
+      ),
+      netChange: quote.change ?? (
+        positiveNumber(quote.prevClose) && price
+          ? Math.round((price - quote.prevClose!) * 100) / 100
+          : undefined
+      ),
+      volume: positiveNumber(quote.volume),
       score: 0,
       provider: quote.provider,
       asOf: quote.asOf,
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
+      expectedDelaySec: quote.expectedDelaySec,
+      delayToleranceSec: quote.delayToleranceSec,
       fetchedAt: quote.fetchedAt,
+      delayedFallback: quote.delayedFallback,
       syntheticBid: quote.syntheticBid ?? quote.syntheticSpread ?? false,
       syntheticAsk: quote.syntheticAsk ?? quote.syntheticSpread ?? false,
       // Seed per-side provenance for a NEWLY-added quote too — otherwise a synthetic bid/ask on an
@@ -1220,49 +1481,95 @@ function envNumber(name: string, fallback: number): number {
 
 export function clearMarketCache(): void {
   screenerCache = new Map();
+  screenerLastGood = new Map();
+  screenerRefreshInFlight.clear();
   clearFundHoldingsCache();
+}
+
+function storeScreenerRows(
+  cacheKey: string,
+  rows: NasdaqScreenerRow[],
+  ttlMs: number,
+  now: number,
+  asOf?: string
+): void {
+  screenerLastGood.set(cacheKey, { rows, asOf });
+  screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
+}
+
+async function refreshNasdaqScreenerLive(
+  cacheKey: string,
+  ttlMs: number,
+  exchange?: NasdaqExchange,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetchNasdaqScreenerResponse("nasdaq-delayed-screener", {
+    url: nasdaqScreenerUrl(exchange),
+    signal
+  });
+  if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
+  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
+  const rows = payload.data.table.rows;
+  const asOf = payload.data.asof ?? undefined;
+  storeScreenerRows(cacheKey, rows, ttlMs, Date.now(), asOf);
+}
+
+function scheduleScreenerBackgroundRefresh(cacheKey: string, ttlMs: number, exchange?: NasdaqExchange): void {
+  if (screenerRefreshInFlight.has(cacheKey)) return;
+  const pending = refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange).catch(() => {
+    /* background refresh is best-effort */
+  }).finally(() => {
+    screenerRefreshInFlight.delete(cacheKey);
+  });
+  screenerRefreshInFlight.set(cacheKey, pending);
 }
 
 async function fetchNasdaqScreener(
   ttlMs: number,
   exchange?: NasdaqExchange,
   signal?: AbortSignal
-): Promise<{ rows: RawNasdaqRow[]; asOf?: string; cached: boolean }> {
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean; stale?: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
+  const lastGood = screenerLastGood.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return { rows: cached.rows, asOf: cached.asOf, cached: true };
   }
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Nasdaq screener aborted.");
+  }
 
-  const controller = new AbortController();
-  const abortFromCaller = () => controller.abort(signal?.reason);
-  if (signal?.aborted) abortFromCaller();
-  else signal?.addEventListener("abort", abortFromCaller, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 8_000);
+  if (lastGood) {
+    scheduleScreenerBackgroundRefresh(cacheKey, ttlMs, exchange);
+    return { rows: lastGood.rows, asOf: lastGood.asOf, cached: true, stale: true };
+  }
+
   try {
-    const response = await fetch(nasdaqScreenerUrl(exchange), {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: {
-        accept: "application/json",
-        "user-agent": "Mozilla/5.0"
-      }
-    });
-    if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
-
-    const payload = await response.json();
-    const rows = Array.isArray(payload?.data?.table?.rows) ? (payload.data.table.rows as RawNasdaqRow[]) : [];
-    const asOf = typeof payload?.data?.asof === "string" ? payload.data.asof : undefined;
-    screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
-    return { rows, asOf, cached: false };
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener("abort", abortFromCaller);
+    await refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange, signal);
+    const fresh = screenerCache.get(cacheKey)!;
+    return { rows: fresh.rows, asOf: fresh.asOf, cached: false };
+  } catch (error) {
+    // This catch runs only when last-good is empty, so there is no prior price to
+    // copy onto a symbol/name row.  The directory never carries lastsale.
+    // toMarketQuote would drop every row, and storing them would skip Nasdaq until
+    // the close.  Report the listing or the directory's own error, and leave both
+    // caches untouched.  Explicit symbols still recover from the last scan, then Yahoo.
+    const original = error instanceof Error ? error.message : "Nasdaq screener failed.";
+    let fallbackDetail: string;
+    try {
+      const listed = (await fetchFallbackUniverseRows(signal)).length;
+      fallbackDetail = listed === 1
+        ? "Keyless directory listed 1 symbol without a price; that row was not cached."
+        : `Keyless directory listed ${listed} symbols without prices; those rows were not cached.`;
+    } catch (err) {
+      fallbackDetail = err instanceof Error ? err.message : "keyless universe fallback failed";
+    }
+    throw new Error(`${original} ${fallbackDetail}`);
   }
 }
 
-function toMarketQuote(row: RawNasdaqRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
+function toMarketQuote(row: NasdaqScreenerRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
   const symbol = normalizeMarketDataSymbol(String(row.symbol ?? ""));
   const price = number(row.lastsale);
   const intradayChangePct = percent(row.pctchange);
@@ -1353,23 +1660,122 @@ function uniqueQuotes(quotes: MarketQuote[]): MarketQuote[] {
   return Array.from(new Map(quotes.map((quote) => [quote.symbol, quote])).values());
 }
 
-function nasdaqScreenerUrl(exchange?: NasdaqExchange): string {
-  if (!exchange) return NASDAQ_SCREENER_URL;
-  const url = new URL(NASDAQ_SCREENER_URL);
-  url.searchParams.set("exchange", exchange);
-  return url.toString();
-}
-
 function normalizeMarketDataSymbol(value: string): string {
   return normalizeSymbol(value).replace(/\//g, "-");
 }
 
-async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPosition[]): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
+async function recoverQuotesWhenScreenerEmpty(input: {
+  allowed: Set<string>;
+  positions: EquityPosition[];
+  seed?: Record<string, MarketQuoteSummary>;
+  userId?: string;
+  connectedAccountId?: string;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}): Promise<{
+  quotes: MarketQuote[];
+  warnings: string[];
+  usedSeed: boolean;
+  recoverySource?: string;
+}> {
+  const requested = Array.from(input.allowed);
+  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
+    signal: input.signal,
+    deadlineAt: input.deadlineAt,
+    userId: input.userId
+  });
+  let quotes = quoteOnly.quotes;
+  const warnings = [...quoteOnly.warnings];
+  let recoverySource: string | undefined;
+
+  if (quotes.length === 0 && input.userId && !input.signal?.aborted) {
+    const brokerRecovery = await recoverUniverseQuotesFromBroker({
+      symbols: requested,
+      positions: input.positions,
+      userId: input.userId,
+      connectedAccountId: input.connectedAccountId,
+      signal: input.signal,
+      deadlineAt: input.deadlineAt
+    });
+    warnings.push(...brokerRecovery.warnings);
+    if (brokerRecovery.quotes.length > 0) {
+      quotes = brokerRecovery.quotes;
+      recoverySource = brokerRecovery.recoverySource;
+    }
+  }
+
+  if (quotes.length === 0 && input.seed) {
+    const seeded = persistedMarketQuotes(input.seed, input.positions);
+    if (seeded.length > 0) {
+      return {
+        quotes: seeded,
+        warnings: [
+          ...warnings,
+          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
+        ],
+        usedSeed: true,
+        recoverySource
+      };
+    }
+  }
+
+  return { quotes, warnings, usedSeed: false, recoverySource };
+}
+
+async function fetchAllowedSetMarketQuotes(
+  symbols: string[],
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineAt?: number; userId?: string }
+): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
+  const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, {
+    concurrency: 4,
+    userId: options?.userId,
+    signal: options?.signal
+  });
+  const quotes: MarketQuote[] = [];
+  const missing: string[] = [];
+  for (const symbol of requested) {
+    const quote = bySymbol.get(symbol);
+    if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
+    else missing.push(symbol);
+  }
+  const warnings: string[] = [];
+  if (missing.length > 0 && !options?.signal?.aborted) {
+    const remainingMs =
+      options?.deadlineAt != null ? Math.max(0, options.deadlineAt - Date.now()) : undefined;
+    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions, {
+      signal: options?.signal,
+      deadlineMs: remainingMs,
+      userId: options?.userId
+    });
+    quotes.push(...chart.quotes);
+    if (requested.length <= 8) warnings.push(...chart.warnings);
+  }
+  warnings.unshift(
+    `The delayed screener returned no quotes; the quote fallback priced ${quotes.length} of ${requested.length} names.`
+  );
+  return { quotes, warnings };
+}
+
+async function fetchQuoteOnlyMarketQuotes(
+  symbols: string[],
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineMs?: number; userId?: string }
+): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const quotes: MarketQuote[] = [];
   const unresolved: string[] = [];
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const results = await Promise.all(requested.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const));
-  for (const [symbol, quote] of results) {
+  // Bounded pool, not Promise.all: firing one chart call per symbol at once
+  // queued hundreds of requests behind the proxy gate, where each one's 5s
+  // timer fired before a slot freed up — zero quotes (prod 2026-11-06).
+  const bySymbol = await fetchYahooFinanceChartQuotes(requested, {
+    signal: options?.signal,
+    deadlineMs: options?.deadlineMs,
+    userId: options?.userId
+  });
+  for (const symbol of requested) {
+    const quote = bySymbol.get(symbol);
     if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
     else unresolved.push(symbol);
   }
@@ -1379,8 +1785,9 @@ async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPo
   return { quotes, warnings };
 }
 
-function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positions: EquityPosition[]): MarketQuote {
-  const prevClose = quote.prevClose > 0 ? quote.prevClose : quote.price;
+export function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positions: EquityPosition[]): MarketQuote {
+  const yahooPrevClose = quote.prevClose;
+  const prevClose = typeof yahooPrevClose === "number" && yahooPrevClose > 0 ? yahooPrevClose : quote.price;
   const netChange = quote.price - prevClose;
   const intradayChangePct = prevClose > 0 ? Math.round((netChange / prevClose) * 10_000) / 100 : 0;
   const position = positions.find((p) => normalizeSymbol(p.symbol) === symbol);
@@ -1404,7 +1811,10 @@ function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positi
     positionMarketValue: position?.marketValue ?? 0,
     score: 0,
     provider: "yahoo-finance",
-    asOf: new Date().toISOString(),
+    // Yahoo's observation time (regularMarketTime).  A wall-clock stamp makes
+    // the staleness gate read ~0s old.  Missing regularMarketTime stays
+    // undefined, which isQuoteFresh already treats as stale.
+    asOf: quote.asOf,
     syntheticBid,
     syntheticAsk,
     sources: {
@@ -1426,11 +1836,42 @@ function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote, positi
 export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): MarketQuote {
   const enrichmentBid = extra.bid && extra.bid > 0;
   const enrichmentAsk = extra.ask && extra.ask > 0;
+  // SEC-derived market cap is a gap fill.  The cascade builds its base only from
+  // enrichment providers, so it never sees the Nasdaq screener cap and emits
+  // shares × price whenever no provider already set marketCap.  A positive screener
+  // cap must win; a stale SEC share count (for example after a split) must not replace it.
+  const screenerMarketCap =
+    typeof quote.marketCap === "number" && quote.marketCap > 0 ? quote.marketCap : undefined;
+  const secDerivedMarketCap =
+    extra.sources?.marketCap === "sec-xbrl" &&
+    typeof extra.marketCap === "number" &&
+    extra.marketCap > 0;
+  const keepScreenerMarketCap = Boolean(secDerivedMarketCap && screenerMarketCap !== undefined);
+  const sources = mergeSources(quote, extra);
+  if (keepScreenerMarketCap) {
+    if (quote.sources?.marketCap) sources.marketCap = quote.sources.marketCap;
+    else delete sources.marketCap;
+  }
+  const fieldObservations: EnrichmentFieldObservations = {
+    ...(quote.fieldObservations ?? {}),
+    ...(extra.fieldObservations ?? {})
+  };
+  if (keepScreenerMarketCap) {
+    if (quote.fieldObservations?.marketCap) fieldObservations.marketCap = quote.fieldObservations.marketCap;
+    else delete fieldObservations.marketCap;
+  }
   return {
     ...quote,
     price: extra.price && extra.price > 0 ? extra.price : quote.price,
     bid: enrichmentBid ? extra.bid : quote.bid,
     ask: enrichmentAsk ? extra.ask : quote.ask,
+    bidSize: extra.bidSize && extra.bidSize > 0 ? extra.bidSize : quote.bidSize,
+    askSize: extra.askSize && extra.askSize > 0 ? extra.askSize : quote.askSize,
+    prevClose: extra.prevClose && extra.prevClose > 0 ? extra.prevClose : quote.prevClose,
+    open: extra.open && extra.open > 0 ? extra.open : quote.open,
+    high: extra.high && extra.high > 0 ? extra.high : quote.high,
+    low: extra.low && extra.low > 0 ? extra.low : quote.low,
+    netChange: typeof extra.netChange === "number" ? extra.netChange : quote.netChange,
     // Enrichment providers supply REAL bid/ask (exchange/broker); clear the synthetic flag when they
     // override a side. When enrichment doesn't provide bid/ask, the original flag is preserved by spread.
     syntheticBid: enrichmentBid ? false : quote.syntheticBid,
@@ -1438,6 +1879,16 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     intradayChangePct: typeof extra.intradayChangePct === "number" ? extra.intradayChangePct : quote.intradayChangePct,
     vwap: extra.vwap && extra.vwap > 0 ? extra.vwap : quote.vwap,
     asOf: extra.asOf ?? quote.asOf,
+    // DELAYED-TAPE METADATA: a `delayed_sip` enrichment (Alpaca PAPER) must be
+    // aged with the delayed-tape rules, not the realtime-stale bar — otherwise
+    // a healthy ~900s-old print is treated as a stale realtime quote and every
+    // scan row fails the staleness gate.
+    expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+    delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
+    venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+    // A delayed tape ages by its RETRIEVAL stamp; a realtime quote keeps the
+    // observation time as its freshness signal (undefined here → unchanged).
+    fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
     companyName: extra.companyName ?? quote.companyName,
     sentiment: extra.sentiment ?? quote.sentiment,
     peRatio: extra.peRatio ?? quote.peRatio,
@@ -1448,6 +1899,11 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     sector: extra.sector ?? quote.sector,
     industry: extra.industry ?? quote.industry,
     volume: extra.volume && extra.volume > 0 ? extra.volume : quote.volume,
+    marketCap: keepScreenerMarketCap
+      ? screenerMarketCap
+      : extra.marketCap && extra.marketCap > 0
+        ? extra.marketCap
+        : quote.marketCap,
     dividendYield: extra.dividendYield ?? quote.dividendYield,
     eps: extra.eps ?? quote.eps,
     sharesOutstanding: extra.sharesOutstanding ?? quote.sharesOutstanding,
@@ -1484,15 +1940,13 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     evidenceBulletins: extra.shortInterestDisagreement
       ? Array.from(new Set([...(quote.evidenceBulletins ?? []), extra.shortInterestDisagreement]))
       : quote.evidenceBulletins,
-    sources: mergeSources(quote, extra),
+    sources,
     // Keep cascade receipts on the quote so admin/ops/coverage reporting (and drilldowns) can see
     // which providers failed and the per-field observation status — not only the winning scalar.
     // MERGE observations field-by-field so a live enrich layer does not wipe per-field as_of/
     // fetched_at stamps from the durable seed baseline for fields the live pass left empty.
-    fieldObservations: {
-      ...(quote.fieldObservations ?? {}),
-      ...(extra.fieldObservations ?? {})
-    },
+    // A kept screener market cap drops the SEC observation so the receipt matches the scalar.
+    fieldObservations,
     providerFailures: extra.providerFailures
       ? { ...(quote.providerFailures ?? {}), ...extra.providerFailures }
       : quote.providerFailures
@@ -1547,6 +2001,42 @@ function normalizeWeights(weights: ScoringWeights): ScoringWeights {
     positioning: sanitized.positioning / total,
     diversification: sanitized.diversification / total
   };
+}
+
+/**
+ * Four-bucket attribution of a quote's deterministic factor scores for the proposal scorecard
+ * (ProposalScorecard.signalAttribution): liquidity+momentum → technical, sentiment → news,
+ * value+quality → fundamentals, positioning+volatility+diversification → market. Same
+ * safeWeight idiom as normalizeWeights; normalized to INTEGERS summing to exactly 100 via
+ * largest-remainder rounding. Returns undefined when the quote carries no factor breakdown or
+ * every bucket is zero — the attribution block is omitted, never fabricated.
+ */
+export function computeSignalAttribution(
+  quote: Pick<MarketQuote, "factorBreakdown">
+): { technical: number; news: number; fundamentals: number; market: number } | undefined {
+  const factors = quote.factorBreakdown;
+  if (!factors) return undefined;
+  const buckets = [
+    safeWeight(factors.liquidity) + safeWeight(factors.momentum), // technical
+    safeWeight(factors.sentiment), // news
+    safeWeight(factors.value) + safeWeight(factors.quality), // fundamentals
+    safeWeight(factors.positioning) + safeWeight(factors.volatility) + safeWeight(factors.diversification) // market
+  ];
+  const total = buckets.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return undefined;
+  const raw = buckets.map((value) => (value / total) * 100);
+  const floors = raw.map(Math.floor);
+  let remainder = 100 - floors.reduce((sum, value) => sum + value, 0);
+  // Largest fractional remainders absorb the leftover points (index breaks ties deterministically).
+  const order = raw
+    .map((value, index) => ({ index, frac: value - floors[index] }))
+    .sort((a, b) => b.frac - a.frac || a.index - b.index);
+  for (const { index } of order) {
+    if (remainder <= 0) break;
+    floors[index] += 1;
+    remainder -= 1;
+  }
+  return { technical: floors[0], news: floors[1], fundamentals: floors[2], market: floors[3] };
 }
 
 function liquidityScore(quote: MarketQuote): number {
@@ -1720,6 +2210,7 @@ function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummar
         dividendYield: quote.dividendYield,
         eps: quote.eps,
         sharesOutstanding: quote.sharesOutstanding,
+        marketCap: quote.marketCap,
         pbRatio: quote.pbRatio,
         shortPercentOfFloat: quote.shortPercentOfFloat,
         beta: quote.beta,

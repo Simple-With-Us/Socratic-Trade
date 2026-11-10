@@ -13,11 +13,17 @@
 
 import crypto from "crypto";
 import { AUTHENTICATED_EMAIL_HEADER } from "../request-user";
-import { isPrimaryEmail } from "./identity";
+import { isAdminEmail } from "./admin-emails";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   isVerifiedIdentitySource
 } from "./strip-identity";
+
+// `isAdminEmail` is defined in the edge-safe `./admin-emails` module so that `middleware.ts` (which
+// cannot import this file — it pulls in node `crypto`) gates the /admin PAGE tree on the exact same
+// allowlist this gate uses for the /api/admin/* routes.  Re-exported here so existing importers of
+// `@/lib/auth/admin` are unchanged.
+export { isAdminEmail };
 
 /**
  * Constant-time string equality for secret comparison (admin tokens). Guards against a timing
@@ -32,21 +38,6 @@ export function timingSafeEqualStr(a: string | null | undefined, b: string | nul
   const bufB = Buffer.from(b, "utf8");
   if (bufA.length !== bufB.length) return false;
   return crypto.timingSafeEqual(bufA, bufB);
-}
-
-function adminEmails(): string[] {
-  return (process.env.ADMIN_USER_EMAILS || "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-/** True if `email` is configured as an admin (or is the primary operator, including any primary aliases). */
-export function isAdminEmail(email: string | null | undefined): boolean {
-  const e = (email || "").trim().toLowerCase();
-  if (!e || !e.includes("@")) return false;
-  if (isPrimaryEmail(e)) return true; // primary operator + PRIMARY_USER_EMAIL_ALIASES
-  return adminEmails().includes(e);
 }
 
 export interface RequireAdminOptions {

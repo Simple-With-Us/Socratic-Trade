@@ -87,7 +87,7 @@ export function AccountDeletionCard() {
     try {
       const next = await fetchPreview("POST");
       setPreview(next);
-      toast.push("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared. Nothing has been deleted yet.");
+      toast.push("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared.  Nothing has been deleted yet.");
     } catch (error) {
       toast.push("neg", "Could not prepare deletion", error instanceof Error ? error.message : undefined);
     } finally {
@@ -156,7 +156,7 @@ export function AccountDeletionCard() {
       <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
         Permanently deletes this login&apos;s data from <strong>this app</strong>: stored API keys, broker connections
         and OAuth tokens, settings, strategy profiles, watchlists, alerts, chat history, memories, proposals, fills,
-        snapshots, notifications, and private learned context. It does <strong>not</strong> close broker positions,
+        snapshots, notifications, and private learned context.  It does <strong>not</strong> close broker positions,
         cancel broker orders, or delete your Google/GitHub/Apple account — those live outside this app.
       </p>
 
@@ -167,7 +167,7 @@ export function AccountDeletionCard() {
             size="sm"
             disabled={busy}
             onClick={() => void start()}
-            title="Opens the deletion flow. Nothing is deleted until the final typed confirmation."
+            title="Opens the deletion flow.  Nothing is deleted until the final typed confirmation."
           >
             <Trash2 size={13} /> {busy ? "Loading…" : "Start deletion…"}
           </Btn>
@@ -182,7 +182,7 @@ export function AccountDeletionCard() {
                 {preview.connectedAccounts.length} broker connection{preview.connectedAccounts.length === 1 ? "" : "s"} · about {recordTotal(preview)} private app row{recordTotal(preview) === 1 ? "" : "s"}
               </span>
               {preview.prepared ? (
-                <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock. Nothing is deleted yet.">
+                <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock.  Nothing is deleted yet.">
                   prepared — strategy stopped
                 </Chip>
               ) : (
@@ -230,7 +230,7 @@ export function AccountDeletionCard() {
               >
                 {busy ? "Preparing…" : "Prepare deletion — stops the strategy"}
               </Btn>
-              <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow. Nothing was deleted.">
+              <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow.  Nothing was deleted.">
                 Cancel
               </Btn>
             </div>
@@ -311,16 +311,16 @@ export function AccountDeletionCard() {
                     variant="danger"
                     disabled={!canDelete}
                     onClick={() => void confirmDelete()}
-                    title="Irreversible. Deletes this login's app data and signs you out."
+                    title="Irreversible.  Deletes this login's app data and signs you out."
                   >
                     <Trash2 size={13} /> {deleting ? "Deleting…" : "Permanently delete account"}
                   </Btn>
-                  <Btn variant="ghost" size="sm" disabled={deleting} onClick={cancelFlow} title="Close the flow. The prepared request stays recorded; the strategy stays stopped until you start it again.">
+                  <Btn variant="ghost" size="sm" disabled={deleting} onClick={cancelFlow} title="Close the flow.  The prepared request stays recorded; the strategy stays stopped until you start it again.">
                     Cancel
                   </Btn>
                 </div>
                 <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                  On success you are signed out. Cancelling here does not restart the strategy — start it again from the
+                  On success you are signed out.  Cancelling here does not restart the strategy — start it again from the
                   run-state chip if you keep the account.
                 </p>
               </div>

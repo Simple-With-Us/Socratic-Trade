@@ -12,7 +12,8 @@ boundaries:
 1. enrichment happened after an overly narrow preselection;
 2. scalar merges hid field freshness, source conflicts, and provider failures;
 3. Green and Red did not receive one provably identical evidence object;
-4. account-derived learning could cross account and paper/live boundaries too easily; and
+4. account-derived learning used to silo paper from live behind a transfer gate that retrieval
+   no longer applies — paper and live lots now pool per user; and
 5. RAG, learned prose, and tool output competed for prompt space without one global budget or a
    uniform prompt-injection boundary.
 
@@ -26,8 +27,9 @@ universe -> wider cheap scan -> bounded enrichment -> field arbitration -> final
 ```
 
 The synthetic product Test Account is removed and purged. Real broker paper accounts remain because
-they produce broker-realistic labeled outcomes, but their lessons stay on that exact account unless
-an independent live sample validates the same directional effect.
+they produce broker-realistic labeled outcomes. Owner cut 2026-08-17: paper→live pooling stays.
+The 20-paper+5-live transfer gate is deleted. Structured lessons retrieve across the owner's
+connected accounts; an account is an account.
 
 ## Source-use audit
 
@@ -41,7 +43,7 @@ an independent live sample validates the same directional effect.
 | Macro/regime/internals | Macro cascade, derived metrics, market internals/signals | Structured macro-regime evidence with one decision timestamp, available to Green and Red | Red received a manually reconstructed subset | Upstream macro observations still vary in timestamp precision |
 | Realized outcomes | Filled lots, excursions, thesis/regime/sector/factor scorecards | Exact-account performance evidence; source ablations join to closed-lot outcomes | Cross-account performance could enter tuning without a transfer contract | Source-value estimates are observational and selection-biased, not causal |
 | Skipped outcomes | Matured skipped-candidate counterfactuals | Joined to decision-time source ablations; ordered by decision time, not return | Return-ordered reads could amplify survivorship/selection bias | Counterfactual prices remain market-data observations, not executable fill simulations |
-| Learned context and episodic memory | Post-mortems, decision cases, owner coaching, vector analogs | Exact-account retrieval for account-derived rows; validated research can transfer; legacy autonomous rows quarantined | Sibling accounts and paper/live histories could contaminate each other | Transfer validation currently operates at thesis-tag level and needs enough paper and live lots |
+| Learned context and episodic memory | Post-mortems, decision cases, owner coaching, vector analogs | Per-user retrieval for structured lessons; paper and live lots pool across the owner's connected accounts; validated research can still carry an explicit transfer state; legacy autonomous rows quarantined | Sibling-account and paper/live histories used to be siloed, then briefly gated by a 20+5 transfer contract | The 20-paper+5-live transfer gate is deleted (owner 2026-08-17). Pooling remains. |
 | Owner/Coach/Framework input | Owner strategy text, Coach turns/tools, framework proposals, tuning evidence | Owner-authored strategy remains trusted; external/tool/retrieved data is recursively contained, globally budgeted, hashed, and audited | Each LLM surface had its own partial context and injection handling | Chat feedback and causal model/source experimentation remain future measurement layers |
 | Provider/model operations | LLM usage, RAG usage, health and audit events | GPT-5.6 cost accounting, role-specific reasoning, model attribution, source coverage and source-value audits | Catalogs diverged and some surfaces silently selected a model | Model and source recommendations must be re-adjudicated from realized samples rather than frozen |
 
@@ -76,11 +78,11 @@ an independent live sample validates the same directional effect.
 
 ### Learning and account boundaries
 
-- Relational and vector decision memory use exact `connectedAccountId` boundaries.
-- Account-derived lessons are private account facts. Paper rows start as transfer candidates.
-- Paper-to-live transfer requires at least 20 paper lots and 5 independently observed live lots for
-  the same thesis, matching direction, with both shrunk effects clearing 0.25 percentage points.
-- Only a validated aggregate research statement transfers; raw paper facts never become live facts.
+- Structured lessons (`learned_context` + lesson vectors) are per-user. Paper and live closed lots
+  pool across the owner's connected accounts (`source_accounts` + `environment_breakdown` are
+  provenance, not a gate). There is no 20-paper+5-live transfer threshold.
+- Research-scope rows may still carry an explicit `validated` / `rejected` transfer state. That is
+  not a paper-lot count gate and does not block pooling.
 - Pre-migration autonomous rows with unknowable provenance are marked `legacy` and excluded from
   decisions. User-authored and ingested rows remain portfolio context.
 - The product Test Account create/UI/read paths are removed. Migration v24 purges legacy Test Account
@@ -102,10 +104,10 @@ an independent live sample validates the same directional effect.
 ## Paper-account decision
 
 Deleting broker paper support would remove useful execution-shaped observations: broker acceptance,
-order lifecycle behavior, fills, and account-specific model/source comparisons. Keeping unscoped paper
-learning would be worse. The selected design therefore keeps real broker paper accounts but makes
-their evidence non-transferable by default. If paper outcomes never receive independent live
-corroboration, they can optimize only that paper account and do not influence a live account.
+order lifecycle behavior, fills, and account-specific model/source comparisons. Owner 2026-08-17:
+paper→live pooling stays. The earlier 20-paper+5-live transfer contract is deleted. Paper trains
+live, so retrieval pools closed lots across the owner's accounts and the paper execution-cost
+default is the same 20 bps constant as OOS walk-forward. A broker paper account is an account.
 
 ## Honest residual gaps
 

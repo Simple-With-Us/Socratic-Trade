@@ -3,29 +3,36 @@
  *
  * Resolution order for each catalog id:
  *   1. user_settings key `source_settings` map entry (if present)
- *   2. process.env[id] when the id looks like an env var (ALL_CAPS / underscores)
- *   3. catalog defaultValue
- *
- * FMP product module flags also mirror TradingPolicy.fmp* for backward compatibility
- * (policy remains source of truth when both exist — policy wins for those four ids).
+ *   2. server-knob DB override, for the ids that are ALSO server knobs (Admin > Operations —
+ *      currently SEC_FILING_RAG_MAX_PER_RUN; see src/lib/server-knobs.ts)
+ *   3. process.env[id] when the id looks like an env var (ALL_CAPS / underscores)
+ *   4. catalog defaultValue
  */
 
 import { LOCAL_USER } from "./db-api-keys";
 import { getUserSetting, setUserSetting } from "./db-settings";
 import { envFlagOn } from "./rag/env-flag";
+import { serverKnobOverride } from "./server-knobs";
 import {
   SOURCE_SETTINGS_CATALOG,
   sourceSettingById,
   type SourceSettingSpec
 } from "./source-settings-catalog";
-import type { TradingPolicy } from "./types";
 
 export const SOURCE_SETTINGS_USER_KEY = "source_settings";
 
 export type SourceSettingsMap = Record<string, boolean | number | string>;
 
 export function getUserSourceSettingsMap(userId: string = LOCAL_USER): SourceSettingsMap {
-  return getUserSetting<SourceSettingsMap>(userId, SOURCE_SETTINGS_USER_KEY, {});
+  // Fail-open: resolvers below sit on enrichment/data-plane hot paths (e.g. the news-relevance
+  // knobs read inside provider enrich() calls), where a settings-store failure must degrade to
+  // env/catalog defaults — never abort the caller. Also keeps DB-mocking tests from having to
+  // stub the settings table just because a provider consults a knob.
+  try {
+    return getUserSetting<SourceSettingsMap>(userId, SOURCE_SETTINGS_USER_KEY, {});
+  } catch {
+    return {};
+  }
 }
 
 export function setUserSourceSettingsMap(
@@ -95,44 +102,17 @@ function envLooksLikeFlag(id: string): boolean {
   return /^[A-Z][A-Z0-9_]*$/.test(id);
 }
 
-/**
- * Resolve a boolean source setting for a user.
- * FMP policy fields (fmp*Enabled) are also read from TradingPolicy when provided.
- */
-export function resolveSourceBool(
-  id: string,
-  userId: string = LOCAL_USER,
-  policy?: Pick<
-    TradingPolicy,
-    | "fmpRealTimeDataEnabled"
-    | "fmpMacroDataEnabled"
-    | "fmpEventsDataEnabled"
-    | "fmpFundamentalsDataEnabled"
-  >
-): boolean {
+/** Resolve a boolean source setting for a user. */
+export function resolveSourceBool(id: string, userId: string = LOCAL_USER): boolean {
   const spec = sourceSettingById(id);
   const default_ = typeof spec?.defaultValue === "boolean" ? spec.defaultValue : false;
-
-  // Policy mirror for the four classic FMP module flags
-  if (policy) {
-    if (id === "fmpRealTimeDataEnabled" && typeof policy.fmpRealTimeDataEnabled === "boolean") {
-      return policy.fmpRealTimeDataEnabled;
-    }
-    if (id === "fmpMacroDataEnabled" && typeof policy.fmpMacroDataEnabled === "boolean") {
-      return policy.fmpMacroDataEnabled;
-    }
-    if (id === "fmpEventsDataEnabled" && typeof policy.fmpEventsDataEnabled === "boolean") {
-      return policy.fmpEventsDataEnabled;
-    }
-    if (id === "fmpFundamentalsDataEnabled" && typeof policy.fmpFundamentalsDataEnabled === "boolean") {
-      return policy.fmpFundamentalsDataEnabled;
-    }
-  }
 
   const map = getUserSourceSettingsMap(userId);
   if (Object.prototype.hasOwnProperty.call(map, id)) {
     return Boolean(map[id]);
   }
+  const server = serverKnobOverride(id); // no-op unless the id is also a server knob with a DB override
+  if (typeof server === "boolean") return server;
   if (envLooksLikeFlag(id)) {
     return envFlagOn(id, default_);
   }
@@ -152,6 +132,10 @@ export function resolveSourceNumber(id: string, userId: string = LOCAL_USER): nu
       return v;
     }
   }
+  // Server-knob override tier (deliberately unclamped by THIS catalog's min/max: the server
+  // catalog validated the write, and e.g. SEC_FILING_RAG_MAX_PER_RUN=0 is a real pause).
+  const server = serverKnobOverride(id);
+  if (typeof server === "number" && Number.isFinite(server)) return server;
   if (envLooksLikeFlag(id) && process.env[id] != null && process.env[id] !== "") {
     const n = Number(process.env[id]);
     if (Number.isFinite(n)) return n;
@@ -176,15 +160,20 @@ export function resolveSourceString(id: string, userId: string = LOCAL_USER): st
 export function listEffectiveSourceSettings(userId: string = LOCAL_USER): Array<{
   spec: SourceSettingSpec;
   value: boolean | number | string;
-  source: "user" | "env" | "default";
+  source: "user" | "server" | "env" | "default";
 }> {
   const map = getUserSourceSettingsMap(userId);
   return SOURCE_SETTINGS_CATALOG.map((spec) => {
-    let source: "user" | "env" | "default" = "default";
+    let source: "user" | "server" | "env" | "default" = "default";
     let value: boolean | number | string = spec.defaultValue;
+    const server = serverKnobOverride(spec.id);
     if (Object.prototype.hasOwnProperty.call(map, spec.id)) {
       source = "user";
       value = map[spec.id]!;
+    } else if (server !== undefined) {
+      // Server-level override set in Admin > Operations — replaces the env tier for this id.
+      source = "server";
+      value = server;
     } else if (envLooksLikeFlag(spec.id) && process.env[spec.id] != null && process.env[spec.id] !== "") {
       source = "env";
       if (spec.type === "boolean") value = envFlagOn(spec.id, Boolean(spec.defaultValue));

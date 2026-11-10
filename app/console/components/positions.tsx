@@ -8,7 +8,7 @@ import { memo } from "react";
 import Link from "next/link";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import type { OptionPosition } from "@/lib/types";
-import { deriveProtection, deriveUnmanagedShortCount, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
+import { deriveProtection, deriveUnmanagedShorts, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
 import { fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
 import { Card, Dash, Empty, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -39,7 +39,8 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
   const exposureCap = snapshot.policy.maxSymbolExposurePct;
   // Advisory only (mirrors the per-row muted protection state): shorts the app's stop
   // monitors deliberately skip while short selling is off. Same copy as Guardrails.
-  const unmanagedShorts = unmanagedShortNotice(deriveUnmanagedShortCount(positions, snapshot.policy));
+  const unmanaged = deriveUnmanagedShorts(positions, snapshot.policy);
+  const unmanagedShorts = unmanagedShortNotice(unmanaged.count, unmanaged.reason ?? undefined);
 
   // Computed once per position and shared by both the ≥lg table and the
   // <lg card list below, so the two layouts can never drift out of sync.
@@ -89,7 +90,7 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
                   <th className="num" title="Shares held; negative means a short position.">Qty</th>
                   <th className="num" title="Average price paid per share.">Avg cost</th>
                   <th className="num" title="Current market value of the position.">Value</th>
-                  <th className="num" title="Share of gross exposure (absolute): this position's |market value| as a percent of the sum of |market value| across all open positions. Direction is carried by the SHORT tag, so shorts never show a negative weight.">Weight</th>
+                  <th className="num" title="Share of gross exposure (absolute): this position's |market value| as a percent of the sum of |market value| across all open positions.  Direction is carried by the SHORT tag, so shorts never show a negative weight.">Weight</th>
                   <th className="num" title="Market value minus cost basis — the gain or loss if you closed now.">Unrealized</th>
                   <th title="What protects this position: a resting broker stop order, an app-managed stop rule, or nothing (—).">Protection</th>
                 </tr>

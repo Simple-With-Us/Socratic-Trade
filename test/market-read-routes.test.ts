@@ -1,6 +1,7 @@
 // Tests for the token-gated market-data READ endpoints (congress.trade cache-aside price pulls):
 //   GET /api/market/prices/{symbol}  -> PriceSeries envelope, closes DESCENDING
 //   GET /api/market/spx              -> { closes } DESCENDING (SPY daily bars)
+//   GET /api/market/quotes + /api/market/intraday/{symbol} (#2953 peer routes)
 // plus the src/lib/market-read.ts shaping helpers and the middleware bearer pass-through.
 //
 // Route tests drive the real handlers with APP_B_INGEST_TOKEN set; fetchDailyOHLC is module-mocked
@@ -13,7 +14,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { NextRequest } from "next/server";
 
 import type { OHLCBar } from "../src/lib/indicators";
-import { closesInRange, fetchPriceSeries, fetchSpxCloses, parseMarketRange } from "../src/lib/market-read";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
+import { clearScreenerProfileCacheForTests, closesInRange, fetchCompanyProfile, fetchPriceSeries, fetchSpxCloses, parseMarketRange } from "../src/lib/market-read";
+import { GET as profileRoute } from "../app/api/market/profile/[symbol]/route";
 import { fetchDailyOHLC } from "../src/lib/history";
 import { GET as pricesRoute } from "../app/api/market/prices/[symbol]/route";
 import { GET as spxRoute } from "../app/api/market/spx/route";
@@ -39,6 +42,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  clearScreenerProfileCacheForTests();
   for (const [key, value] of Object.entries(savedEnv)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -48,6 +52,17 @@ afterEach(() => {
 /** Canned daily bar with a ms-epoch time (Massive shape). */
 function bar(date: string, close: number, volume?: number): OHLCBar {
   return { time: Date.parse(`${date}T00:00:00Z`), close, ...(volume !== undefined ? { volume } : {}) };
+}
+
+/** 2026-07-30 21:00 UTC is after the 16:00 ET close, so that session is the latest completed one. */
+const JULY_30_AFTER_CLOSE = Date.UTC(2026, 6, 30, 21, 0, 0);
+
+function priorIsoDay(date: string): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+}
+
+function isoDaysBefore(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10);
 }
 
 function authedRequest(url: string, token?: string): Request {
@@ -102,46 +117,99 @@ describe("fetchPriceSeries", () => {
   const range = { from: "2026-07-01", to: "2026-07-31" };
 
   it("returns closes DESCENDING with volume, ticker uppercased", async () => {
-    const series = await fetchPriceSeries("aapl", range, async () => [
+    const read = await fetchPriceSeries("aapl", range, async () => [
       bar("2026-07-28", 230.1, 40_000_000),
       bar("2026-07-29", 231.0, 41_000_000),
       bar("2026-07-30", 233.4, 41_230_000)
-    ]);
-    expect(series.ticker).toBe("AAPL");
-    expect(series.closes).toEqual([
-      { date: "2026-07-30", close: 233.4, volume: 41_230_000 },
-      { date: "2026-07-29", close: 231.0, volume: 41_000_000 },
-      { date: "2026-07-28", close: 230.1, volume: 40_000_000 }
-    ]);
-    expect(series.currentPrice).toBe(233.4);
-    expect(series.currentPriceDate).toBe("2026-07-30");
+    ], JULY_30_AFTER_CLOSE);
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "AAPL",
+        closes: [
+          { date: "2026-07-30", close: 233.4, volume: 41_230_000 },
+          { date: "2026-07-29", close: 231.0, volume: 41_000_000 },
+          { date: "2026-07-28", close: 230.1, volume: 40_000_000 }
+        ],
+        currentPrice: 233.4,
+        currentPriceDate: "2026-07-30"
+      }
+    });
   });
 
   it("filters closes to [from, to] but keeps currentPrice from the full series", async () => {
-    const series = await fetchPriceSeries("AAPL", { from: "2026-07-01", to: "2026-07-28" }, async () => [
+    const read = await fetchPriceSeries("AAPL", { from: "2026-07-01", to: "2026-07-28" }, async () => [
       bar("2026-07-27", 228),
       bar("2026-07-28", 230.1),
       bar("2026-07-30", 233.4)
-    ]);
-    expect(series.closes).toEqual([
-      { date: "2026-07-28", close: 230.1 },
-      { date: "2026-07-27", close: 228 }
-    ]);
-    // Range-independent: the true latest close even though it falls outside the requested window.
-    expect(series.currentPrice).toBe(233.4);
-    expect(series.currentPriceDate).toBe("2026-07-30");
+    ], JULY_30_AFTER_CLOSE);
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "AAPL",
+        closes: [
+          { date: "2026-07-28", close: 230.1 },
+          { date: "2026-07-27", close: 228 }
+        ],
+        currentPrice: 233.4,
+        currentPriceDate: "2026-07-30"
+      }
+    });
   });
 
-  it("unknown symbol / no bars → 200-shaped empty series (closes: [], null currentPrice)", async () => {
-    const series = await fetchPriceSeries("NOTREAL", range, async () => null);
-    expect(series).toEqual({ ticker: "NOTREAL", closes: [], currentPrice: null, currentPriceDate: null });
+  it("unknown symbol / no bars → ok empty series (closes: [], null currentPrice)", async () => {
+    const read = await fetchPriceSeries("NOTREAL", range, async () => null);
+    expect(read).toEqual({
+      kind: "ok",
+      series: { ticker: "NOTREAL", closes: [], currentPrice: null, currentPriceDate: null }
+    });
   });
 
   it("empty symbol never calls the fetcher", async () => {
     const fetcher = vi.fn(async () => [bar("2026-07-30", 1)]);
-    const series = await fetchPriceSeries("   ", range, fetcher);
+    const read = await fetchPriceSeries("   ", range, fetcher, JULY_30_AFTER_CLOSE);
     expect(fetcher).not.toHaveBeenCalled();
-    expect(series.closes).toEqual([]);
+    expect(read).toEqual({
+      kind: "ok",
+      series: { ticker: "", closes: [], currentPrice: null, currentPriceDate: null }
+    });
+  });
+
+  it("marks a stale tail so the route can return 502 instead of an empty 200", async () => {
+    // Now is 2026-07-31 after the close, so the newest close (2026-07-30) is one
+    // session behind the latest completed session — a short lag within the
+    // terminal-series threshold, so it stays stale rather than terminal.
+    const read = await fetchPriceSeries("AAPL", range, async () => [
+      bar("2026-07-29", 231),
+      bar("2026-07-30", 233.4)
+    ], Date.UTC(2026, 6, 31, 21, 0, 0));
+    expect(read).toEqual({ kind: "stale" });
+  });
+
+  it("returns ok for a terminal (delisted) series ending ~1 year ago", async () => {
+    // Control: at the same clock a one-session lag is still withheld, so the
+    // stale gate is live and the ok below comes from the terminal exemption.
+    const control = await fetchPriceSeries("AAPL", range, async () => [
+      bar("2026-07-28", 231),
+      bar("2026-07-29", 233.4)
+    ], JULY_30_AFTER_CLOSE);
+    expect(control).toEqual({ kind: "stale" });
+    const read = await fetchPriceSeries("PXD", { from: "2025-07-01", to: "2026-07-31" }, async () => [
+      bar("2025-07-29", 250),
+      bar("2025-07-30", 251.5)
+    ], JULY_30_AFTER_CLOSE);
+    expect(read).toEqual({
+      kind: "ok",
+      series: {
+        ticker: "PXD",
+        closes: [
+          { date: "2025-07-30", close: 251.5 },
+          { date: "2025-07-29", close: 250 }
+        ],
+        currentPrice: 251.5,
+        currentPriceDate: "2025-07-30"
+      }
+    });
   });
 });
 
@@ -150,16 +218,31 @@ describe("fetchPriceSeries", () => {
 describe("fetchSpxCloses", () => {
   it("pulls SPY bars and returns them DESCENDING within the range", async () => {
     const fetcher = vi.fn(async () => [bar("2026-07-29", 635.1), bar("2026-07-30", 636.2)]);
-    const closes = await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, fetcher);
+    const read = await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, fetcher, JULY_30_AFTER_CLOSE);
     expect(fetcher).toHaveBeenCalledWith("SPY");
-    expect(closes).toEqual([
-      { date: "2026-07-30", close: 636.2 },
-      { date: "2026-07-29", close: 635.1 }
-    ]);
+    expect(read).toEqual({
+      kind: "ok",
+      closes: [
+        { date: "2026-07-30", close: 636.2 },
+        { date: "2026-07-29", close: 635.1 }
+      ]
+    });
   });
 
   it("returns an empty array when no SPY bars are available", async () => {
-    expect(await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, async () => null)).toEqual([]);
+    expect(await fetchSpxCloses({ from: "2026-07-01", to: "2026-07-31" }, async () => null)).toEqual({
+      kind: "ok",
+      closes: []
+    });
+  });
+
+  it("marks SPY bars that end before the latest completed session as stale", async () => {
+    const read = await fetchSpxCloses(
+      { from: "2026-07-01", to: "2026-07-31" },
+      async () => [bar("2026-07-29", 635.1), bar("2026-07-30", 636.2)],
+      Date.UTC(2026, 9, 15, 14, 0, 0)
+    );
+    expect(read).toEqual({ kind: "stale" });
   });
 });
 
@@ -188,20 +271,70 @@ describe("GET /api/market/prices/[symbol]", () => {
   });
 
   it("200 with the contract envelope (closes DESCENDING) for an authorized read", async () => {
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const prior = priorIsoDay(latest);
     mockFetchDailyOHLC.mockResolvedValue([
-      bar("2026-07-29", 231.0, 41_000_000),
-      bar("2026-07-30", 233.4, 41_230_000)
+      bar(prior, 231.0, 41_000_000),
+      bar(latest, 233.4, 41_230_000)
     ]);
-    const res = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    const res = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ticker: "AAPL",
       closes: [
-        { date: "2026-07-30", close: 233.4, volume: 41_230_000 },
-        { date: "2026-07-29", close: 231.0, volume: 41_000_000 }
+        { date: latest, close: 233.4, volume: 41_230_000 },
+        { date: prior, close: 231.0, volume: 41_000_000 }
       ],
       currentPrice: 233.4,
-      currentPriceDate: "2026-07-30"
+      currentPriceDate: latest
+    });
+  });
+
+  it("502 when the newest close is behind the latest session", async () => {
+    // One session behind the latest completed session — a short lag within the
+    // terminal-series threshold, so it still 502s for provider fallback.
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const newest = priorIsoDay(latest);
+    const prior = priorIsoDay(newest);
+    mockFetchDailyOHLC.mockResolvedValue([bar(prior, 10), bar(newest, 11)]);
+    const res = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: "stale" });
+  });
+
+  it("200 for a terminal (delisted) series ending ~1 year ago", async () => {
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const last = isoDaysBefore(latest, 365);
+    const prior = isoDaysBefore(latest, 366);
+    // Control: a one-session lag at the same clock still 502s, so the stale gate
+    // is live and the 200 below comes from the terminal exemption.
+    const lagNewest = priorIsoDay(latest);
+    mockFetchDailyOHLC.mockResolvedValueOnce([bar(priorIsoDay(lagNewest), 10), bar(lagNewest, 11)]);
+    const controlRes = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/AAPL?from=${prior}&to=${latest}`, TEST_TOKEN),
+      ctx
+    );
+    expect(controlRes.status).toBe(502);
+    mockFetchDailyOHLC.mockResolvedValue([bar(prior, 10), bar(last, 11)]);
+    const res = await pricesRoute(
+      authedRequest(`http://localhost/api/market/prices/PXD?from=${prior}&to=${latest}`, TEST_TOKEN),
+      { params: Promise.resolve({ symbol: "PXD" }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ticker: "PXD",
+      closes: [
+        { date: last, close: 11 },
+        { date: prior, close: 10 }
+      ],
+      currentPrice: 11,
+      currentPriceDate: last
     });
   });
 
@@ -227,20 +360,30 @@ describe("GET /api/market/spx", () => {
   });
 
   it("200 with { closes } DESCENDING from SPY daily bars", async () => {
-    mockFetchDailyOHLC.mockResolvedValue([bar("2026-07-29", 635.1), bar("2026-07-30", 636.2)]);
-    const res = await spxRoute(authedRequest(url, TEST_TOKEN));
+    const latest = latestCompletedTradingSessionEtKey(Date.now());
+    const prior = priorIsoDay(latest);
+    mockFetchDailyOHLC.mockResolvedValue([bar(prior, 635.1), bar(latest, 636.2)]);
+    const res = await spxRoute(authedRequest(`http://localhost/api/market/spx?from=${prior}&to=${latest}`, TEST_TOKEN));
     expect(res.status).toBe(200);
     // The peer-serving default must skip the App A read-back tier: serving App A's own
     // request through a tier that calls App A back is a guaranteed-wasted echo hop.
     expect(mockFetchDailyOHLC).toHaveBeenCalledWith("SPY", expect.any(Number), undefined, {
-      skipAppATier: true
+      skipAppATier: true,
+      usageLabel: "congress-read",
     });
     expect(await res.json()).toEqual({
       closes: [
-        { date: "2026-07-30", close: 636.2 },
-        { date: "2026-07-29", close: 635.1 }
+        { date: latest, close: 636.2 },
+        { date: prior, close: 635.1 }
       ]
     });
+  });
+
+  it("502 when SPY ends before the latest session", async () => {
+    mockFetchDailyOHLC.mockResolvedValue([bar("2020-01-02", 1), bar("2020-01-03", 2)]);
+    const res = await spxRoute(authedRequest(url, TEST_TOKEN));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: "stale" });
   });
 
   it("200 with { closes: [] } when no SPY bars exist in range", async () => {
@@ -248,6 +391,154 @@ describe("GET /api/market/spx", () => {
     const res = await spxRoute(authedRequest(url, TEST_TOKEN));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ closes: [] });
+  });
+});
+
+
+// ── /api/market/profile/{symbol} ─────────────────────────────────────────────
+
+describe("GET /api/market/profile/{symbol}", () => {
+  function profileUrl(symbol: string): string {
+    return `http://x/api/market/profile/${symbol}`;
+  }
+
+  it("401 without bearer", async () => {
+    const res = await profileRoute(authedRequest(profileUrl("AAPL")), {
+      params: Promise.resolve({ symbol: "AAPL" })
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("404 { ref: null } envelope when screener has no row (no bare framework 404)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({ data: { table: { rows: [] } } })
+      ) as unknown as typeof fetch
+    );
+    const res = await profileRoute(authedRequest(profileUrl("ZZZZNOPE"), TEST_TOKEN), {
+      params: Promise.resolve({ symbol: "ZZZZNOPE" })
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ ref: null });
+  });
+
+  it("helper returns null when the injected lookup misses", async () => {
+    expect(await fetchCompanyProfile("ZZZZNOPE", async () => null)).toBeNull();
+  });
+
+  it("200 { ref } when lookup returns sector/industry/marketCap", async () => {
+    // Unit the helper with an injected lookup (no network / DB).
+    const ref = await fetchCompanyProfile("MSFT", async () => ({
+      ticker: "MSFT",
+      companyName: "Microsoft Corporation",
+      sector: "Technology",
+      industry: "Software",
+      marketCap: 3_000_000_000_000,
+      assetClass: "equity"
+    }));
+    expect(ref).toEqual({
+      ticker: "MSFT",
+      companyName: "Microsoft Corporation",
+      sector: "Technology",
+      industry: "Software",
+      marketCap: 3_000_000_000_000,
+      assetClass: "equity"
+    });
+  });
+
+  it("does not cache empty map after Nasdaq screener fetch failure — subsequent call retries", async () => {
+    clearScreenerProfileCacheForTests();
+    let fetchCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          throw new Error("nasdaq transient failure");
+        }
+        return Response.json({
+          data: {
+            table: {
+              rows: [
+                {
+                  symbol: "RETRYTICK",
+                  name: "Retry Co",
+                  sector: "Technology",
+                  industry: "Software",
+                  marketCap: "1000000000"
+                }
+              ]
+            }
+          }
+        });
+      }) as unknown as typeof fetch
+    );
+
+    expect(await fetchCompanyProfile("RETRYTICK")).toBeNull();
+    const callsAfterFailure = fetchCalls;
+    expect(callsAfterFailure).toBeGreaterThanOrEqual(1);
+
+    const ref = await fetchCompanyProfile("RETRYTICK");
+    expect(ref).toMatchObject({
+      ticker: "RETRYTICK",
+      companyName: "Retry Co",
+      sector: "Technology",
+      industry: "Software",
+      marketCap: 1_000_000_000,
+      assetClass: "equity"
+    });
+    expect(fetchCalls).toBeGreaterThan(callsAfterFailure);
+
+    // Successful map is cached — a third lookup must not re-hit Nasdaq.
+    const callsAfterSuccess = fetchCalls;
+    expect(await fetchCompanyProfile("RETRYTICK")).toMatchObject({ ticker: "RETRYTICK" });
+    expect(fetchCalls).toBe(callsAfterSuccess);
+  });
+
+  it("does not cache empty map after non-OK Nasdaq screener response — subsequent call retries", async () => {
+    clearScreenerProfileCacheForTests();
+    let fetchCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          return new Response("upstream unavailable", { status: 503 });
+        }
+        return Response.json({
+          data: {
+            table: {
+              rows: [
+                {
+                  symbol: "RETRY503",
+                  name: "Retry Five Oh Three",
+                  sector: "Healthcare",
+                  industry: "Biotech",
+                  marketCap: "500000000"
+                }
+              ]
+            }
+          }
+        });
+      }) as unknown as typeof fetch
+    );
+
+    expect(await fetchCompanyProfile("RETRY503")).toBeNull();
+    const callsAfterFailure = fetchCalls;
+    expect(callsAfterFailure).toBeGreaterThanOrEqual(1);
+
+    const ref = await fetchCompanyProfile("RETRY503");
+    expect(ref).toMatchObject({
+      ticker: "RETRY503",
+      companyName: "Retry Five Oh Three",
+      sector: "Healthcare"
+    });
+    expect(fetchCalls).toBeGreaterThan(callsAfterFailure);
+  });
+
+  it("returns null from the helper for an empty symbol", async () => {
+    expect(await fetchCompanyProfile("   ", async () => ({ ticker: "X" }))).toBeNull();
   });
 });
 
@@ -278,6 +569,38 @@ describe("middleware — market read bearer pass-through", () => {
     const middleware = await loadMiddleware();
     const res = await middleware(mwRequest("/api/market/prices/AAPL", { authorization: `Bearer ${TEST_TOKEN}` }));
     expect(res.status).not.toBe(401);
+  });
+
+  it("lets a bearer request through to /api/market/quotes without a session", async () => {
+    vi.resetModules();
+    process.env.AUTH_SECRET = "test-secret";
+    const middleware = await loadMiddleware();
+    const res = await middleware(mwRequest("/api/market/quotes", { authorization: `Bearer ${TEST_TOKEN}` }));
+    expect(res.status).not.toBe(401);
+  });
+
+  it("lets a bearer request through to /api/market/intraday/{symbol} without a session", async () => {
+    vi.resetModules();
+    process.env.AUTH_SECRET = "test-secret";
+    const middleware = await loadMiddleware();
+    const res = await middleware(mwRequest("/api/market/intraday/AAPL", { authorization: `Bearer ${TEST_TOKEN}` }));
+    expect(res.status).not.toBe(401);
+  });
+
+  it("lets a bearer request through to /api/market/profile/{symbol} without a session", async () => {
+    vi.resetModules();
+    process.env.AUTH_SECRET = "test-secret";
+    const middleware = await loadMiddleware();
+    const res = await middleware(mwRequest("/api/market/profile/AAPL", { authorization: `Bearer ${TEST_TOKEN}` }));
+    expect(res.status).not.toBe(401);
+  });
+
+  it("still fail-closes /api/market/quotes with NO bearer token", async () => {
+    vi.resetModules();
+    process.env.AUTH_SECRET = "test-secret";
+    const middleware = await loadMiddleware();
+    const res = await middleware(mwRequest("/api/market/quotes"));
+    expect(res.status).toBe(401);
   });
 
   it("still fail-closes /api/market/spx with NO bearer token", async () => {

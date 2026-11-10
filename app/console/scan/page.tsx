@@ -29,6 +29,7 @@ import { ScanTable } from "./scan-table";
 import { SmartMoneySection } from "./smart-money";
 import { asFullMarketScan, newestScan, useLiveScan } from "./use-live-scan";
 import { destinationLabel } from "../components/nav";
+import { WeeklyDigestCard } from "../components/weekly-digest-card";
 
 type Tab = "scan" | "smart";
 
@@ -108,7 +109,7 @@ export default function ScanPage() {
             title={
               isFresh
                 ? "This scan was generated within the last 15 minutes."
-                : "Captured earlier. Hit Refresh scan for a current view."
+                : "Captured earlier.  Hit Refresh scan for a current view."
             }
           >
             {/* Ago already renders "…ago" — no trailing "old" (read "1h ago old"). */}
@@ -130,7 +131,7 @@ export default function ScanPage() {
           variant="outline"
           onClick={() => void onRefresh()}
           disabled={live.refreshing}
-          title="Run a fresh market scan now — re-screens the universe and re-pulls quotes and enrichment. Read-only: it never places trades. Can take up to ~25 seconds when caches are cold."
+          title="Run a fresh market scan now — re-screens the universe and re-pulls quotes and enrichment.  Read-only: it never places trades.  Can take up to ~25 seconds when caches are cold."
         >
           <RefreshCw size={13} className={cx(live.refreshing && "animate-spin")} aria-hidden />
           {live.refreshing ? "Scanning…" : "Refresh scan"}
@@ -211,7 +212,7 @@ function MarketScanTab({
     return (
       <Card>
         {refreshing ? (
-          <Empty>Scanning the market — fetching quotes and enrichment for your universe. This can take up to ~25 seconds.</Empty>
+          <Empty>Scanning the market — fetching quotes and enrichment for your universe.  This can take up to ~25 seconds.</Empty>
         ) : (
           <>
             {error && (
@@ -220,11 +221,11 @@ function MarketScanTab({
               </p>
             )}
             <Empty>
-              No market scan yet. Run one now with the button below, or it appears automatically after the next strategy
-              run. If your universe is empty, add symbols or choose a base index in Guardrails first.
+              No market scan yet.  Run one now with the button below, or it appears automatically after the next strategy
+              run.  If your universe is empty, add symbols or choose a base index in Guardrails first.
             </Empty>
             <div className="flex justify-center pb-2">
-              <Btn variant="primary" onClick={onRefresh} title="Run a fresh market scan now. Read-only: it never places trades.">
+              <Btn variant="primary" onClick={onRefresh} title="Run a fresh market scan now.  Read-only: it never places trades.">
                 Run scan
               </Btn>
             </div>
@@ -358,6 +359,7 @@ function MarketScanTab({
           )}
         </div>
       )}
+      <WeeklyDigestCard />
       {scan.warnings.length > 0 && (
         <p
           className="cursor-default rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
@@ -391,7 +393,7 @@ function MarketScanTab({
         >
           {typeof scan.returnedQuotes === "number" ? scan.returnedQuotes : EM_DASH} quotes · {formatScanCandidateBreakdown(breakdown)}
           {typeof scan.breadthPct === "number" && (
-            <span title="Market breadth — the share of the full screened universe advancing today. A quick risk-on/risk-off gauge.">
+            <span title="Market breadth — the share of the full screened universe advancing today.  A quick risk-on/risk-off gauge.">
               {" "}
               · breadth {scan.breadthPct.toFixed(0)}%
             </span>
@@ -399,8 +401,11 @@ function MarketScanTab({
         </p>
         {scan.topCandidates.length === 0 ? (
           <Empty>
-            The scan ran but returned no candidates — the universe may be empty or no provider returned quotes. Add
-            symbols or choose a base index in Guardrails, then refresh.
+            {(scan.scannedSymbols ?? 0) > 0 && (scan.returnedQuotes ?? 0) === 0
+              ? "The scan could not price any names.  Refresh after quotes recover."
+              : (scan.scannedSymbols ?? 0) === 0
+                ? "This universe has no symbols.  Choose a base index or add symbols on Guardrails, then refresh."
+                : "The scan returned no ranked names.  Refresh after quotes recover."}
           </Empty>
         ) : (
           <ScanTable scan={scan} />

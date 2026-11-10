@@ -349,13 +349,13 @@ describe("debateProposal LLM request bounds", () => {
       rejected: false,
       available: true,
       reason: "No fatal flaw found.",
-      model: "openai/gpt-4.1-mini"
+      model: "gpt-mini-latest"
     });
     expect(bodies).toHaveLength(1);
     expect(bodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.adversaryReview);
     // Per-role sampling: the adversary samples at a non-zero temperature (vs the Bull's greedy 0).
     expect(bodies[0].temperature).toBe(LLM_REQUEST_DEFAULTS.adversaryTemperature);
-    expect(bodies[0].max_output_tokens).toBe(1500);
+    expect(bodies[0].max_output_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.adversaryReview);
     // OpenAI-compatible providers request STRICT json_schema (not a bare json_object), so the
     // verdict is schema-enforced rather than regex/prose-parsed.
     expect(bodies[0].response_format).toEqual({
@@ -416,7 +416,7 @@ describe("debateProposal — Claude Red Team (via OpenRouter)", () => {
       rejected: true,
       available: true,
       reason: "Overbought into earnings.",
-      model: "anthropic/claude-opus-4-8"
+      model: "claude-opus-latest"
     });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("openrouter.ai");

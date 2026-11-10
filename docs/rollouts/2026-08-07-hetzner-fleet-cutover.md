@@ -3,7 +3,7 @@
 ## Context & Objective
 
 Oracle Cloud production host was suspended/unreachable (edge 522s). Fleet moved to a new
-Hetzner server so Socratic.Trade, Congress.Trade, Usage Monitor, and Coolify run again with
+Hetzner server so Socratic-Trade, Congress.Trade, Usage Monitor, and Coolify run again with
 working DNS, backups, and health verification. Hetzner host backups are ON and complement
 app-level SQLite snapshots (they are not a substitute for frequent app RPO).
 
@@ -11,8 +11,8 @@ app-level SQLite snapshots (they are not a substitute for frequent app RPO).
 
 ### Host
 
-- **Public IP:** `167.233.254.55` (cx43 NBG1 — 8 vCPU / 16 GB / 160 GB)
-- **Tailscale:** `fleet-hetzner-nbg1` / `100.69.77.26`
+- **Public IP:** `<PROD_ORIGIN_IP>` (cx43 NBG1 — 8 vCPU / 16 GB / 160 GB)
+- **Tailscale:** `fleet-hetzner-nbg1` / `<TAILSCALE_IP>`
 - **Coolify:** `4.1.2` at `https://host.jays.services`
 - **Hetzner Backups:** ON (daily window ~14–18 UTC)
 
@@ -20,11 +20,11 @@ app-level SQLite snapshots (they are not a substitute for frequent app RPO).
 
 | App | Domain | Coolify UUID | Notes |
 |-----|--------|--------------|-------|
-| Socratic.Trade | socratictrade.com (+ www, admin) | `d83b1aykr03uwr32yhgzaiay` | Litestream L9 snapshot restored + integrity repair (`task_journal` salvage). Live trading DB. |
-| Congress.Trade | congress.trade (+ www) | `c11c5hdhuczureb6w2pg20p0` | Fresh local SQLite + `/api/admin/migrate`. **No Oracle CT DB copy** — empty pipeline data until re-ingest / future R2 restore. Runtime container: `congress-app-live` (Traefik labels + coolify network). Compose sqlite-web port conflict avoided (proxy owns :8080). |
-| Usage Monitor | usage.jays.services | `yagelvqux9e8l1kztif7bf2o` | Booted with `LITESTREAM_EMERGENCY_DISABLE=true` (R2 LTX non-contiguous). Volume perms fixed for uid 1000. Fresh DB schema via migrate-safe. |
+| Socratic-Trade | socratictrade.com (+ www, admin) | `<ST_COOLIFY_APP_UUID>` | Litestream L9 snapshot restored + integrity repair (`task_journal` salvage). Live trading DB. |
+| Congress.Trade | congress.trade (+ www) | `<CT_COOLIFY_APP_UUID>` | Fresh local SQLite + `/api/admin/migrate`. **No Oracle CT DB copy** — empty pipeline data until re-ingest / future R2 restore. Runtime container: `congress-app-live` (Traefik labels + coolify network). Compose sqlite-web port conflict avoided (proxy owns :8080). |
+| Usage Monitor | usage.jays.services | `<UM_COOLIFY_APP_UUID>` | Booted with `LITESTREAM_EMERGENCY_DISABLE=true` (R2 LTX non-contiguous). Volume perms fixed for uid 1000. Fresh DB schema via migrate-safe. |
 
-### DNS (Cloudflare → Hetzner `167.233.254.55`, proxied)
+### DNS (Cloudflare → Hetzner `<PROD_ORIGIN_IP>`, proxied)
 
 - `socratictrade.com` / www / admin, `host.jays.services` (earlier in cutover)
 - `congress.trade`, `usage.jays.services` (this session)
@@ -72,9 +72,9 @@ curl -sS https://congress.trade/api/health
 curl -sS https://usage.jays.services/api/health
 
 # Host
-ssh root@167.233.254.55 '/usr/local/sbin/fleet-health-verify.sh'
-ssh root@167.233.254.55 '/usr/local/sbin/fleet-sqlite-backup.sh'
-ssh root@167.233.254.55 '/usr/local/sbin/fleet-backup-verify-weekly.sh'
+ssh root@<PROD_ORIGIN_IP> '/usr/local/sbin/fleet-health-verify.sh'
+ssh root@<PROD_ORIGIN_IP> '/usr/local/sbin/fleet-sqlite-backup.sh'
+ssh root@<PROD_ORIGIN_IP> '/usr/local/sbin/fleet-backup-verify-weekly.sh'
 ```
 
 First weekly drill: all three DBs integrity ok + sha256 ok (ST 1.4G, CT 892K, UM 400K).

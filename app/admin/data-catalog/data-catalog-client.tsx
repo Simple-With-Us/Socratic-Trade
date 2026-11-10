@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Btn, Chip, Stat } from "../../console/ui/primitives";
+import { SymbolButton } from "../../console/ui/symbol-drilldown";
 import {
   describeProbeNetworkError,
   describeProbeStatus,
@@ -164,7 +165,7 @@ export function DataCatalogClient() {
           <p className="mt-1 max-w-3xl text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
             Every field the app uses, which sources can supply it (including retired/theoretical),
             live fill % for numbers and RAG/non-numeric corpus, and how the LLM actually sees the
-            data. Expand a field for the source table.
+            data.  Expand a field for the source table.
           </p>
         </div>
         <Btn size="sm" variant="outline" onClick={() => void fetchData()} disabled={loading}>
@@ -242,7 +243,7 @@ export function DataCatalogClient() {
               <div className="mt-2 max-h-48 overflow-auto text-[length:var(--con-fs-xs)] font-mono">
                 {completeness.rag.weakestTickers.slice(0, 25).map((t) => (
                   <div key={t.symbol} className="border-b border-[color:var(--con-line)] py-1">
-                    <span className="font-semibold">{t.symbol}</span> {pct(t.partial)} · missing{" "}
+                    <SymbolButton symbol={t.symbol} /> {pct(t.partial)} · missing{" "}
                     {t.missing.join(", ") || "—"} · chunks {t.chunkCount}
                   </div>
                 ))}

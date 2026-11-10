@@ -2,48 +2,82 @@ import SwiftUI
 
 struct MarketsView: View {
     @EnvironmentObject private var store: MobileStore
+    @Binding var selectedTab: AppTab
+    @Binding private var focusedSymbol: String?
+
+    init(
+        selectedTab: Binding<AppTab> = .constant(.markets),
+        focusedSymbol: Binding<String?> = .constant(nil)
+    ) {
+        self._selectedTab = selectedTab
+        self._focusedSymbol = focusedSymbol
+    }
     @State private var ticker = ""
-    @State private var presentedSheet: MarketsSheet?
+    @State private var presentedSymbol: PresentedSymbol?
+    @State private var presentedItem: PresentedMarketItem?
 
     var body: some View {
-        SnapshotScaffold { snapshot in
-            PositionsSection(positions: snapshot.positions)
-            OrdersSection(orders: snapshot.orders)
-            WatchlistSection(ticker: $ticker, items: snapshot.watchlist)
-            AlertsSection(alerts: snapshot.alerts)
+        SnapshotScaffold(scrollTarget: focusedSymbol) { snapshot in
+            ScanShortcutCard { selectedTab = .scan }
+            PositionsSection(positions: snapshot.positions, presentedItem: $presentedItem)
+            OrdersSection(
+                orders: snapshot.orders,
+                // The account this snapshot was taken from, sent with every cancel as the
+                // server's stale-view guard (see OrderCancellation).
+                accountNumber: snapshot.readiness.selectedAccountNumber,
+                presentedSymbol: $presentedSymbol,
+                focusedSymbol: focusedSymbol
+            )
+            WatchlistSection(
+                ticker: $ticker,
+                items: snapshot.watchlist,
+                presentedSymbol: $presentedSymbol,
+                focusedSymbol: focusedSymbol
+            )
+        }
+        .onChange(of: focusedSymbol) { _, symbol in
+            if let symbol {
+                presentedSymbol = PresentedSymbol(symbol: symbol)
+            }
         }
         .navigationTitle("Assets")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                // Always open the composer; Create is gated inside. Disabling the toolbar
-                // button when the snapshot is briefly stale made it look permanently broken.
-                Button {
-                    presentedSheet = .newAlert
-                } label: {
-                    // bell.badge.plus is not a real SF Symbol (console: "No symbol named…").
-                    Image(systemName: "bell.badge")
-                }
-                .accessibilityLabel("Create Price Alert")
-            }
+        .sheet(item: $presentedSymbol) { presented in
+            SymbolInfoSheet(symbol: presented.symbol)
         }
-        .sheet(item: $presentedSheet) { sheet in
-            switch sheet {
-            case .newAlert:
-                AlertComposerView()
+        .sheet(item: $presentedItem) { item in
+            SymbolInfoSheet(item: item)
+        }
+    }
+}
+
+private struct ScanShortcutCard: View {
+    let openScan: () -> Void
+
+    var body: some View {
+        AppCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeading("Scan Table", subtitle: "ranked names for the current universe")
+                Text("Holdings stay here.  The interactive scan — score, price, and watchlist actions — is its own desk.")
+                    .font(.appSubheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: openScan) {
+                    Label("Open Scan", systemImage: "tablecells")
+                        .font(.appBody.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppPalette.accent)
             }
         }
     }
 }
 
-private enum MarketsSheet: String, Identifiable {
-    case newAlert
-
-    var id: String { rawValue }
-}
-
 private struct PositionsSection: View {
     let positions: [Position]
+    @Binding var presentedItem: PresentedMarketItem?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -56,7 +90,7 @@ private struct PositionsSection: View {
                 )
             } else {
                 ForEach(positions) { position in
-                    PositionRow(position: position)
+                    PositionRow(position: position, presentedItem: $presentedItem)
                 }
             }
         }
@@ -65,43 +99,61 @@ private struct PositionsSection: View {
 
 private struct PositionRow: View {
     let position: Position
+    @Binding var presentedItem: PresentedMarketItem?
 
     var body: some View {
-        AppCard {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
-                        TickerLogo(symbol: position.symbol, size: 26)
-                        Text(position.symbol)
-                            .font(.headline)
-                        if position.quantity < 0 {
-                            StatusPill("Short", color: AppPalette.negative)
+        Button {
+            presentedItem = .position(position)
+        } label: {
+            AppCard {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            TickerLogo(symbol: position.symbol, size: 26)
+                            Text(position.symbol)
+                                .font(.appHeadline)
+                            if position.quantity < 0 {
+                                StatusPill("Short", color: AppPalette.negative)
+                            }
+                        }
+                        Text("\(AppFormat.number(abs(position.quantity))) shares")
+                            .font(.appSubheadline)
+                            .foregroundStyle(.secondary)
+                        if let sector = position.sector, !sector.isEmpty {
+                            Text(sector)
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    Text("\(AppFormat.number(abs(position.quantity))) shares")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let sector = position.sector, !sector.isEmpty {
-                        Text(sector)
-                            .font(.caption)
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text(AppFormat.money(position.marketValue))
+                            .font(.appHeadline)
+                        Text("Avg \(AppFormat.money(position.averageCost))")
+                            .font(.appCaption)
                             .foregroundStyle(.secondary)
                     }
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text(AppFormat.money(position.marketValue))
-                        .font(.headline)
-                    Text("Avg \(AppFormat.money(position.averageCost))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.appCaption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
                 }
             }
         }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("\(position.symbol) position")
+        .accessibilityHint("Opens position and company details")
     }
 }
 
 private struct OrdersSection: View {
     let orders: [EquityOrder]
+    let accountNumber: String?
+    @Binding var presentedSymbol: PresentedSymbol?
+    var focusedSymbol: String? = nil
 
     var body: some View {
         VStack(spacing: 10) {
@@ -114,7 +166,19 @@ private struct OrdersSection: View {
                 )
             } else {
                 ForEach(orders) { order in
-                    OrderRow(order: order)
+                    OrderRow(
+                        order: order,
+                        accountNumber: accountNumber,
+                        presentedSymbol: $presentedSymbol
+                    )
+                    .id(order.symbol)
+                    .overlay {
+                        if focusedSymbol == order.symbol {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(AppPalette.accent, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        }
+                    }
                 }
             }
         }
@@ -122,7 +186,25 @@ private struct OrdersSection: View {
 }
 
 private struct OrderRow: View {
+    @EnvironmentObject private var store: MobileStore
+    @State private var confirmingCancel = false
+
     let order: EquityOrder
+    let accountNumber: String?
+    @Binding var presentedSymbol: PresentedSymbol?
+
+    private var operationID: String { OrderCancellation.operationID(orderId: order.id) }
+
+    /// Cancel is offered exactly where the server would accept it (working states only) and on
+    /// a deployment that advertises the command.  It is otherwise ungated: cancelling is
+    /// risk-reducing, so it stays available while the strategy is stopped, matching the console.
+    private var showsCancel: Bool {
+        OrderCancellation.isCancellable(order) && store.serverAdvertises(OrderCancellation.commandType)
+    }
+
+    private var canCancel: Bool {
+        !store.isBusy(operationID) && store.canSubmit(OrderCancellation.commandType)
+    }
 
     private var statusColor: Color {
         switch order.state.lowercased() {
@@ -136,22 +218,78 @@ private struct OrderRow: View {
         AppCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    TickerLogo(symbol: order.symbol, size: 24)
-                    Text(order.symbol)
-                        .font(.headline)
+                    SymbolTapButton(symbol: order.symbol, logoSize: 24) {
+                        presentedSymbol = PresentedSymbol(symbol: order.symbol)
+                    }
                     StatusPill(order.side.uppercased(), color: sideColor)
                     Spacer()
                     StatusPill(order.state.capitalized, color: statusColor)
                 }
                 HStack {
                     Text(orderDescription)
-                        .font(.subheadline)
+                        .font(.appSubheadline)
                     Spacer()
                     Text(AppFormat.dateTime(order.updatedAt ?? order.createdAt))
-                        .font(.caption)
+                        .font(.appCaption)
                         .foregroundStyle(.secondary)
                 }
+                if showsCancel {
+                    HStack {
+                        Spacer()
+                        Button {
+                            AppHaptics.warning()
+                            confirmingCancel = true
+                        } label: {
+                            HStack(spacing: 7) {
+                                if store.isBusy(operationID) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "xmark.circle")
+                                }
+                                Text("Cancel Order")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!canCancel)
+                        .accessibilityLabel("Cancel \(order.symbol) \(order.side.lowercased()) order")
+                    }
+                }
             }
+        }
+        // Same ceremony as the button: the swipe opens the existing confirmation dialog, never
+        // firing the cancel directly.  Mirrors swipe-to-reject on proposals.
+        .swipeRevealAction(
+            title: "Cancel",
+            systemImage: "xmark.circle",
+            tint: AppPalette.negative,
+            isEnabled: showsCancel && canCancel
+        ) {
+            AppHaptics.warning()
+            confirmingCancel = true
+        }
+        .confirmationDialog(
+            OrderCancellation.confirmationTitle(order),
+            isPresented: $confirmingCancel,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel Order", role: .destructive, action: cancelOrder)
+            Button("Keep It Working", role: .cancel) {}
+        } message: {
+            Text(OrderCancellation.confirmationMessage(order))
+        }
+    }
+
+    private func cancelOrder() {
+        AppHaptics.heavy()
+        Task {
+            await store.submit(
+                OrderCancellation.commandType,
+                payload: OrderCancellation.payload(orderId: order.id, accountNumber: accountNumber),
+                operationID: operationID
+            )
         }
     }
 
@@ -174,6 +312,8 @@ private struct WatchlistSection: View {
 
     @Binding var ticker: String
     let items: [WatchlistItem]
+    @Binding var presentedSymbol: PresentedSymbol?
+    var focusedSymbol: String? = nil
 
     var body: some View {
         VStack(spacing: 10) {
@@ -197,11 +337,11 @@ private struct WatchlistSection: View {
 
                     if items.isEmpty {
                         Text("No symbols watched yet.")
-                            .font(.subheadline)
+                            .font(.appSubheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        FlowSymbols(items: items)
+                        FlowSymbols(items: items, presentedSymbol: $presentedSymbol, focusedSymbol: focusedSymbol)
                     }
                 }
             }
@@ -229,206 +369,88 @@ private struct WatchlistSection: View {
 }
 
 private struct FlowSymbols: View {
-    @EnvironmentObject private var store: MobileStore
-
     let items: [WatchlistItem]
+    @Binding var presentedSymbol: PresentedSymbol?
+    var focusedSymbol: String? = nil
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+        // Content-sized wrap — do not use LazyVGrid(.adaptive(minimum: 92)).
+        // That cell was narrower than logo + ticker + 44pt remove, so `SPCX`
+        // and `XOM` wrapped mid-symbol.  Issue #2657.
+        WrappingHStack(spacing: 8, lineSpacing: 8) {
             ForEach(items) { item in
-                let operationID = "watchlist.remove:\(item.symbol)"
-                Button {
-                    Task {
-                        await store.submit(
-                            "watchlist.remove",
-                            payload: ["symbol": item.symbol],
-                            operationID: operationID
-                        )
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        TickerLogo(symbol: item.symbol, size: 18)
-                        Text(item.symbol)
-                            .font(.subheadline.weight(.semibold))
-                        if store.isBusy(operationID) {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
+                WatchlistChip(item: item, presentedSymbol: $presentedSymbol)
+                    .id(item.symbol)
+                    .overlay {
+                        if focusedSymbol == item.symbol {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(AppPalette.accent, lineWidth: 2)
+                                .allowsHitTesting(false)
                         }
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 8)
-                    .background(AppPalette.accent.opacity(0.1), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(store.isBusy(operationID) || !store.canSubmit("watchlist.remove"))
-                .accessibilityLabel("Remove \(item.symbol) from watchlist")
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct AlertsSection: View {
+private struct WatchlistChip: View {
     @EnvironmentObject private var store: MobileStore
 
-    let alerts: [PriceAlert]
+    let item: WatchlistItem
+    @Binding var presentedSymbol: PresentedSymbol?
+
+    private var operationID: String { "watchlist.remove:\(item.symbol)" }
 
     var body: some View {
-        VStack(spacing: 10) {
-            SectionHeading("Price Alerts", subtitle: "Create a New Alert from the Bell Button")
-            if alerts.isEmpty {
-                EmptyStateCard(
-                    title: "No Price Alerts",
-                    message: "Set above or below thresholds to keep watch without opening the app",
-                    systemImage: "bell"
-                )
-            } else {
-                ForEach(alerts) { alert in
-                    AlertRow(alert: alert)
+        // Two sibling buttons, not nested: tapping the logo/symbol opens
+        // company info; tapping the trailing x removes the watch.  Both stay
+        // real, separately labeled buttons for VoiceOver.
+        HStack(spacing: 6) {
+            Button {
+                presentedSymbol = PresentedSymbol(symbol: item.symbol)
+            } label: {
+                HStack(spacing: 6) {
+                    TickerLogo(symbol: item.symbol, size: 18)
+                    Text(item.symbol)
+                        .font(.appSubheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
-        }
-    }
-}
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(item.symbol) company info")
 
-private struct AlertRow: View {
-    @EnvironmentObject private var store: MobileStore
-    @State private var confirmingDeletion = false
-
-    let alert: PriceAlert
-
-    private var operationID: String { "alert.delete:\(alert.id)" }
-
-    var body: some View {
-        AppCard {
-            HStack(spacing: 12) {
-                TickerLogo(symbol: alert.symbol, size: 26)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(alert.symbol)
-                            .font(.headline)
-                        Image(systemName: alert.status == "armed" ? "bell.fill" : "bell.badge.fill")
-                            .font(.caption)
-                            .foregroundStyle(alert.status == "armed" ? AppPalette.accent : AppPalette.positive)
-                    }
-                    Text("\(alert.op) \(AppFormat.money(alert.price))")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text(alert.note?.isEmpty == false ? alert.note! : alert.status.capitalized)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            Button {
+                Task {
+                    await store.submit(
+                        "watchlist.remove",
+                        payload: ["symbol": item.symbol],
+                        operationID: operationID
+                    )
                 }
-                Spacer()
-                Button(role: .destructive) {
-                    confirmingDeletion = true
-                } label: {
+            } label: {
+                Group {
                     if store.isBusy(operationID) {
-                        ProgressView()
+                        ProgressView().controlSize(.mini)
                     } else {
-                        Image(systemName: "trash")
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .disabled(store.isBusy(operationID) || !store.canSubmit("alert.delete"))
-                .accessibilityLabel("Delete \(alert.symbol) alert")
+                // Icon is ~17pt — below the 44pt HIG minimum.  A fixed 44×44
+                // frame keeps the hit area without the old `.padding(14)`
+                // fighting the chip's intrinsic width.
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(store.isBusy(operationID) || !store.canSubmit("watchlist.remove"))
+            .accessibilityLabel("Remove \(item.symbol) from watchlist")
         }
-        .confirmationDialog(
-            "Delete \(alert.symbol) price alert?",
-            isPresented: $confirmingDeletion,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Alert", role: .destructive, action: deleteAlert)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes a monitoring safeguard.  You can create it again later.")
-        }
-    }
-
-    private func deleteAlert() {
-        Task {
-            await store.submit(
-                "alert.delete",
-                payload: ["alertId": alert.id],
-                operationID: operationID
-            )
-        }
+        .padding(.leading, 10)
+        .padding(.trailing, 2)
+        .background(AppPalette.accent.opacity(0.1), in: Capsule())
     }
 }
 
-private struct AlertComposerView: View {
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var store: MobileStore
-
-    @State private var symbol = ""
-    @State private var comparison = ">"
-    @State private var price = ""
-    @State private var note = ""
-
-    private var parsedPrice: Double? {
-        Double(price.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private var normalizedSymbol: String {
-        symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-    }
-
-    private var operationID: String { "alert.create:\(normalizedSymbol):\(comparison):\(price)" }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Alert") {
-                    TextField("Symbol", text: $symbol)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                    Picker("Notify when price is", selection: $comparison) {
-                        Text("Above").tag(">")
-                        Text("Below").tag("<")
-                    }
-                    TextField("Price", text: $price)
-                        .keyboardType(.decimalPad)
-                    TextField("Note (optional)", text: $note, axis: .vertical)
-                        .lineLimit(2...4)
-                }
-            }
-            .navigationTitle("New Price Alert")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create", action: create)
-                        .disabled(
-                            normalizedSymbol.isEmpty ||
-                            parsedPrice == nil ||
-                            store.isBusy(operationID) ||
-                            !store.canSubmit("alert.create")
-                        )
-                }
-            }
-        }
-    }
-
-    private func create() {
-        guard let parsedPrice, parsedPrice > 0 else { return }
-        var payload: [String: Any] = [
-            "symbol": normalizedSymbol,
-            "op": comparison,
-            "price": parsedPrice
-        ]
-        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedNote.isEmpty { payload["note"] = trimmedNote }
-
-        Task {
-            let succeeded = await store.submit(
-                "alert.create",
-                payload: payload,
-                operationID: operationID
-            )
-            if succeeded { dismiss() }
-        }
-    }
-}

@@ -84,7 +84,9 @@ npm run build      # clean
 
 - Add `user@example.com`-style addresses to `ALLOWED_EMAILS` for any non-primary
   users who should have access (comma-separated).
-- The GitHub OAuth callback URL must be set in the GitHub OAuth App:
-  `https://<your-domain>/api/auth/callback/github`
+- Production GitHub **OAuth App** (not a GitHub App, not Coolify App `4238447`):
+  Homepage `https://socratictrade.com`.  Authorization callback URL
+  `https://socratictrade.com/api/auth/callback/github`.
+- `host.jays.services` is Coolify.  Do not use it as the Auth.js callback.
 - Infisical: add `AUTH_GITHUB_ID` and `AUTH_GITHUB_SECRET` to the `agentic-trading`
   project when provisioning.

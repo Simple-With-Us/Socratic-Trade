@@ -35,6 +35,18 @@ vi.mock("../src/lib/vector-db", () => ({
 
 // Stub ONLY scanMarket (same rationale as order-confirmation-status.test.ts): left real it fans
 // out to live Nasdaq/Yahoo fetches with multi-second abort timeouts and flakes the suite.
+vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/approval-quote-scan")>();
+  return {
+    ...actual,
+    loadApprovalQuoteScan: async () =>
+      actual.buildApprovalQuoteScan(
+        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() } },
+        []
+      )
+  };
+});
+
 vi.mock("../src/lib/market", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/market")>();
   return {
@@ -238,9 +250,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const { executeProposal } = await import("../src/lib/strategy");
     const { getProposal, listAudit } = await import("../src/lib/db");
 
-    const first = await executeProposal(proposalId, userId);
-    expect(first.status).toBe("proposed");
-    expect(first.reasons?.[0]).toContain("Red rejected the final broker-adjusted size");
+    const first: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(first.message).toContain("Red rejected the final broker-adjusted size");
     expect(placeEquityOrder).not.toHaveBeenCalled();
     expect(debateProposal).toHaveBeenCalledTimes(1);
 
@@ -314,9 +328,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
       userId
     );
 
-    const first = await executeProposal(proposalId, userId);
-    expect(first.status).toBe("proposed");
-    expect(first.reasons?.[0]).toContain("increased from $1.00 to $1.02");
+    const first: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(first.message).toContain("increased from $1.00 to $1.02");
     expect(placeEquityOrder).not.toHaveBeenCalled();
     expect(debateProposal).not.toHaveBeenCalled();
     expect(getProposal(proposalId, userId)?.proposal.finalSizeReview).toMatchObject({
@@ -352,8 +368,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const { executeProposal } = await import("../src/lib/strategy");
     const { getProposal } = await import("../src/lib/db");
 
-    const result = await executeProposal(proposalId, userId);
-    expect(result.status).toBe("proposed");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toContain("provider timed out");
     expect(placeEquityOrder).not.toHaveBeenCalled();
     const pending = getProposal(proposalId, userId);
     expect(pending?.decision).toMatchObject({
@@ -382,9 +401,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const { executeProposal } = await import("../src/lib/strategy");
     const { getProposal } = await import("../src/lib/db");
 
-    const result = await executeProposal(proposalId, userId);
-    expect(result.status).toBe("proposed");
-    expect(result.reasons?.[0]).toContain("not executable");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toContain("not executable");
     expect(reviewEquityOrder).toHaveBeenCalledTimes(2);
     expect(placeEquityOrder).not.toHaveBeenCalled();
     expect(getProposal(proposalId, userId)?.proposal).toMatchObject({
@@ -403,9 +424,18 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const { executeProposal } = await import("../src/lib/strategy");
     const { listAudit } = await import("../src/lib/db");
 
-    const result = await executeProposal(proposalId, userId);
+    // #3343: 'blocked' status outcomes now surface as a thrown Error. The persisted proposal
+    // status is updated before the throw, so we can verify both the throw and the row state.
+    const expectBlocked = async (proposalId: string, userId: string) => {
+      return executeProposal(proposalId, userId).then(
+        (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+        (e) => e as Error
+      );
+    };
 
-    expect(result.status).toBe("blocked");
+    const result = await expectBlocked(proposalId, userId);
+
+    expect(result).toBeInstanceOf(Error);
     expect(reviewEquityOrder).toHaveBeenCalledTimes(1); // declined BEFORE any bump re-review
     expect(debateProposal).not.toHaveBeenCalled();
     expect(placeEquityOrder).not.toHaveBeenCalled();
@@ -420,9 +450,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const proposalId = await seedApprovedProposal(userId);
     const { executeProposal } = await import("../src/lib/strategy");
 
-    const result = await executeProposal(proposalId, userId);
-
-    expect(result.status).toBe("blocked");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result).toBeInstanceOf(Error);
     expect(reviewEquityOrder).toHaveBeenCalledTimes(1);
     expect(placeEquityOrder).not.toHaveBeenCalled();
   });
@@ -436,9 +468,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const proposalId = await seedApprovedProposal(userId, { maxDailyOrders: 0 });
     const { executeProposal } = await import("../src/lib/strategy");
 
-    const result = await executeProposal(proposalId, userId);
-
-    expect(result.status).toBe("blocked");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result).toBeInstanceOf(Error);
     expect(reviewEquityOrder).toHaveBeenCalledTimes(1);
     expect(placeEquityOrder).not.toHaveBeenCalled();
   });
@@ -454,9 +488,11 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const { executeProposal } = await import("../src/lib/strategy");
     const { getProposal, listAudit } = await import("../src/lib/db");
 
-    const result = await executeProposal(proposalId, userId);
-
-    expect(result.status).toBe("blocked");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result).toBeInstanceOf(Error);
     // Original review + exactly ONE bump re-review — never a loop.
     expect(reviewEquityOrder).toHaveBeenCalledTimes(2);
     expect(placeEquityOrder).not.toHaveBeenCalled();
@@ -474,10 +510,102 @@ describe("executeProposal — broker-minimum bump-to-floor wiring", () => {
     const proposalId = await seedApprovedProposal(userId, { brokerMinimumHandling: "skip" });
     const { executeProposal } = await import("../src/lib/strategy");
 
-    const result = await executeProposal(proposalId, userId);
-
-    expect(result.status).toBe("blocked");
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result).toBeInstanceOf(Error);
     expect(reviewEquityOrder).toHaveBeenCalledTimes(1); // no bump re-review
     expect(placeEquityOrder).not.toHaveBeenCalled();
+  });
+});
+
+// Audit of the merged G3 change (2026-09-29, board 687a5fb4, lane h3): the human-approval path used
+// to know nothing about the account-questionnaire hold, so a card Robinhood refused for the
+// questionnaire reason left autonomous runs to rediscover it, and an accepted opening order placed
+// by hand never cleared a hold that had already been set.
+describe("executeProposal — account-questionnaire hold on the human-approval path", () => {
+  const QUESTIONNAIRE_REJECTION =
+    'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}';
+
+  it("records the account-level hold when the broker refuses a human-approved order for the questionnaire reason", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(new Error(QUESTIONNAIRE_REJECTION));
+
+    const userId = `questionnaire-approval-refused-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+
+    await executeProposal(proposalId, userId).then(
+      () => undefined,
+      () => undefined
+    );
+
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    const held = getAccountActionRequired(userId, ACCOUNT);
+    expect(held).toBeDefined();
+    expect(held?.reason).toContain("answer account questions");
+    expect(held?.lastAttemptAt).toBeDefined();
+  });
+
+  it("books the refused approval as blocked and alerts the owner, instead of leaving an uncertain placing row", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(new Error(QUESTIONNAIRE_REJECTION));
+
+    const userId = `questionnaire-approval-booked-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listAudit, listNotificationEvents } = await import("../src/lib/db");
+
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/answer account questions/);
+
+    // The refusal is not an HTTP status, so it used to fall through to reconcilePlacementError,
+    // resolve "uncertain" (Robinhood's order list omits terminal orders) and stay in `placing`.
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    expect(listAudit(100, userId).some((event) => event.kind === "proposal_blocked_account_action_required")).toBe(true);
+    expect(listAudit(100, userId).some((event) => event.kind === "order_placement_uncertain")).toBe(false);
+    const alerts = listNotificationEvents(userId, 50).filter((event) => event.title.includes("needs your action on Robinhood"));
+    expect(alerts).toHaveLength(1);
+  });
+
+  it("books a placement-time sub-minimum refusal on the approval path as blocked, not uncertain, and sets no account hold", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockRejectedValue(
+      new Error('Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"Fractional orders must be at least $1.\\"]}"}')
+    );
+
+    const userId = `min-approval-refused-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal, listAudit } = await import("../src/lib/db");
+    const { getAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+
+    await expect(executeProposal(proposalId, userId)).rejects.toThrow(/below its minimum order size/);
+
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(getProposal(proposalId, userId)?.status).toBe("blocked");
+    const skipped = listAudit(100, userId).find((event) => event.kind === "order_skipped_broker_minimum");
+    expect(skipped?.payload).toMatchObject({ phase: "placement", action: "approval" });
+    expect(listAudit(100, userId).some((event) => event.kind === "order_placement_uncertain")).toBe(false);
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
+  });
+
+  it("clears the hold when a human-approved OPENING order is accepted by the broker", async () => {
+    reviewEquityOrder.mockImplementation(async (i) => echoReview(i));
+    placeEquityOrder.mockImplementation(async (i) => ({ orderId: `ord-${randomUUID()}`, state: "confirmed", raw: {}, ...i }));
+
+    const userId = `questionnaire-approval-accepted-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getAccountActionRequired, markAccountActionRequired } = await import("../src/lib/broker-account-questionnaire");
+    markAccountActionRequired(userId, ACCOUNT, "Robinhood requires you to answer account questions.", Date.now() - 60 * 60_000);
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeDefined();
+
+    const result = await executeProposal(proposalId, userId);
+
+    expect(result.status).toBe("placed");
+    expect(getAccountActionRequired(userId, ACCOUNT)).toBeUndefined();
   });
 });

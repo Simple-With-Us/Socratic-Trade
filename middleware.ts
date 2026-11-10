@@ -23,6 +23,23 @@
 // Cloudflare Tunnel may still front the app, but Cloudflare Access email headers are
 // not trusted as an app login source.
 
+// NOTE: no `import "server-only"` here, deliberately.
+//
+// That marker package only does one thing: it throws when a module is reached
+// from a Client Component bundle. This file is a server entry point that
+// Next.js compiles exclusively for the edge runtime, so no Client Component can
+// ever import it and the guard can never fire usefully.
+//
+// It is not free, though. `server-only` resolves to a module that throws unless
+// the bundler applied the `react-server` export condition; without it every
+// request would fail at module load with "This module cannot be imported from a
+// Client Component module". A production build still succeeds in that case,
+// because the throw happens at evaluation time and not at bundle time, so CI
+// green does not prove it. The edge layer is not a layer that needs protecting
+// here, so the dependency on that condition is not worth taking.
+//
+// The guard stays where it earns its keep: the credential-reading modules under
+// src/lib that a Client Component could genuinely pull into a client bundle.
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet } from "jose/jwks/remote";
@@ -30,12 +47,17 @@ import { jwtVerify } from "jose/jwt/verify";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+  AUTHENTICATED_SESSION_SID_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES,
   stripClientIdentityHeaders,
   type AuthenticatedIdentitySource
 } from "./src/lib/auth/strip-identity";
 import { checkSameOrigin } from "./src/lib/auth/csrf";
+import { isAdminEmail } from "./src/lib/auth/admin-emails";
 import { getSessionIdentity } from "./src/lib/auth/session-edge";
+import { isLiveBootstrap } from "./src/lib/auth-secret-guard";
+import { landingPageEnabled } from "./src/lib/landing-page";
+import { CANONICAL_HOST, isAltDomainHost, isMarketingHost } from "./src/lib/marketing-hosts";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -53,6 +75,11 @@ const ALLOWED = (process.env.ALLOWED_EMAILS || "")
 // Paths that never require a user identity.
 const PUBLIC_PREFIXES = [
   "/api/health",
+  "/api/live",
+  // Aggregate proxy-use stats for the external proxy watchdog (no secrets —
+  // only host:port + counts). Must stay anonymous so the watchdog polls
+  // without a credential.
+  "/api/proxy-use",
   "/api/ops",
   "/api/webhooks",
   "/api/csp-report",
@@ -65,15 +92,27 @@ const PUBLIC_PREFIXES = [
   // "no rules"). Discovered live 2026-07-11: production redirected all three.
   "/robots.txt",
   "/sitemap.xml",
-  "/manifest.webmanifest",
+  // Kill-switch worker for leftover PWA installs.  Must stay anonymous so a
+  // controlling worker can fetch the update instead of an auth HTML redirect.
+  "/sw.js",
+  // Apple's CDN fetches this anonymously to verify the universal-link claim; behind auth it
+  // 307s to /login and the domain never claims the iOS app (app/.well-known/...
+  // apple-app-site-association/route.ts).
+  "/.well-known/apple-app-site-association",
   "/welcome",
   "/strategy",
   "/framework",
+  // Sentry browser tunnel (next.config.mjs tunnelRoute). Must stay anonymous
+  // so ad-blocked clients can still deliver envelopes. Matcher also excludes it.
+  "/monitoring",
   "/how-it-works",
   "/design/socratic-trade",
   "/privacy-policy",
   "/terms-and-conditions",
   "/api/mobile/auth/apple",
+  // GET OAuth initiator for the native iOS web-auth flow (see the
+  // /api/auth/signin/<provider> translation below) — must be reachable signed-out.
+  "/api/mobile/auth-start",
 ];
 const AUTHJS_PUBLIC_PATHS = new Set([
   "/api/auth/csrf",
@@ -89,6 +128,44 @@ function isPublicPath(pathname: string): boolean {
   if (PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
   if (AUTHJS_PUBLIC_PATHS.has(pathname)) return true;
   return pathname.startsWith("/api/auth/callback/") || pathname.startsWith("/api/auth/signin/");
+}
+
+/** True for `/login` and its subpaths. The mobile/console host-routing blocks below must
+ *  exempt this (same test as PUBLIC_PREFIXES' own "/login" entry) so a client-side 401
+ *  redirect (app/console/lib/api.ts's redirectToLogin, a plain relative `window.location.href
+ *  = "/login?..."` navigation) actually reaches the sign-in page on those hosts instead of
+ *  being rewritten to the protected `/console/login` (which does not exist as a route and, more
+ *  importantly, is not public — an unauthenticated request to it hits the page-level fail-closed
+ *  branch below, which redirects back to `/login`, which the host block rewrites to
+ *  `/console/login` again: an infinite loop that never shows the sign-in page). */
+function isLoginPath(pathname: string): boolean {
+  return pathname === "/login" || pathname.startsWith("/login/");
+}
+
+/** Token-gated peer-read market routes. Handlers still call verifySecuritiesImportToken.
+ *  Keep this list explicit so /api/market/flatfile stays session-gated. */
+function isPeerMarketReadPath(pathname: string): boolean {
+  return (
+    pathname === "/api/market/spx" ||
+    pathname === "/api/market/quotes" ||
+    pathname.startsWith("/api/market/prices/") ||
+    pathname.startsWith("/api/market/intraday/") ||
+    pathname.startsWith("/api/market/profile/")
+  );
+}
+
+/**
+ * The operator PAGE tree (`/admin`, `/admin/...`) — NOT the `/api/admin/*` routes, which each run
+ * their own `requireAdmin()` (and one of which, `/api/admin/securities/import`, deliberately uses a
+ * different bearer-token auth model that this gate must not pre-empt).
+ *
+ * Before this gate existed, every page under `app/admin/**` was reachable by ANY authenticated,
+ * allowlisted user: the pages are client components whose data probes 403 individually, so a
+ * non-admin saw the full admin chrome, nav and page structure and only the numbers were withheld.
+ * Gating the tree here covers all ten pages at one point, including `app/admin/page.tsx`.
+ */
+function isAdminPagePath(pathname: string): boolean {
+  return pathname === "/admin" || pathname.startsWith("/admin/");
 }
 
 // --- Security response headers -------------------------------------------------
@@ -264,6 +341,59 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const host = (req.headers.get("host") || "").toLowerCase().split(":")[0];
 
+  // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
+  // https://socratictrade.com/welcome in a single hop instead of bouncing off
+  // the marketing redirect while still on the alt host. Anonymous traffic is
+  // forwarded; a signed-in operator stays on the alt host (see below).
+  // Exempt: /api/* (machine callers — webhooks, uptime probes — must not be
+  // handed a 308 they may not follow) and the Apple associated-domain file
+  // (the applinks + webcredentials entitlements on socratic.trade need it served
+  // on THAT domain, not redirected away).
+  if (
+    isAltDomainHost(host) &&
+    !pathname.startsWith("/api/") &&
+    pathname !== "/.well-known/apple-app-site-association"
+  ) {
+    // A signed-in operator must not lose their session to the canonicalization
+    // hop. The Auth.js cookie is host-only by default (AUTH_COOKIE_DOMAIN is
+    // unset), and socratic.trade and socratictrade.com are unrelated domains, so
+    // no cookie domain can span them: the canonical host never receives the
+    // session cookie and the operator would land on the public landing page
+    // instead of the console. So a verified session keeps the request on the alt
+    // host, where its cookie still applies. Only anonymous traffic is forwarded
+    // to the canonical domain.
+    //
+    // The secret is read once and used only when it is actually set. An empty
+    // placeholder is never passed to the verifier: with no AUTH_SECRET there is
+    // no Auth.js session to verify, and handing the verifier an empty string
+    // would make "no secret configured" and "the cookie did not verify" the same
+    // answer, which is how a misconfigured deployment turns into a silent
+    // redirect of every operator. A missing AUTH_SECRET in a live boot is
+    // surfaced where it belongs, by assertAuthSecretConfiguredInLiveBootstrap()
+    // at startup; a Cloudflare-Access-only deployment has no AUTH_SECRET by
+    // design and is not an error.
+    //
+    // The raw value is the source of truth, the same one isAuthConfigured() and
+    // the canonical-host path use.  Trimming here would make this one hop
+    // disagree with them, and the disagreement costs the operator their
+    // session: a whitespace-only secret reads as absent here, so the hop
+    // forwards to the canonical host, where the host-only Auth.js cookie does
+    // not apply and the session is gone.  One secret, one reading of it.
+    const authSecret = process.env.AUTH_SECRET ? process.env.AUTH_SECRET : undefined;
+    const session = authSecret
+      ? await getSessionIdentity(req.headers.get("cookie"), authSecret)
+      : null;
+    if (!session) {
+      const target = new URL(req.url);
+      target.protocol = "https:";
+      target.host = CANONICAL_HOST;
+      // Every other redirect in this middleware goes out through
+      // withSecurityHeaders, so the G4 contract (docs/rollouts/2026-07-01-security-hardening.md)
+      // holds for this one too — a redirect is still a response a browser renders.
+      return withSecurityHeaders(NextResponse.redirect(target, 308));
+    }
+  }
+
   // Host-level routing: admin.socratictrade.com / admin.socratic.trade
   if (host === "admin.socratictrade.com" || host === "admin.socratic.trade") {
     if (pathname === "/") {
@@ -276,13 +406,35 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   }
 
   // Host-level routing: mobile.socratictrade.com / mobile.socratic.trade
+  // PWA retired (owner 2026-08-16/17) — send this host to the website console.
   if (host === "mobile.socratictrade.com" || host === "mobile.socratic.trade") {
-    if (pathname === "/") {
-      return NextResponse.redirect(new URL("/mobile", req.url));
+    if (pathname === "/" || pathname === "/mobile" || pathname.startsWith("/mobile/")) {
+      return NextResponse.redirect(new URL("/console", req.url));
     }
-    if (!pathname.startsWith("/mobile") && !pathname.startsWith("/api") && !pathname.startsWith("/_next") && !pathname.startsWith("/favicon")) {
-      return NextResponse.redirect(new URL(`/mobile${pathname}`, req.url));
+    if (
+      !pathname.startsWith("/console") &&
+      !pathname.startsWith("/api") &&
+      !pathname.startsWith("/_next") &&
+      !pathname.startsWith("/favicon") &&
+      !isLoginPath(pathname)
+    ) {
+      return NextResponse.redirect(new URL(`/console${pathname}`, req.url));
     }
+  }
+
+  // Apex (and every other host): leftover PWA paths go to the website console.
+  // Do not match /api/mobile/* — that is the native iOS command gateway.
+  if (pathname === "/mobile" || pathname.startsWith("/mobile/")) {
+    return withSecurityHeaders(NextResponse.redirect(new URL("/console", req.url)));
+  }
+
+  if (pathname === "/manifest.webmanifest") {
+    return withSecurityHeaders(
+      new NextResponse(null, {
+        status: 410,
+        headers: { "cache-control": "no-store" }
+      })
+    );
   }
 
   // Host-level routing: console.socratictrade.com / console.socratic.trade
@@ -290,8 +442,29 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     if (pathname === "/") {
       return NextResponse.redirect(new URL("/console", req.url));
     }
-    if (!pathname.startsWith("/console") && !pathname.startsWith("/api") && !pathname.startsWith("/_next") && !pathname.startsWith("/favicon")) {
+    if (
+      !pathname.startsWith("/console") &&
+      !pathname.startsWith("/api") &&
+      !pathname.startsWith("/_next") &&
+      !pathname.startsWith("/favicon") &&
+      !isLoginPath(pathname)
+    ) {
       return NextResponse.redirect(new URL(`/console${pathname}`, req.url));
+    }
+  }
+
+  // The native iOS app's ASWebAuthenticationSession opens GET /api/auth/signin/<provider>
+  // directly, but Auth.js v5 only initiates OAuth on POST — that GET is an UnknownAction
+  // that dead-ends on /access-denied?error=Configuration.  Translate it into the
+  // GET-initiating /api/mobile/auth-start route so already-shipped iOS builds can sign in.
+  if (req.method === "GET" && pathname.startsWith("/api/auth/signin/")) {
+    const provider = pathname.slice("/api/auth/signin/".length);
+    if (provider && !provider.includes("/")) {
+      const target = new URL("/api/mobile/auth-start", req.url);
+      target.searchParams.set("provider", provider);
+      const callbackUrl = new URL(req.url).searchParams.get("callbackUrl");
+      if (callbackUrl) target.searchParams.set("callbackUrl", callbackUrl);
+      return withSecurityHeaders(NextResponse.redirect(target));
     }
   }
 
@@ -343,6 +516,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   let trustedEmail: string | null = null;
   let identitySource: AuthenticatedIdentitySource | null = null;
   let sessionIssuedAt: number | null = null;
+  let authSessionId: string | undefined;
   let fromCf = false;
 
   // Source 1: Cloudflare Access header.
@@ -365,6 +539,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     if (!trustedEmail && identity?.email) {
       trustedEmail = identity.email;
       sessionIssuedAt = identity.loginAt ?? null;
+      authSessionId = identity.sessionId;
       identitySource = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
     } else if (
       trustedEmail &&
@@ -372,17 +547,34 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       identity.loginAt != null
     ) {
       sessionIssuedAt = identity.loginAt;
+      authSessionId = identity.sessionId;
       identitySource = AUTHENTICATED_IDENTITY_SOURCES.authJsSession;
+    } else if (identity?.sessionId) {
+      authSessionId = identity.sessionId;
     }
   }
 
-  // Source 3: Dev/local fallback — ONLY when auth is NOT configured.
-  if (!trustedEmail && !isAuthConfigured()) {
+  // Source 3: Dev/local fallback — ONLY when auth is NOT configured and this is not a live bootstrap.
+  if (!trustedEmail && !isAuthConfigured() && !isLiveBootstrap()) {
     trustedEmail = PRIMARY_EMAIL;
     identitySource = AUTHENTICATED_IDENTITY_SOURCES.localFallback;
   }
 
   // --- Authorization ---
+
+  // The public marketing hosts: the root is the product landing page for a
+  // visitor, and the console for a signed-in operator. This runs BEFORE the
+  // fail-closed /login redirect below, so an anonymous visitor to the canonical
+  // domain sees the landing page instead of a login wall — while the operator's
+  // own bookmark to the apex domain still opens the console.
+  // With the marketing pages switched off (/welcome 404s), an anonymous visitor
+  // must fall through to the fail-closed /login redirect below rather than be
+  // sent to a page that does not exist.
+  if (isMarketingHost(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
+    return withSecurityHeaders(
+      NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
+    );
+  }
 
   if (trustedEmail) {
     if (!isEmailAllowed(trustedEmail, fromCf)) {
@@ -397,20 +589,41 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     // Allow unauthenticated requests with an x-admin-token or bearer token to reach the admin route handlers.
     // The middleware does NOT validate the token; the route handler's `requireAdmin()` or custom auth (like verifySecuritiesImportToken) will strictly validate it.
   } else if (
-    (pathname.startsWith("/api/market/prices/") || pathname === "/api/market/spx") &&
+    isPeerMarketReadPath(pathname) &&
     (req.headers.get("authorization") ?? "").trim().toLowerCase().startsWith("bearer ")
   ) {
     // Allow unauthenticated requests with a bearer token to reach the token-gated market READ handlers
-    // (congress.trade cache-aside price pulls). The middleware does NOT validate the token; the route
-    // handler's verifySecuritiesImportToken (APP_B_INGEST_TOKEN) strictly validates it. Deliberately
-    // scoped to these two paths only — /api/market/flatfile stays session-gated.
+    // (congress.trade cache-aside price pulls, plus the #2953 quotes/intraday peer routes). The
+    // middleware does NOT validate the token; the route handler's verifySecuritiesImportToken
+    // (APP_B_INGEST_TOKEN) strictly validates it. /api/market/flatfile stays session-gated.
   } else {
     // No verified identity and auth is configured (or armed) → FAIL CLOSED.
-    return withSecurityHeaders(
-      pathname.startsWith("/api/")
-        ? new NextResponse("Unauthorized", { status: 401 })
-        : NextResponse.redirect(new URL("/login", req.url))
-    );
+    if (pathname.startsWith("/api/")) {
+      return withSecurityHeaders(
+        new NextResponse(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    }
+    const loginUrl = new URL("/login", req.url);
+    loginUrl.searchParams.set("callbackUrl", req.nextUrl.pathname + req.nextUrl.search);
+    return withSecurityHeaders(NextResponse.redirect(loginUrl));
+  }
+
+  // --- Admin role gate for the operator page tree ---
+  //
+  // Same allowlist the route handlers use (`src/lib/auth/admin.ts` shares `isAdminEmail` from the
+  // edge-safe module imported above), so the pages and their data agree about who is an admin.
+  //
+  // Provenance: the route gate additionally rejects the auth-unconfigured `local-fallback` source,
+  // because it also serves token-scripted, cost-side-effecting backfills. This page gate accepts the
+  // identity middleware itself just resolved. That is not a weaker perimeter in production: a live
+  // boot cannot reach the fallback at all — `assertAuthSecretConfiguredInLiveBootstrap` refuses to
+  // start without a real identity source, and the Source 3 branch above is additionally guarded by
+  // `!isLiveBootstrap()`. It only preserves local development, where auth is unconfigured by design.
+  if (isAdminPagePath(pathname) && !isAdminEmail(trustedEmail)) {
+    return withSecurityHeaders(NextResponse.redirect(new URL("/access-denied", req.url)));
   }
 
   // Strip spoofable client-supplied identity hints, then forward the resolved identity + provenance.
@@ -422,10 +635,13 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (sessionIssuedAt !== null) {
     headers.set(AUTHENTICATED_SESSION_ISSUED_AT_HEADER, new Date(sessionIssuedAt).toISOString());
   }
+  if (authSessionId) {
+    headers.set(AUTHENTICATED_SESSION_SID_HEADER, authSessionId);
+  }
   return withSecurityHeaders(NextResponse.next({ request: { headers } }));
 }
 
 export const config = {
   // Run on everything except Next internals and static image assets.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|gif|svg|ico|webp)$).*)"]
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|monitoring|.*\\.(?:png|jpg|jpeg|gif|svg|ico|webp)$).*)"]
 };

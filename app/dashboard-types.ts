@@ -1,9 +1,11 @@
 import type { AuditFeedItem as DashboardAuditFeedItem, SymbolMeta as DashboardSymbolMeta, UnifiedActivityGroup } from "@/lib/dashboard-feed";
 import type { AccountReadiness } from "@/lib/dashboard";
+import type { AutonomyHaltCause } from "@/lib/autonomy-halt-cause";
 import type { PositionStopPlan } from "@/lib/db";
 import type { MacroData } from "@/lib/macro";
 import type { MacroDerivedMetrics } from "@/lib/macro-metrics";
 import type { MarketSignals } from "@/lib/market-signals";
+import type { WeeklyMarketDigest } from "@/lib/weekly-market-digest";
 import type { MarketNewsItem } from "@/lib/market-signals/massive";
 import type { RedTeamEfficacy, RegimeStat, ThesisStat } from "@/lib/performance";
 import type { TaxSummary } from "@/lib/tax";
@@ -46,12 +48,16 @@ export interface StrategyDecision {
     | "skipped_market_closed"
     | "skipped_broker_unhealthy";
   summary: string;
-  proposals: Array<{ proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
+  proposals: Array<{ id?: string; proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
   marketScan?: MarketScan;
   accountNumber?: string;
 }
 
 export interface DashboardSnapshot {
+  /** True when a broker or dependency wait was cut so the snapshot could return inside 20s. */
+  partialData?: boolean;
+  /** Why `partialData` is set.  Absent on a complete snapshot. */
+  partialReason?: string;
   currentUser?: {
     userId: string;
     email?: string;
@@ -73,8 +79,18 @@ export interface DashboardSnapshot {
    *  skips the market-open/paused split rather than mislabeling an extended-hours account. */
   connectedAccountPolicies?: Record<
     string,
-    Pick<TradingPolicy, "systemState" | "strategyAuthority"> & Partial<Pick<TradingPolicy, "runDuringExtendedHours">>
+    Pick<TradingPolicy, "systemState" | "strategyAuthority"> &
+      Partial<Pick<TradingPolicy, "runDuringExtendedHours">> & {
+        /** Why this account is halted and whether it starts again by itself (lane h5 review round).
+         *  Present only for halted accounts with a known cause lookup. */
+        haltCause?: AutonomyHaltCause | null;
+      }
   >;
+  /** Real pending-proposal count per connected account (not just the active one) — the
+   *  scheduler runs every connected account independently of which is loaded, so a
+   *  non-active account can genuinely have proposals waiting. Keyed by ConnectedAccount.id,
+   *  same as connectedAccountPolicies. */
+  connectedAccountPendingCounts?: Record<string, number>;
   portfolio?: Portfolio;
   portfolioReadError?: string;
   positions: EquityPosition[];
@@ -96,11 +112,14 @@ export interface DashboardSnapshot {
    *  entry carries its own as_of so the UI always age-tags it. Optional: older payloads
    *  and empty stores simply omit it ("—" remains the last resort). */
   orderPriceFallbacks?: Record<string, { price: number; asOf: string; source?: string }>;
-  audit: AuditEvent[];
+  /** Raw audit rows are server-only feed input; console clients use auditFeed/unifiedFeed. */
+  audit?: AuditEvent[];
   auditFeed: DashboardAuditFeedItem[];
   unifiedFeed: UnifiedActivityGroup[];
   latestStrategyRun?: StrategyDecision;
   latestScan?: MarketScan;
+  /** Native weekly value + momentum screens from this account's scan tape. */
+  weeklyMarketDigest?: WeeklyMarketDigest;
   dailyStats: { orderCount: number; openingOrderCount: number; notional: number };
   strategyRuns: StrategyRunRow[];
   pendingProposals: PendingProposal[];
@@ -113,10 +132,14 @@ export interface DashboardSnapshot {
     sec8k?: { enabled: boolean; fetchedAt?: string; recordCount: number; sources: string[]; due: boolean; ttlMs: number };
     earningsTranscripts?: FmpTranscriptStatus;
     technical?: { enabled: boolean; source: "tradingview" | "computed"; fetchedAt?: string; recordCount: number; due: boolean; ttlMs: number; secretConfigured: boolean };
+    thirteenF?: { enabled: boolean; fetchedAt?: string; recordCount: number; sources: string[]; due: boolean; ttlMs: number };
+    ark?: { enabled: boolean; fetchedAt?: string; recordCount: number; sources: string[]; due: boolean; ttlMs: number; asOf?: string };
   };
   smartMoney?: {
-    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
+    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell" | "exchange"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
     insider: Array<{ symbol: string; owner: string; buyTx: number; sellTx: number; filedAt: string }>;
+    thirteenF?: Array<{ ticker: string; filerName: string; periodEnd: string; shares: number; valueUsd: number }>;
+    ark?: Array<{ ticker: string; fund: string; asOf: string; weightPct: number; shares: number }>;
     /** Cached congress-score go/no-go verdict (pass/fail + stats); null when never evaluated.
      *  Nested here alongside the other smart-money congress data to match the server payload
      *  (src/lib/dashboard.ts). */
@@ -169,6 +192,9 @@ export interface DashboardSnapshot {
   robinhoodMcpConnected: boolean;
   /** Per-user setting: when true, accounts left in "active" state auto-resume on server boot. */
   autoResumeOnBoot: boolean;
+  /** Why the viewed account is halted and whether it starts again by itself (lane h5).  null when
+   *  it is not halted; optional so older payloads and test fixtures stay valid. */
+  haltCause?: AutonomyHaltCause | null;
   socratic?: {
     decisions: SocraticDecisionCase[];
     frameworkProposals: SocraticFrameworkProposal[];

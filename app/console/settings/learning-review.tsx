@@ -9,14 +9,16 @@
  *  PUT /api/policy path as every other settings card:
  *    learningReviewEnabled — the on/off switch (default off);
  *    learningReviewMode    — decide (apply verdicts, default) vs annotate (notify only);
- *    learningReviewModel   — the model that runs the review (default claude-fable-5,
+ *    learningReviewModel   — the model that runs the review (default claude-fable-latest,
  *                            an explicit value — never a blank that secretly means Fable). */
 
 import { useState } from "react";
 import type { LlmReasoningEffort } from "@/lib/types";
-import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { catalogEntryFor } from "@/lib/llm-model-catalog";
+import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { savePolicy, ConsoleApiError } from "../lib/api";
+import { resolveLearningReviewNumberCommit } from "../lib/number-commit";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Card, Field, RawNumInput, Select, Toggle } from "../ui/primitives";
@@ -28,12 +30,12 @@ const MODE_OPTIONS = [
   {
     value: "annotate",
     label: "Annotate — record verdicts, change nothing",
-    title: "Verdicts land in the activity log plus a daily notification. No learned fact or pending item is touched."
+    title: "Verdicts land in the activity log plus a daily notification.  No learned fact or pending item is touched."
   },
   {
     value: "decide",
     label: "Decide — apply verdicts automatically",
-    title: "Rejected facts are removed, expired facts stop informing runs, and pending items are approved or rejected per the verdict. Every application is audited."
+    title: "Rejected facts are removed, expired facts stop informing runs, and pending items are approved or rejected per the verdict.  Every application is audited."
   }
 ] as const;
 
@@ -41,20 +43,24 @@ const MODE_OPTIONS = [
 // options are frontier-tier; the review model is its own user-level pick (unrelated to the
 // per-account team models on Strategy → Models). No blank/"default" pseudo-option — the
 // field always holds a real, chosen model.
-const REVIEW_MODEL_OPTIONS = [
-  { value: "gpt-5.6-sol", label: "gpt-5.6-sol — recommended frontier audit · $$$" },
-  { value: "gpt-5.6-terra", label: "gpt-5.6-terra — balanced current-generation audit · $$$" },
-  { value: "gpt-5.6-luna", label: "gpt-5.6-luna — lower-cost current-generation audit · $$" },
-  { value: "claude-fable-5", label: "claude-fable-5 — most capable Claude · $$$" },
-  { value: "claude-opus-4-8", label: "claude-opus-4-8 — premium Claude reasoning · $$$" },
-  { value: "gemini-3.1-pro-preview", label: "gemini-3.1-pro-preview — deepest Gemini reasoning · $$$" }
+const reviewModelOption = (value: string, fallbackLabel: string) => {
+  const entry = catalogEntryFor(value);
+  return { value: entry?.displaySlug ?? value, label: entry?.label ?? fallbackLabel };
+};
+
+const NORMALIZED_REVIEW_MODEL_OPTIONS = [
+  reviewModelOption("gpt-6.1-sol", "gpt-6.1-sol — recommended frontier audit · $$$"),
+  reviewModelOption("gpt-6-luna", "gpt-6-luna — lower-cost current-generation audit · $"),
+  reviewModelOption("claude-fable-latest", "claude-fable-latest (5.1) — most capable Claude · $$$"),
+  reviewModelOption("claude-opus-latest", "claude-opus-latest (5.5) — premium Claude reasoning · $$$"),
+  reviewModelOption("gemini-pro-latest", "gemini-pro-latest (4 Argon) — deepest Gemini reasoning · $$$")
 ];
 
 export function LearningReviewCard() {
   const { snapshot, refresh } = useConsoleData();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState<{ learningReviewMinNewLessons?: number; learningReviewMaxWaitDays?: number }>({});
+  const [rawDrafts, setRawDrafts] = useState<{ learningReviewMinNewLessons?: string; learningReviewMaxWaitDays?: string }>({});
 
   const policy = snapshot?.policy;
   if (!snapshot || !policy) return null;
@@ -63,8 +69,12 @@ export function LearningReviewCard() {
   // "decide" is the default; only an explicit "annotate" opts out.
   const mode = policy.learningReviewMode === "annotate" ? "annotate" : "decide";
   // Real default value (never blank-means-Fable).
-  const model = policy.learningReviewModel?.trim() || "claude-fable-5";
-  const customModel = model && !REVIEW_MODEL_OPTIONS.some((o) => o.value === model) ? model : null;
+  const savedModel = policy.learningReviewModel?.trim() || "claude-fable-latest";
+  const catalogModel = catalogEntryFor(savedModel);
+  const model = catalogModel?.displaySlug ?? savedModel;
+  const extraModel = !NORMALIZED_REVIEW_MODEL_OPTIONS.some((o) => o.value === model)
+    ? { value: model, label: catalogModel?.label ?? `${model} — custom id` }
+    : null;
   const reasoningCapability = reasoningCapabilityForModel(model);
   const recommendedEffort = recommendedReasoningEffortForModel(model, "review");
   const reasoningEffort = normalizeReasoningEffortForModel(
@@ -72,8 +82,8 @@ export function LearningReviewCard() {
     policy.learningReviewReasoningEffort ?? recommendedEffort
   );
   const reasoningAdvice = reasoningAdviceForModel(model);
-  const minNewLessons = draft.learningReviewMinNewLessons ?? policy.learningReviewMinNewLessons ?? DEFAULT_MIN_NEW_LESSONS;
-  const maxWaitDays = draft.learningReviewMaxWaitDays ?? policy.learningReviewMaxWaitDays ?? DEFAULT_MAX_WAIT_DAYS;
+  const minNewLessons = policy.learningReviewMinNewLessons ?? DEFAULT_MIN_NEW_LESSONS;
+  const maxWaitDays = policy.learningReviewMaxWaitDays ?? DEFAULT_MAX_WAIT_DAYS;
 
   /** Returns whether the save succeeded, so numeric-field callers can revert their optimistic draft. */
   const save = async (patch: Record<string, unknown>, saved: string): Promise<boolean> => {
@@ -95,14 +105,20 @@ export function LearningReviewCard() {
   // Numeric trigger knobs: local text while typing, commit on blur (mirrors Market-scan shape).
   const commitNumber = (
     key: "learningReviewMinNewLessons" | "learningReviewMaxWaitDays",
-    next: number,
     saved: number,
     label: string
   ) => {
-    if (next === saved) return;
-    void save({ [key]: next }, label).then((ok) => {
-      if (!ok) setDraft((d) => ({ ...d, [key]: saved }));
+    const raw = rawDrafts[key];
+    setRawDrafts((d) => {
+      if (!(key in d)) return d;
+      const copy = { ...d };
+      delete copy[key];
+      return copy;
     });
+    if (raw === undefined) return;
+    const next = resolveLearningReviewNumberCommit(raw, saved);
+    if (next === null) return;
+    void save({ [key]: next }, label);
   };
 
   return (
@@ -115,7 +131,7 @@ export function LearningReviewCard() {
       <div className="flex flex-col gap-3">
         <div
           className="con-row flex items-center justify-between gap-4 rounded-control px-1.5 py-1.5"
-          title="Enable the learning review. Off = nothing runs and nothing is spent."
+          title="Enable the learning review.  Off = nothing runs and nothing is spent."
         >
           <div>
             <div className="text-[length:var(--con-fs-sm)] font-semibold">Enable learning review</div>
@@ -142,15 +158,14 @@ export function LearningReviewCard() {
             >
               <RawNumInput
                 id="learning-review-min-new-lessons"
-                value={String(minNewLessons)}
-                emptyValue={DEFAULT_MIN_NEW_LESSONS}
+                value={rawDrafts.learningReviewMinNewLessons ?? String(minNewLessons)}
+                emptyValue={minNewLessons}
                 disabled={busy}
                 title="Skips the review entirely until at least this many learned facts or pending items have appeared since the last successful review."
-                onValueChange={(parsed) => setDraft((d) => ({ ...d, learningReviewMinNewLessons: parsed }))}
+                onValueChange={(_parsed, raw) => setRawDrafts((d) => ({ ...d, learningReviewMinNewLessons: raw }))}
                 onBlur={() =>
                   commitNumber(
                     "learningReviewMinNewLessons",
-                    minNewLessons,
                     policy.learningReviewMinNewLessons ?? DEFAULT_MIN_NEW_LESSONS,
                     "Threshold saved"
                   )
@@ -164,15 +179,14 @@ export function LearningReviewCard() {
             >
               <RawNumInput
                 id="learning-review-max-wait-days"
-                value={String(maxWaitDays)}
-                emptyValue={DEFAULT_MAX_WAIT_DAYS}
+                value={rawDrafts.learningReviewMaxWaitDays ?? String(maxWaitDays)}
+                emptyValue={maxWaitDays}
                 disabled={busy}
                 title="Even below the threshold, the review still runs once the oldest un-reviewed lesson has waited this many days."
-                onValueChange={(parsed) => setDraft((d) => ({ ...d, learningReviewMaxWaitDays: parsed }))}
+                onValueChange={(_parsed, raw) => setRawDrafts((d) => ({ ...d, learningReviewMaxWaitDays: raw }))}
                 onBlur={() =>
                   commitNumber(
                     "learningReviewMaxWaitDays",
-                    maxWaitDays,
                     policy.learningReviewMaxWaitDays ?? DEFAULT_MAX_WAIT_DAYS,
                     "Max wait saved"
                   )
@@ -192,7 +206,7 @@ export function LearningReviewCard() {
               id="learning-review-mode"
               value={mode}
               disabled={busy}
-              title="Annotate records verdicts without changing anything. Decide applies them — removals, expiries, and pending approvals/rejections — each one audited."
+              title="Annotate records verdicts without changing anything.  Decide applies them — removals, expiries, and pending approvals/rejections — each one audited."
               onChange={(e) =>
                 void save(
                   { learningReviewMode: e.target.value },
@@ -209,14 +223,14 @@ export function LearningReviewCard() {
           </Field>
           <Field
             label="Learning-review model"
-            hint="A frontier model is the point. Defaults to claude-fable-5."
+            hint="A frontier model is the point.  Defaults to the current claude-fable-latest catalog entry."
             htmlFor="learning-review-model"
           >
             <Select
               id="learning-review-model"
               value={model}
               disabled={busy}
-              title="The model that runs the learning review. Needs a resolvable key for its provider (Connections → API keys)."
+              title="The model that runs the learning review.  Needs a resolvable key for its provider (Connections → API keys)."
               onChange={(e) => {
                 const nextModel = e.target.value;
                 void save(
@@ -228,12 +242,12 @@ export function LearningReviewCard() {
                 );
               }}
             >
-              {customModel && (
-                <option value={customModel} title="A model id outside the curated list, kept exactly as stored.">
-                  {customModel} — custom id
+              {extraModel && (
+                <option value={extraModel.value} title="A saved model outside the shortlist.">
+                  {extraModel.label}
                 </option>
               )}
-              {REVIEW_MODEL_OPTIONS.map((o) => (
+              {NORMALIZED_REVIEW_MODEL_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>

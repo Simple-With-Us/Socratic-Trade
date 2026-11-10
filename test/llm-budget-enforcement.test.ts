@@ -19,6 +19,8 @@ afterEach(() => {
   delete process.env.TRIGGER_LLM_DAILY_COST_BUDGET_USD;
   delete process.env.LLM_RUN_RESERVATION_TOKENS;
   delete process.env.LLM_RUN_RESERVATION_COST_USD;
+  vi.doUnmock("../src/lib/llm-usage");
+  vi.doUnmock("../src/lib/rag-metering");
 });
 
 async function seedUsage(userId: string, totalTokens: number, costUsd?: number): Promise<void> {
@@ -222,5 +224,71 @@ describe("LLM budget reservation — concurrency admission control (TOCTOU fix)"
     const r = reserveLlmRunBudget("local");
     expect(r.ok).toBe(true);
     expect(reservedLlmSpend("local").tokens).toBe(3_000);
+  });
+});
+
+describe("LLM budget — user_settings (not Infisical) + fail-closed ledger", () => {
+  it("enforces a user_settings cap with no policy and no env", async () => {
+    const { setUserLlmDailyBudget, checkLlmDailyBudget, isOverLlmBudget } = await import("../src/lib/llm-budget");
+    setUserLlmDailyBudget("local", { tokenBudget: 500 });
+    await seedUsage("local", 600);
+    const decision = checkLlmDailyBudget("local");
+    expect(decision.ok).toBe(false);
+    expect(decision.reason).toBe("token_budget");
+    expect(isOverLlmBudget("local")).toBe(true);
+  });
+
+  it("user_settings wins over legacy policy and retired env default", async () => {
+    process.env.TRIGGER_LLM_DAILY_TOKEN_BUDGET = "100000";
+    await setTokenBudget("local", 80000);
+    const { setUserLlmDailyBudget, isOverLlmBudget } = await import("../src/lib/llm-budget");
+    setUserLlmDailyBudget("local", { tokenBudget: 100 });
+    await seedUsage("local", 200);
+    expect(isOverLlmBudget("local")).toBe(true);
+  });
+
+  it("explicit user 0 opts out of env and legacy policy", async () => {
+    process.env.TRIGGER_LLM_DAILY_TOKEN_BUDGET = "1000";
+    await setTokenBudget("local", 1000);
+    const { setUserLlmDailyBudget, isOverLlmBudget } = await import("../src/lib/llm-budget");
+    setUserLlmDailyBudget("local", { tokenBudget: 0 });
+    await seedUsage("local", 50_000);
+    expect(isOverLlmBudget("local")).toBe(false);
+  });
+
+  it("fail-closes when a cap is set and the usage ledger cannot be read", async () => {
+    const { setUserLlmDailyBudget } = await import("../src/lib/llm-budget");
+    setUserLlmDailyBudget("local", { costBudgetUsd: 2 });
+    vi.resetModules();
+    vi.doMock("../src/lib/llm-usage", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../src/lib/llm-usage")>();
+      return {
+        ...actual,
+        getLlmUsageSummary: () => {
+          throw new Error("ledger down");
+        }
+      };
+    });
+    vi.doMock("../src/lib/rag-metering", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../src/lib/rag-metering")>();
+      return {
+        ...actual,
+        getRagUsageSummary: () => {
+          throw new Error("ledger down");
+        }
+      };
+    });
+    const { checkLlmDailyBudget, isOverLlmBudget, assertWithinLlmBudget, LlmBudgetExceededError } =
+      await import("../src/lib/llm-budget");
+    const decision = checkLlmDailyBudget("local");
+    expect(decision.ok).toBe(false);
+    expect(decision.reason).toBe("ledger_unavailable");
+    expect(isOverLlmBudget("local")).toBe(true);
+    expect(() => assertWithinLlmBudget("local")).toThrow(LlmBudgetExceededError);
+  });
+
+  it("does not fail-close when no cap is set, even if the ledger would throw", async () => {
+    const { checkLlmDailyBudget } = await import("../src/lib/llm-budget");
+    expect(checkLlmDailyBudget("local").ok).toBe(true);
   });
 });

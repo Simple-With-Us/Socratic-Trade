@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { getDb, applyVersionedMigrations } from "../src/lib/db";
 import { createSecIngestJob, enqueueSecIngestTask, getSecIngestTask, claimSecIngestTasks, transitionSecIngestJob } from "../src/lib/db-rag-ingest";
 import { SecIngestWorker } from "../src/lib/rag/sec-ingest-worker";
@@ -16,15 +16,24 @@ beforeAll(() => {
   applyVersionedMigrations(db);
 });
 
-vi.mock("../src/lib/web-sources/http", () => ({
-  politeFetchText: vi.fn(),
-  politeFetch: vi.fn(),
-  BROWSER_UA: "Mozilla/5.0 test"
-}));
+vi.mock("../src/lib/web-sources/http", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/web-sources/http")>();
+  return {
+    ...actual,
+    politeFetchText: vi.fn(),
+    politeFetch: vi.fn(),
+    BROWSER_UA: "Mozilla/5.0 test"
+  };
+});
 
-vi.mock("../src/lib/vector-db", () => ({
-  storeDocument: vi.fn()
-}));
+vi.mock("../src/lib/vector-db", async (importOriginal) => {
+  // classifyEmbedFailure is a pure classifier the worker now calls directly to decide
+  // retryable-vs-dead-letter (2026-08-23 P0 fix) — keep the REAL implementation so these tests
+  // exercise the same classification production does, and only stub the provider-calling
+  // storeDocument.
+  const actual = await importOriginal<typeof import("../src/lib/vector-db")>();
+  return { ...actual, storeDocument: vi.fn(), hasIngestTextBudget: vi.fn(actual.hasIngestTextBudget) };
+});
 
 describe("SEC Ingestion Worker and State Machine (P5)", () => {
   it("should claim a discovered task, run the pipeline checkpoints, and mark it complete", async () => {
@@ -104,6 +113,8 @@ describe("SEC Ingestion Worker and State Machine (P5)", () => {
     // date-only fallback derived from filedAt.
     const storeCall = vi.mocked(storeDocument).mock.calls[0]?.[0] as any;
     expect(storeCall.acceptance_datetime).toBe("2026-07-15T21:37:12.000Z");
+    expect(storeCall.text).toContain("iPhones");
+    expect(storeCall.text).not.toMatch(/<html|<script|<body/i);
 
     // Multi-document accessions: the vector document id must carry the task's document identity
     // (sequence + documentName) so a second document in the same accession can never supersede
@@ -199,6 +210,38 @@ describe("EDGAR 403 handling and dead-letter requeue (2026-08-09 outage class)",
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.id).toBe(task.id);
   });
+
+  it("requeues only budget-misclassified dead letters when errorLike is set", async () => {
+    const budget = makeClaimedTask("idemp-requeue-budget", "0000798354-26-000099");
+    const other = makeClaimedTask("idemp-requeue-other", "0000798354-26-000098");
+    const { failSecIngestTask, requeueSecIngestDeadLetters, getSecIngestTask } =
+      await import("../src/lib/db-rag-ingest");
+
+    failSecIngestTask({
+      taskId: budget.task.id,
+      owner: "test-worker",
+      leaseToken: budget.task.leaseToken || "",
+      retryable: false,
+      errorType: "worker-error",
+      error: "Ingestion budget or capacity exceeded mid-task"
+    });
+    failSecIngestTask({
+      taskId: other.task.id,
+      owner: "test-worker",
+      leaseToken: other.task.leaseToken || "",
+      retryable: false,
+      errorType: "worker-error",
+      error: "HTTP 403 for https://www.sec.gov/Archives/..."
+    });
+
+    const result = requeueSecIngestDeadLetters({
+      errorTypeLike: "worker-error",
+      errorLike: "Ingestion budget or capacity exceeded%"
+    });
+    expect(result.requeuedTasks).toBe(1);
+    expect(getSecIngestTask(budget.task.id)!.status).toBe("retry_wait");
+    expect(getSecIngestTask(other.task.id)!.status).toBe("dead_letter");
+  });
 });
 
 describe("insertDocumentChunkFtsBatch (2026-08-10 lock-contention fix, sub-batched + yielded)", () => {
@@ -249,5 +292,1220 @@ describe("insertDocumentChunkFtsBatch (2026-08-10 lock-contention fix, sub-batch
       .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
       .get("acc-multi-batch-test") as { n: number };
     expect(written.n).toBe(97);
+  });
+
+  it("keeps document_chunks_fts_index at one row per occurrence on re-insert", async () => {
+    const { insertDocumentChunkFts, insertDocumentChunkFtsBatch } = await import("../src/lib/db-learning");
+    const row = {
+      contentHash: "hash-idem",
+      symbol: "AAPL",
+      source: "sec-edgar",
+      accession: "acc-idem-index",
+      text: "first text"
+    };
+    await insertDocumentChunkFtsBatch([row]);
+    await insertDocumentChunkFtsBatch([
+      { ...row, text: "updated text" }
+    ]);
+    const indexCount = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts_index
+         WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?`
+      )
+      .get(row.contentHash, row.symbol, row.source, row.accession) as { n: number };
+    const ftsCount = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts
+         WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?`
+      )
+      .get(row.contentHash, row.symbol, row.source, row.accession) as { n: number };
+    expect(indexCount.n).toBe(1);
+    expect(ftsCount.n).toBe(1);
+    const stored = getDb()
+      .prepare("SELECT text FROM document_chunks_fts WHERE rowid = (SELECT fts_rowid FROM document_chunks_fts_index WHERE content_hash = ?)")
+      .get(row.contentHash) as { text: string };
+    expect(stored.text).toBe("updated text");
+
+    insertDocumentChunkFts(row.contentHash, row.symbol, row.source, row.accession, "third text");
+    const indexAfterSingle = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts_index
+         WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?`
+      )
+      .get(row.contentHash, row.symbol, row.source, row.accession) as { n: number };
+    expect(indexAfterSingle.n).toBe(1);
+  });
+
+  it("does not delete a reused FTS5 rowid after a stale index lookup", async () => {
+    const { insertDocumentChunkFts } = await import("../src/lib/db-learning");
+    const db = getDb();
+    insertDocumentChunkFts(
+      "sum-hash-stale",
+      "MSFT",
+      "document-summarizer",
+      "abstract:earnings-summary:MSFT:stale-rowid",
+      "Azure growth accelerated with enough text to index."
+    );
+    const stale = db
+      .prepare(
+        `SELECT fts_rowid FROM document_chunks_fts_index
+         WHERE content_hash = ? AND symbol = ? AND source = ? AND accession = ?`
+      )
+      .get(
+        "sum-hash-stale",
+        "MSFT",
+        "document-summarizer",
+        "abstract:earnings-summary:MSFT:stale-rowid"
+      ) as { fts_rowid: number };
+    db.prepare("DELETE FROM document_chunks_fts WHERE rowid = ?").run(stale.fts_rowid);
+
+    insertDocumentChunkFts(
+      "filing-hash-victim",
+      "AAPL",
+      "sec-edgar",
+      "0000320193-26-000099",
+      "Item 1A Risk Factors for the reused rowid victim filing."
+    );
+    const victimRowid = db
+      .prepare("SELECT rowid AS n FROM document_chunks_fts WHERE content_hash = ?")
+      .get("filing-hash-victim") as { n: number };
+    expect(victimRowid.n).toBe(stale.fts_rowid);
+
+    insertDocumentChunkFts(
+      "sum-hash-stale",
+      "MSFT",
+      "document-summarizer",
+      "abstract:earnings-summary:MSFT:stale-rowid",
+      "Azure growth accelerated with enough text to index."
+    );
+
+    const victim = db
+      .prepare("SELECT text FROM document_chunks_fts WHERE content_hash = ?")
+      .get("filing-hash-victim") as { text: string } | undefined;
+    expect(victim?.text).toMatch(/Risk Factors/);
+    const summaryCount = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts
+         WHERE content_hash = ? AND source = 'document-summarizer'`
+      )
+      .get("sum-hash-stale") as { n: number };
+    expect(summaryCount.n).toBe(1);
+  });
+
+  it("deleteDocumentChunkFtsBySourceAccession drops matching index keys", async () => {
+    const { insertDocumentChunkFts, deleteDocumentChunkFtsBySourceAccession } =
+      await import("../src/lib/db-learning");
+    const db = getDb();
+    const accession = "abstract:10k-delta:MSFT:index-drop";
+    insertDocumentChunkFts("sum-drop", "MSFT", "document-summarizer", accession, "highlight text enough");
+    insertDocumentChunkFts("keep-filing", "MSFT", "sec-edgar", "0000789019-26-000010", "filing body enough");
+    deleteDocumentChunkFtsBySourceAccession("document-summarizer", accession);
+    const indexLeft = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM document_chunks_fts_index
+         WHERE source = 'document-summarizer' AND accession = ?`
+      )
+      .get(accession) as { n: number };
+    const filingLeft = db
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE content_hash = ?")
+      .get("keep-filing") as { n: number };
+    expect(indexLeft.n).toBe(0);
+    expect(filingLeft.n).toBe(1);
+  });
+});
+
+describe("nextFtsBatchGroupSize (2026-08-13 adaptive stretch budget)", () => {
+  it("halves after an over-budget group, floored at 1", async () => {
+    const { nextFtsBatchGroupSize } = await import("../src/lib/db-learning");
+    expect(nextFtsBatchGroupSize(8, 6600)).toBe(4);
+    expect(nextFtsBatchGroupSize(1, 6600)).toBe(1);
+  });
+
+  it("doubles after a fast group, capped at 40", async () => {
+    const { nextFtsBatchGroupSize } = await import("../src/lib/db-learning");
+    expect(nextFtsBatchGroupSize(8, 10)).toBe(16);
+    expect(nextFtsBatchGroupSize(40, 10)).toBe(40);
+  });
+
+  it("holds steady inside the comfort band", async () => {
+    const { nextFtsBatchGroupSize } = await import("../src/lib/db-learning");
+    expect(nextFtsBatchGroupSize(8, 200)).toBe(8);
+  });
+
+  it("converges from the 119s incident shape: 165ms/row halves 8 -> 1 within three groups", async () => {
+    const { nextFtsBatchGroupSize } = await import("../src/lib/db-learning");
+    let size = 8;
+    size = nextFtsBatchGroupSize(size, 8 * 165);
+    size = nextFtsBatchGroupSize(size, 4 * 165);
+    size = nextFtsBatchGroupSize(size, 2 * 165);
+    expect(size).toBe(1);
+  });
+});
+
+describe("planFtsMirrorSlice (2026-08-14 bound above the 250ms yield)", () => {
+  it("computes the production 933/279522 receipt into a tick that stays inside the wall budget and 250ms sync", async () => {
+    const {
+      FTS_MIRROR_INCIDENT_CHUNKS,
+      FTS_MIRROR_INCIDENT_WALL_MS,
+      FTS_MIRROR_INCIDENT_MS_PER_CHUNK,
+      FTS_MIRROR_MAX_CHUNKS_PER_TICK,
+      FTS_MIRROR_TICK_BUDGET_MS,
+      FTS_MIRROR_SYNC_STRETCH_BUDGET_MS,
+      planFtsMirrorSlice
+    } = await import("../src/lib/rag/fts-mirror-bound");
+    const { FTS_BATCH_STRETCH_BUDGET_MS } = await import("../src/lib/db-learning");
+
+    expect(FTS_MIRROR_INCIDENT_CHUNKS).toBe(933);
+    expect(FTS_MIRROR_INCIDENT_WALL_MS).toBe(279_522);
+    expect(FTS_MIRROR_INCIDENT_MS_PER_CHUNK).toBe(279_522 / 933);
+    expect(FTS_MIRROR_SYNC_STRETCH_BUDGET_MS).toBe(250);
+    expect(FTS_BATCH_STRETCH_BUDGET_MS).toBe(FTS_MIRROR_SYNC_STRETCH_BUDGET_MS);
+
+    const first = planFtsMirrorSlice({
+      totalChunks: FTS_MIRROR_INCIDENT_CHUNKS,
+      offset: 0
+    });
+    expect(first.chunkCount).toBeGreaterThan(0);
+    expect(first.chunkCount).toBeLessThanOrEqual(FTS_MIRROR_MAX_CHUNKS_PER_TICK);
+    expect(first.offset).toBe(0);
+    expect(first.end).toBe(first.chunkCount);
+    expect(first.complete).toBe(false);
+    expect(first.worstCaseSyncStretchMs).toBe(250);
+    expect(first.worstCaseTickWallMs).toBeLessThanOrEqual(FTS_MIRROR_TICK_BUDGET_MS);
+    expect(first.chunkCount * FTS_MIRROR_INCIDENT_MS_PER_CHUNK).toBeLessThanOrEqual(
+      FTS_MIRROR_TICK_BUDGET_MS
+    );
+
+    // A full-document feed of 933 is exactly the incident: 279s wall, unbounded tick.
+    expect(933 * FTS_MIRROR_INCIDENT_MS_PER_CHUNK).toBe(FTS_MIRROR_INCIDENT_WALL_MS);
+    expect(933 * FTS_MIRROR_INCIDENT_MS_PER_CHUNK).toBeGreaterThan(FTS_MIRROR_TICK_BUDGET_MS);
+  });
+
+  it("resume starts after completed slices and never re-plans them", async () => {
+    const { planFtsMirrorSlice, FTS_MIRROR_INCIDENT_CHUNKS } = await import(
+      "../src/lib/rag/fts-mirror-bound"
+    );
+    const first = planFtsMirrorSlice({ totalChunks: FTS_MIRROR_INCIDENT_CHUNKS, offset: 0 });
+    const second = planFtsMirrorSlice({
+      totalChunks: FTS_MIRROR_INCIDENT_CHUNKS,
+      offset: first.end
+    });
+    expect(second.offset).toBe(first.end);
+    expect(second.offset).toBeGreaterThan(0);
+    expect(second.end).toBeGreaterThan(second.offset);
+    expect(second.offset).toBeGreaterThanOrEqual(first.end);
+  });
+
+  it("a 933-chunk filing takes more than one tick (never 279s in one call)", async () => {
+    const {
+      planFtsMirrorSlice,
+      FTS_MIRROR_INCIDENT_CHUNKS,
+      FTS_MIRROR_MAX_CHUNKS_PER_TICK
+    } = await import("../src/lib/rag/fts-mirror-bound");
+    let offset = 0;
+    let ticks = 0;
+    while (offset < FTS_MIRROR_INCIDENT_CHUNKS) {
+      ticks += 1;
+      const start = offset;
+      let doneThisTick = 0;
+      let elapsedMs = 0;
+      while (offset < FTS_MIRROR_INCIDENT_CHUNKS) {
+        const plan = planFtsMirrorSlice({
+          totalChunks: FTS_MIRROR_INCIDENT_CHUNKS,
+          offset,
+          chunksDoneThisTick: doneThisTick,
+          elapsedMs
+        });
+        if (plan.chunkCount <= 0) break;
+        offset = plan.end;
+        doneThisTick += plan.chunkCount;
+        elapsedMs = plan.worstCaseTickWallMs;
+      }
+      expect(offset - start).toBeLessThanOrEqual(FTS_MIRROR_MAX_CHUNKS_PER_TICK);
+      expect(ticks).toBeLessThan(200);
+    }
+    expect(offset).toBe(FTS_MIRROR_INCIDENT_CHUNKS);
+    expect(ticks).toBeGreaterThan(1);
+    expect(ticks).toBe(Math.ceil(FTS_MIRROR_INCIDENT_CHUNKS / FTS_MIRROR_MAX_CHUNKS_PER_TICK));
+  });
+
+  it("stops on wall-clock even when chunks remain (whichever first)", async () => {
+    const { planFtsMirrorSlice, FTS_MIRROR_TICK_BUDGET_MS } = await import("../src/lib/rag/fts-mirror-bound");
+    const plan = planFtsMirrorSlice({
+      totalChunks: 933,
+      offset: 0,
+      elapsedMs: FTS_MIRROR_TICK_BUDGET_MS,
+      tickBudgetMs: FTS_MIRROR_TICK_BUDGET_MS
+    });
+    expect(plan.chunkCount).toBe(0);
+    expect(plan.stopReason).toBe("tick-budget");
+    expect(plan.complete).toBe(false);
+  });
+
+  it("does not start a chunk when remaining budget is below expected ms/chunk", async () => {
+    const { planFtsMirrorSlice, FTS_MIRROR_INCIDENT_MS_PER_CHUNK } = await import(
+      "../src/lib/rag/fts-mirror-bound"
+    );
+    const plan = planFtsMirrorSlice({
+      totalChunks: 933,
+      offset: 0,
+      elapsedMs: 1_900,
+      tickBudgetMs: 2_000,
+      msPerChunk: FTS_MIRROR_INCIDENT_MS_PER_CHUNK
+    });
+    expect(FTS_MIRROR_INCIDENT_MS_PER_CHUNK).toBeGreaterThan(100);
+    expect(plan.chunkCount).toBe(0);
+    expect(plan.stopReason).toBe("tick-budget");
+  });
+
+  it("keeps the FTS tick budget below the getAccounts first wait", async () => {
+    const { FTS_MIRROR_TICK_BUDGET_MS } = await import("../src/lib/rag/fts-mirror-bound");
+    const { GET_ACCOUNTS_FIRST_MS } = await import("../src/lib/inflight-deadline");
+    expect(FTS_MIRROR_TICK_BUDGET_MS).toBeLessThan(GET_ACCOUNTS_FIRST_MS);
+  });
+});
+
+describe("ftsMirrorLeaseExpiresDuringTick (heartbeat + tick cap)", () => {
+  it("the 279s no-heartbeat full-mirror scenario expires a 60s lease", async () => {
+    const { ftsMirrorLeaseExpiresDuringTick, FTS_MIRROR_INCIDENT_WALL_MS } = await import(
+      "../src/lib/rag/fts-mirror-bound"
+    );
+    expect(
+      ftsMirrorLeaseExpiresDuringTick({
+        tickBudgetMs: FTS_MIRROR_INCIDENT_WALL_MS,
+        heartbeatIntervalMs: null
+      })
+    ).toBe(true);
+  });
+
+  it("is no longer possible when the tick is capped and the 20s heartbeat runs", async () => {
+    const { ftsMirrorLeaseExpiresDuringTick } = await import("../src/lib/rag/fts-mirror-bound");
+    expect(ftsMirrorLeaseExpiresDuringTick()).toBe(false);
+    expect(
+      ftsMirrorLeaseExpiresDuringTick({
+        tickBudgetMs: 6_000,
+        heartbeatIntervalMs: 20_000,
+        leaseMs: 60_000
+      })
+    ).toBe(false);
+    // Even without heartbeat, a 6s tick cannot outlive a 60s lease.
+    expect(
+      ftsMirrorLeaseExpiresDuringTick({
+        tickBudgetMs: 6_000,
+        heartbeatIntervalMs: null,
+        leaseMs: 60_000
+      })
+    ).toBe(false);
+  });
+});
+
+describe("embed_queued FTS slice + durable resume", () => {
+  async function seedEmbedQueued(opts: { accession: string; chunks: number; storeAlreadyDone?: boolean }) {
+    const { writeLocalArtifact } = await import("../src/lib/web-sources/sec-filings");
+    const {
+      createSecIngestJob,
+      enqueueSecIngestTask,
+      claimSecIngestTasks,
+      advanceSecIngestTask,
+      transitionSecIngestJob
+    } = await import("../src/lib/db-rag-ingest");
+
+    const job = createSecIngestJob({
+      idempotencyKey: `fts-slice-${opts.accession}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    const { task } = enqueueSecIngestTask({
+      jobId: job.id,
+      accession: opts.accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: {
+        url: `https://www.sec.gov/Archives/edgar/data/320193/${opts.accession.replace(/-/g, "")}/aapl.htm`,
+        docType: "10-K",
+        filedAt: "2026-07-15",
+        acceptanceDateTime: "2026-07-15T21:37:12.000Z"
+      }
+    });
+
+    const raw = "<html><body>Item 1. Business<p>AAPL makes iPhones.</p></body></html>";
+    const chunks = Array.from({ length: opts.chunks }, (_, i) => ({
+      content_hash: `hash-${opts.accession}-${i.toString().padStart(4, "0")}`,
+      text: `chunk ${i} of ${opts.accession}`
+    }));
+    await writeLocalArtifact(task.cik, task.accession, 1, "raw-document.html", raw);
+    await writeLocalArtifact(task.cik, task.accession, 1, "sections.json", JSON.stringify([{ itemCode: "1", text: raw }]));
+    await writeLocalArtifact(task.cik, task.accession, 1, "chunks.json", JSON.stringify(chunks));
+    if (opts.storeAlreadyDone) {
+      await writeLocalArtifact(
+        task.cik,
+        task.accession,
+        1,
+        "storeResult.json",
+        JSON.stringify({ skipped: false, attempted: opts.chunks, indexed: opts.chunks, documentComplete: true })
+      );
+    }
+
+    let claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60_000, limit: 1 });
+    expect(claimed).toHaveLength(1);
+    const steps = [
+      ["discovered", "fetched"],
+      ["fetched", "validated"],
+      ["validated", "parsed"],
+      ["parsed", "facts_extracted"],
+      ["facts_extracted", "chunked"],
+      ["chunked", "embed_queued"]
+    ] as const;
+    for (const [from, to] of steps) {
+      expect(
+        advanceSecIngestTask({
+          taskId: claimed[0]!.id,
+          owner: "test-worker",
+          leaseToken: claimed[0]!.leaseToken || "",
+          expectedCheckpoint: from,
+          nextCheckpoint: to,
+          receipt: claimed[0]!.payload
+        })
+      ).toBe(true);
+      claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60_000, limit: 1 });
+      expect(claimed).toHaveLength(1);
+    }
+    return { jobId: job.id, task: claimed[0]! };
+  }
+
+  it("writes at most one tick of chunks, stays at embed_queued, and resumes without rewriting the first slice", async () => {
+    const { FTS_MIRROR_MAX_CHUNKS_PER_TICK } = await import("../src/lib/rag/fts-mirror-bound");
+    const { getSecIngestTask, claimSecIngestTasks } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 45,
+      indexed: 45,
+      documentComplete: true
+    } as any);
+
+    const accession = "0000320193-26-000099";
+    const { jobId, task } = await seedEmbedQueued({ accession, chunks: 45 });
+    const vectorDocId = `${accession}:1:document.html`;
+    // Count only the FILING commit — the extractive abstract (B-2) is a separate storeDocument
+    // call with its own doc_id, and this assertion is about the body.
+    const filingStoreCalls = () =>
+      vi.mocked(storeDocument).mock.calls.filter((call) => (call[0] as any)?.doc_id === vectorDocId);
+    const worker = new SecIngestWorker();
+
+    await worker.processTask(task);
+
+    const afterFirst = getSecIngestTask(task.id)!;
+    expect(afterFirst.checkpoint).toBe("embed_queued");
+    expect(afterFirst.status).toBe("retry_wait");
+    expect(afterFirst.stageAttempts).toBe(0);
+    const firstRows = getDb()
+      .prepare("SELECT content_hash FROM document_chunks_fts WHERE accession = ? ORDER BY content_hash")
+      .all(vectorDocId) as Array<{ content_hash: string }>;
+    expect(firstRows.length).toBe(FTS_MIRROR_MAX_CHUNKS_PER_TICK);
+    expect(firstRows[0]!.content_hash).toBe(`hash-${accession}-0000`);
+    expect(firstRows.at(-1)!.content_hash).toBe(
+      `hash-${accession}-${String(FTS_MIRROR_MAX_CHUNKS_PER_TICK - 1).padStart(4, "0")}`
+    );
+    expect(filingStoreCalls()).toHaveLength(1);
+
+    const reclaimed = claimSecIngestTasks(jobId, {
+      owner: "test-worker",
+      leaseMs: 60_000,
+      limit: 1
+    });
+    expect(reclaimed).toHaveLength(1);
+    await worker.processTask(reclaimed[0]!);
+
+    const afterSecond = getSecIngestTask(task.id)!;
+    expect(afterSecond.checkpoint).toBe("embed_queued");
+    const secondRows = getDb()
+      .prepare("SELECT content_hash FROM document_chunks_fts WHERE accession = ? ORDER BY content_hash")
+      .all(vectorDocId) as Array<{ content_hash: string }>;
+    expect(secondRows.length).toBe(FTS_MIRROR_MAX_CHUNKS_PER_TICK * 2);
+    expect(secondRows.slice(0, FTS_MIRROR_MAX_CHUNKS_PER_TICK).map((r) => r.content_hash)).toEqual(
+      firstRows.map((r) => r.content_hash)
+    );
+    expect(secondRows[FTS_MIRROR_MAX_CHUNKS_PER_TICK]!.content_hash).toBe(
+      `hash-${accession}-${String(FTS_MIRROR_MAX_CHUNKS_PER_TICK).padStart(4, "0")}`
+    );
+    // storeDocument must not run again on the FTS-only resume.
+    expect(filingStoreCalls()).toHaveLength(1);
+  });
+
+  it("finishes a small filing in ONE drain call, all the way to complete", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 3,
+      indexed: 3,
+      documentComplete: true
+    } as any);
+
+    const accession = "0000320193-26-000098";
+    const { task } = await seedEmbedQueued({ accession, chunks: 3, storeAlreadyDone: true });
+    const worker = new SecIngestWorker();
+    // 2026-09-27 P0-2: the drain carries the task through embed_queued -> ... -> complete in one
+    // call. Before the fix every advance returned, so this needed 6 more claim/process cycles.
+    await worker.processTask(task);
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("complete");
+    expect(after.status).toBe("complete");
+    expect(after.observedChunks).toBe(3);
+    const rows = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+      .get(`${accession}:1:document.html`) as { n: number };
+    expect(rows.n).toBe(3);
+    // storeDocument already ran for this task, so the drain must not embed the body twice.
+    const filingStores = vi
+      .mocked(storeDocument)
+      .mock.calls.filter((call) => (call[0] as any)?.doc_id === `${accession}:1:document.html`);
+    expect(filingStores).toHaveLength(0);
+  });
+
+  // 2026-08-23 P0 fix: an incomplete storeDocument result used to ALWAYS throw the generic
+  // "Ingestion budget or capacity exceeded mid-task" message, which the runTick catch then
+  // dead-lettered with retryable:true — misclassifying a permanent embed rejection (HTTP 400) the
+  // same as a transient one (429/connection failure) and requeuing it forever on every worker
+  // restart (see the errorLike requeue test above). The worker now fails the task directly with a
+  // real errorType/message and classifies retryable-vs-not by what the failure actually is.
+  it("dead-letters immediately (not retryable) on a permanent embed rejection (HTTP 400), with the real reason recorded", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 10,
+      indexed: 0,
+      documentComplete: false,
+      error: "Embedding API failed (isOpenRouter=false): 400 {\"error\":\"invalid input\"}"
+    } as any);
+
+    const accession = "0000320193-26-000097";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await expect(worker.processTask(task)).resolves.toBeUndefined();
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("dead_letter");
+    expect(after.lastErrorType).toBe("embed-permanent-error");
+    expect(after.lastError).toContain("400");
+    const rows = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+      .get(`${accession}:1:document.html`) as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
+  it("retries (not dead-lettered) on a transient embed failure (HTTP 429), recorded with the real reason", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 10,
+      indexed: 0,
+      documentComplete: false,
+      error: "Embedding API failed (isOpenRouter=false): 429 {\"error\":\"rate limited\"}"
+    } as any);
+
+    const accession = "0000320193-26-000095";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await expect(worker.processTask(task)).resolves.toBeUndefined();
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("embed-transient-error");
+    expect(after.lastError).toContain("429");
+  });
+
+  it("retries (not dead-lettered) on a connection failure with no HTTP status at all", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 10,
+      indexed: 0,
+      documentComplete: false,
+      error: "fetch failed"
+    } as any);
+
+    const accession = "0000320193-26-000094";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await expect(worker.processTask(task)).resolves.toBeUndefined();
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("embed-transient-error");
+  });
+
+  it("runTick claims at most SEC_INGEST_TASKS_PER_TICK tasks across all running jobs", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const processed: string[] = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push(task.id);
+    };
+
+    for (let i = 0; i < 3; i++) {
+      const job = createSecIngestJob({
+        idempotencyKey: `tick-cap-${i}-${randomUUID()}`,
+        corpusRevision: "corp-v1"
+      });
+      transitionSecIngestJob(job.id, "running");
+      for (let t = 0; t < 3; t++) {
+        enqueueSecIngestTask({
+          jobId: job.id,
+          accession: `0000320193-26-00020${i}${t}`,
+          cik: "0000320193",
+          symbol: "AAPL",
+          payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+        });
+      }
+    }
+
+    await worker.runTick();
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    expect(SEC_INGEST_TASKS_PER_TICK).toBe(5);
+  });
+
+  it("does not claim FTS / ingest work while a strategy run is in flight", async () => {
+    const { insertStrategyRun, hasInFlightStrategyWork, finishStrategyRun } = await import(
+      "../src/lib/db-execution"
+    );
+    const processed: string[] = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push(task.id);
+    };
+
+    const job = createSecIngestJob({
+      idempotencyKey: `tick-strategy-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession: "0000320193-26-000301",
+      cik: "0000320193",
+      symbol: "RJF",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+
+    const runId = randomUUID();
+    const userId = `sec-yield-${randomUUID()}`;
+    insertStrategyRun(runId, userId);
+    expect(hasInFlightStrategyWork()).toBe(true);
+    await worker.runTick();
+    expect(processed).toHaveLength(0);
+
+    finishStrategyRun(runId, "failed", "test release", userId);
+    expect(hasInFlightStrategyWork()).toBe(false);
+  });
+
+  it("treats a queued Manual Run request as in-flight strategy work", async () => {
+    const { hasInFlightStrategyWork } = await import("../src/lib/db-execution");
+    const { queueStrategyRunRequest } = await import("../src/lib/strategy-run-requests");
+    const userId = `queued-run-${randomUUID()}`;
+    const queued = queueStrategyRunRequest({ userId, manual: true });
+    expect(queued.deduped).toBe(false);
+    expect(hasInFlightStrategyWork()).toBe(true);
+    getDb()
+      .prepare("UPDATE strategy_run_requests SET status = 'failed', finished_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), queued.request.id);
+    expect(hasInFlightStrategyWork()).toBe(false);
+  });
+
+  it("defers a daily write-fuse skip instead of throwing capacity-exceeded", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: true,
+      attempted: 10,
+      indexed: 0,
+      writeUnitBudgetSkipped: 10,
+      documentComplete: false
+    } as any);
+
+    const accession = "0000320193-26-000096";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await worker.processTask(task);
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("wu_exhausted_deferred");
+    const rows = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+      .get(`${accession}:1:document.html`) as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
+  it("parks runTick (no claim) when Qdrant daily point fuse is exhausted", async () => {
+    process.env.QDRANT_URL = "http://127.0.0.1:6333";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
+    process.env.RAG_MAX_DAILY_INGEST_POINTS = "1";
+    try {
+      const { recordRagUsage } = await import("../src/lib/rag-metering");
+      // Spend the entire daily point fuse so hasRagIngestPointsBudget("local", 1, "qdrant") is false.
+      recordRagUsage({
+        userId: "local",
+        operation: "upsert",
+        provider: "qdrant",
+        batchCount: 5,
+        tokensIn: 0,
+        tokensOut: 5
+      });
+
+      const processed: string[] = [];
+      const worker = new SecIngestWorker();
+      worker.processTask = async (task) => {
+        processed.push(task.id);
+      };
+
+      const job = createSecIngestJob({
+        idempotencyKey: `tick-qdrant-fuse-${randomUUID()}`,
+        corpusRevision: "corp-v1"
+      });
+      transitionSecIngestJob(job.id, "running");
+      enqueueSecIngestTask({
+        jobId: job.id,
+        accession: "0000320193-26-000401",
+        cik: "0000320193",
+        symbol: "AAPL",
+        payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+      });
+
+      await worker.runTick();
+      expect(processed).toHaveLength(0);
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+      delete process.env.QDRANT_URL;
+      delete process.env.RAG_MAX_DAILY_INGEST_POINTS;
+    }
+  });
+
+  it("defers embed_queued when storeDocument reports ingestPointsBudgetExhausted", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: true,
+      attempted: 10,
+      indexed: 0,
+      writeUnitBudgetSkipped: 10,
+      ingestPointsBudgetExhausted: true,
+      ingestPointsBudgetExhaustedUntil: "2026-09-18T12:00:00.000Z",
+      documentComplete: false
+    } as any);
+
+    const accession = "0000320193-26-000402";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await worker.processTask(task);
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("wu_exhausted_deferred");
+    expect(after.lastError).toMatch(/Qdrant daily point/i);
+  });
+
+  it("parks embed_queued before any embed when the daily text budget is already spent", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument, hasIngestTextBudget } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(hasIngestTextBudget).mockReturnValueOnce(false);
+
+    const accession = "0000320193-26-000403";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await worker.processTask(task);
+
+    const after = getSecIngestTask(task.id)!;
+    expect(vi.mocked(storeDocument)).not.toHaveBeenCalled();
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("wu_exhausted_deferred");
+    expect(after.lastError).toMatch(/text embed budget/i);
+  });
+
+  it("defers embed_queued when storeDocument reports ingestTextBudgetExhausted", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: true,
+      attempted: 10,
+      indexed: 0,
+      budgetSkipped: 10,
+      ingestTextBudgetExhausted: true,
+      ingestTextBudgetExhaustedUntil: "2026-09-18T12:00:00.000Z",
+      documentComplete: false
+    } as any);
+
+    const accession = "0000320193-26-000404";
+    const { task } = await seedEmbedQueued({ accession, chunks: 10 });
+    const worker = new SecIngestWorker();
+    await worker.processTask(task);
+
+    const after = getSecIngestTask(task.id)!;
+    expect(after.checkpoint).toBe("embed_queued");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("wu_exhausted_deferred");
+    expect(after.lastError).toMatch(/text embed budget/i);
+  });
+
+});
+
+// 2026-09-27 P0-1: the tick used to walk `SELECT id FROM sec_ingest_jobs WHERE status='running'`
+// (no ORDER BY) and hand the ENTIRE per-tick budget to the first job with candidates. With ~500
+// running jobs, issuer #1 consumed all 5 slots every tick and every other issuer sat at
+// `discovered` forever. The claim is now global + round-robin with a per-job ceiling.
+describe("cross-job claim fairness (2026-09-27 P0-1)", () => {
+  beforeEach(() => {
+    // The claim is deliberately GLOBAL, so tasks left claimable by earlier tests in this shared
+    // test DB are fair game for these ticks too. Park them so each fairness assertion sees only
+    // the jobs it seeded. (Their tests have already run and asserted.)
+    getDb()
+      .prepare(
+        `UPDATE sec_ingest_tasks
+         SET status = 'quarantined', lease_owner = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, next_retry_at = NULL
+         WHERE status IN ('pending', 'leased', 'retry_wait')`
+      )
+      .run();
+  });
+
+  function seedJob(idempotencyKey: string, tasks: number, priority: number, tag: string) {
+    const job = createSecIngestJob({
+      idempotencyKey: `${idempotencyKey}-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    for (let t = 0; t < tasks; t++) {
+      enqueueSecIngestTask({
+        jobId: job.id,
+        accession: `0000320193-26-${tag}${t.toString().padStart(4, "0")}`,
+        cik: "0000320193",
+        symbol: "AAPL",
+        priority,
+        payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+      });
+    }
+    return job.id;
+  }
+
+  it("splits one tick's budget between two equally-ranked jobs instead of draining the first", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const perJobCeiling = Math.ceil(SEC_INGEST_TASKS_PER_TICK / 2);
+    const processed: Array<{ id: string; jobId: string }> = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push({ id: task.id, jobId: task.jobId });
+    };
+
+    const first = seedJob("fair-a", 10, 0, "7000");
+    const second = seedJob("fair-b", 10, 0, "8000");
+
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    // Neither job may take more than its share even though both have far more work than the tick.
+    const fromFirst = processed.filter((p) => p.jobId === first).length;
+    const fromSecond = processed.filter((p) => p.jobId === second).length;
+    expect(fromFirst).toBeGreaterThan(0);
+    expect(fromSecond).toBeGreaterThan(0);
+    expect(fromFirst).toBeLessThanOrEqual(perJobCeiling);
+    expect(fromSecond).toBeLessThanOrEqual(perJobCeiling);
+  });
+
+  it("spends the budget on the higher-priority jobs, not on the deepest backlog", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const processed: Array<{ id: string; jobId: string }> = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push({ id: task.id, jobId: task.jobId });
+    };
+
+    // One issuer with a 10-task backlog at UNIVERSE priority, four single-task jobs at the
+    // money-path priority. The backlog must not be able to crowd them out.
+    const backlog = seedJob("fair-backlog", 10, 0, "7100");
+    const desk = ["7200", "7300", "7400", "7500"].map((tag) => seedJob(`fair-desk-${tag}`, 1, 10, tag));
+
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    for (const jobId of desk) {
+      expect(processed.filter((p) => p.jobId === jobId)).toHaveLength(1);
+    }
+    expect(processed.filter((p) => p.jobId === backlog)).toHaveLength(1);
+  });
+
+  it("keeps the per-job ceiling while still filling the tick from one job when nothing else is claimable", async () => {
+    const { SEC_INGEST_TASKS_PER_TICK } = await import("../src/lib/rag/sec-ingest-worker");
+    const processed: string[] = [];
+    const worker = new SecIngestWorker();
+    worker.processTask = async (task) => {
+      processed.push(task.id);
+    };
+
+    const only = seedJob("fair-solo", 10, 0, "7600");
+    await worker.runTick();
+
+    expect(processed).toHaveLength(SEC_INGEST_TASKS_PER_TICK);
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    for (const id of processed) expect(getSecIngestTask(id)!.jobId).toBe(only);
+  });
+});
+
+// 2026-09-27 P0-2: every advanceSecIngestTask used to be followed by an immediate return, so one
+// document cost 11 claim->process->advance cycles. processTask now drains the state machine in
+// process, bounded by wall clock and re-checking the strategy/RTH gates at every stage boundary.
+describe("in-process checkpoint drain (2026-09-27 P0-2)", () => {
+  it("drives a filing from discovered to complete in ONE processTask call", async () => {
+    const { getSecIngestTask } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 2,
+      indexed: 2,
+      documentComplete: true
+    } as any);
+    vi.mocked(politeFetchText).mockResolvedValue(
+      "<html><body>Item 1. Business<p>AAPL makes iPhones and lots of other consumer electronics that people buy all over the world.</p></body></html>"
+    );
+    // ingestCompanyFacts (facts_extracted stage) goes through politeFetch; a 404 is its
+    // "issuer has no companyfacts" no-op, so the drain is not at the mercy of test ordering.
+    vi.mocked(politeFetch).mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: "Not Found"
+    } as any);
+
+    const accession = "0000320193-26-000500";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: {
+        url: "https://www.sec.gov/Archives/edgar/data/320193/a.htm",
+        docType: "10-K",
+        filedAt: "2026-07-15",
+        acceptanceDateTime: "2026-07-15T21:37:12.000Z"
+      }
+    });
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    expect(claimed!.checkpoint).toBe("discovered");
+
+    await new SecIngestWorker().processTask(claimed!);
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("complete");
+    expect(after.status).toBe("complete");
+    // The audit trail is unchanged in shape: one claim + one 'advanced' receipt per stage, and
+    // no stage burned a second attempt because the re-lease went through the claim accounting.
+    const attempts = getDb()
+      .prepare(
+        `SELECT checkpoint, outcome FROM sec_ingest_task_attempts
+         WHERE task_id = ? ORDER BY attempt_no`
+      )
+      .all(claimed!.id) as Array<{ checkpoint: string; outcome: string }>;
+    // One durable attempt receipt per stage (the claim writes it 'claimed', the advance flips it
+    // to 'advanced') — the same shape the 11-tick version produced, now inside one processTask.
+    expect(attempts).toHaveLength(11);
+    expect(attempts.every((a) => a.outcome === "advanced")).toBe(true);
+    expect(attempts[0]!.checkpoint).toBe("discovered");
+    expect(attempts.at(-1)!.checkpoint).toBe("verified");
+    expect(after.stageAttempts).toBe(0);
+    expect(after.totalAttempts).toBe(11);
+
+    // 2026-09-27 B-2: the backfill lane now produces the extractive abstract too. Before this the
+    // only way a document got an abstract was the direct filing/8-K path, so EVERY backfilled
+    // filing landed without one even though information-routing reads abstracts to decide that a
+    // document answers a question.
+    const { getDocumentAbstractByAccession } = await import("../src/lib/db-document-abstracts");
+    const abstract = getDocumentAbstractByAccession(accession)!;
+    expect(abstract).toBeDefined();
+    expect(abstract.sourceType).toBe("10k-delta");
+    expect(abstract.modelUsed).toBe("extractive-highlights-v2");
+    expect(abstract.summaryText.length).toBeGreaterThan(0);
+  });
+
+  it("records a mid-drain stage failure against the LIVE lease, not the tick's stale token", async () => {
+    // The drain re-leases between stages, so the token the tick claimed with is stale by the time a
+    // later stage throws. If the failure were recorded with the tick's token it would match
+    // nothing: the task would sit leased until the lease expired, be re-claimed, and walk into a
+    // dead-letter by the lease-expiry path instead of being classified as a normal worker error.
+    const { getSecIngestTask, claimSecIngestTasks, createSecIngestJob, enqueueSecIngestTask, transitionSecIngestJob } =
+      await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(politeFetch).mockResolvedValue({ ok: false, status: 404, statusText: "Not Found" } as any);
+
+    const accession = "0000320193-26-000503";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-failure-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    // The body fetch (discovered) succeeds; the companyfacts call at facts_extracted — the fifth
+    // stage, i.e. after four re-leases — throws.
+    vi.mocked(politeFetchText).mockResolvedValue(
+      "<html><body><p>Item 1. Business</p><p>AAPL designs, manufactures and markets smartphones, personal computers, tablets and a variety of related services, and sells a broad line of consumer electronics worldwide through its retail and online channels.</p></body></html>"
+    );
+    vi.mocked(politeFetch).mockRejectedValue(new Error("EDGAR exploded on the companyfacts fetch"));
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+
+    await new SecIngestWorker().processTask(claimed!);
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("parsed");
+    expect(after.status).toBe("retry_wait");
+    expect(after.lastErrorType).toBe("worker-error");
+    expect(after.lastError).toContain("EDGAR exploded");
+    expect(after.stageAttempts).toBe(1);
+    // The live lease was released by the recorded failure — the task is NOT left sitting in
+    // 'leased' with no record, which is what a silently dropped failure looks like — and it is not
+    // dead-lettered either (retryable:true, so the retry backoff decides when it returns).
+    expect(after.leaseToken ?? null).toBeNull();
+    expect(after.leaseExpiresAt ?? null).toBeNull();
+    expect(after.status).not.toBe("dead_letter");
+    expect(claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 })).toHaveLength(0);
+  });
+
+  it("hands the task back (no stage attempt burned) when the drain budget is already spent", async () => {
+    const { getSecIngestTask, claimSecIngestTasks } = await import("../src/lib/db-rag-ingest");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+
+    const accession = "0000320193-26-000501";
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-budget-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    const [claimed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+
+    await new SecIngestWorker().processTask(claimed!, { drainBudgetMs: 0 });
+
+    const after = getSecIngestTask(claimed!.id)!;
+    expect(after.checkpoint).toBe("discovered");
+    expect(after.status).toBe("retry_wait");
+    expect(after.stageAttempts).toBe(0);
+    expect(after.lastErrorType).toBe("task_drain_budget_exhausted");
+    expect(vi.mocked(storeDocument)).not.toHaveBeenCalled();
+    // Released, not parked: the very next tick can pick it straight back up.
+    expect(claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 })).toHaveLength(1);
+  });
+
+  it("stops the drain at a stage boundary when a strategy run is in flight, and resumes after it", async () => {
+    const { writeLocalArtifact } = await import("../src/lib/web-sources/sec-filings");
+    const {
+      getSecIngestTask,
+      claimSecIngestTasks,
+      createSecIngestJob,
+      enqueueSecIngestTask,
+      advanceSecIngestTask,
+      transitionSecIngestJob
+    } = await import("../src/lib/db-rag-ingest");
+    const { insertStrategyRun, finishStrategyRun } = await import("../src/lib/db-execution");
+    const { storeDocument } = await import("../src/lib/vector-db");
+    vi.mocked(storeDocument).mockClear();
+    vi.mocked(storeDocument).mockResolvedValue({
+      skipped: false,
+      attempted: 1,
+      indexed: 1,
+      documentComplete: true
+    } as any);
+
+    const accession = "0000320193-26-000502";
+    const vectorDocId = `${accession}:1:document.html`;
+    const job = createSecIngestJob({
+      idempotencyKey: `drain-strategy-${randomUUID()}`,
+      corpusRevision: "corp-v1"
+    });
+    transitionSecIngestJob(job.id, "running");
+    enqueueSecIngestTask({
+      jobId: job.id,
+      accession,
+      cik: "0000320193",
+      symbol: "AAPL",
+      payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+    });
+    const raw = "<html><body>Item 1. Business<p>AAPL makes iPhones.</p></body></html>";
+    const chunks = [{ content_hash: `hash-${accession}-0`, text: "chunk 0" }];
+    await writeLocalArtifact("0000320193", accession, 1, "raw-document.html", raw);
+    await writeLocalArtifact("0000320193", accession, 1, "sections.json", JSON.stringify([{ itemCode: "1", text: raw }]));
+    await writeLocalArtifact("0000320193", accession, 1, "chunks.json", JSON.stringify(chunks));
+    await writeLocalArtifact(
+      "0000320193",
+      accession,
+      1,
+      "storeResult.json",
+      JSON.stringify({ skipped: false, attempted: 1, indexed: 1, documentComplete: true })
+    );
+
+    let claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    const steps = [
+      ["discovered", "fetched"],
+      ["fetched", "validated"],
+      ["validated", "parsed"],
+      ["parsed", "facts_extracted"],
+      ["facts_extracted", "chunked"],
+      ["chunked", "embed_queued"]
+    ] as const;
+    for (const [from, to] of steps) {
+      expect(
+        advanceSecIngestTask({
+          taskId: claimed![0]!.id,
+          owner: "test-worker",
+          leaseToken: claimed![0]!.leaseToken || "",
+          expectedCheckpoint: from,
+          nextCheckpoint: to,
+          receipt: claimed![0]!.payload
+        })
+      ).toBe(true);
+      claimed = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    }
+    const taskId = claimed![0]!.id;
+
+    // A strategy run owns the event loop. The drain must hand the task straight back rather than
+    // keep driving stages through it (runTick's pre-tick gate alone is not enough once a drain
+    // can run many stages back to back).
+    const runId = randomUUID();
+    const userId = `drain-strategy-${randomUUID()}`;
+    const worker = new SecIngestWorker();
+    insertStrategyRun(runId, userId);
+    try {
+      await worker.processTask(claimed![0]!);
+    } finally {
+      finishStrategyRun(runId, "completed", "drain test release", userId);
+    }
+
+    const released = getSecIngestTask(taskId)!;
+    expect(released.status).toBe("retry_wait");
+    expect(released.checkpoint).toBe("embed_queued");
+    expect(released.lastErrorType).toBe("strategy_work_in_flight");
+    // Released, not failed: the stage attempt is refunded and no FTS row was written.
+    expect(released.stageAttempts).toBe(0);
+    const mirrored = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM document_chunks_fts WHERE accession = ?")
+      .get(vectorDocId) as { n: number };
+    expect(mirrored.n).toBe(0);
+
+    // With the strategy run done, the released task resumes and finishes in one more drain.
+    const [resumed] = claimSecIngestTasks(job.id, { owner: "test-worker", leaseMs: 60000, limit: 1 });
+    expect(resumed!.checkpoint).toBe("embed_queued");
+    await worker.processTask(resumed!);
+    expect(getSecIngestTask(taskId)!.status).toBe("complete");
+  });
+
+  describe("dual-speed SEC ingest & transcript pacing (daytime + night-accelerated)", () => {
+    it("paces tasks-per-tick dynamically between RTH daytime (1) and off-hours night (5)", async () => {
+      const {
+        getSecIngestTasksPerTick,
+        secIngestTasksPerTickRth,
+        secIngestTasksPerTickOffHours,
+        secIngestDaytimeEnabled,
+        secIngestWorkerEnabled
+      } = await import("../src/lib/rag/sec-ingest-worker");
+
+      expect(secIngestWorkerEnabled()).toBe(true);
+      expect(secIngestDaytimeEnabled()).toBe(true);
+      expect(secIngestTasksPerTickRth()).toBe(1);
+      expect(secIngestTasksPerTickOffHours()).toBe(5);
+
+      // Tuesday 14:00 ET = 18:00 UTC (RTH)
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      expect(getSecIngestTasksPerTick(rthTuesday)).toBe(1);
+
+      // Tuesday 21:00 ET = Wednesday 01:00 UTC (Night / off-hours)
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+      expect(getSecIngestTasksPerTick(nightTuesday)).toBe(5);
+
+      // Saturday 14:00 ET (Weekend / off-hours)
+      const saturday = new Date("2026-09-19T18:00:00.000Z");
+      expect(getSecIngestTasksPerTick(saturday)).toBe(5);
+    });
+
+    it("runTick claims 1 task during daytime RTH and 5 tasks off-hours", async () => {
+      const worker = new SecIngestWorker();
+      const processed: string[] = [];
+      worker.processTask = async (task) => {
+        processed.push(task.id);
+      };
+
+      const job = createSecIngestJob({
+        idempotencyKey: `pacing-job-${randomUUID()}`,
+        corpusRevision: "corp-v1"
+      });
+      transitionSecIngestJob(job.id, "running");
+
+      for (let i = 0; i < 10; i++) {
+        enqueueSecIngestTask({
+          jobId: job.id,
+          accession: `0000320193-26-00099${i}`,
+          cik: "0000320193",
+          symbol: "AAPL",
+          payload: { url: "https://www.sec.gov/x", docType: "10-K", filedAt: "2026-07-15" }
+        });
+      }
+
+      // During RTH: claims 1
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      await worker.runTick({ now: rthTuesday, allowRth: true });
+      expect(processed).toHaveLength(1);
+
+      // Off-hours: claims 5
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+      await worker.runTick({ now: nightTuesday, allowRth: true });
+      expect(processed).toHaveLength(6); // 1 + 5 = 6 total processed
+    });
+
+    it("paces ROIC transcripts during regular trading hours", async () => {
+      const { maxTranscriptsPerRun } = await import("../src/lib/web-sources/roic-transcripts");
+      const rthTuesday = new Date("2026-09-15T18:00:00.000Z");
+      const nightTuesday = new Date("2026-09-16T01:00:00.000Z");
+
+      expect(maxTranscriptsPerRun("test-user", rthTuesday)).toBe(6);
+      expect(maxTranscriptsPerRun("test-user", nightTuesday)).toBeGreaterThan(6);
+    });
+
+    it("defaults congressFundamentalsShareEnabled to true via server knob", async () => {
+      const { congressFundamentalsShareEnabled } = await import("../src/lib/congress-share");
+      expect(congressFundamentalsShareEnabled()).toBe(true);
+    });
   });
 });

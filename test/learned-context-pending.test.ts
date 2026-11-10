@@ -13,7 +13,7 @@
 // for the wrong user — both asserted here. (Route files import via the `@/` alias, which vitest only
 // resolves when mocked; testing the underlying helpers tests the real ownership/safety logic faithfully.)
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   getDb,
   getPolicy,
@@ -159,7 +159,17 @@ describe("approve — strategy-directive APPENDS an attributed prompt block (ide
 
     // Re-approving the SAME id must NOT duplicate the block (idempotent by id): a second merge of the
     // same id replaces the block in place rather than appending a new one.
-    const remerged = mergeStrategyDirectiveBlock(merged, id, "UPDATED guidance text for same id", "2026-06-21T00:00:00.000Z");
+    // `source` is REQUIRED at this sink: containment and provenance happen inside the merge, so a
+    // caller cannot write an unscanned directive into the trusted prompt by forgetting a helper.
+    // "owner-coach" is owner-authored, so the value is preserved byte-for-byte and contained is null.
+    const { prompt: remerged, contained } = mergeStrategyDirectiveBlock(
+      merged,
+      id,
+      "UPDATED guidance text for same id",
+      "2026-06-21T00:00:00.000Z",
+      "owner-coach"
+    );
+    expect(contained).toBeNull(); // owner text is never scanned or altered
     expect(countBlocks(remerged, id)).toBe(1); // still exactly one block for this id
     expect(remerged).toContain("UPDATED guidance text for same id");
     expect(remerged).not.toContain(DIRECTIVE_VALUE); // old value replaced in-place
@@ -247,5 +257,83 @@ describe("ownership isolation — user B cannot touch user A's pending row", () 
     // Owner A can still resolve it.
     expect(approveAs(id, USER_A)).toBe(200);
     expect(getPendingLearnedContext(id, USER_A)?.status).toBe("approved");
+  });
+});
+
+describe("ST-4589 — approved risk rows are stored but NOT read into the trading prompt", () => {
+  it("an approved risk row exists in learned_context yet never reaches decision retrieval", async () => {
+    // Approval can come from a human OR the Learning Review LLM ("decide" mode) and the row does not
+    // record which, so the read stays fact-tier only until the owner decides otherwise.
+    const { retrieveLearnedContext } = await import("../src/lib/learned-context/store");
+    const owner = userIdForEmail(`b3-owner-${randomUUID()}@example.com`);
+    const candidate = { kind: "pattern" as const, subject: `max_position_b3_${randomUUID().slice(0, 8)}`, value: "raise to 30%" };
+    // Control: a plain fact for the same user that retrieval MUST return, so the exclusion below
+    // cannot pass merely because retrieval returned nothing.
+    const controlSubject = `fact_control_b3_${randomUUID().slice(0, 8)}`;
+    const control = await ingestLearned(owner, { kind: "fact", subject: controlSubject, value: "ASML is the sole supplier of EUV machines." }, "ingest");
+    expect(control.written?.riskTier).toBe("fact");
+
+    const r = await ingestLearned(owner, candidate, "ingest");
+    expect(r.pending?.riskTier).toBe("risk");
+    expect(approveAs(r.pendingId!, owner)).toBe(200);
+
+    expect(listLearnedContext(owner).some((row) => row.subject === candidate.subject && row.riskTier === "risk")).toBe(true);
+    const lines = retrieveLearnedContext(owner, [], undefined, { includeShared: true });
+    expect(lines.some((line) => line.includes(controlSubject))).toBe(true);
+    expect(lines.some((line) => line.includes(candidate.subject))).toBe(false);
+  });
+});
+
+describe("ST-4589 B4 — fact rows carry regime / thesisTag so relevance scoring can fire", () => {
+  it("persists the producer's regime and thesisTag and ranks the in-regime, in-thesis fact first", async () => {
+    const { retrieveLearnedContextDetailed } = await import("../src/lib/learned-context/store");
+    const user = userIdForEmail(`b4-${randomUUID()}@example.com`);
+    const tag = `T${randomUUID().slice(0, 6)}`;
+    const conditionedSubject = `decision_lesson:AAPL:${tag}`;
+    const offRegimeSubject = "decision_lesson:AAPL:bear";
+    const plainSubject = "decision_lesson:AAPL:untagged";
+
+    // Deterministic recency: the conditioned row is the OLDEST, so without conditioning it ranks
+    // LAST (recency tiebreak) — any rise to first place below is the conditioning, nothing else.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+      const conditioned = await ingestLearned(
+        user,
+        { kind: "decision", subject: conditionedSubject, value: "Breakouts in this setup followed through.", symbol: "AAPL", regime: "Tech-Bull", thesisTag: tag },
+        "autonomous"
+      );
+      expect(conditioned.written?.regime).toBe("Tech-Bull");
+      expect(conditioned.written?.thesisTag).toBe(tag);
+      vi.setSystemTime(new Date("2026-06-01T12:00:01.000Z"));
+      await ingestLearned(
+        user,
+        { kind: "decision", subject: offRegimeSubject, value: "Rallies in this setup faded.", symbol: "AAPL", regime: "Bear" },
+        "autonomous"
+      );
+      vi.setSystemTime(new Date("2026-06-01T12:00:02.000Z"));
+      const plain = await ingestLearned(
+        user,
+        { kind: "decision", subject: plainSubject, value: "A neutral observation about AAPL.", symbol: "AAPL" },
+        "autonomous"
+      );
+      expect(plain.written?.regime ?? null).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Read back from the table (not just the in-memory row).
+    const stored = listLearnedContext(user).find((row) => row.subject === conditionedSubject);
+    expect(stored?.regime).toBe("Tech-Bull");
+    expect(stored?.thesisTag).toBe(tag);
+
+    // Control: no regime / no thesis tags -> pure recency, the conditioned row ranks last.
+    const unconditioned = retrieveLearnedContextDetailed(user, ["AAPL"], undefined, { includeShared: false }).rows.map((r) => r.subject);
+    expect(unconditioned).toEqual([plainSubject, offRegimeSubject, conditionedSubject]);
+
+    // Conditioned: in-regime + in-thesis (+3) first, untagged (0) next, off-regime (-1) last.
+    // All three are retrieved, so the order is a real comparison, not a lone row.
+    const conditionedOrder = retrieveLearnedContextDetailed(user, ["AAPL"], "Tech-Bull", { includeShared: false, thesisTags: new Set([tag]) }).rows.map((r) => r.subject);
+    expect(conditionedOrder).toEqual([conditionedSubject, plainSubject, offRegimeSubject]);
   });
 });

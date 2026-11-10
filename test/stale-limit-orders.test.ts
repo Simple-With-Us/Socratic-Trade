@@ -113,6 +113,31 @@ describe("stale limit order alerts", () => {
     expect(activatedAndStale[0]?.ageMinutes).toBe(30);
   });
 
+  it("does not alert on an activated bracket take-profit leg", async () => {
+    const { getPolicy, listNotificationEvents } = await import("../src/lib/db");
+    const { notifyStaleLimitOrders } = await import("../src/lib/stale-limit-orders");
+    const policy = {
+      ...getPolicy("local"),
+      accountNumber: "APCA-PAPER",
+      connectedAccountId: "acct-alpaca-paper",
+      staleLimitOrderMinutes: 15
+    };
+    const activatedBracketLeg = order({
+      id: "activated-bracket-tp",
+      side: "sell",
+      state: "new",
+      type: "limit",
+      orderClass: "bracket",
+      createdAt: "2026-06-30T10:00:00.000Z",
+      updatedAt: "2026-06-30T16:00:00.000Z"
+    });
+
+    const result = await notifyStaleLimitOrders({ userId: "local", policy, orders: [activatedBracketLeg], now });
+    expect(result.alerted).toBe(0);
+    const events = listNotificationEvents("local", 10).filter((event) => event.type === "limit_order_stale");
+    expect(events).toHaveLength(0);
+  });
+
   it("records one notification per stale order and threshold", async () => {
     const { getPolicy, listNotificationEvents } = await import("../src/lib/db");
     const { notifyStaleLimitOrders } = await import("../src/lib/stale-limit-orders");

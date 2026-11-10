@@ -8,6 +8,10 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-usage-limit-alerts-${randomUUID()}.db`)}`;
+  // Cloud / host env may carry live Pushover tokens; email-fallback cases must stay hermetic.
+  vi.stubEnv("PUSHOVER_APP_TOKEN", "");
+  vi.stubEnv("PUSHOVER_ST_API_TOKEN", "");
+  vi.stubEnv("PUSHOVER_USER_KEY", "");
 });
 
 describe("usage limit alerts", () => {
@@ -54,9 +58,10 @@ describe("usage limit alerts", () => {
     expect(calls[0]?.body).toMatchObject({
       from: "alerts@example.test",
       to: ["owner@example.test"],
-      subject: "[Socratic.Trade] Usage limit hit: Pinecone Write Unit daily fuse"
+      subject: "[Socratic-Trade] Usage limit hit: Pinecone Write Unit daily fuse"
     });
     expect(String((calls[0]?.body as { text?: string }).text)).toContain("Inspect chunking and deduping");
+    expect(String((calls[0]?.body as { text?: string }).text)).toMatch(/\n\(sent by Socratic-Trade\)$/);
 
     await alertUsageLimitHit({
       userId,
@@ -67,6 +72,87 @@ describe("usage limit alerts", () => {
     });
     expect(listNotificationEvents(userId, 10)).toHaveLength(1);
     expect(calls).toHaveLength(1);
+  });
+
+  it("does not latch the 6h cooldown when the first attempt never delivered", async () => {
+    const userId = `limit-alert-no-latch-${randomUUID()}`;
+    const { alertUsageLimitHit } = await import("../src/lib/usage-limit-alerts");
+    const { listNotificationEvents, getInternalSetting } = await import("../src/lib/db");
+
+    await alertUsageLimitHit({
+      userId,
+      provider: "Pinecone",
+      operation: "upsert-budget",
+      limitName: "Write Unit daily fuse",
+      status: "exceeded"
+    });
+    expect(listNotificationEvents(userId, 10)).toHaveLength(1);
+    expect(listNotificationEvents(userId, 10)[0]?.status).toBe("skipped");
+    expect(
+      getInternalSetting(`usageLimitAlert:lastSent:${userId}:pinecone:upsert-budget:Write Unit daily fuse`)
+    ).toBeUndefined();
+
+    await alertUsageLimitHit({
+      userId,
+      provider: "Pinecone",
+      operation: "upsert-budget",
+      limitName: "Write Unit daily fuse",
+      status: "exceeded"
+    });
+    expect(listNotificationEvents(userId, 10)).toHaveLength(2);
+  });
+
+  it("does not send Pushover a second time when the user already enabled that channel", async () => {
+    const userId = `limit-alert-no-double-pushover-${randomUUID()}`;
+    const calls: string[] = [];
+    vi.stubEnv("PUSHOVER_APP_TOKEN", "pv-token");
+    vi.stubEnv("PUSHOVER_USER_KEY", "u1userkey");
+    vi.stubGlobal(
+      "fetch",
+      (async (url: string | URL) => {
+        calls.push(String(url));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch
+    );
+
+    const { setNotifyPrefs } = await import("../src/lib/db");
+    setNotifyPrefs(userId, { channels: ["pushover"], pushoverTarget: "u1userkey" });
+    const { alertUsageLimitHit } = await import("../src/lib/usage-limit-alerts");
+    await alertUsageLimitHit({
+      userId,
+      provider: "Pinecone",
+      operation: "upsert-budget",
+      limitName: "Write Unit daily fuse",
+      status: "exceeded"
+    });
+    expect(calls).toEqual(["https://api.pushover.net/1/messages.json"]);
+  });
+
+  it("prefers Pushover over the operator email fallback", async () => {
+    const userId = `limit-alert-pushover-${randomUUID()}`;
+    const calls: string[] = [];
+    vi.stubEnv("RESEND_API_KEY", "rk_test");
+    vi.stubEnv("NOTIFY_EMAIL_FROM", "alerts@example.test");
+    vi.stubEnv("USAGE_LIMIT_ALERT_EMAIL", "owner@example.test");
+    vi.stubEnv("PUSHOVER_APP_TOKEN", "pv-token");
+    vi.stubEnv("PUSHOVER_USER_KEY", "u1userkey");
+    vi.stubGlobal(
+      "fetch",
+      (async (url: string | URL) => {
+        calls.push(String(url));
+        return new Response("ok", { status: 200 });
+      }) as typeof fetch
+    );
+
+    const { alertUsageLimitHit } = await import("../src/lib/usage-limit-alerts");
+    await alertUsageLimitHit({
+      userId,
+      provider: "Pinecone",
+      operation: "upsert-budget",
+      limitName: "Write Unit daily fuse",
+      status: "exceeded"
+    });
+    expect(calls).toEqual(["https://api.pushover.net/1/messages.json"]);
   });
 
   it("fences the real operator-email fallback during a delayed send", async () => {

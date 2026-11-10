@@ -21,6 +21,13 @@ import {
 } from "./db-health";
 import { getDb } from "./db";
 import { isIntentionalOffHealthService } from "./retired-direct-vendors";
+import { resolveApiKey } from "./db-api-keys";
+import {
+  clearFilingApiKeyRejected,
+  isFilingApiAuthStatus,
+  isFilingApiKeyRejected,
+  markFilingApiKeyRejected
+} from "./filingapi-auth";
 
 const DEFAULT_REPROBE_INTERVAL_MS = 4 * 60 * 60_000; // 4h (mid of 3–6h)
 const MIN_REPROBE_INTERVAL_MS = 3 * 60 * 60_000;
@@ -33,10 +40,35 @@ const NEXT_LANE_PREFIX = "healthLaneReprobe:next:";
 export type HealthReprobeOutcome =
   | "skipped_not_due"
   | "skipped_intentional_off"
+  | "skipped_sibling_healthy"
   | "window_opened"
   | "probe_ok"
   | "probe_fail"
   | "probe_unsupported";
+
+/** Backup health lane → primary that already serves the same reading. */
+export const BACKUP_HEALTH_LANES: Record<string, string> = {
+  "vix-yahoo": "vix-cboe-history",
+  "vix-cboe": "vix-cboe-history",
+  "vix-fred": "vix-cboe-history"
+};
+
+/**
+ * True when this backup lane's primary is serving.  Do not re-probe (and 429)
+ * the backup while the primary is up — keep the backup for when the primary dies.
+ */
+export function backupLanePrimaryIsServing(
+  backupService: string,
+  summaries: Array<Pick<ServiceHealthSummary, "service" | "keySource" | "stoppedWorking">>
+): boolean {
+  const primary = BACKUP_HEALTH_LANES[backupService];
+  if (!primary) return false;
+  const row = summaries.find((s) => {
+    if (s.service !== primary) return false;
+    return s.keySource === "env" || s.keySource === "none" || s.keySource === null;
+  });
+  return row != null && row.stoppedWorking !== true;
+}
 
 export interface HealthReprobeLaneResult {
   service: string;
@@ -221,6 +253,17 @@ export function openHardStopReprobeWindow(
 
 type ProbeFn = () => Promise<{ ok: boolean; detail?: string; latencyMs?: number }>;
 
+/** Public JSON health paths on Usage Monitor. Exported for tests. */
+export function usageMonitorProbeUrls(baseRaw?: string): string[] {
+  const base = (
+    baseRaw ||
+    process.env.USAGE_MONITOR_BASE_URL ||
+    process.env.USAGE_MONITOR_URL ||
+    "https://usage.jays.services"
+  ).replace(/\/$/, "");
+  return [`${base}/api/ready`, `${base}/api/health`];
+}
+
 /** Cheap keyless / env probes for common stopped lanes. Unknown services only get a window open. */
 export function probeFnForService(service: string): ProbeFn | null {
   const s = service.toLowerCase();
@@ -282,14 +325,44 @@ export function probeFnForService(service: string): ProbeFn | null {
       return { ok: true, latencyMs: Date.now() - t0 };
     };
   }
+  if (s === "filingapi") {
+    return async () => {
+      const key = resolveApiKey("filingapi")?.trim();
+      // Optional lane: missing or known-dead key is a skip, not a health failure.
+      if (!key) return { ok: true, detail: "no-key-skip" };
+      if (isFilingApiKeyRejected(key)) return { ok: true, detail: "unauthorized-skip" };
+      const t0 = Date.now();
+      const res = await fetch("https://filingapi.dev/v1/company/AAPL", {
+        headers: { Accept: "application/json", "X-API-Key": key },
+        signal: AbortSignal.timeout(8_000)
+      }).catch(() => null);
+      if (!res) return { ok: false, detail: "fetch-failed", latencyMs: Date.now() - t0 };
+      if (isFilingApiAuthStatus(res.status)) {
+        markFilingApiKeyRejected(key);
+        return { ok: true, detail: `HTTP ${res.status} skip`, latencyMs: Date.now() - t0 };
+      }
+      if (!res.ok) return { ok: false, detail: `HTTP ${res.status}`, latencyMs: Date.now() - t0 };
+      clearFilingApiKeyRejected(key);
+      return { ok: true, detail: "AAPL", latencyMs: Date.now() - t0 };
+    };
+  }
   if (s === "usage-monitor") {
     return async () => {
       const t0 = Date.now();
-      const base = (process.env.USAGE_MONITOR_URL || "https://usage.jays.services").replace(/\/$/, "");
-      let res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(8000) }).catch(() => null);
-      if (!res || !res.ok) res = await fetch(base, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) return { ok: false, detail: `HTTP ${res.status}`, latencyMs: Date.now() - t0 };
-      return { ok: true, latencyMs: Date.now() - t0 };
+      const urls = usageMonitorProbeUrls();
+      let lastStatus = 0;
+      for (const url of urls) {
+        // Never follow redirects: `/health` and `/` 307 to the login HTML (200),
+        // which would look like a healthy monitor while the real JSON lives at
+        // `/api/ready` and `/api/health`.
+        const res = await fetch(url, {
+          signal: AbortSignal.timeout(8000),
+          redirect: "manual"
+        }).catch(() => null);
+        if (res?.ok) return { ok: true, detail: url, latencyMs: Date.now() - t0 };
+        lastStatus = res?.status ?? lastStatus;
+      }
+      return { ok: false, detail: `HTTP ${lastStatus || "fetch-failed"}`, latencyMs: Date.now() - t0 };
     };
   }
   return null;
@@ -351,6 +424,21 @@ export async function runHealthLaneReprobeIfDue(
     const intervalMs = envIntervalMs();
 
     for (const s of candidates) {
+      if (backupLanePrimaryIsServing(s.service, summaries)) {
+        // Advance the reprobe clock so this backup lane is not re-evaluated on every scheduler
+        // tick while its primary is healthy.  The lane stays red in Admin Connections (correct —
+        // it IS stopped and we want it ready for failover), but we do not burn a real probe
+        // attempt or generate any Sentry event until the next interval expires.
+        setInternalSetting(laneKey(s.service, s.keySource), new Date(nowMs + intervalMs).toISOString());
+        results.push({
+          service: s.service,
+          keySource: s.keySource,
+          outcome: "skipped_sibling_healthy",
+          reason: s.stoppedReason,
+          detail: `primary ${BACKUP_HEALTH_LANES[s.service]} is serving; keep this backup for failover`
+        });
+        continue;
+      }
       const nextDueIso = getInternalSetting<string>(laneKey(s.service, s.keySource));
       const due = isLaneDueForReprobe(s, nowMs, { nextDueIso, intervalMs });
       if (!due.due) {
@@ -416,16 +504,22 @@ export async function runHealthLaneReprobeIfDue(
             detail: outcome.detail
           });
         } else {
-          const soft =
-            /429|rate limit|quota|budget|25\/day/i.test(outcome.detail ?? "") ||
-            isSoftHealthFailure(outcome.detail);
+          // ALL probe failures are soft — not just the 429-shaped ones this used to match.
+          //
+          // A re-probe is SYNTHETIC traffic we generate specifically because the lane is already
+          // known-red; it is not user traffic and it is not new evidence worth paging on. Logged
+          // hard, each probe failure re-satisfied the alert gate and minted another Sentry event,
+          // which re-armed the 6h alert cooldown, which kept the lane in the probe candidate set —
+          // a self-sustaining loop that alerted forever on a lane nobody was actually calling.
+          // Soft rows are still stored ok=0, so the lane keeps showing red in Admin Connections
+          // and the probe cadence is unchanged; only the paging stops.
           logApiHealth({
             service: s.service,
             ok: false,
             latencyMs: outcome.latencyMs,
             errorText: outcome.detail,
             keySource: s.keySource ?? undefined,
-            soft
+            soft: true
           });
           const until = parseKnownUnavailabilityUntil(outcome.detail, nowMs);
           const next = until != null && until > nowMs ? until : nowMs + intervalMs;
@@ -440,12 +534,14 @@ export async function runHealthLaneReprobeIfDue(
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Same reasoning as the probe_fail branch above: a thrown probe is still a synthetic
+        // probe, so it records red without paging.
         logApiHealth({
           service: s.service,
           ok: false,
           errorText: msg,
           keySource: s.keySource ?? undefined,
-          soft: /abort|timeout|429/i.test(msg)
+          soft: true
         });
         setInternalSetting(laneKey(s.service, s.keySource), new Date(nowMs + intervalMs).toISOString());
         results.push({

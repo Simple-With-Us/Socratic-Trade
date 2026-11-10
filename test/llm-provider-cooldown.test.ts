@@ -45,6 +45,19 @@ const OPENAI_ATTEMPT = { provider: "openai", model: "gpt-5.4-mini", keySource: "
 const GEMINI_ATTEMPT = { provider: "gemini", model: "gemini-2.5-flash", keySource: "user" as const };
 
 describe("llm-provider-cooldown unit behavior", () => {
+  it("classifies HTTP 402 and MiniMax's native insufficient-balance envelope as billing", async () => {
+    const { classifyLlmRateOrQuotaFailure } = await import("../src/lib/llm-provider-cooldown");
+
+    expect(classifyLlmRateOrQuotaFailure(402, undefined)).toBe("billing");
+    expect(
+      classifyLlmRateOrQuotaFailure(
+        200,
+        JSON.stringify({ base_resp: { status_code: 1008, status_msg: "insufficient balance" } })
+      )
+    ).toBe("billing");
+    expect(classifyLlmRateOrQuotaFailure(400, "invalid request parameters")).toBeUndefined();
+  });
+
   it("a transient 429 cools the lane so planning skips straight to the fallback (audited)", async () => {
     const { recordLlmProviderFailure, planLlmProviderAttempts, getLlmProviderCooldown } = await import("../src/lib/llm-provider-cooldown");
     const { listAudit } = await import("../src/lib/db");
@@ -86,13 +99,22 @@ describe("llm-provider-cooldown unit behavior", () => {
       status: 429,
       detail: JSON.stringify({ error: { message: "You exceeded your current quota, please check your plan and billing details.", type: "insufficient_quota" } })
     });
+    recordLlmProviderFailure({
+      provider: "minimax",
+      keySource: "user",
+      status: 402,
+      detail: JSON.stringify({ base_resp: { status_code: 1008, status_msg: "insufficient balance" } })
+    });
 
     const transient = getLlmProviderCooldown("openai", "user");
     const billing = getLlmProviderCooldown("gemini", "user");
+    const minimaxBilling = getLlmProviderCooldown("minimax", "user");
     expect(transient?.record.kind).toBe("transient");
     expect(billing?.record.kind).toBe("billing");
+    expect(minimaxBilling?.record.kind).toBe("billing");
     expect(transient!.remainingMs).toBeLessThanOrEqual(1000);
     expect(billing!.remainingMs).toBeGreaterThan(1000);
+    expect(minimaxBilling!.remainingMs).toBeGreaterThan(1000);
   });
 
   it("an expired cooldown is pruned and the lane serves again", async () => {

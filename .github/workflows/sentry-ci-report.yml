@@ -2,7 +2,7 @@ name: Sentry CI Report
 
 # Fleet-wide CI observability: fires after every other workflow in this repo
 # completes and reports failures to the shared `fleet-infra` Sentry project
-# (org jays-services). ADDITIVE ONLY — this file must never modify the
+# (org simple-with-us). ADDITIVE ONLY — this file must never modify the
 # behavior of the workflows it observes.
 #
 # Two independent signals per completed run:
@@ -23,8 +23,10 @@ name: Sentry CI Report
 #
 # workflows observed (from `ls .github/workflows/`; see each file's `name:`):
 #   Auto-merge PRs, Auto-merge congress-trading-shared PRs, CI, Cleanup Actions Caches,
-#   Codex Autofix, Effort Issues Sync, merge-shepherd, Shared package pin check,
-#   Playwright Smoke, Security
+#   Claude Code Autofix, PR Autofix, Effort Issues Sync, iOS build,
+#   iOS TestFlight ship, Kody MiniMax M3.1 Flash Fix Proposals, merge-shepherd,
+#   Shared package pin check, Playwright Smoke, Security, Deploy freshness,
+#   RTH Deploy Latch, Sentry Deploy
 # Reusable-only `_merge-shepherd-impl` executes inside `merge-shepherd` and has no independent
 # workflow_run event; the caller's completion is the observable run.
 #
@@ -36,6 +38,11 @@ name: Sentry CI Report
 #   Security                 -> "41 10 * * 1" (security.yml)
 #   Playwright Smoke         -> "17 9 * * *"  (e2e.yml nightly)
 #   Shared package pin check -> "0 13 * * 1"  (shared-package-pin-check.yml)
+#   Deploy freshness         -> "13,33,53 * * * *"  (deploy-freshness.yml)
+#   RTH Deploy Latch         -> "20 21 * * 1-5" (rth-deploy-latch.yml weekday after-close drain)
+#   iOS TestFlight ship      -> "*/30 * * * *" (ios-ship.yml hosted macos-latest)
+# refresh-rag-snapshot is not a Socratic-Trade workflow (FLEET-INFRA-DN lives
+# on Fleet-OPS / AI-Fleet-Coordinator).  Do not add it to CRON_SCHEDULES here.
 
 on:
   workflow_run:
@@ -44,13 +51,20 @@ on:
       - Auto-merge PRs
       - CI
       - Cleanup Actions Caches
-      - Codex Autofix
+      - Claude Code Autofix
       - Effort Issues Sync
+      - iOS build
+      - iOS TestFlight ship
+      - Kody MiniMax M3.1 Flash Fix Proposals
       - merge-shepherd
+      - PR Autofix
       - Shared package pin check
       - Playwright Smoke
       - Security
-    types: [completed]
+      - Deploy freshness
+      - RTH Deploy Latch
+      - Sentry Deploy
+    types: [requested, completed]
 
 permissions:
   contents: read
@@ -67,12 +81,20 @@ jobs:
     # still spinning up a full runner + checkout for every one of ~95 completions/day.
     # Gate the whole job so those no-op cases skip at ZERO runner minutes while the
     # two real signals (failure alerts, cron missed-check-in detection) are unchanged.
-    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.event == 'schedule' }}
+    if: >-
+      (github.event.action == 'requested' && github.event.workflow_run.event == 'schedule') ||
+      (github.event.action == 'completed' && (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'timed_out' ||
+      github.event.workflow_run.conclusion == 'startup_failure' ||
+      github.event.workflow_run.event == 'schedule'))
     # Prefer a separate observer lane when one exists. As of 2026-07-24 the
     # ci-cpx32 box has systemd runners for socratic-ci / socratic-ci-2 only —
     # there is no socratic-deploy unit under /opt/actions-runners, so jobs that
     # target that label queue forever. Route the short failure/schedule-only
     # reporter onto socratic-ci until a dedicated observer runner is restored.
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (for the reporter script only; does not touch observed workflows)
@@ -82,7 +104,7 @@ jobs:
         # script rather than whatever version lives on an arbitrary (possibly fork/PR) branch that
         # triggered the observed workflow. Do not add `ref: ${{ github.event.workflow_run.head_sha }}`
         # without re-reviewing the security implications.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             scripts/sentry-ci-report.py
@@ -92,13 +114,16 @@ jobs:
         shell: bash
         env:
           SENTRY_FLEET_DSN: ${{ secrets.SENTRY_FLEET_DSN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKFLOW_RUN_ACTION: ${{ github.event.action }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
           WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
           WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
           WORKFLOW_ACTOR: ${{ github.event.workflow_run.actor.login }}
           WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
-          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: python3 scripts/sentry-ci-report.py
 
       - name: Disable sparse checkout (prevent poisoning self-hosted runner workspace)

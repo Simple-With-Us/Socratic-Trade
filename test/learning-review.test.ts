@@ -306,13 +306,13 @@ describe("review trigger (learningReviewMinNewLessons / learningReviewMaxWaitDay
 // ── Defaults + no hidden model fallback (owner 2026-07-09) ───────────────────────
 
 describe("defaults and model requirement", () => {
-  it("defaults to decide mode and the claude-fable-5 model when nothing was explicitly set", () => {
+  it("defaults to decide mode and the claude-fable-latest model when nothing was explicitly set", () => {
     const userId = `lr-default-${randomUUID().slice(0, 8)}`;
     const policy = getPolicy(userId);
     // "decide" is the default; only an explicit "annotate" opts out.
     expect(policy.learningReviewMode ?? "decide").not.toBe("annotate");
     // The model default is a real, explicit value — never blank-means-Fable.
-    expect(policy.learningReviewModel).toBe("claude-fable-5");
+    expect(policy.learningReviewModel).toBe("claude-fable-latest");
   });
 
   it("skips with reason 'no-model' rather than silently substituting a model when blank", async () => {
@@ -322,6 +322,37 @@ describe("defaults and model requirement", () => {
     const summary = await runDailyLearningReview(userId, { now: NOW, llm: async () => "should-not-be-called" });
     expect(summary.skipped).toBe(true);
     expect(summary.reason).toBe("no-model");
+  });
+
+  it("canonicalizes a legacy catalog alias in review results and audits", async () => {
+    const userId = `lr-model-alias-${randomUUID().slice(0, 8)}`;
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "claude-fable-5" }, userId);
+    seedLearnedRow(userId);
+    const summary = await runDailyLearningReview(userId, { now: NOW, llm: keepAllLlm() });
+    expect(summary.model).toBe("claude-fable-latest");
+    const auditRow = listAuditByKind("learning_review_summary", 1, userId)[0];
+    expect((auditRow.payload as { model?: string; modelLabel?: string; servedModel?: string }).model).toBe("claude-fable-latest");
+    expect((auditRow.payload as { modelLabel?: string }).modelLabel).toContain("5.1");
+    expect((auditRow.payload as { servedModel?: string }).servedModel).toBeUndefined();
+  });
+
+  it("records an unlisted catalog model by its canonical identity", async () => {
+    const userId = `lr-model-astra-${randomUUID().slice(0, 8)}`;
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "openai/gpt-6-astra-pro" }, userId);
+    seedLearnedRow(userId);
+    const summary = await runDailyLearningReview(userId, { now: NOW, llm: keepAllLlm() });
+    expect(summary.model).toBe("gpt-6-astra-pro");
+    const auditRow = listAuditByKind("learning_review_summary", 1, userId)[0];
+    expect((auditRow.payload as { model?: string; modelLabel?: string }).model).toBe("gpt-6-astra-pro");
+    // 2026-09-18 catalog cleanup (docs/rollouts/2026-09-18-model-catalog-cleanup.md) retags the
+    // GPT-6 Astra Pro row as `gpt-6-astra-pro — GPT-6 Astra in pro reasoning mode` (pro is a
+    // request parameter, not a distinct SKU). The audit label therefore resolves to that
+    // canonical entry, not the legacy "GPT-6 Astra Pro" display name.
+    // ST-4589 (2026-11-04): gpt-6-astra-pro left the picker but stays a RETIRED catalog row, so a
+    // stored selection still resolves to its own identity and the retired row's label.
+    expect((auditRow.payload as { modelLabel?: string }).modelLabel).toBe(
+      "gpt-6-astra-pro — retired: the same model as gpt-6-astra in pro reasoning mode",
+    );
   });
 });
 

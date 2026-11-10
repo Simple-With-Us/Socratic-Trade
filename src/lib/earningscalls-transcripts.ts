@@ -80,7 +80,9 @@
 
 import { CircuitOpenError } from "./api-circuit-breaker";
 import { fetchWithRetry } from "./data-providers";
+import { withSentrySpan } from "./sentry-gen-ai";
 import { audit, getDb } from "./db";
+import { resolveSourceNumber } from "./source-settings";
 import {
   getEarningsCallsSymbolCheck,
   getEarningsCallsTranscript,
@@ -113,6 +115,10 @@ import {
 } from "./operation-lease";
 import type { VectorStoreLeaseGuard } from "./vector-db";
 import { getTechnicalWatchlist } from "./web-sources/technical";
+import { chunkDocument, hashContent } from "./rag/chunk";
+import { writesFullBodyToPinecone } from "./rag/pinecone-write-class";
+import { persistLocalComplete } from "./rag/persist-local-complete";
+import { storeSignalSectionDocuments } from "./rag/processed-corpus-write";
 import fs from "fs";
 import path from "path";
 
@@ -135,7 +141,7 @@ const DEFAULT_ROLLING_WINDOW_BUDGET = 195; // 5 under the hard 200, for accounti
 const DEFAULT_RECENT_DAYS = 7;
 const DEFAULT_TOP_CANDIDATES = 3;
 const DEFAULT_NEGATIVE_TTL_DAYS = 3;
-const DEFAULT_DAILY_TARGET_TRANSCRIPTS = 5;
+const DEFAULT_DAILY_TARGET_TRANSCRIPTS = 12;
 const DEFAULT_BURST_MAX_TRANSCRIPTS = 25;
 // Anti-runaway breaker only — see the header comment: the ACTUAL safety bound is the rolling
 // ledger dual-bound in tryReserveEarningsCallsRequests, not this number. Sized generously enough
@@ -165,17 +171,20 @@ function intEnv(raw: string | undefined, fallback: number, min = 0, max = 100_00
   return parsed;
 }
 
-/** Env-overridable monthly soft request budget. 0 is a valid override (block all calls without
+/** Settings/env monthly soft request budget. 0 is a valid override (block all calls without
  *  removing the key). Default 180 — deliberate headroom under the provider's hard 200/month. */
 export function earningsCallsMonthlyBudget(): number {
-  return intEnv(process.env.EARNINGSCALLS_MONTHLY_BUDGET, DEFAULT_MONTHLY_BUDGET);
+  const n = resolveSourceNumber("EARNINGSCALLS_MONTHLY_BUDGET");
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : DEFAULT_MONTHLY_BUDGET;
 }
 
-/** Env-overridable rolling-31-day request budget (the bound that actually maps to the provider's
+/** Settings/env rolling-31-day request budget (the bound that actually maps to the provider's
  *  hard 200, since its window resets on the subscription anniversary, not the UTC calendar
  *  month). Default 195 — 5 under 200 for accounting drift. */
 export function earningsCallsRollingWindowBudget(): number {
-  return intEnv(process.env.EARNINGSCALLS_ROLLING_WINDOW_BUDGET, DEFAULT_ROLLING_WINDOW_BUDGET, 0, 200);
+  const n = resolveSourceNumber("EARNINGSCALLS_ROLLING_WINDOW_BUDGET");
+  if (!Number.isFinite(n)) return DEFAULT_ROLLING_WINDOW_BUDGET;
+  return Math.max(0, Math.min(10_000, Math.floor(n)));
 }
 
 export function earningsCallsRecentDays(): number {
@@ -190,15 +199,16 @@ export function earningsCallsNegativeTtlDays(): number {
   return intEnv(process.env.EARNINGSCALLS_NEGATIVE_TTL_DAYS, DEFAULT_NEGATIVE_TTL_DAYS, 1, 90);
 }
 
-/** How many NEW transcripts an ordinary (non-burst) daily pass targets. ~6 requests including the
- *  amortized listing call, on a day something reported. */
+/** How many NEW transcripts an ordinary (non-burst) daily pass targets. Settings override, then env. */
 export function earningsCallsDailyTargetTranscripts(): number {
-  return intEnv(process.env.EARNINGSCALLS_DAILY_TARGET_TRANSCRIPTS, DEFAULT_DAILY_TARGET_TRANSCRIPTS, 0, 100);
+  const n = resolveSourceNumber("EARNINGSCALLS_DAILY_TARGET_TRANSCRIPTS");
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.floor(n))) : DEFAULT_DAILY_TARGET_TRANSCRIPTS;
 }
 
 /** Ceiling on a single one-shot burst arm — the coordinator's "burst 25" cap. */
 export function earningsCallsBurstMaxTranscripts(): number {
-  return intEnv(process.env.EARNINGSCALLS_BURST_MAX_TRANSCRIPTS, DEFAULT_BURST_MAX_TRANSCRIPTS, 1, 100);
+  const n = resolveSourceNumber("EARNINGSCALLS_BURST_MAX_TRANSCRIPTS");
+  return Number.isFinite(n) ? Math.max(1, Math.min(100, Math.floor(n))) : DEFAULT_BURST_MAX_TRANSCRIPTS;
 }
 
 /** Anti-preview cache/ingest floor (recon memo finding #1): a fetched body shorter than this is
@@ -483,9 +493,10 @@ function meResponseLooksLimited(payload: unknown): boolean {
 /**
  * Trip the durable entitlement block (idempotent — repeat trips update the length/timestamp but
  * notify only ONCE, per the coordinator's no-retry-storm requirement). Best-effort operator
- * notification via the existing notify machinery, forced into enabledEvents like the
- * provider_degraded/storage_warning precedents in db-health.ts/scheduler.ts so a user who
- * disabled this event type still gets the one-time critical alert.
+ * notification via the existing notify machinery. Delivery honors the user's real enabledEvents
+ * toggle (owner ruling 2026-08-12, "ALL toggles must be real" — no force-include). A legacy
+ * stored enabledEvents array predating this event type was backfilled once by migration 78
+ * (db.ts); after that the toggle is genuinely the user's.
  */
 async function tripEntitlementBlock(nowMs: number, previewLength: number | undefined, context: Record<string, unknown>): Promise<void> {
   const existing = loadEntitlementState();
@@ -514,18 +525,9 @@ async function tripEntitlementBlock(nowMs: number, previewLength: number | undef
       "The burst/daily transcript program has been paused so no stub content is permanently cached. " +
       'Upgrade the plan for full-text access, then POST /api/admin/earningscalls {"action":"clear-entitlement-block"} ' +
       '(or {"action":"probe-entitlement"} to re-verify immediately).';
-    const forcedPolicy = {
-      ...policy,
-      notificationSettings: {
-        ...policy.notificationSettings,
-        enabledEvents: Array.from(
-          new Set([...policy.notificationSettings.enabledEvents, "earningscalls_entitlement_blocked" as const])
-        )
-      }
-    };
     await sendNotification(
       { type: "earningscalls_entitlement_blocked", title, payload: { previewLength, ...context } },
-      { userId: "local", policy: forcedPolicy as any, directBody: body }
+      { userId: "local", policy, directBody: body }
     );
   } catch {
     // Best-effort — the persisted block + audit row are the durable record either way.
@@ -802,21 +804,27 @@ async function earningsCallsGet(path: string, nowMs: number): Promise<EarningsCa
   if (tryReserveEarningsCallsRequests(1, nowMs) < 1) return { ok: false, kind: "budget" };
   let response: Response;
   try {
-    response = await fetchWithRetry(
-      `${base}${path}`,
-      {
-        headers,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      },
-      {
-        // retries: 0 is load-bearing — one reservation must never become two provider-side
-        // requests.
-        retries: 0,
-        service: "earningscalls",
-        apiKey,
-        keySource: "env",
-        suppressHealthStatuses: [PRE_SUBSCRIPTION_STATUS]
-      }
+    response = await withSentrySpan(
+      "earningscalls.get",
+      "gen_ai.chat",
+      () =>
+        fetchWithRetry(
+          `${base}${path}`,
+          {
+            headers,
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          },
+          {
+            // retries: 0 is load-bearing — one reservation must never become two provider-side
+            // requests.
+            retries: 0,
+            service: "earningscalls",
+            apiKey,
+            keySource: "env",
+            suppressHealthStatuses: [PRE_SUBSCRIPTION_STATUS]
+          }
+        ),
+      { "gen_ai.system": "earningscalls", "gen_ai.operation.name": "transcript" }
     );
   } catch (error) {
     if (error instanceof CircuitOpenError) {
@@ -855,6 +863,83 @@ export function accessionFor(row: { symbol: string; fiscalYear: number; fiscalQu
   return `earningscalls:${normalizeSymbol(row.symbol)}:${row.fiscalYear}Q${row.fiscalQuarter}`;
 }
 
+/** Map a speaker / section label to the ROIC-compatible role codes selectSignalChunks expects. */
+function roleOfEarningsCallsLabel(label: string): string {
+  const s = label.toLowerCase().trim();
+  if (!s) return "qa";
+  if (/\boperator\b/.test(s)) return "operator";
+  if (/\b(q\s*&\s*a|questions?\s*(?:and|&)\s*answers?)\b/.test(s)) return "qa";
+  if (/\banalyst\b/.test(s) && !/\b(ceo|cfo|coo|officer|president)\b/.test(s)) return "analyst";
+  if (/\b(ceo|cfo|coo|cto|chief|officer|president|director|management|prepared)\b/.test(s)) {
+    return "management";
+  }
+  return "qa";
+}
+
+/**
+ * Split a cached EarningsCalls body into management + Q&A role sections for signal writes.
+ * Prefers `Speaker:` / Operator / Analyst / Q&A markers when present; otherwise first half
+ * is management remarks and the rest is Q&A (pinned by tests).
+ */
+export function earningsCallsSpeakerSections(
+  content: string
+): Array<{ itemCode: string; itemTitle: string; text: string }> {
+  const trimmed = String(content ?? "").trim();
+  if (!trimmed) return [];
+
+  const turnRe = /^([A-Za-z][^\n:]{0,78}):\s*([\s\S]*)$/;
+  const paragraphs = trimmed
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const turns: Array<{ label: string; text: string }> = [];
+  let labeled = 0;
+  for (const para of paragraphs) {
+    const match = para.match(turnRe);
+    if (match) {
+      labeled += 1;
+      turns.push({ label: match[1]!.trim(), text: match[2]!.trim() });
+    } else if (turns.length > 0) {
+      turns[turns.length - 1]!.text += `\n\n${para}`;
+    } else {
+      turns.push({ label: "Management", text: para });
+    }
+  }
+
+  if (labeled >= 2) {
+    return turns
+      .filter((turn) => turn.text.trim().length > 0)
+      .map((turn) => ({
+        itemCode: roleOfEarningsCallsLabel(turn.label),
+        itemTitle: turn.label,
+        text: turn.text
+      }));
+  }
+
+  const qaHeaderRe = /\n(?:Questions?(?:\s+and\s+|&\s*)Answers?|Q\s*&\s*A)\s*\n/i;
+  const qaParts = trimmed.split(qaHeaderRe);
+  if (qaParts.length >= 2) {
+    const management = qaParts[0]!.trim();
+    const qa = qaParts.slice(1).join("\n\n").trim();
+    const out: Array<{ itemCode: string; itemTitle: string; text: string }> = [];
+    if (management) out.push({ itemCode: "management", itemTitle: "Management remarks", text: management });
+    if (qa) out.push({ itemCode: "qa", itemTitle: "Q&A", text: qa });
+    if (out.length > 0) return out;
+  }
+
+  const mid = Math.floor(trimmed.length / 2);
+  let splitAt = trimmed.indexOf("\n\n", mid);
+  if (splitAt < 0) splitAt = mid;
+  const first = trimmed.slice(0, splitAt).trim();
+  const rest = trimmed.slice(splitAt).trim();
+  const fallback: Array<{ itemCode: string; itemTitle: string; text: string }> = [];
+  if (first) fallback.push({ itemCode: "management", itemTitle: "Management remarks", text: first });
+  if (rest) fallback.push({ itemCode: "qa", itemTitle: "Q&A", text: rest });
+  return fallback.length > 0
+    ? fallback
+    : [{ itemCode: "management", itemTitle: "Management remarks", text: trimmed }];
+}
+
 function recordIngestedLedgerRow(accession: string, ticker: string, chunkCount: number, indexedAt: string): void {
   getDb()
     .prepare(
@@ -874,30 +959,45 @@ async function ingestCachedTranscript(
 ): Promise<boolean> {
   if (!row.content) return false;
   const accession = accessionFor(row);
+  const title = `${row.symbol} earnings call ${row.fiscalYear} Q${row.fiscalQuarter}`;
+  const publishedAt = row.eventDate ?? row.fetchedAt;
+  const url = row.eventId
+    ? `${EARNINGSCALLS_BASE}/transcripts/${row.eventId}`
+    : `${EARNINGSCALLS_BASE}/search/by_ticker`;
+  const sections = earningsCallsSpeakerSections(row.content);
+  const writeFullBody = writesFullBodyToPinecone();
   const { storeDocument } = await import("./vector-db");
-  const stored = await storeDocument(
-    {
-      text: row.content,
-      doc_id: accession,
-      ticker: row.symbol,
-      title: `${row.symbol} earnings call ${row.fiscalYear} Q${row.fiscalQuarter}`,
-      doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
-      published_at: row.eventDate ?? row.fetchedAt,
-      acceptance_datetime: row.fetchedAt,
-      source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
-      url: row.eventId ? `${EARNINGSCALLS_BASE}/transcripts/${row.eventId}` : `${EARNINGSCALLS_BASE}/search/by_ticker`
-    },
-    "local",
-    { parserRevision: "earningscalls-transcript-v1", documentKey: accession, leaseGuard }
-  );
-  const reusedCommitted =
-    stored.reusedCommitted === true && stored.documentComplete === true && stored.attempted > 0;
-  const complete = !stored.error && !stored.unconfigured &&
-    stored.documentComplete === true &&
-    (reusedCommitted || stored.indexed === stored.attempted);
-  if (!complete) return false;
+  let attempted = 0;
+  if (writeFullBody) {
+    const stored = await storeDocument(
+      {
+        text: row.content,
+        doc_id: accession,
+        ticker: row.symbol,
+        title,
+        doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
+        published_at: publishedAt,
+        acceptance_datetime: row.fetchedAt,
+        source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+        url,
+        sections
+      },
+      "local",
+      { parserRevision: "earningscalls-transcript-v1", documentKey: accession, leaseGuard }
+    );
+    const reusedCommitted =
+      stored.reusedCommitted === true && stored.documentComplete === true && stored.attempted > 0;
+    const complete = !stored.error && !stored.unconfigured &&
+      stored.documentComplete === true &&
+      (reusedCommitted || stored.indexed === stored.attempted);
+    if (!complete) return false;
+    attempted = stored.attempted;
+  }
+  // Non-full-body write-class: row.content stays in earningscalls_transcripts (local).
+  // Do not dump the full transcript into Pinecone.  Default write-class is still
+  // full-body, so this branch is inert until the post-PR-B Infisical flip.
   const at = new Date().toISOString();
-  recordIngestedLedgerRow(accession, normalizeSymbol(row.symbol), stored.attempted, at);
+  recordIngestedLedgerRow(accession, normalizeSymbol(row.symbol), attempted, at);
   markEarningsCallsTranscriptIngested(row.symbol, row.fiscalYear, row.fiscalQuarter, at);
 
   // Compact earnings-summary for LLM trade use (full earnings-transcript stays in the corpus).
@@ -912,9 +1012,10 @@ async function ingestCachedTranscript(
       headline: `${row.symbol} earnings call highlights ${row.fiscalYear} Q${row.fiscalQuarter}`,
       chunks: tradeHighlightChunksFromText(row.content, {
         maxChunks: 8,
-        formHint: "earnings"
+        formHint: "earnings",
+        sections
       }),
-      publishedAt: row.eventDate ?? row.fetchedAt,
+      publishedAt,
       acceptanceDatetime: row.fetchedAt
     });
   } catch (err) {
@@ -924,30 +1025,68 @@ async function ingestCachedTranscript(
     );
   }
 
-  return true;
-}
-
-// ── Recency signal (FMP calendar) ──────────────────────────────────────────────
-
-/** FMP earnings-calendar prefilter (spends FMP quota, not this budget). undefined on any
- *  failure or when FMP is unconfigured/unentitled — callers then fall back to probe mode. */
-async function fmpRecentlyReportedSymbols(nowMs: number): Promise<Set<string> | undefined> {
-  if (!process.env.FMP_API_KEY) return undefined;
+  // Keep-set extras: management + first 8 Q&A turns as complete storeDocuments (ROIC mirror).
+  const signalChunks = chunkDocument(
+    {
+      doc_id: `${accession}:signal`,
+      title,
+      doc_type: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
+      source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+      text: row.content,
+      ticker: row.symbol,
+      published_at: publishedAt,
+      acceptance_datetime: row.fetchedAt,
+      url,
+      sections
+    },
+    {}
+  );
   try {
-    const { requestFmp } = await import("./fmp-common");
-    const to = new Date(nowMs).toISOString().slice(0, 10);
-    const from = new Date(nowMs - earningsCallsRecentDays() * 86_400_000).toISOString().slice(0, 10);
-    const rows = await requestFmp<unknown>("/earnings-calendar", { from, to });
-    if (!Array.isArray(rows)) return undefined;
-    const reported = new Set<string>();
-    for (const row of rows) {
-      const symbol = normalizeSymbol(String((row as { symbol?: unknown } | null)?.symbol ?? ""));
-      if (symbol) reported.add(symbol);
-    }
-    return reported;
-  } catch {
-    return undefined;
+    await storeSignalSectionDocuments(
+      {
+        ticker: row.symbol,
+        accession,
+        form: "earnings-transcript",
+        title,
+        publishedAt,
+        acceptanceDatetime: row.fetchedAt,
+        source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+        url,
+        chunks: signalChunks,
+        userId: "local",
+        ...(leaseGuard ? { leaseGuard } : {})
+      },
+      storeDocument
+    );
+  } catch (err) {
+    console.warn(
+      `[earningscalls] signal sections failed for ${accession}:`,
+      err instanceof Error ? err.message : String(err)
+    );
   }
+
+  // Local FTS so hydrate can recover without dumping the full call into Pinecone.
+  // recordLedger false: ingest already wrote ingested_accessions above.
+  try {
+    await persistLocalComplete({
+      ticker: row.symbol,
+      accession,
+      docType: EARNINGSCALLS_TRANSCRIPT_DOC_TYPE,
+      source: EARNINGSCALLS_TRANSCRIPT_SOURCE,
+      chunks: signalChunks.map((chunk) => ({
+        content_hash: chunk.content_hash || hashContent(chunk.text),
+        text: chunk.text
+      })),
+      recordLedger: false
+    });
+  } catch (err) {
+    console.warn(
+      `[earningscalls] local FTS persist failed for ${accession}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+
+  return true;
 }
 
 /** UTC-safe event-date parse. A timezone-less date-time string parses as LOCAL time per
@@ -994,7 +1133,7 @@ export interface EarningsCallsScoredCandidate {
 export interface EarningsCallsCandidateInputs {
   /** symbol -> summed |position value| across every connected account (tier 1). */
   holdingsValue: Map<string, number>;
-  /** FMP calendar membership within the recency window — boolean recency signal (tier 2). */
+  /** Injected earnings-calendar membership within the recency window — boolean recency signal (tier 2). */
   recentlyReportedSymbols?: Set<string>;
   /** symbol -> most recent known event_date (from the event index / listing engine) — finer
    *  recency ordering within tier 2 when available. */
@@ -1056,7 +1195,7 @@ export function scoreEarningsCallsCandidates(inputs: EarningsCallsCandidateInput
       score: date ? Date.parse(date) : 0,
       rationale: date
         ? `Reported earnings ${date} (within the recency window).`
-        : "Reported earnings within the recency window (FMP calendar)."
+        : "Reported earnings within the recency window (earnings calendar)."
     });
   }
 
@@ -1569,10 +1708,10 @@ async function runEarningsCallsPass(
     const requestCeiling = effectivePassRequestCeiling(targetTranscripts);
     if (targetTranscripts <= 0) return;
 
-    // 3) Recency signal (FMP calendar) — also gates the daily listing call on a confirmed-quiet
+    // 3) Recency signal (injected earnings calendar; none in production, FMP is never used) — also gates the daily listing call on a confirmed-quiet
     //    day (memo: "0 requests" when nothing tracked reported). A burst always proceeds
     //    regardless: it explicitly reaches for a batch NOW, not just what reported today.
-    const reported = await (deps.recentlyReported ?? (() => fmpRecentlyReportedSymbols(nowMs)))();
+    const reported = deps.recentlyReported ? await deps.recentlyReported() : undefined;
     if (!isBurst && reported !== undefined && reported.size === 0) return; // quiet day, 0 requests
 
     // 4) Entitlement /me probe (only while status is genuinely unknown) — a best-effort tier-text

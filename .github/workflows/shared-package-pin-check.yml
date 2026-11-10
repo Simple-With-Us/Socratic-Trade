@@ -1,277 +1,51 @@
 name: Shared package pin check
 
-# Guards against @jaywedgeworth22/congress-trading-shared drifting between its two consumers:
-# App B = agentic-trading (this repo, spec in package.json) and App A = Congress.Trade (spec in
-# app/package.json). Both must pin the SAME version so the contract they compile against cannot
-# silently diverge. The OLD version of this check only compared a git-SHA pin against
-# congress-trading-shared@main and no-oped for semver-range/registry pins -- so it could not catch
-# the "^1.0.0 in one repo vs a newer version in the other" drift this workflow now covers.
+# Guards @jaywedgeworth22/congress-trading-shared across the three consumers:
+#   ST  = this repo (npm git tag in package.json + lock SHA)
+#   UM  = Usage-Monitor (public npm git tag)
+#   CT  = Congress.Trade vendor tree (VENDOR-PROVENANCE.md; no npm dep)
 #
-# What it does:
-#   1. Reads THIS repo's shared-package dependency spec (package.json).
-#   2. Fetches the PEER repo's spec (Congress.Trade app/package.json) via the GitHub API.
-#   3. Normalizes both specs to their ref-after-'#' form. If the normalized strings already
-#      match, done (fast path, no extra API calls).
-#   4. If they differ AND both specs are git-style refs (github:/git+/...#ref), resolves EACH
-#      ref to a commit SHA against the shared package repo (congress-trading-shared) via the
-#      GitHub API before declaring a divergence -- a tag pin (e.g. #v1.6.0) and a raw-SHA pin
-#      (e.g. #c4fcfb44...) can reference the SAME commit, which a naive string compare cannot
-#      see. Handles annotated tags (dereferences the tag object to its commit).
-#   5. FAILS (exit 1) when the two resolved commits (or, if resolution isn't applicable/possible,
-#      the two normalized strings) differ -- the divergence guard. If exactly one side resolves
-#      and the other errors, this FAILS loudly rather than silently falling back to a string
-#      compare that could be wrong. Only when NEITHER side resolves does it fall back to the
-#      original string-based comparison. Run on demand (workflow_dispatch) for a dry-run, or
-#      let it run on PRs / weekly.
-# Requires the GH_PACKAGES_TOKEN repo secret: a PAT with read access to the private
-# peer repo. Without it the peer comparison is skipped with a notice (the default
-# GITHUB_TOKEN cannot read other private repos), so an unauthenticated run never hard-fails.
-# (The shared package repo itself, congress-trading-shared, is PUBLIC, so ref-resolution calls
-# against it succeed regardless of GH_PACKAGES_TOKEN's scopes -- verified 2026-07-12.)
+# A missing CT npm spec is NOT "skip and pass" -- CT is vendor-only. The
+# script fails if CT cannot be read, if versions diverge, or if CT
+# reintroduces an npm dependency. See scripts/check-shared-package-pin.mjs.
 #
-# NOTE: this workflow is intentionally NOT part of the branch-protection ruleset, so a red result
-# flags divergence loudly without hard-blocking a coordinated two-repo bump (bump one repo, open
-# its PR, then the other). Promote it to a required check once bumps always land as a matched pair.
+# Required check name: `check-pin` (ruleset main-protection). Both consumers pin a public
+# git dependency, so this job must RUN on fork PRs too -- a skipped required check is
+# treated as satisfied. Congress.Trade is public. The script reads it with the Actions
+# installation token first. GH_PACKAGES_TOKEN is a user PAT fallback only. Preferring
+# that PAT makes a burst of pull requests share one rate limit and fail together.
 #
-# Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near shell $VARs.
+# Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near $VARs.
 
 on:
-  # The check must emit a status on every PR. A path filter leaves untouched PRs
-  # without a check-run, which can strand required-context merges indefinitely.
   pull_request:
   push:
     branches: [main]
   schedule:
-    - cron: '0 13 * * 1' # Mondays
+    - cron: '0 13 * * 1'
   workflow_dispatch:
-
-env:
-  PKG: '@jaywedgeworth22/congress-trading-shared'
-  PEER_REPO: jaywedgeworth22/Congress.Trade
-  PEER_PACKAGE_JSON_PATH: app/package.json
-  LOCAL_PACKAGE_JSON_PATH: package.json
-  # The repo both consumers' git-dependency refs (tags/SHAs) point into. Ref resolution below
-  # queries THIS repo, not PEER_REPO (which only hosts the consumer's package.json).
-  SHARED_REPO: jaywedgeworth22/congress-trading-shared
 
 jobs:
   check-pin:
-    # This job receives a private-repo token. Reject fork PRs before checkout or
-    # runner assignment; push/schedule/manual events remain admitted.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    # Self-hosted only: GitHub-hosted ubuntu-latest does not assign jobs for this repo
-    # (runner_id=0 / empty steps, 2026-07-18). Job still avoids disk races by reading
-    # package.json via the GitHub API when possible (see compare step).
+    # Must run on fork PRs. GitHub treats a skipped required check as satisfied.
+    # Congress.Trade is public, so GITHUB_TOKEN can read the peer package.json.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       # Keep the consumer manifest present even if cleanup from a prior job
       # overlaps this long-lived runner workspace after the first checkout.
       - name: Refresh checkout before reading package metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Compare shared-package version against the peer consumer
+      - name: Compare ST / UM / CT shared-package pins
         env:
-          # Default GH_TOKEN = GITHUB_TOKEN so local contents API works on this repo.
-          # Peer private-repo fetch overrides with GH_PACKAGES_TOKEN when set.
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Git dependencies compare by ref after '#'; registry ranges compare by version core.
-          # Normalize tag refs like v1.2.0 and semver refs like semver:^1.2.x.
-          norm() {
-            local spec="$1"
-            case "$1" in
-              github:*|git+*|*"#"*)
-                spec=$(printf '%s' "$spec" | sed -E 's/^.*#//')
-                ;;
-            esac
-            printf '%s' "$spec" | sed -E 's/^semver://; s/^[[:space:]]*[~^><=]+//; s/^v//; s/[[:space:]]//g'
-          }
-
-          # A spec is "git-style" when it names a ref after '#' (github:owner/repo#ref,
-          # git+https://...#ref, etc). Only these have a ref worth resolving to a commit.
-          is_git_spec() {
-            case "$1" in
-              github:*|git+*|*"#"*) return 0 ;;
-              *) return 1 ;;
-            esac
-          }
-
-          # The RAW ref after '#', with none of norm()'s semver stripping ('v' prefix etc).
-          # Ref resolution against the GitHub API needs the literal ref name -- the actual git
-          # tag is "v1.6.0", not "1.6.0", so resolving with the semver-normalized value would
-          # 404. norm() is still used for the fast-path string-equality check and the fallback
-          # comparison; git_ref() is only for API lookups.
-          git_ref() {
-            printf '%s' "$1" | sed -E 's/^.*#//'
-          }
-
-          # Prints "SHA TYPE" parsed from a GitHub git-refs/git-tags API JSON response on stdin.
-          # Empty output on parse failure.
-          parse_ref_json() {
-            node -e '
-              let s = "";
-              process.stdin.on("data", d => { s += d; });
-              process.stdin.on("end", () => {
-                try {
-                  const o = JSON.parse(s);
-                  const obj = o.object || {};
-                  console.log((obj.sha || "") + " " + (obj.type || ""));
-                } catch {
-                  console.log("");
-                }
-              });
-            '
-          }
-
-          # resolve_ref REPO REF
-          # Prints the resolved commit SHA (lowercase) to stdout and returns 0 on success.
-          # On failure returns 1 and prints a human-readable reason to STDERR (never to a
-          # global variable -- this function is always invoked via command substitution,
-          # i.e. in a subshell, so a global var assigned here would not survive back to the
-          # caller; callers that need the message must capture stderr themselves).
-          resolve_ref() {
-            local repo="$1" ref="$2" out rc sha type tagout tagsha parsed
-
-            if printf '%s' "$ref" | grep -qE '^[0-9a-fA-F]{40}$'; then
-              printf '%s' "$ref" | tr '[:upper:]' '[:lower:]'
-              return 0
-            fi
-
-            out=$(gh api "repos/${repo}/git/refs/tags/${ref}" 2>&1); rc=$?
-            if [ $rc -ne 0 ]; then
-              out=$(gh api "repos/${repo}/git/refs/heads/${ref}" 2>&1); rc=$?
-              if [ $rc -ne 0 ]; then
-                echo "could not resolve ref '${ref}' in ${repo} as a tag or branch: ${out}" >&2
-                return 1
-              fi
-            fi
-
-            parsed=$(printf '%s' "$out" | parse_ref_json)
-            sha="${parsed%% *}"
-            type="${parsed#* }"
-            if [ -z "$sha" ]; then
-              echo "unexpected API response resolving '${ref}' in ${repo}: ${out}" >&2
-              return 1
-            fi
-
-            if [ "$type" = "tag" ]; then
-              # Annotated tag -- dereference the tag object to the commit it points at.
-              tagout=$(gh api "repos/${repo}/git/tags/${sha}" 2>&1); rc=$?
-              if [ $rc -ne 0 ]; then
-                echo "could not dereference annotated tag object ${sha} for '${ref}' in ${repo}: ${tagout}" >&2
-                return 1
-              fi
-              parsed=$(printf '%s' "$tagout" | parse_ref_json)
-              tagsha="${parsed%% *}"
-              if [ -z "$tagsha" ]; then
-                echo "unexpected API response dereferencing tag object ${sha} for '${ref}' in ${repo}: ${tagout}" >&2
-                return 1
-              fi
-              sha="$tagsha"
-            fi
-
-            printf '%s' "$sha" | tr '[:upper:]' '[:lower:]'
-            return 0
-          }
-
-          # Prefer reading THIS repo's package.json via the GitHub API (same pattern as the
-          # peer fetch). Self-hosted workspaces race with cleanup and can lose the file after
-          # actions/checkout; API avoids that class of MODULE_NOT_FOUND entirely.
-          REF="${GITHUB_SHA}"
-          if [ -z "$REF" ]; then REF="HEAD"; fi
-          LOCAL_JSON=""
-          if LOCAL_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${LOCAL_PACKAGE_JSON_PATH}?ref=${REF}" -H "Accept: application/vnd.github.raw" 2>/dev/null); then
-            echo "Read ${LOCAL_PACKAGE_JSON_PATH} via API at ref ${REF}"
-          else
-            echo "::warning::API read of ${LOCAL_PACKAGE_JSON_PATH}@${REF} failed; falling back to disk"
-            if [ ! -f "${LOCAL_PACKAGE_JSON_PATH}" ]; then
-              git sparse-checkout disable 2>/dev/null || true
-              git reset --hard HEAD || true
-              git checkout -f HEAD -- "${LOCAL_PACKAGE_JSON_PATH}" 2>/dev/null || true
-            fi
-            if [ ! -f "${LOCAL_PACKAGE_JSON_PATH}" ]; then
-              echo "::error::${LOCAL_PACKAGE_JSON_PATH} unavailable via API and disk"
-              ls -la || true
-              exit 1
-            fi
-            LOCAL_JSON=$(cat "${LOCAL_PACKAGE_JSON_PATH}")
-          fi
-          LOCAL_SPEC=$(printf '%s' "$LOCAL_JSON" | PKG="$PKG" node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).dependencies||{})[process.env.PKG]||'')}catch{console.log('')}})")
-          if [ -z "$LOCAL_SPEC" ]; then
-            echo "::warning::${PKG} not found in ${LOCAL_PACKAGE_JSON_PATH} dependencies"
-            exit 0
-          fi
-          echo "Local spec (${LOCAL_PACKAGE_JSON_PATH}): $LOCAL_SPEC"
-
-          if [ -z "${GH_PACKAGES_TOKEN:-}" ]; then
-            echo "::notice::GH_PACKAGES_TOKEN is unset - skipping the peer divergence check (it needs read access to ${PEER_REPO})."
-            exit 0
-          fi
-
-          # Fetch the peer repo's package.json raw (Accept: raw returns file content, not base64).
-          # Use the packages PAT; default GITHUB_TOKEN cannot read other private repos.
-          if ! PEER_JSON=$(GH_TOKEN="$GH_PACKAGES_TOKEN" gh api "repos/${PEER_REPO}/contents/${PEER_PACKAGE_JSON_PATH}" -H "Accept: application/vnd.github.raw" 2>/dev/null); then
-            echo "::warning::could not fetch ${PEER_REPO}/${PEER_PACKAGE_JSON_PATH} (auth/scope/transient error) - skipping peer check"
-            exit 0
-          fi
-          PEER_SPEC=$(printf '%s' "$PEER_JSON" | PKG="$PKG" node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).dependencies||{})[process.env.PKG]||'')}catch{console.log('')}})")
-          if [ -z "$PEER_SPEC" ]; then
-            echo "::warning::${PKG} not found in ${PEER_REPO}/${PEER_PACKAGE_JSON_PATH} - cannot compare"
-            exit 0
-          fi
-          echo "Peer spec  (${PEER_REPO}/${PEER_PACKAGE_JSON_PATH}): $PEER_SPEC"
-
-          LOCAL_V=$(norm "$LOCAL_SPEC")
-          PEER_V=$(norm "$PEER_SPEC")
-
-          if [ "$LOCAL_V" = "$PEER_V" ]; then
-            echo "OK: both consumers pin ${PKG}@${LOCAL_V}."
-            exit 0
-          fi
-
-          if is_git_spec "$LOCAL_SPEC" && is_git_spec "$PEER_SPEC"; then
-            echo "Normalized refs differ ('${LOCAL_V}' vs '${PEER_V}') - resolving both against ${SHARED_REPO} before declaring a divergence."
-
-            LOCAL_REF=$(git_ref "$LOCAL_SPEC")
-            PEER_REF=$(git_ref "$PEER_SPEC")
-
-            LOCAL_ERRFILE=$(mktemp); PEER_ERRFILE=$(mktemp)
-
-            LOCAL_SHA=""; LOCAL_OK=1; LOCAL_ERR=""
-            if LOCAL_SHA=$(resolve_ref "$SHARED_REPO" "$LOCAL_REF" 2>"$LOCAL_ERRFILE"); then LOCAL_OK=0; else LOCAL_ERR=$(cat "$LOCAL_ERRFILE"); fi
-
-            PEER_SHA=""; PEER_OK=1; PEER_ERR=""
-            if PEER_SHA=$(resolve_ref "$SHARED_REPO" "$PEER_REF" 2>"$PEER_ERRFILE"); then PEER_OK=0; else PEER_ERR=$(cat "$PEER_ERRFILE"); fi
-
-            rm -f "$LOCAL_ERRFILE" "$PEER_ERRFILE"
-
-            if [ $LOCAL_OK -eq 0 ] && [ $PEER_OK -eq 0 ]; then
-              if [ "$LOCAL_SHA" = "$PEER_SHA" ]; then
-                echo "OK: both consumers reference the same commit of ${PKG} (local '${LOCAL_SPEC}' -> ${LOCAL_SHA}; peer '${PEER_SPEC}' -> ${PEER_SHA})."
-                exit 0
-              else
-                echo "::error::${PKG} pin DIVERGED at the commit level: this repo pins '${LOCAL_SPEC}' (-> ${LOCAL_SHA}) but ${PEER_REPO} pins '${PEER_SPEC}' (-> ${PEER_SHA}). Pin BOTH repos to the same exact commit (bump them as a matched pair)."
-                exit 1
-              fi
-            elif [ $LOCAL_OK -ne 0 ] && [ $PEER_OK -ne 0 ]; then
-              echo "::warning::could not resolve either ref against ${SHARED_REPO} (local: ${LOCAL_ERR}; peer: ${PEER_ERR}) - falling back to normalized string comparison."
-              echo "::error::${PKG} pin DIVERGED: this repo pins '${LOCAL_SPEC}' but ${PEER_REPO} pins '${PEER_SPEC}'. Pin BOTH repos to the same exact version (bump them as a matched pair)."
-              exit 1
-            else
-              echo "::error::could not verify whether ${PKG} pins reference the same commit: ref resolution succeeded for one side but not the other (local resolved=$([ $LOCAL_OK -eq 0 ] && echo yes || echo no), peer resolved=$([ $PEER_OK -eq 0 ] && echo yes || echo no)). Local spec '${LOCAL_SPEC}', peer spec '${PEER_SPEC}'. Failure detail: local='${LOCAL_ERR}' peer='${PEER_ERR}'. Refusing to silently fall back to a string comparison that could be wrong -- fix the ref or investigate the API error."
-              exit 1
-            fi
-          else
-            echo "::error::${PKG} pin DIVERGED: this repo pins '${LOCAL_SPEC}' but ${PEER_REPO} pins '${PEER_SPEC}'. Pin BOTH repos to the same exact version (bump them as a matched pair)."
-            exit 1
-          fi
+        run: node scripts/check-shared-package-pin.mjs

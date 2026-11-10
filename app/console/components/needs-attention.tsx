@@ -29,7 +29,7 @@ export function NeedsAttention({ snapshot }: { snapshot: DashboardSnapshot }) {
     <Card title={`Needs attention${items.length > 0 ? ` (${items.length})` : ""}`}>
       {items.length === 0 ? (
         <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
-          Nothing needs you right now. Quiet is a legitimate state — the strategy reports deliberate inaction too.
+          Nothing needs you right now.  Quiet is a legitimate state — the strategy reports deliberate inaction too.
         </p>
       ) : (
         <div className="flex flex-col gap-2">

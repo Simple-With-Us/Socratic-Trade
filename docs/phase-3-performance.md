@@ -1,5 +1,7 @@
 # Phase 3 - Performance Tracking And Reconciliation
 
+2026-08-17 trading-outcomes audit (`docs/audits/2026-08-17-trading-outcomes.md`): paper vs live series and FIFO lots remain the performance contract.  Residual validation gaps are paper cost default (1 bps) vs OOS (20 bps), pending_reconciliation zero prints, and missing `outcome_join_coverage_pct` / live mid-vs-fill slippage.
+
 ## Goals
 
 - Persist portfolio snapshots, fill events, and run attribution.

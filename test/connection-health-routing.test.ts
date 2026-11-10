@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +30,9 @@ describe("Connection Health & Failure Routing", () => {
     process.env.PRIMARY_USER_EMAIL = "admin@socratic.trade";
     process.env.RESEND_API_KEY = "re_test_key";
     process.env.NOTIFY_EMAIL_FROM = "alerts@socratic.trade";
+    delete process.env.PUSHOVER_APP_TOKEN;
+    delete process.env.PUSHOVER_ST_API_TOKEN;
+    delete process.env.PUSHOVER_USER_KEY;
     
     // Clear out cooldown keys from DB
     const { db } = await load();
@@ -46,6 +50,7 @@ describe("Connection Health & Failure Routing", () => {
     delete process.env.DB_BOOTSTRAP;
     delete process.env.LITESTREAM_SOCKET_PATH;
     delete process.env.LITESTREAM_STATE_PATH;
+    delete process.env.LITESTREAM_RUNTIME_LOG_PATH;
     delete process.env.RAG_EMBED_PROVIDER;
     // Remove provider keys seeded by the provider-aware rag-embed criticality tests so
     // activeEmbeddingProvider() does not leak across cases.
@@ -114,6 +119,23 @@ describe("Connection Health & Failure Routing", () => {
       })
     );
     expect(sendNotificationSpy.mock.calls[0]?.[1]?.additionalDelivery).toBeUndefined();
+  });
+
+  it("does not add a Pushover fallback when the user already enabled that channel", async () => {
+    const { db, health, notifyMod, notificationsMod } = await load();
+    process.env.PUSHOVER_APP_TOKEN = "pv-token";
+    process.env.PUSHOVER_USER_KEY = "u1userkey";
+    db.setNotifyPrefs("local", { channels: ["pushover"], pushoverTarget: "u1userkey" });
+    const notifySpy = vi.spyOn(notifyMod, "notify").mockResolvedValue([]);
+    const sendNotificationSpy = vi.spyOn(notificationsMod, "sendNotification").mockResolvedValue({} as any);
+
+    await health.alertConnectionFailure("pinecone", "env", "u_tenant", "API Key Invalid");
+
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(sendNotificationSpy).toHaveBeenCalledOnce();
+    expect(sendNotificationSpy.mock.calls[0]?.[1]?.additionalDelivery).toBeUndefined();
+    delete process.env.PUSHOVER_APP_TOKEN;
+    delete process.env.PUSHOVER_USER_KEY;
   });
 
   it("does not add the operator fallback when a preferred email target already exists", async () => {
@@ -185,6 +207,64 @@ describe("Connection Health & Failure Routing", () => {
     expect(body.checks.dependencies["rag-embed"].ok).toBe(true);
   });
 
+  it("/api/health does not flip dataProvidersDegraded on a matching free Massive plan", async () => {
+    const { healthRoute, db } = await load();
+    const { registerPlanTierLookupForTests } = await import("../src/lib/provider-tier-plan");
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    db.setInternalSetting("providerTier:status:local", {
+      massive: {
+        tier: "free",
+        at: new Date().toISOString(),
+        reason: "plan-access probe: ~2.5y blocked",
+        signal: "history_cap_blocked"
+      }
+    });
+    registerPlanTierLookupForTests((service) => (service === "massive" ? "free" : null));
+    try {
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.checks.dataProviders.massive.tier).toBe("free");
+      expect(body.checks.dataProvidersDegraded).toBeUndefined();
+    } finally {
+      registerPlanTierLookupForTests((service) => db.getUserApiKey("local", service)?.planTier ?? null);
+    }
+  });
+
+  it("/api/health degrades when a paid Massive plan is history-capped or the probe fails", async () => {
+    const { healthRoute, db } = await load();
+    const { registerPlanTierLookupForTests } = await import("../src/lib/provider-tier-plan");
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    registerPlanTierLookupForTests((service) => (service === "massive" ? "starter" : null));
+    try {
+      db.setInternalSetting("providerTier:status:local", {
+        massive: {
+          tier: "free",
+          at: new Date().toISOString(),
+          reason: "plan-access probe: ~2.5y blocked HTTP 403",
+          signal: "history_cap_blocked"
+        }
+      });
+      let body = await (await healthRoute.GET(anonymousHealthRequest())).json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.dataProvidersDegraded).toBe(true);
+
+      db.setInternalSetting("providerTier:status:local", {
+        massive: {
+          tier: "unknown",
+          at: new Date().toISOString(),
+          reason: "recent probe network/timeout error",
+          signal: "probe_error"
+        }
+      });
+      body = await (await healthRoute.GET(anonymousHealthRequest())).json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.dataProvidersDegraded).toBe(true);
+    } finally {
+      registerPlanTierLookupForTests((service) => db.getUserApiKey("local", service)?.planTier ?? null);
+    }
+  });
+
   it("/api/health returns 503 when a critical global dependency fails, but stays 200 for user failures", async () => {
     const { healthRoute, db } = await load();
 
@@ -211,6 +291,52 @@ describe("Connection Health & Failure Routing", () => {
     body = await response.json();
     expect(body.ok).toBe(false);
     expect(body.checks.dependencies.pinecone.ok).toBe(false);
+  });
+
+  it("/api/health stays 200 when Pinecone is hard-stopped but Qdrant is the read backend", async () => {
+    process.env.QDRANT_URL = "http://127.0.0.1:6333";
+    process.env.QDRANT_API_KEY = "test-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      for (let i = 0; i < 5; i++) {
+        db.logApiHealth({ service: "pinecone", ok: false, errorText: "fetch failed", keySource: "env" });
+      }
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.qdrantConfigured).toBe(true);
+      expect(body.checks.ragVectorReadBackend).toBe("qdrant");
+      expect(body.checks.ragVectorWriteBackend).toBe("qdrant");
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+      delete process.env.QDRANT_URL;
+      delete process.env.QDRANT_API_KEY;
+    }
+  });
+
+  it("/api/health reports a misconfigured Qdrant write backend without dropping the rest of the RAG block", async () => {
+    delete process.env.QDRANT_URL;
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.ragVectorWriteBackend).toBe("misconfigured");
+      expect(body.checks.ragVectorWriteBackendError).toMatch(/QDRANT_URL/);
+      expect(body.checks.ragConfigured).toBe(false);
+      expect(body.checks.qdrantConfigured).toBe(false);
+      expect(body.checks.ragVectorReadBackend).toBeDefined();
+      expect(body.checks.ragEmbedProvider ?? body.checks.ragEmbedProviderError).toBeDefined();
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+    }
   });
 
   it("/api/health stays 200 when env lane hard-stops but a user-keyed lane for the same critical service is healthy", async () => {
@@ -246,13 +372,11 @@ describe("Connection Health & Failure Routing", () => {
     expect(body.checks.dependencies["alpaca-broker"].degraded).toBe(true);
   });
 
-  // rag-embed/rag-rerank criticality (bge-m3-metering-gate 2026-07-18; lane rename 2026-07-19 —
-  // see docs/rollouts/2026-07-19-advisory-cleanup-batch.md). The lanes are now provider-generic:
-  // whichever embed/rerank provider is ACTUALLY active (Voyage, OpenRouter, SiliconFlow) logs
-  // under "rag-embed"/"rag-rerank", so they are UNCONDITIONALLY critical — fixing the prior gap
-  // where "voyage"/"voyage-rerank" only gated liveness while Voyage itself was the active provider,
-  // meaning a dead OpenRouter/bge-m3 lane never failed liveness at all.
-  it("/api/health 503s on a hard-stopped rag-embed/rag-rerank lane when OpenRouter is the active embed provider", async () => {
+  // rag-embed/rag-rerank (bge-m3-metering-gate 2026-07-18; lane rename 2026-07-19; soft-degrade
+  // 2026-08-18). The lanes stay provider-generic and are still REPORTED, but they must NEVER 503
+  // Docker: a restart cannot revive a dead embed and re-halts Green/Red via the boot interlock.
+  // pinecone + alpaca-broker remain the only critical liveness deps.
+  it("/api/health degrades a hard-stopped rag-embed/rag-rerank lane without 503 when OpenRouter is the active embed provider", async () => {
     const { healthRoute, db } = await load();
 
     db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
@@ -264,24 +388,54 @@ describe("Connection Health & Failure Routing", () => {
     }
 
     const response = await healthRoute.GET(anonymousHealthRequest());
-    expect(response.status).toBe(503); // now correctly critical regardless of which provider is active
+    expect(response.status).toBe(200);
 
     const body = await response.json();
-    expect(body.ok).toBe(false);
+    expect(body.ok).toBe(true);
     expect(body.checks.ragEmbedProvider).toBe("openrouter");
     expect(body.checks.dependencies["rag-embed"].ok).toBe(false);
+    expect(body.checks.dependencies["rag-embed"].degraded).toBe(true);
     expect(body.checks.dependencies["rag-rerank"].ok).toBe(false);
+    expect(body.checks.dependencies["rag-rerank"].degraded).toBe(true);
   });
 
-  it("/api/health still 503s on a hard-stopped rag-embed lane when Voyage IS the active embed provider", async () => {
+  it("/api/health degrades a hard-stopped rag-embed lane without 503 when Voyage IS the active embed provider", async () => {
     const { healthRoute, db } = await load();
 
     db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
-    // Test-only voyage path: only when no openrouter/siliconflow key is present.
+    // Pin Voyage so a leftover env siliconflow/openrouter key cannot steal the lane.
+    delete process.env.SILICONFLOW_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      db.deleteUserApiKey("local", "openrouter");
+      db.deleteUserApiKey("local", "siliconflow");
+    } catch { /* best-effort */ }
     db.upsertUserApiKey("local", "voyage", "voyage-test-key");
+    process.env.RAG_EMBED_PROVIDER = "voyage";
 
     for (let i = 0; i < 5; i++) {
       db.logApiHealth({ service: "rag-embed", ok: false, errorText: "Voyage down", keySource: "env" });
+    }
+
+    const response = await healthRoute.GET(anonymousHealthRequest());
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    expect(body.checks.ragEmbedProvider).toBe("voyage");
+    expect(body.checks.dependencies["rag-embed"].ok).toBe(false);
+    expect(body.checks.dependencies["rag-embed"].degraded).toBe(true);
+  });
+
+  it("/api/health still 503s on a hard-stopped pinecone lane (critical) even when rag-embed is also dead", async () => {
+    const { healthRoute, db } = await load();
+
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    db.upsertUserApiKey("local", "openrouter", "or-test-key");
+
+    for (let i = 0; i < 5; i++) {
+      db.logApiHealth({ service: "pinecone", ok: false, errorText: "Pinecone down", keySource: "env" });
+      db.logApiHealth({ service: "rag-embed", ok: false, errorText: "OpenRouter down", keySource: "env" });
     }
 
     const response = await healthRoute.GET(anonymousHealthRequest());
@@ -289,8 +443,9 @@ describe("Connection Health & Failure Routing", () => {
 
     const body = await response.json();
     expect(body.ok).toBe(false);
-    expect(body.checks.ragEmbedProvider).toBe("voyage");
+    expect(body.checks.dependencies.pinecone.ok).toBe(false);
     expect(body.checks.dependencies["rag-embed"].ok).toBe(false);
+    expect(body.checks.dependencies["rag-embed"].degraded).toBe(true);
   });
 
   it("/api/health does not fail liveness on a hard-stopped legacy 'voyage' lane (pre-rename/back-compat rows are no longer critical)", async () => {
@@ -352,6 +507,24 @@ describe("Connection Health & Failure Routing", () => {
     expect(body.checks.dependencies.apify.ok).toBe(false);
   });
 
+  it("/api/health stays 200 when FilingAPI 401s (optional lane, soft skip)", async () => {
+    const { healthRoute, db } = await load();
+
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    for (let i = 0; i < 5; i++) {
+      db.logApiHealth({ service: "filingapi", ok: false, errorText: "Invalid API key", keySource: "env" });
+    }
+
+    const response = await healthRoute.GET(anonymousHealthRequest());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ok).toBe(true);
+    // Optional lane: 401s are soft, so public health is ok (possibly degraded), never 503.
+    const filing = body.checks.dependencies.filingapi;
+    expect(filing).toBeDefined();
+    expect(filing.ok).toBe(true);
+  });
+
   it("/api/health reports the live recovery path degraded when Litestream cannot be observed", async () => {
     const { healthRoute, db } = await load();
 
@@ -370,6 +543,249 @@ describe("Connection Health & Failure Routing", () => {
       litestreamDegradedReasons: ["unavailable"]
     });
     expect(body.checks.storageDegraded).toBe(true);
+  });
+
+  // The gap this exists to close: the pre-existing litestream* fields above only ever reflect
+  // level 0 (continuous sync), so a stuck level-1 compactor left production silently unmonitored
+  // for 27+ hours on 2026-08-11 (docs/rollouts/2026-08-09-event-loop-stall-instrumentation.md) —
+  // level 0 kept succeeding the whole time. This reproduces that exact shape against the real
+  // route: a fresh level-0 file (so the OLD signal stays non-degraded) alongside a stale
+  // level-1 file, and asserts the NEW checks.storage.litestreamTiers field is what actually
+  // flags it, and that it alone is sufficient to flip storageDegraded.
+  it("/api/health flags a stuck level-1 compactor via litestreamTiers even while the pre-existing litestream* fields stay non-degraded", async () => {
+    const { healthRoute, db } = await load();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+
+    const stateRoot = mkdtempSync(join(tmpdir(), "health-route-litestream-tiers-"));
+    try {
+      const writeTierFile = (tier: "0" | "1" | "9", mtime: Date) => {
+        const dir = join(stateRoot, "ltx", tier);
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, `${tier}.ltx`);
+        writeFileSync(file, "ltx");
+        utimesSync(file, mtime, mtime);
+      };
+      const now = new Date();
+      writeTierFile("0", new Date(now.getTime() - 30_000)); // 30s old — healthy
+      writeTierFile("1", new Date(now.getTime() - 27 * 3_600_000)); // 27h old — wedged
+      // No socket is listening and DB_BOOTSTRAP is not "live", so the pre-existing signal falls
+      // back to a whole-tree file scan (source: "file") — its newest mtime is level 0's, which
+      // is fresh, so the OLD mechanism stays non-degraded (see the "file signal diagnostic-only"
+      // unit test in runtime-health.test.ts). Only the new per-tier field should catch level 1.
+      process.env.LITESTREAM_SOCKET_PATH = join(stateRoot, "missing.sock");
+      process.env.LITESTREAM_STATE_PATH = stateRoot;
+
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+
+      expect(body.checks.storage.litestreamDegradedReasons).toEqual([]);
+      expect(body.checks.storage.litestreamTiers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tier: "0", state: "known", degraded: false }),
+          expect.objectContaining({ tier: "1", state: "known", degraded: true }),
+          // No local level-9 directory and no replica inventory in this test process: the
+          // route must say it CANNOT see the level, not imply it looked and found nothing.
+          expect.objectContaining({ tier: "9", state: "not-observable", reason: "remote-inventory-missing" })
+        ])
+      );
+      expect(body.checks.storageDegraded).toBe(true);
+    } finally {
+      rmSync(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  // 2026-09-01 product: L2/L3 are off.  The 2026-08-14 empty-L2 wedge is still covered
+  // in runtime-health.test.ts with disabledTiers: [].  The public route must not page
+  // leftover empty L2/L3 as a wedge, or the next deploy would 200-with-storageDegraded
+  // forever after we stop compacting those levels.
+  it("/api/health does not page empty L2/L3 when those levels are product-disabled", async () => {
+    const { healthRoute, db } = await load();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+
+    const inventoryMod = await import("../src/lib/litestream-remote-inventory");
+    const stateRoot = mkdtempSync(join(tmpdir(), "health-route-empty-wedge-"));
+    try {
+      const now = Date.now();
+      const dir = join(stateRoot, "ltx", "0");
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "00000000000468d8-00000000000468d8.ltx");
+      writeFileSync(file, "ltx");
+      const fresh = new Date(now - 30_000);
+      utimesSync(file, fresh, fresh);
+      process.env.LITESTREAM_SOCKET_PATH = join(stateRoot, "missing.sock");
+      process.env.LITESTREAM_STATE_PATH = stateRoot;
+
+      // Persisted via durable_state, exactly as the scheduler writes it, so the route's own
+      // module instance reads the same row (see PR #2683 — the module-level cache never
+      // reached the route handlers).
+      inventoryMod.setLitestreamRemoteInventoryCache({
+        collectedAt: new Date(now - 4 * 60_000).toISOString(),
+        status: "ok",
+        levels: {
+          "1": { level: 1, newestAt: new Date(now - 4 * 60_000).toISOString(), newestTxid: "00000000000468d8", fileCount: 2032 },
+          "2": { level: 2, newestAt: "", newestTxid: null, fileCount: 0 },
+          "3": { level: 3, newestAt: "", newestTxid: null, fileCount: 0 },
+          "9": { level: 9, newestAt: new Date(now - 3.8 * 3_600_000).toISOString(), newestTxid: "0000000000043200", fileCount: 2 }
+        },
+        levelErrors: {},
+        skippedReason: null
+      });
+
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      // A backup-compaction wedge is NOT a reason to 503: the route's own header comment records
+      // that a spurious 503 restarts the container, and a restart cannot clear a wedged B2
+      // compaction — the root cause is the rolling deploy's double-writer window, so restart
+      // loops would deepen the damage.
+      expect(response.status).toBe(200);
+      const body = await response.json();
+
+      // The pre-existing daemon-level signal stays silent, exactly as it did in production.
+      expect(body.checks.storage.litestreamDegradedReasons).toEqual([]);
+      expect(body.checks.storage.litestreamTiers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ tier: "1", state: "known", degraded: false }),
+          expect.objectContaining({
+            tier: "2",
+            state: "empty",
+            verdict: "expected",
+            reason: "product-disabled",
+            degraded: false
+          }),
+          expect.objectContaining({
+            tier: "3",
+            state: "empty",
+            verdict: "expected",
+            reason: "product-disabled",
+            degraded: false
+          }),
+          expect.objectContaining({ tier: "9", state: "known", degraded: false })
+        ])
+      );
+      expect(body.checks.storage.litestreamTiersDegraded).toBe(false);
+      expect(body.checks.storage.litestreamTierDegradedReasons).toEqual([]);
+      expect(body.checks.storageDegraded).toBeFalsy();
+      // Five levels listed, five observed: an empty disabled level is still measured.
+      expect(body.checks.storage.litestreamTierCoverage).toMatchObject({ observed: 5, notObservable: 0 });
+    } finally {
+      inventoryMod.setLitestreamRemoteInventoryCache(null);
+      rmSync(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  // A THIRD, independent signal (2026-08-13): litestream's own log lines, teed to a local file
+  // by scripts/coolify-prod-start.sh and scanned by src/lib/runtime-health.ts's
+  // scanLitestreamRuntimeLogFile. This is deliberately independent of BOTH mechanisms above — it
+  // needs no S3/B2 credentials and does not read the remote LTX inventory
+  // (src/lib/litestream-remote-inventory.ts), so it still catches a wedge even while every tier
+  // above reports "not-observable" (the shape production is actually in right now: the
+  // remote-inventory scheduler has a separate known bug that leaves it permanently "missing").
+  it("/api/health flags a wedged compactor from litestream's own teed log even when the tier system is fully blind", async () => {
+    const { healthRoute, db } = await load();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    process.env.PRIMARY_USER_EMAIL = "admin@socratic.trade";
+
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        calls.push(String(url));
+        return new Response("ok", { status: 200 });
+      })
+    );
+
+    const logPath = join(tmpdir(), `litestream-runtime-${randomUUID()}.log`);
+    writeFileSync(
+      logPath,
+      [
+        'time=2026-08-08T14:35:12Z level=INFO msg="starting compaction monitor" level=2 interval=5m0s',
+        'time=2026-08-08T14:40:12Z level=ERROR msg="compaction failed" level=2 error="write ltx file: extract timestamp from LTX header: non-contiguous transaction ids"'
+      ].join("\n")
+    );
+    process.env.LITESTREAM_RUNTIME_LOG_PATH = logPath;
+    // No socket, no state dir, no remote inventory in this test process: the pre-existing
+    // litestream* fields AND the per-tier breakdown are both blind here, on purpose — proving
+    // the log-based signal alone is what catches this.
+    process.env.LITESTREAM_SOCKET_PATH = join(tmpdir(), `missing-litestream-${randomUUID()}.sock`);
+    process.env.LITESTREAM_STATE_PATH = join(tmpdir(), `missing-litestream-${randomUUID()}`);
+
+    try {
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+
+      // Both pre-existing mechanisms are blind in this test process (no socket, no state dir, no
+      // remote inventory) — the whole point of this test is that the log-based signal below is
+      // what catches it, not either of these.
+      expect(body.checks.storage.litestreamDegradedReasons).toEqual([]);
+      expect(
+        body.checks.storage.litestreamTiers.every((t: { state: string }) => t.state === "not-observable")
+      ).toBe(true);
+      expect(body.checks.storage.litestreamCompactionLogFailureCount).toBe(1);
+      expect(body.checks.storageDegraded).toBe(true);
+
+      // The route fires alertStorageWarning fire-and-forget (`void alertStorageWarning(...)`,
+      // matching every other storage alert in this route) alongside whatever other dependency
+      // alerts this health pass also triggers, so the response can resolve before delivery
+      // finishes and other notification rows can interleave — poll for THIS one specifically
+      // rather than asserting the most-recent row or a synchronous fetch-call count.
+      const findOurEvent = () => {
+        const rows = db
+          .getDb()
+          .prepare("SELECT payload FROM audit_events WHERE kind = 'notification' ORDER BY created_at DESC LIMIT 20")
+          .all() as { payload: string }[];
+        return rows
+          .map((r) => JSON.parse(r.payload))
+          .find((p) => p.title === "Storage Warning: litestream compaction log failure");
+      };
+      const payload = await vi.waitFor(() => {
+        const found = findOurEvent();
+        expect(found).toBeDefined();
+        return found;
+      });
+      expect(payload.status).toBe("sent");
+      expect(calls).toContain("https://api.resend.com/emails");
+    } finally {
+      try {
+        unlinkSync(logPath);
+      } catch {
+        // best-effort
+      }
+    }
+  });
+
+  it("/api/health reports zero compaction-log findings when litestream's runtime log has no failure lines", async () => {
+    const { healthRoute, db } = await load();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+
+    const logPath = join(tmpdir(), `litestream-runtime-healthy-${randomUUID()}.log`);
+    writeFileSync(
+      logPath,
+      'time=2026-08-13T01:00:00Z level=INFO msg="compaction complete" level=1 txid=00000000000123ab size=4096\n'
+    );
+    process.env.LITESTREAM_RUNTIME_LOG_PATH = logPath;
+
+    try {
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      const body = await response.json();
+      expect(body.checks.storage.litestreamCompactionLogFailureCount).toBe(0);
+    } finally {
+      try {
+        unlinkSync(logPath);
+      } catch {
+        // best-effort
+      }
+    }
+  });
+
+  it("/api/health reports zero compaction-log findings when the log file does not exist at all (litestream not booted this way)", async () => {
+    const { healthRoute, db } = await load();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    process.env.LITESTREAM_RUNTIME_LOG_PATH = join(tmpdir(), `does-not-exist-${randomUUID()}.log`);
+
+    const response = await healthRoute.GET(anonymousHealthRequest());
+    const body = await response.json();
+    expect(body.checks.storage.litestreamCompactionLogFailureCount).toBe(0);
   });
 
   // Alpha Vantage daily-cap exhaustion is a quota failure, not a transient connection blip: it

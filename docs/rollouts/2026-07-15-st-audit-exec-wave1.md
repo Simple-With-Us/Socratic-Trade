@@ -121,7 +121,7 @@ changed.
 Full gate run on the merged tree (wave commit `d2fb2208` + merge of `origin/main` @ `951fe45c`,
 which brought in #1629/#1630/#1631/#1632/#1636/#1637; a second pre-land merge then brought in
 #1634 @ `ab400bbc` — both merges auto-resolved with zero conflicts; overlapping files touched
-disjoint regions as coordinated on #agent-sync. land.sh's fork-point same-file guard
+disjoint regions as coordinated on #ag***-s**c. land.sh's fork-point same-file guard
 (STATUS.md/docs/EFFORT-LOG.md) was bypassed with LAND_ALLOW_STALE_OVERLAP=1 only after this
 deliberate merge-and-review, per the script's own instruction),
 under node@24 (`PATH=/opt/homebrew/opt/node@24/bin:$PATH`, node v24.18.0 — system node v26

@@ -88,6 +88,17 @@ export interface LlmRunArgs {
   context?: { memorySummary?: string };
   /** Prior redacted turns (chronological) for multi-turn context. The current message is separate. */
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /** Wall-clock deadline for this turn. Later tool-loop steps skip when remaining < minStageBudgetMs. */
+  deadlineMs?: number;
+  minStageBudgetMs?: number;
+  abortSignal?: AbortSignal;
+  onStage?: (stage: {
+    stage: "thinking" | "tool_start" | "tool_done" | "stage_skipped" | "generating" | "done" | "error";
+    tool?: string;
+    reason?: string;
+    remainingMs?: number;
+    minStageMs?: number;
+  }) => void;
 }
 
 export interface LlmResult {

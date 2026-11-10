@@ -12,11 +12,12 @@ import {
   parseAlphaVantageOverview,
   parseAlphaVantageNewsSentiment,
   resolveRapidApiKey,
-  AlphaVantageRapidApiEnrichmentProvider, FmpRapidApiEnrichmentProvider, InsidersRapidApiEnrichmentProvider, TwelveDataRapidApiEnrichmentProvider,
+  AlphaVantageRapidApiEnrichmentProvider, InsidersRapidApiEnrichmentProvider, TwelveDataRapidApiEnrichmentProvider,
   type MarketEnrichmentProvider,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
 import { __resetRapidApiQuotaForTests } from "../src/lib/rapidapi-quota";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
 
 // Isolated temp SQLite DB per this test file (repo convention — see beforeAll in
 // test/data-providers.test.ts) so persisted budget/exhaustion state never leaks between files.
@@ -29,11 +30,14 @@ beforeAll(() => {
 beforeEach(() => {
   __resetRapidApiQuotaForTests();
   clearEnrichmentCache();
+  clearProviderFieldCacheForTests();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.RAPIDAPI_KEY;
+  delete process.env.YH_FINANCE_APIDOJO_ENABLED;
+  delete process.env.SEEKING_ALPHA_RAPIDAPI_ENABLED;
   delete process.env.PROVIDER_QUOTA_MBOUM_PER_DAY;
   delete process.env.PROVIDER_QUOTA_YAHOO_FINANCE15_PER_DAY;
   delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY;
@@ -285,6 +289,24 @@ describe("RapidAPI providers — registered as a failover tier AFTER yahoo-finan
     expect(yhf15Idx).toBeGreaterThan(mboumIdx);
     expect(avRapidIdx).toBeGreaterThan(yhf15Idx);
   });
+
+  it("does not register YH ApiDojo or Seeking Alpha unless explicitly enabled", () => {
+    process.env.RAPIDAPI_KEY = "test-rapidapi-key";
+    delete process.env.YH_FINANCE_APIDOJO_ENABLED;
+    delete process.env.SEEKING_ALPHA_RAPIDAPI_ENABLED;
+    const order = getEnrichmentProvider().name.split("+");
+    expect(order).not.toContain("yh-finance-apidojo");
+    expect(order).not.toContain("seeking-alpha-rapidapi");
+    expect(order.filter((name) => name === "alpaca-news").length).toBeLessThanOrEqual(1);
+  });
+
+  it("registers YH ApiDojo only when YH_FINANCE_APIDOJO_ENABLED=1", () => {
+    process.env.RAPIDAPI_KEY = "test-rapidapi-key";
+    process.env.YH_FINANCE_APIDOJO_ENABLED = "1";
+    const order = getEnrichmentProvider().name.split("+");
+    expect(order).toContain("yh-finance-apidojo");
+    expect(order).not.toContain("seeking-alpha-rapidapi");
+  });
 });
 
 // ── Cascade failover semantics — free scrape wins ties, RapidAPI only fills gaps ────
@@ -368,6 +390,34 @@ describe("AlphaVantageRapidApiEnrichmentProvider — respects the persisted dail
     expect(filled.length).toBeLessThanOrEqual(2);
   });
 
+  it("skips OVERVIEW when core fund fields are filled even if epsGrowth is missing", async () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY = "10";
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ feed: [] }), { status: 200 });
+    });
+    const provider = new AlphaVantageRapidApiEnrichmentProvider("test-key", "env");
+    await provider.enrich(["AAPL"], {
+      coveredFields: {
+        AAPL: new Set([
+          "peRatio",
+          "dividendYield",
+          "eps",
+          "sector",
+          "industry",
+          "pbRatio",
+          "beta",
+          "fiftyTwoWeekHigh",
+          "fiftyTwoWeekLow",
+          "sentiment",
+          "headlines"
+        ])
+      }
+    });
+    expect(urls).toEqual([]);
+  });
+
   it("skips NEWS_SENTIMENT when coveredFields already has sentiment+headlines", async () => {
     process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY = "10";
     const urls: string[] = [];
@@ -433,23 +483,6 @@ describe("SteadyApiEnrichmentProvider (via getEnrichmentProvider) — combined c
     // Each provider's own cap (50) has plenty of headroom — the combined ceiling (3) is what binds,
     // regardless of how many symbols/fields would otherwise be requested.
     expect(rapidApiCallCount).toBeLessThanOrEqual(3);
-  });
-});
-
-describe("FmpRapidApiEnrichmentProvider", () => {
-  it("is a permanent no-op (FMP direct access retired — use Congress.Trade)", async () => {
-    const provider = new FmpRapidApiEnrichmentProvider("key");
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    const res = await provider.enrich(["AAPL"]);
-    expect(res).toEqual({});
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("keeps the provider name for cascade attribution stability", async () => {
-    const provider = new FmpRapidApiEnrichmentProvider("key");
-    expect(provider.name).toBe("fmp-rapidapi");
-    expect(provider.configured).toBe(true);
   });
 });
 

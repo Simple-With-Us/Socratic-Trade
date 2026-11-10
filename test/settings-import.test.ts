@@ -74,6 +74,24 @@ describe("importAccountSettings", () => {
     expect(db.getPolicy(userId, source).systemState).toBe("active");
   });
 
+  it("preserves the target's strategyAuthority — import never arms Autopilot", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `u-${randomUUID()}`;
+    const source = `source-${randomUUID()}`;
+    const target = `target-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: source, userId, broker: "alpaca", environment: "paper", accountNumber: "PA-S3", label: "Source", isActive: true });
+    db.upsertConnectedAccount({ id: target, userId, broker: "alpaca", environment: "live", accountNumber: "LV-T3", label: "Target", isActive: false });
+
+    db.setPolicy({ ...db.getPolicy(userId, source), strategyAuthority: "decide" }, userId, source);
+    db.setPolicy({ ...db.getPolicy(userId, target), strategyAuthority: "propose" }, userId, target);
+
+    const result = db.importAccountSettings(userId, source, target);
+
+    expect(result.strategyAuthority).toBe("propose");
+    expect(db.getPolicy(userId, target).strategyAuthority).toBe("propose");
+    expect(db.getPolicy(userId, source).strategyAuthority).toBe("decide");
+  });
+
   it("never copies identity fields — target keeps its own accountNumber/broker, and the source's never lands in target's stored JSON", async () => {
     const db = await import("../src/lib/db");
     const userId = `u-${randomUUID()}`;

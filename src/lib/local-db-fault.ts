@@ -41,29 +41,86 @@ const LOCAL_DB_FAULT_MESSAGE_PATTERNS: RegExp[] = [
   /\bSQLITE_(?:BUSY|LOCKED)\b/
 ];
 
+/** SQLite lock/contention shapes that appear inside an App A (Congress.Trade) import body, not ST's file. */
+const DEPENDENCY_DB_CONTENTION_SQLITE_PATTERNS: RegExp[] = [
+  /database is locked/i,
+  /database table is locked/i,
+  /\bSQLITE_(?:BUSY|LOCKED)\b/
+];
+
+/**
+ * True when a health `error_text` row is Congress.Trade-side (or other peer-app) database write
+ * contention surfaced through a successful HTTP import — NOT a broken share connection on ST.
+ *
+ * Prod (ST-3988, 2026-09-30): App A returned HTTP 200 with `ok:false` and per-row D1
+ * `SQLITE_BUSY` rejections.  `logApiHealth` still drove `alertConnectionFailure`, which titled the
+ * Sentry/PD event "congress-share connection failed" even though the token and transport were fine.
+ */
+export function isDependencyDbContentionMessage(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const hasContention = DEPENDENCY_DB_CONTENTION_SQLITE_PATTERNS.some((pattern) => pattern.test(message));
+  if (!hasContention) return false;
+  if (/D1 batch error/i.test(message)) return true;
+  const fromAppA =
+    /App A reported ok=/i.test(message) ||
+    /App A accepted fewer rows/i.test(message) ||
+    /import rejected rows/i.test(message);
+  return fromAppA;
+}
+
+/** Sentry `health.failure_class` for peer-app DB contention (must not route as `hard`). */
+export const HEALTH_FAILURE_CLASS_DEPENDENCY_DB = "dependency-db-contention";
+
 /** SQLite error codes better-sqlite3 puts on `error.code` (the message alone may not carry them). */
 const LOCAL_DB_FAULT_CODE_PREFIXES = ["SQLITE_BUSY", "SQLITE_LOCKED"];
 
 /** True when a raw error MESSAGE is one of our own local-SQLite fault shapes. */
 export function isLocalDbFaultMessage(message: string | null | undefined): boolean {
   if (!message) return false;
+  if (isDependencyDbContentionMessage(message)) return false;
   return LOCAL_DB_FAULT_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 /**
- * True when an ERROR is a local-SQLite fault — by message, or by the `code` better-sqlite3 stamps
- * on `SqliteError` (SQLITE_BUSY's message is the bare "database is locked", but SQLITE_BUSY_SNAPSHOT
- * arrives with `code: "SQLITE_BUSY_SNAPSHOT"`, so both are checked).
+ * How many `cause` links to follow. Bounded so a self-referential or absurdly deep chain can never
+ * spin here — three is already more nesting than any call site in this repo produces.
  */
-export function isLocalDbFaultError(error: unknown): boolean {
-  if (typeof error === "string") return isLocalDbFaultMessage(error);
-  if (!error || typeof error !== "object") return false;
+const LOCAL_DB_FAULT_MAX_CAUSE_DEPTH = 3;
+
+/**
+ * The RAW local-SQLite message behind an error, or null when it is not one of our faults.
+ *
+ * Walks the `cause` chain, which is what makes this usable at a seam that RE-WRAPS the failure.
+ * vector-db.ts's managed-commit path rethrows its local receipt/finalize writes as
+ * `new Error("document-local-commit-finalize-failed", { cause: sqliteError })` — the wrapper's own
+ * message matches no SQLite pattern and carries no `code`, so classifying it alone silently does
+ * nothing. Returning the underlying text (rather than a bare boolean) also means the audit row and
+ * the "local database contention" advisory quote the real SQLite error instead of the opaque
+ * wrapper label.
+ */
+export function localDbFaultReason(error: unknown, depth = 0): string | null {
+  if (depth > LOCAL_DB_FAULT_MAX_CAUSE_DEPTH) return null;
+  if (typeof error === "string") return isLocalDbFaultMessage(error) ? error : null;
+  if (!error || typeof error !== "object") return null;
+  const message = (error as { message?: unknown }).message;
+  const messageText = typeof message === "string" ? message : undefined;
   const code = (error as { code?: unknown }).code;
   if (typeof code === "string" && LOCAL_DB_FAULT_CODE_PREFIXES.some((prefix) => code.startsWith(prefix))) {
-    return true;
+    // Prefer the message; `code` alone is still a truthful, non-empty reason.
+    return messageText && messageText.length > 0 ? messageText : code;
   }
-  const message = (error as { message?: unknown }).message;
-  return typeof message === "string" && isLocalDbFaultMessage(message);
+  if (messageText && isLocalDbFaultMessage(messageText)) return messageText;
+  return localDbFaultReason((error as { cause?: unknown }).cause, depth + 1);
+}
+
+/**
+ * True when an ERROR is a local-SQLite fault — by message, by the `code` better-sqlite3 stamps on
+ * `SqliteError` (SQLITE_BUSY's message is the bare "database is locked", but SQLITE_BUSY_SNAPSHOT
+ * arrives with `code: "SQLITE_BUSY_SNAPSHOT"`, so both are checked), or by either of those on a
+ * wrapped `cause`.
+ */
+export function isLocalDbFaultError(error: unknown): boolean {
+  return localDbFaultReason(error) !== null;
 }
 
 /** Rolling window the recurrence counter is measured over. */
@@ -76,6 +133,10 @@ export const LOCAL_DB_FAULT_WINDOW_KEY = "localDbFault:window";
 export const LOCAL_DB_FAULT_AUDIT_HOUR_KEY = "localDbFault:lastAuditHour";
 /** `warningType` passed to alertStorageWarning — becomes the notification title. */
 export const LOCAL_DB_FAULT_WARNING_TYPE = "local database contention";
+
+export const DEPENDENCY_DB_CONTENTION_WINDOW_KEY = "dependencyDbContention:window";
+export const DEPENDENCY_DB_CONTENTION_AUDIT_HOUR_KEY = "dependencyDbContention:lastAuditHour";
+export const DEPENDENCY_DB_CONTENTION_WARNING_TYPE = "dependency database contention";
 
 interface LocalDbFaultWindow {
   startedAt: string;
@@ -115,6 +176,78 @@ export interface LocalDbFaultInput {
  * notification titled for the real cause. Never throws and never mentions a provider in the title:
  * the whole point is that the vendor is not at fault.
  */
+function readDependencyWindow(nowMs: number): LocalDbFaultWindow {
+  const stored = getInternalSetting<Partial<LocalDbFaultWindow>>(DEPENDENCY_DB_CONTENTION_WINDOW_KEY);
+  const startedAtMs = stored?.startedAt ? Date.parse(stored.startedAt) : Number.NaN;
+  const fresh =
+    Number.isFinite(startedAtMs) &&
+    startedAtMs <= nowMs &&
+    nowMs - startedAtMs < LOCAL_DB_FAULT_WINDOW_MS;
+  if (!fresh) return { startedAt: new Date(nowMs).toISOString(), count: 0, advised: false };
+  return {
+    startedAt: stored!.startedAt!,
+    count: typeof stored?.count === "number" && Number.isFinite(stored.count) ? stored.count : 0,
+    advised: stored?.advised === true
+  };
+}
+
+/**
+ * Record peer-app (e.g. Congress.Trade D1) write contention seen through an import health row.
+ * Never labels it a provider connection outage on ST.
+ */
+export async function noteDependencyDbContention(
+  input: LocalDbFaultInput,
+  nowMs: number = Date.now()
+): Promise<{ count: number; advised: boolean }> {
+  let result = { count: 0, advised: false };
+  try {
+    const window = readDependencyWindow(nowMs);
+    const count = window.count + 1;
+    const shouldAdvise = !window.advised && count >= LOCAL_DB_FAULT_ADVISORY_THRESHOLD;
+    const next: LocalDbFaultWindow = {
+      startedAt: window.startedAt,
+      count,
+      advised: window.advised || shouldAdvise
+    };
+    setInternalSetting(DEPENDENCY_DB_CONTENTION_WINDOW_KEY, next);
+    result = { count, advised: shouldAdvise };
+
+    const hour = new Date(nowMs).toISOString().slice(0, 13);
+    if (getInternalSetting<string>(DEPENDENCY_DB_CONTENTION_AUDIT_HOUR_KEY) !== hour) {
+      setInternalSetting(DEPENDENCY_DB_CONTENTION_AUDIT_HOUR_KEY, hour);
+      audit(
+        "dependency_db_contention",
+        {
+          lane: input.lane,
+          operation: input.operation,
+          reason: input.message.slice(0, 400),
+          windowStartedAt: window.startedAt,
+          windowCount: count
+        },
+        input.userId ?? "local"
+      );
+    }
+    console.warn(
+      `[dependency-db-contention] ${input.lane} "${input.operation}" saw peer-app database write contention ` +
+        `(${input.message.slice(0, 120)}) — ST share connection not implicated (${count} in this window).`
+    );
+
+    if (shouldAdvise) {
+      const { alertStorageWarning } = await import("./db-health");
+      await alertStorageWarning(
+        DEPENDENCY_DB_CONTENTION_WARNING_TYPE,
+        `Congress.Trade (or another peer app) returned database lock/contention errors ${count} times in the last ` +
+          `${Math.round(LOCAL_DB_FAULT_WINDOW_MS / 3_600_000)}h on the ${input.lane} "${input.operation}" path ` +
+          `(latest: "${input.message.slice(0, 160)}"). This is write contention on the peer's database, not a ` +
+          "broken share token or transport from Socratic Trade."
+      );
+    }
+  } catch {
+    // Reporting must never become a second failure.
+  }
+  return result;
+}
+
 export async function noteLocalDbFault(
   input: LocalDbFaultInput,
   nowMs: number = Date.now()

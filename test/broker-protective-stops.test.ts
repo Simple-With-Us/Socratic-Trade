@@ -5,6 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import {
   brokerProtectiveStopsEnabled,
+  brokerStopsForShortsEnabled,
   brokerTrailingStopsEnabled,
   cancelBrokerProtectiveStop,
   desiredBrokerStopKind,
@@ -1504,5 +1505,89 @@ describe("reconcilePendingBracketTeardowns", () => {
     const gw = gatewayWithBracketCancel(async () => ({ cancelledOrderIds: [] }));
     await expect(reconcilePendingBracketTeardowns(gw, "TEARDOWN-NONE", "local")).resolves.toBeUndefined();
     expect(gw.calls).toEqual([]);
+  });
+});
+
+describe("broker-held short buy-stops (Alpaca)", () => {
+  let gw: ReturnType<typeof fakeGateway>;
+  beforeEach(() => { gw = fakeGateway(); });
+
+  const alpacaShortPolicy = (account: string, over: Partial<TradingPolicy> = {}): TradingPolicy => ({
+    ...DEFAULT_POLICY,
+    accountNumber: account,
+    activeBroker: "alpaca",
+    shortSellingEnabled: true,
+    brokerStopsForShorts: true,
+    riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 8, shortStopLossPct: 8 },
+    ...over
+  });
+
+  const shortPos = (symbol: string, quantity: number, averageCost: number): EquityPosition => ({
+    symbol, quantity, averageCost, marketValue: quantity * averageCost
+  });
+
+  it("is enabled on Alpaca even when shortSellingEnabled is off, and off on Robinhood or when explicitly disabled", () => {
+    expect(brokerStopsForShortsEnabled(alpacaShortPolicy("S"))).toBe(true);
+    expect(brokerStopsForShortsEnabled(alpacaShortPolicy("S", { brokerStopsForShorts: false }))).toBe(false);
+    expect(brokerStopsForShortsEnabled(alpacaShortPolicy("S", { shortSellingEnabled: false }))).toBe(true);
+    expect(brokerStopsForShortsEnabled({ ...alpacaShortPolicy("S"), activeBroker: "robinhood" })).toBe(false);
+  });
+
+  it("places a GTC buy-stop (cover) above entry for an open short", async () => {
+    const r = await reconcileBrokerProtectiveStops({
+      userId: "local",
+      policy: alpacaShortPolicy("SS-1"),
+      accountNumber: "SS-1",
+      gateway: gw,
+      positions: [shortPos("TSLA", -10, 200)],
+      executionMode: "broker/paper",
+      running: true
+    });
+    expect(r.placed).toBe(1);
+    expect(gw.placed).toHaveLength(1);
+    expect(gw.placed[0]).toMatchObject({
+      symbol: "TSLA",
+      side: "cover",
+      type: "stop_market",
+      quantity: 10,
+      stopPrice: 216,
+      timeInForce: "gtc"
+    });
+  });
+
+  it("places a short buy-stop even when short selling is off (existing shorts remain protected)", async () => {
+    const r = await reconcileBrokerProtectiveStops({
+      userId: "local",
+      policy: alpacaShortPolicy("SS-2", { shortSellingEnabled: false }),
+      accountNumber: "SS-2",
+      gateway: gw,
+      positions: [shortPos("TSLA", -10, 200)],
+      executionMode: "broker/paper",
+      running: true
+    });
+    expect(r.placed).toBe(1);
+    expect(gw.placed).toHaveLength(1);
+  });
+
+  it("cancels the cover stop when the short is closed", async () => {
+    await reconcileBrokerProtectiveStops({
+      userId: "local",
+      policy: alpacaShortPolicy("SS-3"),
+      accountNumber: "SS-3",
+      gateway: gw,
+      positions: [shortPos("TSLA", -10, 200)],
+      executionMode: "broker/paper",
+      running: true
+    });
+    const r = await reconcileBrokerProtectiveStops({
+      userId: "local",
+      policy: alpacaShortPolicy("SS-3"),
+      accountNumber: "SS-3",
+      gateway: gw,
+      positions: [],
+      executionMode: "broker/paper",
+      running: true
+    });
+    expect(r.cancelled).toBe(1);
   });
 });

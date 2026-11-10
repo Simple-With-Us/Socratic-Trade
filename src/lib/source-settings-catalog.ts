@@ -9,7 +9,6 @@
 export type SourceSettingType = "boolean" | "number" | "string";
 
 export type SourceSettingGroup =
-  | "fmp"
   | "sec"
   | "web_sources"
   | "rag"
@@ -38,18 +37,13 @@ export const SOURCE_SETTING_GROUPS: Record<
   SourceSettingGroup,
   { title: string; blurb: string }
 > = {
-  fmp: {
-    title: "Financial Modeling Prep (FMP)",
-    blurb:
-      "Legacy module toggles. Direct FMP HTTP is still blocked in product code until/unless that ban is lifted — toggles persist so you can pre-select intent and so CT-class features stay visible."
-  },
   sec: {
     title: "SEC EDGAR & filings RAG",
     blurb: "10-K/10-Q ingest cadence, 8-K depth, rate limits, and background backfill worker."
   },
   web_sources: {
     title: "Web sources",
-    blurb: "Congress, insider Form 4, FINRA short volume, technicals — on/off and windows."
+    blurb: "Congress, insider Form 4, 13F, ARK holdings, FINRA short volume, technicals — on/off and windows."
   },
   rag: {
     title: "RAG / retrieval",
@@ -57,7 +51,7 @@ export const SOURCE_SETTING_GROUPS: Record<
   },
   transcripts: {
     title: "Earnings transcripts",
-    blurb: "ROIC, EarningsCalls.dev, and FMP transcript producers (quotas + entitlement)."
+    blurb: "ROIC and EarningsCalls.dev transcript producers (quotas + entitlement)."
   },
   enrichment: {
     title: "Enrichment cascade",
@@ -67,63 +61,6 @@ export const SOURCE_SETTING_GROUPS: Record<
 
 /** All knobs the Settings UI may show and the API may write. */
 export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
-  // ── FMP product modules (policy-backed historically; also in source map) ──
-  {
-    id: "fmpRealTimeDataEnabled",
-    group: "fmp",
-    label: "Real-time & index data",
-    description: "FMP real-time quotes / index modules when product path is allowed.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpMacroDataEnabled",
-    group: "fmp",
-    label: "Macro & commodities",
-    description: "FMP macro / commodity series.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpEventsDataEnabled",
-    group: "fmp",
-    label: "Events & news",
-    description: "FMP calendar / events modules.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpFundamentalsDataEnabled",
-    group: "fmp",
-    label: "Deep fundamentals",
-    description: "FMP ratios / statements modules.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; multi-source cascade is the live path."
-  },
-  {
-    id: "WEB_SOURCE_FMP_TRANSCRIPTS",
-    group: "fmp",
-    label: "FMP earnings transcripts (feature)",
-    description: "Allow FMP transcript producer when storage rights are also confirmed.",
-    type: "boolean",
-    defaultValue: false,
-    advanced: true
-  },
-  {
-    id: "FMP_TRANSCRIPT_STORAGE_RIGHTS_CONFIRMED",
-    group: "fmp",
-    label: "FMP transcript storage rights confirmed",
-    description: "Owner confirms commercial rights to store/redistribute FMP transcript text.",
-    type: "boolean",
-    defaultValue: false,
-    advanced: true,
-    caveat: "Do not enable without a real rights agreement."
-  },
-
   // ── SEC ───────────────────────────────────────────────────────────────────
   {
     id: "WEB_SOURCE_SEC8K",
@@ -137,7 +74,7 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "WEB_SOURCE_SEC8K_FULL_BODY",
     group: "sec",
     label: "8-K full-body ingest",
-    description: "Embed full 8-K HTML bodies into RAG (costly Voyage/Pinecone).",
+    description: "Embed full 8-K HTML bodies into RAG. Bounded per cycle (limit + wall-time budget + adaptive FTS batching).",
     type: "boolean",
     defaultValue: false
   },
@@ -172,34 +109,32 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     max: 90
   },
   {
+    // min 0, not 1: an explicit 0 is the documented site-protective pause (see
+    // maxFilingsPerRunFromEnv in web-sources/sec-filings.ts) — clamping it to 1 would silently
+    // un-pause.  Also a SERVER knob (Admin > Operations); precedence user > server > env > default.
     id: "SEC_FILING_RAG_MAX_PER_RUN",
     group: "sec",
     label: "10-K/10-Q filings per run",
     description: "Max full 10-K/10-Q bodies to ingest per scheduler tick (paid Voyage).",
     type: "number",
     defaultValue: 25,
-    min: 1,
+    min: 0,
     max: 5000
   },
   {
     id: "SEC_FILING_INGEST_TTL_HOURS",
     group: "sec",
     label: "Filing ingest recheck TTL (hours)",
-    description: "How often to re-scan symbols for new 10-K/10-Q filings.",
+    description:
+      "How often the scheduler re-scans for new 10-K/10-Q filings. 24h is the paid OpenRouter/bge-m3 cadence; 168 was the old Voyage-free weekly pin. Values like 87600 are an emergency pause, not a product default.",
     type: "number",
-    defaultValue: 168,
+    defaultValue: 24,
     min: 1,
     max: 720
   },
-  {
-    id: "SEC_INGEST_WORKER_ENABLED",
-    group: "sec",
-    label: "SEC backfill worker",
-    description: "Background job queue for large 10-K/10-Q backfills.",
-    type: "boolean",
-    defaultValue: false,
-    advanced: true
-  },
+  // SEC_INGEST_WORKER_ENABLED was removed from this catalog 2026-08-13: the worker never
+  // consulted the per-user tier (boot gate read env only), so the entry here was a fake toggle.
+  // It is now a real SERVER knob — Admin > Operations (src/lib/server-knobs.ts).
   {
     id: "SEC_RATE_LIMIT",
     group: "sec",
@@ -215,7 +150,8 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "SEC_XBRL_ENRICHMENT_ENABLED",
     group: "enrichment",
     label: "SEC XBRL fundamentals enrichment",
-    description: "Pull companyfacts XBRL into the fundamentals cascade.",
+    description:
+      "Parse companyfacts XBRL from the nightly SQLite cache (sec_facts) into the fundamentals cascade. EDGAR fetches run off the scan path.",
     type: "boolean",
     defaultValue: true
   },
@@ -236,6 +172,71 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     description: "Insider transaction rapid filings.",
     type: "boolean",
     defaultValue: true
+  },
+  {
+    id: "WEB_SOURCE_INSIDER_WATCHLIST",
+    group: "web_sources",
+    label: "Form 4 watchlist targeting",
+    description: "Also pull Form 4s for tickers on your watchlists, not only the current EDGAR feed.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "WEB_SOURCE_INSIDER_WINDOW_DAYS",
+    group: "web_sources",
+    label: "Form 4 window (days)",
+    description: "How long an open-market Form 4 stays in the dollar-weighted sentiment window.",
+    type: "number",
+    defaultValue: 90,
+    min: 7,
+    max: 180
+  },
+  {
+    id: "WEB_SOURCE_INSIDER_MAX_FILINGS",
+    group: "web_sources",
+    label: "Form 4 filings per refresh",
+    description: "Cap on atom-feed ownership XMLs. 0 means no cap. Quarterly bulk rows are never capped.",
+    type: "number",
+    defaultValue: 0,
+    min: 0,
+    max: 200,
+    advanced: true
+  },
+  {
+    id: "WEB_SOURCE_13F",
+    group: "web_sources",
+    label: "SEC 13F superinvestor holdings",
+    description: "Official 13F-HR books for a curated filer set (Berkshire, Pershing, Burry, and others).  Observe only.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "WEB_SOURCE_13F_TTL_MS",
+    group: "web_sources",
+    label: "13F refresh interval (ms)",
+    description: "How often to re-pull latest 13F-HR filings.  Default weekly.",
+    type: "number",
+    defaultValue: 604800000,
+    min: 86400000,
+    advanced: true
+  },
+  {
+    id: "WEB_SOURCE_ARK",
+    group: "web_sources",
+    label: "ARK official daily holdings",
+    description: "ARKK/ARKQ/ARKW/ARKG/ARKF/ARKX holdings from ARK's published CSVs.  Observe only.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "WEB_SOURCE_ARK_TTL_MS",
+    group: "web_sources",
+    label: "ARK refresh interval (ms)",
+    description: "How often to re-pull ARK fund CSVs.  Default daily.",
+    type: "number",
+    defaultValue: 86400000,
+    min: 3600000,
+    advanced: true
   },
   {
     id: "WEB_SOURCE_FINRA",
@@ -299,6 +300,36 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     defaultValue: false,
     advanced: true
   },
+  {
+    id: "RAG_RUN_BUDGET_ENABLED",
+    group: "rag",
+    label: "Per-run RAG operation budget",
+    description:
+      "When on, a rolling-window cap slows extra rerank work after too many calls.  Core search still runs.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "RAG_RUN_BUDGET_CEILING",
+    group: "rag",
+    label: "RAG operations per window",
+    description: "Embed + rerank calls allowed in the rolling window before retrieval degrades.",
+    type: "number",
+    defaultValue: 5000,
+    min: 1,
+    max: 1_000_000
+  },
+  {
+    id: "RAG_RUN_BUDGET_WINDOW_MS",
+    group: "rag",
+    label: "RAG budget window (ms)",
+    description: "Rolling window for the per-run RAG operation cap.  Default one hour.",
+    type: "number",
+    defaultValue: 3_600_000,
+    min: 1_000,
+    max: 86_400_000,
+    advanced: true
+  },
 
   // ── Transcripts ───────────────────────────────────────────────────────────
   {
@@ -313,11 +344,21 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "ROIC_TRANSCRIPTS_MAX_PER_RUN",
     group: "transcripts",
     label: "ROIC transcripts per run",
-    description: "Max transcript fetches per scheduler pass.",
+    description:
+      "Max transcript fetches per scheduler pass.  Free ROIC is 5 req/min (keep this small).  Individual is 300/min and 20 quarters of history — 80 is the paid default so the universe can actually fill.",
     type: "number",
-    defaultValue: 12,
+    defaultValue: 80,
     min: 1,
-    max: 50
+    max: 300
+  },
+  {
+    id: "PUBLIC_EXECUTION_ENABLED",
+    group: "enrichment",
+    label: "Public.com order execution",
+    description:
+      "Allow placing orders on the connected Public.com account.  Leave off until that account is funded.  Quotes and history still use the connection.",
+    type: "boolean",
+    defaultValue: false
   },
   {
     id: "ROIC_HISTORY_ENABLED",
@@ -339,9 +380,10 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "EARNINGSCALLS_DAILY_TARGET_TRANSCRIPTS",
     group: "transcripts",
     label: "EarningsCalls daily target",
-    description: "New full transcripts to fetch on an ordinary day.",
+    description:
+      "New full transcripts to fetch on an ordinary day.  The RapidAPI free-shaped plan is ~200 requests/month (~100 transcripts).  The monthly budget knob is the real cap; this is only the daily sip.",
     type: "number",
-    defaultValue: 5,
+    defaultValue: 12,
     min: 0,
     max: 100
   },
@@ -354,6 +396,147 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     defaultValue: 25,
     min: 1,
     max: 100
+  },
+  {
+    id: "EARNINGSCALLS_MONTHLY_BUDGET",
+    group: "transcripts",
+    label: "EarningsCalls monthly request budget",
+    description:
+      "Soft UTC-month request cap (default 180, headroom under a 200/month plan).  Raise this only if the RapidAPI/EarningsCalls plan is actually larger.",
+    type: "number",
+    defaultValue: 180,
+    min: 0,
+    max: 10_000,
+    advanced: true
+  },
+  {
+    id: "EARNINGSCALLS_ROLLING_WINDOW_BUDGET",
+    group: "transcripts",
+    label: "EarningsCalls rolling 31-day budget",
+    description:
+      "Harder rolling-window cap (default 195 of 200).  Maps to the provider anniversary window, not the calendar month.",
+    type: "number",
+    defaultValue: 195,
+    min: 0,
+    max: 10_000,
+    advanced: true
+  },
+
+  // ── News relevance gating (DSA lesson: providers' own relevance scores were parsed then
+  // thrown away, and providers with no native score attributed every headline that merely named
+  // a symbol/company — even an ambiguous common word like "Apple" or "Target" with nothing
+  // finance-related in the sentence). See src/lib/news-relevance.ts. ─────────────────────────
+  {
+    id: "NEWS_RELEVANCE_FILTER",
+    group: "enrichment",
+    label: "News relevance filter",
+    description:
+      "Keep only headlines/sentiment a provider (or, lacking a provider score, this app's own headline-text rubric) scores as actually about the symbol.  Off restores every headline a provider tags to the symbol, including ambiguous common-word company name matches.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "NEWS_RELEVANCE_MIN_SCORE",
+    group: "enrichment",
+    label: "News relevance minimum score",
+    description:
+      "Minimum 0-1 relevance score a headline must clear to count toward a symbol's news/sentiment.  Applies to provider-native scores (Alpha Vantage relevance_score, Marketaux match_score) and to this app's own headline-text rubric alike.",
+    type: "number",
+    defaultValue: 0.35,
+    min: 0,
+    max: 1
+  },
+
+  // ── Polymarket prediction-market context (keyless — Gamma API needs no API key; see
+  // src/lib/polymarket-provider.ts). Prompt-time only: fetched for the candidates entering the
+  // strategist prompt, gated through the same news-relevance.ts rubric as every other keyless
+  // provider. ──────────────────────────────────────────────────────────────────────────────────
+  {
+    id: "POLYMARKET_CONTEXT",
+    group: "enrichment",
+    label: "Polymarket prediction-market context",
+    description:
+      "Inject up to 3 currently-active, company-relevant Polymarket markets (question, implied probability, volume) into the strategist prompt per candidate.  Keyless — no credential required.  Off restores the pre-Polymarket prompt byte-for-byte.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "POLYMARKET_MIN_RELEVANCE",
+    group: "enrichment",
+    label: "Polymarket relevance minimum score",
+    description:
+      "Minimum 0-1 relevance score (this app's headline-text rubric, applied to the market question) a Polymarket market must clear to be shown for a symbol.",
+    type: "number",
+    defaultValue: 0.5,
+    min: 0,
+    max: 1
+  },
+  {
+    id: "POLYMARKET_THEME_CONTEXT",
+    group: "enrichment",
+    label: "Polymarket sector and theme books",
+    description:
+      "Attach curated sector/theme Polymarket books (semiconductors, AI, energy, finance, defense) to matching scan candidates.  Still keyless.  Off leaves only company-name markets.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "POLYMARKET_MACRO_CONTEXT",
+    group: "enrichment",
+    label: "Polymarket macro books",
+    description:
+      "Inject run-level US recession, Fed, CPI, and WTI books next to Kalshi event markets.  Real-money odds, not a quote.  Off omits the block.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "POLYMARKET_MAX_THEME_QUERIES",
+    group: "enrichment",
+    label: "Polymarket theme query cap",
+    description: "Maximum distinct theme searches per strategy run.  Cached 10 minutes.",
+    type: "number",
+    defaultValue: 6,
+    min: 0,
+    max: 20
+  },
+
+  // ── Kalshi event-market macro context (public GET /markets; KALSHI_ENV
+  // enables the data client. Trading is a separate default-off module.) ──
+  {
+    id: "KALSHI_CONTEXT",
+    group: "enrichment",
+    label: "Kalshi macro event markets",
+    description:
+      "Inject curated Kalshi event-contract probabilities (Fed, CPI, recession, NFP, GDP) into the strategist prompt as macro context.  Public market data — KALSHI_ENV=demo or prod enables the fetcher.  Off omits the block.",
+    type: "boolean",
+    defaultValue: true
+  },
+  {
+    id: "KALSHI_MACRO_SERIES",
+    group: "enrichment",
+    label: "Kalshi series tickers",
+    description:
+      "Comma-separated Kalshi series tickers to fetch.  Blank uses Fed decision, CPI YoY, NBER recession, NFP, and GDP.",
+    type: "string",
+    defaultValue: ""
+  },
+  {
+    id: "KALSHI_MAX_MARKETS_PER_SERIES",
+    group: "enrichment",
+    label: "Kalshi markets per series",
+    description: "Cap on open markets kept per series, most-liquid first.",
+    type: "number",
+    defaultValue: 4,
+    min: 1,
+    max: 12
+  },
+  {
+    id: "KALSHI_INCLUDE_ELECTIONS",
+    group: "enrichment",
+    label: "Include Kalshi election series",
+    description: "Also fetch presidential / Senate / House series.  Default off — elections are noisier as equity-regime evidence.",
+    type: "boolean",
+    defaultValue: false
   }
 ] as const;
 

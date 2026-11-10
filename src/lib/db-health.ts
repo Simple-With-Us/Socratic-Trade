@@ -1,6 +1,16 @@
+import "server-only";
 import { createHash, randomUUID } from "crypto";
 import { getDb } from "./db";
-import { isLocalDbFaultMessage, noteLocalDbFault } from "./local-db-fault";
+import {
+  HEALTH_FAILURE_CLASS_DEPENDENCY_DB,
+  isDependencyDbContentionMessage,
+  isLocalDbFaultMessage,
+  noteDependencyDbContention,
+  noteLocalDbFault
+} from "./local-db-fault";
+import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
+import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
+import { isTransientNetworkErrorText } from "./network-errors";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
 // "5 consecutive failures" condition — the only one strong enough to act on automatically (e.g. the
@@ -34,22 +44,164 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
     /\bkey pool exhausted\b/i.test(errorText) ||
     /\b25\/day cap\b/i.test(errorText) ||
     /\b25 requests per day\b/i.test(errorText) ||
-    /\bproactive daily call budget\b/i.test(errorText)
+    /\bproactive daily call budget\b/i.test(errorText) ||
+    // Caller-budget / AbortController cancellations.  GET /api/quote aborts the
+    // enrichment cascade at 6s; nasdaq-calendar's per-day fetch aborts at 8s.
+    // Those are expected and must not mint "<service> connection failed".
+    /\bthis operation was aborted\b/i.test(errorText) ||
+    /\bthe operation was aborted\b/i.test(errorText) ||
+    /\bAbortError\b/i.test(errorText) ||
+    /\bTimeoutError\b/i.test(errorText)
   );
 }
 
 /**
- * FIFO retention for api_health_log: only the newest N rows per (service, key_source) lane survive
- * (enforced on every insert in logApiHealth). Exported because it is NOT just a storage detail — the
- * `callsLastHour`/`callsLast24h` window counts below are computed over this same capped table, so on
- * a busy lane they are a FLOOR, not a total, and any UI that prints them must say so (see
- * ServiceHealthSummary.laneLogCap). Note the equivalence that makes that cheap to detect: a window
- * count can only reach the cap when every retained row falls inside the window, which is exactly the
- * case where older rows may have been evicted out of it -- so `count === cap` is precisely the
- * "saturated" condition, no extra bookkeeping needed. (The residual ambiguity: a lane with exactly
- * `cap` calls and nothing evicted also reads as saturated. "500+" is still true there.)
+ * Prefix written into `error_text` when a failure is a **transport blip** — Node's `fetch()`
+ * collapsing a dead keep-alive socket, a DNS hiccup, or an `ECONNRESET` into a bare
+ * `"fetch failed"` with the real reason hidden on `err.cause`.
+ *
+ * This is a THIRD class, deliberately not folded into `HEALTH_SOFT_FAILURE_PREFIX`:
+ *
+ * - An **expected limit** (429, daily cap) is not a failure of the integration at all, so it is
+ *   excluded from the hard consecutive-failure streak entirely.
+ * - A **transport blip** might be the first second of a real outage.  It therefore still counts
+ *   toward the hard streak — a provider that is genuinely unreachable must still page — but it
+ *   does not get to page on its own the instant five of them land back to back.  Five failures
+ *   twenty seconds apart is a blip; five failures still going ten minutes later is an outage.
+ *
+ * That distinction is the whole point: classifying these as plain soft would make a real network
+ * outage silent, which is strictly worse than the noise this replaces.
+ */
+export const HEALTH_TRANSIENT_FAILURE_PREFIX = "[transient-network] ";
+
+/**
+ * True when an api_health_log failure row is a transport blip (see the prefix above).  An
+ * expected-limit row is never also transient — soft classification wins, so a 429 keeps its
+ * existing "does not count at all" treatment rather than being promoted into the streak.
+ */
+export function isTransientHealthFailure(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
+  if (isSoftHealthFailure(errorText)) return false;
+  return isTransientNetworkErrorText(errorText);
+}
+
+/**
+ * Classifies the latest failure text for a dependency lane (ops / detailed health). Returns null when
+ * the text is a normal provider/transport failure.
+ */
+export function connectionHealthFailureClass(errorText: string | null | undefined): string | null {
+  if (!errorText) return null;
+  if (isDependencyDbContentionMessage(errorText)) return HEALTH_FAILURE_CLASS_DEPENDENCY_DB;
+  if (isLocalDbFaultMessage(errorText)) return "local-db-contention";
+  if (isTransientHealthFailure(errorText)) return "transient-network";
+  if (isSoftHealthFailure(errorText)) return "expected-limit";
+  return null;
+}
+
+/**
+ * How long a run of consecutive transport blips must keep failing before it is treated as a real
+ * outage and captured at Sentry `error` level (which is what pages).  Below this, the lane is
+ * captured at `warning`: the event is still recorded, Admin Connections still paints the lane,
+ * but nobody is woken for a socket that died and came back.
+ *
+ * Ten minutes is chosen against the two shapes actually seen in prod.  A burst lane (a calendar
+ * fetch that issues several requests seconds apart) produces its whole five-failure streak inside
+ * one blip and stays a warning.  A low-frequency lane (an hourly probe) spreads five consecutive
+ * failures over hours, so a genuine outage there clears this window on the very first alert and
+ * pages exactly as it does today.
+ */
+export const HEALTH_TRANSIENT_ESCALATION_MS = 10 * 60_000;
+
+/** `HEALTH_TRANSIENT_ESCALATION_MINUTES` override, falling back to the constant above. */
+export function transientEscalationWindowMs(env: Record<string, string | undefined> = process.env): number {
+  // `Number("")` is 0, so an empty/unset variable must be rejected BEFORE the numeric check —
+  // otherwise a blank env var silently means "escalate every blip immediately".
+  const text = (env.HEALTH_TRANSIENT_ESCALATION_MINUTES ?? "").trim();
+  if (text === "") return HEALTH_TRANSIENT_ESCALATION_MS;
+  const minutes = Number(text);
+  if (Number.isFinite(minutes) && minutes >= 0) return minutes * 60_000;
+  return HEALTH_TRANSIENT_ESCALATION_MS;
+}
+
+/**
+ * Max rows read from api_health_log when walking a lane's history for hard-streak heuristics
+ * (getLaneHealth).  Storage retention is forever (Jay 2026-10-15); this is a read bound only.
  */
 export const HEALTH_LOG_LANE_CAP = 500;
+
+/** Durable ISO start of the current unbroken hard-failure run — survives unbounded api_health_log history. */
+export const HEALTH_HARD_STREAK_START_PREFIX = "health:hard-streak-start:";
+
+export function hardStreakStartSettingKey(
+  service: string,
+  keySource: string | null,
+  userId?: string | null
+): string {
+  const src = keySource ?? "none";
+  if (src === "user" && userId != null) {
+    return `${HEALTH_HARD_STREAK_START_PREFIX}${service}:user:${userId}`;
+  }
+  return `${HEALTH_HARD_STREAK_START_PREFIX}${service}:${src}`;
+}
+
+/** Durable hard-streak record — survives api_health_log FIFO for both start and class. */
+export type DurableHardStreak = {
+  startedTs: string;
+  /** Sticky false once any hard non-transient failure is observed in the run. */
+  entirelyTransient: boolean;
+};
+
+function readDurableHardStreak(key: string): DurableHardStreak | null {
+  try {
+    const row = getDb().prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as
+      | { value: string }
+      | undefined;
+    if (!row?.value) return null;
+    const parsed = JSON.parse(row.value) as unknown;
+    // Legacy: bare ISO string from the first durable-start tip.
+    if (typeof parsed === "string") {
+      return Number.isFinite(Date.parse(parsed))
+        ? { startedTs: parsed, entirelyTransient: true }
+        : null;
+    }
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as DurableHardStreak).startedTs === "string" &&
+      typeof (parsed as DurableHardStreak).entirelyTransient === "boolean" &&
+      Number.isFinite(Date.parse((parsed as DurableHardStreak).startedTs))
+    ) {
+      return parsed as DurableHardStreak;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDurableHardStreak(key: string, streak: DurableHardStreak): void {
+  try {
+    const updated_at = new Date().toISOString();
+    getDb()
+      .prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+      .run(key, JSON.stringify(streak), updated_at);
+  } catch {
+    // Health path must never throw.
+  }
+}
+
+function clearHardStreakStart(key: string): void {
+  try {
+    getDb().prepare(`DELETE FROM settings WHERE key = ?`).run(key);
+  } catch {
+    // Health path must never throw.
+  }
+}
+
 
 /**
  * Which condition set `stoppedWorking` (see getServiceHealthSummaries). "consecutive-failures" is
@@ -81,6 +233,9 @@ export type HealthStoppedReasonKind = "consecutive-failures" | "no-success-ever"
 // names withRagApiHealth now uses for actual embed/rerank call failures, so an OpenRouter/
 // SiliconFlow-served operation gets the same dedicated-alerting exclusion Voyage always had.
 const RAG_SERVICES_WITH_OWN_ALERTING = new Set(["pinecone", "voyage", "voyage-rerank", "rag-embed", "rag-rerank"]);
+// congress-inbound-push pages from alertPeerPushReceiptGap on the first missing ack.
+// Leaving it on the generic 5-streak path would either delay that page or send a second one.
+const LANES_WITH_OWN_ALERTING = new Set([...RAG_SERVICES_WITH_OWN_ALERTING, "congress-inbound-push"]);
 
 /**
  * Per-credential-lane health for the API circuit breaker. A "lane" is (service, keySource) — the SAME
@@ -94,7 +249,21 @@ export function getLaneHealth(
   service: string,
   keySource: string | null,
   userId?: string | null
-): { stoppedWorking: boolean; reason: string | null; lastFailureTs: string | null } {
+): {
+  stoppedWorking: boolean;
+  reason: string | null;
+  lastFailureTs: string | null;
+  /** True only when the HARD streak holds AND every row in it is a transport blip. */
+  transientStreak: boolean;
+  /**
+   * ts of the first failure in the ENTIRE consecutive hard-failure run (not merely the oldest of
+   * the last-5 sample, and not truncated by HEALTH_LOG_LANE_CAP FIFO). Backed by a durable
+   * settings key so a high-volume outage cannot reset the escalation clock. Set whenever the tip
+   * row is a hard failure — including short runs (<5) — so sparse RAG lanes can escalate via
+   * wall-clock before five rows accumulate. Null only when the tip is not a hard failure.
+   */
+  streakStartedTs: string | null;
+} {
   try {
     const db = getDb();
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
@@ -106,33 +275,102 @@ export function getLaneHealth(
     const withUser = (params: unknown[]): unknown[] => (scopeUser ? [...params, userId] : params);
     // Pull error_text so expected-limit (soft) failures can be excluded from the HARD consecutive
     // streak — five 429s or a daily-cap row must not trip the enrichment circuit breaker.
-    const last5 = db
+    const pendingNewestFirst = pendingHealthRows(service, keySource, userId);
+    const last5db = db
       .prepare(
-        `SELECT ok, error_text FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT 5`
+        `SELECT ok, error_text, ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT 5`
       )
-      .all(...withUser([service, keySource])) as Array<{ ok: number; error_text: string | null }>;
-    const lastSuccess = db
+      .all(...withUser([service, keySource])) as Array<{ ok: number; error_text: string | null; ts: string }>;
+    const last5 = [...pendingNewestFirst, ...last5db].slice(0, 5);
+    const lastSuccessDb = db
       .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 1 ORDER BY ts DESC, rowid DESC LIMIT 1`)
       .get(...withUser([service, keySource])) as { ts: string } | undefined;
-    const lastFailure = db
+    const lastFailureDb = db
       .prepare(`SELECT ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ok = 0 ORDER BY ts DESC, rowid DESC LIMIT 1`)
       .get(...withUser([service, keySource])) as { ts: string } | undefined;
-    const callsLastHour = (
-      db.prepare(`SELECT COUNT(*) as cnt FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ts >= ?`).get(...withUser([service, keySource]), hourAgo) as { cnt: number }
-    ).cnt;
+    const lastSuccess = pendingNewestFirst.find((row) => row.ok === 1) ?? lastSuccessDb;
+    const lastFailure = pendingNewestFirst.find((row) => row.ok === 0) ?? lastFailureDb;
+    const pendingLastHour = pendingNewestFirst.filter((row) => row.ts >= hourAgo).length;
+    const callsLastHour =
+      pendingLastHour +
+      (
+        db.prepare(`SELECT COUNT(*) as cnt FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} AND ts >= ?`).get(...withUser([service, keySource]), hourAgo) as { cnt: number }
+      ).cnt;
 
     let stoppedWorking = false;
     let reason: string | null = null;
+    // `streakStartedTs` is the start of the ENTIRE consecutive hard-failure run (walk newest→oldest
+    // past the last-5 sample until a success or soft row), so `now - streakStartedTs` is how long
+    // the lane has been failing — the quantity that separates a burst of blips from an outage.
+    // Anchoring only to last-5 would keep a busy lane forever inside the escalation window.
+    // Importantly: set this whenever the tip is a hard failure, EVEN when the run is shorter than
+    // five rows — sparse RAG lanes otherwise stay warning forever because they never fill last-5.
+    let transientStreak = false;
+    let streakStartedTs: string | null = null;
+    // Whether EVERY hard row in the unbroken run (not just last-5) is a transport blip.
+    // Computed on the same walk as streakStartedTs so a hard HTTP 401 that aged out of the
+    // last-5 sample cannot be erased by later socket errors (Codex P2 on #3195).
+    let runEntirelyTransient = false;
+    const tipIsHardFailure =
+      last5.length > 0 && last5[0].ok === 0 && !isSoftHealthFailure(last5[0].error_text);
+    if (tipIsHardFailure) {
+      // Walk the capped lane history newest-first; the last hard row before a success/soft break
+      // is the start of this consecutive run (may be far older than last5 on a busy lane, or
+      // shorter than 5 on a sparse one).
+      const historyDb = db
+        .prepare(
+          `SELECT ok, error_text, ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT ?`
+        )
+        .all(...withUser([service, keySource]), HEALTH_LOG_LANE_CAP) as Array<{
+          ok: number;
+          error_text: string | null;
+          ts: string;
+        }>;
+      const history = [...pendingNewestFirst, ...historyDb].slice(0, HEALTH_LOG_LANE_CAP);
+      let runStart: string | null = null;
+      let entirelyTransient = true;
+      let sawHard = false;
+      for (const row of history) {
+        if (row.ok === 1 || isSoftHealthFailure(row.error_text)) break;
+        sawHard = true;
+        runStart = row.ts;
+        if (!isTransientHealthFailure(row.error_text)) entirelyTransient = false;
+      }
+      const walkStart = runStart ?? last5[0]?.ts ?? null;
+      const walkEntirelyTransient = sawHard && entirelyTransient;
+      // Persist start + hard/transient class outside the FIFO health log (Codex P1/P2 on #3195).
+      // Once written, never advance startedTs; entirelyTransient is sticky-false. Cleared only
+      // from logApiHealth on success/soft — getLaneHealth stays read-only for circuit-breaker
+      // preflight (no DELETE on healthy/soft/empty tips).
+      const durableKey = hardStreakStartSettingKey(service, keySource, scopeUser ? userId : null);
+      let durable = readDurableHardStreak(durableKey);
+      if (!durable && walkStart) {
+        durable = { startedTs: walkStart, entirelyTransient: walkEntirelyTransient };
+        writeDurableHardStreak(durableKey, durable);
+      } else if (durable && durable.entirelyTransient && !walkEntirelyTransient && sawHard) {
+        durable = { startedTs: durable.startedTs, entirelyTransient: false };
+        writeDurableHardStreak(durableKey, durable);
+      }
+      streakStartedTs = durable?.startedTs ?? walkStart;
+      runEntirelyTransient = durable
+        ? durable.entirelyTransient && walkEntirelyTransient
+        : walkEntirelyTransient;
+      // Sticky: if durable already recorded a hard non-transient, keep false even when FIFO
+      // dropped that row from the retained walk.
+      if (durable && !durable.entirelyTransient) runEntirelyTransient = false;
+    }
     // HARD consecutive-failures: every one of the last 5 rows is a non-soft failure. Soft/expected
     // limits (429, daily cap) alone never set this reason — they may still surface as the softer
     // "no success this hour" heuristics below (yellow DEGRADED, not red STOPPED for circuit trips
     // that only key off HEALTH_REASON_CONSECUTIVE_FAILURES in the enrichment breaker).
+    // Still requires length >= 5 even though streakStartedTs is set for shorter hard runs above.
     if (
       last5.length >= 5 &&
       last5.every((r) => r.ok === 0 && !isSoftHealthFailure(r.error_text))
     ) {
       stoppedWorking = true;
       reason = HEALTH_REASON_CONSECUTIVE_FAILURES;
+      transientStreak = runEntirelyTransient;
     } else if (callsLastHour > 0 && !lastSuccess) {
       stoppedWorking = true;
       reason = "Active in past hour but no successful call ever";
@@ -140,9 +378,9 @@ export function getLaneHealth(
       stoppedWorking = true;
       reason = "Active in past hour but no success in 60 min";
     }
-    return { stoppedWorking, reason, lastFailureTs: lastFailure?.ts ?? null };
+    return { stoppedWorking, reason, lastFailureTs: lastFailure?.ts ?? null, transientStreak, streakStartedTs };
   } catch {
-    return { stoppedWorking: false, reason: null, lastFailureTs: null };
+    return { stoppedWorking: false, reason: null, lastFailureTs: null, transientStreak: false, streakStartedTs: null };
   }
 }
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -154,8 +392,7 @@ export interface ServiceHealthSummary {
   lastSuccessLatencyMs: number | null;
   lastFailureTs: string | null;
   lastFailureError: string | null;
-  /** Calls in the trailing hour / 24h, counted over the CAPPED log (see HEALTH_LOG_LANE_CAP): a
-   *  value equal to `laneLogCap` means "at least this many", not "exactly this many". */
+  /** Calls in the trailing hour / 24h (full table count for the lane). */
   callsLastHour: number;
   callsLast24h: number;
   stoppedWorking: boolean;
@@ -164,16 +401,33 @@ export interface ServiceHealthSummary {
    *  admin connections route can keep synthesizing never-used placeholder lanes as plain object
    *  literals (they have no log and no stop state). */
   stoppedReasonKind?: HealthStoppedReasonKind | null;
-  /** Row-retention cap the two window counts were computed against, so a caller can render the
-   *  saturated case honestly ("500+") without importing this module. Optional for the same
-   *  placeholder-lane reason; a lane with no rows cannot be saturated. */
+  /** @deprecated FIFO lane cap removed 2026-10-15; omitted on live summaries. */
   laneLogCap?: number;
   /**
-   * Product-retired vendor lane (FMP / Quiver / UW). Admin Connections must render these as
-   * muted OFF — not red STOPPED — and exclude them from the "N stopped" header. Set by the
-   * connections-health route from `retired-direct-vendors`; not computed from the log.
+   * Product-retired vendor lane (FMP / Quiver / UW / FilingAPI). Admin Connections must
+   * render these as muted OFF — not red STOPPED — and exclude them from the "N stopped"
+   * header. Stamped by `getServiceHealthSummaries` from `retired-direct-vendors` so ops
+   * snapshot and `/api/health` see the same OFF as Connections (leftover 401 rows must
+   * not paint a retired vendor as a live outage).
    */
   intentionalOff?: boolean;
+}
+
+/**
+ * Coolify `DB_BOOTSTRAP=live` restarts page every probe that 5xxs during the first minutes
+ * (nasdaq-quote / vix / congress.trade / alpaca-broker). Those are boot, not an outage.
+ * Tests and local/dev never set `DB_BOOTSTRAP=live`, so the existing hard-streak pages stay.
+ */
+export const CONNECTION_ALERT_STARTUP_GRACE_SECONDS = 5 * 60;
+
+export function shouldSuppressConnectionAlertForStartup(
+  processUptimeSeconds: number,
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  if (env.DB_BOOTSTRAP !== "live") return false;
+  const raw = Number(env.HEALTH_ALERT_STARTUP_GRACE_SECONDS ?? CONNECTION_ALERT_STARTUP_GRACE_SECONDS);
+  const grace = Number.isFinite(raw) && raw >= 0 ? raw : CONNECTION_ALERT_STARTUP_GRACE_SECONDS;
+  return processUptimeSeconds < grace;
 }
 
 export interface HealthLogRow {
@@ -200,117 +454,196 @@ export interface ErrorPatternRow {
 
 // ── Write ──────────────────────────────────────────────────────────────────────
 
-export function logApiHealth(opts: {
+
+type ApiHealthLogOpts = {
   service: string;
   ok: boolean;
   latencyMs?: number;
   errorText?: string;
   keySource?: string;
   userId?: string;
-  // Set ONLY by a caller that knows this failure is a daily-quota exhaustion which cannot
-  // recover before a known instant (e.g. Alpha Vantage's 25/day cap resets at midnight
-  // America/New_York) — an ISO timestamp of that reset. db-health never derives this itself
-  // (no string-matching error text here); it just threads whatever the call site passes
-  // through to alertConnectionFailure's cooldown. Omit for ordinary transient failures, which
-  // keep the generic fixed-duration cooldown.
   quotaResetAt?: string;
-  /**
-   * Mark a failure as an *expected limit* (rate limit, daily cap, proactive budget). Soft
-   * failures are still stored as ok=0 for forensics, but do not count toward the hard
-   * consecutive-failure STOPPED / enrichment circuit trip. Prefer this over inventing a success
-   * row for a call that did not succeed.
-   */
   soft?: boolean;
-}): void {
+};
+
+type BufferedHealth = ApiHealthLogOpts & { bufferedAt: string };
+
+const apiHealthBuffer: BufferedHealth[] = [];
+let apiHealthFlushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
+  let errorText = opts.errorText ?? null;
+  const filingApiAuthSoft =
+    opts.service === "filingapi" && !opts.ok && isFilingApiAuthErrorText(errorText);
+  if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {
+    if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
+      errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
+    }
+  } else if (!opts.ok && errorText && isTransientHealthFailure(errorText)) {
+    if (!errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) {
+      errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}`;
+    }
+  }
+  return errorText;
+}
+
+function bufferMatchesLane(
+  opts: BufferedHealth,
+  service: string,
+  keySource: string | null,
+  userId?: string | null
+): boolean {
+  if (opts.service !== service) return false;
+  if ((opts.keySource ?? null) !== keySource) return false;
+  if (keySource === "user" && userId != null) return (opts.userId ?? null) === userId;
+  return true;
+}
+
+function pendingHealthRows(
+  service: string,
+  keySource: string | null,
+  userId?: string | null
+): Array<{ ok: number; error_text: string | null; ts: string }> {
+  return apiHealthBuffer
+    .filter((opts) => bufferMatchesLane(opts, service, keySource, userId))
+    .map((opts) => ({
+      ok: opts.ok ? 1 : 0,
+      error_text: healthErrorTextForLog(opts),
+      ts: opts.bufferedAt
+    }))
+    .reverse();
+}
+
+function scheduleApiHealthFlush(): void {
+  if (apiHealthFlushTimeout) return;
+  apiHealthFlushTimeout = setTimeout(flushApiHealthBuffer, 5000);
+  apiHealthFlushTimeout.unref();
+}
+
+export function flushApiHealthBuffer(): void {
+  if (apiHealthFlushTimeout) {
+    clearTimeout(apiHealthFlushTimeout);
+    apiHealthFlushTimeout = null;
+  }
+  if (apiHealthBuffer.length === 0) return;
+  const batch = apiHealthBuffer.splice(0, apiHealthBuffer.length);
+  let processed: Array<{
+    service: string;
+    ok: boolean;
+    latencyMs?: number;
+    quotaResetAt?: string;
+    now: string;
+    id: string;
+    keySource: string | null;
+    userId: string | null;
+    errorText: string | null;
+    isSoft: boolean;
+  }>;
   try {
     const db = getDb();
-    const now = new Date().toISOString();
-    const id = randomUUID();
-    const keySource = opts.keySource ?? null;
-    const userId = opts.userId ?? null;
-    // Stamp soft failures with a stable prefix so getLaneHealth / summaries can discriminate
-    // without a schema column. Do not double-prefix if the caller already used the marker or
-    // if auto-classification would match the free-text shape either way.
-    let errorText = opts.errorText ?? null;
-    if (!opts.ok && errorText && (opts.soft || isSoftHealthFailure(errorText))) {
-      if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
-        errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
-      }
-    }
+
+    processed = batch.map((opts) => {
+      const now = opts.bufferedAt;
+      const id = randomUUID();
+      const keySource = opts.keySource ?? null;
+      const userId = opts.userId ?? null;
+      const errorText = healthErrorTextForLog(opts);
+      return {
+        service: opts.service,
+        ok: opts.ok,
+        latencyMs: opts.latencyMs,
+        quotaResetAt: opts.quotaResetAt,
+        now,
+        id,
+        keySource,
+        userId,
+        errorText,
+        isSoft: isSoftHealthFailure(errorText ?? "")
+      };
+    });
 
     db.transaction(() => {
-      // Insert log row
-      db.prepare(
-        `INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(id, opts.service, now, opts.ok ? 1 : 0, opts.latencyMs ?? null, errorText, keySource, userId);
-      // Enforce the FIFO cap of HEALTH_LOG_LANE_CAP rows per (service, key_source) credential lane.
-      // The cap has NO user_id predicate, but getLaneHealth scopes its counts to one user on
-      // keySource === "user" lanes — so on a multi-tenant user lane one tenant's traffic can evict
-      // another tenant's rows and shrink that tenant's callsLastHour. Benign today (the only
-      // consumer tests `callsLastHour > 0`, and eviction can only push it toward 0, i.e. the
-      // breaker fails open) but do not build anything on those per-user counts being complete.
-      // `LIMIT ${...}` interpolates a module constant, never user input.
-      db.prepare(
-        `DELETE FROM api_health_log
-         WHERE service = ? AND key_source IS ?
-           AND id NOT IN (
-             SELECT id FROM api_health_log
-             WHERE service = ? AND key_source IS ?
-             ORDER BY ts DESC, rowid DESC
-             LIMIT ${HEALTH_LOG_LANE_CAP}
-           )`
-      ).run(opts.service, keySource, opts.service, keySource);
+      const insertRow = db.prepare(`INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      const updatePattern = db.prepare(`INSERT INTO api_health_error_patterns
+               (id, service, fingerprint, error_text, first_seen, last_seen, count, key_source)
+             VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+             ON CONFLICT(service, fingerprint, key_source) DO UPDATE SET
+               last_seen = excluded.last_seen,
+               count = count + 1`);
+      for (const p of processed) {
+        insertRow.run(p.id, p.service, p.now, p.ok ? 1 : 0, p.latencyMs ?? null, p.errorText, p.keySource, p.userId);
 
-      // Update error pattern if this is a failure.
-      // Use "" (not NULL) as the key_source sentinel so UNIQUE(service,fingerprint,key_source)
-      // deduplicates correctly — SQLite NULL values never collide in UNIQUE constraints.
-      if (!opts.ok && errorText) {
-        const normalized = errorText.trim().toLowerCase().replace(/\s+/g, " ");
-        const fingerprint = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
-        const patternId = randomUUID();
-        const patternKeySource = keySource ?? "";
-
-        db.prepare(
-          `INSERT INTO api_health_error_patterns
-             (id, service, fingerprint, error_text, first_seen, last_seen, count, key_source)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-           ON CONFLICT(service, fingerprint, key_source) DO UPDATE SET
-             last_seen = excluded.last_seen,
-             count = count + 1`
-        ).run(patternId, opts.service, fingerprint, errorText, now, now, patternKeySource);
+        if (!p.ok && p.errorText) {
+          const normalized = p.errorText.trim().toLowerCase().replace(/\s+/g, " ");
+          const fingerprint = createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+          const patternId = randomUUID();
+          const patternKeySource = p.keySource ?? "";
+          updatePattern.run(patternId, p.service, fingerprint, p.errorText, p.now, p.now, patternKeySource);
+        }
       }
     })();
+  } catch {
+    apiHealthBuffer.unshift(...batch);
+    if (apiHealthBuffer.length > 200) apiHealthBuffer.length = 200;
+    if (!process.env.VITEST) scheduleApiHealthFlush();
+    return;
+  }
 
-    if (!opts.ok && errorText && !RAG_SERVICES_WITH_OWN_ALERTING.has(opts.service)) {
-      const keySource = opts.keySource ?? null;
-      // Soft/expected-limit failures (429 bursts, free-tier caps) normally do not page — they are
-      // budget/rate behavior, not a broken integration. Exception: a caller that passes
-      // `quotaResetAt` (Alpha Vantage daily-cap exhaustion) wants ONE operator heads-up pinned to
-      // the known reset instant, so allow that path through even when the row is soft-stamped.
-      // Hard failures still gate on lane health (consecutive hard STOPPED or soft yellow heuristics).
-      const isSoft = isSoftHealthFailure(errorText);
-      if (isSoft && !opts.quotaResetAt) {
-        // pure expected-limit with no known reset: no automatic alert
-      } else {
-        // Scope the streak that gates the alert to this user's own history for user-key lanes, so
-        // tenant A's failures don't fire a provider-degraded alert to tenant B on the shared lane.
-        const lane = getLaneHealth(opts.service, keySource, opts.userId ?? null);
-        // quotaResetAt path: alert once even before a 5-hard streak (the single "pool exhausted"
-        // row is enough signal). Otherwise require the lane already stoppedWorking.
-        if (opts.quotaResetAt || lane.stoppedWorking) {
-          void alertConnectionFailure(opts.service, keySource, opts.userId ?? null, errorText, {
-            // Soft/rate-limit-shaped text: skip Sentry (noise); hard outages still capture.
-            skipSentry: isSoft || /429|rate limit/i.test(errorText),
-            cooldownUntil: opts.quotaResetAt
-          });
+  try {
+    // Post-transaction operations
+    for (const p of processed) {
+      const streakKey = hardStreakStartSettingKey(p.service, p.keySource, p.userId);
+      if (p.ok || p.isSoft) {
+        clearHardStreakStart(streakKey);
+      }
+
+      if (
+        !p.ok &&
+        p.errorText &&
+        !LANES_WITH_OWN_ALERTING.has(p.service) &&
+        !isIntentionalOffHealthService(p.service)
+      ) {
+        if (p.isSoft && !p.quotaResetAt) {
+          // pure expected-limit with no known reset: no automatic alert
+        } else {
+          const lane = getLaneHealth(p.service, p.keySource, p.userId);
+          if (p.quotaResetAt || lane.reason === HEALTH_REASON_CONSECUTIVE_FAILURES) {
+            const escalationWindowMs = transientEscalationWindowMs();
+            const streakStartedMs = lane.streakStartedTs ? Date.parse(lane.streakStartedTs) : NaN;
+            const transientBlip =
+              !p.quotaResetAt &&
+              lane.reason === HEALTH_REASON_CONSECUTIVE_FAILURES &&
+              lane.transientStreak &&
+              (!Number.isFinite(streakStartedMs) || Date.now() - streakStartedMs < escalationWindowMs);
+            void alertConnectionFailure(p.service, p.keySource, p.userId, p.errorText, {
+              skipSentry: p.isSoft || /429|rate limit/i.test(p.errorText),
+              cooldownUntil:
+                p.quotaResetAt ??
+                (transientBlip
+                  ? new Date(
+                      (Number.isFinite(streakStartedMs) ? streakStartedMs : Date.now()) + escalationWindowMs
+                    ).toISOString()
+                  : undefined),
+              transientBlip
+            });
+          }
         }
       }
     }
   } catch {
-    // Health logging must never throw — swallow all errors
+    // Alerts must never resurrect a committed batch or throw out of health logging.
   }
 }
+
+export function logApiHealth(opts: ApiHealthLogOpts): void {
+  apiHealthBuffer.push({ ...opts, bufferedAt: new Date().toISOString() });
+  if (process.env.VITEST || apiHealthBuffer.length >= 50) {
+    flushApiHealthBuffer();
+    return;
+  }
+  scheduleApiHealthFlush();
+}
+
 // ── Read ───────────────────────────────────────────────────────────────────────
 
 interface ServiceKeyLane { service: string; key_source: string | null }
@@ -318,9 +651,17 @@ interface ServiceKeyLane { service: string; key_source: string | null }
 function listHealthLanes(): ServiceKeyLane[] {
   try {
     const db = getDb();
-    return db
+    const rows = db
       .prepare(`SELECT DISTINCT service, key_source FROM api_health_log ORDER BY service, key_source`)
       .all() as ServiceKeyLane[];
+    const seen = new Set(rows.map((row) => `${row.service}::${row.key_source ?? ""}`));
+    for (const opts of apiHealthBuffer) {
+      const key = `${opts.service}::${opts.keySource ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ service: opts.service, key_source: opts.keySource ?? null });
+    }
+    return rows;
   } catch {
     return [];
   }
@@ -332,7 +673,14 @@ export function listHealthServices(): string[] {
     const rows = db
       .prepare(`SELECT DISTINCT service FROM api_health_log ORDER BY service`)
       .all() as Array<{ service: string }>;
-    return rows.map((r) => r.service);
+    const names = rows.map((r) => r.service);
+    const seen = new Set(names);
+    for (const opts of apiHealthBuffer) {
+      if (seen.has(opts.service)) continue;
+      seen.add(opts.service);
+      names.push(opts.service);
+    }
+    return names;
   } catch {
     return [];
   }
@@ -345,51 +693,40 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
     const now = Date.now();
     const hourAgo = new Date(now - 60 * 60 * 1000).toISOString();
     const dayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    // Prepare once.  The public health refresh calls this on the serving thread;
+    // per-lane prepare() was N*5 statement compiles on every probe.
+    const lastSuccessStmt = db.prepare(
+      `SELECT ts, latency_ms FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ok = 1
+       ORDER BY ts DESC, rowid DESC LIMIT 1`
+    );
+    const lastFailureStmt = db.prepare(
+      `SELECT ts, error_text FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ok = 0
+       ORDER BY ts DESC, rowid DESC LIMIT 1`
+    );
+    const callsSinceStmt = db.prepare(
+      `SELECT COUNT(*) as cnt FROM api_health_log
+       WHERE service = ? AND key_source IS ? AND ts >= ?`
+    );
+    const last5Stmt = db.prepare(
+      `SELECT ok, error_text FROM api_health_log
+       WHERE service = ? AND key_source IS ?
+       ORDER BY ts DESC, rowid DESC LIMIT 5`
+    );
 
     return lanes.map(({ service, key_source: ks }) => {
-      const lastSuccess = db
-        .prepare(
-          `SELECT ts, latency_ms FROM api_health_log
-           WHERE service = ? AND key_source IS ? AND ok = 1
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
-        )
-        .get(service, ks) as { ts: string; latency_ms: number | null } | undefined;
+      const lastSuccess = lastSuccessStmt.get(service, ks) as { ts: string; latency_ms: number | null } | undefined;
 
-      const lastFailure = db
-        .prepare(
-          `SELECT ts, error_text FROM api_health_log
-           WHERE service = ? AND key_source IS ? AND ok = 0
-           ORDER BY ts DESC, rowid DESC LIMIT 1`
-        )
-        .get(service, ks) as { ts: string; error_text: string | null } | undefined;
+      const lastFailure = lastFailureStmt.get(service, ks) as { ts: string; error_text: string | null } | undefined;
 
-      const callsLastHour = (
-        db
-          .prepare(
-            `SELECT COUNT(*) as cnt FROM api_health_log
-             WHERE service = ? AND key_source IS ? AND ts >= ?`
-          )
-          .get(service, ks, hourAgo) as { cnt: number }
-      ).cnt;
+      const callsLastHour = (callsSinceStmt.get(service, ks, hourAgo) as { cnt: number }).cnt;
 
-      const callsLast24h = (
-        db
-          .prepare(
-            `SELECT COUNT(*) as cnt FROM api_health_log
-             WHERE service = ? AND key_source IS ? AND ts >= ?`
-          )
-          .get(service, ks, dayAgo) as { cnt: number }
-      ).cnt;
+      const callsLast24h = (callsSinceStmt.get(service, ks, dayAgo) as { cnt: number }).cnt;
 
       // "Stopped working" detection — scoped per credential lane. Soft/expected-limit failures
       // (429, daily caps) do NOT count toward the hard consecutive-failures kind.
-      const last5 = db
-        .prepare(
-          `SELECT ok, error_text FROM api_health_log
-           WHERE service = ? AND key_source IS ?
-           ORDER BY ts DESC, rowid DESC LIMIT 5`
-        )
-        .all(service, ks) as Array<{ ok: number; error_text: string | null }>;
+      const last5 = last5Stmt.all(service, ks) as Array<{ ok: number; error_text: string | null }>;
 
       let stoppedWorking = false;
       let stoppedReason: string | null = null;
@@ -412,6 +749,7 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         stoppedReasonKind = "no-success-this-hour";
       }
 
+      const intentionalOff = isIntentionalOffHealthService(service);
       return {
         service,
         keySource: ks,
@@ -421,15 +759,29 @@ export function getServiceHealthSummaries(): ServiceHealthSummary[] {
         lastFailureError: lastFailure?.error_text ?? null,
         callsLastHour,
         callsLast24h,
-        stoppedWorking,
-        stoppedReason,
-        stoppedReasonKind,
-        laneLogCap: HEALTH_LOG_LANE_CAP,
+        // Leftover 401/5xx rows after a vendor retire must not paint the lane STOPPED.
+        stoppedWorking: intentionalOff ? false : stoppedWorking,
+        stoppedReason: intentionalOff ? intentionalOffHealthReason(service) : stoppedReason,
+        stoppedReasonKind: intentionalOff ? null : stoppedReasonKind,
+        intentionalOff: intentionalOff || undefined
       };
     });
   } catch {
     return [];
   }
+}
+
+/**
+ * Hard outage only: last 5 calls all failed.  Soft "no success this hour" and
+ * rate-limit rows are degraded signal, not a reason to paint the dependency down
+ * or abandon a backup lane.
+ */
+export function isHardStoppedHealthSummary(
+  summary: Pick<ServiceHealthSummary, "stoppedWorking" | "stoppedReasonKind" | "intentionalOff">
+): boolean {
+  if (summary.intentionalOff) return false;
+  if (!summary.stoppedWorking) return false;
+  return summary.stoppedReasonKind === "consecutive-failures";
 }
 
 // NOTE: `rowid DESC` tiebreaker — `ts` is ms-resolution, so rows written in the same millisecond
@@ -543,6 +895,92 @@ function operatorAlertEmail(): string | undefined {
   );
 }
 
+/**
+ * System-wide alerts go to every administrator via sendNotification (APNs is
+ * auto-included when they have a registered device).  Pushover/email remain a
+ * last-resort additionalDelivery only when no admin has a live device token and
+ * those channels are not already in prefs — otherwise we double-send.
+ */
+async function deliverSystemAlertToAdmins(input: {
+  type: "provider_degraded" | "storage_warning" | "liveness_warning";
+  title: string;
+  body: string;
+  payload: unknown;
+  kind: string;
+}): Promise<void> {
+  const { getNotifyPrefs, getPolicy, listActiveDeviceTokens } = await import("./db");
+  const { isPushoverDeliverable, loadNotifyConfig, notify, operatorPushoverUserKey } = await import("./notify");
+  const { sendNotification } = await import("./notifications");
+  const { listAdminUserIds } = await import("./admin-user-ids");
+
+  const adminIds = listAdminUserIds();
+  const config = loadNotifyConfig();
+  const prefs = getNotifyPrefs("local");
+  const alreadySendingPushover = prefs.channels.includes("pushover");
+  const alreadySendingEmail = prefs.channels.includes("email") && Boolean(prefs.email.trim());
+  let anyAdminHasApns = false;
+  for (const id of adminIds) {
+    try {
+      if (listActiveDeviceTokens(id).length > 0) {
+        anyAdminHasApns = true;
+        break;
+      }
+    } catch {
+      /* registry hiccup must not block the rest of delivery */
+    }
+  }
+
+  const fallbackEmail = operatorAlertEmail();
+  const additionalDelivery =
+    anyAdminHasApns || alreadySendingPushover || alreadySendingEmail
+      ? undefined
+      : isPushoverDeliverable(prefs, config)
+        ? () =>
+            notify(
+              "local",
+              { title: input.title, body: input.body, kind: input.kind, data: input.payload },
+              {
+                config,
+                prefs: {
+                  ...prefs,
+                  channels: ["pushover"],
+                  pushoverTarget: operatorPushoverUserKey(prefs),
+                  updatedAt: prefs.updatedAt
+                }
+              }
+            )
+        : fallbackEmail && config.email.resendKey && config.email.from
+          ? () =>
+              notify(
+                "local",
+                { title: input.title, body: input.body, kind: input.kind, data: input.payload },
+                {
+                  config,
+                  prefs: {
+                    ...prefs,
+                    channels: ["email" as const],
+                    email: fallbackEmail,
+                    updatedAt: prefs.updatedAt
+                  }
+                }
+              )
+          : undefined;
+
+  for (const userId of adminIds) {
+    const policy = getPolicy(userId);
+    await sendNotification(
+      { type: input.type, title: input.title, payload: input.payload },
+      {
+        userId,
+        policy,
+        directBody: input.body,
+        notifyDeps: { config },
+        ...(userId === "local" && additionalDelivery ? { additionalDelivery } : {})
+      }
+    ).catch(() => {});
+  }
+}
+
 async function captureHealthSentryMessage(
   level: "warning" | "error",
   message: string,
@@ -561,6 +999,22 @@ async function captureHealthSentryMessage(
       scope.setTag("component", "api-health");
       if (context.service) scope.setTag("health.service", String(context.service));
       if (context.keySource) scope.setTag("health.key_source", String(context.keySource));
+      // Lets an alert rule route on the CLASS of failure, not the level alone: "hard" is a real
+      // provider/auth outage, "transient-network" is a socket/DNS blip that has not escalated.
+      if (context.failureClass) scope.setTag("health.failure_class", String(context.failureClass));
+      // Group by the STABLE lane identifier, not by the rendered message. Sentry's default
+      // fingerprint for captureMessage is the message text, and these messages embed a DISPLAY
+      // name that drifts ("Voyage" vs "voyage", "OpenRouter" vs "OpenRouter embed") — one lane
+      // fragmented into six issues that way. `service` is the health-log service id and never
+      // drifts, so grouping survives any future title rewording.
+      if (context.service) {
+        // Include the warning type so distinct liveness incidents (scheduler-stale vs
+        // trading-liveness-degraded vs run-failure) group into separate Sentry issues
+        // instead of collapsing into one.
+        const fingerprint = ["api-health", String(context.service)];
+        if (context.warningType) fingerprint.push(String(context.warningType));
+        scope.setFingerprint(fingerprint);
+      }
       scope.setContext("api-health", context);
       captureMessage(message);
     });
@@ -588,11 +1042,62 @@ export async function alertConnectionFailure(
   // the generic HEALTH_ALERT_COOLDOWN_MS window. Falls back to the generic window when absent,
   // unparsable, or already in the past, so a bad/stale value never shortens the cooldown to
   // "always re-alert" or silences alerts forever.
-  opts?: { skipSentry?: boolean; cooldownUntil?: string }
+  opts?: {
+    skipSentry?: boolean;
+    cooldownUntil?: string;
+    /**
+     * This streak is made entirely of transport blips and has not yet lasted the escalation
+     * window (see `HEALTH_TRANSIENT_ESCALATION_MS`). Record it — audit row plus a `warning`
+     * Sentry capture — but do NOT page: no `error` level, no operator push. It escalates on its
+     * own if the lane keeps failing past the window.
+     */
+    transientBlip?: boolean;
+  }
 ): Promise<void> {
   try {
     const targetUserId = userId || "local";
     const actualKeySource = keySource || "none";
+    // Peer-app DB contention (Congress.Trade D1 SQLITE_BUSY on an HTTP-200 import) is NOT a broken
+    // share connection on ST. Record honestly and capture at warning — never the generic
+    // "<service> connection failed" title/`hard` class that pages P0 production rules (ST-3988).
+    if (isDependencyDbContentionMessage(errorText)) {
+      await noteDependencyDbContention({
+        lane: service,
+        operation: "connection health",
+        message: errorText,
+        userId: targetUserId
+      });
+      if (shouldSuppressConnectionAlertForStartup(process.uptime())) {
+        return;
+      }
+      const baseKey =
+        actualKeySource === "user"
+          ? `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:${targetUserId}:dependency-db`
+          : `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:dependency-db`;
+      const { getInternalSetting, setInternalSetting, audit } = await import("./db");
+      const now = Date.now();
+      const last = getInternalSetting<string>(baseKey);
+      if (last) {
+        const suppressedUntilMs = Date.parse(last);
+        if (Number.isFinite(suppressedUntilMs) && now < suppressedUntilMs) return;
+      }
+      setInternalSetting(baseKey, new Date(now + HEALTH_ALERT_COOLDOWN_MS).toISOString());
+      audit(
+        "dependency_db_contention_alert",
+        { service, keySource: actualKeySource, userId: targetUserId, errorText },
+        targetUserId
+      );
+      if (!opts?.skipSentry) {
+        await captureHealthSentryMessage("warning", `${service} dependency database contention`, {
+          service,
+          keySource: actualKeySource,
+          userSpecific: actualKeySource === "user",
+          failureClass: HEALTH_FAILURE_CLASS_DEPENDENCY_DB,
+          reason: errorText
+        });
+      }
+      return;
+    }
     // Local SQLite contention/misconfiguration incidental to a provider call is OUR fault, not the
     // vendor's. Never let it mint a "<service> connection failed" push; record it under its real
     // cause instead (audit row + threshold-gated "local database contention" advisory).
@@ -600,14 +1105,25 @@ export async function alertConnectionFailure(
       await noteLocalDbFault({ lane: service, operation: "connection health", message: errorText, userId: targetUserId });
       return;
     }
+    // process.uptime() — do not import runtime-health here.  That module loads
+    // node:fs / node:http / node:path, and db.ts re-exports this file into client
+    // graphs (PR #2798 verify-hosted webpack UnhandledSchemeError).
+    if (shouldSuppressConnectionAlertForStartup(process.uptime())) {
+      return;
+    }
     // Cool down GLOBAL lanes (env/none) by service+source only — NOT per-user. In a multi-user outage
     // each tenant's failure hits the SAME global dependency, so a userId-scoped cooldown key would let
     // every tenant mint its own cooldown row and re-alert the admin every 6h for the one shared outage.
     // Only per-USER credential lanes ("user") key the cooldown by userId (each user's own key/alert).
-    const key =
+    //
+    // Transient-blip warnings use a SEPARATE `:transient` suffix so their short escalation-window
+    // cooldown cannot suppress a later hard failure (HTTP 401/500) on the same lane. Hard / escalated
+    // captures keep the unsuffixed key and ignore any active transient cooldown.
+    const baseKey =
       actualKeySource === "user"
         ? `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}:${targetUserId}`
         : `${HEALTH_ALERT_COOLDOWN_PREFIX}:${service}:${actualKeySource}`;
+    const key = opts?.transientBlip ? `${baseKey}:transient` : baseKey;
 
     // Cooldown check. The stored setting value is the "suppressed until" instant (not "last sent
     // at"): this lets a quota-exhaustion caller stretch the window arbitrarily far (to the
@@ -646,81 +1162,83 @@ export async function alertConnectionFailure(
     // Log audit event
     audit("connection_health_alert", payload, targetUserId);
 
-    // Send Sentry event
+    // Send Sentry event. A transport blip is warning-level on every lane, global or not — the
+    // level is what PagerDuty routes on, so this is the difference between "recorded" and "paged".
     if (!opts?.skipSentry) {
-      await captureHealthSentryMessage(isGlobal ? "error" : "warning", title, {
+      await captureHealthSentryMessage(opts?.transientBlip || !isGlobal ? "warning" : "error", title, {
         service,
         keySource: actualKeySource,
         userSpecific: !isGlobal,
+        failureClass: opts?.transientBlip ? "transient-network" : "hard",
         reason: errorText
       });
     }
 
+    // Not yet an outage: the audit row and the warning capture above are the whole response.
+    if (opts?.transientBlip) return;
+
     if (isGlobal) {
-      // Global failures: Route to admin email and health.
-      const { getNotifyPrefs } = await import("./db");
-      const prefs = getNotifyPrefs("local");
-      const { loadNotifyConfig, notify } = await import("./notify");
-
-      const fallbackEmail = operatorAlertEmail();
-      const config = loadNotifyConfig();
-
-      // The operator's own channels are delivered by sendNotification inside the enabled-event
-      // gate. The fallback email remains an EXTRA lazy lane when the operator has no usable email
-      // preference, so it cannot double-send or bypass that gate.
-      const additionalDelivery =
-        fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
-          ? () =>
-              notify(
-                "local",
-                { title, body, kind: "provider_degraded", data: payload },
-                {
-                  config,
-                  prefs: {
-                    ...prefs,
-                    channels: ["email" as any],
-                    email: fallbackEmail,
-                    updatedAt: prefs.updatedAt
-                  }
-                }
-              )
-          : undefined;
-
-      // Also send standard notification
-      const { sendNotification } = await import("./notifications");
-      const { getPolicy } = await import("./db");
-      const policy = getPolicy("local");
-      const forcedPolicy = {
-        ...policy,
-        notificationSettings: {
-          ...policy.notificationSettings,
-          enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
-        }
-      };
-      await sendNotification(
-        { type: "provider_degraded", title, payload },
-        { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
-      ).catch(() => {});
+      await deliverSystemAlertToAdmins({
+        type: "provider_degraded",
+        title,
+        body,
+        payload,
+        kind: "provider_degraded"
+      });
     } else {
-      // User-key failures: Route to user notifications only
+      // User-key failures: Route to user notifications only. Same real-toggle delivery as above.
       const { sendNotification } = await import("./notifications");
       const { getPolicy } = await import("./db");
       const policy = getPolicy(targetUserId);
-      const forcedPolicy = {
-        ...policy,
-        notificationSettings: {
-          ...policy.notificationSettings,
-          enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "provider_degraded" as const])) as any
-        }
-      };
       await sendNotification(
         { type: "provider_degraded", title, payload },
-        { userId: targetUserId, policy: forcedPolicy as any, directBody: body }
+        { userId: targetUserId, policy, directBody: body }
       ).catch(() => {});
     }
   } catch (err) {
     // Health alerts must never throw
     console.error("Health alert error:", err);
+  }
+}
+
+const PEER_PUSH_ALERT_COOLDOWN_PREFIX = "peerPushAckAlertSent";
+const PEER_PUSH_ALERT_COOLDOWN_MS = 60 * 60_000;
+
+/**
+ * Page on the first inbound Congress.Trade receipt that is not `ok`.  The health
+ * lane still records every attempt.  This alert does not wait for five failures,
+ * and a later success on that lane does not erase it.  Repeats of the same health
+ * value are cooled down for an hour.
+ */
+export async function alertPeerPushReceiptGap(health: string, pushId: string | null): Promise<void> {
+  try {
+    const key = `${PEER_PUSH_ALERT_COOLDOWN_PREFIX}:${health}`;
+    const { getInternalSetting, setInternalSetting } = await import("./db");
+    const last = getInternalSetting<string>(key);
+    if (last && Date.now() - Date.parse(last) < PEER_PUSH_ALERT_COOLDOWN_MS) return;
+    setInternalSetting(key, new Date().toISOString());
+
+    const title = "Congress.Trade push is missing an ack";
+    const body = pushId
+      ? `Inbound Congress.Trade push ${pushId} receipt health is ${health}.  Expected a push id plus delivered and consumed acks.`
+      : `Inbound Congress.Trade push receipt health is ${health}.  Expected a push id plus delivered and consumed acks.`;
+    const payload = { health, pushId, service: "congress-inbound-push" };
+
+    await captureHealthSentryMessage("error", title, {
+      service: "congress-inbound-push",
+      failureClass: "hard",
+      warningType: health,
+      reason: body,
+    });
+    await deliverSystemAlertToAdmins({
+      type: "liveness_warning",
+      title,
+      body,
+      payload,
+      kind: "liveness_warning",
+    });
+  } catch (err) {
+    console.error("Peer push receipt alert error:", err);
   }
 }
 
@@ -738,48 +1256,123 @@ export async function alertStorageWarning(warningType: string, message: string):
 
     audit("storage_warning_alert", payload, "local");
 
-    // Route to admin email
-    const { getNotifyPrefs } = await import("./db");
-    const prefs = getNotifyPrefs("local");
-    const { loadNotifyConfig, notify } = await import("./notify");
-
-    const fallbackEmail = operatorAlertEmail();
-    const config = loadNotifyConfig();
-
-    const additionalDelivery =
-      fallbackEmail && config.email.resendKey && config.email.from && (!prefs.channels.includes("email") || !prefs.email.trim())
-        ? () =>
-            notify(
-              "local",
-              { title, body, kind: "storage_warning", data: payload },
-              {
-                config,
-                prefs: {
-                  ...prefs,
-                  channels: ["email" as any],
-                  email: fallbackEmail,
-                  updatedAt: prefs.updatedAt
-                }
-              }
-            )
-        : undefined;
-
-    // Also send standard notification
-    const { sendNotification } = await import("./notifications");
-    const { getPolicy } = await import("./db");
-    const policy = getPolicy("local");
-    const forcedPolicy = {
-      ...policy,
-      notificationSettings: {
-        ...policy.notificationSettings,
-        enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "storage_warning" as const])) as any
-      }
-    };
-    await sendNotification(
-      { type: "storage_warning", title, payload },
-      { userId: "local", policy: forcedPolicy as any, directBody: body, notifyDeps: { config }, additionalDelivery }
-    ).catch(() => {});
+    await deliverSystemAlertToAdmins({
+      type: "storage_warning",
+      title,
+      body,
+      payload,
+      kind: "storage_warning"
+    });
   } catch {
     // never throw on warnings
+  }
+}
+
+const LIVENESS_ALERT_COOLDOWN_PREFIX = "livenessAlertSent";
+const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000; // 15 mins for liveness since it's more critical, or maybe 12 hours? Let's use 1 hour.
+// Episode tracking for escalation: a degradation nobody acts on must get LOUDER,
+// not just repeat.  `livenessDegradedSince:<type>` marks when the current episode
+// began; `livenessEscalatedAt:<type>` marks the last escalation ping.
+const LIVENESS_DEGRADED_SINCE_PREFIX = "livenessDegradedSince";
+const LIVENESS_ESCALATED_AT_PREFIX = "livenessEscalatedAt";
+
+function livenessEscalationHours(): number {
+  const raw = Number(process.env.ST_LIVENESS_ESCALATION_HOURS ?? 4);
+  return Number.isFinite(raw) && raw > 0 ? raw : 4;
+}
+
+export async function alertLivenessWarning(warningType: string, message: string): Promise<void> {
+  try {
+    const key = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
+    const { getInternalSetting, setInternalSetting, audit } = await import("./db");
+    const last = getInternalSetting<string>(key);
+    if (last && Date.now() - Date.parse(last) < LIVENESS_ALERT_COOLDOWN_MS) return;
+    setInternalSetting(key, new Date().toISOString());
+
+    // Track the episode start so a persistent degradation escalates.  First
+    // alert of an episode stamps it; recovery clears it via clearLivenessWarning.
+    const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+    let sinceIso = getInternalSetting<string>(sinceKey);
+    if (!sinceIso || Number.isNaN(Date.parse(sinceIso))) {
+      sinceIso = new Date().toISOString();
+      setInternalSetting(sinceKey, sinceIso);
+    }
+    const degradedHours = (Date.now() - Date.parse(sinceIso)) / 3_600_000;
+    const escalationHours = livenessEscalationHours();
+    // Escalate at most once per escalation window: loud on crossing, then the
+    // regular 15-min cadence resumes until the next window boundary.
+    const escalatedAtKey = `${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`;
+    const escalatedAt = getInternalSetting<string>(escalatedAtKey);
+    const escalatedAtMs = escalatedAt ? Date.parse(escalatedAt) : NaN;
+    const dueForEscalation =
+      degradedHours >= escalationHours &&
+      (Number.isNaN(escalatedAtMs) || Date.now() - escalatedAtMs >= escalationHours * 3_600_000);
+
+    const title = dueForEscalation
+      ? `ESCALATED Liveness: ${warningType.replace(/_/g, " ")} still degraded after ${Math.floor(degradedHours)}h`
+      : `Liveness Warning: ${warningType.replace(/_/g, " ")}`;
+    const body = dueForEscalation
+      ? `${message}\n\nThis condition has persisted for ${degradedHours.toFixed(1)} hours without recovery. Trading may be silently stalled; human intervention is needed.`
+      : message;
+    const payload = {
+      warningType,
+      message,
+      degradedHours: Math.round(degradedHours * 10) / 10,
+      escalated: dueForEscalation
+    };
+
+    audit("liveness_warning_alert", payload, "local");
+
+    // Page via Sentry at error level (the level PagerDuty routes on) with a
+    // stable fingerprint per warning type, so a degradation that nobody acts on
+    // keeps paging instead of sitting in a notification nobody reads.  The
+    // 2026-09-30 incident had tradingLivenessDegraded=true for ~5 days with no
+    // escalation; this path is the in-app backstop for exactly that.
+    await captureHealthSentryMessage("error", `${title}: ${message}`, {
+      service: "trading-liveness",
+      failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
+      warningType,
+      degradedHours: Math.round(degradedHours * 10) / 10,
+      escalated: dueForEscalation
+    });
+
+    if (dueForEscalation) {
+      setInternalSetting(escalatedAtKey, new Date().toISOString());
+    }
+
+    await deliverSystemAlertToAdmins({
+      type: "liveness_warning",
+      title,
+      body,
+      payload,
+      kind: "liveness_warning"
+    });
+  } catch {
+    // never throw on warnings
+  }
+}
+
+/**
+ * Clear a liveness episode's escalation state once the condition recovers, so
+ * the next episode starts its clock fresh instead of escalating immediately.
+ * Call from the healthy branch wherever alertLivenessWarning is raised.
+ */
+export async function clearLivenessWarning(warningType: string): Promise<boolean> {
+  try {
+    const { getInternalSetting, deleteInternalSetting } = await import("./db");
+    // The public health endpoint calls this on every healthy hit: only touch
+    // the settings table when an episode actually left state behind.
+    let cleared = false;
+    for (const prefix of [LIVENESS_DEGRADED_SINCE_PREFIX, LIVENESS_ESCALATED_AT_PREFIX]) {
+      const key = `${prefix}:${warningType}`;
+      if (getInternalSetting<string>(key) !== undefined) {
+        deleteInternalSetting(key);
+        cleared = true;
+      }
+    }
+    return cleared;
+  } catch {
+    // never throw on warnings
+    return false;
   }
 }

@@ -4,7 +4,11 @@
  *  non-blocking notice. The live-approval typed-confirmation contract mirrors
  *  app/api/proposals/[id]/approve/route.ts exactly. */
 
-import type { LlmReasoningEffort, PerformanceSummary, StrategyTuningProposal, SystemState, TradingPolicy } from "@/lib/types";
+import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "./mutation-busy";
+import type { LookaheadAuditFindingRow } from "@/lib/db-lookahead-audit";
+import type { SignalHealthSnapshotRow } from "@/lib/db-signal-health";
+import type { LookaheadVerdict } from "@/lib/lookahead-audit";
+import type { LlmReasoningEffort, PerformanceSummary, ScoringWeights, StrategyProfile, StrategyTuningProposal, SystemState, TradingPolicy } from "@/lib/types";
 
 export class ConsoleApiError extends Error {
   status: number;
@@ -16,6 +20,59 @@ export class ConsoleApiError extends Error {
     this.status = status;
     this.payload = payload;
   }
+}
+
+// ── Session-expiry → login redirect ─────────────────────────────────────────
+//
+// middleware.ts already fails closed on an unauthenticated PAGE navigation (redirect to
+// /login) and on an unauthenticated /api/* request (plain 401). What it cannot do is notice a
+// session that expires WHILE the console is already open: every console screen reads live data
+// from one polled GET /api/dashboard snapshot (useConsoleData.tsx) plus one-off mutations
+// through `request` below, and a 401 from either used to be handled exactly like a network
+// blip — logged as a generic error string while the last-good snapshot kept rendering as if it
+// were still live. On a trading desk that is dangerous: the user keeps looking at stale
+// positions/orders that stopped updating the moment their session died, with no signal that
+// anything is wrong beyond a small "delayed" chip.
+//
+// Fix: ANY 401 that reaches this client's fetch wrapper sends the browser to the SAME /login
+// page middleware already uses for a page-level fail-closed redirect (no second auth-redirect
+// mechanism invented), preserving the current location as `callbackUrl` so a fresh sign-in
+// returns the user where they were.
+let redirectingToLogin = false;
+
+/** True once a 401 has been seen and the browser is being sent to /login. useConsoleData reads
+ *  this so it can stop treating the in-memory snapshot as live and stop scheduling further
+ *  background fetches once the session is known dead — the redirect itself is not instant. */
+export function isRedirectingToLogin(): boolean {
+  return redirectingToLogin;
+}
+
+/** Idempotent: a second 401 arriving while the navigation is already underway (e.g. the
+ *  dashboard poll and a mutation both fail around the same time) is a no-op, and this refuses
+ *  to fire at all from /login itself — the one guard that keeps a 401 from an auth-adjacent
+ *  page from ever bouncing back to itself in a loop. Exported so the console's OTHER
+ *  self-contained request clients (settings/lib.ts, orders/api.ts — deliberately not merged
+ *  into this file's own `request<T>`, see those files' headers) can fail closed on a 401
+ *  through the same one destination instead of leaving the user on a dead session until the
+ *  next dashboard poll notices. */
+export function redirectToLogin(): void {
+  if (typeof window === "undefined") return;
+  if (redirectingToLogin) return;
+  if (window.location.pathname === "/login" || window.location.pathname.startsWith("/login/")) return;
+  redirectingToLogin = true;
+  // Fragment-driven console views (app/console/guardrails#autonomy, app/console/strategy#models,
+  // settings/connections anchors) read window.location.hash to pick or scroll to a subsection —
+  // dropping it here would land a fresh sign-in back on the route's default view instead of
+  // where the user actually was.
+  const callbackUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
+  // A hard navigation (not useRouter().push()/next/navigation's redirect(), which need a
+  // component render/event-handler context this plain client module doesn't have) is the
+  // correct choice here, not a shortcut: it forces a fresh request through middleware.ts's own
+  // fail-closed auth gate rather than trusting any client-side router cache, matching the same
+  // window.location.href pattern this codebase already uses for auth-adjacent navigation (e.g.
+  // settings/danger.tsx's sign-out redirect, settings/brokers.tsx's OAuth start).
+  // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- intentional hard navigation, see above
+  window.location.href = `/login?callbackUrl=${encodeURIComponent(callbackUrl)}`;
 }
 
 /** Thrown when the approve endpoint answers 409 LIVE_CONFIRMATION_REQUIRED.
@@ -71,12 +128,12 @@ function looksLikeHtml(contentType: string, payload: unknown): boolean {
  *  other HTML error page get a generic "edge/proxy error" framing that still surfaces the code. */
 function edgeErrorMessage(status: number): string {
   if (status === 524) {
-    return "The server took too long to respond at the edge (524). The operation may still be running — check the Activity feed.";
+    return "The server took too long to respond at the edge (524).  The operation may still be running — check the Activity feed.";
   }
   if (status >= 520 && status <= 530) {
-    return `The edge network returned an error (${status}) instead of reaching the app. The operation may still be running — check the Activity feed.`;
+    return `The edge network returned an error (${status}) instead of reaching the app.  The operation may still be running — check the Activity feed.`;
   }
-  return `The server returned an unexpected error page (${status}) instead of a normal response. The operation may still be running — check the Activity feed.`;
+  return `The server returned an unexpected error page (${status}) instead of a normal response.  The operation may still be running — check the Activity feed.`;
 }
 
 /** Shared by every helper below so a raw HTML error page is never surfaced as an error message —
@@ -91,6 +148,8 @@ function buildResponseError(res: Response, payload: unknown, fallback: string): 
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const track = isConsoleMutationMethod(init?.method);
+  if (track) beginConsoleMutation();
   let res: Response;
   try {
     res = await fetch(url, {
@@ -100,9 +159,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     });
   } catch {
     throw new ConsoleApiError("Network error — the server could not be reached.", 0);
+  } finally {
+    if (track) endConsoleMutation();
   }
   const payload = await parseBody(res);
   if (!res.ok) {
+    if (res.status === 401) redirectToLogin();
     throw buildResponseError(res, payload, `Request failed (${res.status}).`);
   }
   return payload as T;
@@ -119,6 +181,7 @@ export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
     throw new ConsoleApiError("Network error — the server could not be reached.", 0);
   }
   if (!res.ok) {
+    if (res.status === 401) redirectToLogin();
     const payload = await parseBody(res);
     throw buildResponseError(res, payload, `Snapshot failed (${res.status}).`);
   }
@@ -132,15 +195,25 @@ export interface RunOnceResult {
   /** "started": the route launched the run and returned before it finished (real runs can take
    *  several minutes on LLM-heavy steps) — the run keeps executing server-side; track it via the
    *  existing Activity/snapshot polling, not this response. */
-  status: "completed" | "failed" | "started";
+  status: "completed" | "failed" | "started" | "queued";
   summary: string;
 }
 
-/** Manual run — the server forces manual runs to propose-only authority. Async: the route races
- *  the run against a bounded window and may return `status: "started"` (202) instead of waiting
- *  for the whole run to finish — see app/api/strategy/run/route.ts. */
+/** Manual run — the server forces manual runs to propose-only authority. Async: the route
+ *  persists a run id and returns `status: "queued"` (202) before executing.
+ *
+ *  Singleflighted: if two callers (e.g. the dual desktop+mobile RunOnceButton instances that
+ *  both listen to the same `console:run-once` window event) call runOnce() concurrently, they
+ *  share the exact same in-flight Promise so only one POST is ever issued per event cycle. The
+ *  server also dedupes via queueStrategyRunRequest, but this eliminates the duplicate request
+ *  and the duplicate toast/busy-state pair on the client. */
+let _runOnceInFlight: Promise<RunOnceResult> | null = null;
 export function runOnce(): Promise<RunOnceResult> {
-  return request<RunOnceResult>("/api/strategy/run", { method: "POST", body: JSON.stringify({ manual: true }) });
+  if (_runOnceInFlight) return _runOnceInFlight;
+  const p = request<RunOnceResult>("/api/strategy/run", { method: "POST", body: JSON.stringify({ manual: true }) });
+  _runOnceInFlight = p;
+  p.finally(() => { _runOnceInFlight = null; }).catch(() => {});
+  return p;
 }
 
 /** STOP everything: systemState → halted. Never sells anything. */
@@ -286,10 +359,45 @@ export interface LiveApprovalConfirmationBody {
 
 export interface ApproveResult {
   status: string;
+  outcome?: string;
   orderId?: string;
   brokerState?: string;
   fillStatus?: string;
   reasons?: string[];
+}
+
+/** A 409 whose body is a placement outcome is not an HTTP success, and it is
+ *  still the structured result the toast needs.  Live confirmation stays a throw. */
+function placementResultFromConflict(error: unknown): ApproveResult | undefined {
+  if (!(error instanceof ConsoleApiError) || error.status !== 409) return undefined;
+  if (!error.payload || typeof error.payload !== "object") return undefined;
+  const payload = error.payload as {
+    error?: string;
+    status?: string;
+    outcome?: string;
+    reasons?: string[];
+    expectedText?: string;
+    orderId?: string;
+    brokerState?: string;
+    fillStatus?: string;
+  };
+  if (payload.error === "LIVE_CONFIRMATION_REQUIRED" && typeof payload.expectedText === "string") {
+    throw new LiveConfirmationRequiredError(
+      Array.isArray(payload.reasons) ? payload.reasons : [],
+      payload.expectedText
+    );
+  }
+  if (typeof payload.status === "string" && typeof payload.outcome === "string") {
+    return {
+      status: payload.status,
+      outcome: payload.outcome,
+      orderId: payload.orderId,
+      brokerState: payload.brokerState,
+      fillStatus: payload.fillStatus,
+      reasons: payload.reasons
+    };
+  }
+  return undefined;
 }
 
 // Approval intentionally shares the per-account strategy lock. A long LLM run can therefore
@@ -305,6 +413,13 @@ function waitForApprovalRetry(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function retryRedTeam(id: string): Promise<{ ok: true; proposalId: string }> {
+  return request(`/api/proposals/${encodeURIComponent(id)}/retry-red-team`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export async function approveProposal(
   id: string,
   liveConfirmation?: LiveApprovalConfirmationBody
@@ -316,12 +431,8 @@ export async function approveProposal(
         body: JSON.stringify(liveConfirmation ? { liveConfirmation } : {})
       });
     } catch (error) {
-      if (error instanceof ConsoleApiError && error.status === 409 && error.payload && typeof error.payload === "object") {
-        const p = error.payload as { error?: string; reasons?: string[]; expectedText?: string; message?: string };
-        if (p.error === "LIVE_CONFIRMATION_REQUIRED" && typeof p.expectedText === "string") {
-          throw new LiveConfirmationRequiredError(Array.isArray(p.reasons) ? p.reasons : [], p.expectedText);
-        }
-      }
+      const placement = placementResultFromConflict(error);
+      if (placement) return placement;
       throw error;
     }
   };
@@ -384,6 +495,39 @@ export function fetchAccountPerformance(id: string): Promise<AccountPerformanceR
   return request<AccountPerformanceResult>(`/api/connected-accounts/${encodeURIComponent(id)}/performance`);
 }
 
+/** Results-page signal-health section: per-horizon snapshot history (newest first) from the daily
+ *  signal-health-refresh lane. Read-only; empty series render an honest empty state. */
+export interface SignalHealthResponse {
+  minObservations: number;
+  topK: number;
+  /** Round-trip transaction-cost estimate (bps) debited for the "net" figure in the Gross vs net
+   *  stat — server-provided so the UI copy never drifts from signal-health.ts's actual constant. */
+  costRoundTripBps: number;
+  horizons: Array<{ horizon: string; snapshots: SignalHealthSnapshotRow[] }>;
+}
+
+export function fetchSignalHealth(): Promise<SignalHealthResponse> {
+  return request<SignalHealthResponse>("/api/signal-health");
+}
+
+/** Results-page lookahead-audit panel: truncated-replay findings (newest pass first) plus the
+ *  aggregate verdict from the weekly lookahead-audit lane. Read-only; 'unverifiable' rows are
+ *  deliberate coverage-gap receipts, rendered plainly rather than hidden. */
+export interface LookaheadAuditResponse {
+  enabled: boolean;
+  /** Factor sub-score mismatch tolerance (0-100 points) the classifications used. */
+  tolerancePoints: number;
+  /** Minimum Jaccard similarity for a clean RAG evidence replay. */
+  jaccardMin: number;
+  cadenceDays: number;
+  verdict: LookaheadVerdict;
+  findings: LookaheadAuditFindingRow[];
+}
+
+export function fetchLookaheadAudit(): Promise<LookaheadAuditResponse> {
+  return request<LookaheadAuditResponse>("/api/lookahead-audit");
+}
+
 /** "Import settings from another account" (Strategy page): copies strategy settings — models,
  *  prompt, guardrails, weights, watchlist, tax treatment — from `sourceConnectedAccountId` onto
  *  `targetConnectedAccountId`. Any->any (not paper-only); never touches broker connection,
@@ -396,6 +540,32 @@ export function importAccountSettings(
     method: "POST",
     body: JSON.stringify({ sourceConnectedAccountId })
   });
+}
+
+export function createProfile(input: {
+  name: string;
+  prompt?: string;
+  policy?: Partial<TradingPolicy>;
+  active?: boolean;
+}): Promise<StrategyProfile> {
+  return request<StrategyProfile>("/api/profiles", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export function updateProfile(
+  id: string,
+  patch: { name?: string; prompt?: string; policy?: Partial<TradingPolicy>; scoringWeights?: Partial<ScoringWeights> }
+): Promise<StrategyProfile> {
+  return request<StrategyProfile>(`/api/profiles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch)
+  });
+}
+
+export function deleteProfile(id: string): Promise<void> {
+  return request<void>(`/api/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** Library-activate a preset (flips the library's active flag and writes the

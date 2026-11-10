@@ -1,5 +1,9 @@
 # Phase 4 - Market Data And Multi-Factor Scoring
 
+## Daily history beyond two years (2026-10-14)
+
+`fetchDailyOHLC` (`src/lib/history.ts`) defaults to about five years.  Massive free aggregates stop near two years, and Stooq stays out of the cascade (bot wall).  A lookback longer than 730 days skips Massive and tries Yahoo chart `range=max` (paced), then Tradier history, then Twelve Data, then the remaining broker and keyed tiers.  A shorter lookback keeps Massive and uses Yahoo `range=1y`.  Both Yahoo ranges share the chart-host pacer, and the abort timer starts after a slot is acquired.  Twelve Data JSON is parsed with `TwelveDataTimeSeriesSchema` before any bar is stored.  SQLite `history_cache_eod` rows are permanent.  A fresh series is served with no network when its oldest bar reaches the requested start, or when a prior `range=max` response recorded that the listing starts later.  A two-year cache with no marker cannot block `range=max`.
+
 ## Goals
 
 - Introduce a provider abstraction without removing the current delayed Nasdaq fallback.
@@ -56,6 +60,18 @@ into the existing Momentum score rather than adding a separate technical weight.
 attributed as `webull-unofficial`, and must not be used for broker execution,
 account state, paper fills, or learning-grade fills.
 
+**Robinhood quote chunk (2026-08-19):** `get_equity_quotes` / tradability /
+fundamentals send at most 10 symbols per MCP call (live reject: `too many
+symbols (max 10, got 250)` on Roth `9d71dda4`).  The scan universe is not
+shrunk.  Rollout: `docs/rollouts/2026-08-19-robinhood-quote-chunk.md`.
+
+**Gather fail-open (2026-08-19, same `9d71dda4` window):** congress.trade 502
+and Massive 429 must not latch enrichment or skip Green.  The legacy
+short-circuit path no longer awaits App A alone.  App A stops remaining
+symbol pulls after the first latching 5xx/429/timeout.  Massive treats 429 as
+soft, retries 0, and stops the rest of that enrich call.  A 404 stays a miss.
+Rollout: `docs/rollouts/2026-08-19-gather-no-pinecone-inventory.md`.
+
 **Quote/OHLC sharing guardrails (2026-06-19):** broker quote merges now append the
 actual provider to `MarketScan.source` (`alpaca-quotes`, `robinhood-quotes`, or
 `broker-quotes` when unspecified) and dedupe repeated merges. OHLC history caches
@@ -86,6 +102,38 @@ quote-resolvable custom U.S. equity/ETF ticker, the scan carries it forward as a
 Yahoo Finance quote-only row and still runs enrichment/scoring. If a custom
 ticker cannot be priced, Market Scan keeps the rest of the scan usable and shows
 a concrete warning naming the ticker.
+
+**Empty screener is a failure, not "no names today" (2026-08-18):** Coolify
+SELECT-only receipts on sha `cda485ff`: Jay's 12:03 CT iOS hit is audit
+`market_scan` `d0359642` at 2026-08-18T17:03:07Z — `scannedSymbols=505`
+`quotes=0` `candidates=0` `cached=true`, provider `nasdaq-delayed-screener`,
+warnings include "This operation was aborted" plus an empty stale-fallback
+claim.  Written as `market_scan`, not `market_scan_failed` (last `_failed`
+was Jul 14).  Same abort + 0 quotes on every scan since 2026-08-13T22:30Z.
+Last good: `2f2a8e11` 2026-08-13T16:15:45Z (515 scanned / 513 quotes / 65
+candidates).  Watchlist is XOM + SPCX (2); 505 is S&P-sized, not watched
+names.  This is not an empty universe and not ranker-zero.
+
+Verified abort cause: `fetchNasdaqScreener` called `controller.abort()` at 8s
+with no reason and left that timer armed through `response.json()` of the
+8000-row table.  That is the exact warning “This operation was aborted.”  It
+is not the 20s `withScanDeadline` (that message is “Interactive market scan
+deadline exceeded.”).  The screener still sent stub `"Mozilla/5.0"` while
+nasdaq-quote already used `BROWSER_UA`.  The screener now uses the same
+`BROWSER_UA` + Origin/Referer + `fetchWithRetry({ retries: 1 })` contract,
+a 15s named timeout, one abort retry, and does not attach the interactive
+deadline signal.  `congress-share` `fetchNasdaqScreenerRefs` uses that same
+helper.  If Nasdaq still returns 0, a usable last-good seed is applied
+before Yahoo prices the whole allowed set.  Live Refresh of a ~5k-name
+universe used to start that Yahoo fallback, miss the 35s interactive
+budget / edge 503, and never reach the seed `/console/scan` already
+paints.  `marketScanQuotesFromAudit` keeps valid rows instead of voiding
+the map on one bad entry.  A non-empty universe that still cannot be priced
+throws `ScanQuotesUnavailableError` (HTTP 503) and writes `market_scan_failed`.
+An empty abort row is not last-good.  An empty `seedEnrichment: {}` does
+not 200 `cached=true`.  iOS Scan seeds from compact `latestScan` on
+`/api/mobile/snapshot` and keeps that universe when live Refresh 503s,
+same as the website.  It does not blame Guardrails or the watchlist.
 
 **Expanded dynamic universes (2026-06-23):** Base universe selection now covers
 small and broad indexes without sending the whole market to the LLM. Static
@@ -220,15 +268,47 @@ enrichment checklist (`SymbolEnrichment` → `EnrichmentSourcedField` → `takeS
   RapidAPI now declare `suppliesFields` so they participate in Wave C. Alpha Vantage RapidAPI
   also supplies NEWS_SENTIMENT when sentiment/headlines remain gaps. Keyless `nasdaq-quote`
   joins the free wave beside Yahoo. ROIC resolves from `ROIC_API_KEY` (profile-first).
-  FilingAPI.dev (`FILINGAPI`) supplies sector/industry/daysToEarnings/insiderSentiment in
-  wave C. SEC XBRL is default ON. Additional RapidAPI scarce lanes: yh-finance-apidojo,
+  FilingAPI.dev (`FILINGAPI`) is optional: when a valid key is present it supplies
+  sector/industry/daysToEarnings/insiderSentiment in wave C; a missing, invalid, or 401
+  key skips the lane (ROIC + SEC EDGAR cover the class) and does not fail health.
+  SEC XBRL is default ON. Additional RapidAPI scarce lanes: yh-finance-apidojo,
+  FilingAPI.dev is retired on `main` (2026-08-17, #2787); ROIC.ai covers fundamentals/transcripts and
+  SEC EDGAR covers 10-K/10-Q bodies.  Open #2792 is an owner reversal (keep the lane; soft-skip
+  missing/401 keys; do not buy Plus).  SEC XBRL is default ON. Additional RapidAPI scarce lanes: yh-finance-apidojo,
   real-time-finance-data, seeking-alpha-rapidapi.
+  Brokers + cascade reliability audit (2026-08-17, report-only):
+  `docs/audits/2026-08-17-brokers-data-cascade.md`.
 - **Enrichment coverage report** — after each cascade run, Admin → Enrichment Coverage
   (`/admin/enrichment-coverage`), `/api/admin/enrichment-coverage`, and ops snapshot
   `enrichmentCoverage` show per-field fill rate, winning/most-frequent source, missing
-  fields, and provider failures. `applyEnrichment` preserves `fieldObservations` /
+  fields, and provider failures.  Reports persist in SQLite (`enrichment_coverage_runs` /
+  `enrichment_coverage_fields`, migration 94) so redeploys still serve the last run until
+  the next enrich. `applyEnrichment` preserves `fieldObservations` /
   `providerFailures` on `MarketQuote`.
 
 See `docs/rollouts/2026-07-01-data-sources-breadth.md`,
 `docs/rollouts/2026-07-01-followon-fmp-breaker-quotes.md`, and
 `docs/rollouts/2026-07-26-free-cascade-coverage.md`.
+
+## Delayed Yahoo fallback (owner 2026-08-18)
+
+When live broker / Alpaca snapshot quotes miss, the cascade keeps the freshest Yahoo
+print (~15–20m delayed) so openings still go through.  That tape is expected delay,
+not a broken cascade:
+
+- Cascade FALLBACK and Alpaca `fillMissingQuotesWithClose` stamp `delayedFallback`.
+- Policy ages the FETCH snapshot (`fetchedAt`), not the delayed print.  Openings are
+  never fail-closed.  Green/Red are not skipped.
+- Approval cards (website + iOS) stamp user-facing **Delayed Quote**.
+
+See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
+
+## Quote observation time (2026-10-15, ST-2584)
+
+The price is the provider's last print, then the mid of a two-sided book.  A size, a one-sided bid or ask, a prior close, and a fabricated 0 are not the price.  `asOf` is the provider's own observation time.  The wall clock is never substituted.  A quote with no parseable observation time is unknown age.  The staleness gate blocks that opening.  A known-old observation still converts to a limit and stays approved.  Exits stay ungated.  `maxQuoteAgeSec` 0 still turns the gate off.  A chat draft preview has no scan, so a draft blocked only by `quote_age_unknown` still stages.  Approve time re-runs the gate and blocks the order if the fresh scan is still undated.
+
+Tradier paper stays `venue_delayed` (age the fetch when `asOf` parses, no Alpaca or Yahoo overlay).  Tradier live is `venue_locked`: the Tradier quote is the price, later cascade levels do not replace it, and the real `asOf` still hits the 120s gate.  Alpaca last prints come from Alpaca's own latest-trades call on the existing market-data client.  No new vendor was added.  `fillMissingQuotesWithClose` remains exported and is no longer called from Alpaca or Tradier quote reads.
+
+Price, bid, and ask rows in `symbol_field_latest` are skipped when they have no provider observation.  `stampFieldObservation` still falls back to `fetchedAt` for non-quote evidence.
+
+See `docs/rollouts/2026-10-15-quote-observation-staleness.md`.  The 2026-10-05 anchors (Yahoo `asOf`, ROIC unset `asOf`) still hold.  The earlier Alpaca mid-then-ask rule does not.

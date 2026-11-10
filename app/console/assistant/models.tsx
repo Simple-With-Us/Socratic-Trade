@@ -22,14 +22,11 @@ export const MODEL_GROUPS: ModelGroup[] = CHAT_MODEL_GROUPS;
 
 export const CATALOG_MODEL_IDS = new Set(MODEL_GROUPS.flatMap((g) => g.options.map((o) => o.value)));
 
-/** Provider a chat request with this model would hit. Delegates to the shared
- *  console attribution module, adding the assistant's one extra case: "mock" is
- *  the explicit keyless offline path (never gated on a provider key). */
-export function providerForModel(model: string): "mock" | ConsoleProviderId {
-  if (model.trim().toLowerCase() === "mock") return "mock";
+/** Provider a chat request with this model would hit. */
+export function providerForModel(model: string): ConsoleProviderId {
   return consoleProviderForModel(model);
 }
 
-export function providerDisplayName(provider: "mock" | ConsoleProviderId): string {
-  return provider === "mock" ? "Mock (offline)" : providerLabel(provider);
+export function providerDisplayName(provider: ConsoleProviderId): string {
+  return providerLabel(provider);
 }

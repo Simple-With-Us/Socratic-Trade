@@ -31,7 +31,7 @@ export function SaveStatus({ status, className }: { status: AutoSaveStatus; clas
       className={`${base} text-[color:var(--con-neg)] ${className ?? ""}`}
       role="status"
       aria-live="polite"
-      title="The last change could not be saved — it was put back. See the error notice; try again."
+      title="The last change could not be saved — it was put back.  See the error notice; try again."
     >
       <TriangleAlert size={12} /> Couldn&apos;t save
     </span>

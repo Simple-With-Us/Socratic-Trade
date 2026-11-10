@@ -45,6 +45,11 @@ const DELETE_TABLES_BY_USER_ID = [
   "user_watchlist",
   "price_alerts",
   "notification_prefs",
+  // Added 2026-08-12: registered APNs device tokens (native iOS push). A deleted account must not
+  // leave a live token behind that would keep delivering to that person's phone.
+  "device_push_tokens",
+  // Added 2026-11-09 (ST-2599): server-backed Auth.js session rows (migration 102).
+  "auth_sessions",
   "chat_turns",
   "llm_usage",
   "user_memory",
@@ -55,11 +60,15 @@ const DELETE_TABLES_BY_USER_ID = [
   "socratic_decisions",
   "socratic_framework_proposals",
   "synthetic_trailing_stops",
+  // Added 2026-09-29: per-user data-source residential proxy settings (including the
+  // encrypted proxy password). A deleted account must not leave proxy credentials behind.
+  "user_proxy_settings",
   "broker_protective_stops",
   "audit_events",
   // Added by the G9(b) coverage cross-check (2026-07-01) — previously missing:
   "api_health_log",
   "mobile_commands",
+  "strategy_run_requests",
   "rag_usage",
   "take_profit_trims",
   // Added 2026-07-05: due_jobs (src/lib/db-jobs.ts) is user-scoped (nullable user_id — system-wide
@@ -87,6 +96,12 @@ const DELETE_TABLES_BY_USER_ID = [
   // (src/lib/db-retrieval-usefulness.ts) — user-scoped learning telemetry.
   "retrieval_usefulness_stats",
   "retrieval_usefulness_credited",
+  // Added 2026-08-12: rolling signal-health diagnostics (src/lib/db-signal-health.ts) —
+  // user-scoped learning telemetry like the retrieval-usefulness tables above.
+  "signal_health_snapshot",
+  // Added 2026-08-12: truncated-replay lookahead-audit findings (src/lib/db-lookahead-audit.ts) —
+  // user-scoped audit telemetry like signal_health_snapshot.
+  "lookahead_audit_findings",
   // Added 2026-07-16: pending_bracket_teardowns (src/lib/db.ts) — queued bracket sibling-leg
   // teardowns are user-scoped like position_stop_plans.
   "pending_bracket_teardowns",
@@ -104,7 +119,11 @@ const DELETE_TABLES_BY_USER_ID = [
   "task_journal",
   // Added 2026-08-05: headline_first_seen (src/lib/db.ts, migration 66) — per-user first
   // observation timestamps for news headlines used by evidence-age receipts (#837).
-  "headline_first_seen"
+  "headline_first_seen",
+  // Added 2026-08-14: r5 scoped locks / memory lifecycle / overlays (migrations 79–81).
+  "trade_locks",
+  "vector_doc_lifecycle",
+  "strategy_overlays"
 ] as const;
 
 type DeleteTable = (typeof DELETE_TABLES_BY_USER_ID)[number];
@@ -255,6 +274,9 @@ export function getAccountDeletionBlockers(userId: string): AccountDeletionBlock
   const activeMobileCommands = db
     .prepare("SELECT COUNT(*) AS count FROM mobile_commands WHERE user_id = ? AND status IN ('queued','running')")
     .get(userId) as { count: number };
+  const activeStrategyRunRequests = db
+    .prepare("SELECT COUNT(*) AS count FROM strategy_run_requests WHERE user_id = ? AND status IN ('queued','running')")
+    .get(userId) as { count: number };
   const activeReplacements = db
     .prepare("SELECT COUNT(*) AS count FROM order_replacements WHERE user_id = ? AND status IN ('cancel_requested', 'cancel_confirmed', 'replacement_claiming', 'replacement_submitted')")
     .get(userId) as { count: number };
@@ -270,7 +292,7 @@ export function getAccountDeletionBlockers(userId: string): AccountDeletionBlock
     .get(userId) as { count: number };
   const activeUserOperations = countActiveUserOperations(userId);
   return {
-    runningStrategyRuns: runningStrategyRuns.count,
+    runningStrategyRuns: runningStrategyRuns.count + activeStrategyRunRequests.count,
     placingProposals: placingProposals.count,
     pendingReconciliationFills: pendingReconciliationFills.count,
     activeMobileCommands: activeMobileCommands.count,

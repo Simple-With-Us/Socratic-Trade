@@ -13,6 +13,7 @@ import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { Btn, Chip } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
+import { SymbolButton } from "../ui/symbol-drilldown";
 import { cancelOrder, OrdersApiError } from "./api";
 import { orderTypeLabel, readableState, type OpenOrderRow } from "./lib";
 
@@ -32,25 +33,37 @@ export function CancelOrderSheet({
   const { refresh } = useConsoleData();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
+  const [dustWarning, setDustWarning] = useState<string | null>(null);
 
   const order = row.order;
   const live = reality.tone === "live";
   const sideWord = SIDE_LABEL[order.side] ?? String(order.side).toUpperCase();
   const filled = order.filledQuantity ?? 0;
 
+  const close = () => {
+    setDustWarning(null);
+    onClose();
+  };
+
   const submit = async () => {
     setBusy(true);
     try {
       const result = await cancelOrder(order.id);
       await refresh();
-      onClose();
       toast.push(
         "pos",
         `Cancel request sent for ${order.symbol}`,
         result.state
-          ? `Broker state: ${readableState(result.state)}. The broker confirms the cancellation on its side.`
+          ? `Broker state: ${readableState(result.state)}.  The broker confirms the cancellation on its side.`
           : "The broker confirms the cancellation on its side."
       );
+      if (result.dustWarning) {
+        // ADVISORY ONLY — the cancel above already went through either way. Keep the sheet open
+        // so the owner actually sees this rather than closing straight into a toast they can miss.
+        setDustWarning(result.dustWarning);
+      } else {
+        close();
+      }
     } catch (error) {
       toast.push("neg", "Cancel failed", error instanceof OrdersApiError ? error.message : String(error));
     } finally {
@@ -59,9 +72,9 @@ export function CancelOrderSheet({
   };
 
   return (
-    <Sheet open={open} onClose={onClose} title="Cancel working order" tone={live ? "live" : undefined}>
+    <Sheet open={open} onClose={close} title="Cancel working order" tone={live ? "live" : undefined}>
       <div className="flex flex-wrap items-center gap-2 text-[length:var(--con-fs-md)] font-bold">
-        {sideWord} {order.symbol}
+        {sideWord} <SymbolButton symbol={order.symbol} className="text-inherit" />
         <span className="text-[length:var(--con-fs-sm)] font-normal text-[color:var(--con-muted)]">
           {orderTypeLabel(order.type)} · {readableState(order.state)}
         </span>
@@ -83,18 +96,30 @@ export function CancelOrderSheet({
         moment before the cancel lands.
       </p>
 
+      {dustWarning && (
+        <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{dustWarning}</p>
+      )}
+
       <div className="mt-4 flex justify-end gap-2">
-        <Btn variant="ghost" onClick={onClose} disabled={busy} title="Close and leave the order working.">
-          Keep it working
-        </Btn>
-        <Btn
-          variant="danger"
-          disabled={busy}
-          onClick={() => void submit()}
-          title="Send the cancel request to the broker now."
-        >
-          {busy ? "Cancelling…" : "Cancel this order"}
-        </Btn>
+        {dustWarning ? (
+          <Btn variant="ghost" onClick={close} title="Close this sheet.">
+            Done
+          </Btn>
+        ) : (
+          <>
+            <Btn variant="ghost" onClick={close} disabled={busy} title="Close and leave the order working.">
+              Keep it working
+            </Btn>
+            <Btn
+              variant="danger"
+              disabled={busy}
+              onClick={() => void submit()}
+              title="Send the cancel request to the broker now."
+            >
+              {busy ? "Cancelling…" : "Cancel this order"}
+            </Btn>
+          </>
+        )}
       </div>
     </Sheet>
   );

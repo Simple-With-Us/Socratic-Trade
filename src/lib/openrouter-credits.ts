@@ -119,11 +119,12 @@ interface KeyLimitRow {
 async function fetchJson(
   url: string,
   key: string,
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  timeoutMs: number = FETCH_TIMEOUT_MS
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
   const res = await fetcher(url, {
     headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    signal: AbortSignal.timeout(timeoutMs)
   });
   let data: unknown = null;
   try {
@@ -136,10 +137,11 @@ async function fetchJson(
 
 async function detectManagementKey(
   key: string,
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  timeoutMs: number = FETCH_TIMEOUT_MS
 ): Promise<boolean> {
   try {
-    const res = await fetchJson(KEY_URL, key, fetcher);
+    const res = await fetchJson(KEY_URL, key, fetcher, timeoutMs);
     if (!res.ok || !res.data || typeof res.data !== "object") return false;
     const data = (res.data as { data?: Record<string, unknown> }).data;
     if (!data || typeof data !== "object") return false;
@@ -151,7 +153,8 @@ async function detectManagementKey(
 
 async function fetchAllKeys(
   key: string,
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  timeoutMs: number = FETCH_TIMEOUT_MS
 ): Promise<{ ok: boolean; status: number; keys: KeyLimitRow[] }> {
   const keys: KeyLimitRow[] = [];
   let offset = 0;
@@ -160,7 +163,7 @@ async function fetchAllKeys(
     const url = new URL(KEYS_URL);
     url.searchParams.set("include_disabled", "true");
     url.searchParams.set("offset", String(offset));
-    const res = await fetchJson(url.toString(), key, fetcher);
+    const res = await fetchJson(url.toString(), key, fetcher, timeoutMs);
     if (!res.ok) {
       return { ok: false, status: res.status, keys: [] };
     }
@@ -243,7 +246,8 @@ function evaluateKeyLimits(
  */
 export async function getOpenRouterCreditStatus(
   nowMs: number = Date.now(),
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  options?: { maxWaitMs?: number }
 ): Promise<OpenRouterCreditStatus | null> {
   const key = resolveCheckKey();
   if (!key) return null;
@@ -253,6 +257,7 @@ export async function getOpenRouterCreditStatus(
   const accountThreshold = thresholdUsd();
   const keyFloor = keyLimitThresholdUsd();
   const checkedAt = new Date(nowMs).toISOString();
+  const waitMs = Math.max(200, Math.min(options?.maxWaitMs ?? FETCH_TIMEOUT_MS, FETCH_TIMEOUT_MS));
 
   const failOpen = (error: string): OpenRouterCreditStatus => {
     if (cache) return cache.status;
@@ -275,12 +280,12 @@ export async function getOpenRouterCreditStatus(
   };
 
   try {
-    const isManagement = await detectManagementKey(key, fetcher);
+    const isManagement = await detectManagementKey(key, fetcher, waitMs);
     const source: "management" | "inference" = isManagement ? "management" : "inference";
 
     // Account prepaid balance (free). Works with management keys; many inference keys also
     // answer /credits — if it fails we fail-open rather than page.
-    const creditsRes = await fetchJson(CREDITS_URL, key, fetcher);
+    const creditsRes = await fetchJson(CREDITS_URL, key, fetcher, waitMs);
     if (!creditsRes.ok) {
       return failOpen(`credits check HTTP ${creditsRes.status}`);
     }
@@ -304,7 +309,7 @@ export async function getOpenRouterCreditStatus(
     let keysError: string | undefined;
 
     if (isManagement) {
-      const keysResult = await fetchAllKeys(key, fetcher);
+      const keysResult = await fetchAllKeys(key, fetcher, waitMs);
       if (keysResult.ok) {
         keysChecked = true;
         const evald = evaluateKeyLimits(keysResult.keys, keyFloor);
@@ -322,6 +327,29 @@ export async function getOpenRouterCreditStatus(
     const reasons: OpenRouterCreditReason[] = [...keyReasons];
     if (remaining < accountThreshold) {
       reasons.push("account_low");
+    }
+
+    // A transient keys-read failure must not erase a known key-limit failure (Sentry, PR #5097):
+    // when this run could not check keys at all — management detection failed or the /keys read
+    // errored — and the previous cached status was failing on key limits, retain the cached key
+    // reasons, counts and labels instead of caching a fresh ok:true that flaps the alert off.
+    // The account-balance fields above still refresh; only the key-limit verdict is carried over,
+    // and the next successful /keys read replaces it.
+    if (!keysChecked && cache) {
+      const cachedKeyReasons = cache.status.reasons.filter(
+        (reason) => reason === "key_limit_reached" || reason === "key_limit_low"
+      );
+      if (cachedKeyReasons.length) {
+        for (const reason of cachedKeyReasons) {
+          if (!reasons.includes(reason)) reasons.push(reason);
+        }
+        keysWithLimit = cache.status.keysWithLimit;
+        keysLimitReached = cache.status.keysLimitReached;
+        keysLimitLow = cache.status.keysLimitLow;
+        if (cache.status.problemKeyLabels?.length) {
+          problemKeyLabels = cache.status.problemKeyLabels;
+        }
+      }
     }
 
     const status: OpenRouterCreditStatus = {
@@ -345,5 +373,34 @@ export async function getOpenRouterCreditStatus(
     return status;
   } catch (error) {
     return failOpen(error instanceof Error ? error.name : "credits check failed");
+  }
+}
+
+/**
+ * Distinct owner-facing hint when a strategy run failed while the cached OpenRouter credits
+ * check is already below threshold.  Empty HTTP-200 bodies are the observed symptom of a
+ * near-zero prepaid balance (issue #2577 / 2026-08-06 Green Team session).  Returns undefined
+ * unless the balance was actually read and is below the floor — a fail-open read error must
+ * never invent a credits cause.
+ */
+export function formatOpenRouterCreditsExhaustedHint(
+  status: OpenRouterCreditStatus | null | undefined
+): string | undefined {
+  if (!status || status.ok) return undefined;
+  if (status.remainingUsd == null || !Number.isFinite(status.remainingUsd)) return undefined;
+  const remaining = status.remainingUsd.toFixed(2);
+  const floor = status.thresholdUsd.toFixed(2);
+  return `OpenRouter credits look exhausted ($${remaining} remaining; alert floor $${floor}).  Empty LLM responses are the usual symptom.  Top up OpenRouter.`;
+}
+
+/** Best-effort: read the cached credits check and format a hint.  Never throws. */
+export async function maybeOpenRouterCreditsExhaustedHint(
+  nowMs: number = Date.now(),
+  fetcher: typeof fetch = fetch
+): Promise<string | undefined> {
+  try {
+    return formatOpenRouterCreditsExhaustedHint(await getOpenRouterCreditStatus(nowMs, fetcher));
+  } catch {
+    return undefined;
   }
 }

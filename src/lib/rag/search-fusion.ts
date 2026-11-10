@@ -1,8 +1,19 @@
 import { getDb, resolveApiKey } from "../db";
-import { retrieveContextDetailed, getClients } from "../vector-db";
+import { siliconflowBaseUrl } from "../siliconflow-base";
+import { retrieveContextDetailed, getClients, currentEmbedRev } from "../vector-db";
 import { applyOpenRouterClassifierEnrichment } from "../llm-call";
 import { providerRequestIdFromPayload } from "../llm-usage";
 import { meterEmbed } from "../rag-metering";
+import {
+  beginEmbedProviderAttempt,
+  createEmbedAttemptAbort,
+  getCachedContentEmbedding,
+  noteEmbedProviderSuccess,
+  settleEmbedProviderAttempt,
+  setCachedContentEmbedding
+} from "./embed-resilience";
+import { parseProviderEmbeddingResponse } from "./embedding-response-schema";
+import { embedRequestFits, packInWindowTexts, truncateEmbedText } from "./embed-request-pack";
 import { deconstructQuery } from "./query-deconstruct";
 import { routeRetrievalIntent } from "./intent-router";
 import { hashContent } from "./chunk";
@@ -45,42 +56,110 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
   const useSiliconFlow = !useOpenRouter && !!siliconflowKey && !siliconflowKey.startsWith("mock");
   if (!useSiliconFlow && !useOpenRouter) return null;
 
-  const url = useSiliconFlow ? "https://api.siliconflow.cn/v1/embeddings" : "https://openrouter.ai/api/v1/embeddings";
+  const url = useSiliconFlow ? `${siliconflowBaseUrl()}/v1/embeddings` : "https://openrouter.ai/api/v1/embeddings";
   const model = useSiliconFlow ? "BAAI/bge-m3" : "baai/bge-m3";
+  const provider = useSiliconFlow ? "siliconflow" : "openrouter";
   const apiKey = useSiliconFlow ? siliconflowKey : openrouterKey;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${apiKey}`
-  };
-  const body: Record<string, unknown> = { model, input: texts };
-  if (!useSiliconFlow) {
-    // OpenRouter attribution headers + classifier enrichment (user + flat trace), same as the
-    // vector-db.ts OpenRouter embed path. Enrichment never breaks the call — see
-    // applyOpenRouterClassifierEnrichment. SiliconFlow bypasses OpenRouter, so its classifier
-    // context flows only via the pushed telemetry event (meterEmbed below).
-    headers["HTTP-Referer"] = "https://socratictrade.com";
-    headers["X-Title"] = "Socratic.Trade";
-    applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "search-fusion-mmr" });
+  const revision = currentEmbedRev();
+  const inputType = "document";
+  const cached = texts.map((text) => getCachedContentEmbedding(model, revision, inputType, text));
+  if (cached.every((row): row is number[] => Array.isArray(row) && row.length > 0)) {
+    return cached;
   }
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    throw new Error(`Alternative embedding failed in search fusion (${useSiliconFlow ? "siliconflow" : "openrouter"}): ${response.status}`);
+  // Open circuit: Jaccard MMR.  Do not throw, so the caller does not log embed.failed per call.
+  if (!beginEmbedProviderAttempt(provider)) return null;
+
+  // Truncate each string (1:1 with the caller's texts) then pack so a dense passage cannot 400.
+  const pieces = texts.map((text, sourceIndex) => ({ text: truncateEmbedText(text), sourceIndex }));
+  const packed = packInWindowTexts(pieces);
+  const vectors = new Array<number[] | undefined>(texts.length);
+  try {
+    for (const group of packed) {
+      const groupTexts = group.map((item) => item.text);
+      if (!embedRequestFits(groupTexts)) {
+        throw new Error(`search-fusion embed pack exceeded the token budget (${groupTexts.length} texts)`);
+      }
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      };
+      const body: Record<string, unknown> = { model, input: groupTexts };
+      if (!useSiliconFlow) {
+        // OpenRouter attribution headers + classifier enrichment (user + flat trace), same as the
+        // vector-db.ts OpenRouter embed path. Enrichment never breaks the call — see
+        // applyOpenRouterClassifierEnrichment. SiliconFlow bypasses OpenRouter, so its classifier
+        // context flows only via the pushed telemetry event (meterEmbed below).
+        headers["HTTP-Referer"] = "https://socratictrade.com";
+        headers["X-Title"] = "Socratic-Trade";
+        applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "search-fusion-mmr" });
+      }
+      const attemptAbort = createEmbedAttemptAbort();
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: attemptAbort.signal
+        });
+        if (!response.ok) {
+          throw new Error(`Alternative embedding failed in search fusion (${provider}): ${response.status}`);
+        }
+        const raw = await response.json();
+        const res = parseProviderEmbeddingResponse(raw);
+        meterEmbed(
+          groupTexts,
+          model,
+          userId,
+          provider,
+          useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", raw)
+        );
+        const groupVectors = (res.data ?? []).map((d) => d.embedding);
+        if (groupVectors.length !== group.length) {
+          throw new Error(`Alternative embedding cardinality mismatch in search fusion (${provider})`);
+        }
+        for (let i = 0; i < group.length; i++) {
+          const vec = groupVectors[i];
+          if (!vec) throw new Error(`Alternative embedding missing a vector in search fusion (${provider})`);
+          vectors[group[i]!.sourceIndex] = vec;
+        }
+      } finally {
+        attemptAbort.cancel();
+      }
+    }
+    for (let i = 0; i < texts.length; i++) {
+      const vec = vectors[i];
+      if (vec) setCachedContentEmbedding(model, revision, inputType, texts[i]!, vec);
+    }
+    noteEmbedProviderSuccess(provider);
+    return vectors as number[][];
+  } catch (error) {
+    settleEmbedProviderAttempt(provider, error);
+    throw error;
   }
-  const res = await response.json();
-  // Meter this paid embed call (usage-compliance WS1 gap #3), mirroring vector-db.ts's
-  // meterEmbed call sites; the OpenRouter generation id rides along for monitor-side verification.
-  meterEmbed(
-    texts,
-    model,
-    userId,
-    useSiliconFlow ? "siliconflow" : "openrouter",
-    useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", res)
-  );
-  return res.data.map((d: any) => d.embedding);
+}
+
+/**
+ * Marks a FusionResult[] as having recalled without dense (vector) matches from at least one
+ * sub-query because the embed/lookup itself failed — not because the corpus genuinely had no
+ * semantic match. `retrieveFusedContext` proceeds lexical-only on this condition (see the P1
+ * fix below) rather than hard-failing the whole hybrid query, but callers that care about
+ * silent quality loss can check this instead of treating every result as equally trustworthy.
+ */
+export function wasDenseRecallDegraded(results: FusionResult[]): boolean {
+  return Boolean((results as unknown as { __denseRecallDegraded?: boolean })?.__denseRecallDegraded);
+}
+
+function markDenseRecallDegraded<T extends FusionResult[]>(results: T): T {
+  try {
+    Object.defineProperty(results, "__denseRecallDegraded", {
+      value: true,
+      enumerable: false,
+      configurable: true
+    });
+  } catch {
+    // best-effort marker only — must never break retrieval
+  }
+  return results;
 }
 
 export async function retrieveFusedContext(
@@ -98,6 +177,36 @@ export async function retrieveFusedContext(
   const k = 60;
   const scoreMap = new Map<string, number>();
   const chunkDetails = new Map<string, { content_hash: string; accession: string; symbol: string; source: string; text: string }>();
+
+  // P1 fix (2026-09-07): a query-embed 400/429/connection failure used to return an empty
+  // `vectorResults` array indistinguishable from "the corpus genuinely has no semantic match" —
+  // this loop swallowed the failure into a bare console.warn and the fused result silently
+  // proceeded lexical-only with no signal anywhere. Track it explicitly so we can fail loudly
+  // (structured log, real telemetry) and mark the returned pool as degraded instead.
+  let denseRecallDegraded = false;
+  const denseRecallDegradedReasons = new Set<string>();
+  // P2 fix (2026-09-07): `budget_skipped` means the caller deliberately reached its configured
+  // RAG budget — retrieveContextDetailed never attempted an embed call, so it is not a
+  // provider/lookup failure. It still counts toward `denseRecallDegraded` (dense recall genuinely
+  // did not run, so wasDenseRecallDegraded() must say so) but must NOT feed the error-level
+  // Sentry log or the embed.failed metric below: a persistently exhausted daily budget would
+  // otherwise flood Sentry and falsely inflate provider-failure metrics on every fused retrieval,
+  // even though no provider call ever failed. Only genuine failures ("lookup_failed", "threw")
+  // are reportable.
+  const reportableDegradationReasons = new Set<string>();
+  const reportDenseRecallDegradation = (): void => {
+    if (reportableDegradationReasons.size === 0) return;
+    void import("../sentry-metrics").then(({ logError, recordEmbedFailure }) => {
+      recordEmbedFailure("search-fusion", "dense-recall-degraded");
+      logError("rag.dense_recall_degraded", {
+        symbol,
+        reasons: Array.from(reportableDegradationReasons).join(",") || "unknown",
+        userId
+      });
+    }).catch(() => {
+      // Observability must never affect retrieval control flow.
+    });
+  };
 
   // Process each sub-query
   for (const subQuery of subQueries) {
@@ -162,10 +271,28 @@ export async function retrieveFusedContext(
 
     let vectorResults: any[] = [];
     if (intent === "semantic" || intent === "hybrid") {
+      const callerOnStatus = options?.onStatus;
       try {
-        vectorResults = await retrieveContextDetailed(subQuery, symbol, 100, userId, options);
+        vectorResults = await retrieveContextDetailed(subQuery, symbol, 100, userId, {
+          ...options,
+          onStatus: (status: string) => {
+            // "lookup_failed" (missing keys or a caught embed/provider error) and
+            // "budget_skipped" both mean dense recall did NOT run for this sub-query — distinct
+            // from "no_memory" (it ran cleanly and found nothing). Only those two make this
+            // sub-query's empty vectorResults a degradation rather than a genuine empty corpus.
+            if (status === "lookup_failed" || status === "budget_skipped") {
+              denseRecallDegraded = true;
+              denseRecallDegradedReasons.add(status);
+              if (status === "lookup_failed") reportableDegradationReasons.add(status);
+            }
+            callerOnStatus?.(status);
+          }
+        });
       } catch (err) {
-        console.warn("[search-fusion] Vector search failed (non-fatal):", err);
+        denseRecallDegraded = true;
+        denseRecallDegradedReasons.add("threw");
+        reportableDegradationReasons.add("threw");
+        console.warn("[search-fusion] Vector search failed (non-fatal):", err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -224,7 +351,10 @@ export async function retrieveFusedContext(
       score
     }));
 
-  if (rawCandidates.length === 0) return [];
+  if (rawCandidates.length === 0) {
+    reportDenseRecallDegradation();
+    return denseRecallDegraded ? markDenseRecallDegraded([]) : [];
+  }
 
   // Batch query to resolve chunk_ids for all unique content_hashes in rawCandidates
   const hashes = rawCandidates.map(c => c.content_hash);
@@ -301,7 +431,14 @@ export async function retrieveFusedContext(
       }
     }
   } catch (embedErr) {
-    console.warn("[search-fusion] MMR embedding failed; using Jaccard fallback:", embedErr instanceof Error ? embedErr.message : String(embedErr));
+    void import("../sentry-metrics").then(({ logWarn, recordEmbedFailure }) => {
+      recordEmbedFailure("search-fusion", "mmr-embed-failed");
+      logWarn("embed.failed", {
+        provider: "search-fusion",
+        error_type: "mmr-embed-failed",
+        error: embedErr instanceof Error ? embedErr.message : String(embedErr)
+      });
+    });
   }
 
   if (queryVec && candVectors) {
@@ -348,7 +485,8 @@ export async function retrieveFusedContext(
       selected.push(candidates[bestIndex]);
     }
 
-    return selected;
+    reportDenseRecallDegradation();
+    return denseRecallDegraded ? markDenseRecallDegraded(selected) : selected;
   }
 
   // Fallback Jaccard MMR similarity (no alternative embedding provider configured, or its call failed)
@@ -381,5 +519,6 @@ export async function retrieveFusedContext(
     selected.push(candidates[bestIndex]);
   }
 
-  return selected;
+  reportDenseRecallDegradation();
+  return denseRecallDegraded ? markDenseRecallDegraded(selected) : selected;
 }

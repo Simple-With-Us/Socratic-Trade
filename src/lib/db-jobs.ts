@@ -12,6 +12,7 @@
 // WAL) plus a conditional UPDATE ... WHERE that re-checks the claim predicate — a lost race
 // leaves `changes !== 1` and the caller treats the row as already taken. Fails closed: any
 // unexpected error during claim is treated as "not claimed" rather than assumed successful.
+import "server-only";
 import crypto from "crypto";
 import { getDb } from "./db";
 

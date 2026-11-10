@@ -8,6 +8,7 @@
 import { resolveAlpacaStreamAccount } from "../db";
 import { onBrokerFill } from "../fills";
 import { fromAlpacaSymbol } from "../money";
+import { serverKnobBool } from "../server-knobs";
 
 // Paper and live Alpaca accounts authenticate against DIFFERENT trade_updates hosts — a live
 // key gets HTTP 401 against the paper host and vice versa. An explicit env override always
@@ -32,7 +33,8 @@ const state: StreamState =
   globalForStream.__alpacaTradeStream ?? (globalForStream.__alpacaTradeStream = { started: false, closing: false, backoffMs: 1000, seen: new Set() });
 
 export function alpacaTradeUpdatesEnabled(): boolean {
-  return ["1", "true", "on", "yes"].includes(String(process.env.STREAMS_ALPACA_TRADE_UPDATES_ENABLED ?? "").trim().toLowerCase());
+  // Server knob: Admin > Operations DB override > STREAMS_ALPACA_TRADE_UPDATES_ENABLED env > off.
+  return serverKnobBool("STREAMS_ALPACA_TRADE_UPDATES_ENABLED");
 }
 
 export function startAlpacaTradeUpdatesStream(): void {
@@ -56,6 +58,12 @@ export function startAlpacaTradeUpdatesStream(): void {
 
 function connect(key: string, secret: string | undefined, environment: "paper" | "live"): void {
   if (state.closing) return;
+  if (!alpacaTradeUpdatesEnabled()) {
+    // Server-knob park: keep the single reconnect chain alive as a slow poll (capped by
+    // MAX_BACKOFF_MS) so flipping the knob back on resumes without a redeploy.
+    scheduleReconnect(key, secret, environment);
+    return;
+  }
   let ws: WebSocket;
   try {
     ws = new WebSocket(tradeWsUrl(environment));
@@ -79,6 +87,16 @@ function connect(key: string, secret: string | undefined, environment: "paper" |
   };
 
   ws.onmessage = (event: MessageEvent) => {
+    if (!alpacaTradeUpdatesEnabled()) {
+      // Server-knob park: close on the first message after a flip off; onclose reconnects into
+      // the parked poll in connect().
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
     let msg: Record<string, unknown>;
     try {
       const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);

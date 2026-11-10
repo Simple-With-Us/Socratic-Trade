@@ -3,12 +3,17 @@
 // this file re-exports them all so every existing `import ... from "./db"` (or
 // `"../lib/db"`, `"@/lib/db"`, etc.) continues to resolve without any changes.
 
+import "server-only";
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync } from "fs";
 import { dirname, resolve } from "path";
+import { resetDrizzleForTesting } from "./db/client";
 import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
-import type { TradingPolicy } from "./types";
+import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
+import { installSlowSqliteTiming } from "./sqlite-slow-timing";
+import { auditRowChangesHaltCause } from "./halt-audit-invalidation";
+import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
 const SP500_DEFAULT_UNIVERSE_MIGRATION_KEY = "migration:sp500_default_universe:2026-06-19";
@@ -37,6 +42,7 @@ function accountSettingMatchesSubject(key: unknown, subjectToken: unknown): numb
     "providerTier:status:",
     "providerTier:lastCheckAt:",
     "risk:hwm:",
+    "risk:hwm-obs:",
     "risk:sod:",
     "learning_review:lastRunDate:",
     "learning_review:lastFingerprint:",
@@ -86,17 +92,20 @@ export function getDb(): Database.Database {
   const path = databasePath();
   mkdirSync(dirname(path), { recursive: true });
   db = new Database(path);
+  installSlowSqliteTiming(db, { walBytes: () => walSizeBytes(path) });
   db.function("account_subject_token", { deterministic: true }, (value: unknown) => accountSubjectToken(String(value ?? "")));
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
+  // Before journal_mode.  The WAL switch writes the file header, and auto_vacuum
+  // can only be armed while that header is still unset.  Existing files already
+  // have tables, so this returns without requesting a rewrite.
+  armIncrementalAutoVacuumIfEmpty(db);
   db.pragma("journal_mode = WAL");
-  // With WAL, a concurrent writer otherwise throws SQLITE_BUSY immediately; wait
-  // up to 60s for the lock instead. NORMAL durability is the WAL-recommended pairing.
-  // Raised from 30s (2026-07-18, PR #1728) after "database is locked" kept surfacing
-  // in prod under heavy concurrent write load (bulk RAG backfill/reindex + scheduler
-  // + burst ingest all writing the same file); WAL already lets readers proceed
-  // during a writer, so a longer wait here only affects genuinely-contended writers,
-  // not the common read path.
-  db.pragma("busy_timeout = 60000");
+  // Short pin, not a 60s sleep. better-sqlite3 waits for SQLITE_BUSY ON THE EVENT LOOP,
+  // so a 60s busy_timeout (raised 5s → 30s → 60s to hide "database is locked") froze
+  // GET /api/live and GET /api/health for the whole wait — Traefik 503 while Docker
+  // still said healthy. WAL readers *can* proceed during a writer only if the loop is
+  // free to run them. Async writers keep the 60s lock budget via sqliteYieldRetry.
+  db.pragma(`busy_timeout = ${SQLITE_BUSY_PIN_MS}`);
   db.pragma("synchronous = NORMAL");
   // Larger page cache + memory-mapped I/O: the dashboard replays fill/proposal history on every
   // request, so a ~20MB page cache (negative = KB) and 256MB mmap keep those hot reads off the
@@ -113,6 +122,24 @@ export function getDb(): Database.Database {
   return db;
 }
 
+/** Size of `<db>-wal` for the slow-call log (ST-4542); null when there is no WAL file. */
+function walSizeBytes(dbPath: string): number | null {
+  try {
+    return statSync(`${dbPath}-wal`).size;
+  } catch {
+    return null;
+  }
+}
+
+/** INCREMENTAL sticks only when it is set before the first user table. */
+function armIncrementalAutoVacuumIfEmpty(database: Database.Database): void {
+  const existing = database
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1")
+    .get();
+  if (existing) return;
+  database.pragma("auto_vacuum = INCREMENTAL");
+}
+
 export function resetDbForTesting(): void {
   if (db) {
     try {
@@ -120,6 +147,12 @@ export function resetDbForTesting(): void {
     } catch {}
     db = undefined;
   }
+  // Drop the cached Drizzle wrapper too — it captures the underlying Database handle
+  // at construction time, so resetting only the raw sqlite connection would leave a
+  // dangling wrapper that throws "The database connection is not open" on the next
+  // query. Test-only helper, no production effect (resetDrizzleForTesting is a no-op
+  // outside the test runtime in practice — getDrizzle is module-private to tests).
+  resetDrizzleForTesting();
 }
 
 // ── Versioned migrations ─────────────────────────────────────────────────────
@@ -129,10 +162,32 @@ export function resetDbForTesting(): void {
 // PRAGMA user_version — replacing the old habit of adding another unversioned ALTER to
 // migrate() (no ordering/stamp; diverged across worktrees).
 const SCHEMA_BASELINE = 1;
-type Migration = { version: number; name: string; up: (db: Database.Database) => void };
+export type Migration = { version: number; name: string; up: (db: Database.Database) => void };
 
 function quoteSqlIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Safe table-existence check using sqlite_master.
+ * PRAGMA table_info on a non-existent table returns an empty array rather than throwing,
+ * which causes naive column-existence checks to misidentify missing tables as missing columns.
+ */
+export function tableExists(database: Database.Database, tableName: string): boolean {
+  const row = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName);
+  return !!row;
+}
+
+/**
+ * Safe column-existence check that first verifies the table exists via sqlite_master
+ * before inspecting PRAGMA table_info.
+ */
+export function columnExists(database: Database.Database, tableName: string, columnName: string): boolean {
+  if (!tableExists(database, tableName)) return false;
+  const cols = database.prepare(`PRAGMA table_info(${quoteSqlIdentifier(tableName)})`).all() as Array<{ name: string }>;
+  return cols.some((c) => c.name === columnName);
 }
 
 /** Install fail-closed INSERT/UPDATE guards for every current user_id table plus user settings. */
@@ -163,6 +218,7 @@ export function installAccountWriteFenceTriggers(database: Database.Database): v
     "provider_usage_outbox",
     "rag_usage",
     "strategy_runs",
+    "strategy_run_requests",
     "task_journal",
     "trade_proposals"
   ]);
@@ -231,8 +287,7 @@ export function installAccountWriteFenceTriggers(database: Database.Database): v
       SELECT RAISE(ABORT, 'account-write-fenced');
     END;
   `);
-  const learnedColumns = database.prepare("PRAGMA table_info(learned_context)").all() as Array<{ name: string }>;
-  if (learnedColumns.some((column) => column.name === "contributor_user_id")) {
+  if (columnExists(database, "learned_context", "contributor_user_id")) {
     database.exec(`
       CREATE TRIGGER IF NOT EXISTS account_write_fence_learned_context_contributor_insert
       BEFORE INSERT ON learned_context
@@ -272,6 +327,7 @@ function migrateLegacyDailyOpeningCapRows(database: Database.Database): number {
   ] as const;
   let changed = 0;
   for (const target of targets) {
+    if (!tableExists(database, target.table)) continue;
     const rows = database
       .prepare(`SELECT rowid, ${target.column} AS json FROM ${target.table} WHERE ${target.where}`)
       .all() as Array<{ rowid: number; json: string }>;
@@ -293,6 +349,80 @@ function migrateLegacyDailyOpeningCapRows(database: Database.Database): number {
   return changed;
 }
 
+/**
+ * Event types that used to be force-included into a send's effective enabledEvents at send time
+ * (banned pattern — owner ruling 2026-08-12, "ALL toggles must be real"): a stored
+ * notificationSettings.enabledEvents array predating the type's addition to NOTIFICATION_EVENT_TYPES
+ * would otherwise silently never receive it, so every one of these sites unconditionally injected
+ * it into that send's policy, permanently overriding a user who had (or later set) the toggle off.
+ * Migration 78 below backfills these into every stored array ONCE instead — see
+ * backfillNotificationEnabledEventsRows. A future NotificationEventType that needs the same one-time
+ * treatment should get its own versioned migration calling that helper with the new type(s); it must
+ * NEVER be handled by resurrecting a force-include-at-send-time site.
+ */
+export const FORCE_INCLUDE_BACKFILL_EVENT_TYPES: readonly NotificationEventType[] = [
+  "provider_degraded",
+  "storage_warning",
+  "autonomy_halted_on_boot",
+  "budget_alert",
+  "earningscalls_entitlement_blocked",
+  "roic_status_advisory",
+  "signal_health",
+  "lookahead_leak",
+  "risk_advisory"
+];
+
+/**
+ * Backfill `eventTypes` into every stored policy's notificationSettings.enabledEvents, ONCE, but
+ * only for rows where an explicit enabledEvents ARRAY is already present. A row with no
+ * notificationSettings (or no enabledEvents key) at all already resolves every event type through
+ * mergePolicy's DEFAULT_POLICY fallback — touching it here would be a no-op at best and would
+ * needlessly freeze that row out of picking up defaults for event types added after this
+ * migration runs. Mirrors migrateLegacyDailyOpeningCapRows's 4-store sweep (account_strategy_state,
+ * strategy_profiles, user_settings, settings) so every place a policy can be persisted is covered.
+ */
+function backfillNotificationEnabledEventsRows(database: Database.Database, eventTypes: readonly NotificationEventType[]): number {
+  const targets = [
+    { table: "account_strategy_state", column: "policy", where: "1=1" },
+    { table: "strategy_profiles", column: "policy", where: "1=1" },
+    { table: "user_settings", column: "value", where: "key = 'policy'" },
+    { table: "settings", column: "value", where: "key = 'policy'" }
+  ] as const;
+  let changed = 0;
+  for (const target of targets) {
+    // Defensive: every one of these exists by the time versioned migrations run against a real
+    // boot (migrate()'s baseline DDL always runs first — see openDatabase). Some test fixtures
+    // build a deliberately minimal schema and invoke applyVersionedMigrations directly without
+    // that baseline, so a table can legitimately be absent there; skip rather than throw.
+    const exists = database
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(target.table);
+    if (!exists) continue;
+    const rows = database
+      .prepare(`SELECT rowid, ${target.column} AS json FROM ${target.table} WHERE ${target.where}`)
+      .all() as Array<{ rowid: number; json: string }>;
+    const update = database.prepare(`UPDATE ${target.table} SET ${target.column} = ? WHERE rowid = ?`);
+    for (const row of rows) {
+      try {
+        const policy = JSON.parse(row.json) as Record<string, unknown>;
+        const notificationSettings = policy.notificationSettings as Record<string, unknown> | undefined;
+        const enabledEvents = notificationSettings?.enabledEvents;
+        if (!notificationSettings || !Array.isArray(enabledEvents)) continue;
+        const existing = new Set(enabledEvents as string[]);
+        const missing = eventTypes.filter((type) => !existing.has(type));
+        if (missing.length === 0) continue;
+        notificationSettings.enabledEvents = [...enabledEvents, ...missing];
+        update.run(JSON.stringify(policy), row.rowid);
+        changed += 1;
+      } catch {
+        // Corrupt JSON is already handled by the owning policy reader; this backfill must not make
+        // the database unbootable while trying to repair an unrelated row.
+      }
+    }
+  }
+  return changed;
+}
+
 const MIGRATIONS: Migration[] = [
   {
     // Per-attached-key LLM usage attribution: usage/cost measured per distinct key (user or
@@ -300,8 +430,8 @@ const MIGRATIONS: Migration[] = [
     version: 2,
     name: "llm_usage_key_ref",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(llm_usage)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "key_ref")) {
+      if (!tableExists(database, "llm_usage")) return;
+      if (!columnExists(database, "llm_usage", "key_ref")) {
         database.exec("ALTER TABLE llm_usage ADD COLUMN key_ref TEXT");
       }
       database.exec("CREATE INDEX IF NOT EXISTS idx_llm_usage_key ON llm_usage (key_ref, created_at)");
@@ -312,8 +442,8 @@ const MIGRATIONS: Migration[] = [
     name: "execution_mode_columns",
     up: (database) => {
       const addColumnIfMissing = (table: string) => {
-        const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-        if (!cols.some((c) => c.name === "execution_mode")) {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, "execution_mode")) {
           database.exec(`ALTER TABLE ${table} ADD COLUMN execution_mode TEXT`);
         }
       };
@@ -322,77 +452,93 @@ const MIGRATIONS: Migration[] = [
       addColumnIfMissing("portfolio_snapshots");
       addColumnIfMissing("fill_events");
 
-      database.exec(`
-        UPDATE trade_proposals
-        SET execution_mode = COALESCE(
-          execution_mode,
-          (
-            SELECT CASE connected_accounts.environment
-              WHEN 'paper' THEN 'broker/paper'
-              WHEN 'live' THEN 'broker/live'
+      if (tableExists(database, "trade_proposals") && tableExists(database, "connected_accounts")) {
+        database.exec(`
+          UPDATE trade_proposals
+          SET execution_mode = COALESCE(
+            execution_mode,
+            (
+              SELECT CASE connected_accounts.environment
+                WHEN 'paper' THEN 'broker/paper'
+                WHEN 'live' THEN 'broker/live'
+                ELSE NULL
+              END
+              FROM connected_accounts
+              WHERE connected_accounts.user_id = trade_proposals.user_id
+                AND connected_accounts.account_number = trade_proposals.account_number
+              LIMIT 1
+            ),
+            CASE
+              WHEN status = 'paper' THEN 'test/local'
+              WHEN status IN ('placed', 'filled', 'placing', 'placing_failed') THEN 'broker/live'
               ELSE NULL
             END
-            FROM connected_accounts
-            WHERE connected_accounts.user_id = trade_proposals.user_id
-              AND connected_accounts.account_number = trade_proposals.account_number
-            LIMIT 1
-          ),
-          CASE
-            WHEN status = 'paper' THEN 'test/local'
-            WHEN status IN ('placed', 'filled', 'placing', 'placing_failed') THEN 'broker/live'
-            ELSE NULL
-          END
-        )
-        WHERE execution_mode IS NULL;
+          )
+          WHERE execution_mode IS NULL;
+        `);
+      }
 
-        UPDATE portfolio_snapshots
-        SET execution_mode = COALESCE(
-          execution_mode,
-          (
-            SELECT CASE connected_accounts.environment
-              WHEN 'paper' THEN 'broker/paper'
-              WHEN 'live' THEN 'broker/live'
+      if (tableExists(database, "portfolio_snapshots") && tableExists(database, "connected_accounts")) {
+        database.exec(`
+          UPDATE portfolio_snapshots
+          SET execution_mode = COALESCE(
+            execution_mode,
+            (
+              SELECT CASE connected_accounts.environment
+                WHEN 'paper' THEN 'broker/paper'
+                WHEN 'live' THEN 'broker/live'
+                ELSE NULL
+              END
+              FROM connected_accounts
+              WHERE connected_accounts.user_id = portfolio_snapshots.user_id
+                AND connected_accounts.account_number = portfolio_snapshots.account_number
+              LIMIT 1
+            ),
+            CASE
+              WHEN source = 'paper' THEN 'test/local'
+              WHEN source = 'live' THEN 'broker/live'
               ELSE NULL
             END
-            FROM connected_accounts
-            WHERE connected_accounts.user_id = portfolio_snapshots.user_id
-              AND connected_accounts.account_number = portfolio_snapshots.account_number
-            LIMIT 1
-          ),
-          CASE
-            WHEN source = 'paper' THEN 'test/local'
-            WHEN source = 'live' THEN 'broker/live'
-            ELSE NULL
-          END
-        )
-        WHERE execution_mode IS NULL;
+          )
+          WHERE execution_mode IS NULL;
+        `);
+      }
 
-        UPDATE fill_events
-        SET execution_mode = COALESCE(
-          execution_mode,
-          (
-            SELECT CASE connected_accounts.environment
-              WHEN 'paper' THEN 'broker/paper'
-              WHEN 'live' THEN 'broker/live'
+      if (tableExists(database, "fill_events") && tableExists(database, "connected_accounts")) {
+        database.exec(`
+          UPDATE fill_events
+          SET execution_mode = COALESCE(
+            execution_mode,
+            (
+              SELECT CASE connected_accounts.environment
+                WHEN 'paper' THEN 'broker/paper'
+                WHEN 'live' THEN 'broker/live'
+                ELSE NULL
+              END
+              FROM connected_accounts
+              WHERE connected_accounts.user_id = fill_events.user_id
+                AND connected_accounts.account_number = fill_events.account_number
+              LIMIT 1
+            ),
+            CASE
+              WHEN source = 'paper' THEN 'test/local'
+              WHEN source = 'live' THEN 'broker/live'
               ELSE NULL
             END
-            FROM connected_accounts
-            WHERE connected_accounts.user_id = fill_events.user_id
-              AND connected_accounts.account_number = fill_events.account_number
-            LIMIT 1
-          ),
-          CASE
-            WHEN source = 'paper' THEN 'test/local'
-            WHEN source = 'live' THEN 'broker/live'
-            ELSE NULL
-          END
-        )
-        WHERE execution_mode IS NULL;
-      `);
+          )
+          WHERE execution_mode IS NULL;
+        `);
+      }
 
-      database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_execution_mode ON trade_proposals (user_id, account_number, execution_mode, created_at)");
-      database.exec("CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_execution_mode ON portfolio_snapshots (user_id, account_number, execution_mode, created_at)");
-      database.exec("CREATE INDEX IF NOT EXISTS idx_fill_events_execution_mode ON fill_events (user_id, account_number, execution_mode, filled_at)");
+      if (tableExists(database, "trade_proposals")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_execution_mode ON trade_proposals (user_id, account_number, execution_mode, created_at)");
+      }
+      if (tableExists(database, "portfolio_snapshots")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_execution_mode ON portfolio_snapshots (user_id, account_number, execution_mode, created_at)");
+      }
+      if (tableExists(database, "fill_events")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_fill_events_execution_mode ON fill_events (user_id, account_number, execution_mode, filled_at)");
+      }
     }
   },
   {
@@ -428,8 +574,8 @@ const MIGRATIONS: Migration[] = [
     version: 5,
     name: "chat_turns_model",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(chat_turns)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "model")) {
+      if (!tableExists(database, "chat_turns")) return;
+      if (!columnExists(database, "chat_turns", "model")) {
         database.exec("ALTER TABLE chat_turns ADD COLUMN model TEXT");
       }
     }
@@ -442,33 +588,39 @@ const MIGRATIONS: Migration[] = [
       database.exec("DROP INDEX IF EXISTS idx_imported_price_eod_ticker");
 
       // 2. Index for joining strategy_runs and trade_proposals (Dashboard bottleneck)
-      database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_run_id ON trade_proposals (run_id)");
+      if (tableExists(database, "trade_proposals")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_run_id ON trade_proposals (run_id)");
+        database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_user_account_status_created ON trade_proposals (user_id, account_number, status, created_at DESC)");
+        database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_user_account_created ON trade_proposals (user_id, account_number, created_at DESC)");
+      }
 
-      // 3. Composite indices for capping and sorting listPending/listRecent
-      database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_user_account_status_created ON trade_proposals (user_id, account_number, status, created_at DESC)");
-      database.exec("CREATE INDEX IF NOT EXISTS idx_trade_proposals_user_account_created ON trade_proposals (user_id, account_number, created_at DESC)");
+      if (tableExists(database, "order_replacements")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_order_replacements_user_account_status ON order_replacements (user_id, account_number, status)");
+        database.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_replacements_active_unique ON order_replacements (account_number, original_order_id) WHERE status NOT IN ('replacement_confirmed', 'failed', 'aborted')");
+      }
 
-      database.exec("CREATE INDEX IF NOT EXISTS idx_order_replacements_user_account_status ON order_replacements (user_id, account_number, status)");
-      database.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_order_replacements_active_unique ON order_replacements (account_number, original_order_id) WHERE status NOT IN ('replacement_confirmed', 'failed', 'aborted')");
+      if (tableExists(database, "fill_events")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_fill_events_user_account_symbol_filled ON fill_events (user_id, account_number, symbol, filled_at DESC)");
+      }
 
-      // 4. Composite index for day-trade counting and excursions
-      database.exec("CREATE INDEX IF NOT EXISTS idx_fill_events_user_account_symbol_filled ON fill_events (user_id, account_number, symbol, filled_at DESC)");
+      if (tableExists(database, "portfolio_snapshots")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_account_source_created ON portfolio_snapshots (user_id, account_number, source, created_at DESC)");
+      }
 
-      // 5. Composite index for portfolio snapshots
-      database.exec("CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_account_source_created ON portfolio_snapshots (user_id, account_number, source, created_at DESC)");
+      if (tableExists(database, "audit_events")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_user_account_kind ON audit_events (user_id, connected_account_id, kind)");
+        database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_user_created ON audit_events (user_id, created_at DESC)");
+        // latestAuditByKind/latestAuditStampByKind: kind-equality + created_at ordering. Without
+        // this, those queries either walk user_created backwards row-by-row or drag every matching
+        // row — multi-MB market_scan payloads included — through the sorter; on the production
+        // 718MB audit_events table that was a minutes-long sync hold on the one DB connection
+        // (2026-08-02 prod wedge, every 60s tick).
+        database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_kind_user_created ON audit_events (kind, user_id, created_at DESC)");
+      }
 
-      // 6. Indices for audit_events querying
-      database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_user_account_kind ON audit_events (user_id, connected_account_id, kind)");
-      database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_user_created ON audit_events (user_id, created_at DESC)");
-      // latestAuditByKind/latestAuditStampByKind: kind-equality + created_at ordering. Without
-      // this, those queries either walk user_created backwards row-by-row or drag every matching
-      // row — multi-MB market_scan payloads included — through the sorter; on the production
-      // 718MB audit_events table that was a minutes-long sync hold on the one DB connection
-      // (2026-08-02 prod wedge, every 60s tick).
-      database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_kind_user_created ON audit_events (kind, user_id, created_at DESC)");
-      
-      // 7. Composite index for matured skipped counterfactuals sorting
-      database.exec("CREATE INDEX IF NOT EXISTS idx_skipped_counterfactuals_user_account_status_return ON skipped_candidate_counterfactuals (user_id, connected_account_id, status, return_pct DESC, updated_at DESC)");
+      if (tableExists(database, "skipped_candidate_counterfactuals")) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_skipped_counterfactuals_user_account_status_return ON skipped_candidate_counterfactuals (user_id, connected_account_id, status, return_pct DESC, updated_at DESC)");
+      }
     }
   },
   {
@@ -509,8 +661,8 @@ const MIGRATIONS: Migration[] = [
     version: 9,
     name: "trade_proposals_prompt_version",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "prompt_version")) {
+      if (!tableExists(database, "trade_proposals")) return;
+      if (!columnExists(database, "trade_proposals", "prompt_version")) {
         database.exec("ALTER TABLE trade_proposals ADD COLUMN prompt_version TEXT");
       }
     }
@@ -522,8 +674,8 @@ const MIGRATIONS: Migration[] = [
     version: 10,
     name: "chat_turns_client_turn_id",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(chat_turns)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "client_turn_id")) {
+      if (!tableExists(database, "chat_turns")) return;
+      if (!columnExists(database, "chat_turns", "client_turn_id")) {
         database.exec("ALTER TABLE chat_turns ADD COLUMN client_turn_id TEXT");
       }
       database.exec("CREATE INDEX IF NOT EXISTS idx_chat_turns_user_client ON chat_turns (user_id, client_turn_id)");
@@ -572,8 +724,8 @@ const MIGRATIONS: Migration[] = [
     version: 12,
     name: "socratic_framework_owner_verb",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(socratic_framework_proposals)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "owner_verb")) {
+      if (!tableExists(database, "socratic_framework_proposals")) return;
+      if (!columnExists(database, "socratic_framework_proposals", "owner_verb")) {
         database.exec("ALTER TABLE socratic_framework_proposals ADD COLUMN owner_verb TEXT");
       }
     }
@@ -599,8 +751,8 @@ const MIGRATIONS: Migration[] = [
     version: 14,
     name: "llm_usage_connected_account",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(llm_usage)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "connected_account_id")) {
+      if (!tableExists(database, "llm_usage")) return;
+      if (!columnExists(database, "llm_usage", "connected_account_id")) {
         database.exec("ALTER TABLE llm_usage ADD COLUMN connected_account_id TEXT");
       }
       database.exec(
@@ -624,6 +776,7 @@ const MIGRATIONS: Migration[] = [
     up: (database) => {
       const envProvider = (process.env.RED_TEAM_LLM_PROVIDER ?? "").trim().toLowerCase();
       if (envProvider !== "anthropic") return;
+      if (!tableExists(database, "account_strategy_state")) return;
       // The exact model the deleted override path was running (red-team.ts's debateViaAnthropic):
       // RED_TEAM_LLM_MODEL when set, else its hardcoded claude-haiku default.
       const servedModel = (process.env.RED_TEAM_LLM_MODEL ?? "").trim() || "claude-haiku-4-5-20251001";
@@ -665,6 +818,7 @@ const MIGRATIONS: Migration[] = [
     version: 16,
     name: "fill_events_dedupe_unique_index",
     up: (database) => {
+      if (!tableExists(database, "fill_events")) return;
       const dupGroups = database
         .prepare(
           `SELECT proposal_id, broker_order_id, COUNT(*) AS c, MIN(rowid) AS keep_rowid
@@ -699,14 +853,13 @@ const MIGRATIONS: Migration[] = [
     version: 17,
     name: "broker_protective_stops_trailing_columns",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(broker_protective_stops)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "kind")) {
+      if (!tableExists(database, "broker_protective_stops")) return;
+      if (!columnExists(database, "broker_protective_stops", "kind")) {
         database.exec("ALTER TABLE broker_protective_stops ADD COLUMN kind TEXT NOT NULL DEFAULT 'fixed'");
       }
-      if (!cols.some((c) => c.name === "trail_percent")) {
+      if (!columnExists(database, "broker_protective_stops", "trail_percent")) {
         database.exec("ALTER TABLE broker_protective_stops ADD COLUMN trail_percent REAL");
       }
-
     }
   },
   {
@@ -719,8 +872,8 @@ const MIGRATIONS: Migration[] = [
     version: 18,
     name: "position_stop_plans_side_column",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(position_stop_plans)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "side")) {
+      if (!tableExists(database, "position_stop_plans")) return;
+      if (!columnExists(database, "position_stop_plans", "side")) {
         database.exec("ALTER TABLE position_stop_plans ADD COLUMN side TEXT NOT NULL DEFAULT 'long'");
       }
     }
@@ -834,20 +987,20 @@ const MIGRATIONS: Migration[] = [
     version: 20,
     name: "order_replacements_original_order_columns",
     up: (database) => {
-      const cols = database.prepare("PRAGMA table_info(order_replacements)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "symbol")) {
+      if (!tableExists(database, "order_replacements")) return;
+      if (!columnExists(database, "order_replacements", "symbol")) {
         database.exec("ALTER TABLE order_replacements ADD COLUMN symbol TEXT");
       }
-      if (!cols.some((c) => c.name === "side")) {
+      if (!columnExists(database, "order_replacements", "side")) {
         database.exec("ALTER TABLE order_replacements ADD COLUMN side TEXT");
       }
-      if (!cols.some((c) => c.name === "original_type")) {
+      if (!columnExists(database, "order_replacements", "original_type")) {
         database.exec("ALTER TABLE order_replacements ADD COLUMN original_type TEXT");
       }
-      if (!cols.some((c) => c.name === "original_quantity")) {
+      if (!columnExists(database, "order_replacements", "original_quantity")) {
         database.exec("ALTER TABLE order_replacements ADD COLUMN original_quantity REAL");
       }
-      if (!cols.some((c) => c.name === "original_filled_quantity")) {
+      if (!columnExists(database, "order_replacements", "original_filled_quantity")) {
         database.exec("ALTER TABLE order_replacements ADD COLUMN original_filled_quantity REAL");
       }
     }
@@ -861,6 +1014,7 @@ const MIGRATIONS: Migration[] = [
     version: 21,
     name: "order_replacements_indexes_reapply",
     up: (database) => {
+      if (!tableExists(database, "order_replacements")) return;
       // Before creating the UNIQUE partial index, collapse any duplicate active
       // rows that could already exist. Prioritize keeping the most progressed
       // row in the state machine (favoring rows with a replacement_order_id).
@@ -911,6 +1065,32 @@ const MIGRATIONS: Migration[] = [
     version: 22,
     name: "order_replacements_claiming_state_schema",
     up: (database) => {
+      if (!tableExists(database, "order_replacements")) {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS order_replacements (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            account_number TEXT NOT NULL,
+            original_order_id TEXT NOT NULL,
+            symbol TEXT,
+            side TEXT,
+            original_type TEXT,
+            original_quantity REAL,
+            original_filled_quantity REAL,
+            replacement_ref_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('cancel_requested', 'cancel_confirmed', 'replacement_claiming', 'replacement_submitted', 'replacement_confirmed', 'failed', 'aborted')),
+            remaining_quantity REAL,
+            cancel_result TEXT,
+            replacement_order_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_order_replacements_user_account_status ON order_replacements (user_id, account_number, status);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_order_replacements_active_unique ON order_replacements (account_number, original_order_id) WHERE status NOT IN ('replacement_confirmed', 'failed', 'aborted');
+        `);
+        return;
+      }
       // SQLite does not support ALTER TABLE DROP CONSTRAINT. To expand the CHECK
       // constraint on status to include 'replacement_claiming', we recreate the table.
       database.exec(`
@@ -1100,21 +1280,21 @@ const MIGRATIONS: Migration[] = [
     name: "learned_context_account_scope",
     up: (database) => {
       const addColumns = (table: "learned_context" | "learned_context_pending") => {
-        const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-        if (!cols.some((c) => c.name === "connected_account_id")) {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, "connected_account_id")) {
           database.exec(`ALTER TABLE ${table} ADD COLUMN connected_account_id TEXT`);
         }
-        if (!cols.some((c) => c.name === "account_environment")) {
+        if (!columnExists(database, table, "account_environment")) {
           database.exec(
             `ALTER TABLE ${table} ADD COLUMN account_environment TEXT CHECK(account_environment IS NULL OR account_environment IN ('paper','live'))`
           );
         }
-        if (!cols.some((c) => c.name === "learning_scope")) {
+        if (!columnExists(database, table, "learning_scope")) {
           database.exec(
             `ALTER TABLE ${table} ADD COLUMN learning_scope TEXT NOT NULL DEFAULT 'legacy' CHECK(learning_scope IN ('account','portfolio','research','legacy'))`
           );
         }
-        if (!cols.some((c) => c.name === "transfer_state")) {
+        if (!columnExists(database, table, "transfer_state")) {
           database.exec(
             `ALTER TABLE ${table} ADD COLUMN transfer_state TEXT NOT NULL DEFAULT 'not_applicable' CHECK(transfer_state IN ('not_applicable','candidate','validated','rejected'))`
           );
@@ -1127,20 +1307,25 @@ const MIGRATIONS: Migration[] = [
       // User-authored and explicitly ingested context was intentionally account-agnostic before this
       // migration, so retain it as portfolio context. Autonomous rows lack enough provenance to know
       // which account produced them; keep them quarantined as legacy rather than guessing.
-      database.exec(`
-        UPDATE learned_context
-        SET learning_scope = CASE WHEN origin IN ('chat','ingest') THEN 'portfolio' ELSE 'legacy' END
-        WHERE connected_account_id IS NULL;
+      if (tableExists(database, "learned_context")) {
+        database.exec(`
+          UPDATE learned_context
+          SET learning_scope = CASE WHEN origin IN ('chat','ingest') THEN 'portfolio' ELSE 'legacy' END
+          WHERE connected_account_id IS NULL;
+          CREATE INDEX IF NOT EXISTS idx_learned_context_account_scope
+            ON learned_context (user_id, connected_account_id, learning_scope, transfer_state, superseded_by);
+        `);
+      }
 
-        UPDATE learned_context_pending
-        SET learning_scope = CASE WHEN origin IN ('chat','ingest') THEN 'portfolio' ELSE 'legacy' END
-        WHERE connected_account_id IS NULL;
-
-        CREATE INDEX IF NOT EXISTS idx_learned_context_account_scope
-          ON learned_context (user_id, connected_account_id, learning_scope, transfer_state, superseded_by);
-        CREATE INDEX IF NOT EXISTS idx_learned_context_pending_account_scope
-          ON learned_context_pending (user_id, connected_account_id, learning_scope, status, created_at);
-      `);
+      if (tableExists(database, "learned_context_pending")) {
+        database.exec(`
+          UPDATE learned_context_pending
+          SET learning_scope = CASE WHEN origin IN ('chat','ingest') THEN 'portfolio' ELSE 'legacy' END
+          WHERE connected_account_id IS NULL;
+          CREATE INDEX IF NOT EXISTS idx_learned_context_pending_account_scope
+            ON learned_context_pending (user_id, connected_account_id, learning_scope, status, created_at);
+        `);
+      }
     }
   },
   {
@@ -1150,6 +1335,7 @@ const MIGRATIONS: Migration[] = [
     version: 25,
     name: "remove_product_test_accounts",
     up: (database) => {
+      if (!tableExists(database, "connected_accounts")) return;
       const accounts = database
         .prepare("SELECT id, user_id, account_number FROM connected_accounts WHERE broker = 'test'")
         .all() as Array<{ id: string; user_id: string; account_number: string | null }>;
@@ -1164,9 +1350,11 @@ const MIGRATIONS: Migration[] = [
             "position_stop_plans",
             "order_replacements"
           ]) {
-            database
-              .prepare(`DELETE FROM ${table} WHERE account_number = ? AND user_id = ?`)
-              .run(account.account_number, account.user_id);
+            if (tableExists(database, table)) {
+              database
+                .prepare(`DELETE FROM ${table} WHERE account_number = ? AND user_id = ?`)
+                .run(account.account_number, account.user_id);
+            }
           }
         }
         for (const table of [
@@ -1181,12 +1369,16 @@ const MIGRATIONS: Migration[] = [
           "learned_context",
           "learned_context_pending"
         ]) {
-          database
-            .prepare(`DELETE FROM ${table} WHERE connected_account_id = ? AND user_id = ?`)
-            .run(account.id, account.user_id);
+          if (tableExists(database, table)) {
+            database
+              .prepare(`DELETE FROM ${table} WHERE connected_account_id = ? AND user_id = ?`)
+              .run(account.id, account.user_id);
+          }
         }
         database.prepare("DELETE FROM connected_accounts WHERE id = ? AND user_id = ?").run(account.id, account.user_id);
-        database.prepare("DELETE FROM settings WHERE key = ?").run(`strategy_run_lock:${account.user_id}:${account.id}`);
+        if (tableExists(database, "settings")) {
+          database.prepare("DELETE FROM settings WHERE key = ?").run(`strategy_run_lock:${account.user_id}:${account.id}`);
+        }
       }
     }
   },
@@ -1208,16 +1400,9 @@ const MIGRATIONS: Migration[] = [
     version: 29,
     name: "provider_dispatch_and_vector_commit_receipts",
     up: (database) => {
-      const tableExists = database
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunk_occurrences'")
-        .get();
-
-      if (tableExists) {
-        const occurrenceColumns = database
-          .prepare("PRAGMA table_info(chunk_occurrences)")
-          .all() as Array<{ name: string }>;
+      if (tableExists(database, "chunk_occurrences")) {
         const addOccurrenceColumn = (name: string, sql: string) => {
-          if (!occurrenceColumns.some((column) => column.name === name)) database.exec(sql);
+          if (!columnExists(database, "chunk_occurrences", name)) database.exec(sql);
         };
         addOccurrenceColumn(
           "tenant_scope",
@@ -1271,7 +1456,7 @@ const MIGRATIONS: Migration[] = [
         );
       `);
 
-      if (tableExists) {
+      if (tableExists(database, "chunk_occurrences")) {
         database.exec(`
           CREATE INDEX IF NOT EXISTS idx_chunk_occurrences_commit
             ON chunk_occurrences (commit_id, receipt_state);
@@ -1357,11 +1542,9 @@ const MIGRATIONS: Migration[] = [
     version: 30,
     name: "vector_commit_attempt_leases",
     up: (database) => {
-      const columns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
+      if (!tableExists(database, "vector_ingest_commits")) return;
       const addColumn = (name: string, sql: string) => {
-        if (!columns.some((column) => column.name === name)) database.exec(sql);
+        if (!columnExists(database, "vector_ingest_commits", name)) database.exec(sql);
       };
       addColumn("attempt_token", "ALTER TABLE vector_ingest_commits ADD COLUMN attempt_token TEXT");
       addColumn(
@@ -1383,12 +1566,11 @@ const MIGRATIONS: Migration[] = [
     version: 31,
     name: "vector_document_active_heads",
     up: (database) => {
-      const commitColumns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
-      if (!commitColumns.some((column) => column.name === "document_key")) {
-        database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN document_key TEXT");
-        database.exec("UPDATE vector_ingest_commits SET document_key = accession WHERE document_key IS NULL");
+      if (tableExists(database, "vector_ingest_commits")) {
+        if (!columnExists(database, "vector_ingest_commits", "document_key")) {
+          database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN document_key TEXT");
+          database.exec("UPDATE vector_ingest_commits SET document_key = accession WHERE document_key IS NULL");
+        }
       }
       database.exec(`
         CREATE TABLE IF NOT EXISTS vector_document_heads (
@@ -1426,28 +1608,30 @@ const MIGRATIONS: Migration[] = [
 
         DELETE FROM vector_document_heads;
       `);
-      const documents = database.prepare(`
-        SELECT DISTINCT tenant_scope, source, document_key FROM vector_document_versions
-      `).all() as Array<{ tenant_scope: string; source: string; document_key: string }>;
-      for (const document of documents) {
-        const rows = database.prepare(`
-          SELECT commit_id, valid_from FROM vector_document_versions
-          WHERE tenant_scope = ? AND source = ? AND document_key = ?
-          ORDER BY valid_from, commit_id
-        `).all(document.tenant_scope, document.source, document.document_key) as Array<{
-          commit_id: string;
-          valid_from: string;
-        }>;
-        const updateInterval = database.prepare(`
-          UPDATE vector_document_versions SET valid_to = ?, updated_at = ? WHERE commit_id = ?
-        `);
-        rows.forEach((row, index) => updateInterval.run(rows[index + 1]?.valid_from ?? null, row.valid_from, row.commit_id));
-        const active = rows.at(-1);
-        if (active) {
-          database.prepare(`
-            INSERT INTO vector_document_heads (tenant_scope, source, accession, commit_id, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-          `).run(document.tenant_scope, document.source, document.document_key, active.commit_id, active.valid_from);
+      if (tableExists(database, "vector_document_versions")) {
+        const documents = database.prepare(`
+          SELECT DISTINCT tenant_scope, source, document_key FROM vector_document_versions
+        `).all() as Array<{ tenant_scope: string; source: string; document_key: string }>;
+        for (const document of documents) {
+          const rows = database.prepare(`
+            SELECT commit_id, valid_from FROM vector_document_versions
+            WHERE tenant_scope = ? AND source = ? AND document_key = ?
+            ORDER BY valid_from, commit_id
+          `).all(document.tenant_scope, document.source, document.document_key) as Array<{
+            commit_id: string;
+            valid_from: string;
+          }>;
+          const updateInterval = database.prepare(`
+            UPDATE vector_document_versions SET valid_to = ?, updated_at = ? WHERE commit_id = ?
+          `);
+          rows.forEach((row, index) => updateInterval.run(rows[index + 1]?.valid_from ?? null, row.valid_from, row.commit_id));
+          const active = rows.at(-1);
+          if (active) {
+            database.prepare(`
+              INSERT INTO vector_document_heads (tenant_scope, source, accession, commit_id, updated_at)
+              VALUES (?, ?, ?, ?, ?)
+            `).run(document.tenant_scope, document.source, document.document_key, active.commit_id, active.valid_from);
+          }
         }
       }
     }
@@ -1459,14 +1643,13 @@ const MIGRATIONS: Migration[] = [
     version: 32,
     name: "vector_retrieval_metadata_and_reconcile_observations",
     up: (database) => {
-      const columns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "retrieval_metadata_version")) {
-        database.exec(`
-          ALTER TABLE vector_ingest_commits
-          ADD COLUMN retrieval_metadata_version TEXT NOT NULL DEFAULT 'legacy'
-        `);
+      if (tableExists(database, "vector_ingest_commits")) {
+        if (!columnExists(database, "vector_ingest_commits", "retrieval_metadata_version")) {
+          database.exec(`
+            ALTER TABLE vector_ingest_commits
+            ADD COLUMN retrieval_metadata_version TEXT NOT NULL DEFAULT 'legacy'
+          `);
+        }
       }
       database.exec(`
         CREATE TABLE IF NOT EXISTS vector_reconcile_observations (
@@ -1499,50 +1682,53 @@ const MIGRATIONS: Migration[] = [
     version: 33,
     name: "vector_commit_provider_authority_and_deterministic_timeline",
     up: (database) => {
-      const columns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "provider_authority")) {
-        database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN provider_authority TEXT");
+      if (tableExists(database, "vector_ingest_commits")) {
+        if (!columnExists(database, "vector_ingest_commits", "provider_authority")) {
+          database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN provider_authority TEXT");
+        }
       }
 
-      database.prepare("DELETE FROM vector_document_heads").run();
-      const documents = database.prepare(`
-        SELECT DISTINCT v.tenant_scope, v.source, v.document_key
-        FROM vector_document_versions v
-        JOIN vector_ingest_commits c ON c.id = v.commit_id AND c.state = 'committed'
-      `).all() as Array<{ tenant_scope: string; source: string; document_key: string }>;
-      const updateInterval = database.prepare(`
-        UPDATE vector_document_versions SET valid_to = ?, updated_at = ? WHERE commit_id = ?
-      `);
-      const insertHead = database.prepare(`
-        INSERT INTO vector_document_heads (tenant_scope, source, accession, commit_id, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      for (const document of documents) {
-        const rows = database.prepare(`
-          SELECT v.commit_id, v.valid_from, c.committed_at
+      if (tableExists(database, "vector_document_heads")) {
+        database.prepare("DELETE FROM vector_document_heads").run();
+      }
+      if (tableExists(database, "vector_document_versions") && tableExists(database, "vector_ingest_commits")) {
+        const documents = database.prepare(`
+          SELECT DISTINCT v.tenant_scope, v.source, v.document_key
           FROM vector_document_versions v
           JOIN vector_ingest_commits c ON c.id = v.commit_id AND c.state = 'committed'
-          WHERE v.tenant_scope = ? AND v.source = ? AND v.document_key = ?
-          ORDER BY v.valid_from, c.committed_at, v.commit_id
-        `).all(document.tenant_scope, document.source, document.document_key) as Array<{
-          commit_id: string;
-          valid_from: string;
-          committed_at: string | null;
-        }>;
-        rows.forEach((row, index) => {
-          updateInterval.run(rows[index + 1]?.valid_from ?? null, row.committed_at ?? row.valid_from, row.commit_id);
-        });
-        const active = rows.at(-1);
-        if (active) {
-          insertHead.run(
-            document.tenant_scope,
-            document.source,
-            document.document_key,
-            active.commit_id,
-            active.committed_at ?? active.valid_from
-          );
+        `).all() as Array<{ tenant_scope: string; source: string; document_key: string }>;
+        const updateInterval = database.prepare(`
+          UPDATE vector_document_versions SET valid_to = ?, updated_at = ? WHERE commit_id = ?
+        `);
+        const insertHead = database.prepare(`
+          INSERT INTO vector_document_heads (tenant_scope, source, accession, commit_id, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const document of documents) {
+          const rows = database.prepare(`
+            SELECT v.commit_id, v.valid_from, c.committed_at
+            FROM vector_document_versions v
+            JOIN vector_ingest_commits c ON c.id = v.commit_id AND c.state = 'committed'
+            WHERE v.tenant_scope = ? AND v.source = ? AND v.document_key = ?
+            ORDER BY v.valid_from, c.committed_at, v.commit_id
+          `).all(document.tenant_scope, document.source, document.document_key) as Array<{
+            commit_id: string;
+            valid_from: string;
+            committed_at: string | null;
+          }>;
+          rows.forEach((row, index) => {
+            updateInterval.run(rows[index + 1]?.valid_from ?? null, row.committed_at ?? row.valid_from, row.commit_id);
+          });
+          const active = rows.at(-1);
+          if (active) {
+            insertHead.run(
+              document.tenant_scope,
+              document.source,
+              document.document_key,
+              active.commit_id,
+              active.committed_at ?? active.valid_from
+            );
+          }
         }
       }
     }
@@ -1554,11 +1740,10 @@ const MIGRATIONS: Migration[] = [
     version: 34,
     name: "vector_commit_ledger_authority",
     up: (database) => {
-      const columns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "ledger_authority")) {
-        database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN ledger_authority TEXT");
+      if (tableExists(database, "vector_ingest_commits")) {
+        if (!columnExists(database, "vector_ingest_commits", "ledger_authority")) {
+          database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN ledger_authority TEXT");
+        }
       }
     }
   },
@@ -1569,11 +1754,10 @@ const MIGRATIONS: Migration[] = [
     version: 35,
     name: "vector_namespace_manifests",
     up: (database) => {
-      const columns = database
-        .prepare("PRAGMA table_info(vector_ingest_commits)")
-        .all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "vector_namespace")) {
-        database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN vector_namespace TEXT NOT NULL DEFAULT 'managed'");
+      if (tableExists(database, "vector_ingest_commits")) {
+        if (!columnExists(database, "vector_ingest_commits", "vector_namespace")) {
+          database.exec("ALTER TABLE vector_ingest_commits ADD COLUMN vector_namespace TEXT NOT NULL DEFAULT 'managed'");
+        }
       }
       database.exec(`
         CREATE TABLE IF NOT EXISTS vector_private_namespace_manifests (
@@ -1600,19 +1784,25 @@ const MIGRATIONS: Migration[] = [
           status TEXT NOT NULL CHECK(status IN ('prepared','completed')),
           updated_at TEXT NOT NULL
         );
+      `);
 
-        INSERT OR IGNORE INTO account_write_fences (subject_token, generation, status, updated_at)
-        SELECT
-          substr(key, length('account_write_epoch:') + 1),
-          json_extract(value, '$.generation'),
-          json_extract(value, '$.status'),
-          COALESCE(json_extract(value, '$.updatedAt'), updated_at)
-        FROM settings
-        WHERE key LIKE 'account_write_epoch:%'
-          AND json_valid(value) = 1
-          AND json_type(value, '$.generation') = 'text'
-          AND json_extract(value, '$.status') IN ('prepared','completed');
+      if (tableExists(database, "settings")) {
+        database.exec(`
+          INSERT OR IGNORE INTO account_write_fences (subject_token, generation, status, updated_at)
+          SELECT
+            substr(key, length('account_write_epoch:') + 1),
+            json_extract(value, '$.generation'),
+            json_extract(value, '$.status'),
+            COALESCE(json_extract(value, '$.updatedAt'), updated_at)
+          FROM settings
+          WHERE key LIKE 'account_write_epoch:%'
+            AND json_valid(value) = 1
+            AND json_type(value, '$.generation') = 'text'
+            AND json_extract(value, '$.status') IN ('prepared','completed');
+        `);
+      }
 
+      database.exec(`
         CREATE INDEX IF NOT EXISTS idx_account_write_fences_status
           ON account_write_fences (status, updated_at);
       `);
@@ -1625,14 +1815,14 @@ const MIGRATIONS: Migration[] = [
     version: 37,
     name: "provider_dispatch_owner_leases",
     up: (database) => {
-      const columns = database.prepare("PRAGMA table_info(provider_dispatch_attempts)").all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "dispatch_owner_token")) {
+      if (!tableExists(database, "provider_dispatch_attempts")) return;
+      if (!columnExists(database, "provider_dispatch_attempts", "dispatch_owner_token")) {
         database.exec("ALTER TABLE provider_dispatch_attempts ADD COLUMN dispatch_owner_token TEXT");
       }
-      if (!columns.some((column) => column.name === "dispatch_heartbeat_at")) {
+      if (!columnExists(database, "provider_dispatch_attempts", "dispatch_heartbeat_at")) {
         database.exec("ALTER TABLE provider_dispatch_attempts ADD COLUMN dispatch_heartbeat_at TEXT");
       }
-      if (!columns.some((column) => column.name === "dispatch_lease_expires_at")) {
+      if (!columnExists(database, "provider_dispatch_attempts", "dispatch_lease_expires_at")) {
         database.exec("ALTER TABLE provider_dispatch_attempts ADD COLUMN dispatch_lease_expires_at TEXT");
       }
       database.exec(`
@@ -1657,8 +1847,8 @@ const MIGRATIONS: Migration[] = [
     version: 38,
     name: "private_vector_provider_authority",
     up: (database) => {
-      const columns = database.prepare("PRAGMA table_info(vector_private_namespace_manifests)").all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "provider_authority")) {
+      if (!tableExists(database, "vector_private_namespace_manifests")) return;
+      if (!columnExists(database, "vector_private_namespace_manifests", "provider_authority")) {
         database.exec("ALTER TABLE vector_private_namespace_manifests ADD COLUMN provider_authority TEXT");
       }
       database.exec(`
@@ -1695,11 +1885,11 @@ const MIGRATIONS: Migration[] = [
     version: 27,
     name: "socratic_decision_narrative_receipts",
     up: (database) => {
-      const columns = database.prepare("PRAGMA table_info(socratic_decisions)").all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === "green_team_rationale")) {
+      if (!tableExists(database, "socratic_decisions")) return;
+      if (!columnExists(database, "socratic_decisions", "green_team_rationale")) {
         database.exec("ALTER TABLE socratic_decisions ADD COLUMN green_team_rationale TEXT");
       }
-      if (!columns.some((column) => column.name === "sizing_snapshot")) {
+      if (!columnExists(database, "socratic_decisions", "sizing_snapshot")) {
         database.exec("ALTER TABLE socratic_decisions ADD COLUMN sizing_snapshot TEXT");
       }
     }
@@ -1769,6 +1959,7 @@ const MIGRATIONS: Migration[] = [
     version: 40,
     name: "purge_legacy_broker_minimum_alert_cooldowns",
     up: (database) => {
+      if (!tableExists(database, "settings")) return;
       database.prepare("DELETE FROM settings WHERE key LIKE 'subMinimumOrderAlertSent:%'").run();
     }
   },
@@ -1816,21 +2007,20 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_fmp_transcript_derived_provider_work_status
           ON fmp_transcript_derived_provider_work (status, created_at);
       `);
-      const columns = database.prepare(
-        "PRAGMA table_info(fmp_transcript_derived_provider_work)"
-      ).all() as Array<{ name: string }>;
-      for (const column of [
-        ["user_id", "TEXT"],
-        ["vector_id", "TEXT"],
-        ["provider_authority", "TEXT"],
-        ["ledger_authority", "TEXT"],
-        ["lease_expires_at", "TEXT"],
-        ["terminal_outcome", "TEXT"]
-      ] as const) {
-        if (!columns.some((existing) => existing.name === column[0])) {
-          database.exec(
-            `ALTER TABLE fmp_transcript_derived_provider_work ADD COLUMN ${column[0]} ${column[1]}`
-          );
+      if (tableExists(database, "fmp_transcript_derived_provider_work")) {
+        for (const column of [
+          ["user_id", "TEXT"],
+          ["vector_id", "TEXT"],
+          ["provider_authority", "TEXT"],
+          ["ledger_authority", "TEXT"],
+          ["lease_expires_at", "TEXT"],
+          ["terminal_outcome", "TEXT"]
+        ] as const) {
+          if (!columnExists(database, "fmp_transcript_derived_provider_work", column[0])) {
+            database.exec(
+              `ALTER TABLE fmp_transcript_derived_provider_work ADD COLUMN ${column[0]} ${column[1]}`
+            );
+          }
         }
       }
       database.exec(`
@@ -1851,12 +2041,8 @@ const MIGRATIONS: Migration[] = [
       // position_stop_plans is created by the main schema's CREATE TABLE, not by a numbered
       // migration, so a migration-only test harness that replays versions from an arbitrary
       // baseline against a minimal hand-built schema may not have it yet.
-      const tableExists = database
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'position_stop_plans'")
-        .get();
-      if (tableExists) {
-        const cols = database.prepare("PRAGMA table_info(position_stop_plans)").all() as Array<{ name: string }>;
-        if (!cols.some((c) => c.name === "opening_order_id")) {
+      if (tableExists(database, "position_stop_plans")) {
+        if (!columnExists(database, "position_stop_plans", "opening_order_id")) {
           database.exec("ALTER TABLE position_stop_plans ADD COLUMN opening_order_id TEXT");
         }
       }
@@ -1989,12 +2175,8 @@ const MIGRATIONS: Migration[] = [
       // finds nothing in this new table, enqueues no teardown at all, and the upsert overwrites
       // opening_order_id with null — permanently losing the only reference to that bracket, and its
       // legs rest on the broker forever with no path back to them (Codex review, PR #1667).
-      const tableExists = database
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'position_stop_plans'")
-        .get();
-      if (tableExists) {
-        const cols = database.prepare("PRAGMA table_info(position_stop_plans)").all() as Array<{ name: string }>;
-        if (cols.some((c) => c.name === "opening_order_id")) {
+      if (tableExists(database, "position_stop_plans")) {
+        if (columnExists(database, "position_stop_plans", "opening_order_id")) {
           const legacyRows = database
             .prepare(
               `SELECT user_id, account_number, symbol, opening_order_id FROM position_stop_plans
@@ -2106,8 +2288,7 @@ const MIGRATIONS: Migration[] = [
       // database that ran the original v47 before the column existed (PR #1669 review: insider
       // rows must preserve the SEC transaction code so P/S open-market trades are distinguishable
       // from grants/exercises/gifts). Guarded because ADD COLUMN fails if the column exists.
-      const cols = database.prepare("PRAGMA table_info(sec_insider_transactions)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "transaction_code")) {
+      if (!columnExists(database, "sec_insider_transactions", "transaction_code")) {
         database.exec("ALTER TABLE sec_insider_transactions ADD COLUMN transaction_code TEXT NOT NULL DEFAULT ''");
       }
     }
@@ -2401,18 +2582,14 @@ const MIGRATIONS: Migration[] = [
       const addColumns = (table: "learned_context" | "learned_context_pending") => {
         // Guard: when the persistence-hardening tests replay migrations from an early schema
         // version, learned_context may not exist yet — skip silently so v59 is idempotent.
-        const tableExists = database.prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
-        ).get(table);
-        if (!tableExists) return;
-        const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-        if (!cols.some((c) => c.name === "regime")) {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, "regime")) {
           database.exec(`ALTER TABLE ${table} ADD COLUMN regime TEXT`);
         }
-        if (!cols.some((c) => c.name === "thesis_tag")) {
+        if (!columnExists(database, table, "thesis_tag")) {
           database.exec(`ALTER TABLE ${table} ADD COLUMN thesis_tag TEXT`);
         }
-        if (!cols.some((c) => c.name === "dominant_factor")) {
+        if (!columnExists(database, table, "dominant_factor")) {
           database.exec(`ALTER TABLE ${table} ADD COLUMN dominant_factor TEXT`);
         }
       };
@@ -2428,14 +2605,11 @@ const MIGRATIONS: Migration[] = [
     version: 60,
     name: "position_stop_plans_exit_contract",
     up: (database) => {
-      const tableExists = database
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'position_stop_plans'")
-        .get();
-      if (!tableExists) return;
-      const cols = database.prepare("PRAGMA table_info(position_stop_plans)").all() as Array<{ name: string }>;
-      const have = new Set(cols.map((c) => c.name));
+      if (!tableExists(database, "position_stop_plans")) return;
       const add = (name: string, ddl: string) => {
-        if (!have.has(name)) database.exec(`ALTER TABLE position_stop_plans ADD COLUMN ${ddl}`);
+        if (!columnExists(database, "position_stop_plans", name)) {
+          database.exec(`ALTER TABLE position_stop_plans ADD COLUMN ${ddl}`);
+        }
       };
       add("resolved_stop_pct", "resolved_stop_pct REAL");
       add("stop_price", "stop_price REAL");
@@ -2494,13 +2668,9 @@ const MIGRATIONS: Migration[] = [
     version: 63,
     name: "pushover_target_column",
     up: (database) => {
-      try {
-        const cols = database.pragma("table_info(notification_prefs)") as { name: string }[];
-        if (cols.length > 0 && !cols.some((c) => c.name === "pushover_target")) {
-          database.exec(`ALTER TABLE notification_prefs ADD COLUMN pushover_target TEXT NOT NULL DEFAULT '';`);
-        }
-      } catch (e) {
-        // Table might not exist in isolated tests
+      if (!tableExists(database, "notification_prefs")) return;
+      if (!columnExists(database, "notification_prefs", "pushover_target")) {
+        database.exec(`ALTER TABLE notification_prefs ADD COLUMN pushover_target TEXT NOT NULL DEFAULT '';`);
       }
     }
   },
@@ -2511,16 +2681,11 @@ const MIGRATIONS: Migration[] = [
       // Per-user delivery-channel credentials (owner directive 2026-07-31):
       // Pushover app token + Twilio set live in user settings, encrypted at rest
       // via db-api-keys' encryptValue; server env vars remain as fallback.
-      try {
-        const cols = database.pragma("table_info(notification_prefs)") as { name: string }[];
-        if (cols.length === 0) return;
-        for (const col of ["pushover_app_token", "twilio_account_sid", "twilio_auth_token", "twilio_from"]) {
-          if (!cols.some((c) => c.name === col)) {
-            database.exec(`ALTER TABLE notification_prefs ADD COLUMN ${col} TEXT NOT NULL DEFAULT '';`);
-          }
+      if (!tableExists(database, "notification_prefs")) return;
+      for (const col of ["pushover_app_token", "twilio_account_sid", "twilio_auth_token", "twilio_from"]) {
+        if (!columnExists(database, "notification_prefs", col)) {
+          database.exec(`ALTER TABLE notification_prefs ADD COLUMN ${col} TEXT NOT NULL DEFAULT '';`);
         }
-      } catch (e) {
-        // Table might not exist in isolated tests
       }
     }
   },
@@ -2532,12 +2697,14 @@ const MIGRATIONS: Migration[] = [
       // indexes: created them manually in prod 2026-08-02 after the unindexed
       // prune pass ran minutes per batch; keeping them in schema so fresh DBs
       // get them too. CREATE INDEX IF NOT EXISTS is idempotent.
-      try {
+      if (tableExists(database, "audit_events")) {
         database.exec("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at);");
+      }
+      if (tableExists(database, "provider_dispatch_attempts")) {
         database.exec("CREATE INDEX IF NOT EXISTS idx_pda_created_at ON provider_dispatch_attempts(created_at);");
+      }
+      if (tableExists(database, "provider_usage_outbox")) {
         database.exec("CREATE INDEX IF NOT EXISTS idx_puo_created_at ON provider_usage_outbox(created_at);");
-      } catch (e) {
-        // tables might not exist in isolated tests
       }
     }
   },
@@ -2568,23 +2735,16 @@ const MIGRATIONS: Migration[] = [
     up: (database) => {
       // P0-4: tamper-evident per-user audit chain. Legacy rows keep NULL chain_hash;
       // new audit() inserts link prev→self. verifyAuditChain checks continuity.
-      try {
+      if (!tableExists(database, "audit_events")) return;
+      if (!columnExists(database, "audit_events", "chain_hash")) {
         database.exec("ALTER TABLE audit_events ADD COLUMN chain_hash TEXT;");
-      } catch {
-        /* column may already exist */
       }
-      try {
+      if (!columnExists(database, "audit_events", "prev_chain_hash")) {
         database.exec("ALTER TABLE audit_events ADD COLUMN prev_chain_hash TEXT;");
-      } catch {
-        /* column may already exist */
       }
-      try {
-        database.exec(
-          "CREATE INDEX IF NOT EXISTS idx_audit_events_user_chain ON audit_events (user_id, created_at DESC, id DESC);"
-        );
-      } catch {
-        /* table might not exist in isolated tests */
-      }
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_user_chain ON audit_events (user_id, created_at DESC, id DESC);"
+      );
     }
   },
   {
@@ -2664,12 +2824,8 @@ const MIGRATIONS: Migration[] = [
     version: 70,
     name: "user_api_keys_plan_tier",
     up: (database) => {
-      const table = database
-        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_api_keys'`)
-        .get() as { name: string } | undefined;
-      if (!table) return;
-      const cols = database.prepare("PRAGMA table_info(user_api_keys)").all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "plan_tier")) {
+      if (!tableExists(database, "user_api_keys")) return;
+      if (!columnExists(database, "user_api_keys", "plan_tier")) {
         database.exec("ALTER TABLE user_api_keys ADD COLUMN plan_tier TEXT");
       }
     }
@@ -2681,10 +2837,7 @@ const MIGRATIONS: Migration[] = [
     version: 71,
     name: "history_cache_eod_source",
     up: (database) => {
-      const table = database
-        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'history_cache_eod'`)
-        .get() as { name: string } | undefined;
-      if (!table) {
+      if (!tableExists(database, "history_cache_eod")) {
         database.exec(`
           CREATE TABLE IF NOT EXISTS history_cache_eod (
             ticker TEXT NOT NULL,
@@ -2703,12 +2856,757 @@ const MIGRATIONS: Migration[] = [
         `);
         return;
       }
-      const cols = database.prepare(`PRAGMA table_info(history_cache_eod)`).all() as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === "source")) {
+      if (!columnExists(database, "history_cache_eod", "source")) {
         database.exec(
           `ALTER TABLE history_cache_eod ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`
         );
       }
+    }
+  },
+  {
+    // Watchlist digest (dsa lesson: digest) needs a queryable per-symbol proposal lookback.
+    // Previously `symbol` only lived inside the `proposal` JSON blob, requiring a full-table
+    // json_extract scan per symbol lookup. Additive + guarded; one-time backfill mirrors the
+    // trade_thesis_tag/entry_market_regime backfill above. insertProposal (db-proposals.ts)
+    // populates the column going forward.
+    version: 72,
+    name: "trade_proposals_symbol_column",
+    up: (database) => {
+      if (!tableExists(database, "trade_proposals")) return;
+      if (!columnExists(database, "trade_proposals", "symbol")) {
+        database.exec("ALTER TABLE trade_proposals ADD COLUMN symbol TEXT");
+        database.exec(
+          "UPDATE trade_proposals SET symbol = UPPER(TRIM(json_extract(proposal, '$.symbol'))) WHERE json_extract(proposal, '$.symbol') IS NOT NULL"
+        );
+      }
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_trade_proposals_symbol_account_created ON trade_proposals (symbol, account_number, created_at)"
+      );
+    }
+  },
+  {
+    // Watchlist digest opt-in (owner default OFF, Settings -> Delivery): same shape as the
+    // pushover_target_column / notify_per_user_channel_credentials migrations above.
+    version: 73,
+    name: "notify_watchlist_digest_enabled",
+    up: (database) => {
+      if (!tableExists(database, "notification_prefs")) return;
+      if (!columnExists(database, "notification_prefs", "watchlist_digest_enabled")) {
+        database.exec(
+          "ALTER TABLE notification_prefs ADD COLUMN watchlist_digest_enabled INTEGER NOT NULL DEFAULT 0;"
+        );
+      }
+    }
+  },
+  {
+    // Signal-health monitor (r2 lesson: health): rolling pure-arithmetic diagnostics of the LLM's
+    // OWN confidenceScore against matured decision outcomes — rank IC + t-stat, quantile buckets,
+    // top-K churn, gross-vs-net — one snapshot row per (user, UTC day, horizon), written by the
+    // daily signal-health-refresh lane (src/lib/signal-health.ts). CRUD in db-signal-health.ts.
+    // Rows exist only when the observation floor is met — an under-sampled day writes nothing
+    // rather than a fabricated diagnostic.
+    version: 74,
+    name: "signal_health_snapshot",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS signal_health_snapshot (
+          user_id TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          horizon TEXT NOT NULL,
+          rank_ic REAL NOT NULL,
+          t_stat REAL NOT NULL,
+          n_observations INTEGER NOT NULL,
+          n_dates INTEGER NOT NULL,
+          quantile_buckets TEXT NOT NULL,
+          top_k_churn_pct REAL,
+          gross_return_pct REAL NOT NULL,
+          net_of_cost_return_pct REAL NOT NULL,
+          rolling_rank_ic_slope REAL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (user_id, period_end, horizon)
+        );
+        CREATE INDEX IF NOT EXISTS idx_signal_health_user_horizon
+          ON signal_health_snapshot (user_id, horizon, period_end DESC);
+      `);
+    }
+  },
+  {
+    // Truncated-replay lookahead audit (freqtrade lookahead-analysis port): one finding row per
+    // (user, decision, factor-or-field) — the decision-time value vs the value recomputed from
+    // data truncated to the decision date, with an honest three-way classification
+    // (clean | mismatch | unverifiable). Written by the weekly lookahead-audit due-job lane
+    // (src/lib/lookahead-audit.ts); CRUD in db-lookahead-audit.ts. Unverifiable rows are
+    // deliberate coverage-gap receipts (factors with no point-in-time source), not noise.
+    version: 75,
+    name: "lookahead_audit_findings",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS lookahead_audit_findings (
+          user_id TEXT NOT NULL,
+          decision_id TEXT NOT NULL,
+          run_id TEXT,
+          symbol TEXT NOT NULL,
+          factor_or_field TEXT NOT NULL,
+          classification TEXT NOT NULL CHECK (classification IN ('clean', 'mismatch', 'unverifiable')),
+          persisted_value REAL,
+          recomputed_value REAL,
+          delta REAL,
+          detail TEXT,
+          as_of TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (user_id, decision_id, factor_or_field)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lookahead_findings_user_created
+          ON lookahead_audit_findings (user_id, created_at DESC);
+      `);
+    }
+  },
+  {
+    // Point-in-time fundamentals revision chain (qlib/ai-hedge-fund lookahead lesson), scoped to
+    // SEC-XBRL-derived GAAP facts (debtToEquity, revenueGrowth today; future EPS/revenue fields can
+    // reuse the same shape). Mirrors the sec_filings/learned_context superseded_by idiom: a NEW
+    // filing for the SAME (symbol, field, fiscal_period_end) marks the prior LIVE row's
+    // superseded_by (the successor's own filed_at — there is no synthetic id, and symbol/field/
+    // fiscal_period_end are already fixed within a group) instead of overwriting it, so the old row
+    // stays queryable. GLOBAL market data (no user_id column) — deliberately exempt from
+    // DELETE_TABLES_BY_USER_ID, same class as sec_filings/symbol_field_latest/
+    // historical_fundamentals: SEC filings are public-company facts, not account-private. CRUD in
+    // db-fundamentals.ts (recordFundamentalRevision / getFundamentalAsOf).
+    version: 76,
+    name: "fundamental_revisions",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS fundamental_revisions (
+          symbol TEXT NOT NULL,
+          field TEXT NOT NULL,
+          fiscal_period_end TEXT NOT NULL,
+          value REAL NOT NULL,
+          form TEXT NOT NULL,
+          filed_at TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          superseded_by TEXT,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (symbol, field, fiscal_period_end, filed_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fundamental_revisions_symbol_field_filed
+          ON fundamental_revisions (symbol, field, filed_at);
+      `);
+    }
+  },
+  {
+    // Native iOS push (APNs) device-token registry. One row per device token; the token is the
+    // PRIMARY KEY because a token identifies exactly one install on one device and must belong to
+    // exactly ONE user — re-registering it under a different account reassigns it (see
+    // registerDeviceToken in db-device-tokens.ts) so a shared phone that switches accounts never
+    // keeps receiving the previous user's alerts.
+    //
+    // `environment` is stored, not inferred: APNs device tokens are environment-specific (a
+    // sandbox token is answered 400 BadDeviceToken by the production endpoint and vice versa), and
+    // the endpoint is chosen from this column at send time.
+    version: 77,
+    name: "device_push_tokens",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS device_push_tokens (
+          token TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          environment TEXT NOT NULL CHECK(environment IN ('sandbox','production')),
+          bundle_id TEXT NOT NULL,
+          platform TEXT NOT NULL DEFAULT 'ios',
+          created_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          disabled_at TEXT,
+          disabled_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_device_push_tokens_user
+          ON device_push_tokens (user_id, disabled_at);
+      `);
+    }
+  },
+  {
+    // Owner ruling 2026-08-12 ("ALL toggles must be real"): removes the force-include-at-send-time
+    // pattern for lookahead_leak, signal_health, provider_degraded, storage_warning,
+    // autonomy_halted_on_boot, earningscalls_entitlement_blocked, budget_alert, and risk_advisory —
+    // every one of those sites injected its event type into that send's effective enabledEvents so a
+    // legacy stored array (predating the type) still delivered it, silently overriding a user who had
+    // (or later set) the toggle off. This is the one-time backfill the removed sites' own comments
+    // said they wanted: union FORCE_INCLUDE_BACKFILL_EVENT_TYPES into every already-explicit stored
+    // enabledEvents array, once, so the Settings toggle becomes genuinely authoritative afterward — on
+    // by default (matching the prior always-delivered behavior), off if/when the user turns it off,
+    // and it STAYS off. See docs/rollouts/2026-08-13-remove-force-include-notifications.md.
+    version: 78,
+    name: "notification_enabled_events_backfill",
+    up: (database) => {
+      const changed = backfillNotificationEnabledEventsRows(database, FORCE_INCLUDE_BACKFILL_EVENT_TYPES);
+      if (changed > 0) {
+        console.log(`[db] migration 78: backfilled ${changed} legacy enabledEvents row(s) with previously force-included event types`);
+      }
+    }
+  },
+  {
+    version: 79,
+    name: "trade_locks",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS trade_locks (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          connected_account_id TEXT NOT NULL,
+          scope TEXT NOT NULL CHECK(scope IN ('account','symbol')),
+          symbol TEXT NOT NULL DEFAULT '',
+          side TEXT NOT NULL CHECK(side IN ('long','short','*')),
+          reason TEXT NOT NULL,
+          trigger TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          until TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(user_id, connected_account_id, scope, symbol, side, trigger)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_locks_active
+          ON trade_locks (user_id, connected_account_id, active, until);
+      `);
+    }
+  },
+  {
+    version: 80,
+    name: "vector_doc_lifecycle",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS vector_doc_lifecycle (
+          user_id TEXT NOT NULL,
+          vector_id TEXT NOT NULL,
+          doc_type TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          last_retrieved_at TEXT,
+          retrieval_count INTEGER NOT NULL DEFAULT 0,
+          archived_at TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (user_id, vector_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vector_doc_lifecycle_live
+          ON vector_doc_lifecycle (user_id, archived_at, doc_type);
+      `);
+    }
+  },
+  {
+    version: 81,
+    name: "strategy_overlays",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS strategy_overlays (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          market_regimes TEXT NOT NULL,
+          instructions TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 100,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_overlays_user
+          ON strategy_overlays (user_id, enabled, priority);
+      `);
+    }
+  },
+  {
+    version: 82,
+    name: "strategy_run_requests",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS strategy_run_requests (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          manual INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed')),
+          result TEXT,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_run_requests_user_status
+          ON strategy_run_requests (user_id, status, created_at);
+      `);
+    }
+  },
+  {
+    version: 83,
+    name: "idea_sources_13f_ark_form4",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS sec_insider_transactions (
+          id TEXT PRIMARY KEY,
+          cik TEXT NOT NULL,
+          accession TEXT NOT NULL,
+          insider_name TEXT NOT NULL,
+          relationship TEXT NOT NULL,
+          side TEXT NOT NULL,
+          shares REAL NOT NULL,
+          price REAL NOT NULL,
+          period_of_report TEXT NOT NULL,
+          is_10b5_1 INTEGER NOT NULL DEFAULT 0,
+          transaction_code TEXT NOT NULL DEFAULT '',
+          symbol TEXT NOT NULL DEFAULT ''
+        );
+      `);
+      if (!columnExists(database, "sec_insider_transactions", "symbol")) {
+        database.exec("ALTER TABLE sec_insider_transactions ADD COLUMN symbol TEXT NOT NULL DEFAULT ''");
+      }
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_sec_insider_transactions_symbol
+          ON sec_insider_transactions(symbol);
+        CREATE TABLE IF NOT EXISTS cusip_ticker_map (
+          cusip TEXT PRIMARY KEY,
+          ticker TEXT NOT NULL,
+          source TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sec_13f_holdings (
+          id TEXT PRIMARY KEY,
+          filer_cik TEXT NOT NULL,
+          filer_name TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          accession TEXT NOT NULL,
+          cusip TEXT NOT NULL,
+          ticker TEXT NOT NULL DEFAULT '',
+          issuer_name TEXT NOT NULL,
+          title_of_class TEXT NOT NULL DEFAULT '',
+          shares REAL NOT NULL,
+          value_usd REAL NOT NULL,
+          ssh_prn_type TEXT NOT NULL DEFAULT 'SH',
+          fetched_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sec_13f_holdings_ticker_period
+          ON sec_13f_holdings(ticker, period_end);
+        CREATE INDEX IF NOT EXISTS idx_sec_13f_holdings_filer_period
+          ON sec_13f_holdings(filer_cik, period_end);
+        CREATE TABLE IF NOT EXISTS ark_holdings (
+          id TEXT PRIMARY KEY,
+          as_of TEXT NOT NULL,
+          fund TEXT NOT NULL,
+          ticker TEXT NOT NULL,
+          company TEXT NOT NULL,
+          cusip TEXT NOT NULL DEFAULT '',
+          shares REAL NOT NULL,
+          market_value_usd REAL NOT NULL,
+          weight_pct REAL NOT NULL,
+          fetched_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ark_holdings_ticker_asof
+          ON ark_holdings(ticker, as_of);
+        CREATE INDEX IF NOT EXISTS idx_ark_holdings_fund_asof
+          ON ark_holdings(fund, as_of);
+      `);
+    }
+  },
+  {
+    version: 84,
+    name: "ingested_accessions_pinecone_write_class",
+    up: (database) => {
+      if (!tableExists(database, "ingested_accessions")) return;
+      if (!columnExists(database, "ingested_accessions", "pinecone_write_class")) {
+        database.exec(
+          "ALTER TABLE ingested_accessions ADD COLUMN pinecone_write_class TEXT NOT NULL DEFAULT 'full-body'"
+        );
+      }
+      if (!columnExists(database, "ingested_accessions", "pinecone_vector_count")) {
+        database.exec(
+          "ALTER TABLE ingested_accessions ADD COLUMN pinecone_vector_count INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+    }
+  },
+  {
+    version: 85,
+    name: "document_chunks_fts_index",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS document_chunks_fts_index (
+          content_hash TEXT NOT NULL,
+          symbol TEXT NOT NULL,
+          source TEXT NOT NULL,
+          accession TEXT NOT NULL,
+          fts_rowid INTEGER NOT NULL,
+          PRIMARY KEY (content_hash, symbol, source, accession)
+        );
+      `);
+      if (!tableExists(database, "document_chunks_fts")) return;
+      database.exec(`
+        INSERT OR REPLACE INTO document_chunks_fts_index
+          (content_hash, symbol, source, accession, fts_rowid)
+        SELECT content_hash, symbol, source, accession, rowid
+        FROM document_chunks_fts;
+      `);
+    }
+  },
+  {
+    // Cost provenance on the LLM ledger.  `cost_usd` used to be exclusively a price-table
+    // ESTIMATE; OpenRouter reports its own billed amount on every response (`usage.cost`), and
+    // recordLlmUsage now prefers it.  Without this column a billed figure and an estimate are
+    // indistinguishable in the table, so /console/usage cannot honestly label either.  Existing
+    // rows stay NULL and are read as estimates — which is exactly what they were.
+    version: 86,
+    name: "llm_usage_cost_source",
+    up: (database) => {
+      // Table-existence guard first.  `PRAGMA table_info` on a MISSING table returns an empty
+      // list rather than erroring, so without this the "column absent" branch is taken and the
+      // ALTER dies with "no such table" — which is exactly how this migration broke
+      // test/persistence-hardening.test.ts, where migrations are exercised against a database
+      // that has not been through the baseline schema.  Matches the guard on migration 84.
+      if (!tableExists(database, "llm_usage")) return;
+      if (!columnExists(database, "llm_usage", "cost_source")) {
+        database.exec("ALTER TABLE llm_usage ADD COLUMN cost_source TEXT");
+      }
+    }
+  },
+  {
+    // Composite query indexes on performance-critical ledger and notification scan paths.
+    // 1. notification_events: speed up user notifications timeline ordered fetches.
+    // 2. fill_events: speed up ordered trade history queries per user/account.
+    // 3. historical_fundamentals: speed up latest fundamental metrics per symbol & field.
+    version: 87,
+    name: "composite_query_indexes",
+    up: (database) => {
+      const hasNotifications = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notification_events'").get();
+      if (hasNotifications) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_notification_events_user_created ON notification_events (user_id, created_at DESC)");
+      }
+      const hasFills = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='fill_events'").get();
+      if (hasFills) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_fill_events_user_account_filled ON fill_events (user_id, account_number, filled_at DESC)");
+      }
+      const hasFundamentals = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='historical_fundamentals'").get();
+      if (hasFundamentals) {
+        database.exec("CREATE INDEX IF NOT EXISTS idx_historical_fundamentals_symbol_field_effective ON historical_fundamentals (symbol, field, effective_at DESC)");
+      }
+    }
+  },
+  {
+    // The FTS mirror resumes per OCCURRENCE — `WHERE symbol = ? AND source = ? AND accession = ?`
+    // — but the only index on `document_chunks_fts_index` is its PK, which leads with
+    // `content_hash`.  An occurrence lookup therefore cannot seek and SCANS the whole covering
+    // index.  Measured on production 2026-09-09 (689,047 rows / 10.98 GB DB): `SCAN
+    // document_chunks_fts_index USING COVERING INDEX`, 78-105 ms per call, and better-sqlite3 is
+    // synchronous so every one of those milliseconds is the serving event loop.  The worker calls
+    // it once per document per tick.  This index turns that SCAN into a SEARCH.
+    version: 88,
+    name: "document_chunks_fts_index_occurrence",
+    up: (database) => {
+      if (!tableExists(database, "document_chunks_fts_index")) return;
+      database.exec(
+        `CREATE INDEX IF NOT EXISTS idx_document_chunks_fts_index_occurrence
+           ON document_chunks_fts_index (symbol, source, accession)`
+      );
+    }
+  },
+  {
+    version: 89,
+    name: "chat_turns_connected_account_id",
+    up: (database) => {
+      if (!tableExists(database, "chat_turns")) return;
+      if (!columnExists(database, "chat_turns", "connected_account_id")) {
+        database.exec("ALTER TABLE chat_turns ADD COLUMN connected_account_id TEXT");
+      }
+    }
+  },
+  {
+    // 2026-09-20 MM comprehensive review: the audit-prune observability+default DELETE does
+    // NOT constrain user_id (audit-prune.ts:115-132) but the only existing kind-prefixed
+    // index is (kind, user_id, created_at DESC) — without a user_id bound, SQLite scans
+    // kind-ranges across every user. Add a tighter (kind, created_at) compound so the prune
+    // path can range-scan created_at inside a single kind without dragging user_id through
+    // the sorter. Idempotent via IF NOT EXISTS.
+    version: 90,
+    name: "audit_events_kind_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_kind_created ON audit_events (kind, created_at)"
+      );
+    }
+  },
+  {
+    // 2026-09-23 MM (llm-stats feature): the LLM stats console page needs per-call
+    // latency_ms + status so it can render p50/p95/p99 latency and an error-rate column.
+    // Both columns are nullable so legacy rows written before this migration stay valid;
+    // the recorder (src/lib/llm-usage.ts) fills them in for every call from here on.  No
+    // data eviction — owner rule: keep every LLM call forever for trade-outcome correlation
+    // (proposals cross-referenced against which LLM family produced them, with enough sample
+    // size per alias that single-generation versions don't each need their own bucket).
+    version: 91,
+    name: "llm_usage_latency_status",
+    up: (database) => {
+      if (!tableExists(database, "llm_usage")) return;
+      if (!columnExists(database, "llm_usage", "latency_ms")) {
+        database.exec("ALTER TABLE llm_usage ADD COLUMN latency_ms INTEGER");
+      }
+      if (!columnExists(database, "llm_usage", "status")) {
+        database.exec("ALTER TABLE llm_usage ADD COLUMN status TEXT");
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS idx_llm_usage_model_status ON llm_usage (model, status, created_at)");
+      database.exec("CREATE INDEX IF NOT EXISTS idx_llm_usage_provider_status ON llm_usage (provider, status, created_at)");
+    }
+  },
+  {
+    // Board 687a5fb4 (2026-09-24, lane B st-run-resilience): one-time retry of a strategy run the
+    // stale-run sweep marked failed because the PROCESS RESTARTED mid-run (operators restart the
+    // container during RTH event-loop stalls; 11 of the last 50 Alpaca Paper runs died this way
+    // and none was retried).  A retry must target the killed run's account (the queue was
+    // user-scoped: the drain ran the user's ACTIVE account) and carry its lineage so a retry is
+    // never itself retried.  Both columns nullable: every existing row (Manual Run once) keeps its
+    // exact behavior.  The partial UNIQUE index makes "at most one retry per killed run" a
+    // database invariant, not just an application check.
+    version: 92,
+    name: "strategy_run_requests_account_and_retry_lineage",
+    up: (database) => {
+      if (!tableExists(database, "strategy_run_requests")) return;
+      if (!columnExists(database, "strategy_run_requests", "connected_account_id")) {
+        database.exec("ALTER TABLE strategy_run_requests ADD COLUMN connected_account_id TEXT");
+      }
+      if (!columnExists(database, "strategy_run_requests", "retry_of_run_id")) {
+        database.exec("ALTER TABLE strategy_run_requests ADD COLUMN retry_of_run_id TEXT");
+      }
+      database.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_run_requests_retry_of ON strategy_run_requests (retry_of_run_id) WHERE retry_of_run_id IS NOT NULL"
+      );
+    }
+  },
+  {
+    // Board 687a5fb4 review round (2026-09-25, follow-up to PR #3752): record WHO launched a
+    // strategy run on the run row itself (`autonomous` | `manual` | `run_state_override` |
+    // `request`, see src/lib/strategy-run-origin.ts).  The restart retry inferred "scheduler run"
+    // from the absence of a strategy_run_requests row, but the iOS Run once calls runStrategyOnce
+    // with `manual: true` directly and writes no request row — so a propose-only owner run killed
+    // by a restart could be retried as an autonomous one.  Nullable: rows written before this
+    // migration stay NULL, and the retry fails closed on NULL.
+    version: 93,
+    name: "strategy_runs_origin",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      if (!columnExists(database, "strategy_runs", "origin")) {
+        database.exec("ALTER TABLE strategy_runs ADD COLUMN origin TEXT");
+      }
+    }
+  },
+  {
+    // Enrichment cascade coverage: durable admin/ops field-fill reports survive redeploys.
+    // One run row per cascade as_of (full report JSON) plus normalized per-(as_of, field) rows
+    // for history. Written by buildEnrichmentCoverageReport via db-enrichment-coverage.ts.
+    version: 94,
+    name: "enrichment_coverage_reports",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS enrichment_coverage_runs (
+          as_of TEXT PRIMARY KEY,
+          symbol_count INTEGER NOT NULL,
+          report_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrichment_coverage_runs_created
+          ON enrichment_coverage_runs (created_at DESC);
+        CREATE TABLE IF NOT EXISTS enrichment_coverage_fields (
+          as_of TEXT NOT NULL,
+          field TEXT NOT NULL,
+          filled_count INTEGER NOT NULL,
+          total_symbols INTEGER NOT NULL,
+          fill_rate REAL NOT NULL,
+          winning_sources_json TEXT NOT NULL,
+          most_frequent_source TEXT,
+          missing_symbols_json TEXT NOT NULL,
+          PRIMARY KEY (as_of, field)
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrichment_coverage_fields_field_as_of
+          ON enrichment_coverage_fields (field, as_of DESC);
+      `);
+    }
+  },
+  {
+    // Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
+    // liveness index (status, connected_account_id in the key). 2026-10-14 prod profile: 84s
+    // snapshot builds with a 16.5 GB DB — this seek keeps recent-run reads off full user scans.
+    version: 95,
+    name: "strategy_runs_user_started_index",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_runs_user_started ON strategy_runs (user_id, started_at DESC)"
+      );
+    },
+  },
+  {
+    // Codec tag and plaintext length so backfill and hasLocalFilingCopy do not
+    // scan blob columns. text_codec NULL means the body has not been stamped yet.
+    version: 96,
+    name: "text_payload_codec_columns",
+    up: (database) => {
+      if (tableExists(database, "earningscalls_transcripts")) {
+        if (!columnExists(database, "earningscalls_transcripts", "text_codec")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN text_codec TEXT");
+        }
+        if (!columnExists(database, "earningscalls_transcripts", "plaintext_length")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN plaintext_length INTEGER");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_earningscalls_text_codec_pending
+            ON earningscalls_transcripts (symbol, fiscal_year, fiscal_quarter)
+            WHERE text_codec IS NULL AND content IS NOT NULL
+        `);
+      }
+      if (tableExists(database, "sec_facts")) {
+        if (!columnExists(database, "sec_facts", "segment_codec")) {
+          database.exec("ALTER TABLE sec_facts ADD COLUMN segment_codec TEXT");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_sec_facts_segment_codec_pending
+            ON sec_facts (id)
+            WHERE segment_codec IS NULL
+              AND concept = '__companyfacts_json__'
+              AND segment IS NOT NULL
+        `);
+      }
+    }
+  },
+  {
+    version: 97,
+    name: "st4541_dedup_isolation_columns",
+    up: (database) => {
+      // ST-4541 (review 17915833/1): the near-duplicate signature/link tables gained tenant_scope,
+      // embed_model and embed_revision so a skip can never inherit a canonical vector from another
+      // tenant or another embedding space. These tables shipped WITH this PR and have never been on
+      // main, so production has no rows to migrate; this only rescues local/staging dev databases
+      // that already created the pre-isolation shape while the branch was in flight. Rows written
+      // before this migration carry tenant_scope='' and therefore simply stop matching any scoped
+      // lookup — the fail-open direction (an extra paid embed), never a wrong skip or a lost record.
+      const addColumnIfMissing = (table: string, column: string) => {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, column)) {
+          database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+        }
+      };
+
+      for (const table of ["chunk_dedup_signatures", "chunk_dedup_links"]) {
+        addColumnIfMissing(table, "tenant_scope");
+        addColumnIfMissing(table, "embed_model");
+        addColumnIfMissing(table, "embed_revision");
+      }
+      // ST-4541 (Kody review): the signature row also records the upserted vector id, so a skip's
+      // link row can name the canonical vector instead of always writing ''. Pre-existing dev rows
+      // keep '' — a blank audit field, never a wrong skip.
+      addColumnIfMissing("chunk_dedup_signatures", "vector_id");
+    }
+  },
+  {
+    // ST-8: which process started the run.  The restart sweep on a follower must not close a
+    // run the leader still owns.  Nullable so rows written before this migration stay unowned
+    // and only a leader, after boot grace, may reap them.  Version 98, not 95, 96 or 97: main
+    // spent 95 on strategy_runs_user_started_index, 96 on text_payload_codec_columns (#4720) and
+    // 97 on st4541_dedup_isolation_columns (#4736), and two migrations can never share a version.
+    // This one renumbers again as main lands new migrations; the alternative is a duplicate
+    // version that silently runs the first migration only and skips the second.
+    version: 98,
+    name: "strategy_runs_owner_instance",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      if (!columnExists(database, "strategy_runs", "owner_instance")) {
+        database.exec("ALTER TABLE strategy_runs ADD COLUMN owner_instance TEXT");
+      }
+    }
+  },
+  {
+    // ST-4543: the Usage Monitor push used to drop everything the provider reported beyond the
+    // prompt/completion totals (cache reads/writes, reasoning tokens, the model that actually
+    // served the call).  The push is rebuilt from this table by usage-monitor-replay.ts, so the
+    // detail must be persisted here or a replayed event would differ from the live one.  All
+    // columns are nullable: legacy rows stay valid and replay as before (no detail available).
+    version: 99,
+    name: "llm_usage_provider_detail",
+    up: (database) => {
+      if (!tableExists(database, "llm_usage")) return;
+      const columns: Array<[string, string]> = [
+        ["cached_prompt_tokens", "INTEGER"],
+        ["cache_creation_tokens", "INTEGER"],
+        ["cache_creation_1h_tokens", "INTEGER"],
+        ["reasoning_tokens", "INTEGER"],
+        ["served_model", "TEXT"],
+        ["request_count", "INTEGER"]
+      ];
+      for (const [name, type] of columns) {
+        if (!columnExists(database, "llm_usage", name)) {
+          database.exec(`ALTER TABLE llm_usage ADD COLUMN ${name} ${type}`);
+        }
+      }
+    }
+  },
+  {
+    // 2026-10-18 BF-FIXER (ST-4561): autonomy_halt_cause.latestHaltBranch correlated-EXISTS fix.
+    //
+    // audit_events carries idx_audit_events_user_account_kind (user_id, connected_account_id, kind)
+    // from v-earlier, and latestHaltBranch's own comment says both of its reads "can use
+    // (user_id, connected_account_id, kind) instead of scanning audit_events".  The database does
+    // not deliver that.  EXPLAIN QUERY PLAN on prod (2026-10-18) showed BOTH subplans narrowing on
+    // user_id alone:
+    //
+    //   SEARCH audit_events USING INDEX idx_audit_events_user_created (user_id=?)
+    //   CORRELATED SCALAR SUBQUERY 1
+    //   SEARCH e USING INDEX idx_audit_events_user_created (user_id=? AND created_at>?)
+    //
+    // connected_account_id and kind never enter a seek, so the handover check walks one user's whole
+    // audit history.  The existing composite cannot serve the shape because it has no created_at,
+    // which the query needs for both `ORDER BY created_at DESC LIMIT 1` and `e.created_at >= h.created_at`.
+    //
+    // Adding created_at as the trailing column lets the correlated EXISTS seek all four columns.
+    // Verified on a same-schema ANALYZEd copy: the correlated subquery becomes
+    //   SEARCH e USING INDEX ... (user_id=? AND connected_account_id=? AND kind=? AND created_at>?)
+    // and it does so with NO ANALYZE — the index alone is sufficient for that half.
+    //
+    // Purely additive: a new index, no data change, no ANALYZE, no PRAGMA.  Creating it over 1.4M
+    // rows takes a write lock for the build, so this is expected to run in the normal migration
+    // window like any other index build here.
+    //
+    // The halt-branch statement that motivated this index was rewritten in the same change:
+    // APP_HALT_PREDICATE is split per kind into two index-ordered latest-per-kind lookups
+    // combined with max(), so the statement seeks (user_id, connected_account_id, kind,
+    // created_at) with no sorter instead of walking the user's audit history.
+    version: 100,
+    name: "audit_events_account_kind_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_kind_created ON audit_events (user_id, connected_account_id, kind, created_at DESC)"
+      );
+    }
+  },
+  {
+    // ST-4561 follow-up: the correlated handover EXISTS constrains kind with an OR/IN, so
+    // created_at can never be a range bound on the kind-first v100 index (SQLite only ranges
+    // a column when every preceding column is equality-constrained).  This companion orders
+    // created_at directly after the two equality columns, so `e.created_at >= h.created_at`
+    // becomes a real bounded seek instead of a scan of the account group's audit rows.
+    version: 101,
+    name: "audit_events_account_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON audit_events (user_id, connected_account_id, created_at DESC)"
+      );
+    }
+  },
+  {
+    version: 102,
+    name: "st2599_auth_sessions",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          absolute_expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          last_seen_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active
+          ON auth_sessions (user_id, revoked_at);
+      `);
     }
   }
 ];
@@ -2726,6 +3624,7 @@ const MIGRATIONS: Migration[] = [
  * testing; the versioned-migration guard runs it exactly once at runtime.
  */
 export function backfillAccountScopedStrategyModels(database: Database.Database): void {
+  if (!tableExists(database, "user_settings") || !tableExists(database, "account_strategy_state")) return;
   const MODEL_FIELDS = ["llmModel", "redTeamLlmModel", "llmReasoningEffort"];
   const userPolicyRows = database
     .prepare("SELECT user_id, value FROM user_settings WHERE key = 'policy'")
@@ -2819,7 +3718,13 @@ export function runMigrations(database: Database.Database, migrations: Migration
       m.up(database);
       database.pragma(`user_version = ${m.version}`);
     });
-    apply();
+    // BEGIN IMMEDIATE, not the default DEFERRED: during a rolling deploy the outgoing container
+    // commits continuously, and a deferred migration transaction that reads before writing dies
+    // with an INSTANT SQLITE_BUSY on the WAL snapshot upgrade — busy_timeout never applies to
+    // that path (proven in prod: deployment pyqxv16i, 2026-08-12, migration 72 crash-looped the
+    // incoming container and Coolify rolled back).  Taking the write lock up front makes the
+    // 60s busy_timeout do its job while the old container's short writes drain.
+    apply.immediate();
     current = m.version;
     console.log(`[db] applied migration ${m.version} (${m.name})`);
   }
@@ -2873,7 +3778,7 @@ export function hasEncryptedCredentials(database: Database.Database): boolean {
  * Fail loudly at boot rather than silently decrypting stored creds to '' (which a
  * per-process random ENCRYPTION_KEY fallback does). Triggers only when the key is absent
  * (ephemeral random fallback) AND the DB already holds ciphertext. `ephemeral` is read
- * from process.env at call time so it reflects any .env.local loaded during import.
+ * from process.env at call time so it reflects any local dotenv-style file loaded during import.
  */
 export function assertEncryptionKeyAvailable(
   database: Database.Database,
@@ -3026,6 +3931,21 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
     db.prepare(
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
+  }
+
+  // ST-4561: the halt-cause cache holds the answer to "did the APP halt this account, and has it
+  // stayed halted?" for up to a minute.  A row that matches the app-halt predicate (a HARD drawdown
+  // breaker, a broker auto-halt) or the handover predicate (an auto-resume, an owner override, a
+  // boot halt, an ops set_system_state, a policy change that leaves `halted`) changes that answer,
+  // so the write marks the cached answer for this scope stale and the next read re-reads it.  A
+  // row that matches neither -- the ADVISORY drawdown row written on every breached strategy run,
+  // for one -- cannot change it and must not force a fresh scan of the 19 GB audit table.
+  //
+  // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
+  // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
+  // load that module, and then the cache TTL governs as before.
+  if (auditRowChangesHaltCause(kind, payloadJson)) {
+    globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
 }
 
@@ -3245,6 +4165,22 @@ function migrate(database: Database.Database): void {
       UNIQUE(user_id, service)
     );
     CREATE INDEX IF NOT EXISTS idx_user_api_keys_user ON user_api_keys (user_id);
+
+    -- Per-user data-source proxy settings (2026-09-25 residential-proxy egress).
+    -- password is encrypted with the same ENCRYPTION_KEY machinery as user_api_keys
+    -- (src/lib/db-api-keys.ts); see src/lib/user-proxy-settings.ts.
+    CREATE TABLE IF NOT EXISTS user_proxy_settings (
+      user_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      protocol TEXT NOT NULL DEFAULT 'http',
+      host TEXT NOT NULL,
+      port INTEGER,
+      username TEXT,
+      password TEXT,
+      failure_mode TEXT NOT NULL DEFAULT 'fail_soft',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
 
     -- Multi-account storage
     CREATE TABLE IF NOT EXISTS connected_accounts (
@@ -3590,6 +4526,8 @@ function migrate(database: Database.Database): void {
       ticker TEXT NOT NULL DEFAULT '',
       indexed_at TEXT NOT NULL,
       chunk_count INTEGER NOT NULL DEFAULT 0,
+      pinecone_write_class TEXT NOT NULL DEFAULT 'full-body',
+      pinecone_vector_count INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (accession, doc_type)
     );
     CREATE TABLE IF NOT EXISTS document_chunks (
@@ -3618,9 +4556,79 @@ function migrate(database: Database.Database): void {
       chunk_id TEXT NOT NULL DEFAULT '',
       user_scope TEXT NOT NULL DEFAULT 'local',
       created_at TEXT NOT NULL,
+      -- ST-4540 (embed-stage no-data-loss): durable delivery receipt. delivered_at IS NOT NULL
+      -- means the vector was PROVEN durably in the vector store (upsert acknowledged, or
+      -- managed two-phase commit finalized), so only then may the row be removed. Undelivered
+      -- rows are NEVER age- or size-deleted — a paid vector is kept until it lands.
+      delivered_at TEXT,
+      delivered_store TEXT,
+      -- ST-4540: undecodable (corrupt) vectors are quarantined and KEPT for re-embed from
+      -- source. They are never deleted; a re-embed (INSERT OR REPLACE) clears the marker.
+      quarantined_at TEXT,
+      quarantine_reason TEXT,
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    -- NOTE: idx_embed_stage_delivered is NOT created here. On a pre-ST-4540 database this block is
+    -- a no-op (the table already exists WITHOUT delivered_at), so indexing that column here would
+    -- abort the whole migration with "no such column: delivered_at". It is created in the guarded
+    -- ALTER TABLE block below, once the columns are known to exist.
+    -- ST-4541 pre-embed near-duplicate detection. chunk_dedup_signatures holds one MinHash
+    -- signature (~256 B) per chunk we actually paid to embed, so a later ingest can compare
+    -- against recent same-source chunks without re-reading full text. chunk_dedup_links is the
+    -- provenance row written when a chunk's embed was SKIPPED, pointing at the canonical chunk that
+    -- answers for it. Deliberately registered in NEITHER sqlite-storage-hygiene's CATEGORY_BY_TABLE
+    -- nor PRUNABLE_TABLES: stored RAG data is kept forever, so these rows are never pruned or capped.
+    -- Write pattern is INSERT OR IGNORE only — no update, no delete.
+    --
+    -- ISOLATION (review 17915833/1): a skip is only safe when the canonical vector the duplicate
+    -- inherits is actually RETRIEVABLE for the skipping caller — i.e. same tenant namespace AND the
+    -- same embedding space. The tenant_scope column (vectorTenantScope: "shared:operator" or
+    -- "private:<sha256>") plus embed_model/embed_revision (the vector space that produced the
+    -- canonical vector) are therefore part of the signature's identity, and every lookup filters on
+    -- them. Without that, tenant A's chunk could be skipped against tenant B's signature and would
+    -- never get a vector in A's isolated namespace — silently unretrievable, i.e. a lost record.
+    -- Both keys are in the primary key so two tenants that embed identical text each keep their own
+    -- signature row instead of one silently winning the INSERT OR IGNORE.
+    CREATE TABLE IF NOT EXISTS chunk_dedup_signatures (
+      content_hash TEXT NOT NULL,
+      normalized_hash TEXT NOT NULL DEFAULT '',
+      signature BLOB NOT NULL,
+      num_perm INTEGER NOT NULL DEFAULT 64,
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      chunk_id TEXT NOT NULL DEFAULT '',
+      -- The record id actually upserted for this chunk, so a later skip's link row can name the
+      -- vector that answers for it (chunk_dedup_links.canonical_vector_id).
+      vector_id TEXT NOT NULL DEFAULT '',
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, tenant_scope, embed_model, embed_revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_scope
+      ON chunk_dedup_signatures (tenant_scope, symbol, source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_normalized
+      ON chunk_dedup_signatures (tenant_scope, embed_model, embed_revision, normalized_hash);
+    CREATE TABLE IF NOT EXISTS chunk_dedup_links (
+      content_hash TEXT NOT NULL,
+      canonical_hash TEXT NOT NULL,
+      canonical_chunk_id TEXT NOT NULL DEFAULT '',
+      canonical_vector_id TEXT NOT NULL DEFAULT '',
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      match_kind TEXT NOT NULL CHECK(match_kind IN ('exact','near')),
+      similarity REAL NOT NULL DEFAULT 0,
+      threshold REAL NOT NULL DEFAULT 0,
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, canonical_hash, tenant_scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_links_scope
+      ON chunk_dedup_links (tenant_scope, symbol, source, created_at);
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -3771,6 +4779,20 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (ticker, date)
     );
     CREATE INDEX IF NOT EXISTS idx_imported_price_eod_ticker ON imported_price_eod (ticker, date);
+    -- Idempotent receipt for one Congress.Trade -> Socratic-Trade push.  Keyed by the
+    -- caller's push id.  An ok receipt is what a retry returns, and that retry does
+    -- not write the cache again.  A non-ok receipt is replaced on the next attempt.
+    -- A push with no id is stored under missing:<received_at> so the ops snapshot
+    -- can still show health.
+    CREATE TABLE IF NOT EXISTS peer_push_receipts (
+      push_id TEXT PRIMARY KEY,
+      received_at TEXT NOT NULL,
+      health TEXT NOT NULL,
+      delivered_at TEXT,
+      consumed_at TEXT,
+      body_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_push_receipts_received_at ON peer_push_receipts (received_at);
     CREATE TABLE IF NOT EXISTS imported_spx_eod (
       date TEXT PRIMARY KEY,
       close REAL NOT NULL,
@@ -3779,7 +4801,7 @@ function migrate(database: Database.Database): void {
       updated_at TEXT NOT NULL
     );
 
-    -- Socratic.Trade local caching for complete EOD bars (OHLCV), replacing the silent-failing flat-file cache.
+    -- Socratic-Trade local caching for complete EOD bars (OHLCV), replacing the silent-failing flat-file cache.
     -- Upserted continuously during live strategy runs for fast replay, avoiding expensive API network loops.
     CREATE TABLE IF NOT EXISTS history_cache_eod (
       ticker TEXT NOT NULL,
@@ -3852,6 +4874,28 @@ function migrate(database: Database.Database): void {
   const counterfactualWatermarkColumns = database.prepare("PRAGMA table_info(counterfactual_learning_watermarks)").all() as Array<{ name: string }>;
   if (!counterfactualWatermarkColumns.some((column) => column.name === "last_audit_rowid")) {
     database.exec("ALTER TABLE counterfactual_learning_watermarks ADD COLUMN last_audit_rowid INTEGER");
+  }
+
+  // ST-4540 (embed-stage no-data-loss): additive delivery/quarantine columns on embed_stage.
+  // Existing rows carry delivered_at = NULL, i.e. "never proven delivered" — the conservative
+  // default, so a pre-migration row is re-verified on the next retry instead of assumed safe to
+  // delete. Every deleter is gated on delivered_at IS NOT NULL.
+  {
+    const stageCols = database.prepare("PRAGMA table_info(embed_stage)").all() as Array<{ name: string }>;
+    if (stageCols.length > 0) {
+      const stageColumns: Array<[string, string]> = [
+        ["delivered_at", "TEXT"],
+        ["delivered_store", "TEXT"],
+        ["quarantined_at", "TEXT"],
+        ["quarantine_reason", "TEXT"]
+      ];
+      for (const [name, type] of stageColumns) {
+        if (!stageCols.some((column) => column.name === name)) {
+          database.exec(`ALTER TABLE embed_stage ADD COLUMN ${name} ${type}`);
+        }
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at)");
+    }
   }
 
   const columns = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;
@@ -4097,6 +5141,23 @@ function migrate(database: Database.Database): void {
     database.exec("ALTER TABLE connected_accounts ADD COLUMN is_draining INTEGER DEFAULT 0");
   }
 
+  // Review rank 8 (2026-09-25): a DELIBERATE park, so a dormant account can be distinguished from a
+  // broken one. `systemState: "halted"` records that trading stopped but not that a person decided
+  // it should, which is why four dormant accounts kept reporting unexplained zeros and unknown
+  // balances. The reason and timestamp travel with the flag so the decision is auditable months
+  // later; both are cleared on un-park. Separate from `is_draining`, which means the account is
+  // being DISCONNECTED — parking keeps the account connected and re-armable in one call.
+  const connectedAccountParkedColumns = database.prepare("PRAGMA table_info(connected_accounts)").all() as Array<{ name: string }>;
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked INTEGER DEFAULT 0");
+  }
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked_reason")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked_reason TEXT");
+  }
+  if (!connectedAccountParkedColumns.some((c) => c.name === "parked_at")) {
+    database.exec("ALTER TABLE connected_accounts ADD COLUMN parked_at TEXT");
+  }
+
   // Exit-strategy Phase A: confirmation-based bad-tick acceptance (suspect_price, suspect_count)
   const syntheticStopCols = database.prepare("PRAGMA table_info(synthetic_trailing_stops)").all() as Array<{ name: string }>;
   if (!syntheticStopCols.some((c) => c.name === "suspect_price")) {
@@ -4325,3 +5386,12 @@ export * from "./db-earningscalls";
 export * from "./db-document-abstracts";
 export * from "./db-task-journal";
 export * from "./db-embed-stage";
+export * from "./db-signal-health";
+export * from "./db-lookahead-audit";
+export * from "./db-enrichment-coverage";
+export * from "./db-device-tokens";
+export * from "./db-auth-sessions";
+export * from "./db-trade-locks";
+export * from "./db-memory-lifecycle";
+export * from "./db-overlays";
+export * from "./db-idea-sources";

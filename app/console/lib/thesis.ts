@@ -91,7 +91,7 @@ export function deterministicOutcomePresentation(
   if (status === "not_placed" || status === "placing_failed") {
     return {
       label: "Order not placed",
-      body: "No broker order was confirmed. The proposal can be reviewed and retried if it still makes sense.",
+      body: "No broker order was confirmed.  The proposal can be reviewed and retried if it still makes sense.",
       tone: "neg"
     };
   }

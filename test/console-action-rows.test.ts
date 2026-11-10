@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isExecutedStatus, isNotPlacedStatus, sideVerb } from "../app/console/lib/action-verbs";
+import {
+  isExecutedStatus,
+  isNotPlacedStatus,
+  isProposalRowApprovable,
+  proposalChipTone,
+  sideVerb
+} from "../app/console/lib/action-verbs";
 
 // Regression guard for a real trust bug: the Home "Autonomous actions" feed used
 // to render a past-tense side verb ("Bought") regardless of whether anything
@@ -63,8 +69,45 @@ describe("isNotPlacedStatus — terminal 'nothing reached the broker' states", (
   });
 
   it("is false for executed, in-flight, or uncertain states", () => {
-    for (const s of ["placed", "filled", "executed", "proposed", "planned", "pending", "observed", "error"]) {
+    for (const s of ["placed", "filled", "executed", "planned", "observed"]) {
       expect(isNotPlacedStatus(s)).toBe(false);
     }
+  });
+});
+
+describe("proposalChipTone — honest lifecycle coloring on Home rows", () => {
+  it("uses success tone only for executed statuses", () => {
+    expect(proposalChipTone("filled")).toBe("pos");
+    expect(proposalChipTone("executed")).toBe("pos");
+  });
+
+  it("uses warning tone for failed/error/not-placed statuses", () => {
+    for (const s of ["blocked", "failed", "not_placed", "error", "rejected", "rejected_by_broker"]) {
+      expect(proposalChipTone(s)).toBe("warn");
+    }
+  });
+
+  it("uses accent for pending approval, not success green", () => {
+    for (const s of ["pending", "proposed", "planned", "placing"]) {
+      expect(proposalChipTone(s)).toBe("accent");
+    }
+  });
+});
+
+describe("isProposalRowApprovable — real ids and approval-eligible statuses only", () => {
+  it("allows approve only when row carries a real id and pending/proposed status", () => {
+    expect(isProposalRowApprovable(true, "proposed")).toBe(true);
+    expect(isProposalRowApprovable(true, "pending")).toBe(true);
+  });
+
+  it("refuses blocked/error/failed rows even when marked approvable", () => {
+    for (const s of ["blocked", "error", "failed", "not_placed", "filled"]) {
+      expect(isProposalRowApprovable(true, s)).toBe(false);
+    }
+  });
+
+  it("refuses rows without a real proposal id", () => {
+    expect(isProposalRowApprovable(false, "proposed")).toBe(false);
+    expect(isProposalRowApprovable(undefined, "pending")).toBe(false);
   });
 });

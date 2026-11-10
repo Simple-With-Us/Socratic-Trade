@@ -83,15 +83,21 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Daily LLM learning review — default OFF (nothing runs until enabled). When enabled the
   // default mode is "decide" (apply verdicts — remove/expire facts, resolve pending items,
   // each audited; owner-chosen 2026-07-09); "annotate" (audit + notify only, no mutation) is
-  // the opt-out. The reviewer model defaults to a real, explicit "claude-fable-5" value —
+  // the opt-out. The reviewer model defaults to a real, explicit "claude-fable-latest" value —
   // never a blank that silently means Fable (owner: no hidden model defaults; require a chosen
   // model). User-level (see USER_LEVEL_POLICY_FIELDS): one config for the whole login.
   learningReviewEnabled: false,
   learningReviewMode: "decide",
-  learningReviewModel: "claude-fable-5",
+  learningReviewModel: "claude-fable-latest",
   // Trigger: run when >= 5 new lessons pile up, OR the oldest un-reviewed one is >= 7 days old.
   learningReviewMinNewLessons: 5,
   learningReviewMaxWaitDays: 7,
+  // Outcome grading stays on raw side-adjusted returns by default (byte-identical behavior).
+  // "alpha" is the opt-in benchmark-relative companion grade — see TradingPolicy.outcomeGradingMode.
+  outcomeGradingMode: "raw",
+  // spyExcessPct grades against the market (^GSPC/SPY) by default; "sector" is the opt-in
+  // per-symbol GICS sector index/ETF grade — see TradingPolicy.benchmarkMode.
+  benchmarkMode: "market",
   holdingHorizon: "swing",
   maxOrderPctOfNav: 5,
   // Account-relative by default: four full-sized 5%-of-NAV openings can fit in one day. A user can
@@ -112,6 +118,16 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // trailing_stop orders; on live Robinhood a tick-ratcheted stop-market, additionally gated on the
   // robinhoodBrokerStops opt-in above. The synthetic monitor stays the always-on fallback.
   brokerTrailingStops: true,
+  // Broker-held buy-stops for shorts (Alpaca). Default ON so enabling short
+  // selling also arms the designed protection lane. Owner can turn off.
+  brokerStopsForShorts: true,
+  // Approved exits may cancel the app's OWN resting protective stop that holds their shares, then
+  // re-place a stop for any remainder (src/lib/exit-stop-release.ts). Owner can turn off.
+  exitsReleaseAppStops: true,
+  // Options + Kalshi event contracts:
+  optionsTradingEnabled: true,
+  eventContractsEnabled: true,
+  // Note: Live/Paper flags are removed as UI does not differentiate them for options.
   // Per-symbol stop intelligence ON by default (owner decision 2026-07-07 — no more one-size-fits-all
   // stops). ATR stops scale the protective stop DISTANCE to each name's realized volatility
   // (atrStopMultiple × ATR as a % of entry); beta-scaling widens the stop for high-beta names and
@@ -122,10 +138,11 @@ export const DEFAULT_POLICY: TradingPolicy = {
   betaScaledStops: true,
   maxDailyOrders: 10,
   maxProposalsPerRun: 3,
-  // Quote staleness gate (owner-approved guard enablement 2026-07-28,
-  // docs/guard-enablement-proposal-2026-07-28.md row 1): block OPENING orders whose backing quote is
-  // older than 120s (policy.ts's staleness gate). Exits are never gated, and a blocked opening is
-  // escalatable — a human approval re-runs the gate against a fresh scan, so it self-heals.
+  // Quote staleness gate (owner-approved 2026-07-28; owner 2026-08-18 delayed Yahoo):
+  // age live tape against 120s.  Delayed Yahoo fallback ages the FETCH snapshot, stamps
+  // user-facing "Delayed Quote" on the approval card, and KEEP TRADING — never fail-closed.
+  // Exits are never gated.  A still-stale fetch converts the opening to a limit; it is
+  // not blocked and does not skip Green/Red.
   maxQuoteAgeSec: 120,
   // Owner-approved guard enablement 2026-07-28 (proposal rows 2-4): risk receipts (inform-only
   // correlation + stress notes on every opening), vol-target sizing taper at a generous 25%
@@ -136,7 +153,20 @@ export const DEFAULT_POLICY: TradingPolicy = {
     riskReceipts: true,
     volTargeting: true,
     targetPortfolioVolPct: 25,
-    portfolioHeatBudgetPct: 10
+    portfolioHeatBudgetPct: 10,
+    // Owner ruling 2026-09-24 (board 687a5fb4): default flipped ON. Exits (sell/cover) are
+    // risk-REDUCING, so holding one for human approval just because the adversary is unavailable
+    // is itself the unsafe choice — blocking a de-risking trade on a reviewer outage can leave more
+    // capital exposed, not less. The per-account override still exists (`false` restores the old
+    // hold-for-review behavior) for anyone who explicitly wants it. mergePolicy deep-merges `tuning`,
+    // so any stored policy that never set this key inherits the new default automatically; only a
+    // policy that explicitly persisted `false` keeps the old behavior. NOTE: in the current
+    // §3.5 single-adversary design (docs/single-adversary-consolidation.md), exits are structurally
+    // exempt from ever reaching the reviewer at all (isRiskAddingOpening filters them out before
+    // debateProposal is called), so this flag's exit branch is not on the live path today — it is
+    // read-with-fallback hardening for `routeOnAdversaryUnavailable`'s exit branch (any future or
+    // secondary caller) rather than a change in today's observable exit behavior.
+    deRiskExitsOnAdversaryUnavailable: true
   },
   marketScanCandidateLimit: DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT,
   marketScanOutlierReserve: DEFAULT_MARKET_SCAN_OUTLIER_RESERVE,
@@ -159,6 +189,7 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Congress.Trade; these toggles are legacy / no-op for the cascade.
   fmpRealTimeDataEnabled: false,
   fmpMacroDataEnabled: false,
+  kalshiMacroEnabled: true,
   fmpEventsDataEnabled: false,
   fmpFundamentalsDataEnabled: false
   // No default broker: a fresh policy is broker-neutral. activeBroker is set when a real broker is

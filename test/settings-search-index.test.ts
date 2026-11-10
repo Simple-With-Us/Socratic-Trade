@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { SETTINGS_FIELDS, searchSettings } from "../app/settings-search";
+import {
+  SETTINGS_FIELDS,
+  SETTINGS_GLOSSARY,
+  hrefForSettingsField,
+  searchSettings,
+  settingsPaletteHits
+} from "../app/settings-search";
 
 describe("settings search index (PR #3)", () => {
   // The index is DERIVED from SETTINGS_FIELDS: searchSettings iterates the same
@@ -40,5 +46,76 @@ describe("settings search index (PR #3)", () => {
   it("returns nothing for an empty query", () => {
     expect(searchSettings("")).toEqual([]);
     expect(searchSettings("   ")).toEqual([]);
+  });
+
+  it("does not catalog the phantom defaultLandingAccount field", () => {
+    expect(SETTINGS_FIELDS.some((f) => f.id === "settings.defaultLandingAccount")).toBe(false);
+    expect(SETTINGS_FIELDS.some((f) => f.backingField === "defaultLandingAccount")).toBe(false);
+    expect(searchSettings("default landing account").map((f) => f.id)).not.toContain(
+      "settings.defaultLandingAccount"
+    );
+    expect(SETTINGS_GLOSSARY.some((e) => /default landing|auto-selected, for safety/i.test(e.whatChanged))).toBe(
+      false
+    );
+  });
+
+  it("deep-links every catalog field to a live console path (and known hash when set)", () => {
+    const knownHashes = new Set([
+      "autonomy",
+      "tax",
+      "scoring",
+      "models",
+      "danger",
+      "brokers",
+      "api-keys",
+      "delivery",
+      "scan-shape",
+      "appearance",
+      "data-sources",
+      "confirmation",
+      "notifications",
+      "sharing",
+      "legal",
+      "learning-review",
+      "llm-budget",
+      "boot",
+      "you",
+      "glossary",
+      "presets",
+      "overlays",
+      "instructions"
+    ]);
+    for (const field of SETTINGS_FIELDS) {
+      const href = hrefForSettingsField(field);
+      expect(href.startsWith("/console/")).toBe(true);
+      const hash = href.includes("#") ? href.slice(href.indexOf("#") + 1) : "";
+      if (field.anchor) {
+        expect(hash).toBe(field.anchor);
+        expect(knownHashes.has(hash)).toBe(true);
+      } else {
+        expect(hash).toBe("");
+      }
+    }
+    expect(hrefForSettingsField(SETTINGS_FIELDS.find((f) => f.id === "settings.theme")!)).toBe(
+      "/console/settings#appearance"
+    );
+    expect(hrefForSettingsField(SETTINGS_FIELDS.find((f) => f.id === "settings.llmDailyTokenBudget")!)).toBe(
+      "/console/settings#llm-budget"
+    );
+    expect(hrefForSettingsField(SETTINGS_FIELDS.find((f) => f.id === "settings.apiKeys")!)).toBe(
+      "/console/connections#api-keys"
+    );
+    expect(hrefForSettingsField(SETTINGS_FIELDS.find((f) => f.id === "guardrails.autonomy")!)).toBe(
+      "/console/guardrails#autonomy"
+    );
+  });
+
+  it("exposes palette hits with the same ranking and a live href", () => {
+    expect(settingsPaletteHits("")).toEqual([]);
+    const hits = settingsPaletteHits("theme");
+    expect(hits.map((h) => h.id)).toContain("settings.theme");
+    const theme = hits.find((h) => h.id === "settings.theme");
+    expect(theme?.href).toBe("/console/settings#appearance");
+    expect(theme?.hint).toBe("Settings · Appearance");
   });
 });

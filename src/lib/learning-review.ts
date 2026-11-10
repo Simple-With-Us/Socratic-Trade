@@ -60,8 +60,9 @@ import { applyApprovedPending } from "./learned-context/store";
 import { isOverLlmBudget } from "./llm-budget";
 import { buildLlmRequestBody, extractLlmText, llmAuthHeaders, type LlmJsonSchema } from "./llm-call";
 import { humanizeLlmError } from "./llm-errors";
+import { catalogEntryFor } from "./llm-model-catalog";
 import { resolveLlmEndpoint } from "./llm-provider";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, normalizeReasoningEffortForModel } from "./llm-request";
+import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, normalizeReasoningEffortForModel, strategyLlmTimeoutMs } from "./llm-request";
 import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "./llm-usage";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
 import { sendNotification } from "./notifications";
@@ -131,6 +132,17 @@ function learningReviewReasoningEffort(policy: TradingPolicy): LlmReasoningEffor
     model,
     policy.learningReviewReasoningEffort ?? recommendedReasoningEffortForModel(model, "review")
   );
+}
+
+function reviewModelIdentity(model: string): { model: string; label: string } {
+  const entry = catalogEntryFor(model);
+  return { model: entry?.displaySlug ?? model, label: entry?.label ?? model };
+}
+
+function responseModel(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const candidate = (payload as { model?: unknown }).model;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
 }
 
 /** Cheap signature of the review CONFIG (mode + model + reasoning effort). A change here must force a fresh review of
@@ -756,6 +768,9 @@ export async function runDailyLearningReview(
     audit("learning_review_summary", { mode, itemsReviewed: 0, verdicts: 0, applied: 0, reason: "no-model" }, userId);
     return { ok: false, skipped: true, reason: "no-model", mode, ...empty };
   }
+  const modelIdentity = reviewModelIdentity(model);
+  let resolvedModel: string | undefined;
+  let servedModel: string | undefined;
   const reasoningEffort = learningReviewReasoningEffort(policy);
   const advanceMarker = () => {
     try {
@@ -782,8 +797,8 @@ export async function runDailyLearningReview(
     } catch (error) {
       console.error("[learning-review] failed to persist review config marker:", error);
     }
-    audit("learning_review_summary", { mode, model, itemsReviewed: 0, verdicts: 0, applied: 0, reason: "no-items" }, userId);
-    return { ok: true, skipped: true, reason: "no-items", mode, model, ...empty };
+    audit("learning_review_summary", { mode, model: modelIdentity.model, modelLabel: modelIdentity.label, itemsReviewed: 0, verdicts: 0, applied: 0, reason: "no-items" }, userId);
+    return { ok: true, skipped: true, reason: "no-items", mode, model: modelIdentity.model, ...empty };
   }
 
   // Don't waste a call re-reviewing an unchanged set: if the exact items + landed-fix history
@@ -792,8 +807,8 @@ export async function runDailyLearningReview(
   const fingerprint = reviewFingerprint(pack, mode, model, reasoningEffort);
   if (!options.force && getInternalSetting<string>(lastFingerprintKey(userId)) === fingerprint) {
     advanceMarker();
-    audit("learning_review_summary", { mode, model, itemsReviewed: pack.items.length, verdicts: 0, applied: 0, reason: "unchanged" }, userId);
-    return { ok: true, skipped: true, reason: "unchanged", mode, model, ...empty };
+    audit("learning_review_summary", { mode, model: modelIdentity.model, modelLabel: modelIdentity.label, itemsReviewed: pack.items.length, verdicts: 0, applied: 0, reason: "unchanged" }, userId);
+    return { ok: true, skipped: true, reason: "unchanged", mode, model: modelIdentity.model, ...empty };
   }
 
   const userContent = JSON.stringify({
@@ -810,27 +825,28 @@ export async function runDailyLearningReview(
     } else {
       // Route through the app's own transport with the review model overriding the strategist model.
       const reviewPolicy = { ...policy, llmModel: model };
-      const { url, key, model: resolvedModel, provider, keySource, keyRef, transport } = resolveLlmEndpoint(
+      const endpoint = resolveLlmEndpoint(
         reviewPolicy,
         userId,
         "https://api.openai.com/v1/chat/completions"
       );
-      if (!key) {
+      resolvedModel = endpoint.model;
+      if (!endpoint.key) {
         // Cheap pre-flight skip: no credential for the review model's provider. Don't advance the
         // marker — adding a key later the same day lets the review run.
-        return { ok: false, skipped: true, reason: "no-key", mode, model: resolvedModel, ...empty };
+        return { ok: false, skipped: true, reason: "no-key", mode, model: modelIdentity.model, ...empty };
       }
       const body = buildLlmRequestBody(
-        { provider, transport },
+        { provider: endpoint.provider, transport: endpoint.transport },
         {
-          model: resolvedModel,
+          model: endpoint.model,
           systemPrompt: SYSTEM_PROMPT,
           userContent,
           maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.learningReview,
           reasoningEffort,
           schema: LEARNING_REVIEW_SCHEMA,
           userId,
-          keyRef,
+          keyRef: endpoint.keyRef,
           service: "strategy",
           feature: "learning-review"
         }
@@ -838,33 +854,39 @@ export async function runDailyLearningReview(
       const traced = await withLlmGeneration(
         {
           name: "trading.learning-review",
-          model: resolvedModel,
+          model: endpoint.model,
           userId,
           input: summarizeOpenAiRequest(body),
-          metadata: { endpoint: url, transport, mode, itemCount: pack.items.length },
+          metadata: { endpoint: endpoint.url, transport: endpoint.transport, mode, itemCount: pack.items.length },
           tags: ["learning-review"],
           output: (result) => summarizeOpenAiResponseText(result.text)
         },
         async () => {
-          const response = await llmFetch(url, {
+          const response = await llmFetch(endpoint.url, {
             method: "POST",
-            headers: llmAuthHeaders({ provider, key }),
-            body: JSON.stringify(body)
+            headers: llmAuthHeaders({ provider: endpoint.provider, key: endpoint.key }),
+            body: JSON.stringify(body),
+            // Background, once-a-day job (no browser waiting): a thinking model gets the same
+            // widened bound Green/Red use (strategyLlmTimeoutMs, 360s) instead of a fixed 60s.
+            // runDailyLearningReviewIfDue's in-flight guard keeps later 60s scheduler ticks from
+            // starting a duplicate review while this one is still thinking.
+            signal: AbortSignal.timeout(strategyLlmTimeoutMs(endpoint.model, reasoningEffort))
           });
           if (!response.ok) {
-            const detail = humanizeLlmError(await response.text().catch(() => ""), { provider, status: response.status });
+            const detail = humanizeLlmError(await response.text().catch(() => ""), { provider: endpoint.provider, status: response.status });
             throw new Error(detail);
           }
           const payload = await response.json();
+          servedModel = responseModel(payload);
           recordLlmUsage({
             userId,
-            provider,
-            model: resolvedModel,
+            provider: endpoint.provider,
+            model: endpoint.model,
             context: "learning-review",
-            keySource,
-            keyRef,
+            keySource: endpoint.keySource,
+            keyRef: endpoint.keyRef,
             connectedAccountId: policy.connectedAccountId,
-            providerRequestId: providerRequestIdFromPayload(provider, payload),
+            providerRequestId: providerRequestIdFromPayload(endpoint.provider, payload),
             ...extractLlmUsage(payload)
           });
           return { text: extractLlmText(payload) };
@@ -877,23 +899,23 @@ export async function runDailyLearningReview(
     // isn't retried on every scheduler tick for the rest of the day.
     advanceMarker();
     const message = error instanceof Error ? error.message : String(error);
-    audit("learning_review_failed", { mode, model, reasoningEffort, reason: message, itemCount: pack.items.length }, userId);
+    audit("learning_review_failed", { mode, model: modelIdentity.model, modelLabel: modelIdentity.label, resolvedModel, servedModel, reasoningEffort, reason: message, itemCount: pack.items.length }, userId);
     console.error("[learning-review] LLM call failed:", message);
-    return { ok: false, reason: "llm-failed", mode, model, reasoningEffort, ...empty };
+    return { ok: false, reason: "llm-failed", mode, model: modelIdentity.model, reasoningEffort, ...empty };
   }
 
   const result = parseLearningReviewVerdicts(text);
   if (!result) {
     advanceMarker();
-    audit("learning_review_failed", { mode, model, reasoningEffort, reason: "parse-failed", itemCount: pack.items.length }, userId);
-    return { ok: false, reason: "parse-failed", mode, model, reasoningEffort, ...empty };
+    audit("learning_review_failed", { mode, model: modelIdentity.model, modelLabel: modelIdentity.label, resolvedModel, servedModel, reasoningEffort, reason: "parse-failed", itemCount: pack.items.length }, userId);
+    return { ok: false, reason: "parse-failed", mode, model: modelIdentity.model, reasoningEffort, ...empty };
   }
 
   // Annotate (always): one audit per verdict + the run summary.
   for (const verdict of result.reviews) {
     audit(
       "learning_review_verdict",
-      { id: verdict.id, table: verdict.table, verdict: verdict.verdict, confidence: verdict.confidence, reasoning: verdict.reasoning, mode, model, reasoningEffort },
+      { id: verdict.id, table: verdict.table, verdict: verdict.verdict, confidence: verdict.confidence, reasoning: verdict.reasoning, mode, model: modelIdentity.model, modelLabel: modelIdentity.label, resolvedModel, servedModel, reasoningEffort },
       userId
     );
   }
@@ -936,7 +958,10 @@ export async function runDailyLearningReview(
     "learning_review_summary",
     {
       mode,
-      model,
+      model: modelIdentity.model,
+      modelLabel: modelIdentity.label,
+      resolvedModel,
+      servedModel,
       reasoningEffort,
       itemsReviewed: pack.items.length,
       verdicts: result.reviews.length,
@@ -983,7 +1008,7 @@ export async function runDailyLearningReview(
           mode === "decide"
             ? `Daily learning review: ${flagged} of ${result.reviews.length} flagged, ${applied.length} applied`
             : `Daily learning review: ${flagged} of ${result.reviews.length} flagged`,
-        payload: { summary: result.summary, mode, model, reasoningEffort, itemsReviewed: pack.items.length, flagged, applied }
+        payload: { summary: result.summary, mode, model: modelIdentity.model, modelLabel: modelIdentity.label, resolvedModel, servedModel, reasoningEffort, itemsReviewed: pack.items.length, flagged, applied }
       },
       { policy, userId }
     );
@@ -991,16 +1016,34 @@ export async function runDailyLearningReview(
     console.error("[learning-review] notification failed:", error);
   }
 
-  return { ok: true, mode, model, reasoningEffort, itemsReviewed: pack.items.length, verdicts: result.reviews.length, applied: applied.length };
+  return { ok: true, mode, model: modelIdentity.model, reasoningEffort, itemsReviewed: pack.items.length, verdicts: result.reviews.length, applied: applied.length };
 }
 
 /**
  * Scheduler entry point: run at most once per UTC day, only when the user's policy has
  * learningReviewEnabled. Self-guarded; returns null when disabled/not due so ticks stay clean.
  */
+/** Users whose scheduled review is running in THIS process.  The daily marker only advances after
+ *  the LLM call, and the scheduler ticks every 60s, so without this a slow (thinking) review could
+ *  be started again by the next tick. */
+const scheduledReviewsInFlight = new Set<string>();
+
 export async function runDailyLearningReviewIfDue(
   userId: string,
   now: number = Date.now()
+): Promise<LearningReviewRunSummary | null> {
+  if (scheduledReviewsInFlight.has(userId)) return null;
+  scheduledReviewsInFlight.add(userId);
+  try {
+    return await runDailyLearningReviewIfDueUnguarded(userId, now);
+  } finally {
+    scheduledReviewsInFlight.delete(userId);
+  }
+}
+
+async function runDailyLearningReviewIfDueUnguarded(
+  userId: string,
+  now: number
 ): Promise<LearningReviewRunSummary | null> {
   try {
     const policy = getPolicy(userId);

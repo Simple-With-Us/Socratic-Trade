@@ -28,7 +28,7 @@ of the existing UI):
   load-bearing, one keystroke/tap away.
 - **One-click STOP that never sells**, with the honest sentence about
   app-managed synthetic stops pausing while broker-held brackets keep resting,
-  and **Close-only as the middle verb** ("what the circuit breakers choose").
+  and **Exit-only as the middle verb** ("what the circuit breakers choose"; wire id stays `close_only`).
 - **Asymmetric friction**: stopping/tightening/rejecting is one tap;
   starting brokerage automation / Autopilot / wind-down / loosening brokerage
   constraints / broker approval costs a typed phrase (paste disabled — the
@@ -50,7 +50,7 @@ of the existing UI):
   three-outcomes block on every approval card ("if you approve / if you
   reject / if you do nothing", expiry countdown), guardrail one-liners, the
   "did nothing on purpose" framing for quiet runs, and the vocabulary layer
-  (Running · Ask-first / Autopilot / Stopped / Exit-only / Winding down).
+  (Running / Autopilot / Stopped / Exit-only / Winding down).  Autopilot is auto-decide only.
 - From **TradeDeck**: the always-visible scope bar in the header, risk styled
   at the object, status-tone chips for lifecycle states, and the
   operator-density tables (positions, scorecards, tax lots).

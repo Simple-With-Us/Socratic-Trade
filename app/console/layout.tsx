@@ -10,6 +10,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  interactiveWidget: "resizes-content",
   // Keep in lockstep with --con-bg in console.css (light :root / dark override) —
   // a mismatched themeColor tints the phone status bar a different shade than the app.
   themeColor: [

@@ -50,11 +50,12 @@ export function interactiveScanKey(input: {
 
 export async function withScanDeadline<T>(
   budgetMs: number,
-  factory: (signal: AbortSignal) => Promise<T>
+  factory: (signal: AbortSignal) => Promise<T>,
+  deadlineMessage = "Interactive market scan deadline exceeded."
 ): Promise<T> {
   const controller = new AbortController();
   return await new Promise<T>((resolve, reject) => {
-    const deadlineError = new Error("Interactive market scan deadline exceeded.");
+    const deadlineError = new Error(deadlineMessage);
     const timeout = setTimeout(() => {
       controller.abort(deadlineError);
       reject(deadlineError);
@@ -97,6 +98,44 @@ export function resetScanSingleFlightForTests(): void {
   activeScans.clear();
 }
 
+/** Last-good scan served after a failed or timed-out refresh.  `generatedAt` stays the
+ *  last successful scan's stamp so a stale response is not mistaken for a new one. */
+export function staleMarketScanResponse<T extends { generatedAt?: string; warnings?: string[] }>(
+  scan: T,
+  staleReason: string
+): T & { stale: true; staleReason: string; generatedAt: string; warnings: string[] } {
+  const warnings = Array.isArray(scan.warnings) ? scan.warnings : [];
+  const reason = staleReason.trim() || "Market scan refresh failed.";
+  return {
+    ...scan,
+    stale: true,
+    staleReason: reason,
+    generatedAt: scan.generatedAt ?? new Date(0).toISOString(),
+    warnings: warnings.includes(reason) ? warnings : [...warnings, reason]
+  };
+}
+
+/** Zero-quote abort/empty rows written as `market_scan` (prod d0359642) are
+ *  not last-good.  A 505-symbol universe with 0 quotes is a quote miss, not
+ *  an empty universe and not a ranker-zero day. */
+export function isUnusableEmptyMarketScan(scan: {
+  topCandidates?: unknown;
+  returnedQuotes?: unknown;
+  scannedSymbols?: unknown;
+  quotesBySymbol?: unknown;
+} | null | undefined): boolean {
+  if (!scan) return false;
+  const scanned = typeof scan.scannedSymbols === "number" ? scan.scannedSymbols : 0;
+  const quoted =
+    typeof scan.returnedQuotes === "number"
+      ? scan.returnedQuotes
+      : scan.quotesBySymbol && typeof scan.quotesBySymbol === "object" && !Array.isArray(scan.quotesBySymbol)
+        ? Object.keys(scan.quotesBySymbol).length
+        : 0;
+  const candidates = Array.isArray(scan.topCandidates) ? scan.topCandidates.length : 0;
+  return scanned > 0 && quoted === 0 && candidates === 0;
+}
+
 /**
  * Read the full per-symbol quote map from a persisted market-scan-bearing audit without
  * trusting an older compact prompt snapshot or a malformed audit payload. Accepts either
@@ -129,7 +168,7 @@ export function marketScanQuotesFromAudit(
 
   const entries = Object.entries(quotes);
   if (entries.length === 0) return undefined;
-  const valid = entries.every(([symbol, value]) => {
+  const validEntries = entries.filter(([symbol, value]) => {
     if (!symbol || !value || typeof value !== "object" || Array.isArray(value)) return false;
     const quote = value as { symbol?: unknown; price?: unknown; score?: unknown };
     return quote.symbol === symbol
@@ -138,5 +177,9 @@ export function marketScanQuotesFromAudit(
       && typeof quote.score === "number"
       && Number.isFinite(quote.score);
   });
-  return valid ? quotes as Record<string, MarketQuoteSummary> : undefined;
+  if (validEntries.length === 0) return undefined;
+  // Keep valid rows.  One bad entry in a 5k-name map must not void the seed
+  // that Refresh needs when Nasdaq/Yahoo miss the interactive budget.
+  if (validEntries.length === entries.length) return quotes as Record<string, MarketQuoteSummary>;
+  return Object.fromEntries(validEntries) as Record<string, MarketQuoteSummary>;
 }

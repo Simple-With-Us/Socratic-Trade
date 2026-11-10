@@ -173,11 +173,12 @@ const createOrder = vi.fn(async (opts: Record<string, unknown>) => ({
   filled_avg_price: null,
   ...opts
 }));
-vi.mock("@alpacahq/alpaca-trade-api", () => ({
-  default: vi.fn(function () {
+vi.mock("@alpacahq/alpaca-trade-api", () => {
+  const MockAlpaca = vi.fn(function () {
     return { createOrder, getAccount: vi.fn(), getPositions: vi.fn() };
-  })
-}));
+  });
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
+});
 
 describe("Alpaca placeEquityOrder — translates short/cover before the network call", () => {
   it("submits short as a broker 'sell' and cover as a broker 'buy'", async () => {

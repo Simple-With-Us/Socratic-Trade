@@ -54,7 +54,11 @@ function tradeToDoc(trade: CongressTrade): ContextDocument {
       symbol: trade.symbol,
       source: "congress-disclosure",
       timestamp: acceptanceDatetime,
-      accession: `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
+      accession: trade.id
+        ? `id:${trade.id}`
+        : trade.docId && trade.rowKey
+          ? `doc:${trade.docId}|row:${trade.rowKey}`
+          : `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
       doc_type: "congress-trade",
       acceptance_datetime: acceptanceDatetime
     }
@@ -113,6 +117,15 @@ export async function embedDisclosures(
     return { attempted: 0, indexed: 0 };
   }
 
+  // Pre-flight: skip the storeContexts call entirely when the daily text embed budget is
+  // already spent — mirroring the hasIngestTextBudget() check in ingestFiling() (sec-filings.ts).
+  // Without this check the scheduler invokes storeContexts every ~30 min and triggers a
+  // cooldown-gated Sentry warning on every tick for the rest of the 24h budget window.
+  const { hasIngestTextBudget } = await import("../vector-db");
+  if (!hasIngestTextBudget(userId)) {
+    return { attempted: docs.length, indexed: 0, skipped: true };
+  }
+
   try {
     const { storeContexts } = await import("../vector-db");
     // R10 (2026-07-01 RAG backlog): content_hash dedup, gated on the same
@@ -140,7 +153,9 @@ export async function embedDisclosures(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[disclosure-rag] embed failed:", msg);
+    const { logError, recordEmbedFailure } = await import("../sentry-metrics");
+    recordEmbedFailure("disclosure-rag", "embed-failed");
+    logError("embed.failed", { provider: "disclosure-rag", error_type: "embed-failed" });
     return { attempted: docs.length, indexed: 0, error: msg };
   }
 }

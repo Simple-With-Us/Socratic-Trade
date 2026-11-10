@@ -1,7 +1,13 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import dns from "node:dns";
-import { withSentryConfig } from "@sentry/nextjs";
+// v11: withSentryConfig moved to the dedicated build-config entry point.
+import { withSentryConfig } from "@sentry/nextjs/config";
+
+const require = createRequire(import.meta.url);
+const webpack = require("webpack");
+const { sentryBuildRelease } = require("./scripts/sentry-build-release.cjs");
 
 dns.setDefaultResultOrder("ipv4first");
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -11,6 +17,11 @@ const nextConfig = {
   outputFileTracingRoot: __dirname,
   async headers() {
     return [
+      {
+        // PWA kill-switch: leftover workers must revalidate this file, not a cached old worker.
+        source: "/sw.js",
+        headers: [{ key: "Cache-Control", value: "no-store, max-age=0" }]
+      },
       {
         // /framework is human-eyes-only: never indexed, cached, archived, or
         // used for AI training. Enforcement is layered — these headers are the
@@ -29,7 +40,7 @@ const nextConfig = {
       }
     ];
   },
-  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai"],
+  serverExternalPackages: ["better-sqlite3", "@pinecone-database/pinecone", "voyageai", "dd-trace", "@sentry/profiling-node", "undici"],
   webpack: (config, { isServer, nextRuntime }) => {
     config.resolve.alias = {
       ...(config.resolve.alias ?? {}),
@@ -41,14 +52,28 @@ const nextConfig = {
         "better-sqlite3": false,
         "@pinecone-database/pinecone": false,
         "voyageai": false,
+        "dd-trace": false,
+        "undici": false,
         "node:fs": false,
         "node:path": false,
+        "node:http": false,
         "node:crypto": false,
         "node:zlib": false,
         "node:stream": false,
         "node:dns": false,
-        "node:net": false
+        "node:net": false,
+        "node:os": false,
+        "node:child_process": false,
+        "node:worker_threads": false,
+        "node:async_hooks": false,
       };
+      // webpack 5 rejects the node: URI scheme before aliases apply
+      // (`UnhandledSchemeError` on node:async_hooks via @sentry/nextjs).
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
+          resource.request = resource.request.replace(/^node:/, "");
+        })
+      );
       config.resolve.fallback = {
         ...(config.resolve.fallback ?? {}),
         fs: false,
@@ -58,8 +83,31 @@ const nextConfig = {
         zlib: false,
         stream: false,
         dns: false,
-        net: false
+        net: false,
+        os: false,
+        http: false,
+        async_hooks: false,
+        // node:http2 is the APNs provider transport (src/lib/apns.ts, reachable from the
+        // src/lib/db.ts barrel). Server-only — stubbed out for client/edge bundles.
+        http2: false,
+        // child_process is used by r2-cold-snapshot.ts (VACUUM INTO in a child process),
+        // reachable via instrumentation -> background-worker-startup -> scheduler. Server-only
+        // — stubbed out for client/edge bundles (same trap as http2 / fs / path).
+        child_process: false,
+        // worker_threads runs the corpus-wide lexical FTS `.all()` off the serving event loop
+        // (`src/lib/rag/sqlite-all-offloop.ts`), reachable via vector-db -> strategy -> scheduler.
+        worker_threads: false
       };
+    }
+    if (isServer && nextRuntime === "nodejs") {
+      config.externals = [
+        ...(Array.isArray(config.externals) ? config.externals : config.externals ? [config.externals] : []),
+        "@datadog/native-metrics",
+        "@datadog/pprof",
+        "@datadog/native-appsec",
+        "@datadog/native-iast-taint-tracking",
+        "@datadog/wasm-js-rewriter"
+      ];
     }
     return config;
   },
@@ -68,6 +116,14 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: "1mb"
     }
+  },
+  async redirects() {
+    return [
+      // Nav labels this destination 'Proposals' (nav.tsx:58 → /console/approvals).
+      // An unaided guess of /console/proposals shows Next's stock 404 with no
+      // console chrome (see board da8a93bf). Permanent redirect to /approvals.
+      { source: "/console/proposals", destination: "/console/approvals", permanent: true }
+    ];
   }
 };
 
@@ -79,11 +135,12 @@ export default withSentryConfig(nextConfig, {
   // For all available options, see:
   // https://www.npmjs.com/package/@sentry/webpack-plugin#options
 
-  org: process.env.SENTRY_ORG || "jays-services",
+  org: process.env.SENTRY_ORG || "simple-with-us",
 
   project: process.env.SENTRY_PROJECT || "socratic-trade",
 
   authToken: process.env.SENTRY_AUTH_TOKEN,
+  release: { name: sentryBuildRelease() },
 
   // Only print logs for uploading source maps in CI
   silent: !process.env.CI,
@@ -94,19 +151,12 @@ export default withSentryConfig(nextConfig, {
   // Upload a larger set of source maps for prettier stack traces (increases build time)
   widenClientFileUpload: true,
 
-  // Uncomment to route browser requests to Sentry through a Next.js rewrite to circumvent ad-blockers.
-  // This can increase your server load as well as your hosting bill.
-  // Note: Check that the configured route will not match with your Next.js middleware, otherwise reporting of client-
-  // side errors will fail.
-  // tunnelRoute: "/monitoring",
+  // Browser envelopes go through this same-origin rewrite so ad-blockers cannot
+  // drop client errors. middleware.ts excludes `/monitoring` from its matcher
+  // (and lists it as a public prefix) so the tunnel is never auth-gated.
+  tunnelRoute: "/monitoring",
 
   webpack: {
-    // Enables automatic instrumentation of Vercel Cron Monitors. (Does not yet work with App Router route handlers.)
-    // See the following for more information:
-    // https://docs.sentry.io/product/crons/
-    // https://vercel.com/docs/cron-jobs
-    automaticVercelMonitors: true,
-
     // Tree-shaking options for reducing bundle size
     treeshake: {
       // Automatically tree-shake Sentry logger statements to reduce bundle size

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Btn, Card, Chip, Meter, Segmented, Stat, TextInput, type ChipTone } from "../../console/ui/primitives";
+import { SymbolButton } from "../../console/ui/symbol-drilldown";
 import { describeProbeNetworkError, describeProbeStatus, type ProbeErrorDescription } from "../lib/probe-error";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ function fmtRelDate(iso: string | null): string {
     if (hours < 24) return `${hours}h ago`;
     const days = Math.floor(hours / 24);
     if (days < 30) return `${days}d ago`;
-    return d.toLocaleDateString();
+    return d.toLocaleDateString(undefined, { timeZone: "America/Chicago" });
   } catch {
     return iso;
   }
@@ -191,9 +192,11 @@ function TickerRow({ coverage }: { coverage: TickerCoverage }) {
   const maxChunks = 200; // reasonable visual scale cap
   return (
     <div className="flex items-center gap-3 border-b border-[color:var(--con-line)] py-2 text-[length:var(--con-fs-sm)] last:border-0">
-      <div className="con-mono w-16 shrink-0 font-semibold">{coverage.symbol}</div>
+      <div className="con-mono w-16 shrink-0 font-semibold">
+        <SymbolButton symbol={coverage.symbol} />
+      </div>
       <div className="min-w-0 flex-1">
-        <Meter value={coverage.chunks} max={maxChunks} />
+        <Meter value={coverage.chunks} max={maxChunks} label={`${coverage.symbol} corpus coverage`} />
         <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
           <span className="font-semibold text-[color:var(--con-fg)]">{coverage.chunks} chunks</span>
           <span>{coverage.filings} filing{coverage.filings !== 1 ? "s" : ""}</span>
@@ -371,7 +374,7 @@ export function RagCoverageClient() {
 
           {(data.vectorStoreTotalVectors > 0 && data.totalChunks === 0) && (
             <StatusNotice tone="warning" title="Pinecone Has Vectors, Local Coverage Ledger Is Empty">
-              The configured Pinecone index reports {data.vectorStoreTotalVectors.toLocaleString()} vector{data.vectorStoreTotalVectors === 1 ? "" : "s"}, but this app&apos;s local <span className="con-mono">document_chunks</span> table has zero rows. Ticker coverage below is a local ledger view, not a full Pinecone inventory.
+              The configured Pinecone index reports {data.vectorStoreTotalVectors.toLocaleString()} vector{data.vectorStoreTotalVectors === 1 ? "" : "s"}, but this app&apos;s local <span className="con-mono">document_chunks</span> table has zero rows.  Ticker coverage below is a local ledger view, not a full Pinecone inventory.
             </StatusNotice>
           )}
           {((data.allVectorStoreTotalVectors ?? 0) > data.vectorStoreTotalVectors) && (
@@ -476,13 +479,13 @@ export function RagCoverageClient() {
                     <span className="con-mono w-16 text-right text-[color:var(--con-muted)]">{row.calls}</span>
                     <span
                       className="con-mono w-20 text-right text-[color:var(--con-muted)]"
-                      title={row.provider === "pinecone" && row.operation === "upsert" ? "Estimated Pinecone Write Units for upserts. Voyage rows show estimated input tokens." : row.provider === "pinecone" && row.operation === "query" ? "Pinecone Read Units reported by the query response when available, otherwise a conservative fallback." : "Estimated input tokens."}
+                      title={row.provider === "pinecone" && row.operation === "upsert" ? "Estimated Pinecone Write Units for upserts.  Voyage rows show estimated input tokens." : row.provider === "pinecone" && row.operation === "query" ? "Pinecone Read Units reported by the query response when available, otherwise a conservative fallback." : "Estimated input tokens."}
                     >
                       {fmtInt(row.tokensIn)}
                     </span>
                     <span
                       className="con-mono w-20 text-right"
-                      title={row.provider === "pinecone" ? "Pinecone cost is not estimated here; use provider billing/usage views for dollars. Units are shown in the Units / Tokens column." : "Estimated Voyage cost from app-recorded token volume and static pricing."}
+                      title={row.provider === "pinecone" ? "Pinecone cost is not estimated here; use provider billing/usage views for dollars.  Units are shown in the Units / Tokens column." : "Estimated Voyage cost from app-recorded token volume and static pricing."}
                     >
                       {row.provider === "pinecone" ? "—" : fmtCost(row.costEstUsd)}
                     </span>

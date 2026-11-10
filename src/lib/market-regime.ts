@@ -67,7 +67,7 @@ export function isEscalationMarketRegime(regime: MarketRegime): boolean {
   return regime === "crisis" || regime === "risk-off" || regime === "cautious-inverted";
 }
 
-/** Regimes `deterministicBearFilter` treats as risk-off (hard-vetoes below-median buys). */
+/** Regimes `deterministicBearFilter` treats as risk-off (tags below-median buys as advisory pre-vetoes). */
 export function isRiskOffFilterRegime(regime: MarketRegime): boolean {
   return regime === "crisis" || regime === "risk-off";
 }

@@ -9,6 +9,7 @@
 // Hard rule: journaling is OBSERVABILITY, never on the money path. Every writer in this
 // module is wrapped so a journal failure (locked DB mid-deploy, write-fence abort during
 // account deletion, schema not yet migrated) can never break the lane being journaled.
+import "server-only";
 import crypto from "crypto";
 import { getDb } from "./db";
 
@@ -197,7 +198,10 @@ export interface TaskJournalLaneSummary {
 }
 
 /** Per-lane aggregate over a lookback window — the ops-snapshot "task brain" view. */
-export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[] {
+export function getTaskJournalSummary(
+  sinceIso: string,
+  opts: { skipLastStatus?: boolean } = {}
+): TaskJournalLaneSummary[] {
   try {
     const rows = getDb()
       .prepare(
@@ -224,11 +228,14 @@ export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[
       lastStartedAt: string | null;
     }>;
     return rows.map((row) => {
-      const last = getDb()
-        .prepare(
-          "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
-        )
-        .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined;
+      const last =
+        opts.skipLastStatus || !row.lastStartedAt
+          ? undefined
+          : (getDb()
+              .prepare(
+                "SELECT status FROM task_journal WHERE task_name = ? AND started_at = ? ORDER BY rowid DESC LIMIT 1"
+              )
+              .get(row.taskName, row.lastStartedAt) as { status: TaskJournalStatus } | undefined);
       return {
         taskName: row.taskName,
         fires: row.fires,
@@ -249,21 +256,19 @@ export function getTaskJournalSummary(sinceIso: string): TaskJournalLaneSummary[
 // high-volume and low-value, so they age out fast. ok/error rows are the actual history.
 export const TASK_JOURNAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 export const TASK_JOURNAL_SKIPPED_RETENTION_MS = 24 * 60 * 60 * 1_000;
+/** Cap one tick's DELETE so retention cannot hold the write lock across the whole table. */
+export const TASK_JOURNAL_PRUNE_BATCH_LIMIT = 500;
 
-/** Delete aged rows. Returns rows deleted. Never throws. */
-export function pruneTaskJournal(now: Date = new Date()): number {
-  try {
-    const okCutoff = new Date(now.getTime() - TASK_JOURNAL_RETENTION_MS).toISOString();
-    const skippedCutoff = new Date(now.getTime() - TASK_JOURNAL_SKIPPED_RETENTION_MS).toISOString();
-    const info = getDb()
-      .prepare(
-        `DELETE FROM task_journal
-         WHERE (status = 'skipped' AND started_at < ?)
-            OR (status != 'skipped' AND started_at < ?)`
-      )
-      .run(skippedCutoff, okCutoff);
-    return info.changes;
-  } catch {
-    return 0;
-  }
+/** Delete aged rows. Returns rows deleted. Never throws. Bounded per call — the scheduler
+ *  drains a backlog across ticks rather than pinning the event loop on one unbounded DELETE.
+ *
+ *  Each delete is forced onto `idx_task_journal_started`.  The previous OR predicate planned
+ *  as MULTI-INDEX OR and, without that index, as a full SCAN of every heartbeat row.  RTH
+ *  stall profiles on 2026-10-05 (45s and 66s busy runs) map the dominant stack to
+ *  `tickInner` -> this function, with better-sqlite3 `prepare` under it, while `/api/health`
+ *  sat on the same loop.  Skipped rows (24h) are drained first, then ok/error rows (30d),
+ *  sharing one batch cap so a tick still deletes at most TASK_JOURNAL_PRUNE_BATCH_LIMIT rows. */
+/** Jay policy (2026-10-15): task journal rows are kept forever; scheduler still calls this hook. */
+export function pruneTaskJournal(_now: Date = new Date()): number {
+  return 0;
 }

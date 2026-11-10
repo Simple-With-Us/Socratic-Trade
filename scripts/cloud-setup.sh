@@ -4,13 +4,23 @@
 #
 # IMPORTANT (Claude Code Cloud environments specifically): the container's working
 # directory when the "Setup script" field runs is the PARENT of the cloned repo
-# (e.g. /home/user), NOT the repo root - `git clone` creates a `Socratic.Trade/`
+# (e.g. /home/user), NOT the repo root - `git clone` creates a `Socratic-Trade/`
 # subdirectory and the sandbox drops you one level above it. A bare
 # `bash scripts/cloud-setup.sh` therefore fails with
 # `bash: scripts/cloud-setup.sh: No such file or directory` (exit 127) because
-# that path doesn't resolve from the parent directory. Point the environment's
-# "setup script" field at this instead:
-#   cd Socratic.Trade && bash scripts/cloud-setup.sh
+# that path doesn't resolve from the parent directory.
+#
+# Point the environment's Setup script field at the fleet locator (works for
+# every app; see ai-fleet-coordinator/docs/CLAUDE-CODE-CLOUD-ENVIRONMENTS.md):
+#   set -euo pipefail
+#   if [ -f scripts/cloud-setup.sh ]; then exec bash scripts/cloud-setup.sh; fi
+#   shopt -s nullglob
+#   matches=(*/scripts/cloud-setup.sh)
+#   if [ "${#matches[@]}" -eq 1 ]; then exec bash "${matches[0]}"; fi
+#   echo "ERROR: scripts/cloud-setup.sh not found from $(pwd)" >&2; ls -la >&2; exit 1
+#
+# Equivalent one-liner if you prefer the repo name:
+#   cd Socratic-Trade && bash scripts/cloud-setup.sh
 #
 # (`.devcontainer/devcontainer.json`'s `postCreateCommand` does NOT need the `cd`
 # - devcontainers set `workspaceFolder` to the repo root automatically. This `cd`
@@ -31,27 +41,24 @@ echo "==> Node: $(node --version 2>/dev/null || echo 'not found')  npm: $(npm --
 echo "==> Installing dependencies (npm ci)"
 npm ci
 
-# Give the sandbox explicit, safe defaults + a place for injected secrets.
-# Non-destructive: never clobber an existing .env.local.
-if [ ! -f .env.local ] && [ -f .env.example ]; then
-  echo "==> Seeding .env.local from .env.example (keys blank)"
-  cp .env.example .env.local
-fi
-
-# Resolve the local Infisical machine-identity bootstrap without sourcing the
-# global key file as shell code and without copying/printing credential values.
-# The runner repeats this resolution at launch, after reading .env.local itself.
-# The global path is intentionally fixed; an inherited legacy override must not
-# redirect setup to an arbitrary credential file.
+# Resolve the local Infisical machine-identity bootstrap (process env, then the
+# macOS login Keychain, service socratic-trade-bootstrap) without copying or
+# printing credential values. The runner repeats this resolution at launch.
+# The retired flat key file is never read (owner,
+# 2026-10-18, OPS-818). An inherited legacy GLOBAL_API_KEYS_FILE is ignored.
+# Cloud VMs have no Keychain — missing identities are expected; do not fail
+# setup for a keyless checkout.
 unset GLOBAL_API_KEYS_FILE
 echo "==> Checking Infisical bootstrap identity (values stay private)"
-node scripts/infisical-bootstrap-env.mjs
+# Cloud VMs have no Keychain items. Missing identities are expected; do not fail the whole session setup for a keyless checkout.
+node scripts/infisical-bootstrap-env.mjs || echo "==> Infisical bootstrap skipped (ok in keyless cloud)"
 
-# Install the Slack coordination sync globally (SessionStart hook). No-op at
-# runtime unless SLACK_BOT_TOKEN is set as an environment secret. Non-fatal:
-# a hiccup here must never fail the whole environment setup.
-echo "==> Installing Slack coordination sync (global SessionStart hook)"
-bash scripts/setup-slack-sync.sh || echo "    (slack-sync install skipped; see docs/slack-coordination.md)"
+# Bootstrap the fleet coordination CLIs (simple-board for Linear, simple-chat for Zulip)
+# into ~/.local/bin. Product setup may continue offline; fleet work must wait
+# until the installed protocol and both CLI identity checks are available.
+echo "==> Installing fleet coordination CLIs (simple-board, simple-chat)"
+bash scripts/install-fleet-coordination.sh || echo "==> Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
 
-echo "==> Setup complete. Start the app with: npm run dev   (Next.js on :3000)"
+echo "==> Setup complete. Start the app with: npm run dev:secrets   (Infisical runner on :3000)"
+echo "    'npm run dev' (plain) is for tests-only — it no longer reads .env.local."
 echo "    Verify a change with: npx tsc --noEmit && npm test && npm run build"

@@ -8,10 +8,11 @@
  *  reverse-chron by created_at); this page owns its own loading/error state
  *  like the [id] page does. */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Brain } from "lucide-react";
 import type { SocraticDecisionCase } from "@/lib/types";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
+import { useConsoleDataOptional } from "../lib/useConsoleData";
 import { Card } from "../ui/primitives";
 import { DecisionsList } from "./decisions-list";
 
@@ -22,6 +23,18 @@ type LoadState =
 
 export default function DecisionsIndexPage() {
   const [state, setState] = useState<LoadState>({ status: "loading" });
+  // Optional (non-throwing): this page is always mounted inside ConsoleShell's
+  // ConsoleDataProvider in production, so the real snapshot is available there — the Optional
+  // variant only matters for the route smoke test, which renders this page bare. Used purely to
+  // label WHICH account each decision belongs to (per-account-visibility, pages-04); the
+  // decisions themselves still come from their own fetch below, unfiltered by account, matching
+  // the console's other "every account, honestly labeled" surfaces (Activity's "Account: ..." rows).
+  const consoleData = useConsoleDataOptional();
+  const connectedAccounts = consoleData?.snapshot?.connectedAccounts;
+  const accountLabelById = useMemo(
+    () => Object.fromEntries((connectedAccounts ?? []).map((account) => [account.id, account.label || account.broker])),
+    [connectedAccounts]
+  );
 
   const load = useCallback(async () => {
     try {
@@ -61,7 +74,7 @@ export default function DecisionsIndexPage() {
         </Card>
       )}
 
-      {state.status === "ready" && <DecisionsList decisions={state.decisions} />}
+      {state.status === "ready" && <DecisionsList decisions={state.decisions} accountLabelById={accountLabelById} />}
     </div>
   );
 }

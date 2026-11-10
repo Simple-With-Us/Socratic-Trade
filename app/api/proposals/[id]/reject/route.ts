@@ -11,7 +11,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const { id } = await params;
     const userId = resolveRequestUserId(request);
-    if (!getProposal(id, userId)) return new NextResponse("Proposal not found.", { status: 404 });
+    if (!getProposal(id, userId)) {
+      return NextResponse.json({ error: "not_found", message: "Proposal not found." }, { status: 404 });
+    }
     if (isProposalActionStopped(getPolicy(userId))) {
       return NextResponse.json(
         { error: "system_stopped", message: STOPPED_PROPOSAL_ACTION_MESSAGE },
@@ -24,6 +26,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ status: "rejected" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to reject proposal.";
-    return new NextResponse(message, { status: 400 });
+    return NextResponse.json({ error: "bad_request", message }, { status: 400 });
   }
 }

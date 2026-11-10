@@ -17,12 +17,14 @@ import {
   DocumentAbstract,
   getDb,
   deleteDocumentAbstractByAccessionAndSource,
+  deleteDocumentChunkFtsBySourceAccession,
   insertDocumentChunkFts
 } from "../db";
 import { storeDocument } from "../vector-db";
 import { jaccardSimilarity } from "./dedupe-similar";
 import { tokenize } from "./hybrid";
-import { chunkDocument, type ChunkInput } from "./chunk";
+import { chunkDocument, hashContent, type ChunkInput } from "./chunk";
+import { parseItemCodeFromSection } from "./pinecone-write-class";
 import { timeSync } from "../slow-sync-guard";
 
 /** Bump when extractive algorithm changes so existing abstracts re-generate once. */
@@ -52,6 +54,12 @@ export interface TradeHighlightOptions {
   diversityJaccard?: number;
   /** Soft prior for 8-K material item codes (e.g. ["2.02","5.02"]). */
   materialItems?: string[];
+  /**
+   * When the producer already chunked the filing, reuse those FTS content_hash
+   * values on highlights so hydrateAccession can look them up.  Synthetic hl:
+   * ids remain only when no matching source chunk is known.
+   */
+  sourceChunks?: Array<{ content_hash: string; text: string; itemCode?: string; section?: string }>;
 }
 
 export interface HighlightChunk {
@@ -177,6 +185,7 @@ interface Candidate {
   sectionKey: string;
   index: number;
   score: number;
+  contentHash?: string;
 }
 
 function splitParagraphs(text: string, minLen = 60): string[] {
@@ -388,15 +397,42 @@ function tradeHighlightChunksFromTextImpl(
         : "";
     const body = row.text.slice(0, maxChars);
     const textOut = (label + body).slice(0, maxChars);
+    const knownHash = row.contentHash || knownSourceChunkHash(row, opts.sourceChunks);
+    const hashedBody = knownHash ?? (opts.sections && opts.sections.length > 0 ? hashContent(row.text) : null);
     const idCore = (row.itemCode ?? "body").toString().replace(/\s+/g, "");
     return {
-      id: `hl:${idCore}:${idx}`,
+      id: hashedBody ?? `hl:${idCore}:${idx}`,
       text: textOut,
       itemCode: row.itemCode,
       itemTitle: row.itemTitle,
       score: row.score
     };
   });
+}
+
+function knownSourceChunkHash(
+  row: Candidate,
+  sourceChunks: TradeHighlightOptions["sourceChunks"]
+): string | undefined {
+  if (!sourceChunks?.length) return undefined;
+  const needle = row.text.trim();
+  if (!needle) return undefined;
+  const rowCode = String(row.itemCode ?? "").trim().toLowerCase();
+  for (const chunk of sourceChunks) {
+    const hash = String(chunk.content_hash ?? "").trim();
+    if (!hash) continue;
+    const body = String(chunk.text ?? "");
+    if (body.includes(needle) || needle.includes(body.trim())) return hash;
+    const chunkCode = (
+      chunk.itemCode ?? parseItemCodeFromSection(chunk.section)
+    )
+      .trim()
+      .toLowerCase();
+    if (rowCode && chunkCode && rowCode === chunkCode && body.includes(needle.slice(0, 80))) {
+      return hash;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -460,11 +496,11 @@ export async function generateAndStoreDocumentAbstract(
       input.accessionOrEventId,
       input.sourceType
     );
-    // Drop stale FTS rows for this abstract accession (content_hash will change).
+    // Drop stale FTS rows and their index keys together. Leaving the index
+    // behind lets a later same-hash remirror DELETE a reused FTS5 rowid that
+    // now belongs to another filing.
     try {
-      db.prepare(
-        "DELETE FROM document_chunks_fts WHERE source = ? AND accession = ?"
-      ).run("document-summarizer", abstractId);
+      deleteDocumentChunkFtsBySourceAccession("document-summarizer", abstractId);
     } catch {
       // FTS table may be absent in very old test DBs
     }

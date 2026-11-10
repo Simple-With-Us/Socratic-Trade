@@ -56,8 +56,16 @@ describe("RAG Evaluation Harness (P7)", () => {
       "Our upcoming product lineup includes the iPhone 17 details and new camera sensors."
     );
 
-    // Mock vector search returning something unrelated
-    vi.mocked(retrieveContextDetailed).mockResolvedValueOnce([]);
+    // Production harness now calls retrieveContextDetailed (not search-fusion).
+    vi.mocked(retrieveContextDetailed).mockResolvedValueOnce([
+      {
+        id: "acc1#c001",
+        text: "Our upcoming product lineup includes the iPhone 17 details and new camera sensors.",
+        score: 0.9,
+        source: "sec-edgar",
+        metadata: { accession: "acc1" }
+      }
+    ]);
 
     // Run harness
     const metrics = await runEvaluationHarness();
@@ -79,7 +87,17 @@ describe("RAG Evaluation Harness (P7)", () => {
       VALUES ('golden-unknown', 'unknown company question', '0009999999', 'acc-x', 'nothing', 'product')
     `).run();
 
-    vi.mocked(retrieveContextDetailed).mockResolvedValue([]);
+    // Same DB as the previous test: golden1 still evaluates.  Keep a matching hit so
+    // the skip row is the only change in the denominator.
+    vi.mocked(retrieveContextDetailed).mockResolvedValue([
+      {
+        id: "acc1#c001",
+        text: "Our upcoming product lineup includes the iPhone 17 details and new camera sensors.",
+        score: 0.9,
+        source: "sec-edgar",
+        metadata: { accession: "acc1" }
+      }
+    ]);
 
     const metrics = await runEvaluationHarness();
 

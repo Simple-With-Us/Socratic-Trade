@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 # Production image for Coolify (socratic-app).
 #
 # Design constraints (learned the hard way 2026-08-04):
@@ -22,25 +22,57 @@
 #   keep python3/make/g++ for that step, and fail the image build if the
 #   .node binary is missing or unloadable.
 
-FROM node:24.14.1-bookworm-slim AS build
+FROM node:26.13.0-bookworm-slim AS build
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+# Latch BEFORE npm ci.  #2811 (docs-only) still ran a full ~30 min image build
+# after Coolify stopped the named container, so origin 503'd.  A refused
+# build here is seconds, not the Horizon budget.  Do not move this into
+# scripts/coolify-prod-start.sh and do not enable Coolify rolling (two
+# Litestream writers).  SOURCE_COMMIT lets the latch read the commit files
+# plus HOTFIX=1 from the public GitHub API.
+RUN npm install -g tsx@4.23.1
+COPY src/lib/market-hours.ts src/lib/market-hours.ts
+COPY src/lib/market-calendar.ts src/lib/market-calendar.ts
+COPY src/lib/deploy-image-impact.ts src/lib/deploy-image-impact.ts
+COPY src/lib/rth-deploy-latch.ts src/lib/rth-deploy-latch.ts
+COPY scripts/assert-rth-deploy-latch.ts scripts/assert-rth-deploy-latch.ts
+ARG HOTFIX=0
+ARG SOURCE_COMMIT=""
+ARG COOLIFY_COMMIT=""
+ARG COOLIFY_COMMIT_SHA=""
+ENV HOTFIX=${HOTFIX} \
+    SOURCE_COMMIT=${SOURCE_COMMIT} \
+    COOLIFY_COMMIT=${COOLIFY_COMMIT} \
+    COOLIFY_COMMIT_SHA=${COOLIFY_COMMIT_SHA} \
+    NEXT_TELEMETRY_DISABLED=1
+RUN tsx scripts/assert-rth-deploy-latch.ts
 COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
 # scripts/eval/* imports test/fixtures (dockerignored). Next typecheck includes
 # **/*.ts and would fail the image build. Drop eval runners before build.
 # --ignore-scripts on prune: avoid re-extracting glibc-2.38 prebuilds.
 # Then wipe any prebuild/build residue and compile better-sqlite3 from source
 # with a real node-gyp (installed globally so prune cannot remove it).
+# Deploy 3f931acb (2026-10-16): next build printed "Failed to type check."
+# yet exited 0 and skipped emitting .next, and the image shipped without a
+# production build (prod down, build log 4658).  Never trust next build's
+# exit code for type validity again:
+# - `npx tsc --noEmit` is the same gate CI runs (ci.yml) and fails the RUN on
+#   any TS error.  Runs AFTER the rm above so this checks exactly the tree
+#   the image sees.
+# - `test -f .next/BUILD_ID` fails the build if Next ever again completes
+#   without emitting a production build, whatever the cause.
 RUN rm -rf scripts/eval test \
+  && npx tsc --noEmit \
   && npm run build \
+  && test -f .next/BUILD_ID \
   && npm prune --omit=dev --ignore-scripts \
   && npm install -g node-gyp@11 \
   && rm -rf node_modules/better-sqlite3/prebuilds node_modules/better-sqlite3/build \
@@ -52,10 +84,10 @@ RUN rm -rf scripts/eval test \
   && find docs -mindepth 1 -maxdepth 1 ! -name benchmarks -exec rm -rf {} + 2>/dev/null || true \
   && rm -rf node_modules/.cache
 
-FROM node:24.14.1-bookworm-slim AS runtime
+FROM node:26.13.0-bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates curl tar gzip \
+  && apt-get install -y --no-install-recommends bash ca-certificates curl tar gzip tini \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -72,7 +104,38 @@ COPY --from=build /app /app
 
 USER root
 EXPOSE 4000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:4000/api/health >/dev/null || exit 1
+# Traefik follows Docker health.  /api/health is the rich ops probe and
+# can 503 (Pinecone/RAG hard-stop) or exceed this 15s timeout after boot.
+# That marks running:unhealthy while the process is up -- public 503 for
+# ~20 min after #2810 finished on 2026-08-17.  /api/live is process-only:
+# it does not open app.db.  Do not point Coolify HTTP health back at /api/health.
+# 2026-09-09: /api/live itself intermittently took ~8s because it read SQLite.
+# better-sqlite3 is SYNCHRONOUS, so a heavy query against the ~11GB app.db
+# blocked the event loop and every request behind it, including this probe.
+# Measured on prod:
+# 8.60s then 0.09s then 0.03s back-to-back, CPU 107%, disk %util 0.10 -- CPU
+# bound in-process, not IO.  At timeout=5s/retries=3 that flapped the container
+# to unhealthy and Traefik served a public 503 while the app was fine (DB ok,
+# scheduler ticking, Alpaca streams live).  Same class as the 2026-08-17 #2810
+# incident noted above.  Widened to tolerate an ~8s stall; 5 x 30s still
+# detects a genuine hang within ~2.5 min.  This is MITIGATION -- the event-loop
+# block is the real defect and is tracked separately (PR #3202).
+#
+# Detection bound, corrected: Docker schedules the next check `interval`
+# seconds after the PREVIOUS CHECK COMPLETES, so a failing cycle costs
+# timeout+interval = 45s and 5 retries is ~225s, not 150s.
+#
+# Honest limit of this mitigation: stalls up to 36,511 ms were measured on
+# 2026-09-08, so a 15s timeout still fails against the worst of them.  This
+# reduces flapping; PR #3202 (non-convergent FTS mirror loop) is what actually
+# stops it.
+#
+# tini is PID1 so Docker HEALTHCHECK children are reaped.  infisical-run
+# (Node) does not wait() those curls; hung probes SIGKILL'd at the old 5s
+# timeout piled up as zombies (CPU 105%, Traefik 503) on 2026-09-09.
+# curl --max-time 14 exits itself before Docker's 15s kill.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=5 \
+  CMD curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null || exit 1
 
+ENTRYPOINT ["tini", "--"]
 CMD ["bash", "scripts/coolify-prod-start.sh"]

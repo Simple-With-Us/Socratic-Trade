@@ -126,6 +126,14 @@ export function laneSortRank(s: ServiceHealthSummary): number {
 
 // ── Service card ──────────────────────────────────────────────────────────────
 
+export function formatServiceName(service: string): string {
+  if (service === "congress.trade") return "Congress.Trade (Public API)";
+  if (service === "earningscalls-dev-rapidapi" || service === "earningscalls" || service === "earningscall") return "EarningsCalls.dev";
+  if (service === "roic.ai" || service === "roic") return "ROIC.ai";
+  if (service === "usage-monitor") return "Usage-Monitor";
+  return service;
+}
+
 function ServiceCard({
   summary,
   onClick,
@@ -158,7 +166,7 @@ function ServiceCard({
         <div className="flex min-w-0 items-center gap-2">
           <Dot tone={tone} pulse={hardStopped} />
           <span className="truncate text-[length:var(--con-fs-sm)] font-medium">
-            {summary.service === "congress.trade" ? "Congress.Trade (Public API)" : summary.service}
+            {formatServiceName(summary.service)}
             {summary.keySource && (
               <span className="ml-1 text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-muted)]">({summary.keySource})</span>
             )}
@@ -236,7 +244,7 @@ function ServiceDetail({
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h3 className="text-[length:var(--con-fs-sm)] font-semibold">
-          {summary.service === "congress.trade" ? "Congress.Trade (Public API)" : summary.service}
+          {formatServiceName(summary.service)}
           {summary.keySource && (
             <span className="ml-1.5 text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-muted)]">({summary.keySource})</span>
           )}

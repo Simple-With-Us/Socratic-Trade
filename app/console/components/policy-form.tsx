@@ -74,10 +74,21 @@ function fmtValue(def: FieldDef, v: unknown): string {
   return String(v);
 }
 
-export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: TradingPolicy; draft: PolicyDraft }) {
+export function PolicyFieldRow({
+  def,
+  policy,
+  draft,
+  hint
+}: {
+  def: FieldDef;
+  policy: TradingPolicy;
+  draft: PolicyDraft;
+  hint?: string;
+}) {
   const current = getAtPath(policy, def.path);
   const touched = def.path in draft.values;
   const value = touched ? draft.values[def.path] : current;
+  const effectiveHint = hint ?? def.hint;
   // While the input is focused we render the raw typed text, so transient
   // states like "0." or "12." survive keystrokes (Number() would collapse
   // them). The parsed number is still committed to the draft on every change;
@@ -92,7 +103,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
             {def.label}
             {touched && <span className="ml-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">edited</span>}
           </div>
-          {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+          {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
         </div>
         <Toggle checked={value === true} onChange={(next) => draft.set(def.path, next)} label={def.label} />
       </div>
@@ -136,7 +147,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
             </Select>
           </div>
         </div>
-        {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+        {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
       </div>
     );
   }
@@ -176,7 +187,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
           {unit && unit !== "$" && <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{unit}</span>}
         </div>
       </div>
-      {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+      {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
     </div>
   );
 }
@@ -303,7 +314,8 @@ export function PolicySaveBar({
   draft,
   defs,
   reality,
-  extraPatch
+  extraPatch,
+  onDiscard
 }: {
   policy: TradingPolicy;
   draft: PolicyDraft;
@@ -311,6 +323,8 @@ export function PolicySaveBar({
   reality: RealityInfo;
   /** Extra body merged into the PUT (e.g. full arrays that aren't diffable). */
   extraPatch?: PolicyPatchBody;
+  /** Called with draft.clear() so pages that keep a sibling draft (Universe) reset it too. */
+  onDiscard?: () => void;
 }) {
   const { refresh } = useConsoleData();
   const toast = useToast();
@@ -342,7 +356,8 @@ export function PolicySaveBar({
         policy.connectedAccountId
       );
       await refresh();
-      draft.clear();
+      if (onDiscard) onDiscard();
+      else draft.clear();
       setReviewOpen(false);
       setTyped("");
       toast.push("pos", "Guardrails updated", "Takes effect from the next policy-gate evaluation.");
@@ -355,13 +370,20 @@ export function PolicySaveBar({
 
   return (
     <>
-      <div className="sticky bottom-16 z-40 lg:bottom-4">
+      <div className="sticky bottom-[calc(3.75rem+env(safe-area-inset-bottom,0px))] z-40 lg:bottom-4">
         <div className="con-card flex items-center justify-between gap-3 border-[color:var(--con-warn)] px-4 py-2.5">
           <span className="text-[length:var(--con-fs-sm)] font-semibold">
             {changeCount} uncommitted {changeCount === 1 ? "change" : "changes"}
           </span>
           <div className="flex gap-2">
-            <Btn variant="ghost" size="sm" onClick={() => draft.clear()}>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (onDiscard) onDiscard();
+                else draft.clear();
+              }}
+            >
               Discard
             </Btn>
             <Btn variant="primary" size="sm" onClick={() => setReviewOpen(true)}>
@@ -413,7 +435,7 @@ export function PolicySaveBar({
                 Commit changes <LiveTag />
               </>
             }
-            note="At least one change expands authority on a brokerage account. Unlocking authority costs a typed word; locking things down never does."
+            note="At least one change expands authority on a brokerage account.  Unlocking authority costs a typed word; locking things down never does."
             onConfirm={() => void commit()}
           />
         ) : (

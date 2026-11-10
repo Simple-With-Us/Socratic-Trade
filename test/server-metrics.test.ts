@@ -5,10 +5,17 @@ import {
   resetServerMetricsCacheForTests,
 } from "../src/lib/server-metrics-runtime";
 import {
+  describeMissingNetworkSeries,
   displayProviderText,
   markServerMetricsSnapshotStale,
+  parseActionRunners,
+  parseResourcesObservation,
   parseServerMetricsEnvelope,
+  parseUnobservedHostFacts,
+  resourceStatusTone,
+  resourcesUnavailableHeadline,
 } from "../app/admin/server/server-metrics-client";
+import { ACTION_RUNNER_REPO, getActionRunners } from "../src/lib/server-metrics-runners";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES
@@ -134,6 +141,251 @@ describe("server-metrics provider shape normalization", () => {
   });
 });
 
+/**
+ * The retired names that used to be hardcoded into the panel. `ci-cpx32` was deleted
+ * 2026-07-31; none of these runners has ever existed in any fleet repository. No code path may
+ * emit them again.
+ */
+const RETIRED_FABRICATED_RUNNER_NAMES = [
+  "ci-cpx32",
+  "socratic-ci",
+  "congress-ci",
+  "shared-ci",
+  "usage-ci",
+  "github-runner",
+];
+
+describe("GitHub Actions runner observability", () => {
+  beforeEach(() => {
+    vi.stubEnv("GH_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "");
+    vi.stubEnv("GITHUB_MCP_TOKEN", "");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("reports an explicit unavailable state, with no runner rows, when no token is configured", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const result = await getActionRunners();
+
+    expect(result).toEqual({
+      state: "unavailable",
+      repo: ACTION_RUNNER_REPO,
+      reason: "no-github-token",
+      detail: expect.stringContaining("GH_TOKEN"),
+    });
+    expect(result).not.toHaveProperty("runners");
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/ci-cpx32|running:healthy/);
+  });
+
+  it("returns exactly the runners GitHub reports, with GitHub's own reachability word", async () => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(providerResponse({
+      total_count: 2,
+      runners: [
+        {
+          id: 42,
+          name: "mac-xcode26-socratic",
+          status: "online",
+          busy: false,
+          labels: [{ name: "self-hosted" }, { name: "macOS" }, { name: "xcode26" }],
+        },
+        { id: 43, name: "oracle-usage-ci", status: "offline", busy: true, labels: ["Linux"] },
+      ],
+    })));
+
+    const result = await getActionRunners();
+
+    expect(result).toEqual({
+      state: "known",
+      repo: ACTION_RUNNER_REPO,
+      omittedCount: 0,
+      runners: [
+        {
+          id: "42",
+          name: "mac-xcode26-socratic",
+          status: "online",
+          busy: false,
+          labels: ["self-hosted", "macOS", "xcode26"],
+        },
+        { id: "43", name: "oracle-usage-ci", status: "offline", busy: true, labels: ["Linux"] },
+      ],
+    });
+    // No invented provenance suffix, and no health verdict layered onto reachability.
+    expect(JSON.stringify(result)).not.toContain("Hetzner runner");
+    expect(JSON.stringify(result)).not.toContain("healthy");
+  });
+
+  it("treats a measured empty runner list as a real answer rather than a failure", async () => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(providerResponse({ total_count: 0, runners: [] })));
+
+    const result = await getActionRunners();
+
+    // "This repository has zero registered runners" is the single most important thing this
+    // panel can report. The old code replaced it with six fabricated healthy rows.
+    expect(result).toEqual({ state: "known", repo: ACTION_RUNNER_REPO, runners: [], omittedCount: 0 });
+  });
+
+  it.each([
+    [500, "github-api-error"],
+    [401, "github-api-error"],
+    [403, "github-api-error"],
+  ])("reports HTTP %i as unavailable/%s instead of fabricating runners", async (status, reason) => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(providerResponse({ message: "boom" }, status)));
+
+    const result = await getActionRunners();
+
+    expect(result).toMatchObject({ state: "unavailable", reason });
+    expect(result).not.toHaveProperty("runners");
+    expect((result as { detail: string }).detail).toContain(String(status));
+  });
+
+  it("reports an unexpected response shape and a transport failure distinctly", async () => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(providerResponse({ runners: "not-an-array" })));
+    expect(await getActionRunners()).toMatchObject({
+      state: "unavailable",
+      reason: "unexpected-shape",
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    expect(await getActionRunners()).toMatchObject({
+      state: "unavailable",
+      reason: "request-failed",
+    });
+  });
+
+  it("counts malformed runner entries instead of silently dropping them", async () => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(providerResponse({
+      runners: [
+        { id: 1, name: "real-runner", status: "online", busy: false, labels: [] },
+        { id: 2, name: { rendered: "bad" }, status: "online" },
+        { id: 3, name: "no-status" },
+      ],
+    })));
+
+    const result = await getActionRunners();
+
+    expect(result).toMatchObject({ state: "known", omittedCount: 2 });
+    expect((result as { runners: unknown[] }).runners).toHaveLength(1);
+  });
+
+  it("never emits a retired fabricated runner name on any outcome", async () => {
+    vi.stubEnv("GH_TOKEN", "test-token");
+    const outcomes = [
+      () => Promise.resolve(providerResponse({ runners: [] })),
+      () => Promise.resolve(providerResponse({}, 500)),
+      () => Promise.resolve(providerResponse({ runners: {} })),
+      () => Promise.reject(new Error("network down")),
+    ];
+
+    for (const outcome of outcomes) {
+      vi.stubGlobal("fetch", vi.fn().mockImplementation(outcome));
+      const serialized = JSON.stringify(await getActionRunners());
+      for (const name of RETIRED_FABRICATED_RUNNER_NAMES) {
+        expect(serialized).not.toContain(name);
+      }
+    }
+  });
+});
+
+describe("server-metrics client rendering decisions", () => {
+  it.each([
+    ["running:healthy", "pos"],
+    ["running", "pos"],
+    ["running:unhealthy", "neg"],
+    ["restarting:unhealthy", "neg"],
+    ["exited:unhealthy", "neg"],
+    ["exited", "neg"],
+    ["restarting:starting", "warn"],
+    ["degraded", "warn"],
+  ])("tones Coolify status %s as %s", (status, tone) => {
+    // "unhealthy".includes("healthy") is true, which is how every *:unhealthy container used
+    // to render as a solid green dot.
+    expect(resourceStatusTone(status)).toBe(tone);
+  });
+
+  it("distinguishes a missing Rx series, a missing Tx series, and no data at all", () => {
+    expect(describeMissingNetworkSeries(0, 0)).toBe("no historical data available");
+    expect(describeMissingNetworkSeries(1, 1)).toContain("only one sample");
+    expect(describeMissingNetworkSeries(0, 12)).toContain("inbound (Rx)");
+    expect(describeMissingNetworkSeries(12, 0)).toContain("outbound (Tx)");
+  });
+
+  it("parses both runner result states and rejects malformed ones", () => {
+    expect(parseActionRunners({
+      state: "known",
+      repo: ACTION_RUNNER_REPO,
+      omittedCount: 1,
+      runners: [{ id: "1", name: "mac-xcode26-socratic", status: "online", busy: false, labels: ["macOS"] }],
+    })).toEqual({
+      state: "known",
+      repo: ACTION_RUNNER_REPO,
+      omittedCount: 1,
+      runners: [{ id: "1", name: "mac-xcode26-socratic", status: "online", busy: false, labels: ["macOS"] }],
+    });
+
+    expect(parseActionRunners({
+      state: "unavailable",
+      repo: ACTION_RUNNER_REPO,
+      reason: "no-github-token",
+      detail: "No GitHub token is configured for this deployment.",
+    })).toMatchObject({ state: "unavailable", reason: "no-github-token" });
+
+    // A malformed payload must NOT collapse into an empty list; empty is a measured answer.
+    expect(parseActionRunners({ state: "known", repo: ACTION_RUNNER_REPO, runners: "nope" })).toBeUndefined();
+    expect(parseActionRunners({ state: "unavailable", repo: ACTION_RUNNER_REPO, reason: "made-up", detail: "x" })).toBeUndefined();
+    expect(parseActionRunners(undefined)).toBeUndefined();
+  });
+
+  it("parses both service-observation states and rejects malformed ones", () => {
+    expect(parseResourcesObservation({ state: "known" })).toEqual({ state: "known" });
+    expect(parseResourcesObservation({
+      state: "unavailable",
+      reason: "coolify-request-failed",
+      detail: "The Coolify resources endpoint could not be read on this refresh.",
+    })).toMatchObject({ state: "unavailable", reason: "coolify-request-failed" });
+
+    // A malformed or absent observation must NOT default to "known": that would restore the
+    // exact bug this field exists to remove, asserting "Coolify reported no services" for a
+    // read that never happened.
+    expect(parseResourcesObservation({ state: "unavailable", reason: "invented", detail: "x" })).toBeUndefined();
+    expect(parseResourcesObservation({ state: "unavailable", reason: "coolify-request-failed" })).toBeUndefined();
+    expect(parseResourcesObservation({ state: "measured" })).toBeUndefined();
+    expect(parseResourcesObservation(undefined)).toBeUndefined();
+    expect(parseResourcesObservation("nope")).toBeUndefined();
+  });
+
+  it("headlines a never-queried service list differently from a failed read", () => {
+    // "not queried" and "unavailable" are different facts for an operator: the first is a
+    // wiring gap, the second is a live provider failure on a page that otherwise looks fresh.
+    expect(resourcesUnavailableHeadline("coolify-not-configured")).toBe("services not queried");
+    expect(resourcesUnavailableHeadline("coolify-partially-configured")).toBe("services not queried");
+    expect(resourcesUnavailableHeadline("coolify-request-failed")).toBe("service list unavailable");
+  });
+
+  it("keeps only recognized unobserved-host facts", () => {
+    expect(parseUnobservedHostFacts([
+      { field: "uptime", reason: "coolify-server-metadata-absent", detail: "Host uptime is not measured." },
+      { field: "somethingElse", reason: "x", detail: "y" },
+      { field: "os" },
+    ])).toEqual([
+      { field: "uptime", reason: "coolify-server-metadata-absent", detail: "Host uptime is not measured." },
+    ]);
+    expect(parseUnobservedHostFacts("nope")).toEqual([]);
+  });
+});
+
 describe("server-metrics API route", () => {
   beforeEach(() => {
     // The route probes GitHub Actions runners whenever ANY of these tokens resolves — and agent
@@ -176,7 +428,21 @@ describe("server-metrics API route", () => {
     expect(body.stale).toBe(false);
     expect(body.hostInfo).toBeDefined();
     expect(body.hostInfo.cpus).toBeGreaterThan(0);
-    expect(body.resources.length).toBeGreaterThanOrEqual(6);
+    // Coolify is unconfigured on this path, so there is nothing to list. This used to return
+    // six fabricated "action-runner" rows describing machines that never existed.
+    expect(body.resources).toEqual([]);
+    // The empty list here is the ABSENCE of a measurement, and must say so.
+    expect(body.resourcesObservation).toEqual({
+      state: "unavailable",
+      reason: "coolify-not-configured",
+      detail: expect.stringContaining("not queried"),
+    });
+    expect(body.actionRunners).toEqual({
+      state: "unavailable",
+      repo: ACTION_RUNNER_REPO,
+      reason: "no-github-token",
+      detail: expect.stringContaining("No GitHub token is configured"),
+    });
     expect(body.metrics).toEqual({
       cpu: [],
       diskRead: [],
@@ -267,8 +533,17 @@ describe("server-metrics API route", () => {
       "Coolify resource at index 1 had malformed display fields and was omitted.",
       "Hetzner metrics contained 2 malformed samples that were omitted.",
     ]);
-    expect(body.resources.length).toBeGreaterThanOrEqual(7);
-    expect(body.resources[0].name).toBe("socratic-trade-prod");
+    // Exactly the one well-formed Coolify resource. No runner rows are mixed into this list.
+    expect(body.resources).toEqual([
+      { uuid: "app-1", name: "socratic-trade-prod", type: "application", status: "running:healthy" },
+    ]);
+    // Coolify was queried and answered, so this list IS a measurement.
+    expect(body.resourcesObservation).toEqual({ state: "known" });
+    expect(body.actionRunners.state).toBe("unavailable");
+    expect(body.monitoredTarget).toEqual({
+      hetznerServerId: "12345",
+      coolifyServerUuid: "mock-coolify-uuid",
+    });
     expect(body.metrics.cpu[0].value).toBeCloseTo(87.9370245);
     expect(body.metrics.cpu).toHaveLength(1);
     expect(body.metrics.diskRead[0].value).toBe(1024);
@@ -330,12 +605,74 @@ describe("server-metrics API route", () => {
     expect(res.status).toBe(200);
     expect(body.degraded).toBe(true);
     expect(body.hostInfo.name).toBe("verified-host");
-    expect(body.resources.length).toBeGreaterThanOrEqual(6);
+    // The Coolify resources call 503'd, so there is nothing to list. Not six invented rows.
+    expect(body.resources).toEqual([]);
+    // ...and the empty list must be marked as a FAILED READ, not as a measured zero. This is
+    // the dangerous path: the Hetzner reads succeeded, so successfulProviderReads > 0 and
+    // neither stale-cache branch fires — the page renders fresh while the service list is
+    // simply unknown. The card used to assert "coolify reported no services for this server".
+    expect(body.stale).toBe(false);
+    expect(body.resourcesObservation).toEqual({
+      state: "unavailable",
+      reason: "coolify-request-failed",
+      detail: expect.stringContaining("could not be read"),
+    });
     expect(body.metrics.cpu).toEqual([]);
     expect(body.warnings).toEqual(expect.arrayContaining([
       "Coolify resources returned HTTP 503.",
       "Hetzner aggregate CPU metrics were omitted because the server core count was unavailable.",
     ]));
+  });
+
+  it("marks a genuinely empty Coolify answer as measured, not as a failed read", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ADMIN_USER_EMAILS", "admin@example.com");
+    vi.stubEnv("HETZNER_API_TOKEN", "");
+    vi.stubEnv("HETZNER_SERVER_ID", "");
+    vi.stubEnv("COOLIFY_API_TOKEN", "mock-coolify-token");
+    vi.stubEnv("COOLIFY_SERVER_UUID", "mock-coolify-uuid");
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve(
+      url.includes("/resources")
+        ? providerResponse([])
+        : providerResponse({ name: "coolify-host", server_metadata: null }),
+    )));
+
+    const body = await (await GET(reqWithEmail("admin@example.com"))).json();
+
+    // Zero services IS an answer when Coolify actually answered, and it must stay
+    // distinguishable from the three ways of not knowing.
+    expect(body.resources).toEqual([]);
+    expect(body.resourcesObservation).toEqual({ state: "known" });
+  });
+
+  it("does not claim a service measurement when Coolify is only half-configured", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ADMIN_USER_EMAILS", "admin@example.com");
+    vi.stubEnv("HETZNER_API_TOKEN", "mock-hetzner-token");
+    vi.stubEnv("HETZNER_SERVER_ID", "12345");
+    // A token with no server UUID: the route skips the Coolify block entirely, so nothing is
+    // ever requested and `resources: []` describes no measurement at all.
+    vi.stubEnv("COOLIFY_API_TOKEN", "mock-coolify-token");
+    vi.stubEnv("COOLIFY_SERVER_UUID", "");
+    const fetchMock = vi.fn().mockImplementation((url: string) => Promise.resolve(providerResponse(
+      url.includes("/metrics")
+        ? { metrics: { time_series: {} } }
+        : { server: { name: "verified-host", status: "running", server_type: { cores: 4 } } },
+    )));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const body = await (await GET(reqWithEmail("admin@example.com"))).json();
+
+    expect(body.resources).toEqual([]);
+    expect(body.resourcesObservation).toEqual({
+      state: "unavailable",
+      reason: "coolify-partially-configured",
+      detail: expect.stringContaining("incomplete"),
+    });
+    // Nothing was requested from Coolify at all.
+    for (const call of fetchMock.mock.calls) {
+      expect(String(call[0])).not.toContain("host.jays.services");
+    }
   });
 
   it("bounds provider response bodies while retaining valid sibling data", async () => {
@@ -500,6 +837,109 @@ describe("server-metrics API route", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it("explains WHY host memory, uptime, OS and disk capacity are blank instead of bare 'Unavailable'", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SERVER_METRICS_TARGET_ENVIRONMENT", "production");
+    vi.stubEnv("ADMIN_USER_EMAILS", "admin@example.com");
+    vi.stubEnv("HETZNER_API_TOKEN", "mock-hetzner-token");
+    vi.stubEnv("HETZNER_SERVER_ID", "159792099");
+    vi.stubEnv("COOLIFY_API_TOKEN", "mock-coolify-token");
+    vi.stubEnv("COOLIFY_SERVER_UUID", "mock-coolify-uuid");
+
+    // Mirrors the live box: Coolify answers, but `server_metadata` is null because its metrics
+    // collection is disabled, and its own host record is the self-referential "localhost".
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/resources")) return Promise.resolve(providerResponse([]));
+      if (url.includes("/metrics")) {
+        return Promise.resolve(providerResponse({ metrics: { time_series: {} } }));
+      }
+      if (url.includes("api.hetzner.cloud")) {
+        return Promise.resolve(providerResponse({
+          server: { name: "fleet-hetzner-nbg1", status: "running", server_type: { name: "cx43", cores: 8, memory: 16 } },
+        }));
+      }
+      return Promise.resolve(providerResponse({ name: "localhost", server_metadata: null }));
+    }));
+
+    const body = await (await GET(reqWithEmail("admin@example.com"))).json();
+
+    const byField = Object.fromEntries(
+      (body.unobservedHostFacts as Array<{ field: string; reason: string; detail: string }>)
+        .map((fact) => [fact.field, fact]),
+    );
+    expect(byField.memoryUtilization.reason).toBe("coolify-server-metadata-absent");
+    expect(byField.uptime.reason).toBe("coolify-server-metadata-absent");
+    expect(byField.os.reason).toBe("coolify-server-metadata-absent");
+    expect(byField.diskCapacity.reason).toBe("not-collected-by-providers");
+    expect(byField.diskCapacity.detail).toContain("bandwidth");
+    // Hetzner's name wins, and Coolify's self-referential "localhost" is never substituted.
+    expect(body.hostInfo.name).toBe("fleet-hetzner-nbg1");
+  });
+
+  it("does not substitute Coolify's self-referential host record when Hetzner metadata fails", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SERVER_METRICS_TARGET_ENVIRONMENT", "production");
+    vi.stubEnv("ADMIN_USER_EMAILS", "admin@example.com");
+    vi.stubEnv("HETZNER_API_TOKEN", "mock-hetzner-token");
+    vi.stubEnv("HETZNER_SERVER_ID", "159792099");
+    vi.stubEnv("COOLIFY_API_TOKEN", "mock-coolify-token");
+    vi.stubEnv("COOLIFY_SERVER_UUID", "mock-coolify-uuid");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (url.includes("api.hetzner.cloud")) return Promise.resolve(providerResponse({}, 404));
+      if (url.includes("/resources")) return Promise.resolve(providerResponse([]));
+      return Promise.resolve(providerResponse({ name: "localhost", server_metadata: null }));
+    }));
+
+    const body = await (await GET(reqWithEmail("admin@example.com"))).json();
+
+    // Showing "Host Server: localhost" on the production panel disguised a provider outage as
+    // a plausible hostname.
+    expect(body.hostInfo.name).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("localhost");
+    expect(body.degraded).toBe(true);
+  });
+
+  it("serves no fabricated infrastructure rows in a production-shaped payload", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("SERVER_METRICS_TARGET_ENVIRONMENT", "production");
+    vi.stubEnv("ADMIN_USER_EMAILS", "admin@example.com");
+    vi.stubEnv("HETZNER_API_TOKEN", "mock-hetzner-token");
+    vi.stubEnv("HETZNER_SERVER_ID", "159792099");
+    vi.stubEnv("COOLIFY_API_TOKEN", "mock-coolify-token");
+    vi.stubEnv("COOLIFY_SERVER_UUID", "mock-coolify-uuid");
+
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/resources")) {
+        return Promise.resolve(providerResponse([
+          { uuid: "app-1", name: "socratic-app", type: "application", status: "running:healthy" },
+          { uuid: "app-2", name: "congress-trade", type: "application", status: "running:healthy" },
+          { uuid: "app-3", name: "usage-monitor", type: "application", status: "running:healthy" },
+        ]));
+      }
+      if (url.includes("/metrics")) {
+        return Promise.resolve(providerResponse({ metrics: { time_series: {} } }));
+      }
+      if (url.includes("api.hetzner.cloud")) {
+        return Promise.resolve(providerResponse({
+          server: { name: "fleet-hetzner-nbg1", status: "running", server_type: { name: "cx43", cores: 8, memory: 16 } },
+        }));
+      }
+      return Promise.resolve(providerResponse({ name: "localhost", server_metadata: null }));
+    }));
+
+    const body = await (await GET(reqWithEmail("admin@example.com"))).json();
+    const serialized = JSON.stringify(body);
+
+    // Coolify really does report exactly three resources on this box. The panel used to show
+    // nine, the extra six being invented runners on a CI server deleted 2026-07-31.
+    expect(body.resources).toHaveLength(3);
+    for (const name of RETIRED_FABRICATED_RUNNER_NAMES) {
+      expect(serialized).not.toContain(name);
+    }
+    expect(body.actionRunners).toMatchObject({ state: "unavailable", reason: "no-github-token" });
+  });
+
   it("returns an explicit degraded receipt without fabricated host data on provider failures", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("SERVER_METRICS_TARGET_ENVIRONMENT", "production");
@@ -526,7 +966,7 @@ describe("server-metrics API route", () => {
     expect(body.degraded).toBe(true);
     expect(body.error).toBe("One or more infrastructure providers could not be queried.");
     expect(body.hostInfo.status).toBe("unknown");
-    expect(body.resources.length).toBeGreaterThanOrEqual(6);
+    expect(body.resources).toEqual([]);
     expect(body.metrics).toEqual({
       cpu: [],
       diskRead: [],

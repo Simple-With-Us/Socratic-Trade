@@ -170,13 +170,18 @@ export type PromptSourceTrust = "trusted_owner" | "untrusted_data";
 
 /**
  * `owner_strategy` is intentionally the only trusted source. In particular, reflection, coach,
- * learned, RAG, and news content remain data even when they were originally authored by an owner
- * or an LLM: they can contain relayed or persistent untrusted material.
+ * learned, RAG, news, and web content remain data even when they were originally authored by an
+ * owner or an LLM: they can contain relayed or persistent untrusted material.
+ *
+ * `web` labels text the app fetched from an arbitrary host (a coach-pasted article URL). It is
+ * the most attacker-controllable source family in the app, which is why it is scanned at INGEST —
+ * before anything durable is written — and not only at prompt-assembly read time.
  */
 export type PromptTextSource =
   | "owner_strategy"
   | "rag"
   | "news"
+  | "web"
   | "learned"
   | "reflection"
   | "coach"

@@ -75,8 +75,14 @@ jobs:
           echo "Changed files:"
           echo "$changed_files"
           non_docs="$(printf '%s\n' "$changed_files" | grep -Ev '(^|/)[^/]+\.md$|^docs/' || true)"
+          # docs/benchmarks/* is bundled at build time (app/api/llm-usage/model-stats/route.ts) — not
+          # safe to skip smoke when only those JSON files change.
+          benchmarks_changed="$(printf '%s\n' "$changed_files" | grep -E '^docs/benchmarks/' || true)"
+          if [ -n "$benchmarks_changed" ]; then
+            non_docs="$(printf '%s\n%s' "$non_docs" "$benchmarks_changed" | sed '/^$/d' | sort -u)"
+          fi
           if [ -z "$non_docs" ]; then
-            echo "All changed files are documentation-class (*.md or docs/**) — docs-only fast path applies."
+            echo "All changed files are documentation-class (*.md or docs/**, excluding build-imported docs/benchmarks/) — docs-only fast path applies."
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
           else
             echo "Non-documentation files changed — running full smoke:"
@@ -113,17 +119,17 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
-            echo "::error::Fork PRs cannot run this job (it installs deps with a private-repo deploy key secret)."
+            echo "::error::Fork PRs cannot run this job."
             exit 1
           fi
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
-                echo "::error::Bot PRs cannot run package installs with this secret (untrusted bot: $actor)."
+                echo "::error::Bot PRs cannot run this job (untrusted bot: $actor)."
                 exit 1
                 ;;
             esac

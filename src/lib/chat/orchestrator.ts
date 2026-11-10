@@ -15,6 +15,7 @@ import { getPerformanceSummary, getRegimeScorecard, getThesisScorecard } from ".
 import { fetchDailyOHLC } from "../history";
 import { fetchYahooFinanceQuote } from "../yahoo-finance";
 import { citationStalenessEnabled, defaultDedupeSimilarity, defaultMinScore, defaultRelevanceFloor, isStale, retrieveContextDetailed } from "../vector-db";
+import { resolveRetrievalAsOf } from "../rag/retrieval-asof";
 import type { RetrieveOptions } from "../vector-db";
 import { derivePromptRagConsumption, stableRagEvidenceRef } from "../rag/evidence-consumption";
 import { createAlert as alertsCreateAlert, listAlerts as alertsListAlerts } from "../alerts";
@@ -35,7 +36,8 @@ import { captureCoachLearning } from "./coach-learning";
 import { classifyIntent, getLLM } from "./llm";
 import { buildSystem, DISCLAIMER, PROMPT_VERSION } from "./prompt";
 import { buildTools, type ToolDeps } from "./tools";
-import type { ChatDraft, ChatLLM, ChatQuote, ChatReply, ToolSchema } from "./types";
+import type { ChatDraft, ChatLLM, ChatQuote, ChatReply, LlmRunArgs, ToolSchema } from "./types";
+import { emitDashboardEvent } from "../events";
 import {
   assertUserOperationClaim,
   runWithUserWriteEpoch,
@@ -55,6 +57,10 @@ import {
   EARNINGSCALLS_TRANSCRIPT_SOURCE,
   earningsCallsTranscriptsEnabled
 } from "../earningscalls-gate";
+import {
+  ROIC_TRANSCRIPT_SOURCE,
+  roicTranscriptsEnabled
+} from "../roic-transcripts-gate";
 
 function toolEvidenceFamily(name: string): EvidenceSourceFamily {
   if (name === "kb_search") return "filings";
@@ -95,7 +101,15 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
     input_schema: t.input_schema
   }));
 
-  return async function handleTurn(args: { userId: string; message: string; clientTurnId?: string }): Promise<ChatReply> {
+  return async function handleTurn(args: {
+    userId: string;
+    message: string;
+    clientTurnId?: string;
+    abortSignal?: AbortSignal;
+    deadlineMs?: number;
+    minStageBudgetMs?: number;
+    onStage?: LlmRunArgs["onStage"];
+  }): Promise<ChatReply> {
     return withUserWriteOperation(args.userId, "chat-turn", async (operationClaim) => {
     const { userId, message, clientTurnId } = args;
     const writeEpoch = operationClaim.epoch;
@@ -127,12 +141,12 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
     const model = llm ?? getLLM(userId);
     writeAudit("chat.turn", { userId, message_len: message.length, prompt_version: PROMPT_VERSION, turnKey });
     // Prior turns (redacted) for multi-turn context — fetched BEFORE appending the current message.
-    const history = listTurns(userId, 10).map((t) => ({ role: t.role, text: t.text }));
+    const history = listTurns(userId, 10, connectedAccountId).map((t) => ({ role: t.role, text: t.text }));
     // Idempotent user-turn recording: a Retry reuses the same clientTurnId, so when that id is
     // already in the transcript we skip the duplicate append but STILL run the provider call —
     // the retry's whole point is getting the reply the failed attempt never produced.
     const alreadyRecorded = clientTurnId != null && findChatTurnByClientId(userId, clientTurnId) != null;
-    if (!alreadyRecorded) appendTurn(userId, { role: "user", text: message, clientTurnId: clientTurnId ?? null }, writeEpoch);
+    if (!alreadyRecorded) appendTurn(userId, { role: "user", text: message, clientTurnId: clientTurnId ?? null, connectedAccountId }, writeEpoch);
 
     const mem = ingestMessage(userId, message, writeEpoch);
     // Coach → durable learning: explicit strategy directives ("from now on…") and pasted article
@@ -316,6 +330,7 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
             // collaterally strip them.
             const safeChunks = kbChunks(sanitized).filter((row) => {
               if (row.source === EARNINGSCALLS_TRANSCRIPT_SOURCE) return earningsCallsTranscriptsEnabled();
+              if (row.source === ROIC_TRANSCRIPT_SOURCE) return roicTranscriptsEnabled();
               return row.source !== FMP_TRANSCRIPT_SOURCE &&
                 String(row.doc_type ?? "").toLowerCase() !== FMP_TRANSCRIPT_DOC_TYPE;
             });
@@ -413,7 +428,19 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
       tools: toolSchemas,
       executeTool,
       context: { memorySummary: boundedMemory },
-      history
+      history,
+      abortSignal: args.abortSignal,
+      deadlineMs: args.deadlineMs,
+      minStageBudgetMs: args.minStageBudgetMs ?? policy.tuning?.chatStageMinBudgetMs,
+      onStage: (stage) => {
+        args.onStage?.(stage);
+        emitDashboardEvent({
+          type: "chat-turn",
+          userId,
+          at: new Date().toISOString(),
+          detail: { turnKey, ...stage }
+        });
+      }
     });
     assertTurnActive();
     rememberFmpProvenance(result.citations ?? []);
@@ -455,7 +482,8 @@ export function makeOrchestrator(deps: ToolDeps, llm?: ChatLLM) {
       text: reply.text,
       citations: reply.citations.map((c) => c.chunk_id ?? c.source),
       intent: reply.intent,
-      model: usedModel
+      model: usedModel,
+      connectedAccountId
     }, writeEpoch);
     if (fmpProvenance.length > 0 && fmpRightsClaim) {
       persistFmpTranscriptDerivedArtifact({
@@ -543,7 +571,9 @@ export function buildProductionDeps(): ToolDeps {
       // Forward ALL retrieval options: as-of (point-in-time), the doc_type the intent classifier extracted
       // (previously dropped here), and the relevance floor. docType matching is casing-tolerant downstream.
       const options: RetrieveOptions = {
-        ...(args.as_of ? { asOf: args.as_of } : {}),
+        // Live chat used to omit asOf, which made VECTOR_ASOF_STRICT a no-op.  Question
+        // date wins when the tool supplies a parseable as_of; otherwise "now".
+        asOf: resolveRetrievalAsOf(args.as_of),
         ...(args.doc_type ? { docType: [args.doc_type] } : {}),
         minScore: defaultMinScore(),
         // 2026-07-04 RAG quick-wins: wire the previously-dormant post-rerank relevance floor +

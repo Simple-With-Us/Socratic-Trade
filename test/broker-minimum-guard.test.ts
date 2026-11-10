@@ -70,13 +70,14 @@ describe("describeBrokerMinimumOrderBlock", () => {
     expect(reason).toBeUndefined();
   });
 
-  // Root cause (2026-07-09): Robinhood permits liquidating an ENTIRE fractional position
-  // regardless of its dollar value (that's how "dust" positions get cleaned up) — its own
-  // order_checks pre-flight does not flag those. The guard's own defensive notional-floor
-  // fallback didn't know about a position's full size, so it wrongly blocked a whole-position
-  // dust sell exactly like a genuinely sub-minimum partial trim.
-  describe("whole-position exit exemption", () => {
-    it("does NOT block a whole-position dust SELL whose quantity matches positionQuantity", async () => {
+  // CORRECTED 2026-09-25 (board 687a5fb4, lane G3): a 2026-07-09 change exempted a whole-position
+  // exit from this fallback on the assumption that "Robinhood permits liquidating an ENTIRE
+  // fractional position regardless of its dollar value." Production evidence on the live Robinhood
+  // "Agentic" account contradicts that — 11 `placing_failed` rejections for "Fractional orders must
+  // be at least $1" and 8 for "Dollar-based orders must be at least $1" — so the exemption was
+  // removed: Robinhood's floor is unconditional, full-position exit or not.
+  describe("whole-position exit (no exemption from the broker's floor)", () => {
+    it("blocks a whole-position dust SELL whose quantity matches positionQuantity", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.22 });
 
@@ -85,10 +86,11 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "sell",
         positionQuantity: 0.0031
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.22");
+      expect(reason).toContain("$1.00");
     });
 
-    it("does NOT block a whole-position dust COVER whose quantity matches positionQuantity", async () => {
+    it("blocks a whole-position dust COVER whose quantity matches positionQuantity", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.5 });
 
@@ -97,10 +99,11 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "cover",
         positionQuantity: 0.01
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.50");
+      expect(reason).toContain("$1.00");
     });
 
-    it("tolerates tiny float rounding between quantity and positionQuantity (epsilon)", async () => {
+    it("still blocks with tiny float rounding between quantity and positionQuantity (epsilon)", async () => {
       const { describeBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
       const review = baseReview({ estimatedNotional: 0.22 });
 
@@ -109,7 +112,8 @@ describe("describeBrokerMinimumOrderBlock", () => {
         side: "sell",
         positionQuantity: 0.0031
       });
-      expect(reason).toBeUndefined();
+      expect(reason).toContain("$0.22");
+      expect(reason).toContain("$1.00");
     });
 
     it("still blocks a genuinely sub-minimum PARTIAL trim (quantity less than positionQuantity)", async () => {
@@ -160,6 +164,206 @@ describe("describeBrokerMinimumOrderBlock", () => {
   });
 });
 
+// Root cause (oss-lessons r2, freqtrade): cancelling a partially-filled entry order can leave a
+// position fragment below the broker's minimum order notional — dust the owner can't exit as a
+// standalone order later. ADVISORY ONLY: describeCancelDustRisk never gates the cancel itself,
+// it only surfaces the risk so the owner sees it at cancel time.
+describe("describeCancelDustRisk", () => {
+  it("warns on a partially-filled fractional BUY whose fill is the whole resulting position, below the floor", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // Filled 0.005 sh @ $100 = $0.50, still below Robinhood's $1 floor; positionQuantity matches
+    // filledQuantity exactly — nothing else backs the position, so this IS the dust fragment.
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(warning).toContain("AAPL");
+    expect(warning).toContain("$0.50");
+    expect(warning).toContain("$1.00");
+  });
+
+  it("warns on a partially-filled fractional SHORT the same way (magnitude comparison)", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // Short positions are stored with NEGATIVE quantities.
+    const warning = describeCancelDustRisk(
+      { side: "short", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "TSLA" },
+      -0.005,
+      "robinhood"
+    );
+    expect(warning).toContain("TSLA");
+  });
+
+  it("does NOT warn when scaling into an existing larger position (fill is only a slice)", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // Held position (5 sh) is much larger than the 0.005 sh this order filled — the fill is an
+    // add to an existing position, not a standalone dust fragment.
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      5,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("is a no-op for a whole-share order even with a tiny partial fill", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 5, filledQuantity: 1, averagePrice: 0.1, symbol: "PENNY" },
+      1,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("is a no-op for a broker with no known minimum-notional floor", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      0.005,
+      "alpaca"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("does NOT warn on exit sides (sell/cover) — cancelling an exit never creates a new fragment", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const sellWarning = describeCancelDustRisk(
+      { side: "sell", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(sellWarning).toBeUndefined();
+    const coverWarning = describeCancelDustRisk(
+      { side: "cover", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      -0.005,
+      "robinhood"
+    );
+    expect(coverWarning).toBeUndefined();
+  });
+
+  it("does not warn when nothing has filled yet", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0, averagePrice: 100, symbol: "AAPL" },
+      0,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("does not warn once the order is fully filled (nothing left for the cancel to interrupt)", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.005, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("does not warn when the resulting position quantity is unknown", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, averagePrice: 100, symbol: "AAPL" },
+      undefined,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("does not warn when the fill notional is already above the floor", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // Filled 0.05 sh @ $100 = $5, comfortably above Robinhood's $1 floor.
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.1, filledQuantity: 0.05, averagePrice: 100, symbol: "AAPL" },
+      0.05,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("falls back to currentPrice when the broker hasn't reported an averagePrice yet", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, currentPrice: 100, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(warning).toContain("$0.50");
+  });
+
+  it("does not warn when no price is available at all", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+
+  it("tolerates tiny float rounding between filledQuantity and positionQuantity (epsilon)", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    const warning = describeCancelDustRisk(
+      { side: "buy", quantity: 0.02, filledQuantity: 0.005000000001, averagePrice: 100, symbol: "AAPL" },
+      0.005,
+      "robinhood"
+    );
+    expect(warning).toContain("AAPL");
+  });
+
+  // Regression guard for the dollar-based `remaining` fix: a dollar-sized order NEVER carries
+  // `quantity`, so the old `(order.quantity ?? 0) - filledQuantity` computation was ALWAYS negative
+  // for these orders (0 - anything filled), which meant the advisory could never fire for a
+  // dollar-based partial fill — exactly the order shape most likely to strand fractional dust.
+  it("warns on a dollar-based partial fill whose fill is the whole resulting position, below the floor", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // $5 dollar order, only 0.02 sh @ $20 = $0.40 filled so far (well below Robinhood's $1 floor
+    // and well short of the $5 target) -- quantity is undefined (dollar-based), not 0.
+    const warning = describeCancelDustRisk(
+      { side: "buy", dollarAmount: 5, filledQuantity: 0.02, averagePrice: 20, symbol: "AAPL" },
+      0.02,
+      "robinhood"
+    );
+    expect(warning).toContain("AAPL");
+    expect(warning).toContain("$0.40");
+    expect(warning).toContain("$1.00");
+  });
+
+  it("does NOT warn on a fully-filled dollar-based order (nothing left for the cancel to interrupt)", async () => {
+    const { describeCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+    // Filled notional ($0.40) equals the dollar target ($0.40) -- fully filled -- even though that
+    // notional is itself below the floor, isolating the "fully filled" no-op from the floor check.
+    const warning = describeCancelDustRisk(
+      { side: "buy", dollarAmount: 0.4, filledQuantity: 0.02, averagePrice: 20, symbol: "AAPL" },
+      0.02,
+      "robinhood"
+    );
+    expect(warning).toBeUndefined();
+  });
+});
+
+describe("shouldAlertCancelDustRisk cooldown", () => {
+  it("alerts once per (user, accountNumber, symbol) and suppresses a second call within the cooldown window", async () => {
+    const { shouldAlertCancelDustRisk } = await import("../src/lib/broker-minimum-guard");
+
+    expect(shouldAlertCancelDustRisk("dust-cooldown-user-1", "RH-ACCOUNT", "AAPL")).toBe(true);
+    expect(shouldAlertCancelDustRisk("dust-cooldown-user-1", "RH-ACCOUNT", "AAPL")).toBe(false);
+  });
+
+  it("cooldown is scoped per (user, accountNumber, symbol), not global, and independent of shouldAlertBrokerMinimumOrderBlock", async () => {
+    const { shouldAlertCancelDustRisk, shouldAlertBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
+
+    expect(shouldAlertCancelDustRisk("dust-cooldown-user-2", "RH-ACCOUNT", "AAPL")).toBe(true);
+    expect(shouldAlertCancelDustRisk("dust-cooldown-user-2", "RH-ACCOUNT", "MSFT")).toBe(true);
+    expect(shouldAlertCancelDustRisk("dust-cooldown-user-2", "OTHER-ACCOUNT", "AAPL")).toBe(true);
+    // A separate cooldown key namespace from the sub-minimum-order-block alert — the two never
+    // share a budget even for the same (user, account, symbol).
+    expect(shouldAlertBrokerMinimumOrderBlock("dust-cooldown-user-2", "RH-ACCOUNT", "AAPL")).toBe(true);
+  });
+});
+
 describe("shouldAlertBrokerMinimumOrderBlock cooldown", () => {
   it("alerts once per (user, accountNumber, symbol) and suppresses a second call within the cooldown window", async () => {
     const { shouldAlertBrokerMinimumOrderBlock } = await import("../src/lib/broker-minimum-guard");
@@ -180,5 +384,33 @@ describe("shouldAlertBrokerMinimumOrderBlock cooldown", () => {
     expect(shouldAlertBrokerMinimumOrderBlock("cooldown-user-2", "OTHER-ACCOUNT", "AAPL")).toBe(true);
     // Same broker account and symbol, different owner — independent cooldown and deletion scope.
     expect(shouldAlertBrokerMinimumOrderBlock("cooldown-user-3", "RH-ACCOUNT", "AAPL")).toBe(true);
+  });
+});
+
+// Review round on the h3 audit (2026-09-30): a sub-minimum order that slips past the pre-flight is
+// refused by Robinhood at placement with a non-HTTP "response had no order id" error.  That text is
+// deterministic, so it must classify as a below-minimum block, never as an uncertain placement.
+describe("detectBrokerMinimumPlacementError", () => {
+  it("matches the production placement errors for both minimum wordings", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    const fractional =
+      'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"Fractional orders must be at least $1.\\"]}"}';
+    const dollarBased = 'Robinhood MCP tool reported an error: Dollar-based orders must be at least $1.';
+
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Fractional orders must be at least $1");
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Nothing was placed");
+    expect(detectBrokerMinimumPlacementError(dollarBased)).toContain("Dollar-based orders must be at least $1");
+  });
+
+  it("does not match the account questionnaire, generic failures, or an empty message", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    expect(
+      detectBrokerMinimumPlacementError(
+        'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}'
+      )
+    ).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("network timeout")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("Quantity must be at least 1 share")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("")).toBeUndefined();
   });
 });

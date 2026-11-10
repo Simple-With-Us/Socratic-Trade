@@ -71,8 +71,9 @@ describe("chat draft policy bridge", () => {
     const { getPolicy, getSocraticDecisionCase, listPendingProposals, setPolicy } = await import("../src/lib/db");
     const { POST } = await import("../app/api/proposals/from-draft/route");
 
-    // Staleness gate ON but caps generous: the scan-less preview treats the missing quote timestamp
-    // as stale, so the only block reason is staleness_gate — which must NOT reject the draft here.
+    // Staleness gate ON but caps generous: the scan-less preview has no provider observation
+    // time, so the only block reason is quote_age_unknown — which must NOT reject the draft here.
+    // The order itself is blocked later, at approve time, if the fresh scan is still undated.
     setPolicy(
       {
         ...getPolicy(DEFAULT_REQUEST_USER_ID),
@@ -115,8 +116,14 @@ describe("chat draft policy bridge", () => {
     expect(response.status).toBe(201);
     const body = await response.json();
     expect(body.proposalId).toBeTruthy();
-    // Proves staleness DID fire (metadata present) but we staged anyway rather than failing closed.
-    expect(body.decision?.quoteStale).toBeDefined();
+    // Proves the unknown-age gate DID fire on the scan-less preview, and we staged anyway.
+    // Approve-time execution re-checks a real scan and blocks the order if that scan still
+    // has no provider observation time.
+    const reasons = body.decision?.reasons;
+    expect(
+      Array.isArray(reasons) &&
+        reasons.some((reason) => typeof reason === "string" && reason.startsWith("quote_age_unknown:"))
+    ).toBe(true);
     expect(listPendingProposals("TEST", DEFAULT_REQUEST_USER_ID)).toHaveLength(1);
     expect(getSocraticDecisionCase(body.proposalId, DEFAULT_REQUEST_USER_ID)).toMatchObject({ status: "proposed", proposalId: body.proposalId });
   });

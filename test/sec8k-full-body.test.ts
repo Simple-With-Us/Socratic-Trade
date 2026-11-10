@@ -15,6 +15,7 @@ beforeAll(() => {
 const mocks = vi.hoisted(() => ({
   politeFetchText: vi.fn(),
   hasIngestTextBudget: vi.fn().mockReturnValue(true),
+  hasPineconeWriteBudget: vi.fn().mockReturnValue(true),
   insertSecArtifact: vi.fn(),
   storeDocument: vi.fn().mockResolvedValue({
     attempted: 1,
@@ -52,6 +53,7 @@ vi.mock("../src/lib/vector-db", async (importOriginal) => {
     ...actual,
     managedVectorLedgerAuthority: vi.fn(),
     hasIngestTextBudget: mocks.hasIngestTextBudget,
+    hasPineconeWriteBudget: mocks.hasPineconeWriteBudget,
     storeDocument: async (...args: Parameters<typeof actual.storeDocument>) => {
       const result = await mocks.storeDocument(...args);
       return result?.documentComplete === true
@@ -62,7 +64,15 @@ vi.mock("../src/lib/vector-db", async (importOriginal) => {
 });
 
 import { hasIngestedAccession } from "../src/lib/db";
-import { eightKFullBodyEnabled, ingestEightKBody, ingestEightKBodies, type EightKEvent } from "../src/lib/web-sources/sec8k";
+import {
+  eightKBodyCycleShouldStop,
+  eightKFullBodyBudgetMs,
+  eightKFullBodyEnabled,
+  eightKFullBodyLimit,
+  ingestEightKBody,
+  ingestEightKBodies,
+  type EightKEvent
+} from "../src/lib/web-sources/sec8k";
 
 const SAMPLE_HTML = `<html><body><div>${"Material event details. ".repeat(30)}</div></body></html>`;
 
@@ -79,6 +89,7 @@ beforeEach(() => {
   delete process.env.WEB_SOURCE_SEC8K_FULL_BODY;
   mocks.politeFetchText.mockResolvedValue(SAMPLE_HTML);
   mocks.hasIngestTextBudget.mockReturnValue(true);
+  mocks.hasPineconeWriteBudget.mockReturnValue(true);
   mocks.insertSecArtifact.mockImplementation(() => undefined);
   mocks.storeDocument.mockResolvedValue({
     attempted: 1,
@@ -279,5 +290,40 @@ describe("ingestEightKBodies (batch path called from refreshEightK when the flag
     });
     expect(mocks.politeFetchText).toHaveBeenCalledTimes(1);
     expect(mocks.storeDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the cycle when the wall-time budget is exhausted (budgetMs=0 after first)", async () => {
+    const events: EightKEvent[] = [
+      { ...EVENT, accession: `budget-a-${randomUUID()}` },
+      { ...EVENT, accession: `budget-b-${randomUUID()}` },
+      { ...EVENT, accession: `budget-c-${randomUUID()}` }
+    ];
+    const result = await ingestEightKBodies(events, Date.now(), undefined, { budgetMs: 0 });
+    expect(result.attempted).toBe(1);
+    expect(result.ingested).toBe(1);
+    expect(result.budgetExhausted).toBe(true);
+    expect(result.deferredAccessions).toEqual(events.slice(1).map((event) => event.accession));
+    expect(mocks.politeFetchText).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("8-K full-body cycle bounds", () => {
+  it("defaults the per-cycle limit to 5 and the wall budget to 12s, capped at 60s", () => {
+    delete process.env.WEB_SOURCE_SEC8K_FULL_BODY_LIMIT;
+    delete process.env.WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS;
+    expect(eightKFullBodyLimit()).toBe(5);
+    expect(eightKFullBodyBudgetMs()).toBe(12_000);
+
+    process.env.WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS = "120000";
+    expect(eightKFullBodyBudgetMs()).toBe(60_000);
+    process.env.WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS = "0";
+    expect(eightKFullBodyBudgetMs()).toBe(12_000);
+    delete process.env.WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS;
+  });
+
+  it("eightKBodyCycleShouldStop is elapsed >= budget", () => {
+    expect(eightKBodyCycleShouldStop(1000, 1000, 12_000)).toBe(false);
+    expect(eightKBodyCycleShouldStop(1000, 13_000, 12_000)).toBe(true);
+    expect(eightKBodyCycleShouldStop(1000, 1000, 0)).toBe(true);
   });
 });

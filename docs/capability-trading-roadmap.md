@@ -140,5 +140,12 @@ AGENTS.md at larger scale; treat it as an exhaustive audit, not a quick add.
 ## Status
 
 Foundation PRs in review (Tradier #1380 gate-green; order-status-reconcile in
-adversarial verify). Phases 0–5 not yet started — sequenced after foundations merge to
+adversarial verify). Phases 0–5 not yet started as a block — sequenced after foundations merge to
 avoid a money-path merge pileup on the live app.
+
+**2026-08-13 first ship (`grok/st-kalshi-exits-options`):** Exit Contract persistence was already
+on main (B1/B2). This slice adds Phase B4 broker-held Alpaca buy-stops for shorts
+(`brokerStopsForShorts` default on), unmanaged-short honesty when the venue cannot hold a cover
+stop, Alpaca paper option place/cancel behind `optionsTradingEnabled` (live kill switch
+`optionsLiveOrdersEnabled` default off), and Kalshi macro prompt context plus a separate
+event-contract trading module (`KALSHI_LIVE_ORDERS` + `kalshiLiveOrdersEnabled` both default off).

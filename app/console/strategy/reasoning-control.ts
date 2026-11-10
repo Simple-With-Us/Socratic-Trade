@@ -19,7 +19,7 @@ import {
   ROTATION_UI_REASONING_CAPABILITY,
   type LlmReasoningCapability,
   type LlmReasoningOption
-} from "@/lib/llm-request";
+} from "@/lib/llm-reasoning";
 
 function uniq<T>(items: T[]): T[] {
   return Array.from(new Set(items));
@@ -61,7 +61,7 @@ export function reasoningControlForModels(models: string[]): ReasoningControl | 
   const labels = uniqueCapabilities.map((capability) => capability.label).join(" + ");
   return {
     label: "Shared Reasoning / Thinking",
-    hint: `${labels} are active. Only values supported by every selected model are shown.`,
+    hint: `${labels} are active.  Only values supported by every selected model are shown.`,
     options,
     capabilities: uniqueCapabilities
   };

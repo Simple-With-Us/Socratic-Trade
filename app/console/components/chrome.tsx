@@ -8,20 +8,27 @@
  *  - Run once (wired; disabled with a reason when blocked)
  *  - data freshness strip */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Check, ChevronDown, LogOut, Monitor, Moon, OctagonMinus, Play, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
 import type { ConnectedAccount } from "@/lib/types";
 // llm-required is PURE (no node/server imports — see its header), so its message constants are
 // safe to import here: classifyRunFailure matches the server's own 412 summary strings.
-import { LLM_MODEL_REQUIRED_STRATEGY_MESSAGE } from "@/lib/llm-required";
+import {
+  LLM_MODEL_REQUIRED_STRATEGY_MESSAGE,
+  LLM_ROTATION_AVAILABILITY_UNAVAILABLE_STRATEGY_MESSAGE,
+  LLM_ROTATION_EMPTY_POOL_STRATEGY_MESSAGE
+} from "@/lib/llm-required";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import {
   activeConnectedAccount,
   deriveReality,
   deriveSpend,
   deriveStateInfo,
-  realityForAccount
+  realityForAccount,
+  stateChipTitle,
+  withHaltCause
 } from "../lib/derive";
 import {
   activateAccount,
@@ -31,14 +38,17 @@ import {
   startStrategy,
   stopEverything
 } from "../lib/api";
-import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmtExact } from "../lib/format";
+import { cx, fmtClock, fmtMoney, fmtMoneyWhole, timeAgo, timeUntil, EM_DASH, fmtExact, SENTENCE_GAP } from "../lib/format";
+import { loginProviderLabel } from "../lib/labels";
 import type { ConsoleStreamHealth } from "../lib/useConsoleData";
 import { useConsoleData } from "../lib/useConsoleData";
 import { useDirtyActionGuard, useNextUnloadBypass } from "../lib/useDirtyGuard";
 import type { ConsoleTheme } from "../lib/useConsoleTheme";
 import { useToast } from "../ui/toast";
+import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 // ── Reality banner ───────────────────────────────────────────────────────────
 
@@ -47,10 +57,11 @@ export function RealityBanner({ snapshot }: { snapshot: DashboardSnapshot }) {
   if (reality.tone === "live") return null;
   return (
     <div className={cx("con-reality", `con-reality-${reality.tone}`)}>
-      <div className="mx-auto flex max-w-[1400px] items-baseline gap-2 px-4 py-1.5">
+      <div className={cx("mx-auto flex max-w-[1400px] items-baseline px-4 py-1.5", reality.tone === "paper" ? "gap-0" : "gap-2")}>
         <span className="con-reality-word text-[length:var(--con-fs-sm)]">{reality.word}</span>
-        <span className="font-semibold">· {reality.phrase}</span>
-        <span className="hidden truncate text-[color:var(--con-muted)] sm:inline">— {reality.clarification}</span>
+        <span className={cx("font-semibold text-black", reality.tone === "paper" && "whitespace-pre")}>{reality.tone === "paper" ? "  •  " : "•"}</span>
+        <span className="font-semibold text-black">{reality.phrase}</span>
+        {reality.tone !== "paper" && <span className="hidden truncate text-black sm:inline">— {reality.clarification}</span>}
       </div>
     </div>
   );
@@ -67,28 +78,38 @@ function brokerName(broker: string | undefined): string {
       return "Robinhood";
     case "tradier":
       return "Tradier";
+    case "kalshi":
+      return "Kalshi";
+    case "etoro":
+      return "eToro";
+    case "public":
+      return "Public";
+    case "webull":
+      return "Webull";
     default:
       return broker ?? "";
   }
 }
 
-export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapshot; compact?: boolean }) {
+export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compact?: boolean }) {
   const toast = useToast();
   const guardAction = useDirtyActionGuard();
   const allowNextUnload = useNextUnloadBypass();
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const reality = deriveReality(snapshot);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "left", width: 360 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const active = activeConnectedAccount(snapshot);
   // Active account hoisted first, the rest after — same order the switch list
   // reads top-to-bottom. Mirrors the Broker connections settings card.
   const others = snapshot.connectedAccounts.filter((a) => !a.isActive);
   const ordered = active ? [active, ...others] : others;
 
-  const label = active
-    ? `${active.label || brokerName(active.broker)}${active.accountNumber ? ` ••${active.accountNumber.slice(-4)}` : ""}`
-    : "No connected account";
+  const label = active ? active.label || brokerName(active.broker) : "No connected account";
+  const activeLast4 = active?.accountNumber ? active.accountNumber.slice(-4) : null;
 
   const close = () => {
     setOpen(false);
@@ -126,21 +147,20 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
     }
   };
 
-  // Compact switch row: name + reality/run-state chips on line one, broker ••last4
-  // (bullet mask, same convention as iOS) on a faint second line. The whole row is
-  // the switch affordance; the loaded account is a non-interactive current-state
-  // marker (checkmark, accent tint).
+  // The whole row is the switch affordance; the loaded account is a non-interactive
+  // current-state marker (checkmark, accent tint).
   const renderRow = (account: ConnectedAccount) => {
     const r = realityForAccount(account);
     const policy = snapshot.connectedAccountPolicies?.[account.id];
-    const st = policy ? deriveStateInfo(policy) : null;
+    // Lane h5 review round: a stopped account that is not loaded says why, too.
+    const st = policy ? withHaltCause(deriveStateInfo(policy), policy.haltCause) : null;
     const isActive = account.isActive;
     const last4 = account.accountNumber ? account.accountNumber.slice(-4) : null;
     return (
       <button
         key={account.id}
         type="button"
-        role="menuitemradio"
+        role="radio"
         aria-checked={isActive}
         disabled={isActive || busyId !== null}
         onClick={() => guardAction(() => void switchTo(account.id))}
@@ -154,17 +174,16 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
             <span className="truncate text-[length:var(--con-fs-sm)] font-semibold">
               {account.label || brokerName(account.broker)}
             </span>
-            {r.tone !== "live" && <Chip tone={r.tone}>{r.word}</Chip>}
+            {r.tone !== "live" && <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.word}</Chip>}
             {st && (
-              <Chip tone={st.tone}>
+              <Chip tone={st.tone} title={stateChipTitle(st)}>
                 {st.label.replace(" · market closed", "")}
               </Chip>
             )}
           </span>
-          <span className="mt-0.5 block truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {brokerName(account.broker)}
-            {last4 ? ` · ••${last4}` : ""}
-            {r.tone !== "live" ? ` · ${r.phrase}` : ""}
+          <span className="mt-0.5 flex min-w-0 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            <span className="truncate">{brokerName(account.broker)}</span>
+            {last4 && <span className="shrink-0 whitespace-pre">{` — ${last4}`}</span>}
           </span>
         </span>
         <span
@@ -198,25 +217,21 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
     // an "N.." clip comes from the reduced button padding (px-2.5) + truncate: at 360px
     // the leftover is ~73px, enough for "No con…"/the broker name, and it only grows
     // from there. Paired with the tighter mobile gap/padding on the header row (shell.tsx).
-    <div className="relative min-w-0 flex-1 sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
+    <div className="relative flex-1 min-w-[120px] sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
       <button
         ref={triggerRef}
         type="button"
         onClick={() => (open ? close() : setOpen(true))}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
-        // items-start + a small chevron nudge aligns the chevron with the first
-        // (account-name) line rather than floating between the two label lines.
-        className="flex w-full items-start gap-2 overflow-hidden rounded-control border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-2.5 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)] sm:px-3"
+        className="flex w-full items-center gap-2 overflow-hidden rounded-control border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-2.5 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)] sm:px-3 con-bar-ctl con-bar-ctl-scope"
         title="Switch which account this console shows"
       >
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[length:var(--con-fs-sm)] font-semibold leading-tight">{label}</span>
-          {!compact && (
-            <span className="hidden truncate text-[length:var(--con-fs-xs)] leading-tight text-[color:var(--con-faint)] sm:block">
-              {reality.tone === "live" ? "Brokerage account" : `${reality.word} · ${reality.phrase}`}
-            </span>
-          )}
+          <span className="flex min-w-0 text-[length:var(--con-fs-sm)] font-semibold leading-tight">
+            <span className="truncate">{label}</span>
+            {activeLast4 && <span className="shrink-0 whitespace-pre">{`   — ${activeLast4}`}</span>}
+          </span>
         </span>
         <ChevronDown
           size={14}
@@ -230,14 +245,20 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
           <button
             type="button"
             aria-label="Close account menu"
+            tabIndex={-1}
             className="fixed inset-0 z-40 h-full w-full cursor-default border-0 bg-transparent opacity-0"
             onClick={close}
           />
-          <div
-            role="menu"
-            aria-label="Account scope"
-            className="con-menu-drop absolute left-0 top-[calc(100%+4px)] z-50 flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
-          >
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                role="dialog"
+                aria-label="Account scope"
+                style={menu.style}
+                className="con-menu-drop flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
+              >
             <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
               One account is loaded at a time. Switching rescopes everything — balances, guardrails, approvals, run
               state, and decision history.
@@ -253,12 +274,11 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
                 </p>
               </div>
             ) : (
-              <div className="flex flex-col gap-1.5">{ordered.map(renderRow)}</div>
+              <div role="radiogroup" aria-label="Select active account" className="flex flex-col gap-1.5">{ordered.map(renderRow)}</div>
             )}
             <div className="my-0.5 h-px bg-[color:var(--con-line)]" />
             <Link
               href="/console/connections#brokers"
-              role="menuitem"
               onClick={close}
               className="con-scope-row flex w-full items-center gap-2 rounded-control border border-[color:var(--con-line)] px-3 py-2 text-[length:var(--con-fs-sm)] font-medium"
               title="Add, remove, or reconnect broker accounts"
@@ -266,7 +286,9 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
               <SlidersHorizontal size={14} className="shrink-0 text-[color:var(--con-faint)]" />
               Configure accounts
             </Link>
-          </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>
@@ -284,7 +306,7 @@ const STATE_TONE: Record<string, "pos" | "warn" | "neg" | "muted"> = {
 
 export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   // On phones the boxed single-line chip read as a second dropdown next to the
   // account selector and crowded the bar (owner report) — below sm it renders
   // unboxed with the state stacked over the authority in smaller type. Desktop
@@ -295,8 +317,8 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
-        title={info.detail}
+        className="con-bar-ctl flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
+        title={info.cause ? `${info.cause}  ${info.detail}` : info.detail}
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />
         <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
@@ -317,13 +339,16 @@ export function RunStateButton({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
   const state = snapshot.policy.systemState;
   const isStartDirection = state === "halted" || state === "close_only";
-  const label = state === "halted" ? "Start" : state === "close_only" ? "Resume" : "STOP";
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
+  const label = state === "halted" ? "Start Agent" : state === "close_only" ? "Resume Agent" : "Stop Agent";
   const title =
-    state === "halted"
-      ? "Open start options. Scheduled/autonomous runs stay off until you confirm Start."
-      : state === "close_only"
-        ? "Open resume options. You can resume full operation or change run state."
-        : "Stop the strategy. Stopping never sells anything.";
+    info.word === "Paused · market closed"
+      ? "The agent is on.  Scheduled runs wait for the next open.  Open this to stop it or change run state."
+      : state === "halted"
+        ? `${info.cause ? `${info.cause}  ` : ""}Open start options.  Scheduled runs stay off until you confirm Start Agent.`
+        : state === "close_only"
+          ? "Open resume options.  You can resume full operation or change run state."
+          : "Stop the agent.  Stopping never sells anything.";
   return (
     <>
       <button
@@ -331,10 +356,10 @@ export function RunStateButton({ snapshot }: { snapshot: DashboardSnapshot }) {
         className={isStartDirection ? "con-start-btn" : "con-stop-btn"}
         onClick={() => setOpen(true)}
         title={title}
-        aria-label={label === "STOP" ? "Stop strategy" : `${label} strategy`}
+        aria-label={label}
       >
         {isStartDirection ? <Play size={15} /> : <OctagonMinus size={15} />}
-        {label}
+        <span className="con-run-state-label">{label}</span>
       </button>
       <ControlSheet snapshot={snapshot} open={open} onClose={() => setOpen(false)} emergency={!isStartDirection} />
     </>
@@ -362,20 +387,20 @@ function ControlSheet({
   const [armText, setArmText] = useState("");
   const [confirmVerb, setConfirmVerb] = useState<"start" | "liquidate" | null>(null);
   const reality = deriveReality(snapshot);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   const state = snapshot.policy.systemState;
 
-  const startLabel = state === "close_only" ? "Resume" : "Start";
+  const startLabel = state === "close_only" ? "Resume Agent" : "Start Agent";
   const startGerund = state === "close_only" ? "Resuming" : "Starting";
   const startProgressLabel = `${startGerund}…`;
   const liquidatePhrase = "WIND DOWN";
   const sheetTitle = emergency
-    ? "Stop the strategy"
+    ? "Stop Agent"
     : state === "halted"
-      ? "Start the strategy"
+      ? "Start Agent"
       : state === "close_only"
-        ? "Resume or change run state"
-        : "Run state";
+        ? "Resume or Change Run State"
+        : "Change Agent";
 
   const act = async (verb: string, fn: () => Promise<unknown>, successTitle: string, successDetail?: string) => {
     setBusy(verb);
@@ -414,7 +439,7 @@ function ControlSheet({
     };
     const closeOnlyOption = {
         id: "close_only",
-        title: "Close-only",
+        title: "Exit-only",
         body:
           "No new buys. Protective sells and the app's stop monitor keep working. This is what the automatic circuit breakers choose.",
         available: state !== "close_only",
@@ -422,7 +447,7 @@ function ControlSheet({
     };
     const liquidatingOption = {
         id: "liquidating",
-        title: "Wind down",
+        title: "Wind Down",
         body:
           "The strategy sells positions until the account is in cash. This SELLS things — it may realize losses and taxes.",
         available: state !== "liquidating",
@@ -457,7 +482,20 @@ function ControlSheet({
           Now: <strong className="text-[color:var(--con-fg)]">{info.label}</strong>
         </span>
       </div>
-      <p className="mb-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">{info.detail}</p>
+      {info.cause && (
+        <p
+          className="mb-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-fg)]"
+          data-testid="halt-cause"
+        >
+          {info.cause.replace(/ {2}/g, SENTENCE_GAP)}
+        </p>
+      )}
+      <p className="mb-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
+        {info.detail}
+        {info.word === "Paused · market closed"
+          ? "  Stop Agent turns scheduled autonomy off.  The market being closed is not the same as the agent being stopped."
+          : ""}
+      </p>
 
       <div className="flex flex-col gap-2.5">
         {options
@@ -472,13 +510,13 @@ function ControlSheet({
                   </Btn>
                 )}
                 {o.id === "close_only" && (
-                  <Btn variant="outline" size="sm" disabled={busy !== null} onClick={() => void act("close_only", () => setSystemState("close_only", snapshot.policy.connectedAccountId), "Close-only", "No new buys. Protective exits keep working.")}>
+                  <Btn variant="outline" size="sm" disabled={busy !== null} onClick={() => void act("close_only", () => setSystemState("close_only", snapshot.policy.connectedAccountId), "Exit-only", "No new buys. Protective exits keep working.")}>
                     {busy === "close_only" ? "Switching…" : "Confirm"}
                   </Btn>
                 )}
                 {o.id === "liquidating" && (
                   <Btn variant="dangerOutline" size="sm" disabled={busy !== null} onClick={() => setConfirmVerb(confirmVerb === "liquidate" ? null : "liquidate")}>
-                    Wind down…
+                    Wind Down…
                   </Btn>
                 )}
                 {o.id === "start" && (
@@ -495,7 +533,7 @@ function ControlSheet({
                   value={armText}
                   onChange={setArmText}
                   busy={busy === "liquidating"}
-                  confirmLabel="Wind down — this sells"
+                  confirmLabel="Wind Down — this sells"
                   variant="danger"
                   onConfirm={() =>
                     void act("liquidating", () => setSystemState("liquidating", snapshot.policy.connectedAccountId), "Winding down", "Only sell orders until the account is in cash.")
@@ -530,6 +568,7 @@ export function TypedConfirm({
   variant?: "danger" | "pos" | "primary";
   note?: string;
 }) {
+  const inputId = useId();
   const matches = value.trim().toUpperCase() === phrase;
   // Only a destructive confirm gets the red frame; other typed rituals use the
   // caution (warn) tint so red stays reserved for reality/STOP/destruction.
@@ -540,11 +579,12 @@ export function TypedConfirm({
   return (
     <div className={cx("mt-3 rounded-control border p-3", frameClass)}>
       {note && <p className="mb-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{note}</p>}
-      <label className="con-label">
+      <label className="con-label" htmlFor={inputId}>
         Type exactly: <span className="con-mono text-[color:var(--con-fg)]">{phrase}</span>
       </label>
       <div className="flex gap-2">
         <TextInput
+          id={inputId}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           autoComplete="off"
@@ -610,6 +650,22 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
   // is missing (everything else — fix under API keys). Titling a model-choice refusal "No LLM key
   // is configured" sent the owner hunting through API keys that were fine — match the choice
   // message FIRST, on the server's own string.
+  if (m.includes(LLM_ROTATION_AVAILABILITY_UNAVAILABLE_STRATEGY_MESSAGE.toLowerCase())) {
+    return {
+      title: "Rotation Couldn't Check Models",
+      detail: message,
+      fixHref: "/console/strategy#models",
+      fixLabel: "Open Strategy → Models"
+    };
+  }
+  if (m.includes(LLM_ROTATION_EMPTY_POOL_STRATEGY_MESSAGE.toLowerCase())) {
+    return {
+      title: "Rotation has no keyed model to serve",
+      detail: message,
+      fixHref: "/console/connections#api-keys",
+      fixLabel: "Open Connections → API keys"
+    };
+  }
   if (m.includes(LLM_MODEL_REQUIRED_STRATEGY_MESSAGE.toLowerCase())) {
     return {
       title: "Choose your team models",
@@ -630,7 +686,7 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
     return {
       title: "A circuit breaker is holding new entries",
       detail: message,
-      note: "A breaker tripping means a hard limit did its job. Review what fired before loosening anything.",
+      note: BREAKER_FIRED_NOTE,
       fixHref: "/console/guardrails",
       fixLabel: "Review Guardrails"
     };
@@ -638,7 +694,7 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
   if (m.includes("halted") || m.includes("stopped")) {
     return {
       title: "The system is stopped",
-      detail: `${message} Start it (or switch to Close-only) from the run-state chip in the top bar.`,
+      detail: `${message} Start it (or switch to Exit-only) from the run-state chip in the top bar.`,
       note:
         "While stopped, nothing buys or sells — and this app's automatic stop-losses are paused too. Broker-held brackets keep resting at your broker."
     };
@@ -647,8 +703,8 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
     return {
       title: "A run is already in progress",
       detail: `${message} Wait for it to finish — Activity shows it as it happens.`,
-      fixHref: "/console/activity",
-      fixLabel: "Open Activity"
+      fixHref: "/console/activity?tab=runs",
+      fixLabel: "Open Strategy Runs"
     };
   }
   if (m.includes("budget")) {
@@ -671,8 +727,8 @@ function classifyRunFailure(message: string, status?: number): RunBlock {
   return {
     title: "The run failed",
     detail: message,
-    fixHref: "/console/activity",
-    fixLabel: "See the full story in Activity"
+    fixHref: "/console/activity?tab=alerts",
+    fixLabel: "See the full story in Alerts Center"
   };
 }
 
@@ -694,7 +750,7 @@ export function RunOnceButton({
 
   const preflight = deriveRunBlock(snapshot);
 
-  const run = async () => {
+  const run = useCallback(async () => {
     // Blocked runs still respond to the click: they open the "why" sheet with
     // the route to the fix, instead of being a dead disabled button.
     if (preflight) {
@@ -707,9 +763,9 @@ export function RunOnceButton({
       await refresh();
       if (result.status === "failed") {
         setBlock(classifyRunFailure(result.summary || "The run failed."));
-      } else if (result.status === "started") {
-        // The route launched the run and returned before it finished (real runs can take several
-        // minutes on LLM-heavy steps) — reflect "started", not "complete". Activity/snapshot
+      } else if (result.status === "started" || result.status === "queued") {
+        // The route persisted the run and returned before it finished (real runs can take several
+        // minutes on LLM-heavy steps) — reflect queued/started, not complete. Activity/snapshot
         // polling already renders the strategy_runs row this created as it progresses.
         toast.push("pos", "Run started", result.summary || "Check Activity for progress.");
       } else {
@@ -725,7 +781,15 @@ export function RunOnceButton({
     } finally {
       setRunning(false);
     }
-  };
+  }, [preflight, refresh, toast]);
+
+  useEffect(() => {
+    const onRunOnce = () => {
+      void run();
+    };
+    window.addEventListener("console:run-once", onRunOnce);
+    return () => window.removeEventListener("console:run-once", onRunOnce);
+  }, [run]);
 
   return (
     <>
@@ -739,7 +803,7 @@ export function RunOnceButton({
         size={size}
         disabled={running}
         onClick={() => void run()}
-        aria-label={iconOnly ? (running ? "Running…" : "Run once") : undefined}
+        aria-label={iconOnly ? (running ? "Running…" : "Run Once") : undefined}
         title={
           preflight
             ? `Blocked: ${preflight.title}. Click to see why and where to fix it.`
@@ -749,10 +813,10 @@ export function RunOnceButton({
         {/* Emoji bolt, not lucide Zap (owner preference 2026-08-08 — the colored emoji
             reads better than the line icon). Still not Play: Start/Resume owns Play. */}
         <span aria-hidden className="text-[13px] leading-none">⚡</span>
-        {iconOnly ? null : running ? "Running…" : "Run once"}
+        {iconOnly ? null : running ? "Running…" : "Run Once"}
       </Btn>
 
-      <Sheet open={block !== null} onClose={() => setBlock(null)} title="Run once can't go ahead">
+      <Sheet open={block !== null} onClose={() => setBlock(null)} title="Run Once Can't Go Ahead">
         {block && (
           <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
             <div className="flex items-center gap-2">
@@ -824,6 +888,10 @@ export function UserMenu({
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 340, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const user = snapshot.currentUser;
 
   const close = () => {
@@ -848,9 +916,9 @@ export function UserMenu({
   const who = user.name ?? user.email ?? user.userId;
 
   return (
-    // Not position:relative — the dropdown anchors to the bar row (the nearest
-    // positioned ancestor, set in shell.tsx) so it hugs the viewport-right edge
-    // instead of overflowing left off small screens.
+    // Not position:relative — the panel portals to <body> and fixed-anchors
+    // to this button (useAnchoredMenu), right-aligned so it cannot overflow
+    // off the left edge of small screens.
     <div className="shrink-0">
       <button
         ref={triggerRef}
@@ -860,8 +928,7 @@ export function UserMenu({
         aria-label={`Signed in as ${user.email ?? who} — account menu`}
         aria-expanded={open}
         aria-haspopup="menu"
-        style={{ width: 32, height: 32, minWidth: 32, minHeight: 32, maxWidth: 32, maxHeight: 32 }}
-        className="flex shrink-0 items-center justify-center overflow-hidden rounded-control border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
+        className="con-bar-ctl flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-control border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
       >
         <Avatar imageUrl={user.imageUrl} size="h-full w-full" iconSize={15} />
       </button>
@@ -870,7 +937,14 @@ export function UserMenu({
         <>
           {/* invisible click-away backdrop; the panel sits above it */}
           <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div className="con-menu-drop absolute right-2 top-[calc(100%+2px)] z-50 w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl">
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                style={menu.style}
+                className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
+              >
             <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
               <div className="flex items-center gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color:var(--con-line)] text-[color:var(--con-muted)]">
@@ -880,7 +954,7 @@ export function UserMenu({
                   <div className="truncate font-semibold">{who}</div>
                   {user.email && user.name && <div className="truncate text-[color:var(--con-muted)]">{user.email}</div>}
                   <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                    {user.loginProvider ? `Signed in via ${user.loginProvider}` : "Signed in"}
+                    {user.loginProvider ? `Signed in via ${loginProviderLabel(user.loginProvider)}` : "Signed in"}
                     {user.isAdmin ? " · operator/admin rights" : ""}
                   </div>
                 </div>
@@ -899,7 +973,7 @@ export function UserMenu({
                         title={THEME_WORD[t]}
                         aria-label={`Set theme to ${THEME_WORD[t]}`}
                         className={cx(
-                          "flex items-center gap-1.5 rounded-control px-2.5 py-1 text-[length:var(--con-fs-xs)] transition-colors",
+                          "con-theme-btn flex items-center gap-1.5 rounded-control px-2.5 py-1 text-[length:var(--con-fs-xs)] transition-colors",
                           active
                             ? "bg-[color:var(--con-surface)] text-[color:var(--con-fg)] font-medium shadow-sm border border-[color:var(--con-line)]"
                             : "text-[color:var(--con-muted)] hover:text-[color:var(--con-fg)] border border-transparent"
@@ -939,8 +1013,10 @@ export function UserMenu({
                   Sign out
                 </a>
               </div>
-            </div>
-          </div>
+              </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>
@@ -964,22 +1040,32 @@ function deriveFreshnessLabel(fetchedAt: Date | null, error: string | null, stre
  *  overlays anything at document end there, so a bottom-anchored strip is
  *  invisible on mobile. This is the only mobile freshness surface; the
  *  desktop-only FreshnessStrip below no longer renders a mobile variant. */
+function OfflineBanner() {
+  return (
+    <span className="shrink-0 font-semibold text-[color:var(--con-warn)]">
+      You’re offline.{SENTENCE_GAP}Showing the last snapshot.
+    </span>
+  );
+}
+
 export function MobileFreshnessBar({
   snapshot,
   fetchedAt,
   error,
-  stream
+  stream,
+  online = true
 }: {
   snapshot: DashboardSnapshot;
   fetchedAt: Date | null;
   error: string | null;
   stream: ConsoleStreamHealth;
+  online?: boolean;
 }) {
   const spend = deriveSpend(snapshot);
   const freshnessLabel = deriveFreshnessLabel(fetchedAt, error, stream);
   // PR-E3: when healthy, collapse to one short line (Fresh · Today) instead of
   // repeating clock + label + spend + delayed chip. Unhealthy keeps the detail.
-  const healthy = !error && freshnessLabel === "fresh" && fetchedAt != null;
+  const healthy = online && !error && freshnessLabel === "fresh" && fetchedAt != null;
   return (
     <div className="flex items-center gap-3 border-t border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-4 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] lg:hidden">
       {healthy ? (
@@ -1003,6 +1089,7 @@ export function MobileFreshnessBar({
             <ShieldCheck size={12} />
             Deployed today: {fmtMoney(spend.usedNotional)}
           </span>
+          {!online && <OfflineBanner />}
           {error && (
             <span className="shrink-0 font-semibold text-[color:var(--con-warn)]" title={error}>
               delayed
@@ -1018,12 +1105,14 @@ export function FreshnessStrip({
   snapshot,
   fetchedAt,
   error,
-  stream
+  stream,
+  online = true
 }: {
   snapshot: DashboardSnapshot;
   fetchedAt: Date | null;
   error: string | null;
   stream: ConsoleStreamHealth;
+  online?: boolean;
 }) {
   const spend = deriveSpend(snapshot);
   const scanAt = snapshot.latestStrategyRun?.marketScan?.generatedAt;
@@ -1064,8 +1153,9 @@ export function FreshnessStrip({
           <ShieldCheck size={12} />
           Deployed today: {fmtMoney(spend.usedNotional)}
           {typeof spend.capNotional === "number" ? ` of ${fmtMoneyWhole(spend.capNotional)}` : ""}
-          <Meter value={spend.usedNotional} max={spend.capNotional} className="w-16" />
+          <Meter value={spend.usedNotional} max={spend.capNotional} className="w-16" label="Deployed today" />
         </span>
+        {!online && <OfflineBanner />}
         {error && (
           <span className="font-semibold text-[color:var(--con-warn)]" title={error}>
             refresh failing — showing last good data

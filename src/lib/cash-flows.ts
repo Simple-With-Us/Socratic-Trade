@@ -1,3 +1,5 @@
+import { centralTradingDayKey } from "./trading-day";
+
 // External deposit/withdrawal inference — PURE, and deliberately dependency-free.
 //
 // Why this is its own module rather than living in `benchmark.ts` where it started:
@@ -29,16 +31,16 @@ export function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-/** Normalize any timestamp (ms epoch | ISO datetime | YYYY-MM-DD) to a calendar date string. */
+/** Normalize any timestamp (ms epoch | ISO datetime | YYYY-MM-DD) to a Central trading-day key. */
 export function isoDate(ts: string | number | undefined): string | null {
   if (ts == null) return null;
   if (typeof ts === "number") {
     const d = new Date(ts);
-    return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+    return Number.isNaN(d.getTime()) ? null : centralTradingDayKey(d);
   }
-  if (/^\d{4}-\d{2}-\d{2}/.test(ts)) return ts.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ts)) return ts;
   const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  return Number.isNaN(d.getTime()) ? null : centralTradingDayKey(d);
 }
 
 /** A flow is only "external" when it clears both floors — below that, cash drift is
@@ -76,6 +78,8 @@ type CurvePoint = {
   cash?: number;
   positionsValue?: number;
   timestampMs: number;
+  /** Broker-reported EOD equity only (no cash/positions split). */
+  brokerHistory?: boolean;
 };
 
 function materialityThreshold(priorEquity: number): number {
@@ -117,6 +121,8 @@ function hasPositions(p: CurvePoint): p is CurvePoint & { positionsValue: number
  *  3. Cash+positions both present and equity ≈ cash+positions: cross-check with
  *     flow ≈ Δequity − Δpositions − tradeCash (same identity when the balance sheet holds).
  *  4. Missing cash: only invent a transfer when both sides look flat and there was no trading.
+ *     Never for broker-reported equity-only points (`brokerHistory`) — their flows come from the
+ *     broker transfer ledger only.
  *
  * Returns a map keyed by the PERIOD-END snapshot date. Sign: deposit +, withdrawal −.
  * Pure — exported for direct unit testing.
@@ -138,6 +144,7 @@ export function inferExternalCashFlows(
     if (typeof p.positionsValue === "number" && Number.isFinite(p.positionsValue)) {
       point.positionsValue = p.positionsValue;
     }
+    if (p.brokerHistory === true) point.brokerHistory = true;
     byDate.set(d, point);
   }
   const dates = [...byDate.keys()].sort();
@@ -161,7 +168,8 @@ export function inferExternalCashFlows(
       if (f.t <= prev.timestampMs) continue;
       if (f.t > cur.timestampMs) break;
       tradeNotionalAbs += Math.abs(f.notional);
-      tradeCash += f.side === "sell" || f.side === "cover" ? f.notional : -f.notional;
+      // Short sale credits cash (+); cover and buy debit cash (−). Sell credits (+).
+      tradeCash += f.side === "sell" || f.side === "short" ? f.notional : -f.notional;
     }
 
     // ── 1. All-cash books: any equity move is a transfer (deposit or withdrawal / reset). ──
@@ -230,6 +238,12 @@ export function inferExternalCashFlows(
 
     // ── 4. Missing cash metadata: only invent a transfer when both sides look flat and no trades. ──
     // (Otherwise mark-to-market would be misread as ACH.)
+    // Broker-reported EOD equity (Alpaca portfolio history) carries no cash/positions split at
+    // all, so "looks flat" is unknowable there: an ordinary ≥0.5% market day would be invented
+    // into a deposit/withdrawal and TWR would neutralize real return toward 0%. For those points
+    // the broker transfer ledger (resolveExternalCashFlows) is the only flow source; equity-only
+    // inference never invents one.
+    if (prev.brokerHistory || cur.brokerHistory) continue;
     const prevFlat = hasPositions(prev) ? Math.abs(prev.positionsValue) < threshold : true;
     const curFlat = hasPositions(cur) ? Math.abs(cur.positionsValue) < threshold : true;
     if (prevFlat && curFlat && tradeNotionalAbs < threshold && Math.abs(deltaEquity) >= threshold) {

@@ -1,5 +1,6 @@
 import type { EquityOrder, EquityPosition, FillEvent, NotificationEvent, PendingProposal, TradeProposal } from "./types";
 import { formatQuantity } from "./money";
+import { humanizeFailureText } from "./strategy-run-failure";
 import { isWorkingOrderState } from "./broker-held-orders";
 import { shortOrderLabel } from "./order-labels";
 
@@ -38,7 +39,7 @@ export interface StrategyDecisionLike {
     | "skipped_market_closed"
     | "skipped_broker_unhealthy";
   summary: string;
-  proposals: Array<{ proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
+  proposals: Array<{ id?: string; proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
   marketScan?: {
     topCandidates: Array<{ symbol: string; companyName?: string }>;
     quotesBySymbol?: Record<string, { symbol: string; companyName?: string }>;
@@ -116,9 +117,11 @@ function formatAuditEvent(
   if (kind === "strategy_run") {
     const llm = formatLlmSteps(payload.llmSteps);
     const summary = stringValue(payload.summary) ?? "No summary";
+    const failed = payload.status === "failed";
+    const detail = failed ? humanizeFailureText(summary) ?? summary : summary;
     return {
-      title: payload.status === "failed" ? "Strategy run failed" : "Strategy run completed",
-      detail: joinDetail([summary, llm]) ?? summary
+      title: failed ? "Strategy Run Failed" : "Strategy Run Completed",
+      detail: joinDetail([detail, llm]) ?? detail
     };
   }
 
@@ -528,8 +531,16 @@ function notificationSide(payload: Record<string, unknown>): string | undefined 
 
 function symbolFromTitle(title?: string): string | undefined {
   if (!title) return undefined;
-  const match = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/);
-  return match?.[0];
+  // Same denylist filter as dashboard-ui.ts: never treat a system identifier (RAG, FMP,
+  // OPENROUTER, …) as a tradable symbol even though it matches the all-caps token regex.
+  // Reuses the exported SYSTEM_SYMBOLS + isSystemSymbol from dashboard-ui so the two feed
+  // paths cannot drift out of sync.
+  const matches = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/g);
+  if (!matches) return undefined;
+  for (const candidate of matches) {
+    if (!isSystemSymbol(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function normalizeSymbol(symbol?: string): string | undefined {
@@ -828,7 +839,7 @@ function brokerOrderTitle(order: EquityOrder): string {
   return `Order Submitted: ${side} ${symbol}`;
 }
 
-import { feedStatusLabel, formatNotificationDisplay, notificationStatusLabel, notificationTypeLabel } from "./dashboard-ui";
+import { feedStatusLabel, formatNotificationDisplay, isSystemSymbol, notificationStatusLabel, notificationTypeLabel } from "./dashboard-ui";
 
 const KNOWN_GLOBAL_AUDIT_KINDS = new Set([
   "vector_store",

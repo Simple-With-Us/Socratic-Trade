@@ -6,10 +6,16 @@ Branch: `codex/evidence-architecture-program`
 State at this checkpoint: implementation, current-main reconciliation, local/landing verification,
 and PR checks are complete; ready PR #1544 is open. Not merged, deployed, or production-verified.
 
+> **Current truth (owner 2026-08-17):** paper→live pooling stays. The 20-paper+5-live transfer
+> gate described below was later deleted (`src/lib/learning-transfer.ts` removed 2026-07-23;
+> docs corrected 2026-08-18). Retrieval pools paper and live lots per user. See
+> `docs/rollouts/2026-08-18-paper-live-pooling-cost.md`.
+
 ## Summary
 
-- Added account-scoped relational/vector learning and explicit, sample-gated paper-to-live research
-  transfer. Legacy autonomous rows without reconstructable account provenance are quarantined.
+- Added account-scoped relational/vector learning and (at this checkpoint) explicit, sample-gated
+  paper-to-live research transfer — later removed; pooling is current retrieval. Legacy autonomous
+  rows without reconstructable account provenance are quarantined.
 - Removed the product Test Account create button/client helper/API creation/read exposure and added a
   production migration that purges legacy Test Accounts and associated simulated outcomes. The test
   broker remains unit-test infrastructure only.

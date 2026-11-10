@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-export type ConsoleTextBoxFont = "site" | "system" | "serif" | "mono";
+/** Mirrors ConsoleFont's value set — see useConsoleFont.ts for why "site" and "lato" both exist. */
+export type ConsoleTextBoxFont = "site" | "lato" | "system" | "serif" | "mono";
 
 export interface ConsoleTextBoxFontOption {
   value: ConsoleTextBoxFont;
@@ -15,8 +16,14 @@ export const CONSOLE_TEXT_BOX_FONT_OPTIONS: ConsoleTextBoxFontOption[] = [
   {
     value: "site",
     label: "Site",
-    description: "Use the same Inter-based font as the rest of Socratic Trade.",
-    fontFamily: "\"Inter\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+    description: "Follow the Socratic Trade default, which is Lato today.",
+    fontFamily: "var(--font-lato), ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
+  },
+  {
+    value: "lato",
+    label: "Lato",
+    description: "Pin the humanist sans the iOS app and site share, whatever the default becomes.",
+    fontFamily: "var(--font-lato), ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif"
   },
   {
     value: "system",
@@ -42,7 +49,7 @@ const STORAGE_KEY = "console:textBoxFont";
 const CHANGE_EVENT = "console:textBoxFontChange";
 
 function isConsoleTextBoxFont(value: unknown): value is ConsoleTextBoxFont {
-  return value === "site" || value === "system" || value === "serif" || value === "mono";
+  return CONSOLE_TEXT_BOX_FONT_OPTIONS.some((o) => o.value === value);
 }
 
 function readStored(): ConsoleTextBoxFont {

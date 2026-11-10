@@ -37,6 +37,10 @@ export async function GET(request: Request) {
     sinceDays,
     operatorFallbackEnabled: llmOperatorFallbackEnabled(),
     totalCostUsd: rows.reduce((s, r) => s + r.costUsd, 0),
+    // Cost provenance split — see the same fields on /api/llm-usage.  Billed is the transport's own
+    // `usage.cost`; estimated comes from the price table and must be labelled as an estimate.
+    billedCostUsd: rows.reduce((s, r) => s + r.billedCostUsd, 0),
+    estimatedCostUsd: rows.reduce((s, r) => s + r.estimatedCostUsd, 0),
     operatorFundedCostUsd: operatorFunded.reduce((s, r) => s + r.costUsd, 0),
     operatorFundedTenants: Array.from(new Set(operatorFunded.map((r) => r.userId))),
     rows

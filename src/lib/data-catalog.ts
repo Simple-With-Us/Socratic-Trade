@@ -60,15 +60,17 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "nasdaq-quote", label: "Nasdaq.com public quote API", status: "keyless", notes: "Free-wave redundancy beside Yahoo." },
   { id: "nasdaq-calendar", label: "Nasdaq earnings calendar", status: "keyless", notes: "daysToEarnings market-wide." },
   { id: "nasdaq-delayed-screener", label: "NASDAQ delayed screener", status: "keyless", notes: "Universe scan price/change; not full fundamentals." },
-  { id: "finnhub", label: "Finnhub", status: "active", notes: "Paid tier in free-first Wave B; ~60/min free." },
+  { id: "finnhub", label: "Finnhub", status: "active", notes: "Keyed Wave B (free-tier key, ~60/min). Not a paid Finnhub plan." },
   { id: "roic", label: "ROIC.ai", status: "active", notes: "Profile reliable; some ratios paths 404; 10k/day paid quota; also history + transcripts + multiyear financials RAG." },
   { id: "tiingo", label: "Tiingo", status: "active", notes: "Hourly/day quotas tight — admit top-N only." },
   { id: "twelvedata", label: "Twelve Data", status: "scarce", notes: "Credits/min; batch quote." },
   { id: "alpha-vantage", label: "Alpha Vantage", status: "scarce", notes: "~25/day native keys; earnings calendar market-wide; often skipped when Alpaca news covers sentiment." },
   { id: "sec-xbrl", label: "SEC EDGAR XBRL", status: "keyless", notes: "Authoritative D/E, shares outstanding; slow." },
   { id: "sec-edgar-form4", label: "SEC Form 4 / insider web signals", status: "keyless", notes: "insiderSentiment overlay from cached web sources." },
+  { id: "sec-edgar-13f", label: "SEC 13F-HR superinvestor holdings", status: "keyless", notes: "Official EDGAR 13F books for a curated filer set. Observe only." },
+  { id: "ark-funds-holdings", label: "ARK official daily holdings CSVs", status: "keyless", notes: "ARKK/Q/W/G/F/X from assets.ark-funds.com. Observe only." },
   { id: "sec-filings-rag", label: "SEC 10-K/10-Q/8-K ingest → vector DB", status: "active", notes: "RAG corpus; presented as retrievedFinancialContext (not full corpus dump)." },
-  { id: "filingapi", label: "FilingAPI.dev", status: "scarce", notes: "~50/day free; sector/earnings/insider." },
+  { id: "filingapi", label: "FilingAPI.dev", status: "scarce", notes: "Optional key; ~50/day; skip on missing/401. Sector/earnings/insider." },
   { id: "congress.trade", label: "Congress.Trade peer", status: "peer", notes: "Disclosures/analytics default ON; fundamentals peer default OFF." },
   { id: "congress-web", label: "Congressional trade web cache", status: "active", notes: "senateTrades / congress composite from local web-source cache." },
   { id: "finra", label: "FINRA short volume", status: "keyless", notes: "Short volume ratio signals." },
@@ -82,6 +84,9 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "quiverquant", label: "QuiverQuant", status: "retired", notes: "Direct ST access retired; congress via Congress.Trade." },
   { id: "unusual-whales", label: "Unusual Whales", status: "retired", notes: "Direct ST access retired." },
   { id: "robinhood-fundamentals", label: "Robinhood MCP fundamentals", status: "opt_in", notes: "ROBINHOOD_ENRICHMENT_ENABLED." },
+  { id: "cboe-options", label: "Cboe delayed options", status: "keyless", notes: "NTM IV / put-call via cdn.cboe.com; default ON." },
+  { id: "alpaca-options", label: "Alpaca indicative options", status: "opt_in", notes: "Snapshots feed=indicative when Alpaca market-data keys exist." },
+  { id: "tradier-options", label: "Tradier options chains", status: "opt_in", notes: "ORATS greeks when Tradier account connected." },
   { id: "robinhood-options", label: "Robinhood options chain", status: "opt_in", notes: "IV / put-call; default OFF." },
   { id: "webull-unofficial", label: "Webull unofficial", status: "opt_in", notes: "Flag-gated." },
   { id: "symbol_field_latest", label: "Durable field store (SQLite)", status: "active", notes: "Latest value per symbol×field with as_of + fetched_at; shared; seed for interactive scan." },
@@ -89,7 +94,7 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "fmp-transcripts", label: "FMP earnings transcripts (rights-gated)", status: "opt_in", notes: "RAG only when rights claim active." },
   { id: "roic-transcripts", label: "ROIC earnings transcripts", status: "opt_in", notes: "RAG ingest path." },
   { id: "roic-financials", label: "ROIC multi-year financials", status: "opt_in", notes: "RAG multi-year doc, not table columns." },
-  { id: "earningscalls", label: "EarningsCalls.com", status: "opt_in", notes: "Transcript path when enabled." }
+  { id: "earningscalls", label: "EarningsCalls.dev", status: "opt_in", notes: "Transcript path when enabled." }
 ];
 
 const src = (sourceId: string, notes?: string, preferred?: boolean): CatalogFieldSource => ({
@@ -132,6 +137,20 @@ export const CATALOG_FIELDS: CatalogField[] = [
       src("alpaca-snapshot", undefined, true),
       src("yahoo-finance"),
       src("finnhub"),
+      src("symbol_field_latest")
+    ]
+  },
+  {
+    id: "marketCap",
+    label: "Market cap",
+    category: "quote",
+    valueKind: "number",
+    description: "Total market capitalization in USD.",
+    provenanceRequired: true,
+    llmKey: "mktCap",
+    sources: [
+      src("nasdaq-delayed-screener", "Scan universe first pass", true),
+      src("yahoo-finance"),
       src("symbol_field_latest")
     ]
   },
@@ -300,6 +319,26 @@ export const CATALOG_FIELDS: CatalogField[] = [
       src("symbol_field_latest")
     ]
   },
+  {
+    id: "thirteenFHoldings",
+    label: "13F superinvestor holdings",
+    category: "ownership_insider",
+    valueKind: "string",
+    description: "Tracked 13F-HR holders and QoQ adds/exits.",
+    provenanceRequired: true,
+    llmKey: "smartMoney",
+    sources: [src("sec-edgar-13f", "Official EDGAR", true)]
+  },
+  {
+    id: "arkHoldings",
+    label: "ARK daily holdings",
+    category: "ownership_insider",
+    valueKind: "string",
+    description: "Official ARK ETF weight and day-over-day adds/exits.",
+    provenanceRequired: true,
+    llmKey: "smartMoney",
+    sources: [src("ark-funds-holdings", "Official ARK CSV", true)]
+  },
   // Analyst / news
   {
     id: "analystRating",
@@ -359,7 +398,13 @@ export const CATALOG_FIELDS: CatalogField[] = [
     description: "Option IV; sparse.",
     provenanceRequired: true,
     llmKey: "iv",
-    sources: [src("robinhood-options", "Opt-in MCP"), src("unusual-whales", "RETIRED")]
+    sources: [
+      src("cboe-options", "Keyless delayed", true),
+      src("alpaca-options", "Indicative snapshots"),
+      src("tradier-options", "Connected Tradier"),
+      src("robinhood-options", "Opt-in MCP"),
+      src("unusual-whales", "RETIRED")
+    ]
   },
   // RAG corpus (non-numerical completeness)
   {
@@ -416,6 +461,21 @@ export const CATALOG_FIELDS: CatalogField[] = [
     provenanceRequired: true,
     llmKey: "peg",
     sources: [src("derived-metrics", "Needs peRatio + epsGrowth")]
+  },
+  {
+    id: "derived:weekly-screens",
+    label: "Weekly value + momentum screens",
+    category: "derived",
+    valueKind: "object",
+    description:
+      "Native large-cap value (trailing P/E ≤ 10, within 10% of the 52-week low) and 5-day momentum screens from the account scan tape.  Missing fields exclude the name.  Advisory only.",
+    provenanceRequired: true,
+    llmKey: "weeklyScreens",
+    sources: [
+      src("nasdaq-delayed-screener", "Universe + live price / volume / cap"),
+      src("symbol_field_latest", "P/E and 52-week low when the interactive scan skipped enrichment"),
+      src("derived-metrics", "ROC / RSI / SMA from daily bars")
+    ]
   }
 ];
 
