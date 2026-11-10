@@ -99,3 +99,10 @@ d5374aa25268b18ee49f363f4209ff534ca48506:scripts/ios-fleet/test-asc-credentials.
 # no longer matches the rule and carries inline gitleaks:allow markers on both
 # literals, so the push scan of the squash commit on main stays clean (Kody 4369915728).
 35732f84d8ba880bd3f4a2206dc1b6fd2291047d:scripts/test-ios-stage-asc-key.sh:generic-api-key:102
+
+# Restore commit c9526e22 on PR #5119 (Nov 9).  3bdaea63 was an empty-tree commit
+# by GB-DEPLOYER that removed every file, and c9526e22 put back the exact tree of
+# 07c0b991.  These lines are unchanged from main; they are flagged only because the
+# restore commit re-adds them.  The PR merges through the queue as one change.
+c9526e22b4b4e1c3808f7e1214879d30488da543:.env.example:generic-api-key:33
+c9526e22b4b4e1c3808f7e1214879d30488da543:docs/rollouts/2026-06-21-logo-dev-toggle.md:generic-api-key:17
