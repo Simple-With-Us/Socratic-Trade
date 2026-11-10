@@ -1,6 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 import { resolveSentryRelease } from "./src/lib/sentry-release";
-import { redactForTelemetry } from "./src/lib/telemetry-sanitize";
+import { redactForTelemetry, sanitizeTelemetryUrl } from "./src/lib/telemetry-sanitize";
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -22,7 +22,16 @@ if (process.env.SENTRY_DSN) {
       graphQL: { document: false, variables: false },
     },
     beforeSend(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeTelemetryUrl(event.request.url);
+      }
       return redactForTelemetry(event) as typeof event;
+    },
+    beforeSendTransaction(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeTelemetryUrl(event.request.url);
+      }
+      return event;
     }
   });
 }

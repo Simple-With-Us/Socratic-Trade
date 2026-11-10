@@ -3,6 +3,16 @@ const SECRET_VALUE =
   /\b(?:Bearer\s+)?(?:sk|pk|rk|ghp|gho|ghs|xox[baprs]?|rh|mcp|pc|voyage|fred|finnhub|tradier|marketstack|massive)[A-Za-z0-9._:-]{12,}\b/g;
 const HEX_SECRET = /\b[A-Fa-f0-9]{48,}\b/g;
 
+// Query-param names that must be redacted in addition to whatever SENSITIVE_KEY
+// already catches. These are either trading-specific identifiers that are not
+// "secrets" in the SENSITIVE_KEY sense (symbol/proposal/account/code) or legacy
+// bare aliases ("key", "auth") that predate SENSITIVE_KEY's compound patterns
+// (api[_-]?key etc). Exact-match only -- SENSITIVE_KEY already does the
+// substring-style matching for anything provider-key-shaped, e.g. a query param
+// literally named "apikey" (no separator) matches api[_-]?key's optional
+// separator, so it's covered without listing every provider's naming style here.
+const SENSITIVE_QUERY_PARAM_NAME = /^(?:symbol|proposal|account|code|auth|key)$/i;
+
 type RedactionOptions = {
   maxDepth?: number;
   maxArrayItems?: number;
@@ -167,4 +177,51 @@ function schemaName(record: Record<string, unknown>): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Parses actual query-param names (rather than matching a fixed alternation
+// literal) and redacts any whose decoded name matches SENSITIVE_KEY or the
+// trading-specific SENSITIVE_QUERY_PARAM_NAME list above. This fixed a real gap:
+// the previous implementation matched "api_key" exactly but not "apikey" (no
+// separator), which is what this app's actual providers use (Alpha Vantage,
+// Twelve Data, ROIC -- see src/lib/history.ts's `?apikey=`), so provider keys
+// were leaking into Sentry unredacted. Parsing param names against the shared
+// sensitive-key list means a future provider using a differently-shaped key
+// param name (as long as it still reads as "...key..."/"...token..."/etc, or is
+// one of the exact trading-identifier names above) is covered automatically.
+export function sanitizeTelemetryUrl(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
+
+  const hashIndex = rawUrl.indexOf("#");
+  const withoutHash = hashIndex === -1 ? rawUrl : rawUrl.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? "" : rawUrl.slice(hashIndex);
+
+  const queryIndex = withoutHash.indexOf("?");
+  if (queryIndex === -1) return rawUrl;
+
+  const base = withoutHash.slice(0, queryIndex);
+  const query = withoutHash.slice(queryIndex + 1);
+  if (!query) return rawUrl;
+
+  const redactedQuery = query
+    .split("&")
+    .map((pair) => {
+      if (!pair) return pair;
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex === -1) return pair; // bare flag, no value to redact
+
+      const rawName = pair.slice(0, eqIndex);
+      let decodedName = rawName;
+      try {
+        decodedName = decodeURIComponent(rawName.replace(/\+/g, " "));
+      } catch {
+        // malformed percent-encoding in the param name: fall back to the raw form
+      }
+
+      const isSensitive = SENSITIVE_KEY.test(decodedName) || SENSITIVE_QUERY_PARAM_NAME.test(decodedName);
+      return isSensitive ? `${rawName}=[REDACTED]` : pair;
+    })
+    .join("&");
+
+  return `${base}?${redactedQuery}${hash}`;
 }
