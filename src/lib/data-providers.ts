@@ -3117,7 +3117,14 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     let creds: YfCreds;
-    try { creds = await getYahooSessionCreds(this.userId); } catch (err) {
+    try {
+      const resolved = await getYahooSessionCreds(this.userId);
+      if (!resolved) {
+        logApiHealth({ service: this.name, ok: false, errorText: "Yahoo session cancelled" });
+        return result;
+      }
+      creds = resolved;
+    } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
       logApiHealth({ service: this.name, ok: false, errorText: scrubProviderErrorText(appendErrorCause(rawMessage, err)) });
       return result;

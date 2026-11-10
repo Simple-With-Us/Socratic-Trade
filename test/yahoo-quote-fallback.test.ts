@@ -13,6 +13,7 @@ import {
   fetchYahooFinanceQuote,
   fetchYahooFinanceQuotesBatch,
   peekLastYahooQuoteTelemetry,
+  yahooQuoteFromChartMeta,
   YAHOO_CHART_FALLBACK_CONCURRENCY
 } from "../src/lib/yahoo-finance";
 import { YAHOO_SESSION_HANDSHAKE_TIMEOUT_MS } from "../src/lib/yahoo-session";
@@ -426,6 +427,19 @@ describe("yahoo batch caller abort", () => {
 });
 
 describe("yahoo quote volume coercion", () => {
+  it("uses volumeHint when meta regularMarketVolume is null", () => {
+    const quote = yahooQuoteFromChartMeta(
+      { regularMarketPrice: 50, regularMarketVolume: null },
+      4_200_000
+    );
+    expect(quote?.volume).toBe(4_200_000);
+  });
+
+  it("uses volumeHint when meta regularMarketVolume is empty string", () => {
+    const quote = yahooQuoteFromChartMeta({ regularMarketPrice: 50, regularMarketVolume: "" }, 99);
+    expect(quote?.volume).toBe(99);
+  });
+
   it("coerces non-numeric v7 volume strings to zero", async () => {
     yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
@@ -475,6 +489,64 @@ describe("yahoo quote volume coercion", () => {
     expect(quote?.price).toBe(12);
     expect(quote?.volume).toBe(0);
     expect(Number.isNaN(quote?.volume)).toBe(false);
+  });
+
+  it("keeps numeric meta volume and ignores hint when meta has a valid value", () => {
+    const quote = yahooQuoteFromChartMeta(
+      { regularMarketPrice: 50, regularMarketVolume: 1_000 },
+      9_999
+    );
+    expect(quote?.volume).toBe(1_000);
+  });
+});
+
+describe("caller abort during retry backoff", () => {
+  it("returns empty batch without throwing when caller aborts during session retry backoff", async () => {
+    const controller = new AbortController();
+    let fcCalls = 0;
+    vi.stubGlobal("fetch", (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("fc.yahoo.com")) {
+        fcCalls += 1;
+        if (fcCalls === 1) return Promise.resolve(new Response("down", { status: 503 }));
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return Promise.resolve(new Response("testcrumb", { status: 200 }));
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["AAPL"], { signal: controller.signal });
+    await vi.waitFor(() => expect(fcCalls).toBeGreaterThanOrEqual(1));
+    await new Promise((r) => setTimeout(r, 50));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).not.toBe("v7_session_unavailable");
+  });
+
+  it("returns empty chunk map without throwing when caller aborts during v7 retry backoff", async () => {
+    const controller = new AbortController();
+    let v7Attempts = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        v7Attempts += 1;
+        if (v7Attempts === 1) {
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["TST000"], { signal: controller.signal });
+    await vi.waitFor(() => expect(v7Attempts).toBe(1));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
   });
 });
 

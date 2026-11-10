@@ -6,6 +6,7 @@ import { YahooChartResponseSchema, YahooV7QuoteResponseSchema } from "./yahoo-sc
 import {
   getYahooSessionCreds,
   invalidateYahooSessionCreds,
+  yahooSleepOrAborted,
   YAHOO_SESSION_UA
 } from "./yahoo-session";
 
@@ -111,9 +112,13 @@ function optionalPositive(value: unknown): number | undefined {
   return n !== undefined && n > 0 ? n : undefined;
 }
 
+/** Present finite volume only — null, empty, and non-numeric are absent (not zero). */
 function quoteVolume(value: unknown): number | undefined {
-  const n = optionalFinite(value);
-  return n !== undefined && n >= 0 ? n : undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return n;
 }
 
 function yahooCombinedAbortSignal(local: AbortSignal, caller?: AbortSignal): AbortSignal {
@@ -122,11 +127,6 @@ function yahooCombinedAbortSignal(local: AbortSignal, caller?: AbortSignal): Abo
   if (local.aborted) return local;
   if (typeof AbortSignal.any === "function") return AbortSignal.any([local, caller]);
   return local;
-}
-
-function throwIfCallerAborted(callerSignal?: AbortSignal): void {
-  if (!callerSignal?.aborted) return;
-  throw callerSignal.reason ?? new DOMException("aborted", "AbortError");
 }
 
 /** Fields the keyless chart endpoint actually returns (today: 52-week range). */
@@ -249,7 +249,8 @@ export async function fetchYahooFinanceQuote(
       if (response.status === 429 && attempt < maxAttempts - 1) {
         const backoff = jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 4_000);
         if (deadlineAt !== undefined && Date.now() + backoff >= deadlineAt) return undefined;
-        await new Promise((resolve) => setTimeout(resolve, backoff));
+        const slept = await yahooSleepOrAborted(backoff, callerSignal);
+        if (!slept) return undefined;
         continue;
       }
       if (!response.ok) return undefined;
@@ -271,7 +272,8 @@ export async function fetchYahooFinanceQuote(
         if (attempt < maxAttempts - 1) {
           const backoff = jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 2_000);
           if (deadlineAt !== undefined && Date.now() + backoff >= deadlineAt) return undefined;
-          await new Promise((resolve) => setTimeout(resolve, backoff));
+          const slept = await yahooSleepOrAborted(backoff, callerSignal);
+          if (!slept) return undefined;
           continue;
         }
         emitYahooQuoteTelemetry({ kind: "chart_quote_abort", chartAborts, chartAttempts: attempt + 1 });
@@ -395,6 +397,7 @@ export async function fetchYahooFinanceQuotesBatch(
   let sessionCreds: Awaited<ReturnType<typeof getYahooSessionCreds>> | undefined;
   try {
     sessionCreds = await getYahooSessionCreds(options?.userId, options?.signal);
+    if (sessionCreds === null) return result;
   } catch (error) {
     if (options?.signal?.aborted) return result;
     stats.v7SkippedNoSession = true;
@@ -461,10 +464,12 @@ async function fetchYahooQuoteChunk(
   stats.v7Chunks += 1;
 
   for (let attempt = 0; attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS; attempt++) {
-    throwIfCallerAborted(callerSignal);
+    if (callerSignal?.aborted) return result;
     try {
       const response = await withProviderLimit("yahoo-finance", async () => {
-        throwIfCallerAborted(callerSignal);
+        if (callerSignal?.aborted) {
+          throw callerSignal.reason ?? new DOMException("aborted", "AbortError");
+        }
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), YAHOO_V7_CHUNK_TIMEOUT_MS);
         const onCallerAbort = (): void => controller.abort();
@@ -570,10 +575,11 @@ async function fetchYahooQuoteChunk(
     } catch (error) {
       if (callerSignal?.aborted) return result;
       if (isAbortOrTimeoutError(error) && attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS - 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, jitteredBackoffMs(attempt, 300, 1_500))
+        const slept = await yahooSleepOrAborted(
+          jitteredBackoffMs(attempt, 300, 1_500),
+          callerSignal
         );
-        throwIfCallerAborted(callerSignal);
+        if (!slept || callerSignal?.aborted) return result;
         continue;
       }
       if (isAbortOrTimeoutError(error)) {
