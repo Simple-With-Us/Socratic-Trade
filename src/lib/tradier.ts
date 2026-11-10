@@ -1609,13 +1609,22 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
     const entryView = withContainerFallback(container, entry);
     const entrySide = recognizedTradierSide(entryView.side);
     const entryType = recognizedTradierType(entryView.type);
+    const mergedType = entryType ?? base.type;
+    const entryLimit = optionalNumber(entryView.price);
+    const entryStop = optionalNumber(entryView.stop_price);
+    const limitPrice = carriesLimitPrice(mergedType)
+      ? entryLimit ?? (carriesLimitPrice(base.type) ? base.limitPrice : undefined)
+      : undefined;
+    const stopPrice = carriesStopPrice(mergedType)
+      ? entryStop ?? (carriesStopPrice(base.type) ? base.stopPrice : undefined)
+      : undefined;
     return {
       ...base,
       ...(entrySide !== undefined ? { side: entrySide } : {}),
       ...(entryType !== undefined ? { type: entryType } : {}),
       quantity: optionalNumber(entryView.quantity) ?? base.quantity,
-      limitPrice: optionalNumber(entryView.price) ?? base.limitPrice,
-      stopPrice: optionalNumber(entryView.stop_price) ?? base.stopPrice,
+      limitPrice,
+      stopPrice,
       filledQuantity: optionalNumber(entry.exec_quantity) ?? base.filledQuantity,
       averagePrice: optionalNumber(entry.avg_fill_price) ?? base.averagePrice
     };
