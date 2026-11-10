@@ -395,7 +395,97 @@ describe("yahoo session handshake timeout", () => {
     controller.abort();
     const batch = await batchPromise;
     expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
     expect(peekLastYahooQuoteTelemetry()?.kind).not.toBe("v7_session_unavailable");
+    expect(peekLastYahooQuoteTelemetry()?.v7Chunks).toBe(0);
+  });
+});
+
+describe("yahoo v7 batch telemetry", () => {
+  it("emits v7_batch_complete when the batch signal is already aborted", async () => {
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "PRIME", regularMarketPrice: 9, bid: 9, ask: 9 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    await fetchYahooFinanceQuotesBatch(["PRIME"]);
+    expect(peekLastYahooQuoteTelemetry()?.v7Chunks).toBe(1);
+    expect(peekLastYahooQuoteTelemetry()?.symbolsPriced).toBe(1);
+
+    const controller = new AbortController();
+    controller.abort();
+    await fetchYahooFinanceQuotesBatch(["CANCEL"], { signal: controller.signal });
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.symbolsRequested).toBe(1);
+    expect(telemetry?.symbolsPriced).toBe(0);
+    expect(telemetry?.v7Chunks).toBe(0);
+  });
+
+  it("does not count v7Chunks for parallel chunks that never start an attempt", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    await fetchYahooFinanceQuotesBatch(symbols(100), { concurrency: 2, signal: controller.signal });
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.symbolsRequested).toBe(100);
+    expect(telemetry?.v7Chunks).toBe(0);
+  });
+
+  it("counts v7Chunks only for chunks that enter their first HTTP attempt", async () => {
+    const controller = new AbortController();
+    let v7Hits = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        v7Hits += 1;
+        if (v7Hits === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            controller.signal.addEventListener(
+              "abort",
+              () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              { once: true }
+            );
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(symbols(60), {
+      concurrency: 1,
+      signal: controller.signal
+    });
+    await vi.waitFor(() => expect(v7Hits).toBe(1));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7Chunks).toBe(1);
   });
 });
 
@@ -422,7 +512,10 @@ describe("yahoo batch caller abort", () => {
     controller.abort();
     const batch = await batchPromise;
     expect(batch.size).toBe(0);
-    expect(peekLastYahooQuoteTelemetry()?.v7ChunksAbort ?? 0).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7ChunksAbort ?? 0).toBe(0);
+    expect(telemetry?.v7Chunks).toBe(1);
   });
 });
 
@@ -521,7 +614,10 @@ describe("caller abort during retry backoff", () => {
     controller.abort();
     const batch = await batchPromise;
     expect(batch.size).toBe(0);
-    expect(peekLastYahooQuoteTelemetry()?.kind).not.toBe("v7_session_unavailable");
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.kind).not.toBe("v7_session_unavailable");
+    expect(telemetry?.symbolsPriced).toBe(0);
   });
 
   it("returns empty chunk map without throwing when caller aborts during v7 retry backoff", async () => {
@@ -547,6 +643,9 @@ describe("caller abort during retry backoff", () => {
     controller.abort();
     const batch = await batchPromise;
     expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7Chunks).toBe(1);
   });
 });
 

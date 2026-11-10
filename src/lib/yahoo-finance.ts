@@ -97,6 +97,29 @@ function emitYahooQuoteTelemetry(payload: YahooQuoteTelemetry): void {
   console.warn("[yahoo-finance]", JSON.stringify({ ...payload, ts: Date.now() }));
 }
 
+type V7BatchStats = {
+  v7Chunks: number;
+  v7ChunksOk: number;
+  v7ChunksAuth: number;
+  v7ChunksAbort: number;
+  v7SkippedCooldown: boolean;
+  v7SkippedNoSession: boolean;
+};
+
+function finishYahooV7Batch(
+  requested: number,
+  result: Map<string, YahooFinanceQuote>,
+  stats: V7BatchStats
+): Map<string, YahooFinanceQuote> {
+  emitYahooQuoteTelemetry({
+    kind: "v7_batch_complete",
+    symbolsRequested: requested,
+    symbolsPriced: result.size,
+    ...stats
+  });
+  return result;
+}
+
 function jitteredBackoffMs(attempt: number, baseMs: number, capMs: number): number {
   const exp = Math.min(capMs, baseMs * 2 ** attempt);
   return Math.round(exp + Math.random() * Math.min(250, baseMs));
@@ -371,10 +394,7 @@ export async function fetchYahooFinanceQuotesBatch(
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   const requested = symbols.length;
-  if (requested === 0) return result;
-  if (options?.signal?.aborted) return result;
-
-  const stats = {
+  const stats: V7BatchStats = {
     v7Chunks: 0,
     v7ChunksOk: 0,
     v7ChunksAuth: 0,
@@ -383,23 +403,20 @@ export async function fetchYahooFinanceQuotesBatch(
     v7SkippedNoSession: false
   };
 
+  if (requested === 0) return finishYahooV7Batch(0, result, stats);
+  if (options?.signal?.aborted) return finishYahooV7Batch(requested, result, stats);
+
   if (isYahooV7AuthBlocked()) {
     stats.v7SkippedCooldown = true;
-    emitYahooQuoteTelemetry({
-      kind: "v7_batch_complete",
-      symbolsRequested: requested,
-      symbolsPriced: 0,
-      ...stats
-    });
-    return result;
+    return finishYahooV7Batch(requested, result, stats);
   }
 
   let sessionCreds: Awaited<ReturnType<typeof getYahooSessionCreds>> | undefined;
   try {
     sessionCreds = await getYahooSessionCreds(options?.userId, options?.signal);
-    if (sessionCreds === null) return result;
+    if (sessionCreds === null) return finishYahooV7Batch(requested, result, stats);
   } catch (error) {
-    if (options?.signal?.aborted) return result;
+    if (options?.signal?.aborted) return finishYahooV7Batch(requested, result, stats);
     stats.v7SkippedNoSession = true;
     emitYahooQuoteTelemetry({
       kind: "v7_session_unavailable",
@@ -434,21 +451,10 @@ export async function fetchYahooFinanceQuotesBatch(
     if (stats.v7ChunksAbort >= YAHOO_V7_ABORT_WAVE_BREAK) break;
   }
 
-  emitYahooQuoteTelemetry({
-    kind: "v7_batch_complete",
-    symbolsRequested: requested,
-    symbolsPriced: result.size,
-    ...stats
-  });
-  return result;
+  return finishYahooV7Batch(requested, result, stats);
 }
 
-type V7ChunkStats = {
-  v7Chunks: number;
-  v7ChunksOk: number;
-  v7ChunksAuth: number;
-  v7ChunksAbort: number;
-};
+type V7ChunkStats = V7BatchStats;
 
 async function fetchYahooQuoteChunk(
   chunk: string[],
@@ -461,10 +467,9 @@ async function fetchYahooQuoteChunk(
   const cleanSymbols = chunk.map((s) => encodeURIComponent(s.toUpperCase().trim())).join(",");
   const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${cleanSymbols}&crumb=${encodeURIComponent(creds.crumb)}`;
 
-  stats.v7Chunks += 1;
-
   for (let attempt = 0; attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS; attempt++) {
     if (callerSignal?.aborted) return result;
+    if (attempt === 0) stats.v7Chunks += 1;
     try {
       const response = await withProviderLimit("yahoo-finance", async () => {
         if (callerSignal?.aborted) {

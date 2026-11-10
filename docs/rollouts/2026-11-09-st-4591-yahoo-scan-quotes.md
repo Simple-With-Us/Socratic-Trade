@@ -27,6 +27,8 @@ npx vitest run test/yahoo-quote-fallback.test.ts
 
 Round 3 (`e17ac322`): `quoteVolume` null/empty → undefined (volumeHint preserved); `yahooSleepOrAborted` for cancel-safe retry backoff; `getYahooSessionCreds` returns `null` on caller cancel; chart 429/abort backoff also abort-aware. 22 tests in `yahoo-quote-fallback.test.ts` pass.
 
+Round 4: `finishYahooV7Batch` emits `v7_batch_complete` on every batch exit including caller cancel / empty request; `v7Chunks` increments only when a chunk passes the first-attempt abort gate. 25 tests in `yahoo-quote-fallback.test.ts` pass (see latest commit SHA).
+
 ## Next Steps & Blockers
 
 - Merge after green `verify` CI; confirm Coolify logs show `v7_session_unavailable` / `v7_auth_wall` / `v7_batch_complete` JSON instead of unbounded `batch fetch failed` noise.
