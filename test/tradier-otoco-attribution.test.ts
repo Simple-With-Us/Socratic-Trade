@@ -42,6 +42,78 @@ beforeEach(() => {
 });
 
 describe("Tradier OTOCO attribution", () => {
+  it("merges recognized entry side/type onto a leg-entry container row", () => {
+    const container: Record<string, unknown> = {
+      id: 88100,
+      class: "otoco",
+      tag: "st-ref-merge",
+      status: "open",
+      symbol: "MPC",
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88101, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, price: 122, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88102, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88103, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    };
+    expect(mapTradierBracketContainerRow(container)).toMatchObject({
+      id: "88100",
+      side: "buy",
+      type: "limit",
+      limitPrice: 122,
+      quantity: 5
+    });
+  });
+
+  it("preserves container side/type when entry leg side/type words are missing or unrecognized", () => {
+    const container: Record<string, unknown> = {
+      id: 88100,
+      class: "otoco",
+      tag: "st-ref-no-fabricate",
+      status: "open",
+      symbol: "MPC",
+      side: "sell",
+      type: "limit",
+      price: 118,
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88101, class: "equity", side: "not_a_side", type: "not_a_type", status: "open", quantity: 5, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88102, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88103, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    };
+    expect(mapTradierBracketContainerRow(container)).toMatchObject({
+      id: "88100",
+      side: "sell",
+      type: "limit",
+      limitPrice: 118
+    });
+  });
+
+  it("does not overwrite container side/type with fabricated buy/market when entry omits side and type", () => {
+    const container: Record<string, unknown> = {
+      id: 88100,
+      class: "otoco",
+      tag: "st-ref-missing-entry",
+      status: "open",
+      symbol: "MPC",
+      side: "buy",
+      type: "limit",
+      price: 99,
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88101, class: "equity", status: "open", quantity: 8, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88102, class: "equity", side: "sell", type: "limit", status: "open", quantity: 8, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88103, class: "equity", side: "sell", type: "stop", status: "open", quantity: 8, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    };
+    const row = mapTradierBracketContainerRow(container);
+    expect(row.side).toBe("buy");
+    expect(row.type).toBe("limit");
+    expect(row.quantity).toBe(8);
+    expect(row.limitPrice).toBe(99);
+  });
+
   it("omits bracket orderClass on leg-entry container and entry leg rows but keeps it on exit legs", () => {
     const container: Record<string, unknown> = {
       id: 88100,

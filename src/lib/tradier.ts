@@ -1475,6 +1475,19 @@ function recognizedTradierSide(raw: unknown): OrderSide | undefined {
   return word === "buy" || word === "sell" || word === "sell_short" || word === "buy_to_cover" ? mapTradierSideRead(word) : undefined;
 }
 
+function recognizedTradierType(raw: unknown): OrderType | undefined {
+  const word = String(raw ?? "").trim().toLowerCase();
+  switch (word) {
+    case "market":
+    case "limit":
+    case "stop":
+    case "stop_limit":
+      return mapTradierTypeRead(word);
+    default:
+      return undefined;
+  }
+}
+
 function rawLegs(row: Record<string, unknown>): Record<string, unknown>[] {
   const legField = row.leg ?? row.legs;
   if (legField === undefined || legField === null) return [];
@@ -1594,10 +1607,12 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
   };
   if (parts.entryIsLeg && entry) {
     const entryView = withContainerFallback(container, entry);
+    const entrySide = recognizedTradierSide(entryView.side);
+    const entryType = recognizedTradierType(entryView.type);
     return {
       ...base,
-      side: mapTradierSideRead(entryView.side),
-      type: mapTradierTypeRead(entryView.type),
+      ...(entrySide !== undefined ? { side: entrySide } : {}),
+      ...(entryType !== undefined ? { type: entryType } : {}),
       quantity: optionalNumber(entryView.quantity) ?? base.quantity,
       limitPrice: optionalNumber(entryView.price) ?? base.limitPrice,
       stopPrice: optionalNumber(entryView.stop_price) ?? base.stopPrice,
