@@ -4,7 +4,7 @@
 // user-facing (account numbers, keys, tokens) may leave the browser.
 import * as Sentry from "@sentry/nextjs";
 import { resolveSentryRelease } from "./src/lib/sentry-release";
-import { redactForTelemetry, sanitizeTelemetryUrl } from "./src/lib/telemetry-sanitize";
+import { redactForTelemetry, sanitizeTelemetryUrl, sanitizeTransactionEvent } from "./src/lib/telemetry-sanitize";
 
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -107,10 +107,7 @@ if (dsn) {
       return redactForTelemetry(event) as typeof event;
     },
     beforeSendTransaction(event) {
-      if (event.request?.url) {
-        event.request.url = sanitizeTelemetryUrl(event.request.url);
-      }
-      return event;
+      return sanitizeTransactionEvent(event);
     }
   });
 }

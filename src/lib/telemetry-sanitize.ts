@@ -194,16 +194,29 @@ export function sanitizeTelemetryUrl(rawUrl: string): string {
 
   const hashIndex = rawUrl.indexOf("#");
   const withoutHash = hashIndex === -1 ? rawUrl : rawUrl.slice(0, hashIndex);
-  const hash = hashIndex === -1 ? "" : rawUrl.slice(hashIndex);
+  // A fragment can carry params too (OAuth implicit flow puts access_token
+  // there), so a key=value fragment gets the same per-param redaction.
+  const rawHash = hashIndex === -1 ? "" : rawUrl.slice(hashIndex + 1);
+  const hash = hashIndex === -1 ? "" : `#${rawHash.includes("=") ? redactParams(rawHash) : rawHash}`;
 
   const queryIndex = withoutHash.indexOf("?");
-  if (queryIndex === -1) return rawUrl;
+  if (queryIndex === -1) return `${withoutHash}${hash}`;
 
   const base = withoutHash.slice(0, queryIndex);
   const query = withoutHash.slice(queryIndex + 1);
-  if (!query) return rawUrl;
+  if (!query) return `${withoutHash}${hash}`;
 
-  const redactedQuery = query
+  return `${base}?${redactParams(query)}${hash}`;
+}
+
+// Any param whose name ends in a key segment (access_key, x-key, accessKey)
+// is a credential slot too; SENSITIVE_KEY alone only knows api/encryption keys.
+// camelCase is matched case-sensitively so words like "monkey" stay readable.
+const KEY_SUFFIXED_PARAM_NAME = /(?:^|[_.-])key$/i;
+const KEY_CAMEL_SUFFIXED_PARAM_NAME = /[a-z0-9]Key$/;
+
+function redactParams(query: string): string {
+  return query
     .split("&")
     .map((pair) => {
       if (!pair) return pair;
@@ -218,10 +231,60 @@ export function sanitizeTelemetryUrl(rawUrl: string): string {
         // malformed percent-encoding in the param name: fall back to the raw form
       }
 
-      const isSensitive = SENSITIVE_KEY.test(decodedName) || SENSITIVE_QUERY_PARAM_NAME.test(decodedName);
+      const isSensitive =
+        SENSITIVE_KEY.test(decodedName) ||
+        SENSITIVE_QUERY_PARAM_NAME.test(decodedName) ||
+        KEY_SUFFIXED_PARAM_NAME.test(decodedName) ||
+        KEY_CAMEL_SUFFIXED_PARAM_NAME.test(decodedName);
       return isSensitive ? `${rawName}=[REDACTED]` : pair;
     })
     .join("&");
+}
 
-  return `${base}?${redactedQuery}${hash}`;
+const URL_IN_TEXT = /(?:https?:\/\/|\/)[^\s"'<>]*\?[^\s"'<>]*/g;
+
+type TransactionLike = {
+  request?: { url?: unknown; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
+  spans?: Array<{ description?: unknown; data?: Record<string, unknown> } | null | undefined>;
+};
+
+/**
+ * Transaction events cannot go through redactForTelemetry whole: its array and
+ * depth limits would truncate the span list and replace spans with strings,
+ * which breaks the trace.  So the request and the URL-bearing span fields are
+ * redacted in place and the span structure is left intact.
+ */
+export function sanitizeTransactionEvent<T>(event: T): T {
+  const e = event as unknown as TransactionLike;
+  if (e && typeof e === "object") {
+    const req = e.request;
+    if (req && typeof req === "object") {
+      if (typeof req.url === "string") req.url = sanitizeTelemetryUrl(req.url);
+      if (typeof req.query_string === "string" && req.query_string) {
+        req.query_string = redactParams(req.query_string.replace(/^\?/, ""));
+      } else if (req.query_string !== undefined) {
+        req.query_string = redactForTelemetry(req.query_string);
+      }
+      if (req.headers !== undefined) req.headers = redactForTelemetry(req.headers);
+      if (req.cookies !== undefined) req.cookies = "[redacted]";
+      if (req.data !== undefined) req.data = redactForTelemetry(req.data);
+    }
+    if (Array.isArray(e.spans)) {
+      for (const span of e.spans) {
+        if (!span || typeof span !== "object") continue;
+        if (typeof span.description === "string") {
+          span.description = span.description.replace(URL_IN_TEXT, (m) => sanitizeTelemetryUrl(m));
+        }
+        const data = span.data;
+        if (data && typeof data === "object") {
+          for (const k of ["url", "http.url", "http.query", "http.fragment"]) {
+            const v = data[k];
+            if (typeof v !== "string") continue;
+            data[k] = k === "http.query" || k === "http.fragment" ? redactParams(v.replace(/^[?#]/, "")) : sanitizeTelemetryUrl(v);
+          }
+        }
+      }
+    }
+  }
+  return event;
 }
