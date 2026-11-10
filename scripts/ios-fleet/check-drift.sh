@@ -22,6 +22,8 @@ FILES=(
   "ship-all.sh"
   "apps.json"
   "asc-api.mjs"
+  "asc-key.mjs"
+  "version-plan.mjs"
   "ExportOptions-appstore.plist"
   "ExportOptions-export-ipa.plist"
   "AppUpdatePrompt.swift"

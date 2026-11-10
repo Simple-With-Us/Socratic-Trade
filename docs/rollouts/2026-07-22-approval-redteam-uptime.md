@@ -86,7 +86,7 @@ Ordered lint/tsc/test/build gate completed under GROK pickup (see handoff close-
 - Worktree: `/Users/jay/.codex/worktrees/trade-approval-redteam-uptime-20260722`
 - Branch: `codex/trade-approval-redteam-uptime-20260722`
 - Base SHA investigated: `315c91e506633c7b458d736c7ba7f97af05236ec`
-- Coordination: CODEX authored the implementation; GROK claimed the unfinished gate/landing on `#agent-sync` and owns the remaining land path.
+- Coordination: CODEX authored the implementation; GROK claimed the unfinished gate/landing on `#ag***-s**c` and owns the remaining land path.
 - Focused tests (CODEX): 27/27 passed.
 - Full tests (CODEX): `npm test` passed, 436 files / 5,071 tests.
 - Lint (CODEX): `npm run lint` passed with the pre-existing 597-warning backlog and 0 errors.

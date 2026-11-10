@@ -77,4 +77,4 @@ Open the PR ready for review with `do-not-automerge`.  Do not enable auto-merge.
 
 ## Zero-Code Findings
 
-Agent-Sync MCP Linear tools are not enabled for the CURSOR seat (`LINEAR_SEATS`).  The claim and the PR link use the `board` CLI as the CURSOR Linear app, which is the same workspace identity.
+Ag***-S**c MCP Linear tools are not enabled for the CURSOR seat (`LINEAR_SEATS`).  The claim and the PR link use the `board` CLI as the CURSOR Linear app, which is the same workspace identity.

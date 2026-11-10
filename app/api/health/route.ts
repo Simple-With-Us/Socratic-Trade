@@ -23,6 +23,7 @@ import { getLease } from "@/lib/scheduler-lease";
 import { toPublicTradingLiveness } from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { yieldEventLoop } from "@/lib/slow-sync-guard";
+import { safeErrorMessage } from "@/lib/telemetry-sanitize";
 import {
   healthProbeDeps,
   readWarmHealthSnapshot,
@@ -223,7 +224,7 @@ async function assembleHealth(): Promise<HealthPayload> {
   // ops-snapshot.ts). Here we fold it down to counts + the oldest age, which is enough for an
   // external uptime probe without leaking account identity.
   try {
-    const liveness = healthProbeDeps.getTradingLivenessSummary();
+    const liveness = await healthProbeDeps.getTradingLivenessSummary();
     const publicLiveness = toPublicTradingLiveness(liveness);
     // Always emit so `tradingLiveness.degraded` exists for JSON-path monitors even when
     // every account is halted.  The boolean sibling is the unique keyword substring.
@@ -237,9 +238,23 @@ async function assembleHealth(): Promise<HealthPayload> {
         publicLiveness.autonomyFullyDark &&
         publicLiveness.autonomyActiveAccounts === 0 &&
         publicLiveness.activeAccounts === 0;
+      // The alert/Sentry message carries the WHY (label, reasons, newest failed
+      // run summary) from the full summary. This never enters the public payload
+      // above, which stays identity-free.
+      const degradedDetail = (liveness?.accounts ?? [])
+        .filter((a) => a.degraded)
+        .slice(0, 3)
+        .map((a) => {
+          const reasons = a.degradedReasons.join(", ") || "degraded";
+          const latest = a.latestFailedRunSummary
+            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${safeErrorMessage(a.latestFailedRunSummary).slice(0, 200)}`
+            : "";
+          return `${a.label} (${reasons}${latest})`;
+        })
+        .join("; ");
       const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
-        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`;
+        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
       void alertLivenessWarning("trading_liveness_degraded", livenessMessage);
     } else if (liveness) {
       // Recovery: reset the escalation episode clock.  Only a real healthy

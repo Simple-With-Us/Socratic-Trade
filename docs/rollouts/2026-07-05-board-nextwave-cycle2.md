@@ -67,7 +67,7 @@ an open, CONFLICTING PR (#805) that also carries unrelated work from a different
     existing row tracked #801 on either board, so this was recorded as a standalone changelog/
     correction note rather than edited into a nonexistent row.
 12. **Codex global coordination + fleet monitoring setup row** — updated with the current
-    Slack relay state: `agent-sync-push` connects to Socket Mode (hello observed) but zero events
+    Slack relay state: `ag***-s**c-push` connects to Socket Mode (hello observed) but zero events
     are delivered pending an owner-side Slack Event Subscriptions toggle; `events.jsonl` does not
     exist yet. (The fleet-infra spec's NEW rows, including bootstrapping
     `/Users/jay/apps/FLEET-INFRA-EFFORT-LOG.md`, were NOT added here per the task instructions —

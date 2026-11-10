@@ -510,7 +510,7 @@ function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
         </div>
       )}
       <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        Same deposits and withdrawals as this account, applied at each day's cutoff.{SENTENCE_GAP}
+        Same deposits and withdrawals as this account, counted from the start of the day they land.{SENTENCE_GAP}
         The dashed line is what those dollars would be if they had tracked {symbol}.
       </p>
     </Card>

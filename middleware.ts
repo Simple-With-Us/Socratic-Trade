@@ -23,6 +23,23 @@
 // Cloudflare Tunnel may still front the app, but Cloudflare Access email headers are
 // not trusted as an app login source.
 
+// NOTE: no `import "server-only"` here, deliberately.
+//
+// That marker package only does one thing: it throws when a module is reached
+// from a Client Component bundle. This file is a server entry point that
+// Next.js compiles exclusively for the edge runtime, so no Client Component can
+// ever import it and the guard can never fire usefully.
+//
+// It is not free, though. `server-only` resolves to a module that throws unless
+// the bundler applied the `react-server` export condition; without it every
+// request would fail at module load with "This module cannot be imported from a
+// Client Component module". A production build still succeeds in that case,
+// because the throw happens at evaluation time and not at bundle time, so CI
+// green does not prove it. The edge layer is not a layer that needs protecting
+// here, so the dependency on that condition is not worth taking.
+//
+// The guard stays where it earns its keep: the credential-reading modules under
+// src/lib that a Client Component could genuinely pull into a client bundle.
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet } from "jose/jwks/remote";
@@ -38,6 +55,8 @@ import { checkSameOrigin } from "./src/lib/auth/csrf";
 import { isAdminEmail } from "./src/lib/auth/admin-emails";
 import { getSessionIdentity } from "./src/lib/auth/session-edge";
 import { isLiveBootstrap } from "./src/lib/auth-secret-guard";
+import { landingPageEnabled } from "./src/lib/landing-page";
+import { CANONICAL_HOST, isAltDomainHost, isMarketingHost } from "./src/lib/marketing-hosts";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -321,6 +340,59 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const host = (req.headers.get("host") || "").toLowerCase().split(":")[0];
 
+  // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
+  // https://socratictrade.com/welcome in a single hop instead of bouncing off
+  // the marketing redirect while still on the alt host. Anonymous traffic is
+  // forwarded; a signed-in operator stays on the alt host (see below).
+  // Exempt: /api/* (machine callers — webhooks, uptime probes — must not be
+  // handed a 308 they may not follow) and the Apple associated-domain file
+  // (the applinks + webcredentials entitlements on socratic.trade need it served
+  // on THAT domain, not redirected away).
+  if (
+    isAltDomainHost(host) &&
+    !pathname.startsWith("/api/") &&
+    pathname !== "/.well-known/apple-app-site-association"
+  ) {
+    // A signed-in operator must not lose their session to the canonicalization
+    // hop. The Auth.js cookie is host-only by default (AUTH_COOKIE_DOMAIN is
+    // unset), and socratic.trade and socratictrade.com are unrelated domains, so
+    // no cookie domain can span them: the canonical host never receives the
+    // session cookie and the operator would land on the public landing page
+    // instead of the console. So a verified session keeps the request on the alt
+    // host, where its cookie still applies. Only anonymous traffic is forwarded
+    // to the canonical domain.
+    //
+    // The secret is read once and used only when it is actually set. An empty
+    // placeholder is never passed to the verifier: with no AUTH_SECRET there is
+    // no Auth.js session to verify, and handing the verifier an empty string
+    // would make "no secret configured" and "the cookie did not verify" the same
+    // answer, which is how a misconfigured deployment turns into a silent
+    // redirect of every operator. A missing AUTH_SECRET in a live boot is
+    // surfaced where it belongs, by assertAuthSecretConfiguredInLiveBootstrap()
+    // at startup; a Cloudflare-Access-only deployment has no AUTH_SECRET by
+    // design and is not an error.
+    //
+    // The raw value is the source of truth, the same one isAuthConfigured() and
+    // the canonical-host path use.  Trimming here would make this one hop
+    // disagree with them, and the disagreement costs the operator their
+    // session: a whitespace-only secret reads as absent here, so the hop
+    // forwards to the canonical host, where the host-only Auth.js cookie does
+    // not apply and the session is gone.  One secret, one reading of it.
+    const authSecret = process.env.AUTH_SECRET ? process.env.AUTH_SECRET : undefined;
+    const session = authSecret
+      ? await getSessionIdentity(req.headers.get("cookie"), authSecret)
+      : null;
+    if (!session) {
+      const target = new URL(req.url);
+      target.protocol = "https:";
+      target.host = CANONICAL_HOST;
+      // Every other redirect in this middleware goes out through
+      // withSecurityHeaders, so the G4 contract (docs/rollouts/2026-07-01-security-hardening.md)
+      // holds for this one too — a redirect is still a response a browser renders.
+      return withSecurityHeaders(NextResponse.redirect(target, 308));
+    }
+  }
+
   // Host-level routing: admin.socratictrade.com / admin.socratic.trade
   if (host === "admin.socratictrade.com" || host === "admin.socratic.trade") {
     if (pathname === "/") {
@@ -483,6 +555,20 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   }
 
   // --- Authorization ---
+
+  // The public marketing hosts: the root is the product landing page for a
+  // visitor, and the console for a signed-in operator. This runs BEFORE the
+  // fail-closed /login redirect below, so an anonymous visitor to the canonical
+  // domain sees the landing page instead of a login wall — while the operator's
+  // own bookmark to the apex domain still opens the console.
+  // With the marketing pages switched off (/welcome 404s), an anonymous visitor
+  // must fall through to the fail-closed /login redirect below rather than be
+  // sent to a page that does not exist.
+  if (isMarketingHost(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
+    return withSecurityHeaders(
+      NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
+    );
+  }
 
   if (trustedEmail) {
     if (!isEmailAllowed(trustedEmail, fromCf)) {

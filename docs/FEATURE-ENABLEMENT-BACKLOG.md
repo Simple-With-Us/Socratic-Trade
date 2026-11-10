@@ -31,7 +31,7 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 
 | Flag / gate | Default | Ready? | How to enable safely |
 |-------------|---------|--------|----------------------|
-| `LANDING_PAGE_ENABLED` | **ON** (unset) | Live | Set `off` only for private deploys. Pages: `/welcome`, `/how-it-works`, `/strategy`. |
+| `LANDING_PAGE_ENABLED` | **ON** (unset) | Live | Set `off` only for private deploys.  Pages: `/welcome`, `/framework`, `/how-it-works`, `/strategy`. |
 | `CSP_ENABLED` | off (prod Infisical **on** 2026-08-13, report-only) | **Live** (report-only) | `CSP_REPORT_ONLY=on`. Watch `[csp-report]` logs. **Do not** set `CSP_REPORT_ONLY=off` until clean. |
 | `USAGE_BUDGET_ENFORCE` | off | **Yes** | Set `on` when usage-monitor budget-status is trusted. Fail-open on monitor outage. |
 | `CONGRESS_SHARE_ENABLED` | off (prod Infisical **on** 2026-08-13) | **Live** | Requires `CONGRESS_TRADE_TOKEN` (CT INGEST_TOKEN). Nightly batch + after-scan refs. Keep `CONGRESS_SHARE_FUNDAMENTALS_ENABLED` off unless App A #46 is confirmed. |

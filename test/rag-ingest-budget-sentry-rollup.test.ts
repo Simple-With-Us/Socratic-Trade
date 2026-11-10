@@ -192,30 +192,35 @@ describe("RAG ingest budget Sentry rollup", () => {
   }, 90_000); // 3 sequential storeContexts calls — see timeout note above.
 
   it("resumes emitting once the cooldown window has elapsed", async () => {
-    const { storeContexts, __ragIngestBudgetAlertCooldownTestHandle__ } = await import("../src/lib/vector-db");
+    const { storeContexts, __ragIngestBudgetAlertCooldownTestHandle__, __ragSentryCooldownTestHandle__ } = await import("../src/lib/vector-db");
     const { getInternalSetting, setInternalSetting } = await import("../src/lib/db");
 
     await storeContexts([...context(), ...context()], "local", {});
     await waitForCaptureCount(1);
 
-    // Immediately retrying stays inside the (now 6h) window: still suppressed. The gate itself
+    // Immediately retrying stays inside the (now 24h, global) window: still suppressed. The gate itself
     // (unlike the fire-and-forget Sentry capture) runs synchronously inside storeContexts, so
     // this negative check needs no waitFor — there is nothing in flight left to resolve.
     await storeContexts([...context(), ...context()], "local", {});
     expect(mocks.captureMessage).toHaveBeenCalledTimes(1);
 
-    const key = "vectorStore:ingestBudgetAlert:local";
+    // Global lane key, not per-user: a second user's throttled batch must not re-mint an event.
+    const key = "vectorStore:ingestBudgetAlert:rag-ingest-budget";
     expect(getInternalSetting<string>(key)).toBeTruthy();
+    expect(getInternalSetting<string>("vectorStore:ingestBudgetAlert:local")).toBeFalsy();
     // Rewind the persisted cooldown marker past the window instead of mocking the clock —
     // shouldEmitRagIngestBudgetSentry reads/writes this exact key via getInternalSetting/
     // setInternalSetting (vector-db.ts), so this simulates the window having elapsed without
     // needing fake timers around better-sqlite3's synchronous calls.
-    setInternalSetting(key, new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString());
+    setInternalSetting(key, new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
 
     // Rewind the in-memory cooldown too — shouldEmitRagIngestBudgetSentry
     // short-circuits on the in-memory map BEFORE the persisted key, so a
     // persisted rewind alone is not enough to make the next call fire.
-    __ragIngestBudgetAlertCooldownTestHandle__.delete("local");
+    __ragIngestBudgetAlertCooldownTestHandle__.delete(key);
+    // Also rewind PR #4971's volatile 15-min capture layer, or it (correctly)
+    // suppresses the resumed emission this test is simulating.
+    __ragSentryCooldownTestHandle__.clear();
 
     await storeContexts([...context(), ...context()], "local", {});
     await waitForCaptureCount(2);

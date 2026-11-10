@@ -100,12 +100,17 @@ struct MobileAPIClient {
         return snap
     }
 
-    func snapshotData(timeout: TimeInterval = 30) async throws -> (MobileSnapshot, Data) {
+    func snapshotData(
+        timeout: TimeInterval = 30,
+        captureFailures: Bool = true
+    ) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
         // A shared URL cache can replay the previous account after a switch or sign-out.
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = timeout
-        let data = try await successfulResponseData(for: req)
+        // Retrying callers pass captureFailures: false and report only the terminal
+        // failure, so a recovered transient does not mint a Sentry issue per attempt.
+        let data = try await successfulResponseData(for: req, captureFailures: captureFailures)
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
             return (snap, data)

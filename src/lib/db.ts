@@ -12,6 +12,7 @@ import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
 import { installSlowSqliteTiming } from "./sqlite-slow-timing";
+import { auditRowChangesHaltCause } from "./halt-audit-invalidation";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -3535,6 +3536,60 @@ const MIGRATIONS: Migration[] = [
         }
       }
     }
+  },
+  {
+    // 2026-10-18 BF-FIXER (ST-4561): autonomy_halt_cause.latestHaltBranch correlated-EXISTS fix.
+    //
+    // audit_events carries idx_audit_events_user_account_kind (user_id, connected_account_id, kind)
+    // from v-earlier, and latestHaltBranch's own comment says both of its reads "can use
+    // (user_id, connected_account_id, kind) instead of scanning audit_events".  The database does
+    // not deliver that.  EXPLAIN QUERY PLAN on prod (2026-10-18) showed BOTH subplans narrowing on
+    // user_id alone:
+    //
+    //   SEARCH audit_events USING INDEX idx_audit_events_user_created (user_id=?)
+    //   CORRELATED SCALAR SUBQUERY 1
+    //   SEARCH e USING INDEX idx_audit_events_user_created (user_id=? AND created_at>?)
+    //
+    // connected_account_id and kind never enter a seek, so the handover check walks one user's whole
+    // audit history.  The existing composite cannot serve the shape because it has no created_at,
+    // which the query needs for both `ORDER BY created_at DESC LIMIT 1` and `e.created_at >= h.created_at`.
+    //
+    // Adding created_at as the trailing column lets the correlated EXISTS seek all four columns.
+    // Verified on a same-schema ANALYZEd copy: the correlated subquery becomes
+    //   SEARCH e USING INDEX ... (user_id=? AND connected_account_id=? AND kind=? AND created_at>?)
+    // and it does so with NO ANALYZE — the index alone is sufficient for that half.
+    //
+    // Purely additive: a new index, no data change, no ANALYZE, no PRAGMA.  Creating it over 1.4M
+    // rows takes a write lock for the build, so this is expected to run in the normal migration
+    // window like any other index build here.
+    //
+    // The halt-branch statement that motivated this index was rewritten in the same change:
+    // APP_HALT_PREDICATE is split per kind into two index-ordered latest-per-kind lookups
+    // combined with max(), so the statement seeks (user_id, connected_account_id, kind,
+    // created_at) with no sorter instead of walking the user's audit history.
+    version: 100,
+    name: "audit_events_account_kind_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_kind_created ON audit_events (user_id, connected_account_id, kind, created_at DESC)"
+      );
+    }
+  },
+  {
+    // ST-4561 follow-up: the correlated handover EXISTS constrains kind with an OR/IN, so
+    // created_at can never be a range bound on the kind-first v100 index (SQLite only ranges
+    // a column when every preceding column is equality-constrained).  This companion orders
+    // created_at directly after the two equality columns, so `e.created_at >= h.created_at`
+    // becomes a real bounded seek instead of a scan of the account group's audit rows.
+    version: 101,
+    name: "audit_events_account_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON audit_events (user_id, connected_account_id, created_at DESC)"
+      );
+    }
   }
 ];
 
@@ -3858,6 +3913,21 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
     db.prepare(
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
+  }
+
+  // ST-4561: the halt-cause cache holds the answer to "did the APP halt this account, and has it
+  // stayed halted?" for up to a minute.  A row that matches the app-halt predicate (a HARD drawdown
+  // breaker, a broker auto-halt) or the handover predicate (an auto-resume, an owner override, a
+  // boot halt, an ops set_system_state, a policy change that leaves `halted`) changes that answer,
+  // so the write marks the cached answer for this scope stale and the next read re-reads it.  A
+  // row that matches neither -- the ADVISORY drawdown row written on every breached strategy run,
+  // for one -- cannot change it and must not force a fresh scan of the 19 GB audit table.
+  //
+  // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
+  // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
+  // load that module, and then the cache TTL governs as before.
+  if (auditRowChangesHaltCause(kind, payloadJson)) {
+    globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
 }
 

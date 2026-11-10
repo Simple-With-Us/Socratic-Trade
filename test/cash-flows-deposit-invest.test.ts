@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { inferExternalCashFlows } from "../src/lib/cash-flows";
 import { normalizeAgainstBenchmark } from "../src/lib/benchmark";
+import type { EquityCurvePoint } from "../src/lib/types";
 
 /**
  * Owner bug (Alpaca Paper / Sandbox): account shows ~+50% vs SPY despite ~$100k start
@@ -92,5 +93,35 @@ describe("deposit then invest without fills (paper vs-SPY inflation)", () => {
     const r = normalizeAgainstBenchmark(equity, spy, "SPY", flows.size ? flows : undefined)!;
     // Real ~+2% account return should survive (not neutralized as a deposit).
     expect(r.accountReturnPct).toBeCloseTo(2, 0);
+  });
+});
+
+describe("broker-reported equity-only history (Alpaca portfolio history fallback, PR #4971)", () => {
+  it("never invents a transfer from an equity-only market move between broker-history points", () => {
+    // No cash/positions split and no fills: a +2% / −1.5% market day must stay market return,
+    // not be neutralized into a phantom deposit/withdrawal (Kody 4433485074, sentry 4433471476).
+    const curve: EquityCurvePoint[] = [
+      { timestamp: "2026-07-01T16:00:00Z", equity: 100_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-07-02T16:00:00Z", equity: 102_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-07-06T16:00:00Z", equity: 100_470, source: "paper", brokerHistory: true }
+    ];
+    expect(inferExternalCashFlows(curve, []).size).toBe(0);
+  });
+
+  it("does not invent a transfer between the last broker-history point and a live cash tip", () => {
+    const curve: EquityCurvePoint[] = [
+      { timestamp: "2026-07-01T16:00:00Z", equity: 100_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-07-02T16:00:00Z", equity: 101_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-07-03T19:00:00Z", equity: 103_000, source: "paper", cash: 40_000, positionsValue: 63_000 }
+    ];
+    expect(inferExternalCashFlows(curve, []).size).toBe(0);
+  });
+
+  it("still invents the transfer for the same move on a local equity-only, flat-book curve (unchanged)", () => {
+    const curve: EquityCurvePoint[] = [
+      { timestamp: "2026-07-01T16:00:00Z", equity: 100_000, source: "paper" },
+      { timestamp: "2026-07-02T16:00:00Z", equity: 102_000, source: "paper" }
+    ];
+    expect(inferExternalCashFlows(curve, []).get("2026-07-02")).toBe(2_000);
   });
 });

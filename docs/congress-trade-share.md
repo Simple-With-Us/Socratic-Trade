@@ -9,6 +9,11 @@ hooks in `src/lib/market.ts` (after-scan) and `src/lib/scheduler.ts` (nightly).
 and runtime Zod schemas are imported from `@jaywedgeworth22/congress-trading-shared`, with local App B
 code retaining only mapping logic and operational gates.
 
+**Share envelope version (2026-10-23, ST-3853):** since `@jaywedgeworth22/congress-trading-shared`
+v2.9.0 the sender stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every outbound import POST body
+(and App A resolves it with `resolveSharePayloadSchemaVersion`, warning on unsupported versions
+without rejecting the payload).
+
 **2026-06-25 additions (all default-OFF):**
 - **Numeric analyst price targets** — `fundamentals[]`/`analyst[]` already ride the
   push via `marketQuoteToFundamentals`/`marketQuoteToAnalyst` (sourced from the scan's

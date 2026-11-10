@@ -133,7 +133,7 @@ describe("MiniMax empty reasoning output", () => {
     const accountId = randomUUID();
     db.upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "MiniMax truncation", isActive: true });
     db.setActiveConnectedAccount(accountId);
-    db.setPolicy({ ...DEFAULT_POLICY, systemState: "active", llmModel: "minimax-m3", llmReasoningEffort: "medium", includedIndices: [], additionalSymbols: ["AAPL"], strategyAuthority: "decide" });
+    db.setPolicy({ ...DEFAULT_POLICY, systemState: "active", llmModel: "minimax-m3.1-flash", llmReasoningEffort: "medium", includedIndices: [], additionalSymbols: ["AAPL"], strategyAuthority: "decide" });
     return db;
   }
 
@@ -173,7 +173,7 @@ describe("MiniMax empty reasoning output", () => {
     const persisted = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "llm_step");
     expect(persisted.some((e) => (e.payload as { responseAttempts?: unknown[] }).responseAttempts?.length === 2)).toBe(true);
     const firstTruncated = persisted.find((e) => (e.payload as { finishReason?: string }).finishReason === "length");
-    expect(firstTruncated?.payload).toMatchObject({ status: "failed", model: "MiniMax-M3" });
+    expect(firstTruncated?.payload).toMatchObject({ status: "failed", model: "MiniMax-M3.1-Flash" });
     expect(db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "strategy_llm_failover")).toHaveLength(0);
   }, 30_000);
 
@@ -221,7 +221,7 @@ describe("MiniMax empty reasoning output", () => {
     expect(result.status).toBe("completed");
     const hops = db.listAudit(5000).filter((e) => (e.payload as { runId?: string }).runId === result.runId && e.kind === "strategy_llm_failover");
     expect(hops).toHaveLength(1);
-    expect(hops[0].payload).toMatchObject({ fromModel: "MiniMax-M3", fromProvider: "minimax", toModel: fallback.model, toProvider: fallback.provider, reason: "empty_truncated_response", truncated: true, wireOutputCap: 24_000 });
+    expect(hops[0].payload).toMatchObject({ fromModel: "MiniMax-M3.1-Flash", fromProvider: "minimax", toModel: fallback.model, toProvider: fallback.provider, reason: "empty_truncated_response", truncated: true, wireOutputCap: 24_000 });
     const step = result.llmSteps?.find((s) => s.step === "bull");
     expect(step).toMatchObject({ status: "completed", provider: "gemini" });
     expect(step?.responseAttempts).toHaveLength(3);

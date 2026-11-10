@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CATALOG_FIELDS,
   CATALOG_SOURCES,
@@ -9,6 +13,35 @@ import {
   buildDataCompletenessReport,
   resolveCompletenessUniverse
 } from "../src/lib/data-completeness";
+import { resetDbForTesting } from "../src/lib/db";
+
+// Per repo convention every test file points DATABASE_URL at its own temp SQLite DB.
+// This file asserts an empty-database universe, so it has to own its database: the
+// enrichment-coverage tests persist a coverage report into whatever DATABASE_URL
+// points at, and buildDataCompletenessReport reads the newest persisted report back
+// and uses its fill rate as a field's completeness whenever one exists.  Without an
+// isolated database this test passes or fails on the order the files happened to run
+// in, and on whether a fire-and-forget persist had landed before it started.
+let dir: string;
+let prevDb: string | undefined;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), `data-catalog-completeness-${randomUUID()}-`));
+  prevDb = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
+  resetDbForTesting();
+});
+
+afterEach(() => {
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 describe("data-catalog", () => {
   it("lists every field with at least one source and required provenance", () => {

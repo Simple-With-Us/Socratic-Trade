@@ -265,6 +265,22 @@ describe("required contexts are not renamed out from under the ruleset", () => {
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
     const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
     expect(gate).toContain("CODEOWNERS");
+
+    // The reusable's in-flight gate looks up the head commit's check runs and the head
+    // branch's queued workflow runs.  A called workflow cannot elevate the caller's token:
+    // it fails at startup with "The workflow is requesting 'checks: read', but is only
+    // allowed 'checks: none'" when the caller omits a scope.  No job in this workflow
+    // declares its own permissions block, so the workflow-level block below is the
+    // effective one and these lines are the whole contract.  A later edit that drops one
+    // of them breaks arming for every pull request in this repo, so assert them here
+    // rather than trusting the grant to stay put (Kody review, PR #4908).
+    const callerPermissions =
+      withoutComments(auto).match(/^permissions:\n((?:[ \t]+\S+: \S+\n)+)/m)?.[1] ?? "";
+    expect(callerPermissions).toMatch(/^[ \t]+contents: write$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+pull-requests: write$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+checks: read$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+actions: read$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+issues: read$/m);
   });
 
   it("does not ask the armer to delete the branch while the merge queue is on", () => {

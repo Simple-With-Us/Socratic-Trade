@@ -1285,10 +1285,19 @@ final class MobileStore: ObservableObject {
         let maxAttempts = 2
         for attempt in 0..<maxAttempts {
             do {
-                return try await client.snapshotData(timeout: timeout)
+                return try await client.snapshotData(timeout: timeout, captureFailures: false)
             } catch let error as MobileAPIError {
-                guard case .network = error else { throw error }
-                if attempt >= maxAttempts - 1 { throw error }
+                guard case .network(let underlying) = error else { throw error }
+                if attempt >= maxAttempts - 1 {
+                    // Only the terminal failure is reported: per-attempt capture in
+                    // snapshotData is suppressed above, so a retry that recovers
+                    // never mints a Sentry issue for the transient.
+                    SentryTelemetry.captureAPIFailure(
+                        error: underlying,
+                        endpoint: "/api/mobile/snapshot"
+                    )
+                    throw error
+                }
                 let backoffNs: UInt64 = attempt == 0 ? 1_500_000_000 : 3_000_000_000
                 try await Task.sleep(nanoseconds: backoffNs)
                 guard generation == loadGeneration else { throw CancellationError() }

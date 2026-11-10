@@ -737,7 +737,7 @@ private struct PerformanceOverviewCard: View {
                                 .font(.appCaption)
                                 .foregroundStyle(pnlColor(dollarExcess))
                             }
-                            Text("Same deposits and withdrawals as this account, applied at each day's cutoff.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
+                            Text("Same deposits and withdrawals as this account, counted from the start of the day they land.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
                                 .font(.appCaption2)
                                 .foregroundStyle(.secondary)
                             if let accountSeries = benchmark.accountEquitySeries,
@@ -752,6 +752,23 @@ private struct PerformanceOverviewCard: View {
                                 )
                                 .padding(.top, 4)
                             }
+                        }
+                    }
+                } else if let unavailable = performance.benchmarkUnavailable {
+                    AppCard {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("vs SPY")
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                            Text(
+                                unavailable.reason == "insufficient-history" ||
+                                    unavailable.reason == "insufficient-overlap"
+                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
+                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+                            )
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

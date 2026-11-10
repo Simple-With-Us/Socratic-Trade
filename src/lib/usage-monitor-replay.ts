@@ -1,7 +1,9 @@
 // Crash-durable replay of Socratic-Trade's local usage ledgers into API Usage Monitor.
 //
-// Live writes still enqueue immediately through usage-monitor-push.ts. This worker closes the
-// durability gap left by a process crash: it reconstructs events from llm_usage / rag_usage using
+// LLM live writes still enqueue immediately through usage-monitor-push.ts.  RAG and provider-dispatch
+// rows are NOT live-pushed: this worker is their only path, as one summed row per closed window
+// (see "Windowed rollup lanes" below).  For the LLM ledger this worker closes the
+// durability gap left by a process crash: it reconstructs events from llm_usage using
 // each row's existing ID + timestamp, and advances an ordered settings-table watermark only after
 // the monitor acknowledges the batch. Once a lane has ACKed its first strict-v2 row, every run
 // inclusively re-sends the prior watermark row, so a crash between remote acknowledgement and the
@@ -10,16 +12,14 @@
 import {
   audit,
   getDb,
-  listProviderUsageOutboxRows,
   reconcileStaleProviderDispatches,
-  type ProviderUsageOutboxRow,
 } from "./db";
 import {
   ackCallVolumeWindows,
   createCallVolumeUsageMonitorEvent,
   createLlmUsageMonitorEvent,
-  createProviderDispatchUsageMonitorEvent,
-  createRagUsageMonitorEvent,
+  createProviderDispatchRollupUsageMonitorEvent,
+  createRagRollupUsageMonitorEvent,
   loadPersistedCallVolumeWindows,
   sendUsageMonitorBatch,
   usageMonitorEnabled,
@@ -72,19 +72,6 @@ interface LlmUsageLedgerRow {
   created_at: string;
 }
 
-interface RagUsageLedgerRow {
-  id: string;
-  user_id: string;
-  operation: string;
-  provider: string;
-  model: string | null;
-  tokens_in: number | null;
-  tokens_out: number | null;
-  batch_count: number | null;
-  cost_est_usd: number | null;
-  created_at: string;
-}
-
 interface LedgerReplayResult {
   sent: number;
   complete: boolean;
@@ -101,6 +88,12 @@ export interface UsageMonitorReplayResult {
 }
 
 export interface UsageMonitorReplayOptions {
+  /** Test seam: the clock used to decide which rollup windows are closed. */
+  nowMs?: number;
+  /** Test/maintenance override of the rollup window width (default 10 minutes). */
+  rollupWindowMs?: number;
+  /** Test/maintenance override of the grace after a window ends before it is sent (default 60 s). */
+  rollupGraceMs?: number;
   /** Test/maintenance override; production uses the ingest contract's 100-event maximum. */
   pageSize?: number;
   /** Bounds one startup/interval pass so a large historical ledger drains without a request burst. */
@@ -371,31 +364,6 @@ function readLlmRows(
     .all(...params, limit) as LlmUsageLedgerRow[];
 }
 
-function readRagRows(
-  cursor: ReplayCursor | null,
-  inclusive: boolean,
-  limit: number,
-  upperBound: ReplayCursor | null = null
-): RagUsageLedgerRow[] {
-  const columns =
-    "id, user_id, operation, provider, model, tokens_in, tokens_out, batch_count, " +
-    "cost_est_usd, created_at";
-  const clauses: string[] = [];
-  const params: (string | number)[] = [];
-  if (cursor) {
-    clauses.push(`(${cursorClause(inclusive)})`);
-    params.push(cursor.createdAt, cursor.createdAt, cursor.id);
-  }
-  if (upperBound) {
-    clauses.push(`(${upperBoundClause()})`);
-    params.push(upperBound.createdAt, upperBound.createdAt, upperBound.id);
-  }
-  const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-  return getDb()
-    .prepare(`SELECT ${columns} FROM rag_usage${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
-    .all(...params, limit) as RagUsageLedgerRow[];
-}
-
 function optionalFinite(value: number | null): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -438,57 +406,260 @@ async function llmEvents(rows: LlmUsageLedgerRow[]): Promise<RowEventPair<LlmUsa
   );
 }
 
-async function ragEvents(rows: RagUsageLedgerRow[]): Promise<RowEventPair<RagUsageLedgerRow>[]> {
+// ── Windowed rollup lanes (rag, provider-dispatch) ──────────────────────────────
+//
+// These two ledgers were sent one monitor row per ledger row, by the live push AND this replay
+// (same key, so the second send was a counted duplicate), and made up 86% of Socratic-Trade's
+// ~9,600 rows/day.  They now reach the monitor only here, as ONE summed row per closed window
+// and group.  Every numeric field is additive and every categorical field is constant inside a
+// group, so totals are exact.  A window is sent only after it has ended plus a grace period, from
+// the durable ledger, so it is immutable: the same window always rebuilds the byte-identical event
+// (same key, same content) and a crash between the ACK and the watermark write is harmless.  The
+// monitor 409s a changed resend, so a window is never re-sent with different totals.
+
+const DEFAULT_ROLLUP_WINDOW_MS = 10 * 60_000;
+const DEFAULT_ROLLUP_GRACE_MS = 60_000;
+const MAX_ROLLUP_WINDOWS_PER_PASS = 12;
+const MAX_EVENTS_PER_POST = 100;
+
+// Self-hosted Qdrant rows are rolled up too, but as call volume (unit "request", no quantity, no
+// cost): see ragUsageEvent in usage-monitor-push.ts.  Their token columns hold a record count.
+
+function rollupMs(override: number | undefined, envName: string, fallback: number): number {
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) return Math.floor(override);
+  const fromEnv = Number(process.env[envName]);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : fallback;
+}
+
+function rollupRoleKey(lane: "rag"): string {
+  return `usage_monitor_replay:${REPLAY_TABLES[lane]}:rollup_cutover:v1`;
+}
+
+/**
+ * First start of the RAG rollup: rag rows were live-pushed per-row, so rows already delivered must
+ * not be counted again inside a first window; seed the watermark to the newest existing row.  Same
+ * bounded-loss trade the v2 identity cutover made (owner-accepted), preferred to duplicate totals.
+ * Runs synchronously right after the v2 cutover and BEFORE any await, so rows written while the LLM
+ * replay awaits the network are not swallowed by a later seed.  The provider-dispatch lane is NOT
+ * seeded: it never had a live push, so rows past its old watermark were never delivered and the
+ * rollup is their first (and only) copy.  This assumes the old build has stopped (Coolify stops the
+ * old container before starting the new one); an old process still live-pushing rag rows would be
+ * double counted for the overlap.
+ */
+function prepareRollupCutover(lane: "rag"): void {
+  const database = getDb();
+  const watermarkKey = USAGE_MONITOR_REPLAY_WATERMARK_KEYS[lane];
+  const markerKey = rollupRoleKey(lane);
+  database.transaction(() => {
+    const marker = database.prepare("SELECT value FROM settings WHERE key = ?").get(markerKey);
+    if (marker) return;
+    const now = new Date().toISOString();
+    const high = latestCursor(REPLAY_TABLES[lane]);
+    const current = readWatermark(watermarkKey);
+    if (high && (!current || compareCursors(current, high) < 0)) {
+      // Durable receipt of the bounded loss, like the v2 cutover's pre_v2_rows_skipped, so rows the
+      // old lane never acknowledged are visible and reconcilable rather than silently dropped.
+      const skipped = countRowsAfterCursor(REPLAY_TABLES[lane], current);
+      database
+        .prepare(
+          "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+        )
+        .run(watermarkKey, JSON.stringify(high), now);
+      database
+        .prepare(
+          "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+        )
+        .run(`${markerKey}:rows_skipped`, String(skipped), now);
+      audit(
+        "usage_monitor_replay_rollup_cutover_skip",
+        { watermarkKey, rowsSkipped: skipped, seededTo: high },
+        "local"
+      );
+    }
+    database
+      .prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, 'rollup-active', ?)")
+      .run(markerKey, now);
+  }).immediate();
+}
+
+function afterCursorSql(cursor: ReplayCursor | null): { sql: string; params: string[] } {
+  return cursor
+    ? { sql: " AND (created_at > ? OR (created_at = ? AND id > ?))", params: [cursor.createdAt, cursor.createdAt, cursor.id] }
+    : { sql: "", params: [] };
+}
+
+function firstRowAfter(table: string, cursor: ReplayCursor | null): ReplayCursor | null {
+  const after = afterCursorSql(cursor);
+  const row = getDb()
+    .prepare(`SELECT id, created_at AS createdAt FROM ${table} WHERE 1=1${after.sql} ORDER BY created_at ASC, id ASC LIMIT 1`)
+    .get(...after.params) as ReplayCursor | undefined;
+  return row ?? null;
+}
+
+function lastRowInWindow(table: string, startIso: string, endIso: string, cursor: ReplayCursor | null): ReplayCursor | null {
+  const after = afterCursorSql(cursor);
+  const row = getDb()
+    .prepare(
+      `SELECT id, created_at AS createdAt FROM ${table} WHERE created_at >= ? AND created_at < ?${after.sql} ` +
+      "ORDER BY created_at DESC, id DESC LIMIT 1"
+    )
+    .get(startIso, endIso, ...after.params) as ReplayCursor | undefined;
+  return row ?? null;
+}
+
+interface RagRollupGroup {
+  provider: string;
+  operation: string;
+  user_id: string;
+  model: string | null;
+  rows: number;
+  tokens_in: number;
+  tokens_out: number;
+  batch_count: number;
+  cost_usd: number | null;
+}
+
+async function ragWindowEvents(startIso: string, endIso: string, cursor: ReplayCursor | null): Promise<UsageMonitorEvent[]> {
+  const after = afterCursorSql(cursor);
+  const groups = getDb()
+    .prepare(
+      "SELECT provider, operation, user_id, model, COUNT(*) AS rows, " +
+      "SUM(COALESCE(tokens_in, 0)) AS tokens_in, SUM(COALESCE(tokens_out, 0)) AS tokens_out, " +
+      "SUM(COALESCE(batch_count, 0)) AS batch_count, SUM(cost_est_usd) AS cost_usd " +
+      `FROM rag_usage WHERE created_at >= ? AND created_at < ?${after.sql} ` +
+      "GROUP BY provider, operation, user_id, model " +
+      "ORDER BY provider, operation, user_id, COALESCE(model, '')"
+    )
+    .all(startIso, endIso, ...after.params) as RagRollupGroup[];
   return Promise.all(
-    rows.map(async (row) => ({
-      row,
-      event: await createRagUsageMonitorEvent({
-        sourceEventId: row.id,
-        occurredAt: row.created_at,
-        provider: row.provider,
-        operation: row.operation,
-        model: row.model ?? undefined,
-        userId: row.user_id,
-        tokensIn: optionalFinite(row.tokens_in),
-        tokensOut: optionalFinite(row.tokens_out),
-        batchCount: optionalFinite(row.batch_count),
-        costUsd: optionalFinite(row.cost_est_usd),
+    groups.map((group) =>
+      createRagRollupUsageMonitorEvent({
+        windowStart: startIso,
+        windowEnd: endIso,
+        requests: group.rows,
+        provider: group.provider,
+        operation: group.operation,
+        model: group.model ?? undefined,
+        userId: group.user_id,
+        tokensIn: group.tokens_in,
+        tokensOut: group.tokens_out,
+        batchCount: group.batch_count,
+        costUsd: optionalFinite(group.cost_usd),
       })
-    }))
+    )
   );
 }
 
-function readProviderRows(
-  cursor: ReplayCursor | null,
-  inclusive: boolean,
-  limit: number,
-  upperBound: ReplayCursor | null = null
-): ProviderUsageOutboxRow[] {
-  const rows = listProviderUsageOutboxRows({ after: cursor, inclusive, limit });
-  return upperBound
-    ? rows.filter((row) => compareCursors({ createdAt: row.created_at, id: row.id }, upperBound) <= 0)
-    : rows;
+interface ProviderRollupGroup {
+  provider: string;
+  operation: string;
+  credential_ref: string;
+  user_id: string;
+  outcome: "succeeded" | "failed" | "unknown";
+  units: number;
 }
 
-async function providerEvents(rows: ProviderUsageOutboxRow[]): Promise<RowEventPair<ProviderUsageOutboxRow>[]> {
-  // Retired provider families return null from createProviderDispatchUsageMonitorEvent. Drop them
-  // here so replay still advances its watermark past those rows (empty batches ACK as true).
-  const built = await Promise.all(rows.map(async (row) => ({
-    row,
-    event: await createProviderDispatchUsageMonitorEvent({
-      sourceEventId: row.id,
-      occurredAt: row.occurred_at,
-      provider: row.provider,
-      operation: row.operation,
-      credentialRef: row.credential_ref,
-      userId: row.user_id,
-      outcome: row.outcome,
-      requests: row.requests,
-      estimatedCostUsd: row.estimated_cost_usd,
-      ...(row.actual_cost_usd == null ? {} : { actualCostUsd: row.actual_cost_usd }),
-    })
-  })));
-  return built.filter((pair): pair is RowEventPair<ProviderUsageOutboxRow> => pair.event !== null);
+async function providerWindowEvents(startIso: string, endIso: string, cursor: ReplayCursor | null): Promise<UsageMonitorEvent[]> {
+  const after = afterCursorSql(cursor);
+  const groups = getDb()
+    .prepare(
+      "SELECT provider, operation, credential_ref, user_id, outcome, SUM(COALESCE(requests, 1)) AS units " +
+      `FROM provider_usage_outbox WHERE created_at >= ? AND created_at < ?${after.sql} ` +
+      "GROUP BY provider, operation, credential_ref, user_id, outcome " +
+      "ORDER BY provider, operation, credential_ref, user_id, outcome"
+    )
+    .all(startIso, endIso, ...after.params) as ProviderRollupGroup[];
+  // Retired provider families return null; they are dropped here but the watermark still advances.
+  const built = await Promise.all(
+    groups.map((group) =>
+      createProviderDispatchRollupUsageMonitorEvent({
+        windowStart: startIso,
+        windowEnd: endIso,
+        provider: group.provider,
+        operation: group.operation,
+        credentialRef: group.credential_ref,
+        userId: group.user_id,
+        outcome: group.outcome,
+        requests: group.units,
+      })
+    )
+  );
+  return built.filter((event): event is UsageMonitorEvent => event !== null);
+}
+
+/** Send one window's events (chunked to the ingest cap), skipping a key the monitor already holds. */
+async function sendWindowEvents(events: UsageMonitorEvent[], watermarkKey: string, windowStart: string): Promise<boolean> {
+  for (let offset = 0; offset < events.length; offset += MAX_EVENTS_PER_POST) {
+    const pending = events
+      .slice(offset, offset + MAX_EVENTS_PER_POST)
+      .map((event) => ({ row: { id: event.eventId, created_at: windowStart }, event }));
+    let collisionSkips = 0;
+    for (;;) {
+      let collisionKey: string | null = null;
+      const acknowledged = await sendUsageMonitorBatch(
+        pending.map((pair) => pair.event),
+        { onIdempotencyCollision: (key) => { collisionKey = key; } }
+      );
+      if (acknowledged) break;
+      if (!collisionKey || collisionSkips >= MAX_COLLISION_SKIPS_PER_PAGE) return false;
+      const index = await findCollisionPairIndex(pending, collisionKey);
+      if (index === -1) return false;
+      const [skipped] = pending.splice(index, 1);
+      collisionSkips += 1;
+      console.warn(
+        `[usage-monitor-replay] skipping rollup ${skipped.row.id} (${watermarkKey}): ` +
+        `monitor already holds idempotency key ${collisionKey} (prior-delivery collision).`
+      );
+      audit(
+        "usage_monitor_replay_collision_skip",
+        { watermarkKey, rowId: skipped.row.id, rowCreatedAt: windowStart, idempotencyKey: collisionKey },
+        "local"
+      );
+      if (pending.length === 0) break;
+    }
+  }
+  return true;
+}
+
+async function replayRolledLane(input: {
+  table: string;
+  watermarkKey: string;
+  v2CutoverKey: string;
+  cutoverState: PreparedV2Cutover;
+  nowMs: number;
+  windowMs: number;
+  graceMs: number;
+  buildEvents: (startIso: string, endIso: string, cursor: ReplayCursor | null) => Promise<UsageMonitorEvent[]>;
+}): Promise<LedgerReplayResult> {
+  let sent = 0;
+  try {
+    if (input.cutoverState === "invalid") return { sent: 0, complete: false, failed: true };
+    let cursor = readWatermark(input.watermarkKey);
+    for (let windows = 0; windows < MAX_ROLLUP_WINDOWS_PER_PASS; windows += 1) {
+      const first = firstRowAfter(input.table, cursor);
+      if (!first) return { sent, complete: true, failed: false };
+      const startMs = Math.floor(Date.parse(first.createdAt) / input.windowMs) * input.windowMs;
+      const endMs = startMs + input.windowMs;
+      // Still open (or inside the grace): nothing later can be closed either, and sending it now
+      // would freeze totals that late rows could still change.
+      if (input.nowMs < endMs + input.graceMs) return { sent, complete: true, failed: false };
+      const startIso = new Date(startMs).toISOString();
+      const endIso = new Date(endMs).toISOString();
+      const last = lastRowInWindow(input.table, startIso, endIso, cursor);
+      if (!last) return { sent, complete: true, failed: false };
+      const events = await input.buildEvents(startIso, endIso, cursor);
+      if (!(await sendWindowEvents(events, input.watermarkKey, startIso))) {
+        return { sent, complete: false, failed: true };
+      }
+      cursor = advanceWatermark(input.watermarkKey, input.v2CutoverKey, last);
+      sent += events.length;
+    }
+    return { sent, complete: false, failed: false };
+  } catch {
+    return { sent, complete: false, failed: true };
+  }
 }
 
 /**
@@ -624,6 +795,9 @@ async function executeUsageMonitorReplay(
     // This synchronous BEGIN IMMEDIATE is deliberately the first DB action in the configured lane.
     // All three identity boundaries exist before reconciliation, event construction, or network I/O.
     cutovers = prepareV2ReplayCutovers();
+    // An invalid lane halts without state writes (replayRolledLane returns failed); seeding it here
+    // would move its watermark and skip the backlog once the corruption is fixed.
+    if (cutovers.rag !== "invalid") prepareRollupCutover("rag");
   } catch {
     const failed = { sent: 0, complete: false, failed: true };
     return { configured: true, llm: failed, rag: failed, provider: failed, callVolume: failed };
@@ -644,24 +818,37 @@ async function executeUsageMonitorReplay(
     readRows: readLlmRows,
     toEvents: llmEvents,
   });
-  const rag = await replayLedger<RagUsageLedgerRow>({
-    watermarkKey: USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag,
-    v2CutoverKey: USAGE_MONITOR_REPLAY_V2_CUTOVER_KEYS.rag,
-    cutoverState: cutovers.rag,
-    pageSize,
-    maxPages,
-    readRows: readRagRows,
-    toEvents: ragEvents,
-  });
-  const provider = await replayLedger<ProviderUsageOutboxRow>({
-    watermarkKey: USAGE_MONITOR_REPLAY_WATERMARK_KEYS.provider,
-    v2CutoverKey: USAGE_MONITOR_REPLAY_V2_CUTOVER_KEYS.provider,
-    cutoverState: cutovers.provider,
-    pageSize,
-    maxPages,
-    readRows: readProviderRows,
-    toEvents: providerEvents,
-  });
+  const nowMs = typeof options.nowMs === "number" && Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const windowMs = rollupMs(options.rollupWindowMs, "USAGE_MONITOR_ROLLUP_WINDOW_MS", DEFAULT_ROLLUP_WINDOW_MS);
+  const graceMs = rollupMs(options.rollupGraceMs, "USAGE_MONITOR_ROLLUP_GRACE_MS", DEFAULT_ROLLUP_GRACE_MS);
+  let rag: LedgerReplayResult;
+  let provider: LedgerReplayResult;
+  try {
+    rag = await replayRolledLane({
+      table: REPLAY_TABLES.rag,
+      watermarkKey: USAGE_MONITOR_REPLAY_WATERMARK_KEYS.rag,
+      v2CutoverKey: USAGE_MONITOR_REPLAY_V2_CUTOVER_KEYS.rag,
+      cutoverState: cutovers.rag,
+      nowMs,
+      windowMs,
+      graceMs,
+      buildEvents: ragWindowEvents,
+    });
+    provider = await replayRolledLane({
+      table: REPLAY_TABLES.provider,
+      watermarkKey: USAGE_MONITOR_REPLAY_WATERMARK_KEYS.provider,
+      v2CutoverKey: USAGE_MONITOR_REPLAY_V2_CUTOVER_KEYS.provider,
+      cutoverState: cutovers.provider,
+      nowMs,
+      windowMs,
+      graceMs,
+      buildEvents: providerWindowEvents,
+    });
+  } catch {
+    const failed = { sent: 0, complete: false, failed: true };
+    rag = failed;
+    provider = failed;
+  }
   const callVolume = await replayCallVolume();
   return { configured: true, llm, rag, provider, callVolume };
 }

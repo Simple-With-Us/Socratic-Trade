@@ -1068,6 +1068,20 @@ export interface BrokerQuote {
    * continue.  (Codex P1 review on the quote cascade.)
    */
   venueDelayedTape?: boolean;
+  /**
+   * Documented expected publication delay of this quote's tape, in seconds.
+   * Alpaca PAPER trades on the `delayed_sip` feed (~900s).  When this is set,
+   * an `asOf` age near the expected delay is NORMAL — it must not trip the
+   * real-time staleness gate — but the timestamp is still checked
+   * independently: lag beyond `expectedDelaySec + delayToleranceSec` is
+   * EXCESS delay and is flagged (see `alpaca-paper-quotes.ts`).
+   */
+  expectedDelaySec?: number;
+  /**
+   * Tolerance (seconds) allowed ON TOP of `expectedDelaySec` before the lag
+   * counts as excess. Defaults to the Alpaca PAPER tolerance (120s).
+   */
+  delayToleranceSec?: number;
   /** Previous session closing price. Used for intraday price change and % change calculations. */
   prevClose?: number;
   /** Today's session opening price. */
@@ -1262,6 +1276,16 @@ export interface TradingPolicy {
    * to try if the primary `redTeamLlmModel` fails (timeout, rate limit, or 5xx).
    */
   redTeamFallbackModels?: string[];
+  /**
+   * Owner-chosen rotation set for the Green Team seat (ST-4589): catalog display slugs the
+   * `__rotate__` option may pick from.  Only read while `llmModel` is the rotation sentinel.
+   * Undefined/empty = rotate over the whole eligible pool (the pre-ST-4589 behaviour).  A ticked
+   * model is honoured even if it is excluded from the default pool for cost.  Normalised by
+   * `normalizeRotationModelSelection` (src/lib/model-rotation-selection.ts) on save.
+   */
+  llmRotationModels?: string[];
+  /** Same as `llmRotationModels`, for the Red Team reviewer seat (`redTeamLlmModel`). */
+  redTeamRotationModels?: string[];
   /**
    * The Green Team / proposer's provider-specific reasoning/thinking effort, for models that
    * support it (ignored by models without that knob). Per-team split 2026-07-10: this legacy
@@ -2198,6 +2222,10 @@ export interface MarketQuote {
   asOf?: string;
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
   /** See BrokerQuote.fetchedAt. */
   fetchedAt?: string;
   /** See BrokerQuote.delayedFallback — carried through mergeQuoteData for approval cards. */
@@ -2401,6 +2429,18 @@ export interface CandidateEvidence {
   congressMemberTradeScoredCount?: number;
   asOf?: string; // candidate data freshness (most-recent enrichment timestamp)
   provider?: string; // primary provider
+  // Decision-time quote tape (Cluster D F4): persisted in the signal_snapshot JSON only —
+  // no schema change. Lets post-hoc analysis tell whether sizing used a delayed/synthetic quote.
+  bid?: number;
+  ask?: number;
+  bidSize?: number;
+  askSize?: number;
+  volume?: number;
+  fetchedAt?: string;
+  delayedFallback?: boolean;
+  syntheticBid?: boolean;
+  syntheticAsk?: boolean;
+  venuePriceAuthoritative?: boolean;
   sources?: EnrichmentSources; // per-field provenance (source attribution)
   /** Decision-time leave-one-provider-out score estimate. This is shadow telemetry, not a causal
    *  claim: it removes only fields that provider won in the cascade and does not invent a fallback
@@ -2471,6 +2511,10 @@ export interface MarketQuoteSummary {
   asOf?: string;
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
   /** See BrokerQuote.fetchedAt. */
   fetchedAt?: string;
   /** See BrokerQuote.delayedFallback. */
@@ -2559,6 +2603,12 @@ export interface MarketDataProviderOptions {
   seedEnrichment?: Record<string, MarketQuoteSummary>;
   /** Epoch ms when the strategy gather wall expires.  Drives internal wave budget. */
   deadlineAt?: number;
+  /**
+   * The connected account the scan is operating for.  Used to pick an
+   * ACCOUNT-SCOPED market-data tape (Alpaca PAPER → `delayed_sip`) without
+   * touching any process-global feed setting.
+   */
+  connectedAccountId?: string;
 }
 
 export interface MarketDataProvider {
@@ -3083,6 +3133,11 @@ export interface EquityCurvePoint {
    *  cash→stock conversion (not a withdrawal) apart from an external transfer when fills are
    *  missing from the ledger. */
   positionsValue?: number;
+  /** True when the point is the broker's own reported end-of-day equity (e.g. Alpaca
+   *  portfolio history) rather than a local portfolio snapshot. Real account equity, but
+   *  with no cash/positions split — flow detection must rely on the broker transfer
+   *  ledger or fills, never on an invented cash balance. */
+  brokerHistory?: boolean;
 }
 
 export interface RunAttribution {
@@ -3198,9 +3253,9 @@ export interface PerformanceSummary {
   paperEquityCurve: EquityCurvePoint[];
   /** SPY-benchmark comparison for the active execution mode's equity curve (absent when insufficient data). */
   benchmark?: BenchmarkComparison;
-  /** Set when `benchmark` is absent because the SPY series was dead/stale/unfetchable (feed
-   *  failure), so the UI can say WHY instead of a generic "not computable" — and never render
-   *  a fake 0.00% comparison. Absent for the ordinary young-account insufficient-history case. */
+  /** Set when `benchmark` is absent, naming why (dead/stale SPY feed, or too little
+   *  account history), so the UI can say WHY instead of silently omitting the card —
+   *  and never render a fake 0.00% comparison. */
   benchmarkUnavailable?: BenchmarkUnavailability;
   /** Broker-authoritative Day P&L hints when Alpaca activities are available. */
   dayPnlHints?: DayPnlHints;
@@ -3208,8 +3263,17 @@ export interface PerformanceSummary {
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
   paperUnrealizedPnl: number;
+  /** Per closed FIFO LOT (a scaled-out position counts once per trim). Kept for existing consumers;
+   *  the console Results card shows the round-trip figure below instead. */
   liveWinRate: number;
   paperWinRate: number;
+  /** Win rate per COMPLETED round trip (one per opening fill; still-open positions excluded).
+   *  Absent — never a fabricated 0 — while no round trip has completed (ST-4589 B10). */
+  liveRoundTripWinRate?: number;
+  paperRoundTripWinRate?: number;
+  /** Completed round trips behind liveRoundTripWinRate / paperRoundTripWinRate. */
+  liveRoundTripCount?: number;
+  paperRoundTripCount?: number;
   liveAverageReturnPct: number;
   paperAverageReturnPct: number;
   /** Count of CLOSED lots feeding liveWinRate/liveAverageReturnPct (0 for an account that has
@@ -3487,6 +3551,10 @@ export interface LearnedContextCandidate {
   intent?: string;
   /** Set only when the producer can vouch for the statement's provenance. See the type doc. */
   provenance?: LearnedContextCandidateProvenance;
+  /** Market regime the evidence came from, when the producer knows it (regime-relevance scoring). */
+  regime?: string | null;
+  /** Trade thesis tag the evidence came from, when the producer knows it (thesis-affinity scoring). */
+  thesisTag?: string | null;
 }
 
 /** Status of a queued risk-tier candidate awaiting explicit human confirmation. */

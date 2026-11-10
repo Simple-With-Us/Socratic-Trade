@@ -322,7 +322,7 @@ describe("runFailureWatchdogTick", () => {
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
 
     const liveness = await import("../src/lib/trading-liveness");
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     const row = summary?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(0);
     expect(liveness.toPublicTradingLiveness(summary).maxConsecutiveFailedRuns).toBe(0);
@@ -346,7 +346,7 @@ describe("runFailureWatchdogTick", () => {
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
     const liveness = await import("../src/lib/trading-liveness");
-    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const row = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(0);
   });
 
@@ -365,7 +365,7 @@ describe("runFailureWatchdogTick", () => {
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     const liveness = await import("../src/lib/trading-liveness");
-    const mid = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const mid = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(mid?.consecutiveFailedRuns).toBe(4);
 
     await addFailedRuns(1);
@@ -390,7 +390,7 @@ describe("runFailureWatchdogTick", () => {
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     const liveness = await import("../src/lib/trading-liveness");
-    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const row = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(1);
   });
 

@@ -50,6 +50,13 @@ export interface ProxyUseEntry {
   /** HTTP status of the proxied response, when a response was received. */
   statusCode?: number;
   /**
+   * Milliseconds this request spent queued for a proxy concurrency slot
+   * (the PROXY_MAX_CONCURRENCY gate in proxy-fetch.ts) before dispatch.
+   * Set only when the wait was measurable (> 0), so the watchdog can tell
+   * queue wait apart from proxy leg time.
+   */
+  queueWaitMs?: number;
+  /**
    * Short error class for a proxied request that threw: the error's `code`
    * (ECONNREFUSED, UND_ERR_CONNECT_TIMEOUT, ...) or, failing that, its
    * `name` (AbortError, ...). Never the error message.

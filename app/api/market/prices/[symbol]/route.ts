@@ -10,9 +10,14 @@ export const dynamic = "force-dynamic";
 // history for congress.trade (App A) cache-aside reads. Auth: the same APP_B_INGEST_TOKEN bearer
 // secret as /api/admin/securities/import (middleware passes bearer requests through unauthenticated;
 // verified strictly here, constant-time). An unknown symbol or a confirmed empty range is 200
-// { ticker, closes: [] }.  A stale tail is 502 { ok: false, error: "stale" }.  App A treats
-// 200-empty as "this source has nothing" and only tries the next provider on non-200.  Closes
-// are DESCENDING by date (closes[0] = latest close). See src/lib/market-read.ts.
+// { ticker, closes: [] }.  A short-lag stale tail (newest close behind the latest completed
+// session by <= TERMINAL_SERIES_AGE_DAYS in src/lib/market-read.ts) is 502
+// { ok: false, error: "stale" }.  A terminal series (delisted/acquired/halted; newest close
+// more than that threshold behind the latest session) is 200 with the closes in range and
+// currentPrice/currentPriceDate from the newest bar — App A computes staleness itself from
+// the price date and no next provider has newer bars.  App A treats 200-empty as "this source
+// has nothing" and only tries the next provider on non-200.  Closes are DESCENDING by date
+// (closes[0] = latest close). See src/lib/market-read.ts.
 export async function GET(req: Request, { params }: { params: Promise<{ symbol: string }> }) {
   if (!verifySecuritiesImportToken(req)) {
     audit("market_read_rejected", { reason: "token", route: "prices" });

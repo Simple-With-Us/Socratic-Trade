@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Card } from "../ui/primitives";
+import { BACKUP_RETENTION_SENTENCE } from "@/lib/legal-notice";
+import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
 // The CDN-cached prerender (`s-maxage=31536000`) was leaving a deployed docs edit stale
 // for up to a year. A docs-only deploy can change the policy the consent gate links to
@@ -24,8 +26,6 @@ export const metadata: Metadata = {
       : { index: false, follow: false, nocache: true }
 };
 
-const PRIMARY_LINK_SM =
-  "inline-flex h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 text-[13px] font-medium text-accent-fg shadow-sm transition-colors hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 max-sm:min-h-11";
 
 const SECTIONS: Array<{ title: string; body: string[] }> = [
   {
@@ -72,7 +72,7 @@ const SECTIONS: Array<{ title: string; body: string[] }> = [
     title: "6. Data retention",
     body: [
       "We retain account, connection, and audit data for as long as your account is active and as needed to comply with legal obligations, resolve disputes, and enforce agreements.",
-      "Database backups are kept for 7 days, then deleted.  Deleting your account removes this account's app data; leftover backup copies expire at the end of that window.",
+      `${BACKUP_RETENTION_SENTENCE}  Deleting your account removes this account's app data; leftover backup copies expire at the end of those windows.`,
       "You can delete your account yourself in Settings → Danger using the typed confirmation.  That permanently removes this account's app data and stored secrets.  Open positions at your broker and sign-in connections with other services are not closed or revoked by this app."
     ]
   },
@@ -110,17 +110,15 @@ const SECTIONS: Array<{ title: string; body: string[] }> = [
 
 export default function PrivacyPolicyPage() {
   return (
-    <div className="min-h-screen bg-bg text-fg">
-      <header className="border-b border-line bg-surface/80 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
-          <span className="text-base font-semibold text-fg">Socratic Trade</span>
-          <a href="/welcome" className={PRIMARY_LINK_SM}>
-            Home
-          </a>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-3xl px-6 py-14 space-y-10">
+    <PublicShell
+      contentWidth="narrow"
+      headerAction={
+        <a href="/welcome" className={PUBLIC_HEADER_ACTION_CLASS}>
+          Home
+        </a>
+      }
+    >
+      <div className="space-y-10">
         <section className="space-y-3">
           <h1 className="text-3xl font-bold tracking-tight text-fg sm:text-4xl">Privacy Policy</h1>
           <p className="text-sm text-faint">Effective date: August 18, 2026</p>
@@ -148,24 +146,7 @@ export default function PrivacyPolicyPage() {
             .
           </p>
         </Card>
-      </main>
-
-      <footer className="border-t border-line mt-8">
-        <div className="mx-auto max-w-3xl px-6 py-8 flex flex-col items-center gap-2 text-center sm:flex-row sm:justify-between">
-          <p className="text-xs text-faint">
-            Not investment advice. Trading involves risk of loss.{" "}
-            <a href="/welcome" className="underline underline-offset-2 hover:text-muted">
-              Home
-            </a>
-          </p>
-          <p className="text-xs text-faint">
-            &copy; 2026 Socratic Trade &middot;{" "}
-            <a href="mailto:mail@jays.services" className="underline underline-offset-2 hover:text-muted">
-              mail@jays.services
-            </a>
-          </p>
-        </div>
-      </footer>
-    </div>
+      </div>
+    </PublicShell>
   );
 }

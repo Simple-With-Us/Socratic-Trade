@@ -1,15 +1,16 @@
 // economic-calendar.ts — forward economic-event awareness for the strategist (handoff 3.5).
 //
 // The strategist previously saw macro LEVELS (CPI value, fed funds, regime label) but nothing
-// that says "CPI / FOMC / NFP is TOMORROW". This module ingests FMP's /economic-calendar
-// (via the existing quota-reserved requestFmp lane in fmp-common.ts, through fmp-gamma's
-// getEconomicCalendar) at most ONCE PER UTC DAY (persisted watermark), keeps only
+// that says "CPI / FOMC / NFP is TOMORROW". This module ingests an injected economic-calendar
+// fetcher at most ONCE PER UTC DAY (persisted watermark), keeps only
 // high-impact US events over a short forward horizon in the small `economic_events` table
 // (db.ts migration 42; CRUD in db-economic-events.ts), and exposes a compact upcoming-events
 // read for the prompt.
 //
 // Operating rules (product philosophy — advisory, fail-open, quota-friendly):
-//   - Key-gated: no FMP_API_KEY => no fetch, no error, no block.
+//   - Source-gated: no production calendar source is wired (FMP is never used here), so
+//     refresh is a no-op unless a fetcher is injected.  Existing economic_events rows stay
+//     readable for the prompt.
 //   - Ingest failure NEVER blocks a strategy run — it logs + audits and the prompt block is
 //     simply omitted. A transport failure does not consume the daily watermark (retry after a
 //     short in-process cool-off); a completed-but-empty fetch DOES (retrying an empty or
@@ -18,7 +19,18 @@
 
 import { audit, getInternalSetting, setInternalSetting } from "./db";
 import { listUpcomingEconomicEvents, pruneEconomicEvents, upsertEconomicEvents, type EconomicEventRow } from "./db-economic-events";
-import type { EconomicCalendar } from "./fmp-gamma";
+
+export interface EconomicCalendar {
+  date: string;
+  country: string;
+  event: string;
+  currency: string;
+  previous: number | null;
+  estimate: number | null;
+  actual: number | null;
+  change: number | null;
+  impact: string;
+}
 
 const WATERMARK_KEY = "economicCalendar:lastIngestDay";
 /** Forward horizon injected into the prompt: next ~5 calendar days. */
@@ -82,7 +94,7 @@ function toEventRow(row: EconomicCalendar): EconomicEventRow | undefined {
  * Beyond it the event is excluded entirely (a stale print is not a catalyst). */
 export const ECONOMIC_EVENT_RELEASED_GRACE_MS = 2 * 60 * 60_000;
 
-/** Parse the stored calendar timestamp when it carries a time component. FMP calendar rows are
+/** Parse the stored calendar timestamp when it carries a time component. Stored calendar rows are
  * "YYYY-MM-DD HH:MM:SS" UTC datetimes (stored verbatim by toEventRow); a bare datetime is treated
  * as UTC, an explicit offset/Z is honored, and a date-only row returns undefined (time genuinely
  * unknown — the caller must not pretend otherwise). */
@@ -98,33 +110,22 @@ function eventTimestampUtcMs(eventDate: string): number | undefined {
 }
 
 /**
- * Economic-calendar ingest previously used FMP. Direct FMP is retired
- * (owner 2026-08-04), so this path is permanently off until a non-FMP source
- * is wired. Existing rows in economic_events remain readable for the prompt.
- */
-export function economicCalendarConfigured(): boolean {
-  return false;
-}
-
-/**
  * Refresh the economic_events cache if today's UTC ingest hasn't happened yet.
  * At most one upstream fetch per UTC day (persisted watermark). Fail-open: returns false
- * (and audits) on any failure; never throws. `fetchCalendar` is injectable for tests —
- * production resolves fmp-gamma's getEconomicCalendar lazily so merely importing this
- * module never pulls the full provider stack.
+ * (and audits) on any failure; never throws. `fetchCalendar` is injectable; without one
+ * there is no source, so this returns false.
  */
 export async function refreshEconomicCalendarIfStale(
   now: Date = new Date(),
   userId?: string,
   fetchCalendar?: (from: string, to: string) => Promise<EconomicCalendar[]>
 ): Promise<boolean> {
-  if (!economicCalendarConfigured() && !fetchCalendar) return false;
+  if (!fetchCalendar) return false;
   const day = utcDay(now);
   if (getInternalSetting<string>(WATERMARK_KEY) === day) return false; // daily watermark: no double-fetch
   if (Date.now() - lastFailedAttemptMs < FAILURE_RETRY_MS) return false; // recent failure cool-off
   try {
-    const fetcher = fetchCalendar ?? (await import("./fmp-gamma")).getEconomicCalendar;
-    const raw = await fetcher(day, utcDayPlus(now, ECONOMIC_CALENDAR_HORIZON_DAYS));
+    const raw = await fetchCalendar(day, utcDayPlus(now, ECONOMIC_CALENDAR_HORIZON_DAYS));
     const rows = (Array.isArray(raw) ? raw : []).filter(isHighImpactUs).map(toEventRow).filter((row): row is EconomicEventRow => row !== undefined);
     upsertEconomicEvents(rows, now.toISOString());
     pruneEconomicEvents(day); // rolling cache: drop past events
@@ -148,7 +149,7 @@ export async function refreshEconomicCalendarIfStale(
 /** Upcoming high-impact US events within the forward horizon, soonest first, capped for the prompt.
  *
  * Same-day honesty (a past print must NEVER be presented as an upcoming catalyst):
- *  - Timestamped rows (FMP's normal "YYYY-MM-DD HH:MM:SS" UTC shape) whose time has passed are
+ *  - Timestamped rows (the stored "YYYY-MM-DD HH:MM:SS" UTC shape) whose time has passed are
  *    EXCLUDED once past the short grace window; inside the window they are kept but labeled as
  *    released today, not upcoming.
  *  - Date-only rows for today carry a "may have already printed" annotation — the stored data

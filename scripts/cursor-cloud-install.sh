@@ -39,8 +39,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   exit 0
 fi
 
-# 1. Node toolchain -- match .nvmrc (24) when nvm is installed on the image.
-NODE_REQUIRED="24"
+# 1. Node toolchain -- match .nvmrc (26) when nvm is installed on the image.
+NODE_REQUIRED="26"
 NODE_CURRENT="$(node -v 2>/dev/null || echo "none")"
 if [[ "$NODE_CURRENT" == "none" || "$NODE_CURRENT" != v${NODE_REQUIRED}.* ]]; then
   if load_nvm && type nvm >/dev/null 2>&1; then
@@ -80,11 +80,11 @@ else
   warn "scripts/infisical-run.mjs missing; Infisical injection unavailable."
 fi
 
-# 5. Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
+# 5. Bootstrap the fleet coordination CLIs (simple-board for Linear, simple-chat for Zulip)
 # into ~/.local/bin.  Product setup may continue offline; fleet work waits
 # until the installed protocol and both CLI identity checks are available.
 if [[ -f scripts/install-fleet-coordination.sh ]]; then
-  log "Installing fleet coordination CLIs (board, agent-sync)"
+  log "Installing fleet coordination CLIs (simple-board, simple-chat)"
   bash scripts/install-fleet-coordination.sh || warn "Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
 else
   warn "scripts/install-fleet-coordination.sh missing; coordination CLIs not bootstrapped."

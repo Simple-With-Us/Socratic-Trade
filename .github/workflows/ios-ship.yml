@@ -28,6 +28,7 @@ on:
       - '.github/workflows/ios-ship.yml'
       - 'scripts/ios-ship-testflight.sh'
       - 'scripts/ios-appstore-gm-prepare.sh'
+      - 'scripts/ios-asc-key-env.sh'
       - 'scripts/ios-stage-asc-key.sh'
       - 'scripts/ios-install-appstore-profiles.sh'
       - 'scripts/ios-collect-ship-logs.sh'
@@ -76,6 +77,8 @@ jobs:
     if: github.event.repository.fork == false
     runs-on: macos-latest
     timeout-minutes: 90
+    outputs:
+      build: ${{ steps.plan-build.outputs.build }}
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -105,12 +108,26 @@ jobs:
       # red on an unrelated environment problem. The logic lives in a script,
       # not inline YAML, so CI can unit-test it on every PR -- otherwise it
       # would only ever execute on the one Mac that can ship.
-      - name: Scheduled ship gate (skip unless iOS code changed)
+      - name: Scheduled ship gate (skip unless a ship path changed)
         id: gate
         run: |
+          # These flags must mirror on.push.paths above entry-for-entry: the
+          # cron carries no paths filter, so the gate replays it. A missed
+          # push (disabled workflow, dropped event, bot merge) still ships
+          # iff a push path changed since the last ship.
           bash "$GITHUB_WORKSPACE/scripts/ios-scheduled-ship-gate.sh" \
             --event "${{ github.event_name }}" \
-            --path-prefix 'ios/' \
+            --path-prefix 'ios/**' \
+            --path-prefix '.github/workflows/ios-ship.yml' \
+            --path-prefix 'scripts/ios-ship-testflight.sh' \
+            --path-prefix 'scripts/ios-appstore-gm-prepare.sh' \
+            --path-prefix 'scripts/ios-asc-key-env.sh' \
+            --path-prefix 'scripts/ios-stage-asc-key.sh' \
+            --path-prefix 'scripts/ios-install-appstore-profiles.sh' \
+            --path-prefix 'scripts/ios-collect-ship-logs.sh' \
+            --path-prefix 'scripts/ios-fleet/**' \
+            --path-prefix 'scripts/ios-fleet-pin.sh' \
+            --path-prefix 'scripts/ios-fleet.sha256' \
             --repo-root "$GITHUB_WORKSPACE" \
             socratic
 
@@ -199,17 +216,58 @@ jobs:
           fi
           printf '::add-mask::%s\n' "${TOKEN//'%'/'%25'}"
 
+          # The App Store Connect trio has exactly one home:  Fleet-OPS /asc
+          # (owner ruling 2026-10-11; any app may use it, ruling 2026-10-17).
+          # This repository's INFISICAL_PROJECT_ID is the application project,
+          # which has no /asc folder, so a read against it returns nothing
+          # (ST-4579).  There is no second source and no override:  Infisical
+          # is the only source of truth, and a missing or unreadable secret
+          # stops the run with a message that names it (owner policy
+          # 2026-10-24, no fallbacks, no overrides).
+          FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
+          asc_get() {
+            INFISICAL_TOKEN="$TOKEN" infisical secrets get "$1" \
+              --plain --silent --telemetry=false --expand=false \
+              --projectId="$2" --env=prod --path="$3" \
+              2>/dev/null
+          }
+          # read_required <variable> <secret> <project> <path> <label>
+          # A failed read (expired token, revoked grant, outage) and an empty
+          # value are different faults, so they get different messages:  a
+          # failed read never claims the secret is missing.  A blank value
+          # (only whitespace) counts as missing, because every consumer
+          # trims it and would reject it later with a vaguer error.
+          read_required() {
+            local value
+            if ! value="$(asc_get "$2" "$3" "$4")"; then
+              echo "::error::Could not read required secret $2 from Infisical prod ($5):  the read failed, so it is not known whether the secret is missing." >&2
+              exit 1
+            fi
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "::error::Missing required secret $2 in Infisical prod ($5)." >&2
+              exit 1
+            fi
+            printf -v "$1" '%s' "$value"
+          }
+          # Read the trio once, together, from the one source, and reuse the
+          # values below:  the three names always come from the same project.
+          read_required asc_key_id ASC_KEY_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required asc_issuer_id ASC_ISSUER_ID "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+          read_required key_material ASC_KEY_P8 "$FLEET_ASC_PROJECT_ID" /asc "Fleet-OPS /asc"
+
           for name in ASC_KEY_ID ASC_ISSUER_ID \
                       IOS_DIST_P12_BASE64 IOS_DIST_P12_PASSWORD; do
-            val="$(
-              INFISICAL_TOKEN="$TOKEN" infisical secrets get "$name" \
-                --plain --silent --telemetry=false --expand=false \
-                --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
-                2>/dev/null || true
-            )"
-            if [ -z "$val" ]; then
-              continue
-            fi
+            # The ASC ids were read above from Fleet-OPS /asc and are reused
+            # here; the certificate material comes from this project's root.
+            case "$name" in
+              ASC_KEY_ID) val="$asc_key_id" ;;
+              ASC_ISSUER_ID) val="$asc_issuer_id" ;;
+              # Every signing field is required:  an unreadable, empty or blank
+              # value stops the step here, naming the secret, instead of
+              # skipping it and failing later in the import (owner policy
+              # 2026-10-24, no fallbacks).
+              *) read_required val "$name" "$INFISICAL_PROJECT_ID" / "application project root" ;;
+            esac
             if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
               echo "::error::Signing field $name must be single-line; correct Infisical formatting." >&2
               exit 1
@@ -222,18 +280,13 @@ jobs:
               printf '%s=%s\n' "$name" "$val" >> "$GITHUB_ENV"
             fi
           done
-          # Keep multiline PEM out of GITHUB_ENV and every later step environment.
-          # Only its mode-600 file path crosses the step boundary.
-          key_material="$(
-            INFISICAL_TOKEN="$TOKEN" infisical secrets get ASC_KEY_P8 \
-              --plain --silent --telemetry=false --expand=false \
-              --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/ \
-              2>/dev/null || true
-          )"
-          if [ -z "$key_material" ]; then
-            echo "::error::Missing ASC key material in Infisical prod."
-            exit 1
-          fi
+          # The key material is fetched here and never leaves this step:  the
+          # environment file must not hold key material (the staging script
+          # publishes only its path).  The steps that call the client fetch
+          # the key themselves, in their own step, through
+          # scripts/ios-asc-key-env.sh, and hand it to the client in the
+          # environment:  a path on disk is not a credential source
+          # (AFC-459, revision 2).
           printf '%s\n' "$key_material" | bash "$GITHUB_WORKSPACE/scripts/ios-stage-asc-key.sh"
           ASC_KEY_PATH="$(sed -n 's/^ASC_KEY_PATH=//p' "$GITHUB_ENV" | tail -n 1)"
           export ASC_KEY_PATH
@@ -306,6 +359,69 @@ jobs:
           fi
           echo "$bin" >> "$GITHUB_PATH"
 
+      # ONE release, ONE build number (owner 2026-10-29). The merge-timestamp
+      # build is computed ONCE here and handed to the ship step via --build, so
+      # a release can never number its platforms differently. The stamp S is the
+      # committer date of HEAD in America/Chicago (YYYYMMDDHHMM); the plan is
+      # max(S, M + 1), M the highest build on record for the app AND its paired
+      # app plus every extra floor. This step reads the same inputs as
+      # ship-testflight.sh asc_next_shared_build (pairedBundleId with legacy
+      # macBundleId fallback, pairedBuildFeed Sparkle max), so CI plans exactly
+      # what a local run plans even after the registry gains paired keys. Runs
+      # after the gate, so a tick with nothing to ship never reaches App Store
+      # Connect.
+      - name: Plan release build (compute once)
+        id: plan-build
+        if: steps.gate.outputs.should_ship == '1'
+        env:
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          stamp="$(TZ=America/Chicago git show -s --format=%cd --date=format-local:%Y%m%d%H%M HEAD)"
+          if ! [[ "$stamp" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::Could not read the 12-digit merge stamp of HEAD."
+            exit 1
+          fi
+          registry="scripts/ios-fleet/apps.json"
+          bundle="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["apps"]["socratic"]["bundleId"])' "$registry")"
+          paired="$(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["apps"]["socratic"];print(a.get("pairedBundleId") or a.get("macBundleId") or "")' "$registry")"
+          feed="$(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["apps"]["socratic"];print(a.get("pairedBuildFeed") or "")' "$registry")"
+          plan_args=("$bundle")
+          if [[ -n "$paired" ]]; then
+            plan_args+=("$paired")
+          fi
+          if [[ -n "$feed" ]]; then
+            case "$feed" in
+              https://*) ;;
+              *) echo "::error::pairedBuildFeed ${feed} is not https; cannot work out the build floor."; exit 1 ;;
+            esac
+            feed_xml="$(curl -fsSL --connect-timeout 10 --max-time 30 "$feed")" || {
+              echo "::error::pairedBuildFeed ${feed} could not be read; cannot work out the build floor."
+              exit 1
+            }
+            if [[ -z "$feed_xml" ]]; then
+              echo "::error::pairedBuildFeed ${feed} returned empty; cannot work out the build floor."
+              exit 1
+            fi
+            floor="$(printf '%s' "$feed_xml" | grep -o -E '<sparkle:version>[0-9]+</sparkle:version>' 2>/dev/null | grep -o -E '[0-9]+' 2>/dev/null | python3 -c 'import sys; ns=[int(x.strip()) for x in sys.stdin if x.strip().isdigit()]; print(max(ns) if ns else "")' 2>/dev/null || true)"
+            if [[ ! "$floor" =~ ^[0-9]{1,18}$ || ! "$floor" =~ [1-9] ]]; then
+              echo "::error::pairedBuildFeed ${feed} holds no usable plain-integer <sparkle:version>; cannot work out the build floor."
+              exit 1
+            fi
+            plan_args+=("$floor")
+          fi
+          build="$(bash scripts/ios-asc-key-env.sh node scripts/ios-fleet/asc-api.mjs plan-release-build "${plan_args[@]}" --merge-stamp "$stamp")"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::plan-release-build did not return a 12-digit build."
+            exit 1
+          fi
+          echo "planned build ${build} for merge stamp ${stamp}"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+
       # No IOS_TF_MIN_INTERVAL_SEC here. That variable is a PER-RUN override.
       # Standing gate is DEFAULT_MIN_INTERVAL_SEC=3600 (1 hour) in the fleet
       # script (owner 2026-08-14). The 30-minute cron picks up an unbuilt merge
@@ -316,13 +432,36 @@ jobs:
           IOS_TF_RELEASE_NOTES: "1"  # Jay 2026-09-08: publish ASC What to Test
           IOS_MANUAL_SIGN: "1"  # 2026-09-30: App Store profile, no Xcode provisioning service
           EXPORT_ONLY_INPUT: ${{ inputs.export_only }}
+          # The client takes the key from the environment, never from a path
+          # (AFC-459, revision 2), and no key material may cross a step
+          # boundary, so this step fetches the key itself.
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
+          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          # The fleet iOS version manifest lives in AI-Fleet-Coordinator, and
+          # that repository's ruleset refuses a direct write to its protected
+          # branch, so the publish is a branch plus a pull request.  The
+          # workflow's own GITHUB_TOKEN is read-only by declaration and cannot
+          # write to another repository, so the fleet's elevated token is
+          # passed for that one step.  The publisher refuses GITHUB_TOKEN
+          # outright, and it never arms auto-merge with one.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           args=()
           if [ "${EXPORT_ONLY_INPUT:-false}" = "true" ]; then
             echo "[ios-ship] export_only=true: archive + export the IPA, no upload"
             args+=(--export-only)
           fi
-          bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
+          build="${{ steps.plan-build.outputs.build }}"
+          if ! [[ "$build" =~ ^[1-9][0-9]{11}$ ]]; then
+            echo "::error::No planned 12-digit build from the plan-build step; refusing to ship."
+            exit 1
+          fi
+          echo "[ios-ship] shipping the once-planned build ${build}"
+          args+=(--build "$build")
+          bash scripts/ios-asc-key-env.sh bash scripts/ios-ship-testflight.sh ${args[@]+"${args[@]}"}
 
       # Archive/export/upload logs are tee'd into the job log, but Xcode's
       # .xcdistributionlogs are not.  Collect both on failure, redact the ASC and
