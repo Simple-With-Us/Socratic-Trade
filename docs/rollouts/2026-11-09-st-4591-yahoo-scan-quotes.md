@@ -6,8 +6,9 @@ Production market scans were emptying when Yahoo v7 batch returned 401 (crumb wa
 
 ## Changes Made
 
-- Added `src/lib/yahoo-session.ts` — shared cookie/crumb acquisition and cache keyed by egress proxy; enrichment and v7 batch share one session handshake.
-- `src/lib/yahoo-finance.ts` — v7 batch calls use session auth; skip v7 immediately when handshake fails; per-chunk pacing via `withProviderLimit`, jittered abort retries, abort wave breaker; chart quotes paced with 429/abort retries; structured JSON telemetry on 401/abort/empty/session skip.
+- Added `src/lib/yahoo-session.ts` — shared cookie/crumb acquisition and cache keyed by egress proxy (pinned on `globalThis`); bounded handshake timeouts; enrichment and v7 batch share one session handshake.
+- Added `src/lib/yahoo-schemas.ts` — zod parse at the Yahoo chart/v7 trust boundary.
+- `src/lib/yahoo-finance.ts` — v7 batch calls use session auth; skip v7 immediately when handshake fails; per-chunk pacing via `withProviderLimit`, jittered abort retries, abort wave breaker only counts exhausted chunk aborts; chart fallback uses shorter deadline-aware retries; structured JSON telemetry on 401/abort/empty/session skip.
 - `src/lib/data-providers.ts` — Yahoo enrichment uses shared session module.
 - Tests: `test/yahoo-quote-fallback.test.ts`, `test/yahoo-finance-fundamentals.test.ts`.
 

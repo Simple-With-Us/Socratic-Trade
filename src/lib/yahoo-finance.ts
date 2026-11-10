@@ -2,6 +2,7 @@ import { dataSourceFetch } from "./data-source-fetch";
 import { isAbortOrTimeoutError } from "./network-errors";
 import { withProviderLimit } from "./provider-rate-limit";
 import { BROWSER_UA } from "./web-sources/http";
+import { YahooChartResponseSchema, YahooV7QuoteResponseSchema } from "./yahoo-schemas";
 import {
   getYahooSessionCreds,
   invalidateYahooSessionCreds,
@@ -13,6 +14,8 @@ import {
 export interface YahooFetchOptions {
   userId?: string;
   signal?: AbortSignal;
+  /** Chart-pool calls pass the fallback deadline so retries/timeouts stay in budget. */
+  deadlineAt?: number;
 }
 
 export interface YahooFinanceQuote {
@@ -159,7 +162,25 @@ export function yahooQuoteFromChartMeta(
 
 export const YAHOO_CHART_QUOTE_TIMEOUT_MS = 9_000;
 export const YAHOO_CHART_QUOTE_MAX_ATTEMPTS = 3;
+export const YAHOO_CHART_FALLBACK_QUOTE_TIMEOUT_MS = 5_000;
+export const YAHOO_CHART_FALLBACK_MAX_ATTEMPTS = 2;
 export const YAHOO_CHART_QUOTE_BACKOFF_MS = 400;
+
+function chartAttemptBudget(options?: YahooFetchOptions): {
+  maxAttempts: number;
+  perAttemptTimeoutMs: number;
+} {
+  if (options?.deadlineAt !== undefined) {
+    return {
+      maxAttempts: YAHOO_CHART_FALLBACK_MAX_ATTEMPTS,
+      perAttemptTimeoutMs: YAHOO_CHART_FALLBACK_QUOTE_TIMEOUT_MS
+    };
+  }
+  return {
+    maxAttempts: YAHOO_CHART_QUOTE_MAX_ATTEMPTS,
+    perAttemptTimeoutMs: YAHOO_CHART_QUOTE_TIMEOUT_MS
+  };
+}
 
 export async function fetchYahooFinanceQuote(
   symbol: string,
@@ -170,16 +191,27 @@ export async function fetchYahooFinanceQuote(
   const callerSignal = options?.signal;
   if (callerSignal?.aborted) return undefined;
   const userId = options?.userId;
+  const deadlineAt = options?.deadlineAt;
+  const { maxAttempts, perAttemptTimeoutMs } = chartAttemptBudget(options);
 
   let chartAborts = 0;
-  for (let attempt = 0; attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (callerSignal?.aborted) return undefined;
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) return undefined;
     try {
       const response = await withProviderLimit("yahoo-finance", async () => {
+        if (callerSignal?.aborted) {
+          throw callerSignal.reason ?? new DOMException("aborted", "AbortError");
+        }
+        const remainingMs =
+          deadlineAt === undefined ? perAttemptTimeoutMs : Math.min(perAttemptTimeoutMs, deadlineAt - Date.now());
+        if (remainingMs <= 0) {
+          throw new DOMException("aborted", "AbortError");
+        }
         const controller = new AbortController();
         const onCallerAbort = (): void => controller.abort();
         if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort, { once: true });
-        const timeout = setTimeout(() => controller.abort(), YAHOO_CHART_QUOTE_TIMEOUT_MS);
+        const timeout = setTimeout(() => controller.abort(), remainingMs);
         try {
           return await dataSourceFetch(
             url,
@@ -196,33 +228,32 @@ export async function fetchYahooFinanceQuote(
         }
       });
 
-      if (response.status === 429 && attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS - 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 4_000))
-        );
+      if (response.status === 429 && attempt < maxAttempts - 1) {
+        const backoff = jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 4_000);
+        if (deadlineAt !== undefined && Date.now() + backoff >= deadlineAt) return undefined;
+        await new Promise((resolve) => setTimeout(resolve, backoff));
         continue;
       }
       if (!response.ok) return undefined;
-      const payload = await response.json() as {
-        chart?: {
-          result?: Array<{
-            meta?: Record<string, unknown>;
-            indicators?: { quote?: Array<{ volume?: unknown[] }> };
-          }>;
-        };
-      };
-      const meta = payload?.chart?.result?.[0]?.meta;
+      const raw = await response.json();
+      const parsed = YahooChartResponseSchema.safeParse(raw);
+      if (!parsed.success) return undefined;
+      const chartResult = parsed.data.chart?.result?.[0];
+      const meta = chartResult?.meta;
       if (!meta) return undefined;
-      const quote = payload?.chart?.result?.[0]?.indicators?.quote?.[0];
-      const volumeHint = Number(quote?.volume?.[0] ?? 0);
-      return yahooQuoteFromChartMeta(meta, Number.isFinite(volumeHint) ? volumeHint : undefined);
+      const volumeArr = chartResult?.indicators?.quote?.[0]?.volume;
+      const volumeHint = Number(volumeArr?.[0] ?? 0);
+      return yahooQuoteFromChartMeta(
+        meta as Record<string, unknown>,
+        Number.isFinite(volumeHint) ? volumeHint : undefined
+      );
     } catch (error) {
       if (isAbortOrTimeoutError(error)) {
         chartAborts += 1;
-        if (attempt < YAHOO_CHART_QUOTE_MAX_ATTEMPTS - 1) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 2_000))
-          );
+        if (attempt < maxAttempts - 1) {
+          const backoff = jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 2_000);
+          if (deadlineAt !== undefined && Date.now() + backoff >= deadlineAt) return undefined;
+          await new Promise((resolve) => setTimeout(resolve, backoff));
           continue;
         }
         emitYahooQuoteTelemetry({ kind: "chart_quote_abort", chartAborts, chartAttempts: attempt + 1 });
@@ -242,22 +273,34 @@ export const YAHOO_V7_CHUNK_MAX_ATTEMPTS = 2;
 /** Stop further v7 waves after this many chunks exhausted retries (proxy pressure). */
 export const YAHOO_V7_ABORT_WAVE_BREAK = 2;
 
-let yahooV7AuthBlockedUntilMs = 0;
+type YahooFinanceHost = typeof globalThis & {
+  __yahooV7AuthBlockedUntilMs?: number;
+};
+
+const yahooFinanceHost = globalThis as YahooFinanceHost;
+
+function v7AuthBlockedUntilMs(): number {
+  return yahooFinanceHost.__yahooV7AuthBlockedUntilMs ?? 0;
+}
+
+function setV7AuthBlockedUntilMs(value: number): void {
+  yahooFinanceHost.__yahooV7AuthBlockedUntilMs = value;
+}
 
 function isYahooV7AuthBlocked(now: number = Date.now()): boolean {
-  return now < yahooV7AuthBlockedUntilMs;
+  return now < v7AuthBlockedUntilMs();
 }
 
 function markYahooV7AuthBlocked(): void {
   const now = Date.now();
-  if (now < yahooV7AuthBlockedUntilMs) return;
-  yahooV7AuthBlockedUntilMs = now + YAHOO_V7_AUTH_COOLDOWN_MS;
+  if (now < v7AuthBlockedUntilMs()) return;
+  setV7AuthBlockedUntilMs(now + YAHOO_V7_AUTH_COOLDOWN_MS);
   emitYahooQuoteTelemetry({ kind: "v7_auth_wall" });
 }
 
 /** Test-only reset for the v7 auth cooldown. */
 export function __resetYahooV7AuthCooldownForTests(): void {
-  yahooV7AuthBlockedUntilMs = 0;
+  setV7AuthBlockedUntilMs(0);
 }
 
 /** Bounded pool for the per-symbol chart fallback: matches the proxy gate cap
@@ -284,15 +327,17 @@ export async function fetchYahooFinanceChartQuotes(
   const deadlineAt = Date.now() + Math.max(0, options?.deadlineMs ?? YAHOO_CHART_FALLBACK_DEADLINE_MS);
   const userId = options?.userId;
   const signal = options?.signal;
-  const quoteOptions =
-    userId === undefined && signal === undefined ? undefined : { userId, signal };
   const worker = async (): Promise<void> => {
     for (;;) {
       if (signal?.aborted) return;
       const symbol = queue.shift();
       if (symbol === undefined) return;
       if (Date.now() >= deadlineAt || signal?.aborted) return;
-      const quote = await fetchYahooFinanceQuote(symbol, quoteOptions);
+      const quote = await fetchYahooFinanceQuote(symbol, {
+        userId,
+        signal,
+        deadlineAt
+      });
       if (quote) result.set(symbol, quote);
     }
   };
@@ -426,31 +471,14 @@ async function fetchYahooQuoteChunk(
         return result;
       }
 
-      const payload = await response.json() as {
-        quoteResponse?: {
-          result?: Array<{
-            symbol: string;
-            regularMarketPrice?: number;
-            bid?: number;
-            ask?: number;
-            regularMarketPreviousClose?: number;
-            regularMarketOpen?: number;
-            regularMarketDayHigh?: number;
-            regularMarketDayLow?: number;
-            regularMarketVolume?: number;
-            regularMarketTime?: number;
-            regularMarketChange?: number;
-            regularMarketChangePercent?: number;
-            shortName?: string;
-            longName?: string;
-            trailingPE?: number;
-            fiftyTwoWeekHigh?: number;
-            fiftyTwoWeekLow?: number;
-          }>;
-        };
-      };
+      const raw = await response.json();
+      const parsed = YahooV7QuoteResponseSchema.safeParse(raw);
+      if (!parsed.success) {
+        emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
+        return result;
+      }
 
-      const items = payload?.quoteResponse?.result;
+      const items = parsed.data.quoteResponse?.result;
       if (!items || items.length === 0) {
         emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
         return result;
@@ -509,18 +537,19 @@ async function fetchYahooQuoteChunk(
       return result;
     } catch (error) {
       if (isAbortOrTimeoutError(error) && attempt < YAHOO_V7_CHUNK_MAX_ATTEMPTS - 1) {
-        stats.v7ChunksAbort += 1;
         await new Promise((resolve) =>
           setTimeout(resolve, jitteredBackoffMs(attempt, 300, 1_500))
         );
         continue;
       }
-      stats.v7ChunksAbort += 1;
-      emitYahooQuoteTelemetry({
-        kind: "v7_chunk_abort",
-        v7ChunksAbort: stats.v7ChunksAbort,
-        v7Chunks: stats.v7Chunks
-      });
+      if (isAbortOrTimeoutError(error)) {
+        stats.v7ChunksAbort += 1;
+        emitYahooQuoteTelemetry({
+          kind: "v7_chunk_abort",
+          v7ChunksAbort: stats.v7ChunksAbort,
+          v7Chunks: stats.v7Chunks
+        });
+      }
       return result;
     }
   }
