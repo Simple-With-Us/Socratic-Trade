@@ -18,7 +18,7 @@ export async function onBrokerFill(detail: { orderId: string; symbol?: string; e
     // The trade_updates stream is authed with the Alpaca account; reconcile only users on Alpaca.
     if (policy.activeBroker !== "alpaca" || !policy.accountNumber) continue;
     try {
-      await reconcilePendingFills(getBrokerGateway(policy, userId), policy.accountNumber, userId);
+      await reconcilePendingFills(getBrokerGateway(policy, userId), policy.accountNumber, userId, policy.connectedAccountId);
     } catch (err) {
       console.error("[fills] reconcile error:", err);
     }

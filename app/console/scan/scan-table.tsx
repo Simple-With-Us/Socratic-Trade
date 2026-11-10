@@ -8,14 +8,24 @@
  *  tooltip; cell tooltips get the scan-level "Received …" stamp when the
  *  field's own tooltip doesn't already carry one. */
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Columns3, Star } from "lucide-react";
+import { TableVirtuoso } from "react-virtuoso";
 import type { MarketQuote, MarketScan } from "@/lib/types";
 import { receivedLabel } from "@/lib/dashboard-ui";
-import { cx } from "../lib/format";
+import { cx, SENTENCE_GAP } from "../lib/format";
+import { useFocusTrap } from "../ui/focus-trap";
 import { Tooltip } from "../ui/primitives";
 import { useToast } from "../ui/toast";
+import { openSymbolDetails } from "../ui/symbol-drilldown";
+import { useSymbolDrawer } from "../ui/symbol-drawer";
 import { DEFAULT_VISIBLE_SCAN_COLUMN_IDS, SCAN_COLUMNS, type ScanColumn } from "./columns";
+
+/** Approx row height for virtualized height budgeting (con-table cells). */
+const SCAN_ROW_PX = 40;
+const SCAN_HEADER_PX = 40;
+/** Cap so a 100-row scan still virtualizes on mid phones / laptops. */
+const SCAN_VIEWPORT_MAX_PX = 560;
 
 type SortDir = "asc" | "desc";
 const SYMBOL_COLUMN_ID = "symbol";
@@ -118,7 +128,7 @@ function WatchButton({
           : `Add ${symbol} to your watchlist — watching costs nothing and never trades.`
       }
       className={cx(
-        "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+        "con-watch-btn inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-control border transition-colors disabled:cursor-not-allowed disabled:opacity-60",
         watched
           ? "border-[color:var(--con-accent-border)] bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
           : "border-[color:var(--con-line)] text-[color:var(--con-faint)] hover:border-[color:var(--con-line-strong)] hover:text-[color:var(--con-fg)]"
@@ -148,19 +158,34 @@ function ScanCard({
   pending: boolean;
   onToggleWatch: () => void;
 }) {
+  const { openDrawer } = useSymbolDrawer();
   const symbolColumn = SCAN_COLUMNS.find((c) => c.id === SYMBOL_COLUMN_ID);
   const fields = CARD_FIELD_IDS.map((id) => SCAN_COLUMNS.find((c) => c.id === id)).filter(
     (c): c is ScanColumn => Boolean(c)
   );
+  const normalized = q.symbol.trim().toUpperCase();
+  const openDetails = () => openSymbolDetails(openDrawer, normalized, q);
   return (
-    <div className="con-row flex flex-col gap-2 rounded-lg border border-[color:var(--con-line)] p-3">
-      <div className="flex items-center justify-between gap-2">
-        {symbolColumn?.render(q)}
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={openDetails}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetails();
+        }
+      }}
+      aria-label={q.companyName ? `${q.companyName} — open ${normalized} details` : `Open ${normalized} details`}
+      className="con-row flex cursor-pointer flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3"
+    >
+      <div className="flex items-center gap-2">
         <WatchButton symbol={q.symbol} watched={watched} pending={pending} onToggle={onToggleWatch} />
+        {symbolColumn?.render(q)}
       </div>
       <div className="grid grid-cols-2 gap-1.5 text-[length:var(--con-fs-sm)]">
         {fields.map((c) => (
-          <div key={c.id} title={cellTitleWithReceived(c, q, received)} className="rounded-md bg-[color:var(--con-surface-2)] px-2 py-1">
+          <div key={c.id} title={cellTitleWithReceived(c, q, received)} className="rounded-control bg-[color:var(--con-surface-2)] px-2 py-1">
             <div className="text-[length:var(--con-fs-xs)] uppercase tracking-[0.06em] text-[color:var(--con-faint)]">{c.label}</div>
             <div className={cx(c.num && "con-num")}>{c.render(q)}</div>
           </div>
@@ -170,7 +195,128 @@ function ScanCard({
   );
 }
 
-export function ScanTable({ scan }: { scan: MarketScan }) {
+function ScanColumnsMenu({
+  open,
+  onOpenChange,
+  visible,
+  columnChooserRows,
+  onReset,
+  onToggle,
+  onMove
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  visible: string[];
+  columnChooserRows: ScanColumn[];
+  onReset: () => void;
+  onToggle: (id: string) => void;
+  onMove: (id: string, delta: -1 | 1) => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const panelId = useId();
+  useFocusTrap(panelRef, open, { onEscape: () => onOpenChange(false) });
+
+  return (
+    <div className="relative">
+      <Tooltip content={`Show, hide, reorder, or reset scan columns.${SENTENCE_GAP}Saved in this browser.`}>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={panelId}
+          aria-haspopup="dialog"
+          onClick={() => onOpenChange(!open)}
+          className="inline-flex h-8 items-center gap-1.5 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-2.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-muted)] transition-colors hover:text-[color:var(--con-fg)]"
+        >
+          <Columns3 size={14} aria-hidden />
+          Columns
+        </button>
+      </Tooltip>
+      {open && (
+        <>
+          <div
+            className="fixed inset-0 z-10 cursor-default"
+            aria-hidden
+            onClick={() => onOpenChange(false)}
+          />
+          <div
+            ref={panelRef}
+            id={panelId}
+            role="dialog"
+            aria-label="Scan columns"
+            tabIndex={-1}
+            className="absolute right-0 z-20 mt-1 flex max-h-[60vh] w-72 flex-col overflow-hidden rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface)] shadow-[var(--shadow-lg)]"
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-[color:var(--con-line)] px-3 py-2">
+              <p className="text-[length:var(--con-fs-xs)] font-semibold uppercase tracking-[0.07em] text-[color:var(--con-faint)]">
+                Columns
+              </p>
+              <button
+                type="button"
+                onClick={onReset}
+                className="text-[length:var(--con-fs-xs)] font-medium text-[color:var(--con-accent)] hover:opacity-80"
+              >
+                Reset
+              </button>
+            </div>
+            <div className="flex flex-col gap-1 overflow-auto p-1.5">
+              {columnChooserRows.map((column) => {
+                const isVisible = visible.includes(column.id);
+                const index = visible.indexOf(column.id);
+                return (
+                  <Tooltip key={column.id} content={column.headerTitle}>
+                    <div
+                      className={cx(
+                        "flex w-full items-center justify-between gap-2 rounded-control px-2.5 py-1.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)]",
+                        !isVisible && "opacity-70"
+                      )}
+                    >
+                      <label className={cx("flex min-w-0 items-center gap-2", column.id === SYMBOL_COLUMN_ID ? "opacity-70" : "cursor-pointer")}>
+                        <input
+                          type="checkbox"
+                          checked={isVisible}
+                          onChange={() => onToggle(column.id)}
+                          disabled={column.id === SYMBOL_COLUMN_ID}
+                          className="accent-[var(--con-accent)]"
+                        />
+                        <span className="truncate">{column.label}</span>
+                      </label>
+                      {isVisible ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Move ${column.label} earlier`}
+                            onClick={() => onMove(column.id, -1)}
+                            disabled={index <= 0}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
+                          >
+                            <ArrowUp size={14} aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Move ${column.label} later`}
+                            onClick={() => onMove(column.id, 1)}
+                            disabled={index === visible.length - 1}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
+                          >
+                            <ArrowDown size={14} aria-hidden />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">hidden</span>
+                      )}
+                    </div>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan }) {
   const toast = useToast();
   const [sort, setSort] = useState<{ col: string; dir: SortDir }>({ col: "score", dir: "desc" });
   const [visible, setVisible] = useState<string[]>(DEFAULT_VISIBLE_SCAN_COLUMN_IDS);
@@ -293,6 +439,45 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
   // the scan's ISO generatedAt is the authoritative "received" time here.
   const received = receivedLabel(scan.generatedAt);
 
+  // Virtualization needs a fixed viewport height; size to content until the cap.
+  const tableHeight = Math.min(SCAN_VIEWPORT_MAX_PX, Math.max(SCAN_HEADER_PX + SCAN_ROW_PX, rows.length * SCAN_ROW_PX + SCAN_HEADER_PX));
+
+  const headerRow = (
+    <tr>
+      {visibleColumns.map((c, i) => {
+        const active = activeSort.col === c.id;
+        return (
+          <th
+            key={c.id}
+            scope="col"
+            aria-sort={active ? (activeSort.dir === "asc" ? "ascending" : "descending") : undefined}
+            className={cx(
+              "!text-center text-center",
+              c.id === "score" && "w-16 px-2",
+              i === 0 && STICKY_CELL
+            )}
+          >
+            <Tooltip
+              content={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${activeSort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}>
+              <button
+                type="button"
+                onClick={() => setSort({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
+                className={cx(
+                  "inline-flex cursor-pointer select-none items-center justify-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors mx-auto",
+                  active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
+                )}>
+                {c.label}
+                <span aria-hidden className={cx("text-[length:var(--con-fs-2xs)]", !active && "opacity-0")}>
+                  {active && activeSort.dir === "asc" ? "▲" : "▼"}
+                </span>
+              </button>
+            </Tooltip>
+          </th>
+        );
+      })}
+    </tr>
+  );
+
   return (
     <div>
       {/* Column picker only applies to the desktop table — the mobile card
@@ -304,155 +489,80 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
             {visibleColumns.length} shown
           </p>
         </Tooltip>
-        <div className="relative">
-          <Tooltip
-            content="Show, hide, reorder, or reset scan columns. Saved in this browser.">
-            <button
-              type="button"
-              onClick={() => setColumnsOpen((open) => !open)}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-2.5 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-muted)] transition-colors hover:text-[color:var(--con-fg)]">
-              <Columns3 size={14} aria-hidden />
-              Columns
-            </button>
-          </Tooltip>
-          {columnsOpen && (
-            <>
-              <button
-                type="button"
-                className="fixed inset-0 z-10 cursor-default border-0 bg-transparent p-0"
-                aria-label="Close column settings"
-                onClick={() => setColumnsOpen(false)}
-              />
-              <div className="absolute right-0 z-20 mt-1 flex max-h-[60vh] w-72 flex-col overflow-hidden rounded-lg border border-[color:var(--con-line)] bg-[color:var(--con-surface)] shadow-[var(--shadow-lg)]">
-                <div className="flex items-center justify-between gap-2 border-b border-[color:var(--con-line)] px-3 py-2">
-                  <p className="text-[length:var(--con-fs-xs)] font-semibold uppercase tracking-[0.07em] text-[color:var(--con-faint)]">
-                    Columns
-                  </p>
-                  <button
-                    type="button"
-                    onClick={resetScanColumns}
-                    className="text-[length:var(--con-fs-xs)] font-medium text-[color:var(--con-accent)] hover:opacity-80"
-                  >
-                    Reset
-                  </button>
-                </div>
-                <div className="overflow-auto p-1.5">
-                  {columnChooserRows.map((column) => {
-                    const isVisible = visible.includes(column.id);
-                    const index = visible.indexOf(column.id);
+        <ScanColumnsMenu
+          open={columnsOpen}
+          onOpenChange={setColumnsOpen}
+          visible={visible}
+          columnChooserRows={columnChooserRows}
+          onReset={resetScanColumns}
+          onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
+          onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
+        />
+      </div>
+      {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS. */}
+      <div className="hidden overflow-x-auto lg:block">
+        {rows.length === 0 ? (
+          <table className="con-table min-w-full">
+            <thead>{headerRow}</thead>
+            <tbody />
+          </table>
+        ) : (
+          <TableVirtuoso
+            style={{ height: tableHeight }}
+            data={rows}
+            overscan={8}
+            components={{
+              Table: (props) => <table {...props} className="con-table min-w-full" />,
+              TableRow: ({ item: _item, ...props }) => <tr {...props} className="group" />
+            }}
+            fixedHeaderContent={() => headerRow}
+            itemContent={(_index, q) => {
+              const symbolKey = q.symbol.trim().toUpperCase();
+              return (
+                <>
+                  {visibleColumns.map((c, i) => {
+                    const isSymbolCol = c.id === SYMBOL_COLUMN_ID;
+                    const alignmentClass =
+                      c.align === "left"
+                        ? "!text-left text-left"
+                        : c.align === "right"
+                          ? "!text-right text-right"
+                          : "!text-center text-center";
+                    const flexAlignClass =
+                      c.align === "left" ? "justify-start" : c.align === "right" ? "justify-end" : "justify-center";
                     return (
-                      <Tooltip key={column.id} content={column.headerTitle}>
-                        <div
-                          className={cx(
-                            "grid grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2 py-1.5 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)]",
-                            !isVisible && "opacity-70"
-                          )}>
-                          <label className={cx("flex min-w-0 items-center gap-2", column.id === SYMBOL_COLUMN_ID ? "opacity-70" : "cursor-pointer")}>
-                            <input
-                              type="checkbox"
-                              checked={isVisible}
-                              onChange={() => saveVisibleColumns(toggleVisibleScanColumn(visible, column.id))}
-                              disabled={column.id === SYMBOL_COLUMN_ID}
-                              className="accent-[var(--con-accent)]"
+                      <td
+                        key={c.id}
+                        title={cellTitleWithReceived(c, q, received)}
+                        className={cx(
+                          "cursor-default whitespace-nowrap",
+                          alignmentClass,
+                          c.id === "score" && "w-16 px-2",
+                          c.num && "con-num",
+                          i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER)
+                        )}
+                      >
+                        {isSymbolCol ? (
+                          <div className="inline-flex w-full items-center justify-start gap-1.5">
+                            <WatchButton
+                              symbol={q.symbol}
+                              watched={watched.has(symbolKey)}
+                              pending={pendingWatch.has(symbolKey)}
+                              onToggle={() => void toggleWatch(q.symbol)}
                             />
-                            <span className="truncate">{column.label}</span>
-                          </label>
-                          {isVisible ? (
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                aria-label={`Move ${column.label} earlier`}
-                                onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, -1))}
-                                disabled={index <= 0}
-                                className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
-                              >
-                                <ArrowUp size={14} aria-hidden />
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Move ${column.label} later`}
-                                onClick={() => saveVisibleColumns(moveVisibleScanColumn(visible, column.id, 1))}
-                                disabled={index === visible.length - 1}
-                                className="inline-flex h-6 w-6 items-center justify-center rounded text-[color:var(--con-faint)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)] disabled:opacity-30"
-                              >
-                                <ArrowDown size={14} aria-hidden />
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">hidden</span>
-                          )}
-                        </div>
-                      </Tooltip>
+                            {c.render(q)}
+                          </div>
+                        ) : (
+                          <div className={cx("inline-flex w-full items-center", flexAlignClass)}>{c.render(q)}</div>
+                        )}
+                      </td>
                     );
                   })}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-      <div className="hidden overflow-x-auto lg:block">
-        <table className="con-table w-full min-w-max">
-        <thead>
-          <tr>
-            {visibleColumns.map((c, i) => {
-              const active = activeSort.col === c.id;
-              return (
-                <th
-                  key={c.id}
-                  scope="col"
-                  aria-sort={active ? (activeSort.dir === "asc" ? "ascending" : "descending") : undefined}
-                  className={cx(c.num && "num", i === 0 && STICKY_CELL)}
-                >
-                  <Tooltip
-                    content={`${c.headerTitle}\nClick to sort by ${c.label.toLowerCase()}${active ? ` (currently ${activeSort.dir === "asc" ? "ascending" : "descending"})` : ""}.`}>
-                    <button
-                      type="button"
-                      onClick={() => setSort({ col: c.id, dir: activeSort.col === c.id && activeSort.dir === "desc" ? "asc" : "desc" })}
-                      className={cx(
-                        "inline-flex cursor-pointer select-none items-center gap-1 font-semibold uppercase tracking-[0.07em] transition-colors",
-                        active ? "text-[color:var(--con-fg)]" : "hover:text-[color:var(--con-fg)]"
-                      )}>
-                      {c.label}
-                      <span aria-hidden className={cx("text-[9px]", !active && "opacity-0")}>
-                        {active && activeSort.dir === "asc" ? "▲" : "▼"}
-                      </span>
-                    </button>
-                  </Tooltip>
-                </th>
+                </>
               );
-            })}
-            <th title="Add or remove a symbol from your watchlist. Watching costs nothing and never trades.">
-              <span className="sr-only">Watch</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((q) => {
-            const symbolKey = q.symbol.trim().toUpperCase();
-            return (
-              <tr key={q.symbol} className="group">
-                {visibleColumns.map((c, i) => (
-                  <td
-                    key={c.id}
-                    title={cellTitleWithReceived(c, q, received)}
-                    className={cx("cursor-default whitespace-nowrap", c.num && "num con-num", i === 0 && cx(STICKY_CELL, STICKY_CELL_HOVER))}>
-                    {c.render(q)}
-                  </td>
-                ))}
-                <td className="cursor-default whitespace-nowrap text-right">
-                  <WatchButton
-                    symbol={q.symbol}
-                    watched={watched.has(symbolKey)}
-                    pending={pendingWatch.has(symbolKey)}
-                    onToggle={() => void toggleWatch(q.symbol)}
-                  />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-        </table>
+            }}
+          />
+        )}
       </div>
       <div className="flex flex-col gap-2 p-2 lg:hidden">
         {rows.map((q) => {
@@ -471,4 +581,4 @@ export function ScanTable({ scan }: { scan: MarketScan }) {
       </div>
     </div>
   );
-}
+});

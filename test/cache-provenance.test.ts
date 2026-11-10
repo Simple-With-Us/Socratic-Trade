@@ -48,6 +48,17 @@ describe("macro.ts cache-provenance", () => {
     delete process.env.MARKET_DATA_SHARE_USER_KEYED_MACRO;
     const { clearMacroCacheForTests } = await import("../src/lib/macro");
     clearMacroCacheForTests();
+    const { clearBlsMacroCacheForTests } = await import("../src/lib/market-signals/bls");
+    clearBlsMacroCacheForTests();
+    // The keyless VIX cascade (Yahoo/Cboe/Stooq) records per-lane health and runs through the
+    // shared circuit breaker: a previous test's stubbed failures would otherwise trip the lanes
+    // and silently skip the sources this test expects to be called.
+    const { resetApiCircuitBreaker } = await import("../src/lib/api-circuit-breaker");
+    resetApiCircuitBreaker();
+    const { getDb } = await import("../src/lib/db");
+    getDb()
+      .prepare("DELETE FROM api_health_log WHERE service IN ('vix-yahoo', 'vix-cboe', 'vix-stooq')")
+      .run();
   });
 
   afterEach(() => {
@@ -150,7 +161,8 @@ describe("macro.ts cache-provenance", () => {
 
   it("no-key path tries Yahoo VIX; falls back to asOf=unavailable when Yahoo also fails", async () => {
     delete process.env.FRED_API_KEY;
-    // Stub fetch to simulate a failing Yahoo response (network error).
+    // Stub fetch to simulate a failing Yahoo response (network error) — this also fails the
+    // keyless Treasury yield-curve fallback, since it shares the same stubbed fetch.
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network error")));
 
     const { fetchMacroData, clearMacroCacheForTests } = await import("../src/lib/macro");
@@ -158,7 +170,178 @@ describe("macro.ts cache-provenance", () => {
 
     const result = await fetchMacroData(undefined);
     expect(result.asOf).toBe("unavailable");
-    // Nothing was sourced — the flag says so explicitly.
+    // Nothing was sourced — the flags say so explicitly.
+    expect(result.fredSourced).toBe(false);
+    expect(result.treasurySourced).toBe(false);
+    expect(result.dgs3moTreasury).toBe("");
+    expect(result.dgs10Treasury).toBe("");
+  });
+
+  it("no-key path sources the yield curve keylessly from Treasury.gov when VIX also fails", async () => {
+    delete process.env.FRED_API_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("home.treasury.gov")) {
+          return {
+            ok: true,
+            text: async () =>
+              `<feed><entry><content type="application/xml"><m:properties>` +
+              `<d:NEW_DATE m:type="Edm.DateTime">2026-07-31T00:00:00</d:NEW_DATE>` +
+              `<d:BC_3MONTH m:type="Edm.Double">3.90</d:BC_3MONTH>` +
+              `<d:BC_2YEAR m:type="Edm.Double">4.20</d:BC_2YEAR>` +
+              `<d:BC_10YEAR m:type="Edm.Double">4.55</d:BC_10YEAR>` +
+              `</m:properties></content></entry></feed>`
+          };
+        }
+        // Every VIX lane (Cboe + Yahoo) fails.
+        throw new Error("Network error");
+      })
+    );
+
+    const { fetchMacroData, clearMacroCacheForTests } = await import("../src/lib/macro");
+    clearMacroCacheForTests();
+
+    const result = await fetchMacroData(undefined);
+    expect(result.asOf).not.toBe("unavailable");
+    expect(result.dgs3moTreasury).toBe("3.90%");
+    expect(result.dgs2Treasury).toBe("4.20%");
+    expect(result.dgs10Treasury).toBe("4.55%");
+    expect(result.treasurySourced).toBe(true);
+    // The VIX lane genuinely failed — never fabricated, even though the curve is real.
+    expect(result.vix).toBe("");
+    // Still not a full FRED fetch — every non-Treasury FRED field stays blank.
+    expect(result.fredSourced).toBe(false);
+    expect(result.fedFundsRate).toBe("");
+  });
+
+  it("no-key path sources BOTH a live VIX and the Treasury yield curve when both keyless lanes succeed", async () => {
+    delete process.env.FRED_API_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("home.treasury.gov")) {
+          return {
+            ok: true,
+            text: async () =>
+              `<feed><entry><content type="application/xml"><m:properties>` +
+              `<d:NEW_DATE m:type="Edm.DateTime">2026-07-31T00:00:00</d:NEW_DATE>` +
+              `<d:BC_10YEAR m:type="Edm.Double">4.55</d:BC_10YEAR>` +
+              `</m:properties></content></entry></feed>`
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ chart: { result: [{ indicators: { quote: [{ close: [22.5] }] } }] } })
+        };
+      })
+    );
+
+    const { fetchMacroData, clearMacroCacheForTests } = await import("../src/lib/macro");
+    clearMacroCacheForTests();
+
+    const result = await fetchMacroData(undefined);
+    expect(parseFloat(result.vix)).toBeCloseTo(22.5, 1);
+    expect(result.dgs10Treasury).toBe("4.55%");
+    expect(result.treasurySourced).toBe(true);
+    expect(result.fredSourced).toBe(false);
+  });
+
+  const blsLiveShapedResponse = {
+    status: "REQUEST_SUCCEEDED",
+    responseTime: 100,
+    message: [],
+    Results: {
+      series: [
+        {
+          seriesID: "CUUR0000SA0",
+          data: [
+            { year: "2026", period: "M06", periodName: "June", latest: "true", value: "333.952", footnotes: [{}] },
+            { year: "2025", period: "M06", periodName: "June", value: "322.561", footnotes: [{}] }
+          ]
+        },
+        {
+          seriesID: "LNS14000000",
+          data: [{ year: "2026", period: "M06", periodName: "June", latest: "true", value: "4.20", footnotes: [{}] }]
+        },
+        {
+          seriesID: "CES0000000001",
+          data: [
+            { year: "2026", period: "M06", periodName: "June", latest: "true", value: "158984", footnotes: [{}] },
+            { year: "2026", period: "M05", periodName: "May", value: "158927", footnotes: [{}] }
+          ]
+        }
+      ]
+    }
+  };
+
+  it("no-key path sources CPI/unemployment/payrolls keylessly from BLS when VIX and Treasury both fail", async () => {
+    delete process.env.FRED_API_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("api.bls.gov")) {
+          return { ok: true, json: async () => blsLiveShapedResponse };
+        }
+        // Every VIX lane (Cboe + Yahoo) and the Treasury yield-curve lane all fail.
+        throw new Error("Network error");
+      })
+    );
+
+    const { fetchMacroData, clearMacroCacheForTests } = await import("../src/lib/macro");
+    const { clearBlsMacroCacheForTests } = await import("../src/lib/market-signals/bls");
+    clearMacroCacheForTests();
+    clearBlsMacroCacheForTests();
+
+    const result = await fetchMacroData(undefined);
+    expect(result.asOf).not.toBe("unavailable");
+    expect(result.cpiInflation).toBe("3.53%"); // (333.952-322.561)/322.561 * 100, YoY
+    expect(result.unemploymentRate).toBe("4.20%");
+    expect(result.nonfarmPayrollsChangeK).toBe("+57K"); // 158984-158927
+    expect(result.blsSourced).toBe(true);
+    // Neither VIX nor Treasury actually succeeded — never fabricated, even though BLS is real.
+    expect(result.vix).toBe("");
+    expect(result.dgs10Treasury).toBe("");
+    expect(result.treasurySourced).toBe(false);
+    // Still not a full FRED fetch — every non-BLS FRED field stays blank.
+    expect(result.fredSourced).toBe(false);
+    expect(result.fedFundsRate).toBe("");
+  });
+
+  it("no-key path sources VIX, Treasury, AND BLS together when all three keyless lanes succeed", async () => {
+    delete process.env.FRED_API_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("api.bls.gov")) return { ok: true, json: async () => blsLiveShapedResponse };
+        if (url.includes("home.treasury.gov")) {
+          return {
+            ok: true,
+            text: async () =>
+              `<feed><entry><content type="application/xml"><m:properties>` +
+              `<d:NEW_DATE m:type="Edm.DateTime">2026-07-31T00:00:00</d:NEW_DATE>` +
+              `<d:BC_10YEAR m:type="Edm.Double">4.55</d:BC_10YEAR>` +
+              `</m:properties></content></entry></feed>`
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ chart: { result: [{ indicators: { quote: [{ close: [22.5] }] } }] } })
+        };
+      })
+    );
+
+    const { fetchMacroData, clearMacroCacheForTests } = await import("../src/lib/macro");
+    const { clearBlsMacroCacheForTests } = await import("../src/lib/market-signals/bls");
+    clearMacroCacheForTests();
+    clearBlsMacroCacheForTests();
+
+    const result = await fetchMacroData(undefined);
+    expect(parseFloat(result.vix)).toBeCloseTo(22.5, 1);
+    expect(result.dgs10Treasury).toBe("4.55%");
+    expect(result.treasurySourced).toBe(true);
+    expect(result.unemploymentRate).toBe("4.20%");
+    expect(result.blsSourced).toBe(true);
     expect(result.fredSourced).toBe(false);
   });
 

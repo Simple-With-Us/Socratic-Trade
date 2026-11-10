@@ -43,6 +43,69 @@ describe("getLaneHealth — per (service, keySource) lane", () => {
   });
 });
 
+describe("ts-tie tiebreaker — same-millisecond api_health_log rows", () => {
+  // logApiHealth() always stamps `new Date().toISOString()`, so it can't reproduce a same-ts
+  // collision on its own. Insert rows directly with an IDENTICAL ts and a KNOWN insertion order
+  // (ascending rowid) to prove reads are ordered by insertion (newest inserted first), not left to
+  // SQLite's tie-order (which — absent a `rowid DESC` tiebreaker — resolves ties in ascending
+  // rowid/scan order, i.e. OLDEST-first: the exact bug this sweep fixes).
+  it("last-5 window and last-ok/last-fail reads return insertion order, not ts-tie scan order", async () => {
+    const { getLaneHealth } = await load();
+    const { getDb } = await import("../src/lib/db");
+    const { randomUUID: uuid } = await import("node:crypto");
+    const db = getDb();
+    const service = "tie-sweep-svc";
+    const keySource = "user";
+    const sharedTs = "2026-07-10T12:00:00.000Z";
+
+    // Insertion order (ascending rowid): success, success, fail, fail, fail, fail, fail.
+    // The most-recently-inserted 5 rows (r3..r7) are ALL failures — the breaker must trip.
+    // A ts-only ORDER BY (ties resolved by ascending scan order) would instead return the
+    // OLDEST 5 rows (r1..r5 = 2 successes + 3 fails) and wrongly report the lane as healthy.
+    const okPattern = [1, 1, 0, 0, 0, 0, 0];
+    for (const ok of okPattern) {
+      db.prepare(
+        `INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(uuid(), service, sharedTs, ok, null, ok ? null : "HTTP 500", keySource, null);
+    }
+
+    const result = getLaneHealth(service, keySource);
+    // r3..r7 (last 5 inserted) are all failures -> consecutive-failure breaker trips.
+    expect(result.stoppedWorking).toBe(true);
+    expect(result.reason).toContain("5 consecutive calls all failed");
+
+    // lastFailureTs sanity: with a single shared ts, the ONLY thing an ordering bug could get
+    // wrong here is *which* row's ts is picked when ties race — same value either way — so the
+    // meaningful assertion is the stoppedWorking verdict above, which depends on picking the
+    // newest-inserted 5 rows specifically.
+    expect(result.lastFailureTs).toBe(sharedTs);
+  });
+
+  it("getServiceHealthSummaries agrees with getLaneHealth on the same tie-heavy lane", async () => {
+    const { getServiceHealthSummaries } = await load();
+    const { getDb } = await import("../src/lib/db");
+    const { randomUUID: uuid } = await import("node:crypto");
+    const db = getDb();
+    const service = "tie-sweep-summary-svc";
+    const keySource = "env";
+    const sharedTs = "2026-07-10T12:00:00.000Z";
+
+    const okPattern = [1, 1, 0, 0, 0, 0, 0];
+    for (const ok of okPattern) {
+      db.prepare(
+        `INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(uuid(), service, sharedTs, ok, null, ok ? null : "HTTP 500", keySource, null);
+    }
+
+    const summaries = await getServiceHealthSummaries();
+    const summary = summaries.find((s) => s.service === service && s.keySource === keySource);
+    expect(summary).toBeDefined();
+    expect(summary?.stoppedWorking).toBe(true);
+  });
+});
+
 describe("apiCircuitBreakerShouldSkip", () => {
   beforeEach(async () => {
     (await load()).resetApiCircuitBreaker();

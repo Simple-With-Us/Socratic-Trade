@@ -13,6 +13,46 @@ Touchpoints: `src/lib/chat/*`, `app/api/chat/route.ts`, `app/api/proposals/from-
 
 ---
 
+## 2026-07-13 shared evidence-consumption update
+
+The write boundaries below remain intact, but Coach/chat, strategy tuning, and Framework review now
+consume evidence through the same primitives as the trading strategy:
+
+- retrieved, tool, provider, and persisted-LLM strings are recursively contained as untrusted data;
+- each surface has one global context budget with model-visible truncation/omission receipts;
+- evidence is content-addressed, hashed, and audited rather than being anonymous prompt prose;
+- chat memory/learned context retrieval carries the selected account boundary;
+- Coach uses the shared model catalog, exposes provider-supported reasoning effort, and requires an
+  explicit model instead of silently selecting one; and
+- GPT-5.6 Luna, Terra, and Sol are available alongside retained GPT-5.4 Mini/Nano.
+
+This closes the previously tracked RAG prompt-injection gap (I8) for the active chat tool loop. It
+does not give free-text chat authority to mutate strategy weights or risk policy.
+
+## 2026-07-22 parent-context expansion boundary
+
+Long filing sections are stored as child chunks with their source parent text. `RAG_PARENT_CONTEXT_EXPANSION`
+is default-off: child text is the only recall/rerank unit, then the final survivors may receive one
+deduplicated parent-context attachment under `RAG_PARENT_CONTEXT_MAX_CHARS` (default 6,000) and
+`RAG_PARENT_CONTEXT_MAX_TOTAL_CHARS` (default 12,000). It never creates a candidate, inflates a score,
+or changes child provenance/order. Where the selected child is verbatim inside its parent, the helper
+attaches only surrounding parent prose rather than duplicating prompt text. Under an active strict
+`asOf`, an undated or future parent is not attached. This is a context-quality experiment, not an
+ingestion or re-embedding change; evaluate it against prompt consumption and production-path PIT results
+before enabling it.
+
+## 2026-07-22 exact retrieval-versus-consumption receipts
+
+Retrieval is not evidence use. Strategy now derives decision-case RAG attribution only from chunks
+that survived containment and the final shared prompt budget into the Bull/Red payload. It retains
+the rejected retrieval candidates separately as identifier-only diagnostics, so later usefulness
+learning cannot award outcomes to a chunk the model never saw. Truncated/header-only evidence stays
+diagnostic and never earns outcome credit. Chat KB tool results use the same stable `rag_*` evidence
+references and propagate them into citations, but are truthfully labeled tool-result assembly until
+a subsequent provider request actually uses them. New receipt/audit payloads
+contain identifiers, metadata, character counts, and text-free empty/error/deduplication counters
+only—never raw prompts, raw retrieval queries, or error strings.
+
 ## 1. Core decision — HYBRID: separate WRITE surfaces, one shared READ substrate
 
 The question is not "one brain or two." Decompose "separation" into **read** and **write**; the
@@ -29,6 +69,15 @@ human-gated `from-draft` bridge).
 | RAG knowledge corpus | **SHARE** | One corpus, one `as_of` point-in-time guard. No double-embedding the same 10-K. |
 | User preferences/constraints (`user_memory`) | **SHARE** | Already injected into the chat prompt; the legitimate personalization that honors `[HARD]` constraints. |
 | Trade outcomes + app state (positions/P&L/proposals/watchlist/regime/scorecards) | **SHARE (read-only)** | The **biggest gap + cheapest win** — see I6. Zero execution risk. |
+
+### Structured-vs-narrative retrieval boundary (2026-07-22)
+
+RAG is only for caller-declared narrative needs: filings, entitled transcript narrative, lessons,
+and research prose. Current market quotes, positions/portfolio state, open orders, and normalized
+financial/insider facts remain deterministic tool or SQLite inputs. `src/lib/rag/information-routing.ts`
+is fail-closed: it does not infer a route from free text, and unknown need kinds create neither a
+semantic retrieval request nor a synthetic substitute. Strategy uses this contract now; chat and
+evidence-consumption should adopt it before adding new retrieval callers.
 
 **One-way data flow:** outcomes/app-state/corpus flow **into** chat as grounded context; chat
 opinions **never** flow into the trading brain except through one explicit, human-confirmed path
@@ -138,9 +187,23 @@ default-off LLM judge); an offline **corpus coverage/freshness report** shipped 
 `scripts/eval/corpus-coverage.ts` (doc_type/symbol breakdown + watchlist zero-coverage check from
 SQLite, no Pinecone key required) — a richer **dashboard UI** surfacing the same data is still open
 (note: `/api/admin/rag-coverage` + `app/admin/rag-coverage/` already exist as a related, separate
-live-API/UI capability — not touched by this pass, owned by the dashboard-redesign thread); typed
+live-API/UI capability — not touched by this pass, owned by the dashboard-redesign thread). A separate
+**production-path retrieval evaluator** now runs `retrieveContextDetailedWithStatus` against required frozen,
+version-controlled JSON cases carrying authoritative availability timestamps and stable evidence provenance selectors (with
+vector ids retained only as diagnostics). It emits machine-readable
+recall/MRR/nDCG, future/undated-evidence, duplicate, source/section, latency, status, and usage receipts;
+live provider reads require an explicit `--allow-live`, and comparison labels never mutate production defaults.
+The golden set must be curated from frozen EDGAR evidence before it can select a model; typed
 second gate on **BROKERAGE·LIVE** confirm only (keep paper/test one-click); persistent "what can I
 ask?" popover.
+
+**Hosted-inference comparison (2026-07-21):** `eval:pinecone-inference` evaluates frozen candidate pools
+through Pinecone's standalone `/embed` and `/rerank` inference APIs, with live calls opt-in and bounded. It
+supports `llama-text-embed-v2`/`multilingual-e5-large`, `bge-reranker-v2-m3`/`pinecone-rerank-v0`, and any
+other account-exposed reranker such as Cohere; optional `/models` inventory is read-only. Results retain only
+case/candidate ids, scores, metrics, latency, and provider usage receipts—never candidate text—and do not access
+a Pinecone index. CLI inputs are hard-capped at 100 cases, 100 candidates/case, 100 results, and 10 distinct
+models per inference kind.
 
 **Follow-on, 2026-07-01** (`docs/rollouts/2026-07-01-rag-followon.md`): the two items the Workstream
 C rollout note deferred are now DONE — a **retrieval regression net** (R4) pins the as-of/rerank/
@@ -173,6 +236,20 @@ unchanged)) are now DONE. R3 (golden-set anti-leakage lint) and R8 (salience fir
 already shipped in earlier passes (#297/#299) and were verified, not re-implemented. Every item is
 default-off/opt-in and proven byte-identical when unset — see the rollout note for the full
 item-by-item detail and verify-quartet results.
+
+**Strategic-performance follow-on, updated 2026-07-22:** the 28-case mocked fixture remains a regression
+net, not evidence that one embedding/reranker wins on the live financial corpus. The active program
+therefore separates four concerns before changing production defaults: a production-path PIT
+evaluator; corpus-wide FTS5 candidates unioned with dense recall before one rerank; independently
+selectable rerank route/model plus default-off scout/deep/exact/general candidate depths; and
+text-free per-stage latency/candidate/drop receipts. The pure rerank-policy and stage-telemetry
+modules are now wired into `retrieveContextDetailed` on the integration lane. Corpus-wide FTS5
+recall is an independent source, unioned with dense results by RRF before one rerank; committed head
+or PIT-version receipts prevent stale generations from bypassing dense eligibility. Lexical recall
+also enforces authoritative tenant scopes, excludes sources whose rights metadata is not present in
+the filing FTS table, and hides legacy rows shadowed by a current/PIT managed version. The new paths
+remain default-off pending production evaluation. No local model service or sparse-vector API is
+assumed: BGE-M3 sparse capability counts only when the selected transport actually returns it.
 
 ## 6. User-guidance design ("how to advise users to interact")
 

@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Production ops diagnostics (Cursor Cloud)
 
-When the user asks about **production** behavior on `trading.jays.services` (strategy runs, multi-account autonomy, missing proposals, errors, audit logs, scheduler), **fetch the ops snapshot first** before guessing:
+When the user asks about **production** behavior on `socratictrade.com` (strategy runs, multi-account autonomy, missing proposals, errors, audit logs, scheduler), **fetch the ops snapshot first** before guessing:
 
 ```bash
 bash scripts/fetch-prod-ops-snapshot.sh
@@ -19,14 +19,14 @@ OPS_SNAPSHOT_OUT=/tmp/ops-snapshot.json bash scripts/fetch-prod-ops-snapshot.sh
 
 ## Prerequisites (owner one-time setup)
 
-1. **Production** (`trading-live`): set `OPS_DIAGNOSTIC_TOKEN` (same value as cloud secret), restart `pm2 trading`. Endpoint must be deployed (`GET /api/ops/snapshot`).
+1. **Production** (Coolify `socratic-app`): set `OPS_DIAGNOSTIC_TOKEN` (same value as cloud secret) in Infisical, then restart the Coolify app. Endpoint must be deployed (`GET /api/ops/snapshot`). Do not `pm2 restart trading` on the Mac.
 2. **Cursor Cloud Secrets** (cursor.com dashboard -> Cloud Agents -> Secrets):
    - Name: `OPS_DIAGNOSTIC_TOKEN`
    - Type: **Runtime Secret** (recommended)
    - Scope: this repository (or team)
    - Value: **must match** production `OPS_DIAGNOSTIC_TOKEN`
 
-Legacy fallback: `ADMIN_REINDEX_TOKEN` works if set in both places.
+`ADMIN_REINDEX_TOKEN` is not a fallback.  Production must set `OPS_DIAGNOSTIC_TOKEN`.  Do not mint a second token if both envs already share one value.
 
 ## How to use the response
 

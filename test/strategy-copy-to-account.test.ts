@@ -65,6 +65,26 @@ describe("strategy copy-to-account (PR 2)", () => {
     expect(db.getPolicy(userId, target).systemState).toBe("halted");
   });
 
+  it("preserves the target account's strategyAuthority — copying never arms Autopilot", async () => {
+    const db = await import("../src/lib/db");
+    const userId = `u-${randomUUID()}`;
+    const active = `active-${randomUUID()}`;
+    const target = `target-${randomUUID()}`;
+
+    db.upsertConnectedAccount({ id: active, userId, broker: "alpaca", environment: "paper", accountNumber: "PA-A3", label: "Active", isActive: true });
+    db.upsertConnectedAccount({ id: target, userId, broker: "alpaca", environment: "paper", accountNumber: "PA-T3", label: "Target", isActive: false });
+
+    db.setPolicy({ ...db.getPolicy(userId, target), strategyAuthority: "propose" }, userId, target);
+    const autopilot = db.createStrategyProfile(
+      { name: "Autopilot", policy: { ...db.getPolicy(userId, active), strategyAuthority: "decide" } },
+      userId
+    );
+
+    db.applyProfileToAccount(autopilot.id, target, userId);
+
+    expect(db.getPolicy(userId, target).strategyAuthority).toBe("propose");
+  });
+
   it("rejects unknown profile or unknown account", async () => {
     const db = await import("../src/lib/db");
     const userId = `u-${randomUUID()}`;

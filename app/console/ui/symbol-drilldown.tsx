@@ -17,7 +17,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { MarketQuote, MarketQuoteSummary } from "@/lib/types";
-import { useConsoleData } from "../lib/useConsoleData";
+import { useConsoleDataOptional } from "../lib/useConsoleData";
 import { cx, fmtMoney, fmtPct, EM_DASH } from "../lib/format";
 import { Chip } from "./primitives";
 import { useSymbolDrawer } from "./symbol-drawer";
@@ -27,12 +27,18 @@ import {
   AnalystSection,
   DerivedTilesSection,
   EvidenceSection,
+  ExitPlanSection,
   ExposureSection,
   FactorSection,
+  LastCallSection,
   FundamentalsSection,
+  PeerAccountsSection,
   SignalSummarySection,
   SourcesSection
 } from "./drilldown-sections";
+import { activateAccount, redirectToLogin } from "../lib/api";
+import { deriveProtection } from "../lib/derive";
+import type { SymbolDesk } from "@/lib/symbol-desk";
 
 // ── Data ─────────────────────────────────────────────────────────────────────
 
@@ -56,23 +62,25 @@ function useHistory(symbol: string, enabled: boolean): HistoryState {
 
   useEffect(() => {
     if (!enabled) return;
-    let cancelled = false;
+    const controller = new AbortController();
     setState({ status: "loading" });
     (async () => {
       try {
-        const res = await fetch(`/api/history?symbol=${encodeURIComponent(symbol)}`);
+        const res = await fetch(`/api/history?symbol=${encodeURIComponent(symbol)}`, { signal: controller.signal });
+        if (res.status === 401) {
+          redirectToLogin();
+          return;
+        }
         if (!res.ok) throw new Error(`history ${res.status}`);
         const json: { bars?: HistoryBar[] } = await res.json();
         const bars = (json.bars ?? []).filter((b) => typeof b.close === "number" && Number.isFinite(b.close));
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setState(bars.length >= 2 ? { status: "ready", bars } : { status: "empty" });
-      } catch {
-        if (!cancelled) setState({ status: "error" });
+      } catch (err) {
+        if (!controller.signal.aborted) setState({ status: "error" });
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [symbol, enabled]);
 
   return state;
@@ -96,23 +104,25 @@ function useOnDemandEnrichment(symbol: string, enabled: boolean): EnrichmentStat
       setState({ status: "idle" });
       return;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     setState({ status: "loading" });
     (async () => {
       try {
-        const res = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`);
+        const res = await fetch(`/api/quote?symbol=${encodeURIComponent(symbol)}`, { signal: controller.signal });
+        if (res.status === 401) {
+          redirectToLogin();
+          return;
+        }
         if (!res.ok) throw new Error(`quote ${res.status}`);
         const json: Record<string, unknown> = await res.json();
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         const view = toQuoteViewFromEnrichment(symbol, json);
         setState(hasEnrichedData(view) ? { status: "ready", view } : { status: "empty" });
-      } catch {
-        if (!cancelled) setState({ status: "error" });
+      } catch (err) {
+        if (!controller.signal.aborted) setState({ status: "error" });
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [symbol, enabled]);
 
   return state;
@@ -209,7 +219,7 @@ function PriceHistoryChart({ bars }: { bars: HistoryBar[] }) {
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="h-auto w-full rounded-lg border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)]"
+        className="h-auto w-full rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)]"
         role="img"
         aria-label={`Daily closes from ${fmtMoney(first)} to ${fmtMoney(last)}`}
       >
@@ -243,7 +253,14 @@ export function SymbolDrilldownSheet({
    *  the drilldown can never disagree with the row the user clicked. */
   quote?: MarketQuote;
 }) {
-  const { snapshot } = useConsoleData();
+  // Optional: /admin mounts SymbolDrawerProvider without ConsoleDataProvider (no dashboard
+  // snapshot fetch there by design — see app/admin/layout.tsx). `hasAccountData` distinguishes
+  // "no provider, so exposure is genuinely unknown" from "provider present, snapshot just hasn't
+  // loaded/has nothing" — the two need different copy below (see ExposureSection call).
+  const consoleData = useConsoleDataOptional();
+  const hasAccountData = consoleData !== null;
+  const snapshot = consoleData?.snapshot ?? null;
+  const { updateDrawerTitle } = useSymbolDrawer();
   const normalized = symbol.trim().toUpperCase();
   const history = useHistory(normalized, true);
 
@@ -261,8 +278,51 @@ export function SymbolDrilldownSheet({
   const onDemandView = enrichment.status === "ready" ? enrichment.view : null;
   // Best-available view for the price line / score chip / sector line / footer below.
   const view = scanView ?? onDemandView;
+  const companyName = resolveDrilldownCompanyName(scanView, onDemandView);
+
+  // The drawer title is created when the ticker is clicked, before an out-of-scan
+  // symbol's on-demand identity exists. Refresh only the matching open drawer once
+  // the provider response supplies the issuer name; the aria-label guard prevents a
+  // late response from renaming a newer drawer.
+  useEffect(() => {
+    if (!companyName) return;
+    updateDrawerTitle(
+      `${normalized} details`,
+      <SymbolDrilldownTitle symbol={normalized} companyName={companyName} />
+    );
+  }, [companyName, normalized, updateDrawerTitle]);
+
+  const [desk, setDesk] = useState<SymbolDesk | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setDesk(null);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/symbol-desk?symbol=${encodeURIComponent(normalized)}`, { signal: controller.signal });
+        if (res.status === 401) {
+          redirectToLogin();
+          return;
+        }
+        if (!res.ok) return;
+        const json = (await res.json()) as SymbolDesk;
+        if (!controller.signal.aborted) setDesk(json);
+      } catch (err) {
+        // Desk extras are optional — the sheet still shows quote, position, and scan research.
+      }
+    })();
+    return () => controller.abort();
+  }, [normalized]);
 
   const position = snapshot?.positions?.find((p) => p.symbol.trim().toUpperCase() === normalized);
+  const protection =
+    position && snapshot
+      ? deriveProtection(
+          position,
+          snapshot.orders ?? [],
+          snapshot.policy,
+          snapshot.stopPlanBySymbol?.[normalized] ?? snapshot.stopPlanBySymbol?.[position.symbol]
+        )
+      : null;
   const pending = useMemo(
     () => (snapshot?.pendingProposals ?? []).filter((p) => p.proposal.symbol.trim().toUpperCase() === normalized),
     [snapshot?.pendingProposals, normalized]
@@ -336,7 +396,7 @@ export function SymbolDrilldownSheet({
           {typeof view?.score === "number" && (
             <Chip
               tone="accent"
-              title="Composite 0–100 score from the last market scan — the policy-weighted total of the factor breakdown below. Higher = the screener ranked it more attractive."
+              title="Composite 0–100 score from the last market scan — the policy-weighted total of the factor breakdown below.  Higher = the screener ranked it more attractive."
             >
               Score {Math.round(view.score)}
             </Chip>
@@ -345,7 +405,7 @@ export function SymbolDrilldownSheet({
             <Chip
               tone="warn"
               title={withProvenance(
-                "Trading days until the next scheduled earnings report. Prices can gap sharply on the report — entries this close to earnings carry extra risk.",
+                "Trading days until the next scheduled earnings report.  Prices can gap sharply on the report — entries this close to earnings carry extra risk.",
                 view,
                 "daysToEarnings"
               )}
@@ -382,8 +442,31 @@ export function SymbolDrilldownSheet({
         )}
         {history.status === "ready" && <PriceHistoryChart bars={history.bars} />}
 
-        {/* Your exposure — account truth, available even when the scan didn't know the symbol */}
-        <ExposureSection symbol={normalized} position={position} pending={pending} orders={recentOrders} />
+        {/* Your exposure — account truth, available even when the scan didn't know the symbol.
+            Outside the console (no ConsoleDataProvider) there is no account snapshot to read at
+            all, so say that plainly instead of letting ExposureSection's normal empty state
+            ("no position, no pending ideas, no recent orders") assert a negative it can't know. */}
+        {hasAccountData ? (
+          <>
+            <ExposureSection symbol={normalized} position={position} pending={pending} orders={recentOrders} />
+            {protection && (
+              <ExitPlanSection symbol={normalized} protection={protection} exit={desk?.exit} />
+            )}
+            <PeerAccountsSection
+              symbol={normalized}
+              peers={desk?.peerAccounts ?? []}
+              onSwitch={(accountId) => {
+                void activateAccount(accountId);
+              }}
+            />
+            <LastCallSection lastCall={desk?.lastCall} />
+          </>
+        ) : (
+          <p className="text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">
+            Account exposure (position, pending ideas, recent orders) isn&apos;t available here — open{" "}
+            {normalized} from the console for that.
+          </p>
+        )}
 
         {scanView && derived ? (
           <>
@@ -419,7 +502,7 @@ export function SymbolDrilldownSheet({
             {/* Explicit {" "} after the symbol: the literal space here was dropped at runtime
                 (observed "LRCXwasn't" in prod) — same idiom as the second occurrence below. */}
             {normalized}
-            {" wasn't in the last market scan, so fundamentals, factor scores, and signals aren't available yet. The chart and your account data above are still real. Run a scan that includes "}
+            {" wasn't in the last market scan, so fundamentals, factor scores, and signals aren't available yet.  The chart and your account data above are still real.  Run a scan that includes "}
             {normalized}
             {" to fill this in."}
           </p>
@@ -428,14 +511,24 @@ export function SymbolDrilldownSheet({
         {view?.asOf && (
           <p
             className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-            title="When this symbol's quote data was captured. The chart above refreshes independently from free daily history."
+            title="When this symbol's quote data was captured.  The chart above refreshes independently from free daily history."
           >
             Quote data from {usingOverride ? "the scan currently on screen" : scanView ? "the last market scan" : "a live on-demand fetch"} (
-            {new Date(view.asOf).toLocaleString()}).
+            {new Date(view.asOf).toLocaleString(undefined, { timeZone: "America/Chicago" })}).
           </p>
         )}
     </div>
   );
+}
+
+/** Resolve the identity rendered in the drawer header. The scan remains first
+ * choice; on-demand identity fills the header for symbols outside that scan. */
+export function resolveDrilldownCompanyName(
+  scanView: QuoteView | null,
+  onDemandView: QuoteView | null
+): string | undefined {
+  const name = scanView?.companyName ?? onDemandView?.companyName;
+  return name?.trim() || undefined;
 }
 
 function SymbolDrilldownTitle({ symbol, companyName }: { symbol: string; companyName?: string }) {
@@ -455,6 +548,21 @@ function SymbolDrilldownTitle({ symbol, companyName }: { symbol: string; company
 }
 
 // ── SymbolButton ─────────────────────────────────────────────────────────────
+
+/** Open the company drilldown for a scan/desk ticker.  Shared by SymbolButton
+ *  and the full-card scan hit target so both surfaces open the same sheet. */
+export function openSymbolDetails(
+  openDrawer: ReturnType<typeof useSymbolDrawer>["openDrawer"],
+  symbol: string,
+  quote?: MarketQuote
+): void {
+  const normalized = symbol.trim().toUpperCase();
+  openDrawer({
+    title: <SymbolDrilldownTitle symbol={normalized} companyName={quote?.companyName} />,
+    ariaLabel: `${normalized} details`,
+    body: <SymbolDrilldownSheet key={normalized} symbol={normalized} quote={quote} />
+  });
+}
 
 /** A ticker rendered as logo + text that opens the drilldown sheet. Drop this
  *  wherever a table shows a symbol. */
@@ -481,7 +589,6 @@ export function SymbolButton({
 }) {
   const { openDrawer } = useSymbolDrawer();
   const normalized = symbol.trim().toUpperCase();
-  const companyName = quote?.companyName;
 
   return (
     <button
@@ -489,11 +596,7 @@ export function SymbolButton({
       title={title ?? `Open ${normalized} details`}
       onClick={(e) => {
         e.stopPropagation();
-        openDrawer({
-          title: <SymbolDrilldownTitle symbol={normalized} companyName={companyName} />,
-          ariaLabel: `${normalized} details`,
-          body: <SymbolDrilldownSheet key={normalized} symbol={normalized} quote={quote} />
-        });
+        openSymbolDetails(openDrawer, normalized, quote);
       }}
       className={cx(
         "inline-flex cursor-pointer items-center gap-1.5 font-semibold underline decoration-[color:var(--con-line-strong)] decoration-1 underline-offset-[3px] transition-colors hover:text-[color:var(--con-accent)] hover:decoration-[color:var(--con-accent)]",

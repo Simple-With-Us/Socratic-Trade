@@ -12,7 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getPolicy: vi.fn(),
-  resolveLlmEndpoint: vi.fn()
+  resolveLlmEndpoint: vi.fn(),
+  recordLlmUsage: vi.fn()
 }));
 
 vi.mock("../src/lib/db", () => ({
@@ -22,6 +23,14 @@ vi.mock("../src/lib/db", () => ({
 vi.mock("../src/lib/llm-provider", () => ({
   resolveLlmEndpoint: mocks.resolveLlmEndpoint
 }));
+
+// extractLlmUsage is kept as the REAL (pure, no-DB) implementation via importOriginal — only
+// recordLlmUsage (the DB-writing / telemetry-firing side effect) is replaced with a spy, so these
+// tests assert exactly what salience-llm.ts hands to the ledger without needing a real DB.
+vi.mock("../src/lib/llm-usage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/llm-usage")>();
+  return { ...actual, recordLlmUsage: mocks.recordLlmUsage };
+});
 
 const originalFetch = global.fetch;
 
@@ -67,7 +76,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex when the flag is on but no LLM credential resolves (no key)", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => {
       throw new Error("should not be called with no key");
     }) as any;
@@ -82,7 +91,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex when the LLM call throws (network error / timeout)", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.reject(new Error("network down"))) as any;
 
     const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
@@ -95,7 +104,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex on a non-OK HTTP response", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 429, json: async () => ({}) })) as any;
 
     const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
@@ -108,7 +117,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex on malformed/unparseable LLM JSON", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: "not valid json {{{" } }] }) })
     ) as any;
@@ -134,7 +143,7 @@ describe("extractLearnedCandidatesLLM: ticker validation against the real known-
 
   beforeEach(() => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
   });
 
   it("attaches a REAL, known-universe ticker (e.g. AAPL) as the candidate's symbol", async () => {
@@ -180,5 +189,116 @@ describe("extractLearnedCandidatesLLM: ticker validation against the real known-
     const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
     const result = await extractLearnedCandidatesLLM("What's the weather like today?");
     expect(result).toEqual([]);
+  });
+});
+
+// ── Usage ledger + external telemetry recording (coverage gap fix) ───────────
+// This module used to make a raw LLM fetch with NO usage recording at all — a hole in the
+// "EVERY SINGLE LLM USE must be hardwired into the ledger AND external telemetry" owner directive.
+// recordLlmUsage is the ONE function that both writes the local ledger row AND fire-and-forgets the
+// push to the external API Usage Monitor, so asserting it's called (with the right context/tokens)
+// on a successful response IS the coverage for both effects, without needing a real DB or network.
+describe("extractLearnedCandidatesLLM: usage ledger + telemetry recording", () => {
+  beforeEach(() => {
+    process.env.LLM_SALIENCE_EXTRACTOR = "on";
+    mocks.resolveLlmEndpoint.mockReturnValue({
+      provider: "openai",
+      url: "https://openrouter.ai/v1/chat/completions",
+      key: "sk-test",
+      model: "gpt-5.4-mini",
+      keySource: "user",
+      keyRef: "fp_abc123",
+      transport: "chat-completions"
+    });
+  });
+
+  it("records usage under context 'chat-salience' with token counts + the resolved endpoint's provider/model/keySource/keyRef on a successful call", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ candidates: [] }) } }],
+          usage: { prompt_tokens: 120, completion_tokens: 40, total_tokens: 160 }
+        })
+      })
+    ) as any;
+
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    await extractLearnedCandidatesLLM("Some message.", "user-42");
+
+    expect(mocks.recordLlmUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.recordLlmUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-42",
+        provider: "openai",
+        model: "gpt-5.4-mini",
+        context: "chat-salience",
+        keySource: "user",
+        keyRef: "fp_abc123",
+        promptTokens: 120,
+        completionTokens: 40
+      })
+    );
+  });
+
+  it("defaults userId to 'local' when the caller doesn't pass one", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ candidates: [] }) } }] }) })
+    ) as any;
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    await extractLearnedCandidatesLLM("Some message.");
+    expect(mocks.recordLlmUsage).toHaveBeenCalledWith(expect.objectContaining({ userId: "local" }));
+  });
+
+  it("still records usage even when the response JSON is malformed (tokens were still spent, even though the fallback path returns the regex result)", async () => {
+    global.fetch = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "not valid json {{{" } }],
+          usage: { prompt_tokens: 80, completion_tokens: 10 }
+        })
+      })
+    ) as any;
+
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    const { extractLearnedCandidates } = await import("../src/lib/memory/salience");
+    const message = "GOOGL is the dominant supplier in this market.";
+    const result = await extractLearnedCandidatesLLM(message);
+
+    expect(result).toEqual(extractLearnedCandidates(message));
+    expect(mocks.recordLlmUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.recordLlmUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ context: "chat-salience", promptTokens: 80, completionTokens: 10 })
+    );
+  });
+
+  it("does NOT record usage when the HTTP response itself is non-OK (no successful call happened)", async () => {
+    global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 500, json: async () => ({}) })) as any;
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    await extractLearnedCandidatesLLM("Some message.");
+    expect(mocks.recordLlmUsage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record usage when the flag is off (no LLM call is made at all)", async () => {
+    delete process.env.LLM_SALIENCE_EXTRACTOR;
+    global.fetch = vi.fn(() => {
+      throw new Error("should not be called when the flag is off");
+    }) as any;
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    await extractLearnedCandidatesLLM("Some message.");
+    expect(mocks.recordLlmUsage).not.toHaveBeenCalled();
+  });
+
+  it("a recordLlmUsage failure never breaks chat memory extraction (wrapped so ledger errors can't surface)", async () => {
+    mocks.recordLlmUsage.mockImplementationOnce(() => {
+      throw new Error("ledger boom");
+    });
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ candidates: [] }) } }] }) })
+    ) as any;
+
+    const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
+    await expect(extractLearnedCandidatesLLM("Some message.")).resolves.toEqual([]);
   });
 });

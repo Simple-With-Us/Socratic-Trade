@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { applyDeterministicSizing } from "../src/lib/strategy";
 import type { PortfolioHeatResult } from "../src/lib/vol-targeting";
 import type { EquityPosition, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
 // Volatility-targeting sizing + portfolio-heat budget (opt-in, continuous taper, advisory-first).
 // Drives applyDeterministicSizing directly (the deterministic, non-LLM sizer) with precomputed

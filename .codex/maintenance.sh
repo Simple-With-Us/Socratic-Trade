@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Codex Cloud maintenance: run on cached container resume after branch checkout.
-# Quick health check only — no heavy installs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "==> Codex Cloud maintenance (resumed container)"
-
-# Verify the Slack token is still valid (lightweight, no side effects)
-if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
-  bash scripts/slack-sync.sh test 2>/dev/null || echo "Slack coordination: token check failed (may be transient)"
-else
-  echo "SLACK_BOT_TOKEN not set — Slack coordination silent."
+echo "==> Codex Cloud maintenance: Socratic-Trade"
+test -f AGENTS.md && test -f docs/EFFORT-LOG.md && echo "Protocol files: OK" || echo "Protocol files: CHECK"
+if [ -x scripts/codex-coordination.sh ]; then
+  scripts/codex-coordination.sh test || echo "Coordination check incomplete"
 fi
+echo "Apple Notes: Mac-only; preserve a completion handoff for local Notes publication."
 
-echo "==> Maintenance complete."

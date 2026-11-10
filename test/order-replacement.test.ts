@@ -64,6 +64,221 @@ describe("market replacement for stale limit orders", () => {
     });
   });
 
+  it("still honours a MANUAL replace after the owner cancelled a protective stop on that symbol", async () => {
+    // Regression for #3319 review: `owner_cancelled_stop` is a permanent tombstone with no
+    // clearing path, so it must fence only AUTOMATED remediation.  A manual replace the owner
+    // explicitly asked for still goes through, exactly like the `not_app_placed` bypass.
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const { recordOwnerCancelledProtectiveStop } = await import("../src/lib/order-provenance");
+    recordOwnerCancelledProtectiveStop("local", "APCA-PAPER", "AAPL");
+
+    const original = order({ id: "limit-1", quantity: 10, filledQuantity: 2, state: "accepted" });
+    const canceled = order({ id: "limit-1", quantity: 10, filledQuantity: 2, state: "canceled" });
+    const gateway = gatewayMock({
+      orders: [[original], [canceled]],
+      execution: { orderId: "market-1", refId: "ref-1", state: "accepted", raw: { id: "market-1" } }
+    });
+
+    const result = await replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orderId: "limit-1",
+      cancelSettleMs: 0
+    });
+
+    expect(result).toMatchObject({ status: "replaced", replacementOrderId: "market-1" });
+    expect(gateway.placeEquityOrder).toHaveBeenCalled();
+  });
+
+  it("books a terminal partial replacement as a real fill instead of reporting a total failure", async () => {
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const { listFillEvents } = await import("../src/lib/db");
+    const original = order({ id: "partial-exit", side: "sell", quantity: 10, state: "accepted" });
+    const canceled = order({ id: "partial-exit", side: "sell", quantity: 10, state: "canceled" });
+    const gateway = gatewayMock({
+      orders: [[original], [canceled]],
+      positions: [position({ quantity: 10 })],
+      execution: {
+        orderId: "terminal-partial-1",
+        refId: "terminal-partial-ref",
+        state: "canceled",
+        filledQuantity: 3,
+        averagePrice: 101,
+        raw: { id: "terminal-partial-1" }
+      }
+    });
+
+    await expect(replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orderId: original.id,
+      cancelSettleMs: 0
+    })).resolves.toMatchObject({
+      status: "replaced",
+      replacementOrderId: "terminal-partial-1",
+      fillStatus: "filled"
+    });
+
+    const fills = listFillEvents("APCA-PAPER", "paper", 10, "local");
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      brokerOrderId: "terminal-partial-1",
+      side: "sell",
+      quantity: 3,
+      status: "filled"
+    });
+    expect(fills[0].price).toBeGreaterThan(0);
+    expect(fills[0].notional).toBeCloseTo(fills[0].price * 3);
+  });
+
+  it("keeps an unpriced terminal partial recoverable, then updates the same receipt when price arrives", async () => {
+    const { autoRemediateStaleExitOrders, replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const { getDb, listFillEvents } = await import("../src/lib/db");
+    const original = order({ id: "unpriced-terminal", side: "sell", quantity: 10, state: "accepted" });
+    const canceled = order({ id: original.id, side: "sell", quantity: 10, state: "canceled" });
+    const firstGateway = gatewayMock({
+      orders: [[original], [canceled]],
+      positions: [position({ quantity: 10 })],
+      execution: {
+        orderId: "unpriced-terminal-market",
+        refId: "broker-returned-ref",
+        state: "canceled",
+        filledQuantity: 3,
+        raw: {}
+      }
+    });
+
+    await expect(replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: firstGateway,
+      orderId: original.id,
+      cancelSettleMs: 0
+    })).resolves.toMatchObject({ status: "replaced", replacementOrderId: "unpriced-terminal-market", fillStatus: "pending_reconciliation" });
+
+    const db = getDb();
+    const row = db.prepare("SELECT replacement_ref_id, status FROM order_replacements WHERE original_order_id = ?").get(original.id) as { replacement_ref_id: string; status: string };
+    expect(row.status).toBe("replacement_submitted");
+    expect(listFillEvents("APCA-PAPER", "paper", 10, "local")).toMatchObject([
+      { status: "pending_reconciliation", quantity: 3, price: 0, notional: 0, brokerOrderId: "unpriced-terminal-market" }
+    ]);
+
+    const priced = order({
+      id: "unpriced-terminal-market",
+      clientOrderId: row.replacement_ref_id,
+      type: "market",
+      side: "sell",
+      state: "canceled",
+      filledQuantity: 3,
+      averagePrice: 101
+    });
+    await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: gatewayMock({ orders: [[priced]] }),
+      orders: []
+    });
+
+    const fills = listFillEvents("APCA-PAPER", "paper", 10, "local");
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ status: "filled", quantity: 3, brokerOrderId: priced.id });
+    expect(fills[0].price).toBeGreaterThan(0);
+    expect(db.prepare("SELECT status FROM order_replacements WHERE original_order_id = ?").get(original.id)).toMatchObject({ status: "replacement_confirmed" });
+  });
+
+  it("preserves a positive partial response without an order id and later binds it by replacement ref", async () => {
+    const { autoRemediateStaleExitOrders, replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const { getDb, listFillEvents } = await import("../src/lib/db");
+    const original = order({ id: "partial-no-order-id", side: "sell", quantity: 10, state: "accepted" });
+    const canceled = order({ id: original.id, side: "sell", quantity: 10, state: "canceled" });
+    const firstGateway = gatewayMock({
+      orders: [[original], [canceled]],
+      positions: [position({ quantity: 10 })],
+      execution: {
+        refId: "broker-returned-ref",
+        state: "partially_filled",
+        filledQuantity: 3,
+        averagePrice: 101,
+        raw: {}
+      }
+    });
+
+    await expect(replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: firstGateway,
+      orderId: original.id,
+      cancelSettleMs: 0
+    })).resolves.toMatchObject({ status: "replaced", fillStatus: "partially_filled" });
+
+    const db = getDb();
+    const row = db.prepare("SELECT replacement_ref_id, status, replacement_order_id FROM order_replacements WHERE original_order_id = ?").get(original.id) as { replacement_ref_id: string; status: string; replacement_order_id: string | null };
+    expect(row).toMatchObject({ status: "replacement_submitted", replacement_order_id: null });
+    expect(listFillEvents("APCA-PAPER", "paper", 10, "local")).toMatchObject([
+      { status: "partially_filled", quantity: 3, brokerOrderId: undefined }
+    ]);
+
+    const found = order({
+      id: "bound-partial-order",
+      clientOrderId: row.replacement_ref_id,
+      type: "market",
+      side: "sell",
+      state: "partially_filled",
+      filledQuantity: 3,
+      averagePrice: 101
+    });
+    await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: gatewayMock({ orders: [[found]] }),
+      orders: []
+    });
+
+    const fills = listFillEvents("APCA-PAPER", "paper", 10, "local");
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ status: "partially_filled", quantity: 3, brokerOrderId: found.id });
+    expect(db.prepare("SELECT status, replacement_order_id FROM order_replacements WHERE original_order_id = ?").get(original.id)).toMatchObject({
+      status: "replacement_confirmed",
+      replacement_order_id: found.id
+    });
+  });
+
+  it("keeps a zero-fill terminal replacement as a failure", async () => {
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const { listFillEvents } = await import("../src/lib/db");
+    const original = order({ id: "declined-exit", side: "sell", quantity: 10, state: "accepted" });
+    const canceled = order({ id: "declined-exit", side: "sell", quantity: 10, state: "canceled" });
+    const gateway = gatewayMock({
+      orders: [[original], [canceled]],
+      positions: [position({ quantity: 10 })],
+      execution: {
+        orderId: "declined-market-1",
+        refId: "declined-market-ref",
+        state: "rejected",
+        filledQuantity: 0,
+        raw: { id: "declined-market-1" }
+      }
+    });
+
+    await expect(replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orderId: original.id,
+      cancelSettleMs: 0
+    })).rejects.toThrow("Broker rejected the replacement order");
+    expect(listFillEvents("APCA-PAPER", "paper", 10, "local")).toHaveLength(0);
+  });
+
   it("requires typed confirmation before replacing a live Brokerage order", async () => {
     const { MarketReplaceConfirmationError, replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
     const gateway = gatewayMock({ orders: [[order({ id: "live-limit" })]] });
@@ -92,20 +307,19 @@ describe("market replacement for stale limit orders", () => {
     const pendingCancel = order({ id: "limit-1", state: "pending_cancel" });
     const gateway = gatewayMock({ orders: [[original], [pendingCancel]] });
 
-    await expect(
-      replaceStaleLimitOrderWithMarket({
-        userId: "local",
-        policy: paperPolicy(),
-        activeAccount: account("paper"),
-        gateway,
-        orderId: "limit-1",
-        cancelSettleMs: 0
-      })
-    ).rejects.toMatchObject({
-      name: "MarketReplacePreconditionError",
-      message: "Cancel request is still pending at the broker. Wait for cancellation before placing the market replacement."
+    const result = await replaceStaleLimitOrderWithMarket({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orderId: "limit-1",
+      cancelSettleMs: 0
     });
-    expect(MarketReplacePreconditionError).toBeDefined();
+    expect(result).toMatchObject({
+      status: "pending_cancel",
+      canceledOrderId: "limit-1",
+      remainingQuantity: 10
+    });
     expect(gateway.cancelEquityOrder).toHaveBeenCalledWith("APCA-PAPER", "limit-1");
     expect(gateway.placeEquityOrder).not.toHaveBeenCalled();
   });
@@ -274,6 +488,18 @@ describe("held-leg + position-backed guards — 2026-07-08 PG/T naked-short regr
     });
   });
 
+  it("never cancels a tiny fractional exit when there is no backing position", async () => {
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const original = order({ id: "tiny-exit", symbol: "T", side: "sell", quantity: 0.0000005, filledQuantity: 0 });
+    const gateway = gatewayMock({ orders: [[original]], positions: [] });
+    await expect(replaceStaleLimitOrderWithMarket({
+      userId: "local", policy: paperPolicy(), activeAccount: account("paper"), gateway,
+      orderId: original.id, cancelSettleMs: 0
+    })).rejects.toMatchObject({ name: "MarketReplacePreconditionError", status: 409 });
+    expect(gateway.cancelEquityOrder).not.toHaveBeenCalled();
+    expect(gateway.placeEquityOrder).not.toHaveBeenCalled();
+  });
+
   it("skips the replacement when the position is smaller than the order's remaining quantity", async () => {
     const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
     const { latestAuditByKind } = await import("../src/lib/db");
@@ -416,6 +642,31 @@ describe("manual-path held-leg, post-cancel TOCTOU, and in-flight guards — adv
     });
   });
 
+  it("allows manual replacement of a standalone order beside an unrelated opposite-side bracket order", async () => {
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const original = order({ id: "manual-standalone", symbol: "MU", side: "buy", orderClass: undefined,
+      createdAt: "2026-01-01T00:00:00.000Z" });
+    const unrelated = order({ id: "unrelated-bracket", symbol: "MU", side: "sell", orderClass: "bracket",
+      createdAt: "2026-01-01T00:00:01.000Z" });
+    const canceled = order({ ...original, state: "canceled" });
+    const gateway = gatewayMock({ orders: [[original, unrelated], [canceled, unrelated]] });
+    const result = await replaceStaleLimitOrderWithMarket({
+      userId: "local", policy: paperPolicy(), activeAccount: account("paper"), gateway,
+      orderId: original.id, cancelSettleMs: 0
+    });
+    expect(result).toMatchObject({ status: "replaced" });
+    expect(gateway.cancelEquityOrder).toHaveBeenCalledWith("APCA-PAPER", original.id);
+  });
+
+  it("keeps the bracket-sibling heuristic as an automatic-remediation fence", async () => {
+    const { autoReplaceProvenanceSkipReason } = await import("../src/lib/order-provenance");
+    const original = order({ id: "possible-leg", symbol: "MU", side: "sell", orderClass: undefined,
+      createdAt: "2026-01-01T00:00:00.000Z" });
+    const sibling = order({ id: "bracket", symbol: "MU", side: "buy", orderClass: "bracket",
+      createdAt: "2026-01-01T00:00:01.000Z" });
+    expect(autoReplaceProvenanceSkipReason(original, { userId: "local", accountNumber: "APCA-PAPER" }, [original, sibling])).toBe("bracket_leg");
+  });
+
   it("blocks concurrent replacement of the same order via the shared in-flight set — second entrant gets 409", async () => {
     const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
     const staleSell = order({ id: "race-sell-1", symbol: "MU", side: "sell", quantity: 5, filledQuantity: 0, state: "accepted", createdAt: "2026-01-01T00:00:00.000Z" });
@@ -461,6 +712,42 @@ describe("manual-path held-leg, post-cancel TOCTOU, and in-flight guards — adv
       replaceStaleLimitOrderWithMarket({ ...args, gateway: freshGateway })
     ).resolves.toMatchObject({ status: "replaced", replacementOrderId: "mkt-race-2" });
   });
+
+  it("scopes the manual replacement lock by user", async () => {
+    const { replaceStaleLimitOrderWithMarket } = await import("../src/lib/order-replacement");
+    const staleSell = order({ id: "cross-user-manual", symbol: "MU", side: "sell", quantity: 5, state: "accepted", createdAt: "2026-01-01T00:00:00.000Z" });
+    const canceled = order({ id: "cross-user-manual", symbol: "MU", side: "sell", quantity: 5, state: "canceled" });
+    const firstGateway = gatewayMock({
+      orders: [[staleSell], [canceled]],
+      positions: [position({ symbol: "MU", quantity: 5 })],
+      execution: { orderId: "cross-user-manual-1", refId: "manual-user-1", state: "accepted", raw: {} }
+    });
+    const secondGateway = gatewayMock({
+      orders: [[staleSell], [canceled]],
+      positions: [position({ symbol: "MU", quantity: 5 })],
+      execution: { orderId: "cross-user-manual-2", refId: "manual-user-2", state: "accepted", raw: {} }
+    });
+
+    const first = replaceStaleLimitOrderWithMarket({
+      userId: "user-1",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: firstGateway,
+      orderId: staleSell.id,
+      cancelSettleMs: 0
+    });
+    const second = replaceStaleLimitOrderWithMarket({
+      userId: "user-2",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway: secondGateway,
+      orderId: staleSell.id,
+      cancelSettleMs: 0
+    });
+
+    await expect(first).resolves.toMatchObject({ replacementOrderId: "cross-user-manual-1" });
+    await expect(second).resolves.toMatchObject({ replacementOrderId: "cross-user-manual-2" });
+  });
 });
 
 function paperPolicy() {
@@ -505,8 +792,9 @@ function account(environment: "paper" | "live"): ConnectedAccount {
 }
 
 function order(overrides: Partial<EquityOrder> = {}): EquityOrder {
+  const id = overrides.id ?? "limit-1";
   return {
-    id: "limit-1",
+    id,
     symbol: "AAPL",
     side: "buy",
     type: "limit",
@@ -514,6 +802,7 @@ function order(overrides: Partial<EquityOrder> = {}): EquityOrder {
     quantity: 10,
     filledQuantity: 0,
     createdAt: "2026-01-01T00:00:00.000Z",
+    clientOrderId: `sstop-test-${id}`,
     ...overrides
   };
 }
@@ -551,3 +840,186 @@ function gatewayMock(input: {
     }))
   };
 }
+
+describe("reconciliation and reconstruction recovery", () => {
+  it("reconstructs original order from persisted DB columns if not returned by broker", async () => {
+    const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
+    const { getDb } = await import("../src/lib/db");
+    
+    const db = getDb();
+    const id = randomUUID();
+    const refId = randomUUID();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO order_replacements 
+      (id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, replacement_ref_id, status, created_at, updated_at) 
+      VALUES (?, 'local', 'APCA-PAPER', 'missing-order-1', 'AAPL', 'sell', 'limit', 10, 2, ?, 'cancel_confirmed', ?, ?)
+    `).run(id, refId, now, now);
+
+    const gateway = gatewayMock({
+      orders: [[]],
+      positions: [position({ symbol: "AAPL", quantity: 10 })],
+      execution: { orderId: "replacement-market-1", refId, state: "accepted", raw: {} }
+    });
+
+    const out = await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orders: []
+    });
+
+    expect(out).toMatchObject({ remediated: 1 });
+    expect(gateway.placeEquityOrder).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: "AAPL",
+      side: "sell",
+      type: "market",
+      quantity: 8
+    }));
+
+    const record = db.prepare("SELECT status, replacement_order_id FROM order_replacements WHERE id = ?").get(id) as any;
+    expect(record.status).toBe("replacement_confirmed");
+    expect(record.replacement_order_id).toBe("replacement-market-1");
+  });
+
+  it("reconciles replacement_submitted rows by locating the order via clientOrderId at the broker", async () => {
+    const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
+    const { getDb } = await import("../src/lib/db");
+
+    const db = getDb();
+    const id = randomUUID();
+    const refId = "submitted-ref-1";
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO order_replacements 
+      (id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, remaining_quantity, replacement_ref_id, status, created_at, updated_at) 
+      VALUES (?, 'local', 'APCA-PAPER', 'limit-2', 'AAPL', 'sell', 'limit', 10, 0, 10, ?, 'replacement_submitted', ?, ?)
+    `).run(id, refId, now, now);
+
+    const submittedOrder = order({ id: "broker-market-2", type: "market", side: "sell", clientOrderId: refId, state: "filled", quantity: 10 });
+    const gateway = gatewayMock({
+      orders: [[submittedOrder]]
+    });
+
+    const out = await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orders: []
+    });
+
+    const record = db.prepare("SELECT status, replacement_order_id FROM order_replacements WHERE id = ?").get(id) as any;
+    expect(record.status).toBe("replacement_confirmed");
+    expect(record.replacement_order_id).toBe("broker-market-2");
+
+    const fillExists = db.prepare("SELECT 1 FROM fill_events WHERE broker_order_id = 'broker-market-2'").get();
+    expect(fillExists).toBeDefined();
+  });
+
+  it("does not let another tenant/account fill with the same broker order id suppress recovery", async () => {
+    const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
+    const { getDb, insertFillEvent, listFillEvents } = await import("../src/lib/db");
+
+    const db = getDb();
+    const id = randomUUID();
+    const refId = "scoped-replacement-ref";
+    const brokerOrderId = "reused-broker-order-id";
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO order_replacements
+      (id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, remaining_quantity, replacement_ref_id, status, created_at, updated_at)
+      VALUES (?, 'local', 'APCA-PAPER', 'scoped-limit', 'AAPL', 'sell', 'limit', 10, 0, 10, ?, 'replacement_submitted', ?, ?)
+    `).run(id, refId, now, now);
+    for (const collision of [
+      { userId: "other-user", accountNumber: "APCA-PAPER", replacementRefId: "other-tenant" },
+      { userId: "local", accountNumber: "OTHER-ACCOUNT", replacementRefId: "other-account" },
+      { userId: "local", accountNumber: "APCA-PAPER", replacementRefId: "other-proposal" }
+    ]) {
+      insertFillEvent({
+        userId: collision.userId,
+        accountNumber: collision.accountNumber,
+        source: "paper",
+        executionMode: "broker/paper",
+        symbol: "MSFT",
+        side: "buy",
+        quantity: 1,
+        price: 50,
+        notional: 50,
+        status: "filled",
+        brokerOrderId,
+        raw: { source: "unrelated", replacementRefId: collision.replacementRefId }
+      });
+    }
+
+    const recovered = order({
+      id: brokerOrderId,
+      type: "market",
+      side: "sell",
+      clientOrderId: refId,
+      state: "canceled",
+      quantity: 10,
+      filledQuantity: 4,
+      averagePrice: 102
+    });
+    const gateway = gatewayMock({ orders: [[recovered]] });
+
+    const out = await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orders: []
+    });
+
+    expect(out.remediated).toBe(1);
+    const localFills = listFillEvents("APCA-PAPER", "paper", 10, "local");
+    expect(localFills).toHaveLength(2);
+    expect(localFills.find((fill) => (fill.raw as { replacementRefId?: string }).replacementRefId === refId)).toMatchObject({
+      brokerOrderId,
+      quantity: 4,
+      status: "filled",
+      raw: expect.objectContaining({ replacementRefId: refId })
+    });
+    expect(listFillEvents("APCA-PAPER", "paper", 10, "other-user")).toHaveLength(1);
+    expect(listFillEvents("OTHER-ACCOUNT", "paper", 10, "local")).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM fill_events WHERE broker_order_id = ?").get(brokerOrderId)).toMatchObject({ count: 4 });
+  });
+
+  it("scopes automatic replacement dedupe by user", async () => {
+    const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
+    const { getDb } = await import("../src/lib/db");
+
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO order_replacements
+      (id, user_id, account_number, original_order_id, symbol, side, original_type, original_quantity, original_filled_quantity, replacement_ref_id, status, created_at, updated_at)
+      VALUES (?, 'user-1', 'APCA-PAPER', 'cross-user-auto', 'MU', 'sell', 'limit', 5, 0, ?, 'cancel_requested', ?, ?)
+    `).run(randomUUID(), randomUUID(), now, now);
+
+    const staleSell = order({ id: "cross-user-auto", symbol: "MU", side: "sell", quantity: 5, state: "accepted", createdAt: "2026-01-01T00:00:00.000Z" });
+    const canceled = order({ id: "cross-user-auto", symbol: "MU", side: "sell", quantity: 5, state: "canceled" });
+    const gateway = gatewayMock({
+      orders: [[staleSell], [canceled]],
+      positions: [position({ symbol: "MU", quantity: 5 })],
+      execution: { orderId: "cross-user-auto-2", refId: "auto-user-2", state: "accepted", raw: {} }
+    });
+
+    const out = await autoRemediateStaleExitOrders({
+      userId: "user-2",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orders: [staleSell]
+    });
+
+    expect(out).toMatchObject({ attempted: 1, remediated: 1 });
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM order_replacements
+      WHERE account_number = ? AND original_order_id = ?
+    `).get("APCA-PAPER", "cross-user-auto")).toMatchObject({ count: 2 });
+  });
+});

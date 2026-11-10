@@ -114,6 +114,27 @@ describe("POST /api/webhooks/tradingview", () => {
     expect(mocks.verifyWebhookSecret).not.toHaveBeenCalled();
   });
 
+  // ITEM 13 (bounded body): this route previously had NO byte cap at all, unlike the congress
+  // webhook (which at least checked a declared content-length). A single Pine alert() payload
+  // is always tiny, so an oversized body is always rejected — see src/lib/bounded-body.ts.
+  it("returns 413 and never reaches the secret check for an oversized body", async () => {
+    const { POST } = await import("../app/api/webhooks/tradingview/route");
+
+    const oversized = JSON.stringify({ ...validPayload, padding: "a".repeat(2 * 1024 * 1024) });
+    const res = await POST(makeRequest(oversized, { "content-type": "application/json" }));
+
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(mocks.verifyWebhookSecret).not.toHaveBeenCalled();
+  });
+
+  it("accepts a normal-sized payload comfortably under the byte cap", async () => {
+    const { POST } = await import("../app/api/webhooks/tradingview/route");
+    const res = await POST(makeRequest(validPayload));
+    expect(res.status).toBe(200);
+  });
+
   it("returns 401 and audits secret rejection when secret does not match", async () => {
     const { POST } = await import("../app/api/webhooks/tradingview/route");
     mocks.verifyWebhookSecret.mockReturnValue(false);

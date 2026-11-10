@@ -7,6 +7,7 @@ import {
   deriveWeightsFromICs,
   deriveWeightsFromIC,
   splitWalkForward,
+  formatOosWindow,
   adjustReturns,
   buildEquityCurve,
   maxDrawdownOfCurve,
@@ -212,6 +213,55 @@ describe("splitWalkForward", () => {
     const observations = dates.map((d) => obs(d, "A", 0.01, { momentum: 1 }));
     const { train } = splitWalkForward(observations, 0.01);
     expect(new Set(train.map((o) => o.date)).size).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("splitWalkForward — boundary report (§6 slice 3)", () => {
+  const dates = [
+    "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05",
+    "2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10"
+  ];
+  const observations = dates.map((d) => obs(d, "A", 0.01, { momentum: 1 }));
+
+  it("reports exact fold indices with embargo only (default)", () => {
+    // 10 dates × 0.7 → cutIdx 7; embargo 2 date-buckets → test starts at index 9.
+    const { train, test, boundary } = splitWalkForward(observations, 0.7, 2);
+    expect(boundary).toEqual({ totalDates: 10, cutIdx: 7, trainCutIdx: 7, testCutIdx: 9 });
+    expect(new Set(train.map((o) => o.date)).size).toBe(7);
+    expect([...new Set(test.map((o) => o.date))]).toEqual(["2026-06-10"]);
+    // Derived window arithmetic: embargo = testCutIdx - cutIdx; purged = cutIdx - trainCutIdx.
+    expect(boundary.testCutIdx - boundary.cutIdx).toBe(2);
+    expect(boundary.cutIdx - boundary.trainCutIdx).toBe(0);
+  });
+
+  it("reports the purge shrinking the train side (P1-2 opt-in)", () => {
+    const { train, boundary } = splitWalkForward(observations, 0.7, 2, { purge: true });
+    expect(boundary).toEqual({ totalDates: 10, cutIdx: 7, trainCutIdx: 5, testCutIdx: 9 });
+    expect(new Set(train.map((o) => o.date)).size).toBe(5);
+    expect(boundary.cutIdx - boundary.trainCutIdx).toBe(2);
+  });
+
+  it("caps the embargo at the available dates", () => {
+    const { test, boundary } = splitWalkForward(observations, 0.7, 50);
+    expect(boundary.testCutIdx).toBe(10);
+    expect(test.length).toBe(0);
+  });
+});
+
+describe("formatOosWindow (§6 slice 3)", () => {
+  it("renders the held-out window, train window, embargo and purge in one clause", () => {
+    const clause = formatOosWindow(
+      {
+        trainStartDate: "2026-01-05", trainEndDate: "2026-05-29",
+        embargoDates: 5, purgedTrainDates: 0,
+        testStartDate: "2026-06-05", testEndDate: "2026-07-29"
+      },
+      34,
+      78
+    );
+    expect(clause).toBe(
+      "held-out window 2026-06-05→2026-07-29 (34 dates; train 2026-01-05→2026-05-29, 78 dates; embargo 5, purge 0)"
+    );
   });
 });
 

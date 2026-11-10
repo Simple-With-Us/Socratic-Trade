@@ -24,9 +24,11 @@ import {
   setPolicy,
   upsertConnectedAccount
 } from "../src/lib/db";
-import { executeProposal } from "../src/lib/strategy";
+import { executeProposal } from "../src/lib/strategy-execution";
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -38,6 +40,18 @@ vi.mock("../src/lib/vector-db", () => ({
 // incidental here (this file verifies the run-lock), but unmocked it makes REAL Nasdaq/Yahoo
 // fetches — the root cause of this file's recurring full-suite timeout flake (the 2026-06-21
 // "fix" only padded the timeouts). Stub scanMarket; keep every other market.ts export real.
+vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/approval-quote-scan")>();
+  return {
+    ...actual,
+    loadApprovalQuoteScan: async () =>
+      actual.buildApprovalQuoteScan(
+        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() } },
+        []
+      )
+  };
+});
+
 vi.mock("../src/lib/market", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/market")>();
   return {
@@ -144,7 +158,7 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
 
     // Simulate an autonomous run holding the lock. executeProposal acquires it scoped to
     // policy.connectedAccountId internally, so the outer simulated hold must match that scope.
-    expect(acquireStrategyLock(userId, accountId)).toBe(true);
+    expect(acquireStrategyLock("simulated-run", userId, accountId)).toBe(true);
 
     try {
       const result = await executeProposal(proposalId, userId);
@@ -152,7 +166,7 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
       expect(result.reasons).toBeDefined();
       expect(result.reasons![0]).toMatch(/strategy run is in progress/i);
     } finally {
-      releaseStrategyLock(userId, accountId);
+      releaseStrategyLock("simulated-run", userId, accountId);
     }
   });
 
@@ -161,11 +175,11 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
     const accountId = setPaperPolicy(userId);
     const proposalId = makeProposalId(userId);
 
-    expect(acquireStrategyLock(userId, accountId)).toBe(true);
+    expect(acquireStrategyLock("simulated-run", userId, accountId)).toBe(true);
     try {
       await executeProposal(proposalId, userId);
     } finally {
-      releaseStrategyLock(userId, accountId);
+      releaseStrategyLock("simulated-run", userId, accountId);
     }
 
     // The proposal must still be 'proposed' — nothing was placed or mutated.
@@ -189,8 +203,8 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
     }
 
     // After the function exits, the lock must be free for the next caller.
-    expect(acquireStrategyLock(userId, accountId)).toBe(true);
-    releaseStrategyLock(userId, accountId);
+    expect(acquireStrategyLock("post-execute", userId, accountId)).toBe(true);
+    releaseStrategyLock("post-execute", userId, accountId);
   }, 20000); // executeProposal may exhaust broker-review retries — allow margin over the 5s default
 
   it("does not interfere with a different user's lock", async () => {
@@ -202,7 +216,7 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
     const proposalA = makeProposalId(userA);
 
     // userB holds their own lock — should NOT block userA's executeProposal.
-    expect(acquireStrategyLock(userB, accountIdB)).toBe(true);
+    expect(acquireStrategyLock("userb-run", userB, accountIdB)).toBe(true);
 
     let resultA: Awaited<ReturnType<typeof executeProposal>> | undefined;
     try {
@@ -210,7 +224,7 @@ describe("executeProposal run-lock (TOCTOU guard)", () => {
     } catch {
       // userA may throw for unrelated reasons, but must NOT return "busy".
     } finally {
-      releaseStrategyLock(userB, accountIdB);
+      releaseStrategyLock("userb-run", userB, accountIdB);
     }
 
     // If we got a result, it must not be "busy" — userB's lock does not block userA.

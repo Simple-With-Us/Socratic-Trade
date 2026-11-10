@@ -209,6 +209,23 @@ export function indexUniverseLabel(index: IndexUniverse): string {
   return INDEX_UNIVERSES[index].label;
 }
 
+/** User-facing label for a stored/API slug.  Unknown values stay off the label
+ *  so camelCase ids like `sp500` never print as copy. */
+export function indexUniverseDisplayLabel(value: string): string {
+  const trimmed = value.trim();
+  return isIndexUniverse(trimmed) ? indexUniverseLabel(trimmed) : "";
+}
+
+export function formatIndexUniverseLabels(values: readonly string[] | undefined): string[] {
+  return (values ?? []).map(indexUniverseDisplayLabel).filter((label) => label.length > 0);
+}
+
+/** Joined selected-set copy for Guardrails / Desk / policy-diff.  Empty → "none". */
+export function formatIndexUniverseList(values: readonly string[] | undefined): string {
+  const labels = formatIndexUniverseLabels(values);
+  return labels.length > 0 ? labels.join(", ") : "none";
+}
+
 export function indexUniverseSymbolCount(index: IndexUniverse): number {
   return INDEX_UNIVERSES[index].estimatedSymbols ?? INDEX_UNIVERSES[index].symbols.length;
 }

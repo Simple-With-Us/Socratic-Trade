@@ -1,5 +1,13 @@
 import type { DerivedMetrics } from "./derived-metrics";
+import type { FieldObservation, ProviderFailureReceipt } from "./evidence-facts";
+import type { ModelRotationPin } from "./model-rotation";
 
+export class OrderValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OrderValidationError";
+  }
+}
 export type OrderSide = "buy" | "sell" | "short" | "cover";
 export type OrderType = "market" | "limit" | "stop_market" | "stop_limit";
 export type TimeInForce = "gfd" | "gtc";
@@ -23,10 +31,51 @@ export type StrategyAuthority = "propose" | "decide";
 export type SellToFundBuyMode = "off" | "suggest" | "propose" | "automated";
 
 export type LlmReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+/** How the learning loop GRADES decision outcomes: "raw" = side-adjusted return alone (the
+ * original behavior); "alpha" = additionally judge against the same-window SPY-excess return
+ * (spyExcessPct), so a rising market's beta can't teach the loop that every long was a good
+ * decision. See TradingPolicy.outcomeGradingMode. */
+export type OutcomeGradingMode = "raw" | "alpha";
+/** What spyExcessPct is measured against: "market" (default, byte-identical to before this knob
+ * existed) = the S&P 500 index (^GSPC, SPY ETF fallback); "sector" = the symbol's own GICS sector
+ * index/ETF when its sector is known and mappable, market otherwise. See
+ * TradingPolicy.benchmarkMode and outcome-horizons.ts's sectorBenchmarkEntry. */
+export type BenchmarkMode = "market" | "sector";
 /** Intended holding horizon — shapes the agent's setup selection, exit timing, and tax awareness. */
 export type HoldingHorizon = "intraday" | "swing" | "position" | "longterm";
 export type FillSource = "live" | "paper";
 export type ExecutionMode = "broker/paper" | "broker/live";
+/**
+ * The LLM's chosen per-position stop-loss TYPE (distinct from `TradeProposal.bracketStopLoss`,
+ * which is a per-trade stop PRICE). "default" (or the field absent) defers entirely to the
+ * account's own precedence (ATR → beta-scaled → flat, plus trailing if configured) — no behavior
+ * change from before this field existed. "fixed"/"atr" PIN this position to that one distance rule
+ * (skipping the account's other rules for this symbol only) rather than letting the account's
+ * ATR/beta toggles decide; "atr" falls back to the flat base % when bars are unavailable for the
+ * symbol, same honesty as the account-wide ATR fallback. "trailing" makes this position's ONLY
+ * per-position stop a trail (skipping the fixed/ATR proactive exit), using the account's configured
+ * trailingStopPct, or — if the account hasn't set one — this position's own effective stop distance
+ * as the trail %. "none" is a genuine, owner-preference no-stop choice (real trading, owner's risk —
+ * never hard-blocked) and is never silent: it requires a rationale and is surfaced loudly wherever
+ * this position's protection is shown.
+ */
+export type StopPlanStyle = "default" | "fixed" | "atr" | "trailing" | "none";
+export const STOP_PLAN_STYLES: readonly StopPlanStyle[] = ["default", "fixed", "atr", "trailing", "none"];
+export interface StopPlan {
+  style: StopPlanStyle;
+  /** Required when style is "none" — the LLM's justification for carrying no stop, shown wherever
+   *  this position's protection is displayed. Optional for every other style. */
+  rationale?: string;
+}
+/**
+ * Shared fallback stop-loss distance (%) for a per-position "fixed"/"atr" plan (or the trail % for
+ * a "trailing" plan) when the account's own configured distance is 0/unset — so a per-position plan
+ * is genuinely usable even on an account that otherwise runs with no stop-loss configured at all
+ * (universal-availability requirement). Shared across strategy.ts, synthetic-stops.ts, and
+ * broker-protective-stops.ts so the same position never sees a different fallback depending on
+ * which enforcement layer is evaluating it.
+ */
+export const STOP_PLAN_FALLBACK_STOP_PCT = 8;
 export const NOTIFICATION_EVENT_TYPES = [
   "fill",
   "block",
@@ -37,12 +86,42 @@ export const NOTIFICATION_EVENT_TYPES = [
   "proposal_withdrawn",
   "limit_order_stale",
   "provider_degraded",
+  "liveness_warning",
   "budget_alert",
   "learning_review",
   "deterministic_bear_veto",
+  "red_team_veto_override_requested",
   "red_team_veto_overridden",
   "prompt_injection_suspected",
-  "evidence_age_anomaly"
+  "evidence_age_anomaly",
+  "storage_warning",
+  "autonomy_halted_on_boot",
+  "option_alert",
+  "earningscalls_entitlement_blocked",
+  "roic_status_advisory",
+  // Advisory guardrail breach (e.g. the drawdown breaker in advisory mode): a configured risk
+  // threshold was crossed but NOTHING halted or was blocked — nothing was blocked or changed.
+  // Deliberately NOT "kill_switch" (nothing flipped state) so owners don't learn to ignore
+  // kill-switch alerts.
+  "risk_advisory",
+  // P2.8: synthetic protective exit is retrying after a persistent broker decline / placement
+  // failure. Coalesced to one owner-visible alert per (stop, fingerprint) failure streak.
+  "protective_exit_failing",
+  // Signal-health drift alarm (src/lib/signal-health.ts): the rolling rank IC of the LLM's own
+  // confidenceScore against matured outcomes is decaying. Advisory — nothing halts; sizing only
+  // changes under the opt-in policy.tuning.signalHealthAutoThrottle.
+  "signal_health",
+  // Lookahead-audit mismatch (src/lib/lookahead-audit.ts): the weekly truncated-replay audit
+  // recomputed a decision-time factor or RAG evidence set from point-in-time data and it differed
+  // beyond tolerance — future data may be leaking into decision inputs. Fired ONLY on 'mismatch'
+  // classifications, never on 'unverifiable'. Advisory — nothing halts or changes sizing.
+  "lookahead_leak",
+  // Opt-in daily watchlist summary (default OFF — notification_prefs.watchlistDigestEnabled, see
+  // Settings -> Delivery). Delivered via notify() directly (src/lib/watchlist-digest.ts), like the
+  // R2 usage digest, so it does NOT go through sendNotification's enabledEvents gate — the member
+  // exists here for vocabulary/label consistency across the notification-event surfaces that key
+  // off NotificationEventType, not to duplicate its own on/off switch in Event notifications.
+  "watchlist_digest"
 ] as const;
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
 export type PriceAlertOp = "<" | ">";
@@ -84,10 +163,11 @@ export interface ScoringWeights {
 /** US tax-mitigation settings (estimates only — not tax advice). */
 /**
  * Tax treatment of an account. IRAs (Roth/Traditional) are tax-sheltered: there is no annual
- * capital-gains tax, and the IRC §1091 wash-sale lockout does not apply WITHIN a single IRA
- * (a wash sale has no benefit there). A loss realized in a TAXABLE account, however, still locks
- * rebuys of that symbol across ALL of the user's accounts — including the IRAs — for 30 days,
- * because buying the replacement in the IRA permanently destroys the disallowed basis.
+ * capital-gains tax, tax-loss harvesting has no effect (losses never appear on a return), and
+ * the IRC §1091 wash-sale lockout does not apply WITHIN a single IRA (a wash sale has no benefit
+ * there). A loss realized in a TAXABLE account, however, still locks rebuys of that symbol across
+ * ALL of the user's accounts — including the IRAs — for 30 days, because buying the replacement
+ * in the IRA permanently destroys the disallowed basis.
  */
 export type TaxationType = "taxable" | "roth_ira" | "traditional_ira";
 
@@ -131,6 +211,33 @@ export interface AccountCapabilities {
   marginEnabled: boolean;
   /** Broker's required maintenance margin percentage (e.g. 25 = 25%). */
   marginRequirementPct?: number;
+  /** Fractional equity shares. Undefined = unknown (treat as false at the venue contract). */
+  fractional?: boolean;
+  /** Pre/post regular session. */
+  extendedHours?: boolean;
+  /** Overnight / 24-hour equity session. */
+  overnightHours?: boolean;
+  /** Native broker-held trailing stop (not a synthetic ratchet). */
+  trailingStops?: boolean;
+  /** Native multi-leg bracket / OTOCO at the venue. */
+  nativeBrackets?: boolean;
+  /**
+   * This app can PLACE option orders on this account. Distinct from optionsTrading,
+   * which only means the broker reports an options approval level / open contracts.
+   */
+  optionsOrders?: boolean;
+  /** Binary event contracts trading (e.g. Kalshi prediction markets). */
+  eventContracts?: boolean;
+  /** Equity order types the venue will accept on this account. */
+  orderTypes?: Array<"market" | "limit" | "stop_market" | "stop_limit">;
+  /** Sessions the venue will accept on this account. */
+  marketHours?: Array<"regular_hours" | "extended_hours" | "all_day_hours">;
+  /** Minimum whole-share quantity (1 = whole shares only). */
+  minShareQuantity?: number;
+  /** Minimum order notional in account currency when the venue publishes one. */
+  minOrderNotional?: number;
+  /** Sells close a specific position id (eToro), not a symbol-level sell-to-open. */
+  positionIdCloses?: boolean;
   /**
    * Account structure, which determines the applicable tax regime:
    *   "brokerage"       → standard taxable account
@@ -158,27 +265,19 @@ export interface AccountCapabilities {
  *              itself. Never silent; never a hard block by default.
  * The IRA-replacement rule (Rev. Rul. 2008-5) is governed SEPARATELY by
  * taxSettings.iraWashSaleHandling: an IRA buying a symbol locked by a taxable-account loss
- * defaults to "disregard" (see IraWashSaleHandling) for the same reason — the owner may still
- * opt an account into the stricter "block".
+ * defaults to "disregard" (see IraWashSaleHandling). The owner may choose Auto (weigh it)
+ * or the stricter Block.
  */
 export type WashSaleHandling = "block" | "ask" | "auto";
 
 /**
  * What an IRA-replacement wash sale MEANS for a BUY in an IRA (taxSettings.iraWashSaleHandling):
- *   - "block": the buy is refused outright in EVERY washSaleHandling mode — Rev. Rul.
- *     2008-5: buying the replacement inside the IRA permanently destroys the disallowed loss,
- *     with no basis adjustment ever recoverable. A stricter per-account opt-in; no longer the
- *     default.
- *   - "disregard": (DEFAULT) the buy proceeds through the normal authority flow (all other gates
- *     unchanged). Rationale (owner decision 2026-07-03): brokers do not report cross-account IRA
- *     wash sales to the IRS — the rule only bites under audit — so respecting it is the account
- *     owner's call, not a hard system stop. NEVER silent: the decision carries outcome
- *     "ira_disregarded" with the verbatim annotation "Wash Sale (Technically, but IRA purchase
- *     unreported to IRS)" plus the priced lock provenance, an audit event fires, and the note
- *     renders wherever the purchase shows. This is still an explicit audit-risk acceptance —
- *     the transparency machinery is unchanged, only the default toggle position.
+ *   - "block": refuse a replacement buy when the taxable-account loss meets the optional
+ *     washSaleMinLossUsd floor (blank = every loss). Stricter opt-in.
+ *   - "auto": proceed; Green weighs the priced forfeited deduction. Same idea as taxable Auto.
+ *   - "disregard": (DEFAULT, Ignore) the buy proceeds and Green is not told to skip.
  */
-export type IraWashSaleHandling = "block" | "disregard";
+export type IraWashSaleHandling = "block" | "auto" | "disregard";
 
 export interface TaxSettings {
   /** Tax treatment driving rates + wash-sale handling. Defaults to "taxable". */
@@ -191,10 +290,9 @@ export interface TaxSettings {
   iraWashSaleHandling?: IraWashSaleHandling;
   /**
    * Optional floor (dollars) for a realized loss to trigger the wash-sale rebuy lockout.
-   * Losses smaller than this are ignored when building the 30-day locked-symbol set, so a
-   * trivial loss doesn't freeze a symbol for a month. Default undefined = every loss locks
-   * (current behavior). This changes only THIS APP's guardrail — the IRS still applies
-   * §1091 to any size of loss; the disallowed-loss REPORTING here is unaffected.
+   * Blank = every loss is in play (taxable and IRA). Set a dollar amount to ignore smaller
+   * losses. Explicit 0 is the same as blank. The IRS still applies §1091 to any size of loss;
+   * this is only this app's guardrail.
    */
   washSaleMinLossUsd?: number;
   /** Marginal rate applied to short-term realized gains (ordinary income), e.g. 24. */
@@ -215,6 +313,30 @@ export interface TuningSettings {
   sizingFloorPct?: number;
   /** Maximum % of max order notional the deterministic sizer will ever allocate. Default 100. */
   sizingCeilingPct?: number;
+  /**
+   * Per-thesis multiplier applied to the deterministic sizer's composed multiplier, keyed by
+   * `tradeThesisTag`. `0.5` halves every position opened under that thesis; `0` disables it.
+   *
+   * Distinct from the learned `edgeFactor`/`selectThesisStat` path, which is DERIVED from realized
+   * stats and shrinks on its own. This is an operator dial for a decision the data cannot make on
+   * its own — e.g. parking a thesis that is consistently negative while its sample is too thin or
+   * too regime-specific to trust as an edge signal. Absent key → thesis sizes exactly as before.
+   *
+   * Reversible by design: delete the key. Values are clamped to [0, 1] at the call site, so a typo
+   * can never inflate a position past its existing ceiling.
+   */
+  thesisSizeMultipliers?: Record<string, number>;
+  /**
+   * Equal-risk sizing: cap the DOLLAR risk any single new position may carry, as a % of account
+   * equity. A position sized to a fixed notional risks proportionally more when its stop sits
+   * further from entry, so a name with a wide stop silently gets a wider loss than the account
+   * intended. This inverts that: size = risk budget ÷ stop distance, so every position risks the
+   * same dollars by construction.
+   *
+   * Off when unset or non-positive. It is a CAP, never a sizing target: it can only shrink an
+   * order, and the existing floor/ceiling, ADV, and broker-minimum rules still apply around it.
+   */
+  maxPositionRiskPctOfEquity?: number;
   // `redTeamConvictionThreshold` and `redTeamNotionalPctOfNavThreshold` were REMOVED 2026-07-07
   // (single-adversary consolidation, decision O2): the Red Team review now runs on EVERY risk-adding
   // opening — coverage is structural, not conviction/stakes-gated — so both trigger thresholds (and
@@ -233,6 +355,37 @@ export interface TuningSettings {
   corroborationWinRatePct?: number;
   /** Shrunk realized avg return (%) strictly above which conviction is treated as corroborated. Default 0. */
   corroborationEdgePct?: number;
+  /**
+   * Max value AI confidence may contribute to the conviction sizing multiplier (0–1) when the
+   * proposal's CORE scan inputs were degraded at proposal time (no scan quote for the symbol,
+   * missing/non-positive price, or an all-providers-failed enrichment receipt on the quote — see
+   * degradedCoreInputs in proposal-phase-guard.ts). Applies AFTER (composes with) the
+   * convictionCapUncorroborated cap and mirrors its semantics exactly: absent → code default 0.7;
+   * it is a cap VALUE, not a switch (1 never binds = disabled; an explicit 0 removes confidence's
+   * contribution entirely). Caps only the UPSIDE — low confidence still shrinks size fully. When
+   * it binds, a `confidence_capped_degraded_data: …` receipt is appended to the proposal's
+   * dataAdjustments — visible, never a silent haircut.
+   */
+  confidenceCapDataDegraded?: number;
+  /**
+   * Signal-health auto-throttle (default OFF — the drift alarm only notifies/logs). When true and
+   * a CONFIRMED confidence-drift alarm is active (signal-health.ts: declining rolling rank IC of
+   * the LLM's own confidenceScore vs matured outcomes), conviction's UPSIDE contribution to sizing
+   * is capped at the convictionCapUncorroborated value even for corroborated theses — a decaying
+   * confidence signal shouldn't ride realized-edge corroboration to full size. When it binds, a
+   * `confidence_capped_signal_drift: …` receipt is appended to dataAdjustments (visible, never a
+   * silent haircut). Owner-adjustable; turning it off restores today's sizing exactly.
+   */
+  signalHealthAutoThrottle?: boolean;
+  /**
+   * Advisory overlay library (default off). When true, matching owner-authored
+   * strategy_overlays rows are injected as DATA in the strategist prompt.
+   */
+  strategyOverlaysEnabled?: boolean;
+  /** Max overlays injected per run. Default 2. */
+  maxActiveOverlays?: number;
+  /** Skip a Coach tool-loop step after the first when remaining time is below this (ms). Default 15000. 0 = never skip. */
+  chatStageMinBudgetMs?: number;
   /**
    * Deterministic fundamentals hard-veto on BUYS, applied model-free in deterministicBearFilter
    * (independent of the Bull/Bear LLMs). Veto a buy when the candidate's free-cash-flow yield is
@@ -297,17 +450,15 @@ export interface TuningSettings {
    */
   minProposalScoreThreshold?: number;
   /**
-   * Hard per-user/day LLM + RAG TOKEN ceiling. When today's summed model + retrieval usage reaches
-   * this, the run skips every model/RAG spend for the rest of the day (non-LLM risk maintenance still
-   * runs). `undefined` (blank in the UI) INHERITS the operator env default
-   * `TRIGGER_LLM_DAILY_TOKEN_BUDGET`; an explicit `0` means NO LIMIT (opt out of the default); a
-   * positive value is that ceiling. Modifiable in Settings → Tuning. Enforced at the spend primitives
-   * (`withLlmGeneration`, `retrieveContextDetailed`), so it covers every spend site.
+   * Legacy per-account LLM + RAG TOKEN ceiling. Prefer `user_settings.llm_daily_budget`
+   * (Settings → Daily LLM Budget / `PATCH /api/settings/llm-budget`). When the user setting
+   * is unset, this still binds; then retired env `TRIGGER_LLM_DAILY_TOKEN_BUDGET`.
+   * `undefined` inherits the next tier; explicit `0` means NO LIMIT.
    */
   llmDailyTokenBudget?: number;
   /**
-   * Hard per-user/day LLM + RAG COST ceiling in USD (estimated). Same semantics as
-   * `llmDailyTokenBudget`: `undefined` inherits env `TRIGGER_LLM_DAILY_COST_BUDGET_USD`, `0` = no limit.
+   * Legacy per-account LLM + RAG COST ceiling in USD. Same inheritance as
+   * `llmDailyTokenBudget`; prefer the per-user Settings cap.
    */
   llmDailyCostBudgetUsd?: number;
 
@@ -399,6 +550,15 @@ export interface TuningSettings {
    */
   oosPurgeEmbargo?: boolean;
   /**
+   * DEFAULT TRUE (§6 slice-3 follow-up, 2026-08-01): when on and an OOS test fold exists,
+   * `proposeStrategyTuning` cuts its realized-outcome evidence (factor/source scorecards, recent
+   * fills, performance summary, skipped-candidate counterfactuals) off at the fold's start date —
+   * candidate weights are generated WITHOUT seeing evaluation-period outcomes, retiring the
+   * "partially in-sample" caveat for the weight path. No-op when snapshot history is insufficient
+   * for a fold (nothing to leak into). Set false to restore the legacy all-history evidence.
+   */
+  pitEvidenceCutoff?: boolean;
+  /**
    * OPT-IN (DEFAULT false, panel P1-3): when true, each autonomous-tuning EVALUATION records a SHADOW ledger
    * row — what the tuner WOULD have applied and the OOS readout — WITHOUT applying it (never touches policy).
    * A forward-A/B audit trail so an operator can watch the tuner's decisions accrue before trusting autonomy.
@@ -446,12 +606,18 @@ export interface TuningSettings {
    */
   minOosTestDates?: number;
   /**
-   * VESTIGIAL since the 2026-07-07 single-adversary consolidation (§3.5): exits (sell/cover) and
-   * net-risk-reducing trades are now STRUCTURALLY exempt from the Red Team review — they can never
-   * be debate-unavailable because they are never debated — so this opt-in no longer has a
-   * production call site (`routeOnAdversaryUnavailable` still honors it as a pure function). Kept
-   * (rather than deleted) so persisted tuning JSON round-trips unchanged; it may be removed once
-   * the consolidation has soaked.
+   * DEFAULT TRUE as of owner ruling 2026-09-24 (board 687a5fb4; see `defaults.ts`'s
+   * `DEFAULT_POLICY.tuning`) — a de-risking exit must not be held for human approval just because
+   * the adversary is unavailable.  Explicit `false` is a per-account opt-OUT back to the old
+   * hold-for-review behavior.
+   *
+   * Still VESTIGIAL on the live path since the 2026-07-07 single-adversary consolidation (§3.5):
+   * exits (sell/cover) and net-risk-reducing trades are STRUCTURALLY exempt from the Red Team
+   * review — they can never be debate-unavailable because they are never debated — so this flag
+   * has no production call site today (`routeOnAdversaryUnavailable` still honors it as a pure
+   * function, and a future/secondary caller inherits the honest default rather than the old
+   * hold-by-default one). Kept (rather than deleted) so persisted tuning JSON round-trips
+   * unchanged; it may be removed once the consolidation has soaked.
    */
   deRiskExitsOnAdversaryUnavailable?: boolean;
   /**
@@ -542,6 +708,34 @@ export interface TuningSettings {
   portfolioHeatBudgetPct?: number;
 }
 
+/**
+ * PER-ACCOUNT event-trigger configuration (2026-07-28, owner-directed). Every field is OPTIONAL:
+ * unset means "follow the global env" (TRIGGER_ENGINE / TRIGGER_MODE), preserving byte-identical
+ * pre-existing behavior. These only ever take effect when the trigger engine is reachable for the
+ * deployment; a per-account `enabled: true` cannot turn the engine on when the env has it off
+ * (producers no-op on the env gate) — it can only keep an account IN when the env turns it on, or
+ * opt an account OUT (`enabled: false`) while the env is on.
+ */
+export interface TriggerSettings {
+  /** Per-account opt-in/out of event-triggered runs. Unset = follow the global TRIGGER_ENGINE env. */
+  enabled?: boolean;
+  /** Per-account run mix. Unset = follow the global TRIGGER_MODE env (default "both"). */
+  mode?: "interval" | "event" | "both";
+  /**
+   * When the effective mode is "event": still run the fixed-interval cadence lane at least this
+   * often (a safety floor so a silent producer can never strand the account with no runs at all).
+   * Unset = never (the pre-existing event-mode behavior: the cadence lane is dropped entirely).
+   */
+  fallbackIntervalMinutes?: number;
+  /**
+   * What an event-triggered run may do. "full" (default, current behavior) = a normal strategy
+   * run. "close_only" = the run executes with a RUN-SCOPED policy clone whose systemState is
+   * "close_only" — openings are rejected at the policy gate, exits and all safety maintenance
+   * still flow; the clone is never persisted.
+   */
+  eventRunMode?: "full" | "close_only";
+}
+
 export interface RiskRules {
   stopLossPct?: number;
   stopLossNotional?: number;
@@ -598,6 +792,71 @@ export interface RiskRules {
    * The breaker itself is still opt-in via the thresholds above (unset ⇒ no breaker at all).
    */
   drawdownBreakerAction?: "advisory" | "close_only" | "halt";
+  /**
+   * Owner preference, default OFF.  When on, a drawdown / daily-loss breach that coincides with a
+   * run-over-run equity fall of 20% or more with NO deposit or withdrawal on the broker ledger
+   * (possibly a withdrawal whose ledger row has not posted yet) holds an opted-in
+   * `drawdownBreakerAction` (close_only / halt) as advisory for ONE run.  A real loss is enforced on
+   * the next run.  Off: the configured action applies on the run the breach happens.  Either way
+   * the breach reason and receipt say the fall was unexplained, and the HWM is re-based on the
+   * follow-up run if the withdrawal posts.
+   */
+  drawdownUnexplainedDropGrace?: boolean;
+  /**
+   * Accuracy breaker (nofx-style consecutive-miss safety mode, docs/oss-lessons.md §8): fires after
+   * this many CONSECUTIVE matured losses on real (placed/filled) decisions. The drawdown breaker
+   * bounds the account's bleed; this one notices the account being WRONG — a thesis regime can
+   * degrade long before a 15% drawdown shows it, especially with small positions. Undefined or <=0
+   * disables the streak trigger. A "flat" or "won" outcome breaks the streak; counterfactual
+   * outcomes of blocked/rejected proposals never count (avoiding a bad trade is a good call, not a
+   * miss). Response governed by `accuracyBreakerAction` (default advisory).
+   */
+  accuracyBreakerConsecutiveLosses?: number;
+  /**
+   * Optional second accuracy trigger: rolling hit-rate window. With `accuracyBreakerMinHitRatePct`
+   * set, the breaker fires when the win rate over the last N matured decisive outcomes (won/lost/
+   * flat on real decisions) drops below the floor. Only evaluates once a FULL window exists — a
+   * tiny sample never fires. Undefined/<=0 disables the hit-rate trigger.
+   */
+  accuracyBreakerWindow?: number;
+  /** Hit-rate floor (%) for the window trigger above (0–100). */
+  accuracyBreakerMinHitRatePct?: number;
+  /**
+   * Auto-recovery: once degraded, the marker clears after this many most-recent decisive outcomes
+   * show no loss (default 2). Recovery clears the marker and notifies — it NEVER flips systemState
+   * back on its own; after a hard close_only flip the owner re-arms (which itself clears the
+   * marker), same philosophy as the drawdown breaker.
+   */
+  accuracyBreakerRecoveryWins?: number;
+  /**
+   * What the accuracy breaker does on fire. Same philosophy as `drawdownBreakerAction`:
+   * - "advisory" (DEFAULT): `policy_violation_accuracy` receipt + one risk_advisory notification
+   *   per degradation. No state change — the agent and owner decide.
+   * - "close_only": OPT-IN hard enforcement — flip systemState → "close_only" (risk-reducing exits
+   *   still flow) + kill_switch notification. Owner re-arms; auto-recovery only clears the marker.
+   * The breaker itself stays opt-in via the thresholds above (unset ⇒ no breaker at all).
+   */
+  accuracyBreakerAction?: "advisory" | "close_only";
+  /**
+   * Per-symbol post-close cooldown (minutes). Unset/<=0 disables. Advisory by default;
+   * `symbolLockAction` can opt into close_only for the locked name only.
+   */
+  symbolCooldownMinutes?: number;
+  /**
+   * Consecutive losing closes on one symbol that write a symbol lock. Unset/<=0 disables.
+   */
+  symbolLosingStreakLimit?: number;
+  /**
+   * What a per-symbol lock does. advisory (DEFAULT): receipt + overridable policy gate.
+   * close_only: the lock still does not halt the account — it only blocks new entries in
+   * that symbol unless autonomyOverride passes (same overridable-preference bucket).
+   */
+  symbolLockAction?: "advisory" | "close_only";
+  /**
+   * Allow synthetic trailing-stops to fire exits even when systemState is 'halted'.
+   * Never registers or updates to looser stops, but will trigger existing ones.
+   */
+  protectWhileHalted?: boolean;
 }
 
 export interface NotificationSettings {
@@ -612,7 +871,7 @@ export interface ConnectedAccount {
    * Broker identifier. Add new values here when connecting a new venue
    * (e.g. "coinbase" for a crypto exchange) and wire a matching BrokerGateway.
    */
-  broker: "alpaca" | "alpaca-mcp" | "robinhood" | "test";
+  broker: "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier" | "etoro" | "public" | "webull" | "kalshi";
   environment: "paper" | "live";
   /**
    * @deprecated Use capabilities.accountType instead for new accounts.
@@ -626,6 +885,27 @@ export interface ConnectedAccount {
   apiSecret?: string;
   baseUrl?: string;
   isActive: boolean;
+  isDraining?: boolean;
+  /**
+   * DELIBERATELY parked by an operator (review rank 8, 2026-09-25) — the review found four
+   * dormant accounts (Alpaca Standard since Jul 6, Tradier live exit-only, Public with no
+   * snapshots, Agentic since Jul 27) and asked for a decision on each: park it, re-arm it, or
+   * investigate. `halted` alone cannot record that a halt was a *decision* rather than a symptom,
+   * so every report kept showing an unexplained zero or an unknown balance for an account nobody
+   * had looked at in months.
+   *
+   * Distinct from `isDraining` (disconnecting — the account is being removed) and from a plain
+   * `systemState: "halted"` (something stopped it). A parked account is skipped by the scheduler
+   * exactly like a halted one, but the reason is known and the parking is reversible in one call.
+   *
+   * Set only through the ops account-control surface, which requires a reason and audits both
+   * directions. Absent/`false` means the account was never parked.
+   */
+  parked?: boolean;
+  /** Why this account was parked. Required when parking; cleared on un-park. */
+  parkedReason?: string;
+  /** When the account was parked (ISO). Cleared on un-park. */
+  parkedAt?: string;
   /**
    * Persisted snapshot of the capabilities last reported by the broker for
    * this account. Populated on connect/re-sync; undefined for legacy rows
@@ -662,6 +942,44 @@ export interface EquityPosition {
   industry?: string;
 }
 
+export interface OptionPosition {
+  symbol: string;
+  underlyingSymbol: string;
+  expirationDate: string;
+  optionType: "call" | "put";
+  strikePrice: number;
+  quantity: number;
+  averageCost: number;
+  marketValue: number;
+}
+
+/**
+ * Why a broker order exists / is resting, from `src/lib/order-role.ts`'s `classifyOrderRole`.
+ * Computed server-side (needs DB-tracked rows) and attached only to WORKING orders in a
+ * dashboard/ops snapshot — never present on a raw broker-mapped order (`mapAlpacaOrder`, …) or
+ * on a finished/history order.
+ *  - protective_stop: broker-held fixed stop tracked in `broker_protective_stops` (kind "fixed").
+ *  - trailing_stop: broker-held trailing stop tracked in `broker_protective_stops` (kind "trailing").
+ *  - bracket_take_profit / bracket_stop_loss: the limit / stop leg of a bracket order's exit pair.
+ *  - synthetic_stop: the exit order placed when the app's OWN price-triggered synthetic trailing
+ *    stop (`synthetic_trailing_stops`) fired.
+ *  - replacement: the new order an automatic stale-limit cancel-replace submitted.
+ *  - entry / exit: an app-tracked order (a `trade_proposals` row, or a stop-placement intent)
+ *    that opens/adds to, or reduces/closes, a position.
+ *  - external: no app-tracked row and no app-minted `client_order_id` prefix matched — placed
+ *    outside the app's own order-management systems (e.g. directly at the broker).
+ */
+export type OrderRole =
+  | "protective_stop"
+  | "trailing_stop"
+  | "bracket_take_profit"
+  | "bracket_stop_loss"
+  | "entry"
+  | "exit"
+  | "synthetic_stop"
+  | "replacement"
+  | "external";
+
 export interface EquityOrder {
   id: string;
   symbol: string;
@@ -688,6 +1006,36 @@ export interface EquityOrder {
    * recover an order whose placement response was lost (broker-truth-first reconciliation).
    */
   clientOrderId?: string;
+  /**
+   * When Tradier (or another gateway) flattens a bracket/OTOCO container into per-leg rows, the
+   * container's broker order id — the id stored on the opening proposal at placement.
+   */
+  parentOrderId?: string;
+  /**
+   * Container idempotency tag when the leg row omits its own `clientOrderId` (Tradier exit legs).
+   * Used for attribution and contingent-leg detection without copying the tag onto every leg.
+   */
+  parentClientOrderId?: string;
+  /**
+   * Broker-reported order-class family (Alpaca `order_class`: "simple" | "bracket" | "oco" | "oto"),
+   * carried through unchanged on both the parent AND the split child legs once a bracket's entry
+   * fills. The ONLY authoritative signal that two resting exit orders are true bracket/OCO siblings
+   * (as opposed to two independently-placed orders that merely happen to match in quantity, or in
+   * quantity and rough timing) — `liveExitOrderCoverage` requires this before pairing two legs into
+   * one unit of coverage (Codex review, PR #1331: a quantity-only, or quantity+time-window, match
+   * can still conflate an owner's separately-placed same-size stop and limit, which can BOTH fill
+   * and over-sell the position). Absent for brokers without a bracket concept (Robinhood) or for a
+   * manually-placed simple order — absence never pairs, which only risks the bounded,
+   * previously-accepted "half-bracket looks fully covered" gap, never a false-positive pair that
+   * could stack two real exits on the same shares.
+   */
+  orderClass?: string;
+  /** See `OrderRole`. Present only when a dashboard/ops snapshot attached it via
+   *  `order-role-context.ts`'s `attachOrderRoles`/`buildOpsWorkingOrderDetails`. */
+  role?: OrderRole;
+  /** One-sentence, owner-facing explanation of why a `role`-classified order is resting (e.g.
+   *  "Protective trailing stop for 24 BAC; rests until price falls 5%."). Present alongside `role`. */
+  whyResting?: string;
 }
 
 export interface BrokerQuote {
@@ -698,6 +1046,21 @@ export interface BrokerQuote {
   volume?: number;
   asOf?: string;
   provider?: string;
+  /**
+   * When true, this quote's price is the execution-venue tape (e.g. Tradier sandbox paper, which
+   * only trades against its ~15-minute delayed feed). Do NOT replace with a fresher external
+   * quote, and do NOT treat the expected feed delay as "stale live data" — age the snapshot via
+   * `fetchedAt` instead of trade-time `asOf`.
+   */
+  venuePriceAuthoritative?: boolean;
+  /** Wall-clock ISO when we fetched this quote from the venue (staleness of the snapshot). */
+  fetchedAt?: string;
+  /**
+   * True when this price is the delayed Yahoo fallback tape (live broker / Alpaca
+   * snapshot missed).  Owner 2026-08-18: stamp user-facing "Delayed Quote" on approval
+   * cards and keep trading — do not fail-closed openings.
+   */
+  delayedFallback?: boolean;
   /** True when bid/ask were synthesized from price (no real quoted spread) — e.g. a Yahoo batch quote
    *  used by the Test-mode gateway. Consumers (mergeQuoteData provenance, hasRealAsk) must not treat a
    *  synthetic spread as a real quoted one. `syntheticSpread` stays true only when BOTH sides were
@@ -707,6 +1070,70 @@ export interface BrokerQuote {
   syntheticBid?: boolean;
   /** True when only the ASK was derived from price (the bid may be real). */
   syntheticAsk?: boolean;
+  /**
+   * Secondary delayed-tape book (e.g. a connected Tradier paper account in cascade
+   * Level 1b): ~15m delayed market data that must NEVER be promoted to real-time by
+   * a fresh fetch stamp.  Unlike venuePriceAuthoritative (the ACTIVE execution venue),
+   * this does not stop the cascade — the quote ages by market time and later levels
+   * continue.  (Codex P1 review on the quote cascade.)
+   */
+  venueDelayedTape?: boolean;
+  /**
+   * Documented expected publication delay of this quote's tape, in seconds.
+   * Alpaca PAPER trades on the `delayed_sip` feed (~900s).  When this is set,
+   * an `asOf` age near the expected delay is NORMAL — it must not trip the
+   * real-time staleness gate — but the timestamp is still checked
+   * independently: lag beyond `expectedDelaySec + delayToleranceSec` is
+   * EXCESS delay and is flagged (see `alpaca-paper-quotes.ts`).
+   */
+  expectedDelaySec?: number;
+  /**
+   * Tolerance (seconds) allowed ON TOP of `expectedDelaySec` before the lag
+   * counts as excess. Defaults to the Alpaca PAPER tolerance (120s).
+   */
+  delayToleranceSec?: number;
+  /** Previous session closing price. Used for intraday price change and % change calculations. */
+  prevClose?: number;
+  /** Today's session opening price. */
+  open?: number;
+  /** Today's session high price. */
+  high?: number;
+  /** Today's session low price. */
+  low?: number;
+  /** Last trade close / regular market close price. */
+  close?: number;
+  /** Session volume-weighted average price (VWAP). */
+  vwap?: number;
+  /** Net price change from previous close. */
+  change?: number;
+  /** Net price change alias matching MarketQuoteSummary. */
+  netChange?: number;
+  /** Percentage price change from previous close. */
+  changePct?: number;
+  /** Quoted bid size (shares or lots, venue-specific). */
+  bidSize?: number;
+  /** Quoted ask size (shares or lots, venue-specific). */
+  askSize?: number;
+  /** Issuer / company name reported by exchange or venue. */
+  companyName?: string;
+  /**
+   * Per-field provenance for merged quotes. `mergeBrokerQuoteFields` records which
+   * provider (and which of its timestamps) supplied each coalesced field, so durable
+   * persistence (`syncQuotesToFieldStore`) can attribute every field to its true
+   * source instead of stamping all fields with the merged quote's single
+   * provider/asOf/fetchedAt.  (Codex P1 review on #3449.)
+   */
+  fieldProvenance?: Record<string, QuoteFieldProvenance>;
+}
+
+/**
+ * Provenance receipt for one coalesced quote field: the provider that supplied the
+ * winning value and that provider's own timestamps for it.
+ */
+export interface QuoteFieldProvenance {
+  provider?: string;
+  asOf?: string;
+  fetchedAt?: string;
 }
 
 /**
@@ -762,7 +1189,8 @@ export interface TradingPolicy {
    * defaults, ever; the former OPENAI_MODEL/DEFAULT_OPENAI_MODEL fallbacks are gone). Unset
    * resolves to "" and the strategy run fails closed with an actionable Settings message.
    * May also hold the "__rotate__" rotation sentinel (LLM_MODEL_ROTATION_SENTINEL) — resolved to a
-   * concrete round-robin pick at run start (src/lib/model-rotation.ts), never served literally.
+   * concrete representation-weighted pick at run start (src/lib/model-rotation.ts), never served
+   * literally.
    */
   llmModel?: string;
   /**
@@ -774,6 +1202,22 @@ export interface TradingPolicy {
    */
   redTeamLlmModel?: string;
   /**
+   * Controlled-experiment pin on the `"__rotate__"` rotation sentinel (review rank 6, 2026-09-25).
+   *
+   * The review's finding was that per-model results are not a clean comparison — the rotation
+   * strategy changed three times, so each model's numbers are tied to a calendar period. This makes
+   * that testable: force a model and/or override the LEARNED rotation weights for a bounded window.
+   *
+   * Per-policy, not global, which is what keeps the review's other suggestion ("split models by
+   * account") viable — a policy is already per-account. Removing the field restores learned
+   * rotation exactly, and `expiresAt` is an independent backstop.
+   *
+   * Never silent: every run the pin touches is audited as `model_rotation_pin` and its picks are
+   * stamped `pinned`. A pin that quietly changed which model proposed a trade would silently
+   * distort every performance report built on top of it.
+   */
+  rotationPin?: ModelRotationPin | null;
+  /**
    * Daily LLM learning review (default OFF): once per UTC day a frontier-class model audits the
    * system's LEARNING DECISIONS — recent learned_context rows + the pending risk-tier queue —
    * against a system-history digest (execution-failure audits, recent rollout notes), so lessons
@@ -782,32 +1226,101 @@ export interface TradingPolicy {
    */
   learningReviewEnabled?: boolean;
   /**
-   * "annotate" (default) = verdicts are recorded as audits + a notification only; nothing changes.
-   * "decide" (owner opt-in) = verdicts are additionally APPLIED via the existing learned-context
-   * mutation paths (delete/expire rows; approve/reject pending items) — every application audited.
+   * "decide" (default) = verdicts are APPLIED via the existing learned-context mutation paths
+   * (delete/expire rows; approve/reject pending items), every application audited. "annotate" =
+   * verdicts are recorded as audits + a notification only; nothing changes.
    */
   learningReviewMode?: "annotate" | "decide";
-  /** Model for the daily learning review. Unset = claude-fable-5 (one frontier call per day). */
+  /** Model for the learning review. Default claude-fable-5 (an explicit value, not a hidden
+   *  fallback — a blank model skips the review with reason "no-model"). */
   learningReviewModel?: string;
   /**
+   * Provider reasoning/thinking effort for the daily learning review. User-level, like the
+   * review model. When unset, the runner derives the role-specific recommendation for the chosen
+   * model; selecting a curated model in Settings persists that recommendation explicitly.
+   */
+  learningReviewReasoningEffort?: LlmReasoningEffort;
+  /**
+   * TRIGGER — the review fires when EITHER threshold is met (whichever comes first), capped at one
+   * run per UTC day. Both user-level; the review is user-scoped (one run per user per day).
+   */
+  /** Run once at least this many NEW reviewable lessons (learned facts + pending items) have
+   *  accumulated since the last review. Default 5. */
+  learningReviewMinNewLessons?: number;
+  /** …or run anyway once the oldest un-reviewed lesson has waited this many days, so nothing
+   *  corrupted lingers when new learning is slow. Default 7. */
+  learningReviewMaxWaitDays?: number;
+  /**
+   * How the learning loop GRADES decision outcomes (default "raw" — byte-identical to before this
+   * knob existed). "alpha" adds a COMPANION grade from the headline horizon's SPY-excess return
+   * (spyExcessPct): lesson gating and the post-mortem prompt then cite alpha instead of letting a
+   * rising market's beta mark every long a winner, and retrieval-usefulness weighting reads the
+   * ':alpha' stat rows. The raw status is ALWAYS still written; a case with no measurable
+   * spyExcessPct falls back to raw grading WITH a receipt (outcome_alpha_grading) — lesson
+   * generation is never blocked. Owner-adjustable preference, not a cage.
+   */
+  outcomeGradingMode?: OutcomeGradingMode;
+  /**
+   * What spyExcessPct (every horizon row, regardless of outcomeGradingMode) is measured against.
+   * Default "market" (unset = "market" too — nothing changes for an owner who never touches this
+   * knob): the S&P 500 INDEX, SPY as the automatic ETF fallback. "sector" grades each symbol
+   * against its OWN GICS sector index/ETF (via the symbol's sector already stored on the
+   * decision's candidate evidence / counterfactual row) when the sector is known and mappable;
+   * an unknown/unmapped sector honestly falls back to the market benchmark. See
+   * outcome-horizons.ts (sectorBenchmarkEntry, resolveBenchmarkSeries) and outcome-engine.ts.
+   * Owner-adjustable preference, not a cage.
+   */
+  benchmarkMode?: BenchmarkMode;
+  /**
    * Ordered cross-provider FAILOVER models for the Green Team (Bull) call. Default OFF (empty/unset).
-   * When non-empty, a TRANSIENT primary failure (HTTP 429/5xx or timeout) transparently re-issues the
-   * SAME request against each model in order; the first success serves the run. The failover is
-   * recorded loudly — a `strategy_llm_failover` audit per hop, plus the served model/provider and a
-   * reason on the Green Team llm step. Empty/unset = single primary endpoint, byte-identical to before.
+   * When non-empty, a TRANSIENT primary failure (HTTP 429/5xx, timeout, or an HTTP-200 with
+   * empty/malformed content) transparently re-issues the SAME request against each model in order;
+   * the first success serves the run. The failover is recorded loudly — a `strategy_llm_failover`
+   * audit per hop, plus the served model/provider and a reason on the Green Team llm step.
+   * Empty/unset = single primary endpoint, unless the Green seat is rotating — then a small
+   * implicit pool failover is appended (issue #2577).
    */
   llmFallbackModels?: string[];
-  /** Provider-specific reasoning/thinking effort for models that support it. Ignored by models without that knob. */
+  /**
+   * Optional ordered list of failover models (e.g. `["gemini-2.5-flash", "claude-3-5-haiku-20241022"]`)
+   * to try if the primary `redTeamLlmModel` fails (timeout, rate limit, or 5xx).
+   */
+  redTeamFallbackModels?: string[];
+  /**
+   * Owner-chosen rotation set for the Green Team seat (ST-4589): catalog display slugs the
+   * `__rotate__` option may pick from.  Only read while `llmModel` is the rotation sentinel.
+   * Undefined/empty = rotate over the whole eligible pool (the pre-ST-4589 behaviour).  A ticked
+   * model is honoured even if it is excluded from the default pool for cost.  Normalised by
+   * `normalizeRotationModelSelection` (src/lib/model-rotation-selection.ts) on save.
+   */
+  llmRotationModels?: string[];
+  /** Same as `llmRotationModels`, for the Red Team reviewer seat (`redTeamLlmModel`). */
+  redTeamRotationModels?: string[];
+  /**
+   * The Green Team / proposer's provider-specific reasoning/thinking effort, for models that
+   * support it (ignored by models without that knob). Per-team split 2026-07-10: this legacy
+   * field is the PROPOSER's; the reviewer has its own `redTeamReasoningEffort` below.
+   */
   llmReasoningEffort?: LlmReasoningEffort;
+  /**
+   * The Red Team reviewer's reasoning/thinking effort (named to mirror `redTeamLlmModel`).
+   * UNSET falls back to the proposer's `llmReasoningEffort` — resolve it ONLY via
+   * `resolveReviewerReasoningEffort` (src/lib/llm-request.ts) so the fallback stays in one place.
+   * Deliberately NO default (unlike `llmReasoningEffort`'s "medium"): a stored value here means
+   * the owner EXPLICITLY split the teams; absent means "inherit the proposer's".
+   */
+  redTeamReasoningEffort?: LlmReasoningEffort;
   /** Intended holding horizon for new positions (default "swing" — days to weeks). */
   holdingHorizon?: HoldingHorizon;
   maxOrderNotional?: number;
   maxOrderPctOfNav?: number;
+  /** Daily opening-order ceiling in fixed dollars. Mutually exclusive with maxDailyPctOfNav. */
   maxDailyNotional?: number;
   /** Hard ceiling on total order notional executed within any rolling 60-minute window. On breach the account auto-reverts strategyAuthority to "propose" and the order is rejected. */
   maxHourlyNotional?: number;
   /** Allow synthetic trailing-stop monitoring to act during extended hours. Default false (regular hours only). */
   allowExtendedHoursSyntheticStops?: boolean;
+  /** Daily opening-order ceiling as a percentage of current portfolio value. Mutually exclusive with maxDailyNotional. */
   maxDailyPctOfNav?: number;
   maxSymbolExposurePct?: number;
   maxSymbolExposureNotional?: number;
@@ -852,6 +1365,15 @@ export interface TradingPolicy {
    * when requireTypedConfirmation is on; entries are never auto-forced to market. Owner-tunable.
    */
   autoRemediateStaleExits?: boolean;
+  /**
+   * What to do with a fractional/dollar-based order that lands below the active broker's minimum
+   * order size (e.g. Robinhood's $1 floor — typically a pct-of-NAV-clamped trim on a small
+   * account). "bump" (default; owner ruling 2026-07-09): raise the order TO the floor and place
+   * it, audited as order_bumped_broker_minimum; sells are capped at the full held position and
+   * the bumped order still passes normal policy evaluation. "skip": block it pre-flight instead
+   * (the pre-ruling behavior), audited as order_skipped_broker_minimum with a cooldown-gated alert.
+   */
+  brokerMinimumHandling?: "bump" | "skip";
   permittedOrderTypes: OrderType[];
   permitExtendedHours: boolean;
   runCadenceMinutes: number;
@@ -862,14 +1384,37 @@ export interface TradingPolicy {
   notificationSettings: NotificationSettings;
   taxSettings?: TaxSettings;
   tuning?: TuningSettings;
+  triggerSettings?: TriggerSettings;
   activeProfileId?: string;
-  activeBroker?: "alpaca" | "alpaca-mcp" | "robinhood" | "test";
+  activeBroker?: "alpaca" | "alpaca-mcp" | "robinhood" | "test" | "tradier" | "etoro" | "public" | "webull" | "kalshi";
   // SHORT_SELLING: Feature gate for short/cover order sides.
   // When true, policy.ts will allow short/cover proposals through (with stricter
   // guardrails). When false or absent, short/cover proposals are unconditionally
   // rejected. Requires broker-side support (Robinhood does not currently support
   // equity shorting via MCP). See docs/phase-7-strategy.md §C.
   shortSellingEnabled?: boolean;
+  /**
+   * Broker-held buy-stops for open shorts (Alpaca). Default ON
+   * when short selling is on.  Off keeps shorts on the synthetic monitor only.
+   * Robinhood/Webull never get this lane.
+   */
+  brokerStopsForShorts?: boolean;
+  /**
+   * "Exits release the app's own stop" (src/lib/exit-stop-release.ts). Default ON (`false` opts
+   * out). When an approved exit (autopilot or human-approved sell/cover) needs shares that only the
+   * app's OWN resting protective stop is holding at the broker, cancel that stop, place the exit,
+   * then re-place a stop for any remaining shares. Owner and external orders are never touched.
+   * Off keeps the old behavior: the exit is blocked and the position can only leave via its stop.
+   */
+  exitsReleaseAppStops?: boolean;
+  /**
+   * Options place/cancel. Default ON.
+   */
+  optionsTradingEnabled?: boolean;
+  /**
+   * Kalshi (and later other venue) event-contract sleeve. Default ON.
+   */
+  eventContractsEnabled?: boolean;
   // SHORT_SELLING: Per-order notional cap for short positions. Should be lower
   // than maxOrderNotional per the design doc's risk guidance.
   maxShortOrderNotional?: number;
@@ -902,6 +1447,15 @@ export interface TradingPolicy {
    */
   maxEntryDriftPct?: number;
   /**
+   * OVERRIDE for the scorecard's `sniperPoints.secondaryBuy` level: a secondary entry this far (%)
+   * beyond the entry anchor in the pullback direction (below it for a long, above it for a short).
+   * When set, this owner-chosen % wins outright over the built-in volatility-aware ATR derivation
+   * (half of ATR(14) as a % of the entry anchor, clamped 1-4%). PURELY informational — rendered on
+   * the scorecard, never traded automatically. Undefined (the default) leaves the ATR derivation in
+   * control; the level is omitted entirely only when neither this knob nor a usable ATR read exists.
+   */
+  secondaryBuyPullbackPct?: number;
+  /**
    * Auto-attach broker-held bracket (OCO) legs — a stop-loss and take-profit resting at the broker's
    * matching engine — to opening orders on brokers that support native brackets (Alpaca), derived
    * from riskRules.stopLossPct/takeProfitPct. Makes protective exits survive local downtime instead
@@ -920,6 +1474,26 @@ export interface TradingPolicy {
    * the synthetic monitor remains the always-on fallback either way.
    */
   robinhoodBrokerStops?: boolean;
+  /**
+   * Broker-held TRAILING stops (default ON; inert until riskRules.trailingStopPct > 0). When a
+   * trailing % is configured, the protective-stop reconciler maintains a broker-held trailing stop
+   * for each open long instead of (not in addition to — shares can only back one resting sell) the
+   * fixed broker stop:
+   *  - Alpaca REST (paper or live): a TRUE native `trailing_stop` order — the broker trails the
+   *    high-water mark itself, so the trail keeps moving even while this app is offline. An
+   *    alpaca-mcp account takes the Robinhood-style ratcheted lane through its MCP transport
+   *    instead (an endpoint-only account has no REST keys for the native order type).
+   *  - Robinhood (live only, and additionally gated on `robinhoodBrokerStops` — the existing
+   *    "resting stops at Robinhood are live-verified" opt-in): the Robinhood MCP exposes no
+   *    verified native trailing parameter, so the reconciler places a resting GTC stop-market at
+   *    trailingStopPct below the high-water mark and RATCHETS it upward (cancel-replace) on each
+   *    scheduler tick as the price rises. Between ticks the broker holds a real fixed stop, so
+   *    protection survives app downtime; the trail catches up on the app's cadence.
+   * Positions already covered by another live exit-side order (e.g. an Alpaca bracket stop leg)
+   * are skipped — the synthetic scheduler-tick monitor remains the always-on fallback for anything
+   * a broker-held stop doesn't cover. Set false to keep trailing purely app-managed.
+   */
+  brokerTrailingStops?: boolean;
   /**
    * Scale per-position stop-loss distance by the name's beta (clamped 0.5×–2.0×) so high-beta names
    * get wider stops (fewer noise stop-outs) and low-beta names tighter stops (cut losers sooner),
@@ -983,6 +1557,141 @@ export interface TradingPolicy {
   /** Max age (seconds) of the scan's fundamentals/enrichment data, using MarketScan.generatedAt as the
    *  available proxy (no per-symbol fundamentals timestamp is surfaced on the quote). Undefined/<=0 disables. */
   maxFundamentalsAgeSec?: number;
+  /** Whether the FMP Real-Time Quotes and ETF data integration is enabled. */
+  fmpRealTimeDataEnabled?: boolean;
+  /** Whether the FMP Macro & Commodities data integration is enabled. */
+  fmpMacroDataEnabled?: boolean;
+  /** Whether Kalshi macro event data is injected into the context. Default ON. */
+  kalshiMacroEnabled?: boolean;
+  /** Whether the FMP Events & News data integration is enabled. */
+  fmpEventsDataEnabled?: boolean;
+  /** Whether the FMP Deep Fundamentals data integration is enabled. */
+  fmpFundamentalsDataEnabled?: boolean;
+}
+
+export interface ProposalSizingSnapshot {
+  portfolioValue: number;
+  estimatedNotional: number;
+  /** Exact broker-routing basis reviewed by Red (quantity wins when present). */
+  sizeBasis?: "quantity" | "notional";
+  /** Exact routed quantity when sizeBasis is quantity. */
+  quantity?: number;
+  /** Exact routed dollar amount when sizeBasis is notional. */
+  dollarAmount?: number;
+  estimatedPctOfNav?: number;
+  dailyOpeningCap?: {
+    mode: "pct_nav" | "dollar";
+    configuredValue: number;
+    effectiveNotional: number;
+    pctOfNav?: number;
+  };
+  dailyNotionalUsed?: number;
+  remainingDailyNotional?: number;
+}
+
+export type HumanReviewReasonCode =
+  | "initial_red_team"
+  | "rationale_collapse"
+  | "pre_veto_override"
+  | "final_size_red_team"
+  | "override_resolution";
+
+/** Durable explanation for why an otherwise reviewable proposal requires an owner decision.
+ * Keeping these structured prevents a rationale-diversity or override hold from being mislabeled
+ * as a Red Team outage after the proposal leaves the strategy loop. */
+export interface HumanReviewReasonReceipt {
+  code: HumanReviewReasonCode;
+  title: string;
+  summary: string;
+}
+
+/**
+ * Coarse, aggregable classification of why an "Awaiting approval" (status "proposed") proposal is
+ * held instead of executed or blocked outright — set at every insertion site in strategy.ts's run
+ * loop that lands a proposal in that status. Deliberately much coarser than
+ * `HumanReviewReasonCode` (a specific per-gate receipt with its own title/summary): `holdReason`
+ * exists so the run summary, the console approval card, and GET /api/ops/performance's funnel can
+ * COUNT holds by cause without parsing free text (see `classifyHoldReasonFromCodes`,
+ * hold-reason.ts). "red_team_unavailable" covers both Red-Team-related `HumanReviewReasonCode`s
+ * ("initial_red_team", "final_size_red_team" — Red could not run OR its own verdict needs a
+ * decision); "policy_revert" covers an app policy/preference gate that reverted an otherwise
+ * auto-actionable decision to a human call (an escalatable soft-block, an override request);
+ * "funding_sell" is the sell-to-fund-buy "propose" mode queuing a funding sell for approval;
+ * "other" is every remaining cause (e.g. a standalone rationale-diversity hold) and the safe
+ * default when nothing more specific matched.
+ */
+export type HoldReasonCode = "red_team_unavailable" | "funding_sell" | "policy_revert" | "other";
+
+/** Lifecycle vocabulary for `ProposalScorecard.decisionChain`. Steps are APPENDED at the exact
+ * points the pipeline already records the corresponding state (stampRedTeamResult's reject paths,
+ * `redTeamVerdict.overridden`, `PolicyDecision.socraticOverride.applied`,
+ * `redTeamVerdict.humanOverrideApplied`, and the placement claim) — the chain is a receipt of what
+ * happened, never a state machine that gates anything. */
+export type DecisionStep =
+  | "proposed"
+  | "red_team_reject"
+  | "override_requested"
+  | "override_applied"
+  | "human_approved"
+  | "final";
+
+/** One rendered row of the scorecard's action checklist — a RENDERING of gate state the pipeline
+ * already computed (policy reasons, red-team verdict, sizing snapshot, dataAdjustments), never a
+ * new authority. `id` is a stable machine key (e.g. "entry_drift"); `label` is owner-facing copy. */
+export interface ProposalScorecardChecklistItem {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+}
+
+/**
+ * Unified, typed decision receipt assembled DETERMINISTICALLY at proposal-persistence time
+ * (buildProposalScorecard, src/lib/strategy.ts) from data the pipeline already computed — no LLM
+ * call authors any field (lesson from daily_stock_analysis's validated Dashboard contract; the gap
+ * analysis explicitly warns against a monolithic LLM-authored schema). Every section is optional
+ * and simply absent when its source data is (never fabricated); legacy persisted proposals carry
+ * no scorecard at all and render unchanged.
+ */
+export interface ProposalScorecard {
+  /** Thesis + deterministic position advice derived from the existing rationale/bracket fields. */
+  coreConclusion?: {
+    thesis: string;
+    noPositionAdvice: string;
+    hasPositionAdvice: string;
+  };
+  /** Price-vs-moving-average and volume context from indicators already computed this run
+   * (the ATR precompute's daily bars) and the scan quote. Fields are omitted when the source
+   * series was unavailable — `maAlignment: "unknown"` is the honest no-data state. */
+  dataPerspective?: {
+    maAlignment: "above_both" | "below_both" | "mixed" | "unknown";
+    priceVsMa: { price: number; sma50?: number; sma200?: number };
+    volume: { current?: number; avg20d?: number };
+  };
+  /** Key price levels reusing referencePrice + the bracket legs. `secondaryBuy` is volatility-aware
+   * BY DEFAULT — half of ATR(14) as a % of the entry anchor, clamped 1-4% — and exists whenever that
+   * ATR read or the owner override policy.secondaryBuyPullbackPct is available; it is never a silent
+   * hardcoded number, and is genuinely omitted only when neither basis exists. `secondaryBuyBasis`
+   * discloses which one produced it. */
+  sniperPoints?: {
+    idealBuy?: number;
+    secondaryBuy?: number;
+    secondaryBuyBasis?: "atr-derived" | "owner-set";
+    stopLoss?: number;
+    takeProfit?: number;
+  };
+  actionChecklist?: ProposalScorecardChecklistItem[];
+  /** Four-bucket signal attribution (integers summing to exactly 100) from the quote's
+   * deterministic factor scores — computeSignalAttribution (src/lib/market.ts). Absent when the
+   * quote carried no factor breakdown. */
+  signalAttribution?: {
+    technical: number;
+    news: number;
+    fundamentals: number;
+    market: number;
+  };
+  /** Append-only lifecycle receipt; validated (never dropped) at persistence time by
+   * validateDecisionChain (src/lib/db-proposals.ts) — a malformed chain logs an audit receipt. */
+  decisionChain?: DecisionStep[];
 }
 
 export interface TradeProposal {
@@ -996,7 +1705,27 @@ export interface TradeProposal {
   timeInForce: TimeInForce;
   marketHours: MarketHours;
   rationale: string;
+  /**
+   * The Green Team's original rationale before deterministic sizing/risk receipts and Red Team text
+   * are appended to the legacy `rationale` string. Optional for persisted proposals created before
+   * the narrative split; readers fall back to the pre-Red portion of `rationale`.
+   */
+  greenTeamRationale?: string;
+  /** App-computed sizing arithmetic captured before Red Team review; never model-authored. */
+  sizingSnapshot?: ProposalSizingSnapshot;
+  /** Unified deterministic decision receipt (see ProposalScorecard). Additive/optional — attached
+   * at persistence time by the strategy loop; legacy proposals and test fixtures don't carry it. */
+  scorecard?: ProposalScorecard;
   tradeThesisTag: string;
+  /**
+   * The tag the PROPOSING MODEL chose, retained when `tradeThesisTag` was overridden by the
+   * deterministic thesis scorer (src/lib/strategy-prompts.ts, P0-2). Absent when the scorer
+   * abstained or on proposals persisted before 2026-09-27, in which case `tradeThesisTag` IS the
+   * model's own pick. This is what makes the two comparable: the report can be recomputed on
+   * assigned tags and on proposed tags side by side, and the divergence is measured from the
+   * `thesis_tag_assigned` audit events rather than inferred.
+   */
+  tradeThesisProposedTag?: string;
   entryMarketRegime: string;
   /**
    * Multi-signal regime severity ([0,1], rounded 2dp) from `computeMultiSignalSeverity`
@@ -1006,6 +1735,8 @@ export interface TradeProposal {
    * to bucket by (do NOT build the scorecard now; see the lane-5 rollout doc).
    */
   entryRegimeSeverity?: number;
+  /** Overlay ids injected into this run's prompt (advisory DATA only). */
+  appliedOverlayIds?: string[];
   confidenceScore?: number;
   /**
    * The FAILOVER-AWARE model that actually generated this proposal (the Green/Bull step's served
@@ -1016,14 +1747,82 @@ export interface TradeProposal {
    */
   proposedByModel?: string;
   /**
+   * Set ONLY when the model named in `proposedByModel` is not the one the run set out to use — the
+   * configured primary (or, under rotation, this run's rotation pick) failed and a fallback
+   * answered instead.  Absent means the intended model served.
+   *
+   * This exists because the run-scoped failover facts (`bullFailoverNote`, the
+   * `strategy_llm_failover` audit) live on the run record, not the proposal, so the approval card
+   * had no way to tell a rotation PICK apart from a rotation FALLBACK and asserted the former for
+   * both — a receipt that read as reassurance while being wrong.  Under rotation with no
+   * owner-configured fallbacks the run still appends implicit pool fallbacks
+   * (`implicitGreenRotationFallbacks`), which is precisely the case the old copy denied.
+   */
+  greenServedByFallback?: {
+    /** The model the run intended to use — the configured primary, or the rotation pick. */
+    fromModel: string;
+    fromProvider?: string;
+    /** Why the intended model did not serve, e.g. "HTTP 400" or "malformed response". */
+    reason?: string;
+    /** 1-based position of the attempt that answered, and how many were planned. */
+    attempt?: number;
+    attempts?: number;
+  };
+  /**
+   * The model that reviewed this proposal (Red Team). Persisted with the proposal JSON so Red
+   * attribution joins outcome analytics symmetrically. Optional: legacy proposals predate it.
+   */
+  reviewedByModel?: string;
+  /**
    * Decision-time market price captured when the proposal was generated. Serves as the entry anchor
    * for the deterministic entry-drift guard (policy.maxEntryDriftPct) at approval time. Persisted with
    * the proposal so the guard can compare it against the fresh price even when approval happens hours
    * later or off the run cadence.
    */
   referencePrice?: number;
+  /**
+   * Approval-time limit re-anchor receipts (src/lib/approval-reprice.ts): a pending ordinary limit
+   * proposal is re-anchored to the fresh approval-time quote before placement, preserving the
+   * stored limit-to-anchor ratio. All additive/optional — proposals never repriced don't carry them.
+   *   - `repriceAnchorPrice`: the fresh quote the MOST RECENT reprice anchored to. Subsequent
+   *     reprices measure ratio and drift from here, never compounding off the original
+   *     `referencePrice` (which stays untouched so the entry-drift guard and
+   *     "performance since proposal" analytics keep their generation-time anchor).
+   *   - `repricedFromLimit`: the stored limit the most recent reprice replaced.
+   *   - `priceRequoteReason` / `priceRequotedAt`: stamped only when a MATERIAL reprice on a live
+   *     typed-confirmation account re-queued the card for a fresh approval instead of placing —
+   *     the price analog of `finalSizeReview.ownerApprovalRequoteReason` (which stays a SIZE
+   *     receipt; reusing it for a price requote would misreport a broker_minimum_bump).
+   */
+  repriceAnchorPrice?: number;
+  repricedFromLimit?: number;
+  priceRequoteReason?: string;
+  priceRequotedAt?: string;
+  /**
+   * Where `referencePrice` came from, stamped by insertProposal (db-proposals.ts):
+   * "provided" = the proposal arrived with its own reference (a genuine decision-time quote from
+   * the strategy/enrichment path); "limit-fallback" = insertProposal defensively copied the
+   * limit/stop price because no reference existed (chat/manual/legacy paths). The approval-time
+   * re-anchor treats "limit-fallback" as a hard price (never repriced); rows predating this field
+   * fall back to the conservative equality heuristic.
+   */
+  referencePriceProvenance?: "provided" | "limit-fallback";
+  /**
+   * True when the generation-time quote was delayed Yahoo fallback.  Owner
+   * 2026-08-18: approval cards stamp user-facing "Delayed Quote"; openings
+   * still go through.  Optional so legacy rows stay valid.
+   */
+  quoteDelayedFallback?: boolean;
+  /** Provider id for the generation-time quote (e.g. yahoo-finance-delayed). */
+  quoteProvider?: string;
   /** Limit price for the take-profit leg of a bracket order. */
   bracketTakeProfit?: number;
+  /**
+   * Green Team's staged-exit note when they set (or deliberately omit) a target.
+   * Optional.  Used on the iOS review card when `bracketTakeProfit` is missing
+   * so the owner can see the expert-panel debate instead of a blank target.
+   */
+  exitPlan?: string;
   /** Stop price for the stop-loss leg of a bracket order. */
   bracketStopLoss?: number;
   /**
@@ -1031,6 +1830,16 @@ export interface TradeProposal {
    * When absent the stop-loss leg is a plain stop-market.
    */
   bracketStopLimit?: number;
+  /**
+   * The LLM's chosen stop-loss TYPE for this position (see `StopPlanStyle`) — set only on an
+   * OPENING (buy/short) proposal. Persisted per position at fill time (`position_stop_plans`,
+   * mirroring the `takeProfitBand`/`take_profit_trims` pattern below) and read back by every
+   * stop-enforcement layer (`generateProactiveRiskProposals`, `enrichOpeningProposal`,
+   * `runSyntheticStopMonitor`, `reconcileBrokerProtectiveStops`) for the life of the position, so
+   * the choice made at entry — including "none" — survives across runs instead of being
+   * re-decided (or silently dropped) on every cycle. Absent = "default" (no change in behavior).
+   */
+  stopPlan?: StopPlan;
   /**
    * Take-profit trim bookkeeping (set only on proactive take-profit trim proposals by
    * planTakeProfitTrims). `takeProfitBand` = the take-profit band this trim corresponds to; its position
@@ -1071,13 +1880,16 @@ export interface TradeProposal {
     model?: string;
     trigger?: "all_openings" | "confidence" | "notional" | "live_opening" | "override_requested" | "escalation_regime";
     /**
-     * True when the Bear REJECTED this opening but an agent-authored `autonomyOverride` thesis made
-     * the veto advisory (folded into the sized PolicyDecision as an overridable reason and then
-     * applied at resolveSocraticOverride). Lets the decision card distinguish "Bear rejected AND
-     * blocked" from "Bear rejected but overridden & executed". See the pre-veto override flow in
-     * strategy.ts (the Red Team veto branch + the preVetoReasons fold-in before resolveSocraticOverride).
+     * Legacy-named marker that the Bear REJECTED and an agent-authored `autonomyOverride` requested
+     * the advisory path. It is set before `resolveSocraticOverride`, so it does NOT prove the final
+     * override applied. Renderers and decision evidence must use `PolicyDecision.socraticOverride.applied`
+     * (or the final SocraticOverrideResolution) for that claim.
      */
     overridden?: boolean;
+    /** A human explicitly approved the final broker-adjusted size after a fresh Red objection,
+     * unavailable review, or incompatible half-size recommendation. Unlike `overridden`, this is
+     * a consumed owner action, not merely an agent request. */
+    humanOverrideApplied?: boolean;
     /**
      * Structured reason the debate was unavailable (`available: false`) — mirrors
      * `RedTeamDebateResult.failureKind` (src/lib/red-team.ts), persisted onto the decision case so
@@ -1086,6 +1898,29 @@ export interface TradeProposal {
      */
     failureKind?: "not_configured" | "timeout" | "provider_error" | "rate_limited" | "malformed_response";
   };
+  /** One-shot receipt for a broker-minimum size mutation that required a fresh Red review. When
+   * ownerApprovalRequired is true the updated card must be approved once more; that next click
+   * consumes the marker instead of rerunning Red indefinitely. */
+  finalSizeReview?: {
+    trigger: "broker_minimum_bump";
+    fromNotional: number;
+    toNotional: number;
+    reviewedAt: string;
+    ownerApprovalRequired: boolean;
+    ownerApprovalReason?: string;
+    /** Broker estimate the pending owner consent currently covers. Defaults to toNotional on
+     * legacy receipts. It can advance only after a material upward requote is shown again. */
+    ownerApprovalNotional?: number;
+    /** Explains why a prior click was not consumed after the broker estimate increased. */
+    ownerApprovalRequoteReason?: string;
+    ownerApprovalRequotedAt?: string;
+    ownerOverrideAppliedAt?: string;
+  };
+  /** Every independent hold that must be resolved before placement, in strategy evaluation order. */
+  humanReviewReasons?: HumanReviewReasonReceipt[];
+  /** Coarse cause bucket for a status="proposed" (Awaiting approval) proposal — see
+   *  `HoldReasonCode`'s doc comment. Absent on any proposal that isn't held awaiting approval. */
+  holdReason?: HoldReasonCode;
   /**
    * Advisory PRE-POLICY veto reasons (deterministic-bear filter, approval-time Red Team) attached to a
    * TAGGED-not-dropped candidate. They are folded into the single sized PolicyDecision as OVERRIDABLE
@@ -1097,6 +1932,17 @@ export interface TradeProposal {
    * or `red_team_veto: …`).
    */
   preVetoReasons?: string[];
+  /**
+   * Auditable repair-ladder receipts: deterministic post-generation consistency checks whose
+   * corrections/fallbacks are recorded as VISIBLE, named entries — never silent edits, never blocks
+   * (proposal-phase-guard.ts owns the doc of record). Each entry is prefixed with its receipt kind
+   * (mirroring `preVetoReasons`' kind-prefix convention), e.g. `session_phrase_mismatch: …`,
+   * `confidence_capped_degraded_data: …`, `bracket_stop_fallback_atr: …`. APP-AUTHORED only: the
+   * Bull parse boundary discards any model-emitted field of this name, so every entry is a
+   * deterministic receipt, not model prose. Optional — proposals with no adjustments (and all
+   * persisted/legacy proposals) simply don't carry it.
+   */
+  dataAdjustments?: string[];
   /**
    * Explicit agent-authored request to override owner preference gates for this decision.
    * This is not a client-side bypass token and does not override broker/account/integrity gates.
@@ -1118,9 +1964,15 @@ export interface TradeProposal {
 export type SocraticDecisionStatus =
   | "planned"
   | "proposed"
+  | "placing"
   | "placed"
+  | "filled"
   | "blocked"
   | "rejected"
+  | "rejected_by_broker"
+  | "not_placed"
+  | "expired"
+  | "withdrawn"
   | "error"
   | "observed";
 
@@ -1141,10 +1993,17 @@ export interface SocraticOutcomeHorizonRow {
   /** Side-adjusted % return over this horizon (positive = the decided/considered direction worked;
    * mirrors returnSinceProposalPct's sign convention). Present only when resolution === 'ok'. */
   returnPct?: number;
-  /** returnPct minus the same-window SPY return under the same side convention (long: vs holding
-   * SPY; short: vs shorting SPY). Undefined when no SPY series covered the window (15m/1h have no
-   * intraday SPY basis). */
+  /** returnPct minus the same-window benchmark return under the same side convention (long: vs
+   * holding the benchmark; short: vs shorting it). The field name is legacy (kept so history
+   * doesn't orphan) but the basis is no longer always SPY: as of the ^GSPC/sector-index rollout
+   * (outcome-horizons.ts) it's the S&P 500 INDEX by default, or a GICS sector index/ETF under
+   * policy.benchmarkMode 'sector' — see `benchmarkBasis` for exactly which series this row used.
+   * Undefined when no benchmark series covered the window (15m/1h have no intraday basis). */
   spyExcessPct?: number;
+  /** Honest disclosure of exactly which series backed `spyExcessPct` on this row, e.g. "^GSPC",
+   * "SPY(fallback)", "^SP500-60", "XLK(fallback)" — see resolveBenchmarkSeries/sectorBenchmarkEntry
+   * (outcome-horizons.ts). Present only alongside a defined `spyExcessPct`. */
+  benchmarkBasis?: string;
   /** Optional % return of the alternative actually taken instead (reserved; populated when an
    * alternative join exists — never fabricated). */
   altReturnPct?: number;
@@ -1161,7 +2020,12 @@ export interface SocraticOutcomeHorizonRow {
 
 export interface SocraticRagAttribution {
   symbol: string;
-  query: string;
+  /** Stable ref to the exact retrieved chunk; safe to persist/audit without prompt or query text. */
+  evidenceRef?: string;
+  /** Legacy rows may retain this raw query. New writes use queryHash instead. */
+  query?: string;
+  /** SHA-256 query fingerprint for new attribution rows; raw queries are not persisted. */
+  queryHash?: string;
   chunkId?: string;
   source?: string;
   docType?: string;
@@ -1213,6 +2077,10 @@ export interface SocraticDecisionCase {
   authority: StrategyAuthority;
   thesis: string;
   rationale: string;
+  /** Green Team rationale before deterministic receipts and Red Team review text were appended. */
+  greenTeamRationale?: string;
+  /** App-computed sizing arithmetic captured with the proposal. */
+  sizingSnapshot?: ProposalSizingSnapshot;
   action: string;
   thesisTag?: string;
   regime?: string;
@@ -1242,6 +2110,19 @@ export interface SocraticDecisionCase {
     status: "open" | "won" | "lost" | "flat" | "unknown" | "unresolvable";
     returnPct?: number;
     pnlUsd?: number;
+    /** Benchmark-alpha COMPANION verdict (written only under outcomeGradingMode "alpha"): the sign
+     * of the headline spyExcessPct (pickHeadlineAlpha, outcome-horizons.ts). Never replaces
+     * `status` — raw grading remains the primary record. Undefined in "raw" mode or when no
+     * resolved horizon carried spyExcessPct (never fabricated). */
+    alphaStatus?: "won" | "lost" | "flat";
+    /** The headline spyExcessPct behind alphaStatus. */
+    alphaPct?: number;
+    /** Sniper-point grading receipt (gradeSniperAccuracy, src/lib/outcome-engine.ts): did the
+     * matured DAILY CLOSES breach the proposal scorecard's stop / reach its take-profit?  Close
+     * basis only — intraday touches between closes are invisible here, which `priceBasis`
+     * discloses.  Purely additive; absent when the proposal carried no sniper points or no bars
+     * covered the window (never fabricated). */
+    sniperAccuracy?: { stopHit?: boolean; takeProfitHit?: boolean; priceBasis?: string };
     note?: string;
     measuredAt?: string;
     outcomes: SocraticOutcomeHorizonRow[];
@@ -1256,6 +2137,17 @@ export interface SocraticDecisionCase {
 
 export type SocraticFrameworkOwnerVerb = "accept" | "reject" | "rewrite";
 export type SocraticFrameworkProposalStatus = "pending" | "accepted" | "rejected" | "applied";
+
+/** Advisory AI review attached to a pending framework proposal by the single-call
+ *  batched reviewer. It is a RECOMMENDATION only — it never changes the proposal's
+ *  status or owner verb; the owner still makes the final accept/reject/rewrite call. */
+export interface SocraticFrameworkAiReview {
+  verdict: SocraticFrameworkOwnerVerb; // accept | reject | rewrite (recommended)
+  rationale: string;
+  rewrittenChange?: string; // present when verdict is "rewrite": the AI's improved proposedChange
+  model: string;
+  reviewedAt: string;
+}
 
 export interface SocraticFrameworkProposal {
   id: string;
@@ -1274,20 +2166,30 @@ export interface SocraticFrameworkProposal {
   evidence: SocraticEvidenceItem[];
   ownerVerb?: SocraticFrameworkOwnerVerb;
   ownerResponse?: string;
+  /** Advisory AI recommendation from the batched reviewer; owner decision still required. */
+  aiReview?: SocraticFrameworkAiReview;
 }
 
 export interface SocraticDecisionTrace {
   decision: SocraticDecisionCase;
   run?: StrategyRunRow;
+  /** The linked proposal's persisted scorecard (read-only render in the decision trace). Joined by
+   * the trace API from the trade_proposals row — the case itself stores no duplicate copy. */
+  scorecard?: ProposalScorecard;
 }
 
 // Per-field provenance: which provider supplied each enriched value. Used for the
 // single-source tooltips in the market scan table.
 export type EnrichmentSources = Partial<
   Record<
-    "price" | "bid" | "ask" | "intradayChangePct" | "asOf" | "sentiment" | "peRatio" | "analystRating" | "sector" | "industry" | "volume" | "dividendYield" | "eps" | "companyName" | "insiderSentiment" | "fcfYield" | "debtToEquity" | "epsGrowth" | "senateTrades" | "daysToEarnings" | "institutionOwnershipPct" | "nearTheMoneyIv" | "putCallRatio" | "vwap" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian",
+    "price" | "bid" | "ask" | "prevClose" | "intradayChangePct" | "asOf" | "sentiment" | "peRatio" | "analystRating" | "sector" | "industry" | "volume" | "marketCap" | "dividendYield" | "eps" | "companyName" | "pbRatio" | "shortPercentOfFloat" | "beta" | "fiftyTwoWeekHigh" | "fiftyTwoWeekLow" | "insiderSentiment" | "fcfYield" | "debtToEquity" | "epsGrowth" | "senateTrades" | "daysToEarnings" | "institutionOwnershipPct" | "nearTheMoneyIv" | "putCallRatio" | "vwap" | "bidSize" | "askSize" | "open" | "high" | "low" | "netChange" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian" | "returnOnEquity" | "returnOnAssets" | "revenueGrowth" | "freeCashFlowYield" | "grossProfitMargin" | "congressTradesQuiver" | "insiderTradesQuiver" | "govContractsQuiver" | "lobbyingQuiver" | "patentsQuiver" | "sharesOutstanding" | "headlines",
     string
   >
+>;
+
+/** Optional source-faithful receipts for enriched scalar fields. */
+export type EnrichmentFieldObservations = Partial<
+  Record<keyof EnrichmentSources, FieldObservation<unknown>>
 >;
 
 export interface AnalystRatingDetail {
@@ -1295,6 +2197,8 @@ export interface AnalystRatingDetail {
   label: string;
   counts?: { strongBuy: number; buy: number; hold: number; sell: number; strongSell: number };
   mean?: number;
+  /** Canonical upstream source family, used to avoid blending duplicate redistributions. */
+  upstreamFamily?: string;
 }
 
 export interface MarketQuote {
@@ -1305,19 +2209,37 @@ export interface MarketQuote {
   vwap?: number;
   bid?: number;
   ask?: number;
+  /** Quoted bid size (shares or lots, venue-specific). Source-provided only. */
+  bidSize?: number;
+  /** Quoted ask size (shares or lots, venue-specific). Source-provided only. */
+  askSize?: number;
   volume: number;
   marketCap?: number;
+  sharesOutstanding?: number;
   intradayChangePct: number;
   netChange?: number;
+  prevClose?: number;
+  open?: number;
+  high?: number;
+  low?: number;
   sector?: string;
   industry?: string;
   positionMarketValue: number;
   score: number;
   factorBreakdown?: MarketFactorBreakdown;
   provider?: string;
-  stale?: boolean;
   cached?: boolean;
   asOf?: string;
+  /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
+  venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
+  /** See BrokerQuote.fetchedAt. */
+  fetchedAt?: string;
+  /** See BrokerQuote.delayedFallback — carried through mergeQuoteData for approval cards. */
+  delayedFallback?: boolean;
   sentiment?: number;
   peRatio?: number;
   headlines?: string[];
@@ -1350,6 +2272,16 @@ export interface MarketQuote {
   targetHigh?: number;
   targetLow?: number;
   targetMedian?: number;
+  returnOnEquity?: number;
+  returnOnAssets?: number;
+  revenueGrowth?: number;
+  freeCashFlowYield?: number;
+  grossProfitMargin?: number;
+  congressTradesQuiver?: number;
+  insiderTradesQuiver?: number;
+  govContractsQuiver?: number;
+  lobbyingQuiver?: number;
+  patentsQuiver?: number;
   /** Cross-sectional: this name's intraday % move minus the average move of its sector among
    *  the scan candidates. >0 = outperforming its sector today (relative strength). Computed in-house. */
   sectorRelStrength?: number;
@@ -1373,8 +2305,28 @@ export interface MarketQuote {
   congressCompositeVersion?: string;
   congressCompositeWeights?: Record<string, number>;
   preCongressScore?: number;
+  /** Best cluster member skill rank 0–100 (App A; filing-date preferred). */
+  congressMemberSkillScore?: number;
+  congressMemberSkillSource?: string;
+  congressMemberFilerId?: string;
+  /** Raw excess return vs S&P since disclosure (copy-trade) for that member. */
+  congressMemberFilingAvgExcess?: number;
+  congressMemberFilingWinRate?: number;
+  congressMemberFilingScoredCount?: number;
+  congressMemberFilingAvgAnnualizedExcess?: number;
+  /** Opposite-anchor context: excess since the politician's trade date. */
+  congressMemberTradeAvgExcess?: number;
+  congressMemberTradeWinRate?: number;
+  congressMemberTradeScoredCount?: number;
   evidenceBulletins?: string[]; // 1-line backend web-source bulletins (congress, insider, etc.)
+  /** Bounded (max 3) Polymarket prediction-market lines — question, implied probability, volume,
+   *  explicitly Polymarket-attributed. Fetched keylessly at STRATEGIST PROMPT TIME for the
+   *  candidates entering the LLM call only (never through the scan-wide enrichment cascade, never
+   *  persisted on the stored MarketScan) — see polymarket-provider.ts. */
+  polymarketLines?: string[];
   sources?: EnrichmentSources;
+  fieldObservations?: EnrichmentFieldObservations;
+  providerFailures?: Record<string, ProviderFailureReceipt>;
 }
 
 export interface MarketScan {
@@ -1388,6 +2340,12 @@ export interface MarketScan {
   outlierReserve?: number;
   /** Number of notable below-cutoff candidates included in `topCandidates`. */
   outlierCandidateCount?: number;
+  /** Number of forced-held-position candidates in `topCandidates` beyond the ranked cut and the
+   *  outlier reserve — held positions are never hidden regardless of rank, so `topCandidates.length`
+   *  can legitimately exceed `candidateLimit` by this much (plus outliers). Undefined on scans
+   *  persisted before this field existed; the UI falls back to a coarser breakdown rather than
+   *  guessing a count. */
+  heldCandidateCount?: number;
   /** Market breadth: % of the full screener advancing today (risk-on/off gauge). */
   breadthPct?: number;
   topCandidates: MarketQuote[];
@@ -1396,6 +2354,35 @@ export interface MarketScan {
   cacheTtlMs?: number;
   cached?: boolean;
   warnings: string[];
+  /**
+   * When the Nasdaq/Yahoo chain was empty, the broker tape that filled the universe
+   * (e.g. `alpaca-delayed_sip`, `tradier`).  Set only for that recovery path.
+   */
+  universeQuoteRecoverySource?: string;
+  /**
+   * Honest fill/shortfall report for the candidate set — makes missing PE/EPS/news
+   * and provider failures obvious on Scan/admin instead of silent dashes.
+   */
+  dataCoverage?: MarketScanDataCoverage;
+}
+
+/** Per-scan coverage shortfall report (user-visible + ops). */
+export interface MarketScanDataCoverage {
+  symbolCount: number;
+  /** 0–1 fill rate for key display fields on topCandidates. */
+  fieldFillRates: Record<string, number>;
+  /** Fields with fillRate === 0. */
+  missingFields: string[];
+  /** Fields with 0 < fillRate < 1. */
+  partialFields: string[];
+  /** One plain-language line for the Scan banner. */
+  shortfallSummary: string;
+  /** Providers that contributed at least one field this scan (from sources). */
+  contributingSources: string[];
+  /** How many topCandidates had at least one durable-store fieldObservation. */
+  durableStoreSeededCount: number;
+  /** Worst missing/partial fields for triage (capped). */
+  topGaps: Array<{ field: string; fillRate: number; missingCount: number }>;
 }
 
 export type MarketFactor = keyof ScoringWeights;
@@ -1445,13 +2432,80 @@ export interface CandidateEvidence {
   congressCompositeVersion?: string;
   congressCompositeWeights?: Record<string, number>;
   preCongressScore?: number;
+  congressMemberSkillScore?: number;
+  congressMemberSkillSource?: string;
+  congressMemberFilerId?: string;
+  congressMemberFilingAvgExcess?: number;
+  congressMemberFilingWinRate?: number;
+  congressMemberFilingScoredCount?: number;
+  congressMemberFilingAvgAnnualizedExcess?: number;
+  congressMemberTradeAvgExcess?: number;
+  congressMemberTradeWinRate?: number;
+  congressMemberTradeScoredCount?: number;
   asOf?: string; // candidate data freshness (most-recent enrichment timestamp)
   provider?: string; // primary provider
+  // Decision-time quote tape (Cluster D F4): persisted in the signal_snapshot JSON only —
+  // no schema change. Lets post-hoc analysis tell whether sizing used a delayed/synthetic quote.
+  bid?: number;
+  ask?: number;
+  bidSize?: number;
+  askSize?: number;
+  volume?: number;
+  fetchedAt?: string;
+  delayedFallback?: boolean;
+  syntheticBid?: boolean;
+  syntheticAsk?: boolean;
+  venuePriceAuthoritative?: boolean;
   sources?: EnrichmentSources; // per-field provenance (source attribution)
+  /** Decision-time leave-one-provider-out score estimate. This is shadow telemetry, not a causal
+   *  claim: it removes only fields that provider won in the cascade and does not invent a fallback
+   *  value from a provider that was not retained. */
+  sourceAblations?: SourceAblationReceipt[];
+  /** Provider failures visible during this symbol's enrichment pass. */
+  providerFailures?: Record<string, ProviderFailureReceipt>;
   bulletins?: string[]; // up to 3 web-source evidence bulletins
   /** Backend-derived ratios at decision time (PEG, earnings yield, ROE, payout, $ volume, spread).
    *  Persisted so the learning loop can correlate, e.g., low-PEG entries with realized outcomes. */
   derived?: DerivedMetrics;
+}
+
+export interface SourceAblationReceipt {
+  provider: string;
+  affectedFields: string[];
+  scoringFields: string[];
+  promptOnlyFields: string[];
+  originalScore: number;
+  shadowScore: number;
+  /** originalScore - shadowScore; positive means this source lifted deterministic rank. */
+  scoreDelta: number;
+  method: "leave_winning_fields_out/v1";
+}
+
+export interface SourceCoverageReceipt {
+  provider: string;
+  symbolsCovered: number;
+  symbolCoveragePct: number;
+  fieldsObserved: number;
+  fields: string[];
+  failedSymbols: number;
+  failureKinds: string[];
+}
+
+export interface SourceValueStat {
+  provider: string;
+  outcomes: number;
+  directionalOutcomes: number;
+  chosenOutcomes: number;
+  skippedOutcomes: number;
+  winRate: number;
+  avgReturnPct: number;
+  avgScoreDelta: number;
+  /** Average sign(scoreDelta) * realized return. Positive means the source's rank direction aligned
+   *  with subsequent returns. Observational and selection-biased; never treated as causal. */
+  directionalValuePct: number;
+  directionalAgreementRate: number;
+  fields: string[];
+  learningStatus: "insufficient" | "directional" | "established";
 }
 
 export interface MarketQuoteSummary {
@@ -1461,11 +2515,25 @@ export interface MarketQuoteSummary {
   vwap?: number;
   bid?: number;
   ask?: number;
+  /** Quoted bid size (shares or lots, venue-specific). Source-provided only. */
+  bidSize?: number;
+  /** Quoted ask size (shares or lots, venue-specific). Source-provided only. */
+  askSize?: number;
   sector?: string;
   industry?: string;
   score: number;
   provider?: string;
   asOf?: string;
+  /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
+  venuePriceAuthoritative?: boolean;
+  /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
+  expectedDelaySec?: number;
+  /** See BrokerQuote.delayToleranceSec. */
+  delayToleranceSec?: number;
+  /** See BrokerQuote.fetchedAt. */
+  fetchedAt?: string;
+  /** See BrokerQuote.delayedFallback. */
+  delayedFallback?: boolean;
   sentiment?: number;
   peRatio?: number;
   analystRating?: string;
@@ -1473,6 +2541,9 @@ export interface MarketQuoteSummary {
   analystBySource?: Record<string, AnalystRatingDetail>;
   dividendYield?: number;
   eps?: number;
+  sharesOutstanding?: number;
+  /** Screener / implied cap.  Optional so older summaries stay valid. */
+  marketCap?: number;
   pbRatio?: number;
   shortPercentOfFloat?: number;
   beta?: number;
@@ -1491,6 +2562,16 @@ export interface MarketQuoteSummary {
   targetHigh?: number;
   targetLow?: number;
   targetMedian?: number;
+  congressTradesQuiver?: number;
+  insiderTradesQuiver?: number;
+  govContractsQuiver?: number;
+  lobbyingQuiver?: number;
+  patentsQuiver?: number;
+  returnOnEquity?: number;
+  returnOnAssets?: number;
+  revenueGrowth?: number;
+  freeCashFlowYield?: number;
+  grossProfitMargin?: number;
   syntheticBid?: boolean;
   syntheticAsk?: boolean;
   evidenceBulletins?: string[];
@@ -1498,14 +2579,23 @@ export interface MarketQuoteSummary {
   factorBreakdown?: MarketFactorBreakdown;
   headlines?: string[];
   intradayChangePct?: number;
+  netChange?: number;
+  prevClose?: number;
+  open?: number;
+  high?: number;
+  low?: number;
   volume?: number;
   sectorRelStrength?: number;
   sources?: EnrichmentSources;
+  fieldObservations?: EnrichmentFieldObservations;
+  providerFailures?: Record<string, ProviderFailureReceipt>;
 }
 
 export interface MarketDataProviderOptions {
   scoringWeights?: ScoringWeights;
   ttlMs?: number;
+  /** Cancels the current scan's outbound discovery reads when its caller deadline expires. */
+  signal?: AbortSignal;
   userId?: string;
   dynamicUniverses?: IndexUniverse[];
   candidateLimit?: number;
@@ -1518,6 +2608,22 @@ export interface MarketDataProviderOptions {
    * verdict and `policy.tuning.congressGoNoGoGating` is on. Resolved by the caller from the cached verdict.
    */
   congressMultiplier?: number;
+  /**
+   * Interactive refreshes must not enqueue the multi-minute fundamentals cascade.
+   * They still return real screener, broker, and persisted web-signal data; the full
+   * strategy/scheduler path keeps deep enrichment enabled.
+   */
+  enrichmentMode?: "full" | "skip";
+  /** Slow-changing facts from the latest completed strategy scan. */
+  seedEnrichment?: Record<string, MarketQuoteSummary>;
+  /** Epoch ms when the strategy gather wall expires.  Drives internal wave budget. */
+  deadlineAt?: number;
+  /**
+   * The connected account the scan is operating for.  Used to pick an
+   * ACCOUNT-SCOPED market-data tape (Alpaca PAPER → `delayed_sip`) without
+   * touching any process-global feed setting.
+   */
+  connectedAccountId?: string;
 }
 
 export interface MarketDataProvider {
@@ -1612,7 +2718,7 @@ export interface WashSaleGateAudit {
   note?: string;
   outcome:
     | "blocked" // handling "block" (a stricter opt-in, no longer the default): refused outright
-    | "blocked_ira" // IRA replacement purchase — hard block (Rev. Rul. 2008-5; iraWashSaleHandling "block", a stricter opt-in)
+    | "blocked_ira" // IRA replacement purchase — hard block (iraWashSaleHandling "block" and a material taxable loss)
     | "ira_disregarded" // IRA replacement purchase allowed by iraWashSaleHandling "disregard" (the default) — annotated + audited, never silent
     | "ask_escalated" // handling "ask": refused here, marked escalatable for the run loop
     | "auto_proceeded" // handling "auto" (the default): always proceeds — priced tax cost recorded as receipt telemetry, never a veto
@@ -1650,6 +2756,15 @@ export interface PolicyDecision {
   adversaryUnavailableReason?: string;
   projectedSymbolExposurePct?: number;
   dailyNotionalUsed?: number;
+  quoteStale?: {
+    ageSec?: number;
+    originalType: OrderType;
+    originalLimitPrice?: number;
+    referencePrice: number;
+    /** True when the backing quote is delayed Yahoo fallback (keep trading). */
+    delayedFallback?: boolean;
+    provider?: string;
+  };
 }
 
 export interface ReviewedOrder {
@@ -1700,25 +2815,145 @@ export interface EquityOrderInput {
    * When absent the stop-loss leg is a plain stop-market.
    */
   bracketStopLimit?: number;
+  /**
+   * Native broker-held trailing stop distance (% below the high-water mark). Alpaca translates this
+   * to a `trailing_stop` order with `trail_percent` (the broker trails the extreme itself; any
+   * `stopPrice` is ignored for that order type). Brokers WITHOUT a verified native trailing
+   * parameter (Robinhood MCP) must fail closed — the protective-stop reconciler emulates trailing
+   * there by ratcheting a plain stop_market instead, and never sets this field for them.
+   */
+  trailPercent?: number;
+  /**
+   * Caller-verified SIGNED position quantity for this symbol (short = negative), from a broker
+   * position read the caller made moments before placing (protective stops, synthetic stops,
+   * stale-exit replacements).  Consumed ONLY by the placement choke point's position invariant
+   * (order-position-invariant.ts) as the fallback when its own fresh read fails, so a protective
+   * exit of a verified quantity is not blocked by a transient read error.  Never sent to a broker.
+   */
+  verifiedPositionQuantity?: number;
+}
+
+/** Scoped broker order-list fetch. Default: open orders plus terminal orders inside a bounded window. */
+export interface GetEquityOrdersOptions {
+  /** ISO timestamp — include terminal orders created on or after this instant. */
+  since?: string;
+  /** Walk full broker history (status all, unbounded pagination). */
+  fullHistory?: boolean;
 }
 
 export interface BrokerGateway {
+  /**
+   * True when getEquityOrders returns a list that reliably includes recently-TERMINAL orders
+   * (filled/canceled/rejected/expired) for at least the placement-reconcile lookback window — not
+   * just currently-live/open orders. reconcilePlacementError only concludes `not_placed`
+   * (safe-to-retry, self-clearing) when this is true; otherwise an order absent from the list is
+   * treated as `uncertain` (keep 'placing' + the protected alert), because absence can't distinguish
+   * "never placed" from "placed, filled, and already aged out of a live-only list" — and dropping a
+   * possibly-real order is the money-path hazard. Undefined ⇒ conservative (treated as false).
+   * Alpaca sets this true (default getEquityOrders includes terminal orders inside the bounded window).
+   */
+  readonly ordersListIncludesTerminal?: boolean;
   getAccounts(): Promise<BrokerageAccount[]>;
   getPortfolio(accountNumber: string): Promise<Portfolio>;
   getEquityPositions(accountNumber: string): Promise<EquityPosition[]>;
-  getEquityOrders(accountNumber: string): Promise<EquityOrder[]>;
-  getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>>;
+  getOptionPositions?(accountNumber: string): Promise<OptionPosition[]>;
+  getEquityOrders(accountNumber: string, options?: GetEquityOrdersOptions): Promise<EquityOrder[]>;
+  getEquityQuotes(accountNumber: string, symbols: string[], options?: { signal?: AbortSignal }): Promise<Record<string, BrokerQuote>>;
   getEquityTradability(accountNumber: string, symbols: string[]): Promise<Record<string, { tradable: boolean; fractional: boolean; reason?: string }>>;
   reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder>;
   placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder>;
   cancelEquityOrder(accountNumber: string, orderId: string): Promise<ExecutedOrder>;
+  /**
+   * Optional options placement surface. Implemented on Alpaca only. Callers MUST
+   * go through `evaluateOptionOrderPolicy` first — live money stays off by default.
+   */
+  placeOptionOrder?(input: {
+    accountNumber: string;
+    occSymbol: string;
+    intent: "buy_to_open" | "sell_to_close" | "buy_to_close" | "sell_to_open";
+    quantity: number;
+    type: "market" | "limit";
+    limitPrice?: number;
+    timeInForce?: TimeInForce;
+    refId: string;
+  }): Promise<ExecutedOrder>;
+  cancelOptionOrder?(accountNumber: string, orderId: string): Promise<ExecutedOrder>;
+  /**
+   * Identify and cancel the still-resting sibling legs (take-profit/stop-loss) of a broker-native
+   * bracket order (Alpaca order_class "bracket", Tradier "otoco"), given the ORIGINAL entry order's
+   * own ID — used when a per-position stop plan changes away from "fixed"/"atr" after an earlier
+   * opening already placed a bracket, whose legs `enrichOpeningProposal` has no other way to reach
+   * (only strips bracket fields from the NEW order being placed, not a resting one). Best-effort:
+   * a leg that already filled/cancelled between lookup and cancel is simply skipped, not an error.
+   * Optional — undefined on a broker/adapter with no bracket support (e.g. Robinhood).
+   */
+  cancelBracketSiblingLegs?(accountNumber: string, originalOrderId: string): Promise<{ cancelledOrderIds: string[] }>;
+  /**
+   * Lightweight "can this account place orders right now?" probe used by broker-health to auto-pause
+   * strategy runs when the order path is down (e.g. Tradier sandbox OMS 500s) without spending an
+   * LLM run. Must be cheap, side-effect free (preview / account flags only — never a real order),
+   * and may throttle internally. Optional — gateways without a probe skip this check.
+   */
+  probeOrderCapability?(accountNumber: string): Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * Broker truth for ONE order id, independent of the order listing's window.  Tradier's order
+   * listing only covers the current market session, so a receipt that did not reconcile the same
+   * day (halted account, missed tick, bracket container the listing flattens away) could never
+   * match again.  Resolves `undefined` only when the broker definitively reports the id as not
+   * found; any transport or server failure throws so callers never read absence into an error.
+   * Optional — gateways without it keep the listing-only reconciliation.
+   */
+  getEquityOrder?(accountNumber: string, orderId: string): Promise<BrokerOrderLookup | undefined>;
+  /**
+   * Executed orders (and bracket legs) visible in the broker's recent order listing, with the
+   * structure the flattened `getEquityOrders` view loses: which rows are a bracket's entry leg vs
+   * its contingent exit legs.  Feeds broker-originated fill ingestion (owner orders and bracket
+   * exits that no app lane books).  Optional.
+   */
+  listRecentExecutions?(accountNumber: string): Promise<BrokerExecution[]>;
 }
+
+/** Result of `BrokerGateway.getEquityOrder`. */
+export interface BrokerOrderLookup {
+  /**
+   * Reconciliation view of the id that was asked for.  For a multi-leg bracket container (Tradier
+   * OTO/OTOCO) the state and execution fields are the ENTRY leg's, while `id` and `clientOrderId`
+   * stay the container's — the id the app stored at placement.
+   */
+  order: EquityOrder;
+  /** The entry leg's own broker id when the order is a container whose entry is a separate leg. */
+  entryLegId?: string;
+  /** Contingent exit legs of a bracket container, each with its own id and execution truth. */
+  exitLegs?: EquityOrder[];
+}
+
+/** One order or bracket leg from the broker's recent order listing, with its bracket role. */
+export interface BrokerExecution {
+  order: EquityOrder;
+  /** `single` = a plain order; `entry`/`exit` = a leg of a bracket container. */
+  role: "single" | "entry" | "exit";
+  /** Container id for a bracket leg. */
+  parentOrderId?: string;
+  /** The container's idempotency tag, when the container carried one (app-placed brackets). */
+  parentClientOrderId?: string;
+}
+
+/** Strategy run status — see `src/lib/strategy-run-status.ts` for skip taxonomy (UX PR-A1). */
+export type StrategyRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "skipped_budget"
+  | "skipped_market_closed"
+  | "skipped_broker_unhealthy";
 
 export interface StrategyRun {
   id: string;
   startedAt: string;
   finishedAt?: string;
-  status: "running" | "completed" | "failed";
+  /** skipped_* = pre-decision gate; not a successful evaluation */
+  status: StrategyRunStatus;
   summary?: string;
 }
 
@@ -1726,7 +2961,7 @@ export interface StrategyRunRow {
   id: string;
   startedAt: string;
   finishedAt?: string;
-  status: "running" | "completed" | "failed";
+  status: StrategyRunStatus;
   summary?: string;
   connectedAccountId?: string;
   placedCount: number;
@@ -1755,6 +2990,12 @@ export interface PendingProposal {
   proposalReferencePrice?: number;
   /** The current price used for the performance figure. */
   proposalCurrentPrice?: number;
+  /**
+   * True when the card's Now price (or the persisted generation quote) is
+   * delayed Yahoo fallback.  Website + iOS stamp user-facing "Delayed Quote".
+   */
+  delayedFallback?: boolean;
+  quoteProvider?: string;
 }
 
 export interface RecentProposal {
@@ -1774,6 +3015,8 @@ export interface RecentProposal {
   proposalReferencePrice?: number;
   /** The current price used for the performance figure. */
   proposalCurrentPrice?: number;
+  delayedFallback?: boolean;
+  quoteProvider?: string;
   /** Broker or network error message when status is placing_failed. */
   errorMessage?: string;
 }
@@ -1822,7 +3065,9 @@ export interface StrategyTuningPatch {
     Pick<
       TradingPolicy,
       | "maxOrderNotional"
+      | "maxOrderPctOfNav"
       | "maxDailyNotional"
+      | "maxDailyPctOfNav"
       | "maxHourlyNotional"
       | "maxSymbolExposurePct"
       | "maxDailyOrders"
@@ -1846,6 +3091,13 @@ export interface StrategyTuningProposal {
   cautions: string[];
   confidenceScore: number;
   generatedBy: "llm" | "local_rules";
+  /**
+   * §6 slice-3 follow-up: when `policy.tuning.pitEvidenceCutoff` is on (default) and an OOS test
+   * fold exists, the date the tuner's realized-outcome evidence was cut off at (the fold's start).
+   * Present ⇒ the candidate was generated WITHOUT evaluation-period outcomes, so the OOS readout
+   * drops the "partially in-sample" caveat in favor of this cutoff disclosure.
+   */
+  evidenceCutoffDate?: string;
 }
 
 export interface PortfolioSnapshot {
@@ -1892,6 +3144,15 @@ export interface EquityCurvePoint {
    *  Used to infer external deposits/withdrawals for time-weighted return math; absent on
    *  synthetic curves so consumers must degrade honestly rather than assume zero flows. */
   cash?: number;
+  /** Mark-to-market value of open positions at the snapshot. Used with `cash` to tell a
+   *  cash→stock conversion (not a withdrawal) apart from an external transfer when fills are
+   *  missing from the ledger. */
+  positionsValue?: number;
+  /** True when the point is the broker's own reported end-of-day equity (e.g. Alpaca
+   *  portfolio history) rather than a local portfolio snapshot. Real account equity, but
+   *  with no cash/positions split — flow detection must rely on the broker transfer
+   *  ledger or fills, never on an invented cash balance. */
+  brokerHistory?: boolean;
 }
 
 export interface RunAttribution {
@@ -1911,18 +3172,60 @@ export interface BenchmarkSeriesPoint {
   index: number;
 }
 
+/** One point on a dollar series (account equity or same-cash S&P shadow). */
+export interface BenchmarkDollarPoint {
+  date: string;
+  value: number;
+}
+
 /**
- * SPY-benchmark equity-curve comparison: the account's equity curve and a SPY buy-and-hold curve,
- * both normalized to 100 at the first common date, plus the window's total returns. The honest
- * "are we beating the market" readout. Computed on the fly from portfolio snapshots + SPY daily
- * closes; null/absent when there isn't enough history or SPY data is unavailable (degrade to "—").
+ * SPY-benchmark equity-curve comparison. Two readouts share the same deposit/withdrawal knots:
+ *  1) Time-weighted % (equityIndex vs benchmarkIndex, both start at 100) — manager skill,
+ *     cash flows neutralized so a transfer is not P&L.
+ *  2) Same-cash dollars (accountEquitySeries vs shadowBenchmarkSeries) — what the account
+ *     would be worth if every deposit bought S&P and every withdrawal sold S&P at that day's
+ *     close. dollarExcess = ending account equity − ending shadow value.
+ * Read the % tiles as: if excess is +5% and SPY is +8%, the account returned +13%. Read the
+ * dollar tiles as: "same cash in S&P is $X; you have $Y." Computed from portfolio snapshots +
+ * SPY daily closes; null/absent when there isn't enough history or SPY data is unavailable
+ * (degrade to "—").
  */
+/**
+ * One capital regime between deposits/withdrawals (or a coalesced no-flow run of snapshots).
+ * Account and SPY returns are for this sub-period only; overall TWR is the geometric product
+ * of (1 + r_i) across subPeriods.
+ */
+export interface BenchmarkSubPeriod {
+  startDate: string;
+  endDate: string;
+  startEquity: number;
+  endEquity: number;
+  /** External cash on endDate: deposit +, withdrawal −, 0 if none. */
+  externalFlow: number;
+  accountReturnPct: number;
+  benchmarkReturnPct: number;
+  /** True when `externalFlow` failed the equity-delta sanity bound (an inferred transfer must
+   *  roughly reconcile with its own sub-period's equity move). The flow is shown for review but
+   *  EXCLUDED from TWR neutralization — accountReturnPct here is the raw equity growth. */
+  flowUnverified?: boolean;
+}
+
 export interface BenchmarkComparison {
   equityIndex: BenchmarkSeriesPoint[];
   benchmarkIndex: BenchmarkSeriesPoint[];
-  /** Account total return over the window (%, base→last). */
+  /** Account equity in dollars at each aligned date (last snapshot of that day). */
+  accountEquitySeries: BenchmarkDollarPoint[];
+  /** Hypothetical S&P tracker funded with the same deposits and withdrawals, in dollars. */
+  shadowBenchmarkSeries: BenchmarkDollarPoint[];
+  /** Ending value of the same-cash S&P tracker. */
+  shadowValue: number;
+  /** Ending account equity minus shadowValue (positive = you have more dollars than same-cash S&P). */
+  dollarExcess: number;
+  /** Account multi-period time-weighted return (%, geometric chain of sub-period returns
+   *  between each deposit/withdrawal). External cash is neutralized each sub-period. */
   accountReturnPct: number;
-  /** Benchmark (SPY) total return over the same window (%). */
+  /** SPY multi-period return over the same sub-period calendar windows, geometrically chained
+   *  the same way (equals full-window SPY buy-hold when segments cover the timeline). */
   benchmarkReturnPct: number;
   /** accountReturnPct − benchmarkReturnPct, in percentage points (positive = outperformance). */
   excessReturnPct: number;
@@ -1930,14 +3233,34 @@ export interface BenchmarkComparison {
   endDate: string;
   points: number;
   benchmarkSymbol: string;
-  /** True when the account line is a time-weighted return chained over inferred external
-   *  deposits/withdrawals (at least one material flow was detected and neutralized).
-   *  False/absent = plain equity growth, which counts any transfers as if they were returns. */
+  /** Back-to-back capital regimes (split at each inferred deposit/withdrawal). */
+  subPeriods?: BenchmarkSubPeriod[];
+  /** True when at least one material external deposit/withdrawal was inferred and neutralized. */
   cashFlowAdjusted?: boolean;
   /** Net inferred external flow over the window in dollars (deposits positive, withdrawals
-   *  negative). Present only when cashFlowAdjusted is true. Inferred from snapshot cash deltas
-   *  minus recorded trade cash — an estimate, not a broker transfer ledger. */
+   *  negative). Present when cashFlowAdjusted is true. Excludes unverified flows. */
   netExternalFlows?: number;
+  /** Inferred flows that failed the equity-delta sanity bound (see BenchmarkSubPeriod.flowUnverified):
+   *  shown for owner review, excluded from TWR math and from netExternalFlows. Deposit +, withdrawal −. */
+  unverifiedFlows?: Array<{ date: string; amount: number }>;
+}
+
+/** Why the SPY benchmark comparison could not be computed honestly. Feed failures
+ *  ("fetch-failed" | "no-bars" | "stale-series") mean the SPY series itself is dead/stale —
+ *  render a first-class "benchmark unavailable" state, never a fake 0.00%. The account-side
+ *  reasons ("insufficient-history" | "insufficient-overlap") are the normal young-account state. */
+export interface BenchmarkUnavailability {
+  reason: "insufficient-history" | "fetch-failed" | "no-bars" | "stale-series" | "insufficient-overlap";
+  /** Cheap human-readable why (e.g. last SPY close date + source tier), when known. */
+  detail?: string;
+}
+
+export interface DayPnlHints {
+  /** Prior session close equity from the broker when available (e.g. Alpaca last_equity). */
+  priorCloseEquity?: number;
+  /** Net external flow on the current Central trading day from broker activities. */
+  todayBrokerFlow?: number;
+  cashFlowSource?: "broker" | "inferred";
 }
 
 export interface PerformanceSummary {
@@ -1945,14 +3268,42 @@ export interface PerformanceSummary {
   paperEquityCurve: EquityCurvePoint[];
   /** SPY-benchmark comparison for the active execution mode's equity curve (absent when insufficient data). */
   benchmark?: BenchmarkComparison;
+  /** Set when `benchmark` is absent, naming why (dead/stale SPY feed, or too little
+   *  account history), so the UI can say WHY instead of silently omitting the card —
+   *  and never render a fake 0.00% comparison. */
+  benchmarkUnavailable?: BenchmarkUnavailability;
+  /** Broker-authoritative Day P&L hints when Alpaca activities are available. */
+  dayPnlHints?: DayPnlHints;
   liveRealizedPnl: number;
   paperRealizedPnl: number;
   liveUnrealizedPnl: number;
   paperUnrealizedPnl: number;
+  /** Per closed FIFO LOT (a scaled-out position counts once per trim). Kept for existing consumers;
+   *  the console Results card shows the round-trip figure below instead. */
   liveWinRate: number;
   paperWinRate: number;
+  /** Win rate per COMPLETED round trip (one per opening fill; still-open positions excluded).
+   *  Absent — never a fabricated 0 — while no round trip has completed (ST-4589 B10). */
+  liveRoundTripWinRate?: number;
+  paperRoundTripWinRate?: number;
+  /** Completed round trips behind liveRoundTripWinRate / paperRoundTripWinRate. */
+  liveRoundTripCount?: number;
+  paperRoundTripCount?: number;
   liveAverageReturnPct: number;
   paperAverageReturnPct: number;
+  /** Count of CLOSED lots feeding liveWinRate/liveAverageReturnPct (0 for an account that has
+   *  never closed a lot). winRate/averageReturn compute to 0 — not undefined — for an empty lot
+   *  list, so consumers MUST gate the "0%" / "+0.00%" render on this count being > 0, never on
+   *  the value itself (an account with exactly one break-even closed lot has a genuine 0%). */
+  liveClosedLotCount: number;
+  paperClosedLotCount: number;
+  /** Closing fills in the live ledger with no opening lot to close against (pre-app, manual or MCP
+   *  positions exited through the broker). Their P&L is NOT in liveRealizedPnl — there is no cost
+   *  basis in this app to compute one from — so the figure discloses the count instead of quietly
+   *  omitting them. 0 when the ledger reconciles. */
+  liveUnmatchedClosingFills: number;
+  /** Same, for the paper ledger. */
+  paperUnmatchedClosingFills: number;
   attribution: RunAttribution[];
   fills: FillEvent[];
 }
@@ -1976,18 +3327,70 @@ export interface NotificationEvent {
 }
 
 // --- Out-of-app multi-channel alert delivery (ported from Atlas) ---
-/** Out-of-app delivery channels for triggered alerts. */
-export type NotifyChannelId = "push" | "webhook" | "email" | "sms";
+/** Out-of-app delivery channels for triggered alerts. `apns` is native iOS push (Apple Push
+ *  Notification service) — unlike every other channel its delivery target is NOT a user-typed
+ *  string in notification_prefs but the device tokens the iOS app registered (device_push_tokens,
+ *  see db-device-tokens.ts). */
+export type NotifyChannelId = "push" | "webhook" | "email" | "sms" | "pushover" | "apns";
+
+// --- Native iOS push (APNs) -------------------------------------------------
+/**
+ * Which APNs environment a device token was minted in. Device tokens are environment-specific: a
+ * sandbox token is rejected by the production endpoint with 400 BadDeviceToken and vice versa, so
+ * the registry stores the environment the client reported rather than guessing it.
+ *
+ * `sandbox`    -> https://api.sandbox.push.apple.com (Xcode/debug builds)
+ * `production` -> https://api.push.apple.com (TestFlight AND App Store — TestFlight is PRODUCTION)
+ */
+export type ApnsEnvironment = "sandbox" | "production";
+
+/** One registered device token. A token belongs to exactly ONE user — re-registering it under a
+ *  different account REASSIGNS it (see registerDeviceToken) so a shared device that switches
+ *  accounts can never keep receiving the previous user's alerts. */
+export interface DeviceToken {
+  /** The raw APNs device token (hex). Never log this in full — use maskDeviceToken. */
+  token: string;
+  userId: string;
+  environment: ApnsEnvironment;
+  bundleId: string;
+  platform: string;
+  createdAt: string;
+  lastSeenAt: string;
+  /** Set when the token was retired (410 Unregistered, 400 BadDeviceToken, or an explicit
+   *  sign-out unregister). A disabled token is never sent to again. */
+  disabledAt: string | null;
+  disabledReason: string | null;
+}
 
 /** Per-user notification preferences: enabled channels + per-channel delivery target. */
 export interface NotifyPrefs {
   userId: string;
   channels: NotifyChannelId[];
   pushTarget: string;
+  pushoverTarget: string;
   webhookUrl: string;
   email: string;
   phone: string;
+  /** Presence flags for per-user channel credentials — the API only ever
+   *  exposes whether a secret is stored, never the value. */
+  pushoverAppTokenSet: boolean;
+  twilioAccountSidSet: boolean;
+  twilioAuthTokenSet: boolean;
+  twilioFromSet: boolean;
+  /** Opt-in daily watchlist digest (default false — see watchlist-digest.ts). Delivery-scoped
+   *  (notification_prefs), not policy-scoped, because it's "where/whether alerts leave the app"
+   *  like the rest of this interface, not a per-account trading behavior. */
+  watchlistDigestEnabled: boolean;
   updatedAt: string | null;
+}
+
+/** Decrypted per-user delivery-channel credentials (server-side only — never
+ *  serialized to the client). Empty string = not set → env fallback applies. */
+export interface NotifyPrefsSecrets {
+  pushoverAppToken: string;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+  twilioFrom: string;
 }
 
 export interface NotifyMessage {
@@ -1995,6 +3398,19 @@ export interface NotifyMessage {
   body: string;
   kind?: string;
   data?: unknown;
+  /**
+   * Pre-rendered alternate bodies for channels with different length constraints (report-renderer.ts
+   * produces these for the watchlist digest). When present, notify() (src/lib/notify.ts) delivers
+   * to each channel the LARGEST tier that fits that channel's CHANNEL_CAPABILITIES.maxBodyChars,
+   * falling back to the smallest tier (then that channel's own existing truncation) when nothing
+   * fits. `body` above remains the default/fallback body and is what every channel gets when
+   * bodyTiers is absent — existing single-body callers are unaffected.
+   */
+  bodyTiers?: {
+    full: string;
+    medium?: string;
+    brief?: string;
+  };
 }
 
 export interface NotifyChannelResult {
@@ -2014,6 +3430,10 @@ export interface NotifyChannelDescriptor {
   targetLabel: string;
   placeholder: string;
   hint: string;
+  /** True when the channel's delivery target is managed by the app rather than typed by the user
+   *  (apns: the device tokens the iOS app registers). The Settings -> Delivery UI renders a
+   *  read-only status line for these instead of a target input. */
+  managedTarget?: boolean;
 }
 
 // --- Conversation transcript (chat history, ported from Atlas) ---
@@ -2032,6 +3452,8 @@ export interface ChatTurn {
   model?: string | null;
   /** Client-generated idempotency key (user turns only): reused on Retry so a retried send doesn't duplicate the turn. */
   clientTurnId?: string | null;
+  /** The account context active when this turn occurred (NULL for legacy unattributed turns). */
+  connectedAccountId?: string | null;
   createdAt: string;
 }
 
@@ -2075,6 +3497,18 @@ export type LearnedContextScope = "private" | "shared";
 export type LearnedContextKind = "pattern" | "decision" | "fact";
 export type LearnedContextOrigin = "chat" | "autonomous" | "ingest";
 export type LearnedContextRiskTier = "fact" | "risk" | "strategy-directive";
+/**
+ * Which decision boundary a lesson is allowed to cross.
+ *
+ * - account: evidence learned from one connected broker account; exact-account retrieval only.
+ * - portfolio: owner-supplied/general context that is safe across the owner's accounts.
+ * - research: an explicitly transfer-tested result that may inform sibling accounts.
+ * - legacy: pre-scoping autonomous data whose account provenance cannot be reconstructed.
+ */
+export type LearnedContextLearningScope = "account" | "portfolio" | "research" | "legacy";
+/** Paper-derived research stays `candidate` until corroborated; only `validated` research is retrievable. */
+export type LearnedContextTransferState = "not_applicable" | "candidate" | "validated" | "rejected";
+export type LearnedContextAccountEnvironment = "paper" | "live";
 
 /** A persisted learned-context row. `supersededBy` non-null means a newer fact replaced it. */
 export interface LearnedContextRow {
@@ -2090,10 +3524,35 @@ export interface LearnedContextRow {
   riskTier: LearnedContextRiskTier;
   confidence: number;
   contributorUserId: string | null;
+  connectedAccountId: string | null;
+  accountEnvironment: LearnedContextAccountEnvironment | null;
+  learningScope: LearnedContextLearningScope;
+  transferState: LearnedContextTransferState;
   assertedAt: string;
   supersededBy: string | null;
   expiresAt: string | null;
+  regime?: string | null;
+  thesisTag?: string | null;
+  dominantFactor?: string | null;
 }
+
+/**
+ * EXPLICIT producer provenance for a candidate whose epistemic status is settled at the source.
+ *
+ * "system-postmortem" is the single narrow value today, and it means exactly one thing: the statement
+ * was derived BY THIS APP from its OWN already-realized, already-measured trade outcomes (the
+ * post-mortem lesson writer in outcome-engine.ts). It is a fact about a closed trade, not a claim
+ * about how the agent *should* trade going forward. The semantic gate asks a model "is this behavioral
+ * advice?" — for a closed-outcome post-mortem that is a category error, so the LLM layer is skipped
+ * for these rows (see semantic-gate.ts). The keyword layer stays AUTHORITATIVE and still routes a
+ * lesson that reads like a risk knob to the human queue.
+ *
+ * The marker is OPT-IN PER CANDIDATE and deliberately NOT inferred from `origin`: a generic
+ * "autonomous" producer (chat-driven ingest, a future agent) keeps the full gate. Widening this union
+ * is a safety-relevant change — each new value is a class of statement that stops being second-guessed
+ * by a model, so it needs the same review the first one got.
+ */
+export type LearnedContextCandidateProvenance = "system-postmortem";
 
 /** A pre-persistence learned-context candidate (origin/scope are assigned at ingest time). */
 export interface LearnedContextCandidate {
@@ -2105,6 +3564,12 @@ export interface LearnedContextCandidate {
   confidence?: number;
   /** Optional intent hint from the producer; the classifier may use it to force 'risk'. */
   intent?: string;
+  /** Set only when the producer can vouch for the statement's provenance. See the type doc. */
+  provenance?: LearnedContextCandidateProvenance;
+  /** Market regime the evidence came from, when the producer knows it (regime-relevance scoring). */
+  regime?: string | null;
+  /** Trade thesis tag the evidence came from, when the producer knows it (thesis-affinity scoring). */
+  thesisTag?: string | null;
 }
 
 /** Status of a queued risk-tier candidate awaiting explicit human confirmation. */
@@ -2129,10 +3594,21 @@ export interface LearnedContextPendingRow {
   origin: LearnedContextOrigin;
   /** Only the two human-confirmable tiers are ever queued. */
   riskTier: Exclude<LearnedContextRiskTier, "fact">;
+  connectedAccountId: string | null;
+  accountEnvironment: LearnedContextAccountEnvironment | null;
+  learningScope: LearnedContextLearningScope;
+  transferState: LearnedContextTransferState;
   classifierReason: string | null;
   createdAt: string;
   status: LearnedContextPendingStatus;
   resolvedAt: string | null;
+  /** Set only when the daily Learning Review LLM (src/lib/learning-review.ts) reviewed this item
+   *  and returned a "defer" verdict — it could not confidently decide, so it left the item exactly
+   *  as-is (still pending) and explained why here. Optional so every pre-existing row/fixture that
+   *  never went through review (or was decided keep/reject) simply omits it. Null once approved or
+   *  rejected? No — deliberately left in place even after resolution, so a human who acted on a
+   *  previously-deferred item can still see why the reviewer punted it to them. */
+  reviewNote?: string | null;
 }
 
 /**

@@ -125,3 +125,18 @@ app/console/lib/api.ts, + 8 test files.
 - Tiingo 403 (owner: key/plan) and AV paid-tier decision remain open.
 - Watch first market-hours session post-deploy for synthetic-stops + remediation
   regressions (none expected; guards fail toward inaction + receipts).
+
+## 2026-07-11 correction — canonical admin health lane
+
+The provider and persisted health rows use `alpha-vantage`, but the admin connections-health
+expected-lane inventory retained the API-key slug `alphavantage`. That did not affect provider calls,
+key selection, pacing, or daily-cap detection; it only injected an empty `alphavantage:env` card next
+to the real `alpha-vantage:env` lane. Branch `codex/alpha-health-lane-fix` corrects the inventory to
+the canonical provider service name and adds authenticated route coverage proving the canonical lane
+is deduplicated and the legacy spelling is absent. This supersedes any implication in this rollout
+that `alphavantage` is a valid health-service identifier; it remains only the API-key storage slug.
+
+Separately, PR #1392 (`32783b12`) superseded this rollout's multi-key production design after live
+evidence showed Alpha Vantage's free daily cap is enforced per source IP. Current code resolves one
+singular key, or only the first entry of the legacy plural env value for compatibility; it does not
+rotate six keys. The health-lane spelling fix does not reintroduce multi-key behavior.

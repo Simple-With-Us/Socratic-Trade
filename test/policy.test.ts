@@ -39,7 +39,11 @@ const enabledPolicy: TradingPolicy = {
   strategyAuthority: "decide",
   accountNumber: "A1",
   includedIndices: [],
-  additionalSymbols: ["AAPL", "TSLA"]
+  additionalSymbols: ["AAPL", "TSLA"],
+  // maxQuoteAgeSec defaulted to 120 on 2026-07-28 (guard enablement); these tests exercise OTHER
+  // gates without a marketScan in context, so pin the staleness gate off — a missing timestamp is
+  // treated as stale while the gate is on.
+  maxQuoteAgeSec: 0
 };
 
 const proposal: TradeProposal = {
@@ -265,6 +269,7 @@ describe("evaluateTradeProposal", () => {
   it("blocks daily notional overflow", () => {
     const decision = evaluateTradeProposal(proposal, {
       ...context(),
+      policy: { ...enabledPolicy, maxDailyNotional: 500, maxDailyPctOfNav: undefined },
       dailyNotionalUsed: 495
     });
     expect(decision.approved).toBe(false);
@@ -553,6 +558,23 @@ describe("evaluateTradeProposal", () => {
     expect(decision.reasons.join(" ")).toContain("mandatory stop-loss");
   });
 
+  it("an explicit stopPlan: 'none' short satisfies the mandatory-stop-loss gate (owner decision, 2026-07-15 — a deliberate no-stop choice is okay)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "none", rationale: "deliberately unhedged short thesis" } },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.reasons.join(" ")).not.toContain("mandatory stop-loss");
+  });
+
+  it("an explicit stopPlan: 'default' short does NOT satisfy the mandatory-stop-loss gate (defers to the account's own precedence, which here guarantees nothing)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "default" } },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.approved).toBe(false);
+    expect(decision.reasons.join(" ")).toContain("mandatory stop-loss");
+  });
+
   it("short over maxShortOrderNotional is rejected", () => {
     const decision = evaluateTradeProposal(
       { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 5000 },
@@ -695,6 +717,45 @@ describe("evaluateTradeProposal", () => {
       estimatedNotional: 10
     });
     expect(decision.approved).toBe(true);
+  });
+
+  describe("bracket-order permission (Codex review, PR #1371)", () => {
+    // A bare account: no "bracket" in permittedOrderTypes, no stopLossPct configured — the two
+    // pre-existing green-lights for a bracket order.
+    const barePolicy: TradingPolicy = { ...enabledPolicy, riskRules: { ...enabledPolicy.riskRules, stopLossPct: 0 } };
+
+    it("still blocks a bracket with no explicit stop plan on a bare account (unchanged baseline)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9 },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.approved).toBe(false);
+      expect(decision.reasons.join(" ")).toContain("Bracket orders require");
+    });
+
+    it("permits a bracket on a bare account when the proposal carries an explicit 'fixed' stop plan (the plan guarantees the bracket via the universal-availability fallback)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "fixed" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).not.toContain("Bracket orders require");
+    });
+
+    it("permits a bracket on a bare account when the proposal carries an explicit 'atr' stop plan", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "atr" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).not.toContain("Bracket orders require");
+    });
+
+    it("does NOT permit a bracket on a bare account for a 'trailing'/'none'/'default' plan (those never attach a bracket leg in the first place, so this shouldn't matter, but the permission gate itself must not misread them as a green light)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "trailing" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).toContain("Bracket orders require");
+    });
   });
 });
 

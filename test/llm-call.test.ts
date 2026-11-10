@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, toGeminiJsonSchema } from "../src/lib/llm-call";
+import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, shouldRequireOpenRouterParameters, toGeminiJsonSchema } from "../src/lib/llm-call";
 
 const SCHEMA = {
   name: "trade_proposals",
@@ -89,6 +89,18 @@ const BULL_PROPOSAL_SCHEMA = {
 };
 
 describe("buildLlmRequestBody", () => {
+  it("MiniMax native chat uses documented bounds without unsupported response_format", () => {
+    const body = buildLlmRequestBody(
+      { provider: "minimax", transport: "chat-completions" },
+      { model: "MiniMax-M2.7", systemPrompt: "Return JSON.", userContent: "{}", maxOutputTokens: 1500, schema: SCHEMA }
+    );
+    expect(body.max_completion_tokens).toBe(9_500);
+    expect(body.temperature).toBe(1);
+    expect(body.reasoning_split).toBe(true);
+    expect(body.response_format).toBeUndefined();
+    expect((body.messages as Array<{ content: string }>)[0].content).toContain(JSON.stringify(SCHEMA.schema));
+  });
+
   it("OpenAI chat-completions: strict json_schema + max_completion_tokens (reasoning model)", () => {
     const body = buildLlmRequestBody(
       { provider: "openai", transport: "chat-completions" },
@@ -121,12 +133,33 @@ describe("buildLlmRequestBody", () => {
     expect(body.text).toEqual({ format: { type: "json_schema", name: "trade_proposals", strict: true, schema: SCHEMA.schema } });
   });
 
+  it("GPT-5.6 preserves the exact tier and reasoning effort on the OpenAI Responses transport", () => {
+    const body = buildLlmRequestBody(
+      { provider: "openai", transport: "responses" },
+      {
+        model: "gpt-5.6-terra",
+        systemPrompt: "sys",
+        userContent: "{}",
+        schema: SCHEMA,
+        maxOutputTokens: 1500,
+        reasoningEffort: "high"
+      }
+    ) as Record<string, any>;
+
+    expect(body.model).toBe("gpt-5.6-terra");
+    expect(body.reasoning).toEqual({ effort: "high" });
+    expect(body.max_output_tokens).toBeGreaterThanOrEqual(1500);
+    expect(body.text).toEqual({ format: { type: "json_schema", name: "trade_proposals", strict: true, schema: SCHEMA.schema } });
+    expect(body.messages).toBeUndefined();
+    expect(body.max_completion_tokens).toBeUndefined();
+  });
+
   it("Anthropic: system field + forced tool-use for the schema, max_tokens set, no response_format", () => {
     const body = buildLlmRequestBody(
       { provider: "anthropic", transport: "anthropic-messages" },
-      { model: "claude-opus-4-8", systemPrompt: "sys", userContent: "{\"a\":1}", schema: SCHEMA, maxOutputTokens: 1500 }
+      { model: "anthropic/claude-opus-4-8", systemPrompt: "sys", userContent: "{\"a\":1}", schema: SCHEMA, maxOutputTokens: 1500 }
     ) as Record<string, any>;
-    expect(body.model).toBe("claude-opus-4-8");
+    expect(body.model).toBe("anthropic/claude-opus-4-8");
     // Prompt caching (Chat A item 3): system is a single ephemeral cache block, not a bare string.
     expect(body.system).toEqual([{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }]);
     expect(body.messages).toEqual([{ role: "user", content: "{\"a\":1}" }]);
@@ -143,7 +176,7 @@ describe("buildLlmRequestBody", () => {
     const body = buildLlmRequestBody(
       { provider: "anthropic", transport: "anthropic-messages" },
       {
-        model: "claude-opus-4-8",
+        model: "anthropic/claude-opus-4-8",
         systemPrompt: "sys",
         userContent: "{}",
         schema: SCHEMA,
@@ -166,16 +199,28 @@ describe("buildLlmRequestBody", () => {
 
     const xai = buildLlmRequestBody(
       { provider: "xai", transport: "chat-completions" },
-      { model: "grok-4.3", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500, reasoningEffort: "high" }
+      { model: "xai/grok-4.3", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500, reasoningEffort: "high" }
     ) as Record<string, any>;
     expect(xai.reasoning_effort).toBe("high");
 
+    // Only mistral-medium-3-5 carries a Mistral reasoning capability (provider enforces
+    // reasoning_effort high|none); an explicit xhigh request normalizes to "high", sent WITHOUT
+    // prompt_mode (2026-07-10 keyed probe: medium-3-5 rejects prompt_mode:"reasoning" too).
     const mistral = buildLlmRequestBody(
       { provider: "mistral", transport: "chat-completions" },
-      { model: "mistral-large-2512", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500, reasoningEffort: "xhigh" }
+      { model: "mistral-medium-3-5", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500, reasoningEffort: "xhigh" }
     ) as Record<string, any>;
-    expect(mistral.reasoning_effort).toBe("xhigh");
-    expect(mistral.prompt_mode).toBe("reasoning");
+    expect(mistral.reasoning_effort).toBe("high");
+    expect(mistral.prompt_mode).toBeUndefined();
+
+    // The rest of the Mistral family (small-2603 rejects the reasoning prompt mode outright;
+    // benchmark 2026-07-08) sends a plain body with no reasoning params at all.
+    const mistralPlain = buildLlmRequestBody(
+      { provider: "mistral", transport: "chat-completions" },
+      { model: "mistral-small-latest", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500, reasoningEffort: "xhigh" }
+    ) as Record<string, any>;
+    expect(mistralPlain.reasoning_effort).toBeUndefined();
+    expect(mistralPlain.prompt_mode).toBeUndefined();
   });
 
   it("Anthropic auth headers include the prompt-caching beta; OpenAI-compatible unchanged (item 3)", () => {
@@ -192,7 +237,7 @@ describe("buildLlmRequestBody", () => {
   it("openAiJsonObject keeps OpenAI on json_object but Anthropic still uses the forced tool", () => {
     const oa = buildLlmRequestBody(
       { provider: "openai", transport: "chat-completions" },
-      { model: "gpt-4o-mini", systemPrompt: "s", userContent: "{}", schema: SCHEMA, openAiJsonObject: true, maxOutputTokens: 1500 }
+      { model: "openai/gpt-4o-mini", systemPrompt: "s", userContent: "{}", schema: SCHEMA, openAiJsonObject: true, maxOutputTokens: 1500 }
     ) as Record<string, any>;
     expect(oa.response_format).toEqual({ type: "json_object" });
 
@@ -203,10 +248,20 @@ describe("buildLlmRequestBody", () => {
     expect(an.tool_choice).toEqual({ type: "tool", name: "trade_proposals" });
   });
 
+  it("includes the MiniMax schema in the prompt even when OpenRouter handles structured output", () => {
+    const body = buildLlmRequestBody(
+      { provider: "openrouter", transport: "chat-completions" },
+      { model: "minimax/minimax-m3.1-flash", systemPrompt: "sys", userContent: "{}", schema: SCHEMA, maxOutputTokens: 1500 }
+    ) as Record<string, any>;
+    expect(body.messages[0].content).toContain(JSON.stringify(SCHEMA.schema));
+    expect(body.response_format?.type).toBe("json_schema");
+    expect(body.reasoning_split).toBeUndefined();
+  });
+
   it("no schema → free-text output (no response_format / tools)", () => {
     const oa = buildLlmRequestBody(
       { provider: "openai", transport: "chat-completions" },
-      { model: "gpt-4o-mini", systemPrompt: "s", userContent: "hi", maxOutputTokens: 500 }
+      { model: "openai/gpt-4o-mini", systemPrompt: "s", userContent: "hi", maxOutputTokens: 500 }
     ) as Record<string, any>;
     expect(oa.response_format).toBeUndefined();
 
@@ -263,7 +318,7 @@ describe("buildLlmRequestBody", () => {
   it("Gemini schema translation is a pure function of provider — xAI/Mistral (also OpenAI-compatible) stay strict-unchanged", () => {
     const xai = buildLlmRequestBody(
       { provider: "xai", transport: "chat-completions" },
-      { model: "grok-4.3", systemPrompt: "sys", userContent: "{}", schema: { name: "trade_proposals", schema: BULL_PROPOSAL_SCHEMA }, maxOutputTokens: 1500 }
+      { model: "xai/grok-4.3", systemPrompt: "sys", userContent: "{}", schema: { name: "trade_proposals", schema: BULL_PROPOSAL_SCHEMA }, maxOutputTokens: 1500 }
     ) as Record<string, any>;
     expect(xai.response_format).toEqual({ type: "json_schema", json_schema: { name: "trade_proposals", strict: true, schema: BULL_PROPOSAL_SCHEMA } });
   });
@@ -444,6 +499,58 @@ describe("llmAuthHeaders", () => {
   });
 });
 
+describe("OpenRouter provider routing", () => {
+  it("requires advertised parameters so GPT-5.4 nano does not 400 on the OpenAI endpoint", () => {
+    const body = buildLlmRequestBody(
+      { provider: "openrouter", transport: "chat-completions" },
+      {
+        model: "openai/gpt-5.4-nano",
+        systemPrompt: "sys",
+        userContent: "{}",
+        schema: SCHEMA,
+        maxOutputTokens: 1500,
+        reasoningEffort: "low"
+      }
+    ) as Record<string, any>;
+    expect(body.provider).toEqual({ require_parameters: true, allow_fallbacks: true });
+    expect(body.max_completion_tokens).toBeGreaterThan(0);
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it("does not require_parameters on today's Coolify Green 404 seats (valid public slugs)", () => {
+    // Live 2026-08-18 sha cda485ff: gemini-3.7-flash 86ms 404, mistral-medium-3-5 82ms 404.
+    // 7d also mistral-small-2603.  All three exist on /api/v1/models.
+    const seats: Array<{ model: string; reasoningEffort: "low" | "none" }> = [
+      { model: "google/gemini-3.7-flash", reasoningEffort: "low" },
+      { model: "mistralai/mistral-medium-3-5", reasoningEffort: "none" },
+      { model: "mistralai/mistral-small-2603", reasoningEffort: "none" }
+    ];
+    for (const seat of seats) {
+      const body = buildLlmRequestBody(
+        { provider: "openrouter", transport: "chat-completions" },
+        {
+          model: seat.model,
+          systemPrompt: "sys",
+          userContent: "{}",
+          schema: SCHEMA,
+          maxOutputTokens: 1500,
+          reasoningEffort: seat.reasoningEffort,
+          userId: "coolify-receipt",
+          service: "strategy",
+          feature: "strategy"
+        }
+      ) as Record<string, any>;
+      expect(body.max_completion_tokens).toBeGreaterThan(0);
+      expect(body.response_format).toBeTruthy();
+      expect(body.provider?.require_parameters, seat.model).not.toBe(true);
+      expect(body.provider?.allow_fallbacks).toBe(true);
+      expect(shouldRequireOpenRouterParameters(body), seat.model).toBe(false);
+    }
+
+    expect(shouldRequireOpenRouterParameters({ model: "openai/gpt-5.4-nano" })).toBe(false);
+  });
+});
+
 describe("extractLlmText", () => {
   it("OpenAI chat-completions content", () => {
     expect(extractLlmText({ choices: [{ message: { content: "{\"ok\":true}" } }] })).toBe("{\"ok\":true}");
@@ -451,6 +558,27 @@ describe("extractLlmText", () => {
 
   it("OpenAI responses output_text", () => {
     expect(extractLlmText({ output_text: "hello" })).toBe("hello");
+  });
+
+  it("Mistral high-reasoning chat-completions content is a chunk array, not a string", () => {
+    const payload = {
+      choices: [
+        {
+          message: {
+            content: [
+              { type: "thinking", thinking: [{ type: "text", text: "reasoning trace, not the answer" }] },
+              { type: "text", text: "{\"ok\":true}" }
+            ]
+          }
+        }
+      ]
+    };
+    expect(extractLlmText(payload)).toBe("{\"ok\":true}");
+  });
+
+  it("Mistral chunk array with multiple text chunks concatenates them", () => {
+    const payload = { choices: [{ message: { content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] } }] };
+    expect(extractLlmText(payload)).toBe("ab");
   });
 
   it("Anthropic tool_use input is re-serialized to JSON", () => {

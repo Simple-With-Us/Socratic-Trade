@@ -23,7 +23,9 @@ Four focused improvements to the strategy learning loop:
    weight-nudge math — display/diagnostic only.
 
 4. **Execution-cost model ON by default** — `executionCostConfig()` in `execution-cost.ts` now
-   returns `enabled: true` when no env is set (was `false`). Default base slippage = 1 bps.
+   returns `enabled: true` when no env is set (was `false`). Default base slippage was 1 bps
+   at this checkpoint; current default is the shared `OOS_ROUND_TRIP_COST_BPS` (20). See
+   `docs/rollouts/2026-08-18-paper-live-pooling-cost.md`.
    Explicit opt-out: `PAPER_EXECUTION_COST_MODEL=0|false|off|no`.
 
 ## Why

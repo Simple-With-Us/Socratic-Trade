@@ -30,15 +30,20 @@ still forces keyed data to `shared` for all (operator escape hatch).
 ## Consent record
 - Stored per user in `user_settings` key `data_pool_consent` =
   `{ accepted, acceptedAt, version }` (`src/lib/db.ts`: `get/setDataPoolConsent`, `hasDataPoolConsent`).
-- **Versioned** (`DATA_POOL_CONSENT_VERSION`): a stale acceptance under an older terms version does
+- **Versioned** (`DATA_POOL_CONSENT_VERSION`, currently 2): a stale acceptance under an older terms version does
   NOT count — the user is re-prompted when the terms materially change.
+- **Mandatory share (owner 2026-08-17):** `hasDataPoolConsent` is true only after an explicit
+  accept at the current version.  Unset users (`version === 0`, no `acceptedAt`) do **not**
+  silently share.  Decline does not resolve the first-use gate — accept or the app stays locked.
 - Every change is audited (`data_pool_consent` audit event).
+- The same first-use surface records the versioned legal clickwrap (`legal_notice_consent`).
 
 ## Surfaces
-- `GET /api/consent` → status + `needsConsent`. `POST /api/consent {accepted}` → record the choice.
-- A blocking consent modal on the dashboard gates first use; can be revisited in Settings.
-  The client now fails closed: if consent status cannot be loaded or a consent write fails, the
-  modal/settings control stays locked and the app does not silently proceed as opted in.
+- `GET /api/consent` → status + `needsConsent`. `POST /api/consent {accepted:true}` records accept;
+  `{accepted:false}` returns 400.
+- A blocking first-use gate (console + iOS) requires Accept.  Settings → Data sharing shows the
+  required pool as status, not an off switch.  Fail-closed: if consent status cannot be loaded,
+  the gate stays up.
 
 ## Status / follow-ups
 - **Implemented:** consent record + API + the `pool` tier wired into the OHLC/history path

@@ -10,9 +10,12 @@
  * rendering the page's markup.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConsoleApiError, fetchDashboard, runOnce } from "../app/console/lib/api";
+import { approveProposal, ConsoleApiError, fetchDashboard, runOnce } from "../app/console/lib/api";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 const CLOUDFLARE_524_BODY =
   "<!DOCTYPE html><html><head><title>524: A timeout occurred</title></head><body>cloudflare edge timeout</body></html>";
@@ -91,5 +94,36 @@ describe("console api client — HTML error body mapping (shared response-error 
       expect(apiErr.message).not.toContain("<html");
       expect(apiErr.message.toLowerCase()).toContain("524");
     }
+  });
+
+  it("retries a side-effect-free Busy approval result until the strategy lock clears", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "busy",
+            outcome: "busy",
+            reasons: ["A strategy run is in progress."]
+          }),
+          {
+            status: 409,
+            headers: { "content-type": "application/json" }
+          }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "placed", orderId: "order-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = approveProposal("proposal-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(resultPromise).resolves.toMatchObject({ status: "placed", orderId: "order-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

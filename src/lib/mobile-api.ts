@@ -5,28 +5,31 @@ import {
   audit,
   getDataPoolConsent,
   getDb,
+  getLegalNoticeConsent,
   getPolicy,
   getProposal,
   listConnectedAccounts,
+  needsAppConsent,
   setActiveConnectedAccount,
   setDataPoolConsent,
+  setLegalNoticeConsent,
   setPolicy
 } from "./db";
 import { isIndexUniverse, isValidAppSymbol } from "./index-universes";
 import { normalizeSymbol } from "./money";
 import { notify } from "./notify";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
+import { cancelWorkingOrder } from "./order-cancel";
+import { normalizeExclusivePolicyCaps } from "./policy-normalization";
 import {
-  executeProposal,
-  LiveApprovalConfirmationError,
   rejectProposal,
-  runStrategyOnce,
-  type LiveApprovalConfirmation
+  runStrategyOnce
 } from "./strategy";
 import { addToWatchlist, removeFromWatchlist } from "./watchlist";
 import type {
   HoldingHorizon,
   IndexUniverse,
+  NotificationEvent,
   NotificationEventType,
   RiskRules,
   StrategyAuthority,
@@ -34,6 +37,14 @@ import type {
   TaxSettings,
   TradingPolicy
 } from "./types";
+import { retryProposalRedTeam } from "./retry-red-team";
+import {
+  placementCommandErrorMessage,
+  resolvePlacementOutcome,
+  type PlacementOutcome
+} from "./placement-outcome";
+import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "./strategy-execution";
+import { releaseBrokerPlacementPauseToOwner } from "./broker-health";
 
 export const MOBILE_COMMAND_TYPES = [
   "strategy.run_once",
@@ -43,7 +54,9 @@ export const MOBILE_COMMAND_TYPES = [
   "strategy.liquidating",
   "proposal.approve",
   "proposal.reject",
+  "proposal.retry_red_team",
   "account.activate",
+  "order.cancel",
   "watchlist.add",
   "watchlist.remove",
   "alert.create",
@@ -56,11 +69,161 @@ export const MOBILE_COMMAND_TYPES = [
 export type MobileCommandType = (typeof MOBILE_COMMAND_TYPES)[number];
 export type MobileCommandStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+const IMMEDIATE_PROTECTIVE_COMMAND_TYPES = new Set<MobileCommandType>([
+  "strategy.stop",
+  "strategy.close_only",
+  "strategy.liquidating"
+]);
+
+/**
+ * Commands that must not wait on the global sequential mobile worker.
+ * Protective state changes (stop/close_only/liquidating) already used this path so a long
+ * strategy.run_once cannot block a halt. account.activate is the same class of problem: it is a
+ * pure active-pointer flip with no broker I/O, but was queued behind run_once — so the iOS/PWA
+ * "Use" / account selector spinner hung for the entire in-flight strategy run (owner report:
+ * Roth IRA spinner while Sandbox stayed Active, backlog 2 queued · 1 running).
+ *
+ * order.cancel is here for the timing reason and NOT in IMMEDIATE_PROTECTIVE_COMMAND_TYPES. The
+ * whole point of cancelling a rotting limit order from a phone is that it happens now, not after
+ * a 30-minute strategy.run_once drains — so it bypasses the worker. But protective membership
+ * additionally means "on success, cancel this user's queued run_once / start / approve"
+ * (cancelQueuedRiskIncreasingCommands), which is the right blast radius for a system-wide
+ * containment state and the wrong one for killing ONE order: an operator cancelling a stale AAPL
+ * limit did not ask to also drop a queued approval on an unrelated symbol. Same seat as
+ * account.activate — immediate, not preemptive.
+ */
+const IMMEDIATE_MOBILE_COMMAND_TYPES = new Set<MobileCommandType>([
+  ...IMMEDIATE_PROTECTIVE_COMMAND_TYPES,
+  "account.activate",
+  "order.cancel"
+]);
+
+const RISK_INCREASING_QUEUED_COMMAND_TYPES = [
+  "strategy.run_once",
+  "strategy.start",
+  "proposal.approve"
+] as const satisfies readonly MobileCommandType[];
+
+export function isImmediateProtectiveMobileCommandType(
+  commandType: MobileCommandType
+): boolean {
+  return IMMEDIATE_PROTECTIVE_COMMAND_TYPES.has(commandType);
+}
+
+export function isImmediateMobileCommandType(commandType: MobileCommandType): boolean {
+  return IMMEDIATE_MOBILE_COMMAND_TYPES.has(commandType);
+}
+
 export interface MobileClientInfo {
   platform?: "ios" | "web" | "unknown";
   appVersion?: string;
   buildNumber?: string;
   deviceIdHash?: string;
+}
+
+
+export interface MobileBriefItem {
+  label: string;
+  value: string;
+  tone?: "ok" | "warn" | "danger" | "neutral";
+}
+
+export interface MobileBrief {
+  headline: string;
+  summary: string;
+  items: MobileBriefItem[];
+  nextActions: string[];
+  generatedAt: string;
+}
+
+function formatBriefMoney(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "n/a";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+
+const MARKET_SESSION_WORDS: Record<string, string> = {
+  regular: "Open",
+  pre: "Pre-market",
+  post: "After-hours",
+  closed: "Closed"
+};
+
+function briefMarketLabel(session: { label?: string; isOpen?: boolean } | string | null | undefined): string {
+  if (typeof session === "string") {
+    const known = MARKET_SESSION_WORDS[session];
+    if (known) return known;
+    return session ? session.charAt(0).toUpperCase() + session.slice(1) : "-";
+  }
+  if (!session) return "-";
+  if (session.label) return session.label;
+  if (typeof session.isOpen === "boolean") return session.isOpen ? "Open" : "Closed";
+  return "-";
+}
+
+function countByStatus(rows: Array<{ status?: string }> | undefined, status: string): number {
+  return rows?.filter((row) => row.status === status).length ?? 0;
+}
+
+export function buildMobileBrief(input: {
+  readiness: ReturnType<typeof mobileReadiness>;
+  portfolio?: { totalMarketValue?: unknown; buyingPower?: unknown } | null;
+  pendingProposals?: Array<{ executionMode?: string | null }>;
+  positions?: unknown[];
+  alerts?: Array<{ status?: string }>;
+  recentCommands?: Array<{ status?: string }>;
+  marketSession?: { label?: string; isOpen?: boolean } | string | null;
+  /** The connected account's mode; a pending row with no executionMode stamp runs in it. */
+  currentMode?: "broker/paper" | "broker/live";
+  /** True when the snapshot is degraded and its lists may be defaulted. */
+  partialData?: boolean;
+  generatedAt?: string;
+}): MobileBrief {
+  const pending = input.pendingProposals?.length ?? 0;
+  const livePending = input.pendingProposals?.filter((proposal) => (proposal.executionMode ?? input.currentMode) === "broker/live").length ?? 0;
+  const queued = input.readiness.commandBacklog.queued;
+  const running = input.readiness.commandBacklog.running;
+  const failedRecent = countByStatus(input.recentCommands, "failed");
+  // PriceAlertStatus is "armed" | "triggered";  an armed alert is the live one.
+  const activeAlerts = countByStatus(input.alerts, "armed");
+  const hasAccount = input.readiness.hasAccount;
+  const hasUniverse = input.readiness.hasUniverse;
+  const market = briefMarketLabel(input.marketSession);
+  const partialNote = input.partialData === true ? " Some account data did not load, so counts may be incomplete." : "";
+
+  const blockers: string[] = [];
+  if (!hasAccount) blockers.push("connect an account");
+  if (!hasUniverse) blockers.push("choose a universe/watchlist");
+
+  const headline = blockers.length > 0
+    ? `Setup needed: ${blockers.join(" + ")}`
+    : pending > 0
+      ? `${pending} proposal${pending === 1 ? "" : "s"} waiting${livePending > 0 ? ` (${livePending} live)` : ""}`
+      : queued + running > 0
+        ? `${queued + running} mobile command${queued + running === 1 ? "" : "s"} in flight`
+        : `${input.readiness.systemState.replace(/_/g, " ")} / ${input.readiness.strategyAuthority.replace(/_/g, " ")}`;
+
+  const nextActions = blockers.length > 0
+    ? blockers.map((blocker) => `Finish setup: ${blocker}.`)
+    : pending > 0
+      ? ["Review pending proposals before they age.", livePending > 0 ? "Live approvals may require typed confirmation." : "Paper-account approvals still route through the broker account environment."]
+      : queued + running > 0
+        ? ["Watch command status until the queue drains."]
+        : ["Use Run once for a fresh scan or Start to resume autonomy."];
+
+  return {
+    headline,
+    summary: `${market} market; ${input.positions?.length ?? 0} position${(input.positions?.length ?? 0) === 1 ? "" : "s"}; ${activeAlerts} active alert${activeAlerts === 1 ? "" : "s"}.${partialNote}`,
+    items: [
+      { label: "Equity", value: formatBriefMoney(input.portfolio?.totalMarketValue), tone: "neutral" },
+      { label: "Buying power", value: formatBriefMoney(input.portfolio?.buyingPower), tone: "neutral" },
+      { label: "Pending", value: String(pending), tone: pending > 0 ? "warn" : "ok" },
+      { label: "Queue", value: `${queued} queued / ${running} running`, tone: queued + running > 0 ? "warn" : "ok" },
+      { label: "Recent failures", value: String(failedRecent), tone: failedRecent > 0 ? "danger" : "ok" }
+    ],
+    nextActions,
+    generatedAt: input.generatedAt ?? new Date().toISOString()
+  };
 }
 
 interface MobileCommandRecord {
@@ -114,6 +277,45 @@ const mobileListeners =
 
 export class MobileCommandValidationError extends Error {
   status = 400;
+}
+
+/** Statuses that mean the broker accepted the order. Anything else is not a success. */
+const PLACED_APPROVAL_STATUSES = new Set(["placed", "filled", "paper"]);
+
+/**
+ * Thrown only from mobile `proposal.approve` when `executeProposal` returns a
+ * status outside placed/filled/paper.  The command is failed with the structured
+ * placement result.  `executeProposal` itself still returns busy/blocked and
+ * throws its existing non-placement errors — this class does not change that.
+ */
+export class ProposalNotPlacedError extends Error {
+  readonly result: PlacementOutcome;
+
+  constructor(result: PlacementOutcome) {
+    super(placementCommandErrorMessage(result) ?? "Order was not placed.");
+    this.name = "ProposalNotPlacedError";
+    this.result = result;
+  }
+}
+
+/**
+ * A `policy.patch` refused at execution time because an `expectedCurrent` precondition no longer
+ * matched what is stored. Same shape and same 409 as `OrderCancelPreconditionError`
+ * (src/lib/order-cancel.ts), which refuses a cancel whose `expectedAccountNumber` has moved.
+ */
+export class PolicyPatchPreconditionError extends Error {
+  status = 409;
+  field: string;
+  expected: PolicyPreconditionValue;
+  actual: PolicyPreconditionValue;
+
+  constructor(message: string, detail: { field: string; expected: PolicyPreconditionValue; actual: PolicyPreconditionValue }) {
+    super(message);
+    this.name = "PolicyPatchPreconditionError";
+    this.field = detail.field;
+    this.expected = detail.expected;
+    this.actual = detail.actual;
+  }
 }
 
 export function isMobileCommandType(value: unknown): value is MobileCommandType {
@@ -229,8 +431,8 @@ export function toPublicMobileCommand(command: MobileCommandRecord): PublicMobil
   };
 }
 
-function requireString(payload: Record<string, unknown>, key: string): string {
-  const value = asOptionalString(payload[key]);
+function requireString(payload: Record<string, unknown>, key: string, max = 256): string {
+  const value = asOptionalString(payload[key], max);
   if (!value) throw new MobileCommandValidationError(`${key} is required.`);
   return value;
 }
@@ -257,6 +459,127 @@ function normalizeNotificationEvents(value: unknown): NotificationEventType[] | 
   if (!Array.isArray(value)) return undefined;
   const allowed: NotificationEventType[] = ["fill", "block", "run_failed", "pending_approval", "kill_switch", "price_alert", "proposal_withdrawn"];
   return value.map(String).filter((item): item is NotificationEventType => allowed.includes(item as NotificationEventType));
+}
+
+/** Numeric guardrails `policy.patch` may set, with the server-side bounds each one accepts. */
+const POLICY_PATCH_NUMERIC_FIELDS: Array<[keyof TradingPolicy, number | undefined, number | undefined]> = [
+  ["maxOrderNotional", 1, 100_000],
+  ["maxOrderPctOfNav", 0.01, 100],
+  ["maxDailyNotional", 1, undefined],
+  ["maxHourlyNotional", 1, undefined],
+  ["maxDailyPctOfNav", 0.01, 100],
+  ["maxSymbolExposurePct", 0.01, 100],
+  ["maxSymbolExposureNotional", 1, undefined],
+  ["maxGrossExposurePct", 0, 100],
+  ["maxNetExposurePct", 0, 100],
+  ["maxDailyOrders", 1, 500],
+  ["maxProposalsPerRun", 1, 25],
+  ["proposalExpiryMinutes", 0, undefined],
+  ["proposalRevalidateCadenceHours", 0, undefined],
+  ["runCadenceMinutes", 1, 24 * 60],
+  ["maxShortOrderNotional", 1, 100_000],
+  ["maxShortExposurePct", 0, 100],
+  ["maxPortfolioBeta", 0.01, 10],
+  ["maxEntryDriftPct", 0, 100],
+  ["maxOrderPctOfAdv", 0, 100],
+  ["volPanicVixThreshold", 0, undefined],
+  ["volPanicVvixThreshold", 0, undefined],
+  ["volPanicSkewThreshold", 0, undefined]
+];
+
+/** Boolean switches `policy.patch` may set. */
+const POLICY_PATCH_BOOLEAN_FIELDS = [
+  "permitExtendedHours",
+  "runDuringExtendedHours",
+  "allowExtendedHoursSyntheticStops",
+  "shortSellingEnabled",
+  "brokerStopsForShorts",
+  "exitsReleaseAppStops",
+  "optionsTradingEnabled",
+  "eventContractsEnabled",
+  "kalshiMacroEnabled",
+  "brokerBracketsEnabled",
+  "betaScaledStops",
+  "marketableLimitEntries",
+  "volPanicBrakeEnabled"
+] as const;
+
+type PolicyPreconditionKind = "number" | "boolean" | "text";
+type PolicyPreconditionValue = string | number | boolean | null;
+
+/**
+ * The fields an `expectedCurrent` precondition may name, and how each one compares.
+ *
+ * Deliberately SCALAR-ONLY. A precondition is a promise the server keeps exactly, and "equal"
+ * is only unambiguous for a value a client can read off a snapshot and send back verbatim.
+ * Collections (`includedIndices`, `additionalSymbols`, `blocklist`) and nested objects
+ * (`riskRules`, `taxSettings`, `notificationSettings`) are excluded rather than compared with a
+ * hand-rolled deep-equal whose disagreements would be silent.
+ */
+const POLICY_PRECONDITION_FIELDS: Record<string, PolicyPreconditionKind> = {
+  strategyAuthority: "text",
+  holdingHorizon: "text",
+  ...Object.fromEntries(POLICY_PATCH_NUMERIC_FIELDS.map(([field]) => [field, "number" as const])),
+  ...Object.fromEntries(POLICY_PATCH_BOOLEAN_FIELDS.map((field) => [field, "boolean" as const]))
+};
+
+/**
+ * Optional stale-view guard for `policy.patch`, the exact counterpart of `order.cancel`'s
+ * `expectedAccountNumber` (src/lib/order-cancel.ts): the values the CALLER believed were current
+ * for the fields it is patching. When supplied they must equal what is stored at EXECUTION time,
+ * otherwise the patch is refused outright rather than silently applied against a policy that
+ * moved underneath it.
+ *
+ * This is what makes the phone's "these controls only tighten" footer true END TO END.
+ * `policy.patch` is a QUEUED command (it is not in IMMEDIATE_MOBILE_COMMAND_TYPES), so minutes
+ * can pass behind a draining `strategy.run_once` between the tap and the write — and
+ * `applyPolicyPatch` merges verbatim in either direction. A tightening tapped against a $10,000
+ * cap that the console has since lowered to $2,000 would land as a LOOSENING. The phone's
+ * tap-time re-check closes every window the phone can see; this closes the one it cannot.
+ *
+ * OPTIONAL by construction: a patch that carries no `expectedCurrent` behaves exactly as it
+ * always has. The web console and every existing caller are unaffected.
+ */
+function normalizePolicyPreconditions(raw: unknown): Record<string, PolicyPreconditionValue> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  // A malformed precondition is refused, never coerced away: `asRecord` would quietly turn a
+  // string or array into `{}`, and dropping an assertion the caller believes is being enforced
+  // is the one failure mode this guard exists to prevent.
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new MobileCommandValidationError("expectedCurrent must be an object of policy fields.");
+  }
+  const expected: Record<string, PolicyPreconditionValue> = {};
+  for (const [field, value] of Object.entries(raw as Record<string, unknown>)) {
+    const kind = POLICY_PRECONDITION_FIELDS[field];
+    if (!kind) {
+      throw new MobileCommandValidationError(`expectedCurrent.${field} is not a field policy.patch can guard.`);
+    }
+    // Explicit null means "I believed this was unset" — a real, checkable expectation.
+    if (value === null || value === undefined) {
+      expected[field] = null;
+      continue;
+    }
+    switch (kind) {
+      case "number":
+        expected[field] = finiteNumber(value, `expectedCurrent.${field}`);
+        break;
+      case "boolean":
+        if (typeof value !== "boolean") {
+          throw new MobileCommandValidationError(`expectedCurrent.${field} must be boolean.`);
+        }
+        expected[field] = value;
+        break;
+      case "text": {
+        const text = asOptionalString(value, 64);
+        if (!text) throw new MobileCommandValidationError(`expectedCurrent.${field} must be a string.`);
+        expected[field] = text;
+        break;
+      }
+    }
+  }
+  // An empty object asserts nothing; keep the payload in its legacy shape rather than storing a
+  // guard that would always pass.
+  return Object.keys(expected).length > 0 ? expected : undefined;
 }
 
 function normalizePolicyPatch(raw: unknown): Partial<TradingPolicy> {
@@ -287,46 +610,13 @@ function normalizePolicyPatch(raw: unknown): Partial<TradingPolicy> {
   if (input.additionalSymbols !== undefined) patch.additionalSymbols = normalizeSymbols(input.additionalSymbols, "additionalSymbols");
   if (input.blocklist !== undefined) patch.blocklist = normalizeSymbols(input.blocklist, "blocklist");
 
-  const numericFields: Array<[keyof TradingPolicy, number | undefined, number | undefined]> = [
-    ["maxOrderNotional", 1, 100_000],
-    ["maxOrderPctOfNav", 0.01, 100],
-    ["maxDailyNotional", 1, undefined],
-    ["maxHourlyNotional", 1, undefined],
-    ["maxDailyPctOfNav", 0.01, 100],
-    ["maxSymbolExposurePct", 0.01, 100],
-    ["maxSymbolExposureNotional", 1, undefined],
-    ["maxGrossExposurePct", 0, 100],
-    ["maxNetExposurePct", 0, 100],
-    ["maxDailyOrders", 1, 500],
-    ["maxProposalsPerRun", 1, 25],
-    ["proposalExpiryMinutes", 0, undefined],
-    ["proposalRevalidateCadenceHours", 0, undefined],
-    ["runCadenceMinutes", 1, 24 * 60],
-    ["maxShortOrderNotional", 1, 100_000],
-    ["maxShortExposurePct", 0, 100],
-    ["maxPortfolioBeta", 0.01, 10],
-    ["maxEntryDriftPct", 0, 100],
-    ["maxOrderPctOfAdv", 0, 100],
-    ["volPanicVixThreshold", 0, undefined],
-    ["volPanicVvixThreshold", 0, undefined],
-    ["volPanicSkewThreshold", 0, undefined]
-  ];
-  for (const [field, min, max] of numericFields) {
+  for (const [field, min, max] of POLICY_PATCH_NUMERIC_FIELDS) {
     if (input[field] !== undefined) {
       (patch as Record<string, unknown>)[field] = finiteNumber(input[field], String(field), { min, max });
     }
   }
 
-  for (const field of [
-    "permitExtendedHours",
-    "runDuringExtendedHours",
-    "allowExtendedHoursSyntheticStops",
-    "shortSellingEnabled",
-    "brokerBracketsEnabled",
-    "betaScaledStops",
-    "marketableLimitEntries",
-    "volPanicBrakeEnabled"
-  ] as const) {
+  for (const field of POLICY_PATCH_BOOLEAN_FIELDS) {
     if (input[field] !== undefined) {
       if (typeof input[field] !== "boolean") throw new MobileCommandValidationError(`${field} must be boolean.`);
       patch[field] = input[field] as never;
@@ -400,9 +690,18 @@ function normalizeCommandPayload(commandType: MobileCommandType, rawPayload: unk
       return Object.keys(liveConfirmation).length > 0 ? { proposalId, liveConfirmation } : { proposalId };
     }
     case "proposal.reject":
+    case "proposal.retry_red_team":
       return { proposalId: requireString(payload, "proposalId") };
     case "account.activate":
       return { accountId: requireString(payload, "accountId") };
+    case "order.cancel": {
+      const orderId = requireString(payload, "orderId", 128);
+      // Optional, and verified server-side when present: the account the phone BELIEVED it was
+      // looking at. A client that sends it gets a refusal instead of a cancel landing on whatever
+      // account happens to be selected by the time the command runs.
+      const accountNumber = asOptionalString(payload.accountNumber, 64);
+      return accountNumber ? { orderId, accountNumber } : { orderId };
+    }
     case "watchlist.add":
     case "watchlist.remove": {
       const symbol = normalizeSymbol(requireString(payload, "symbol"));
@@ -418,11 +717,23 @@ function normalizeCommandPayload(commandType: MobileCommandType, rawPayload: unk
     }
     case "alert.delete":
       return { alertId: requireString(payload, "alertId") };
-    case "policy.patch":
-      return { patch: normalizePolicyPatch(payload.patch ?? payload) };
+    case "policy.patch": {
+      const patch = normalizePolicyPatch(payload.patch ?? payload);
+      // Optional, and verified server-side when present: the values the phone BELIEVED were
+      // current for the fields it is changing. A client that sends them gets a refusal instead
+      // of a patch landing on a policy that moved while the command sat in the queue.
+      const expectedCurrent = normalizePolicyPreconditions(payload.expectedCurrent);
+      return expectedCurrent ? { patch, expectedCurrent } : { patch };
+    }
     case "consent.set":
-      if (typeof payload.accepted !== "boolean") throw new MobileCommandValidationError("accepted must be boolean.");
-      return { accepted: payload.accepted };
+      if (payload.accepted !== true) {
+        throw new MobileCommandValidationError("Accepting the current terms and shared data pool is required.");
+      }
+      return { accepted: true };
+    default: {
+      const _exhaustive: never = commandType;
+      throw new MobileCommandValidationError(`Unsupported command: ${String(_exhaustive)}`);
+    }
   }
 }
 
@@ -538,11 +849,47 @@ function claimNextQueuedCommand(): MobileCommandRecord | undefined {
 
 function finishCommand(command: MobileCommandRecord, status: "succeeded" | "failed", result: unknown, error?: string): MobileCommandRecord {
   const nowIso = new Date().toISOString();
-  getDb()
+  const database = getDb();
+  const args = [status, result === undefined ? null : JSON.stringify(result), error ?? null, nowIso, nowIso, command.id, command.userId] as const;
+  // The `AND status = 'running'` guard exists to DETECT (not to lose) the race with
+  // markStaleRunningMobileCommands: a command that outlived the stale threshold while still
+  // genuinely executing gets stamped 'failed'/"outcome unknown" by the sweep, and then this worker
+  // reports in with the real outcome. Without the guard the overwrite is silent, and the audit
+  // trail shows an unexplained mobile_command_crashed -> mobile_command_succeeded pair for the
+  // same commandId.
+  const info = database
     .prepare(
-      "UPDATE mobile_commands SET status = ?, result = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+      "UPDATE mobile_commands SET status = ?, result = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = 'running'"
     )
-    .run(status, result === undefined ? null : JSON.stringify(result), error ?? null, nowIso, nowIso, command.id, command.userId);
+    .run(...args);
+  if (info.changes === 0) {
+    const superseded = getMobileCommandRecord(command.id, command.userId);
+    // The row can also be gone entirely (account deletion swept mobile_commands mid-flight). There
+    // is nothing left to correct or emit; hand the caller the in-memory outcome so the normal
+    // return contract holds.
+    if (!superseded) return { ...command, status, result, error, finishedAt: nowIso, updatedAt: nowIso };
+    // The worker's outcome supersedes the sweep's guess: the sweep only ever knew "this looked
+    // dead", whereas the worker knows whether the broker call actually happened. Leaving the
+    // operator with "outcome unknown" for a command we can fully account for would be the less
+    // honest record. Receipt the correction first so the crashed->terminal sequence is explained.
+    audit(
+      "mobile_command_late_completion",
+      {
+        commandId: command.id,
+        commandType: command.commandType,
+        supersededStatus: superseded.status,
+        supersededError: superseded.error,
+        status,
+        error
+      },
+      command.userId
+    );
+    database
+      .prepare(
+        "UPDATE mobile_commands SET status = ?, result = ?, error = ?, finished_at = ?, updated_at = ? WHERE id = ? AND user_id = ?"
+      )
+      .run(...args);
+  }
   const updated = getMobileCommandRecord(command.id, command.userId)!;
   audit(
     status === "succeeded" ? "mobile_command_succeeded" : "mobile_command_failed",
@@ -558,12 +905,87 @@ function finishCommand(command: MobileCommandRecord, status: "succeeded" | "fail
   return updated;
 }
 
+function cancelQueuedRiskIncreasingCommands(
+  userId: string,
+  exceptCommandId: string,
+  protectiveCommandType: MobileCommandType
+): PublicMobileCommand[] {
+  const database = getDb();
+  const nowIso = new Date().toISOString();
+  const placeholders = RISK_INCREASING_QUEUED_COMMAND_TYPES.map(() => "?").join(",");
+  const cancelled = database.transaction(() => {
+    const rows = database.prepare(`
+      SELECT id
+        , command_type
+        , payload
+      FROM mobile_commands
+      WHERE user_id = ?
+        AND id <> ?
+        AND status = 'queued'
+        AND command_type IN (${placeholders})
+      ORDER BY queued_at ASC
+    `).all(userId, exceptCommandId, ...RISK_INCREASING_QUEUED_COMMAND_TYPES) as Array<{
+      id: string;
+      command_type: MobileCommandType;
+      payload: string;
+    }>;
+    const update = database.prepare(`
+      UPDATE mobile_commands
+      SET status = 'cancelled', error = ?, finished_at = ?, updated_at = ?
+      WHERE id = ? AND user_id = ? AND status = 'queued'
+    `);
+    const records: MobileCommandRecord[] = [];
+    for (const row of rows) {
+      // A queued approval may be an exit: preserve sell/cover approvals only while Close-only
+      // or Liquidating is being applied, so those containment modes can still reduce risk. A
+      // full Stop must cancel every queued approval, including exits, because it promises no
+      // additional broker submission. An approval whose proposal has disappeared is stale work.
+      if (protectiveCommandType !== "strategy.stop" && row.command_type === "proposal.approve") {
+        let proposalId: string | undefined;
+        try {
+          const payload = JSON.parse(row.payload) as Record<string, unknown>;
+          proposalId = typeof payload.proposalId === "string" ? payload.proposalId : undefined;
+        } catch {
+          // Malformed queued payloads cannot execute a valid approval, so they remain cancellable.
+        }
+        const proposal = proposalId ? getProposal(proposalId, userId) : undefined;
+        if (proposal && (proposal.proposal.side === "sell" || proposal.proposal.side === "cover")) {
+          continue;
+        }
+      }
+      const reason = `Cancelled because ${protectiveCommandType} took immediate effect.`;
+      const result = update.run(reason, nowIso, nowIso, row.id, userId);
+      if (result.changes !== 1) continue;
+      const updated = getMobileCommandRecord(row.id, userId);
+      if (updated) records.push(updated);
+    }
+    return records;
+  })() as MobileCommandRecord[];
+
+  for (const command of cancelled) {
+    audit(
+      "mobile_command_cancelled_by_protective_state",
+      {
+        commandId: command.id,
+        commandType: command.commandType,
+        protectiveCommandType,
+        error: command.error
+      },
+      userId
+    );
+    emitMobileCommandEvent(command);
+  }
+  return cancelled.map(toPublicMobileCommand);
+}
+
 function summarizeResult(result: unknown): unknown {
   if (!result || typeof result !== "object") return result;
   const obj = result as Record<string, unknown>;
   return {
     ok: obj.ok,
     status: obj.status,
+    outcome: obj.outcome,
+    reasons: obj.reasons,
     runId: obj.runId,
     proposalId: obj.proposalId,
     orderId: obj.orderId,
@@ -574,7 +996,10 @@ function summarizeResult(result: unknown): unknown {
 
 async function setStrategyState(userId: string, state: SystemState): Promise<{ ok: true; systemState: SystemState }> {
   const policy = getPolicy(userId);
-  if (state !== "halted") {
+  // Active is the only state that can authorize new strategy work. The three containment states
+  // must remain available even when a user has an incomplete universe: they are the path to stop
+  // future submissions or allow only exits for an already-held account.
+  if (state === "active") {
     if (!policy.accountNumber) throw new Error("Select an account before changing strategy state.");
     if (policy.includedIndices.length === 0 && policy.additionalSymbols.length === 0) {
       throw new Error("Select at least one base index or additional watchlist symbol before changing strategy state.");
@@ -588,12 +1013,54 @@ async function setStrategyState(userId: string, state: SystemState): Promise<{ o
   const next = { ...policy, systemState: state } as TradingPolicy & { enabled?: boolean };
   if (state === "halted") next.enabled = false;
   setPolicy(next, userId);
+  if (state === "halted") {
+    // Owner Stop on top of a broker-health auto-pause: the halt is now the owner's, so a later
+    // healthy probe must never auto-resume it (board 687a5fb4).
+    releaseBrokerPlacementPauseToOwner({
+      userId,
+      connectedAccountId: policy.connectedAccountId,
+      accountNumber: policy.accountNumber,
+      source: "mobile/strategy.stop"
+    });
+  }
   audit("mobile_strategy_state", { from: policy.systemState, to: state }, userId);
   return { ok: true, systemState: state };
 }
 
-function applyPolicyPatch(userId: string, patch: Partial<TradingPolicy>): { ok: true; policy: TradingPolicy } {
+/** Stored value as a precondition compares it: absent and null are the same "not set". */
+function policyPreconditionActual(value: unknown): PolicyPreconditionValue {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") return value;
+  // Not a scalar, so it cannot equal any accepted expectation. Reported as-is in the receipt.
+  return String(value);
+}
+
+function describePreconditionValue(value: PolicyPreconditionValue): string {
+  return value === null ? "not set" : String(value);
+}
+
+function applyPolicyPatch(
+  userId: string,
+  patch: Partial<TradingPolicy>,
+  expectedCurrent?: Record<string, PolicyPreconditionValue>
+): { ok: true; policy: TradingPolicy } {
   const current = getPolicy(userId);
+  // Fail closed BEFORE anything is merged: a mismatch means the policy moved between the tap and
+  // this write, so the whole patch is refused. Never partially applied, never silently applied.
+  for (const [field, expected] of Object.entries(expectedCurrent ?? {})) {
+    const actual = policyPreconditionActual((current as unknown as Record<string, unknown>)[field]);
+    if (actual === expected) continue;
+    audit(
+      "mobile_policy_patch_precondition_mismatch",
+      { field, expected, actual, fields: Object.keys(patch) },
+      userId,
+      current.connectedAccountId
+    );
+    throw new PolicyPatchPreconditionError(
+      `${field} changed since this was sent — it is ${describePreconditionValue(actual)} now, not the ${describePreconditionValue(expected)} this change was based on.  Nothing was changed.`,
+      { field, expected, actual }
+    );
+  }
   const next: TradingPolicy = {
     ...current,
     ...patch,
@@ -612,8 +1079,13 @@ function applyPolicyPatch(userId: string, patch: Partial<TradingPolicy>): { ok: 
       throw new Error("Select at least one base index or additional watchlist symbol before enabling autonomy.");
     }
   }
+  normalizeExclusivePolicyCaps(next, patch);
   setPolicy(next, userId);
-  audit("mobile_policy_patch", { fields: Object.keys(patch) }, userId);
+  audit(
+    "mobile_policy_patch",
+    { fields: Object.keys(patch), ...(expectedCurrent ? { guardedFields: Object.keys(expectedCurrent) } : {}) },
+    userId
+  );
   return { ok: true, policy: getPolicy(userId) };
 }
 
@@ -633,21 +1105,53 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
       return setStrategyState(command.userId, "close_only");
     case "strategy.liquidating":
       return setStrategyState(command.userId, "liquidating");
-    case "proposal.approve":
-      return executeProposal(String(payload.proposalId), command.userId, {
+    case "proposal.approve": {
+      const result = await executeProposal(String(payload.proposalId), command.userId, {
         liveConfirmation: payload.liveConfirmation as LiveApprovalConfirmation | undefined
       });
+      const placement = resolvePlacementOutcome(result);
+      if (!PLACED_APPROVAL_STATUSES.has(result.status)) {
+        throw new ProposalNotPlacedError(placement);
+      }
+      return placement;
+    }
     case "proposal.reject": {
       const proposalId = String(payload.proposalId);
       if (!getProposal(proposalId, command.userId)) throw new Error("Proposal not found.");
       rejectProposal(proposalId, command.userId);
       return { ok: true, status: "rejected", proposalId };
     }
+    case "proposal.retry_red_team":
+      return retryProposalRedTeam(String(payload.proposalId), command.userId);
     case "account.activate": {
       const accountId = String(payload.accountId);
       setActiveConnectedAccount(accountId, command.userId);
       audit("mobile_account_activate", { accountId }, command.userId);
       return { ok: true, activeAccount: listConnectedAccounts(command.userId).find((account) => account.id === accountId) };
+    }
+    case "order.cancel": {
+      // Same implementation the console's POST /api/orders/cancel runs — lease-interleave receipt,
+      // time-bounded dust advisory, audit trail, dashboard event and all. `requireWorkingOrder`
+      // asks it to resolve the order inside THIS user's selected account first, because a mobile
+      // failure is read as text on a phone minutes later and has to say something true; account
+      // isolation itself does not rest on that read (the cancel is always scoped to the requesting
+      // user's own selected account and their own broker credentials).
+      const orderId = String(payload.orderId);
+      const expectedAccountNumber = typeof payload.accountNumber === "string" ? payload.accountNumber : undefined;
+      const result = await cancelWorkingOrder({
+        userId: command.userId,
+        orderId,
+        expectedAccountNumber,
+        requireWorkingOrder: true,
+        source: "mobile"
+      });
+      return {
+        ok: true,
+        status: result.state,
+        orderId: result.orderId ?? orderId,
+        ...(result.symbol ? { symbol: result.symbol } : {}),
+        ...(result.dustWarning ? { dustWarning: result.dustWarning } : {})
+      };
     }
     case "watchlist.add": {
       const item = addToWatchlist(command.userId, String(payload.symbol));
@@ -672,9 +1176,16 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
       return { ok: true, alertId, removed: removeAlert(command.userId, alertId) };
     }
     case "policy.patch":
-      return applyPolicyPatch(command.userId, payload.patch as Partial<TradingPolicy>);
-    case "consent.set":
-      return { ok: true, consent: setDataPoolConsent(command.userId, payload.accepted === true) };
+      return applyPolicyPatch(
+        command.userId,
+        payload.patch as Partial<TradingPolicy>,
+        payload.expectedCurrent as Record<string, PolicyPreconditionValue> | undefined
+      );
+    case "consent.set": {
+      const legal = setLegalNoticeConsent(command.userId, true);
+      const dataPool = setDataPoolConsent(command.userId, true);
+      return { ok: true, legal, consent: dataPool };
+    }
     case "notification.test":
       return {
         ok: true,
@@ -684,10 +1195,28 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
           kind: "test"
         })
       };
+    default: {
+      const _exhaustive: never = command.commandType;
+      throw new Error(`Unsupported command: ${String(_exhaustive)}`);
+    }
   }
 }
 
 function errorPayload(error: unknown): { message: string; result?: unknown } {
+  if (error instanceof ProposalNotPlacedError) {
+    return { message: error.message, result: error.result };
+  }
+  if (error instanceof PolicyPatchPreconditionError) {
+    return {
+      message: error.message,
+      result: {
+        error: "policy_precondition_mismatch",
+        field: error.field,
+        expected: error.expected,
+        actual: error.actual
+      }
+    };
+  }
   if (error instanceof LiveApprovalConfirmationError) {
     return {
       message: error.message,
@@ -705,6 +1234,56 @@ export async function executeMobileCommand(command: MobileCommandRecord): Promis
     const payload = errorPayload(error);
     return toPublicMobileCommand(finishCommand(command, "failed", payload.result, payload.message));
   }
+}
+
+/**
+ * Runs an immediate mobile command outside the global sequential worker so it cannot stall behind
+ * a long strategy.run_once (or any other queued command). Used for:
+ * - Protective strategy state (stop / close_only / liquidating): Stop must remain authoritative
+ *   while a run awaits providers. Cannot revoke a broker request that already crossed the
+ *   submission boundary; placement re-reads durable state at its final pre-submit boundary.
+ * - account.activate: pure active-pointer flip; must complete in the same request so mobile
+ *   clients do not leave the Use / selector control spinning for the entire run_once duration.
+ * - order.cancel: killing a rotting limit order is worth nothing if it lands after the run that
+ *   was already ahead of it in the queue. Immediate, but NOT protective — it does not cancel the
+ *   user's other queued work (see IMMEDIATE_MOBILE_COMMAND_TYPES).
+ */
+export async function executeMobileCommandImmediately(
+  commandId: string,
+  userId: string
+): Promise<PublicMobileCommand> {
+  const current = getMobileCommandRecord(commandId, userId);
+  if (!current) throw new MobileCommandValidationError("Command not found.");
+  if (!isImmediateMobileCommandType(current.commandType)) {
+    throw new MobileCommandValidationError("Command is not an immediate action.");
+  }
+  if (current.status !== "queued") return toPublicMobileCommand(current);
+
+  const nowIso = new Date().toISOString();
+  const claimed = getDb().prepare(`
+    UPDATE mobile_commands
+    SET status = 'running', started_at = ?, updated_at = ?
+    WHERE id = ? AND user_id = ? AND status = 'queued'
+  `).run(nowIso, nowIso, commandId, userId);
+  if (claimed.changes !== 1) {
+    return getMobileCommand(commandId, userId) ?? toPublicMobileCommand(current);
+  }
+
+  const running = getMobileCommandRecord(commandId, userId)!;
+  emitMobileCommandEvent(running);
+  const completed = await executeMobileCommand(running);
+  if (completed.status === "succeeded" && isImmediateProtectiveMobileCommandType(running.commandType)) {
+    cancelQueuedRiskIncreasingCommands(userId, commandId, running.commandType);
+  }
+  return completed;
+}
+
+/** @deprecated Prefer executeMobileCommandImmediately — kept for existing test import sites. */
+export async function executeProtectiveMobileCommandImmediately(
+  commandId: string,
+  userId: string
+): Promise<PublicMobileCommand> {
+  return executeMobileCommandImmediately(commandId, userId);
 }
 
 export async function processPendingMobileCommands(options: { limit?: number } = {}): Promise<{ processed: number }> {
@@ -726,37 +1305,178 @@ export async function processPendingMobileCommands(options: { limit?: number } =
   }
 }
 
-export function mobileCommandBacklog(): { queued: number; running: number } {
+/** Scoped to the requesting user (api-contract-web-ios:api-10) — this backlog gauge renders on
+ *  the iOS Home/Activity screens as if it were "your commands"; unscoped, it silently counted
+ *  every user's queued/running mobile commands, which would misattribute another user's activity
+ *  as the signed-in user's own. */
+export function mobileCommandBacklog(userId: string): { queued: number; running: number } {
   const rows = getDb()
-    .prepare("SELECT status, COUNT(*) AS n FROM mobile_commands WHERE status IN ('queued','running') GROUP BY status")
-    .all() as Array<{ status: MobileCommandStatus; n: number }>;
+    .prepare("SELECT status, COUNT(*) AS n FROM mobile_commands WHERE user_id = ? AND status IN ('queued','running') GROUP BY status")
+    .all(userId) as Array<{ status: MobileCommandStatus; n: number }>;
   return {
     queued: rows.find((row) => row.status === "queued")?.n ?? 0,
     running: rows.find((row) => row.status === "running")?.n ?? 0
   };
 }
 
+// Mirrors STALE_RUN_THRESHOLD_MS in db-execution.ts, and for the same reason: the longest command
+// here (strategy.run_once) wraps the very strategy run that threshold was raised to 30 min to
+// accommodate, so anything tighter would re-create the 2026-07-08 incident on the mobile path.
+// Consequence worth stating plainly: after a crash, a stranded command — and therefore the
+// account-deletion blocker it feeds — clears in up to 30 minutes, not instantly.
+const STALE_MOBILE_COMMAND_THRESHOLD_MS = 30 * 60_000;
+
+// This string is read by a human on their phone, and it must not lie. The sweep knows only that
+// the worker stopped reporting — it does NOT know whether the command ran. Saying "failed" here
+// would tell an operator whose proposal.approve had already crossed the broker submission boundary
+// that nothing happened, and the natural next action is a duplicate order. State the uncertainty
+// and point at verification instead.
+const STALE_MOBILE_COMMAND_ERROR =
+  "Interrupted by a process restart while running. The outcome is UNKNOWN - this command may have completed, partly completed, or never started. Check your orders and settings before retrying; do not assume it did nothing.";
+
+/**
+ * Liveness evidence for a command that is already past the time cutoff. Returning true means "slow,
+ * not dead" — the sweep must leave it alone. Only the two command types that can legitimately run
+ * long have evidence to check; every other type is a single DB write or one bounded HTTP call, so
+ * 30 minutes past `started_at` can only mean the worker process died.
+ */
+function staleMobileCommandStillAlive(
+  db: ReturnType<typeof getDb>,
+  row: { user_id: string; command_type: MobileCommandType; started_at: string; payload: string },
+  cutoffIso: string
+): boolean {
+  if (row.command_type === "strategy.run_once") {
+    // The command wraps runStrategyOnce, which inserts a strategy_runs row immediately. A run this
+    // user started at/after the command claim and that is STILL 'running' is the command's own body
+    // still executing. This deliberately reads the run's live status rather than its own clock: the
+    // scheduler sweeps strategy_runs on the same tick with the same threshold and the same
+    // audit-activity grace, so a run that is genuinely alive keeps its 'running' status and hands
+    // that grace straight through to the command here. A concurrent unrelated run for the same user
+    // would also grant grace — that errs toward not declaring a live command dead, which is the
+    // side to err on.
+    const liveRun = db
+      .prepare("SELECT 1 FROM strategy_runs WHERE user_id = ? AND status = 'running' AND started_at >= ? LIMIT 1")
+      .get(row.user_id, row.started_at);
+    if (liveRun) return true;
+  }
+  if (row.command_type === "proposal.approve") {
+    // The money-path case. executeProposal receipts every step of an approval under the proposal's
+    // id (order_placement_uncertain, order_rejected_by_broker, proposal_approved, ...), so an
+    // approval still emitting audit rows inside the lookback window is demonstrably mid-flight —
+    // the same evidence markStaleRunningRuns uses via '$.runId'. Declaring a live approval dead is
+    // the single worst outcome this sweep can produce: the operator reads "outcome unknown" while
+    // the broker submission is still in progress, and the natural response is a duplicate order.
+    let proposalId: string | undefined;
+    try {
+      const payload = JSON.parse(row.payload) as Record<string, unknown>;
+      proposalId = typeof payload.proposalId === "string" ? payload.proposalId : undefined;
+    } catch {
+      // A malformed payload can't have executed an approval; fall through with no grace.
+    }
+    if (proposalId) {
+      const recentActivity = db
+        .prepare("SELECT 1 FROM audit_events WHERE json_extract(payload, '$.proposalId') = ? AND created_at >= ? LIMIT 1")
+        .get(proposalId, cutoffIso);
+      if (recentActivity) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Sweep mobile_commands rows left in status='running' after a process crash / kill / unhandled
+ * rejection (claimNextQueuedCommand set 'running', and finishCommand never ran). Without this,
+ * such a row is stuck forever: nothing in the codebase selects or updates 'running' commands, so
+ * account deletion stays blocked on `activeMobileCommands` permanently, the PWA spins forever, and
+ * `mobileCommandBacklog().running` never returns to zero.
+ *
+ * Rows are marked FAILED, never requeued. A stranded proposal.approve may already have crossed the
+ * broker submission boundary, so re-executing it could duplicate a real order — the correct repair
+ * is to record that the outcome is unknown and let the operator decide, not to retry.
+ *
+ * Returns the number of repaired rows for logging/auditing.
+ */
+export function markStaleRunningMobileCommands(now: number = Date.now()): number {
+  const db = getDb();
+  const cutoffIso = new Date(now - STALE_MOBILE_COMMAND_THRESHOLD_MS).toISOString();
+  const stale = db
+    .prepare(
+      `SELECT id, user_id, command_type, payload, started_at FROM mobile_commands
+       WHERE status = 'running' AND started_at IS NOT NULL AND started_at < ?`
+    )
+    .all(cutoffIso) as Array<{
+      id: string;
+      user_id: string;
+      command_type: MobileCommandType;
+      payload: string;
+      started_at: string;
+    }>;
+  let count = 0;
+  for (const row of stale) {
+    if (staleMobileCommandStillAlive(db, row, cutoffIso)) continue;
+
+    const nowIso = new Date(now).toISOString();
+    const res = db
+      .prepare(
+        "UPDATE mobile_commands SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ? AND status = 'running'"
+      )
+      .run(STALE_MOBILE_COMMAND_ERROR, nowIso, nowIso, row.id);
+    // Only receipt+count rows this sweep actually transitioned, so a concurrent scheduler instance
+    // that repaired the row between our SELECT and UPDATE doesn't produce a duplicate receipt.
+    if (res.changes === 0) continue;
+    audit(
+      "mobile_command_crashed",
+      {
+        commandId: row.id,
+        commandType: row.command_type,
+        startedAt: row.started_at,
+        reason: "marked failed by stale mobile-command sweep; outcome unknown"
+      },
+      row.user_id
+    );
+    const updated = getMobileCommandRecord(row.id, row.user_id);
+    if (updated) emitMobileCommandEvent(updated);
+    count++;
+  }
+  return count;
+}
+
+/** Public iOS Activity rows. Payload and webhook URL stay off the wire. */
+export function serializeMobileNotifications(events: NotificationEvent[]) {
+  return events.map((event) => ({
+    id: event.id,
+    type: event.type,
+    title: event.title,
+    createdAt: event.createdAt,
+    status: event.status,
+    acknowledgedAt: event.acknowledgedAt ?? null,
+    connectedAccountId: event.connectedAccountId ?? null
+  }));
+}
+
 export function mobileControlCatalog() {
   return {
-    version: 1,
+    version: 2,
     auth: {
       mode: "server-session",
       supported: ["Cloudflare Access", "Auth.js session"],
-      phoneStores: "session token only; provider and broker secrets stay server-side"
+      phoneStores: "server session cookie only; provider and broker secrets stay server-side"
     },
     realtime: {
       sse: "/api/mobile/events",
       eventTypes: ["mobile.command", "dashboard.run-complete", "dashboard.proposal", "dashboard.order", "dashboard.market-data", "dashboard.dirty"]
     },
     accountDeletion: {
-      request: "POST /api/mobile/account-deletion/request",
+      request: "GET /api/mobile/account-deletion/request (read-only preview)",
       confirm: "POST /api/mobile/account-deletion/confirm",
       requiredText: "DELETE MY ACCOUNT",
-      note: "Deletes app-side data and server-stored secrets for the signed-in OAuth identity, then the client should sign out."
+      note: "Previewing is read-only. Final confirmation prepares and deletes app-side data and server-stored secrets for the signed-in OAuth identity, then the client should sign out."
     },
     commands: MOBILE_COMMAND_TYPES.map((type) => ({ type }))
   };
 }
+
+import { userHasAnyLlmCredential } from "./db-api-keys";
 
 export function mobileReadiness(userId: string) {
   const policy = getPolicy(userId);
@@ -765,11 +1485,14 @@ export function mobileReadiness(userId: string) {
   return {
     hasAccount: Boolean(policy.accountNumber),
     hasUniverse: policy.includedIndices.length > 0 || policy.additionalSymbols.length > 0,
+    hasLlmKey: userHasAnyLlmCredential(userId),
     systemState: policy.systemState,
     strategyAuthority: policy.strategyAuthority,
     selectedAccountNumber: policy.accountNumber ?? null,
     activeConnectedAccount: connectedAccounts.find((account) => account.isActive) ?? null,
     dataPoolConsent: consent,
-    commandBacklog: mobileCommandBacklog()
+    legalNotice: getLegalNoticeConsent(userId),
+    needsAppConsent: needsAppConsent(userId),
+    commandBacklog: mobileCommandBacklog(userId)
   };
 }

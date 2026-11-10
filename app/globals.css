@@ -1,9 +1,11 @@
 @import "tailwindcss";
 
-/* Keep Tailwind's class-candidate scanner OUT of docs/: rollout notes quote utility
-   literals (e.g. arbitrary-value shadow classes), and Tailwind v4 treating those
-   markdown snippets as candidates makes Turbopack `next dev` 500 on every route. */
+/* Keep Tailwind's class-candidate scanner OUT of docs/ and .worktrees/:
+   rollout notes quote utility literals (e.g. arbitrary-value shadow classes with
+   literal `*`), and Tailwind v4 treating those markdown snippets as candidates
+   generates invalid CSS (e.g. `var(--shadow*)`) that breaks the build. */
 @source not "../docs";
+@source not "../.worktrees";
 
 /* Class-based dark mode: utilities prefixed `dark:` apply under a `.dark` ancestor. */
 @custom-variant dark (&:where(.dark, .dark *));
@@ -51,33 +53,35 @@
   --ring: color-mix(in oklab, var(--accent) 45%, transparent);
   --shadow: 0 12px 32px -8px rgba(15, 23, 34, 0.18), inset 0 1px 1px rgba(255, 255, 255, 0.6);
   --shadow-lg: 0 24px 60px -12px rgba(15, 23, 34, 0.28), inset 0 1px 1px rgba(255, 255, 255, 0.8);
-  /* ── Named elevation scale (see docs/design/visual-system.md) ──────────────
-     Three tiers pair a shadow with a backdrop-blur so glass depth is consistent
-     instead of ad-hoc. `surface` = resting cards, `raised` = popovers/menus,
-     `overlay` = modals/palette. `--blur-scrim` is the dimmed backdrop behind an
-     overlay (formerly the arbitrary 2px/3px bracket backdrop-blur values). */
-  --elev-surface-shadow: var(--shadow);
-  --elev-surface-blur: 4px;
-  --elev-raised-shadow: var(--shadow);
-  --elev-raised-blur: 12px;
-  --elev-overlay-shadow: var(--shadow-lg);
-  --elev-overlay-blur: 40px;
-  --blur-scrim: 2px;
+  /* Sign-in provider row — Google's Light theme, reused for GitHub and Apple so
+     the three buttons are one family.  iOS LoginView.providerFill uses the same
+     table.  Do not put the color Google G on --accent (explicit Google Don't). */
+  --login-provider-bg: #ffffff;
+  --login-provider-stroke: #747775;
+  --login-provider-ink: #1f1f1f;
+  --login-provider-apple-ink: #000000;
+  /* Elevation utilities (.elev-*) and .skeleton/.boot-strip-glow/.scroll-fade-edge/
+     .animate-pulse-fast were deleted 2026-07-16 as consumer-free (see
+     docs/rollouts/2026-07-16-public-renderer-decision-legacy-primitives-slim.md);
+     resurrect from git history if needed. */
   color-scheme: light;
 }
 
 .dark {
-  --bg: #111827;
-  --surface: rgba(31, 41, 55, 0.65);
-  --surface-2: rgba(55, 65, 81, 0.55);
-  --surface-3: rgba(75, 85, 99, 0.5);
-  --line: rgba(42, 57, 71, 0.4);
-  --line-strong: rgba(42, 57, 71, 0.6);
-  --fg: #e7eef6;
+  /* Near-black neutral greys — no blue/slate cast. Sign-in + public pages sit on
+     --bg alone (logo contrast), so keep chroma near zero. Surfaces are neutral
+     charcoal glass, not slate-800. */
+  --bg: #0a0a0a;
+  --surface: rgba(22, 22, 22, 0.78);
+  --surface-2: rgba(30, 30, 30, 0.72);
+  --surface-3: rgba(42, 42, 42, 0.68);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --fg: #f0f0f0;
   /* WCAG AA: muted/faint must meet 4.5:1 (normal text) on all surface tiers.
-     The values below achieve ≥5.5:1 on surface-3 (worst-case dark-mode background). */
-  --muted: #b8c3d0;
-  --faint: #a0b0c0;
+     Measured ≥4.85:1 (faint) / ≥6.6:1 (muted) on surface-3 (#2a2a2a). */
+  --muted: #b0b0b0;
+  --faint: #969696;
   --accent: var(--brand-accent-dark);
   --accent-fg: #04130d;
   --pos: #34d399;
@@ -86,9 +90,63 @@
   --warn: #fbbf24;
   --info: #60a5fa;
   --ring: color-mix(in oklab, var(--accent) 50%, transparent);
-  --shadow: 0 18px 45px -12px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.08);
-  --shadow-lg: 0 30px 70px -15px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.12);
+  --shadow: 0 18px 45px -12px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.06);
+  --shadow-lg: 0 30px 70px -15px rgba(0, 0, 0, 0.75), inset 0 1px 1px rgba(255, 255, 255, 0.08);
+  --login-provider-bg: #131314;
+  --login-provider-stroke: #8e918f;
+  --login-provider-ink: #e3e3e3;
+  --login-provider-apple-ink: #ffffff;
   color-scheme: dark;
+}
+
+/* Public login provider buttons.  Metrics match iOS LoginView (44pt tall, 10pt
+   radius, 20pt logo slot, 16pt leading pad, 12pt logo/title gap, 19pt title). */
+.login-provider-btn {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  height: 44px;
+  padding: 0 16px;
+  gap: 12px;
+  border-radius: 10px;
+  background: var(--login-provider-bg);
+  color: var(--login-provider-ink);
+  border: 1px solid var(--login-provider-stroke);
+  font-family: var(--font-sans);
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  box-shadow: none;
+}
+.login-provider-btn--apple {
+  color: var(--login-provider-apple-ink);
+}
+.login-provider-btn:hover {
+  opacity: 0.92;
+}
+.login-provider-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.login-provider-mark {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-provider-mark svg {
+  display: block;
+}
+.login-provider-mark--github svg {
+  /* Invertocat artwork is edge-to-edge in its 98x96 box; 1px optical inset
+     matches iOS GitHubMark so it does not read bigger than the G. */
+  width: 18px;
+  height: 18px;
 }
 
 @theme inline {
@@ -109,7 +167,13 @@
   --color-warn: var(--warn);
   --color-info: var(--info);
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", monospace;
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Lato is the product typeface, shared with the native iOS app. --font-lato is injected on
+     <html> by next/font/local (app/fonts/lato.ts) and already carries its own metric-matched
+     fallback stack, so the tail here is only for the case where that class is missing entirely.
+     This slot previously named "Inter", which was never actually loaded anywhere in the app —
+     no @font-face, no next/font, no file in public/ — so the site silently rendered in whatever
+     system UI font the device had. Lato is the first real webfont this stack has ever resolved. */
+  --font-sans: var(--font-lato), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-xl: 16px;
   --radius-2xl: 20px;
   /* Shared card/control radius canon (console values are canonical — console.css
@@ -162,7 +226,7 @@ body::before {
     radial-gradient(circle at 85% 15%, color-mix(in oklab, var(--accent) 30%, transparent) 0%, transparent 50%),
     radial-gradient(circle at 15% 85%, color-mix(in oklab, var(--info) 30%, transparent) 0%, transparent 50%);
   animation: orb1 24s ease-in-out infinite;
-  opacity: 0.45; /* subtle in light mode; .dark restores full intensity */
+  opacity: 0.45; /* subtle in light mode */
 }
 
 body::after {
@@ -173,9 +237,10 @@ body::after {
   opacity: 0.3;
 }
 
-/* Dark mode keeps the vivid mesh; light mode stays calm so cards don't wash out. */
-.dark body::before { opacity: 0.9; }
-.dark body::after { opacity: 0.7; }
+/* Dark mode: keep mesh barely-there so --bg stays near-black (not navy/slate).
+   Former opacities 0.9/0.7 washed login + public pages blue and hurt logo contrast. */
+.dark body::before { opacity: 0.22; }
+.dark body::after { opacity: 0.12; }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -185,12 +250,6 @@ body::after {
 /* Tabular, monospace numerals everywhere numbers matter. */
 .tnum {
   font-variant-numeric: tabular-nums;
-}
-
-/* Scroll fade edge mask */
-.scroll-fade-edge {
-  mask-image: linear-gradient(to right, black 85%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
 }
 
 /* Thin, themed scrollbars. */
@@ -213,95 +272,12 @@ body::after {
   background-clip: content-box;
 }
 
-@keyframes shimmer {
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes boot-strip {
-  0% {
-    opacity: 0.2;
-    transform: translateX(-140%);
-  }
-  35% {
-    opacity: 0.95;
-  }
-  100% {
-    opacity: 0.2;
-    transform: translateX(280%);
-  }
-}
-
-.boot-strip-glow {
-  animation: boot-strip 1.15s ease-in-out infinite;
-}
-
-/* ── Named elevation utilities ─────────────────────────────────────────────
-   Pair a shadow + backdrop-blur per tier so glass surfaces stay consistent.
-   Prefer these over ad-hoc arbitrary-bracket shadow/backdrop-blur combinations.
-   Documented in docs/design/visual-system.md. */
-.elev-surface {
-  box-shadow: var(--elev-surface-shadow);
-  backdrop-filter: blur(var(--elev-surface-blur));
-  -webkit-backdrop-filter: blur(var(--elev-surface-blur));
-}
-.elev-raised {
-  box-shadow: var(--elev-raised-shadow);
-  backdrop-filter: blur(var(--elev-raised-blur));
-  -webkit-backdrop-filter: blur(var(--elev-raised-blur));
-}
-.elev-overlay {
-  box-shadow: var(--elev-overlay-shadow);
-  backdrop-filter: blur(var(--elev-overlay-blur));
-  -webkit-backdrop-filter: blur(var(--elev-overlay-blur));
-}
-/* Dimmed backdrop scrim behind overlays (replaces the 2px/3px bracket blurs). */
-.backdrop-blur-scrim {
-  backdrop-filter: blur(var(--blur-scrim));
-  -webkit-backdrop-filter: blur(var(--blur-scrim));
-}
-
-.skeleton {
-  position: relative;
-  overflow: hidden;
-  background: var(--surface-2);
-}
-.skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--fg) 6%, transparent), transparent);
-  animation: shimmer 1.4s infinite;
-}
-
-@keyframes pulse-fast {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-
-.animate-pulse-fast {
-  animation: pulse-fast 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
 /* Accessibility: honor the OS "reduce motion" setting — stop the perpetual
-   background orbs, skeleton shimmer, and fast pulse. */
+   background orbs. */
 @media (prefers-reduced-motion: reduce) {
   body::before,
-  body::after,
-  .skeleton::after,
-  .boot-strip-glow,
-  .animate-pulse-fast {
+  body::after {
     animation: none !important;
-  }
-  .boot-strip-glow {
-    opacity: 0.8;
-    transform: none !important;
   }
 }
 

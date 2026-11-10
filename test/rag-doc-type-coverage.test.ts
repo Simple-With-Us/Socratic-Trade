@@ -1,12 +1,14 @@
 /**
  * corpus-coverage-receipt (2026-07-06; redesigned same day for the SECOND time — see
  * docs/rollouts/2026-07-06-corpus-coverage-receipt.md for the full history). Per-run advisory
- * receipt for a COVERAGE-CHECKED filings doc type (a static allowlist of types whose PRODUCER
- * LEDGER IS COMPLETE — COVERAGE_CHECKED_DOC_TYPES in strategy.ts, currently 10-k/10-q ONLY) that is
+ * receipt for a COVERAGE-CHECKED filings doc type whose PRODUCER LEDGER IS COMPLETE — always
+ * 10-k/10-q, plus earnings-transcript only while its default-off producer is enabled — that is
  * BOTH not retrieved this run AND has zero ever-ingested producer rows.
  *
- * Ground truth: strategy.ts's filings-RAG pass (retrieveContextDetailed(..., { docType: ["10-k",
- * "10-q", "8-k", "earnings-transcript"] })) is the only doc-type-requesting call site.
+ * Ground truth: strategy.ts's filings-RAG pass requests only narrative 10-k/10-q/8-k plus
+ * earnings-transcript only while storage/display rights remain confirmed. Transcript retrieval
+ * remains useful for already-ingested chunks when refresh is off, but is removed everywhere if
+ * rights confirmation is withdrawn.
  * ingested_accessions is a COMPLETE producer ledger for 10-K/10-Q (src/lib/web-sources/sec-filings.ts
  * writes an accession row for every 10-K/10-Q ingest) but INCOMPLETE for 8-K (the default-ON
  * summary writer in sec8k.ts writes retrievable doc_type:"8-k" chunks but no accession row; only
@@ -17,8 +19,8 @@
  * daily-noise bug: 8-k is event-sparse and frequently won't rank top-3, so the receipt would fire
  * on a large fraction of normal runs. This fix:
  *   - Narrows COVERAGE_CHECKED_DOC_TYPES to ["10-k", "10-q"] (ledger-complete types only) —
- *     "8-k" is excluded (ledger incomplete, would false-positive on normal runs) and
- *     "earnings-transcript" stays excluded (no producer anywhere, would fire forever).
+ *     "8-k" is excluded (ledger incomplete, would false-positive on normal runs).
+ *     "earnings-transcript" is included only while its complete-ledger producer is explicitly on.
  *   - Restores the BOTH-CONDITIONS guard for the ledger-complete set: not-retrieved-this-run AND
  *     zero-ever-ingested-producer-rows (via one bulk ingestedAccessionCountsByDocType() call +
  *     in-memory prefix lookup in strategy.ts, fed into computeEmptyDocTypes as a
@@ -31,7 +33,7 @@
  *      >=1 producer row — receipt does NOT fire. Proves normal-run silence.
  *  (c) 8-k never triggers a coverage receipt regardless of retrieval/accession state (excluded from
  *      COVERAGE_CHECKED_DOC_TYPES).
- *  (d) earnings-transcript never fires (no producer anywhere, excluded).
+ *  (d) earnings-transcript stays quiet by default, but fires when its producer is explicitly enabled.
  *  (e) advisory invariant: ragContext / proposal count unchanged by the receipt firing.
  */
 import { randomUUID } from "node:crypto";
@@ -50,6 +52,7 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-rag-doc-type-coverage-${randomUUID()}.db`)}`;
+  process.env.ENCRYPTION_KEY = "0".repeat(64);
 });
 
 afterEach(() => {
@@ -93,9 +96,9 @@ describe("computeEmptyDocTypes (pure)", () => {
     expect(empty).toEqual([]);
   });
 
-  it("never considers 8-k or earnings-transcript (not passed in by the caller's allowlist)", () => {
-    // strategy.ts only ever passes COVERAGE_CHECKED_DOC_TYPES (10-k/10-q) here — "8-k" and
-    // "earnings-transcript" simply never appear as inputs, so they can never be flagged.
+  it("never considers 8-k or a disabled transcript producer when omitted by the caller", () => {
+    // strategy.ts passes only the dynamically enabled, complete-ledger subset. 8-k and a default-off
+    // earnings-transcript producer do not appear as inputs and therefore cannot false-positive.
     const empty = computeEmptyDocTypes(["10-k", "10-q"], ["10-k", "10-q"], noProducer);
     expect(empty).toEqual([]);
   });
@@ -120,6 +123,7 @@ const BULL_PROPOSAL = {
   marketHours: "regular_hours",
   rationale: "Structured momentum evidence for AAPL",
   tradeThesisTag: "Momentum-Breakout",
+  entryMarketRegime: "Neutral (Normal Volatility)",
   confidenceScore: 40
 };
 
@@ -150,9 +154,15 @@ function nasdaqResponse(): Response {
 function stubFetch(openAiBodies: OpenAiBody[]): void {
   vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
       const body = JSON.parse(String(init?.body ?? "{}")) as OpenAiBody;
       openAiBodies.push(body);
+      if (JSON.stringify(body).includes("Red Team Risk Agent")) {
+        return new Response(
+          JSON.stringify({ output_text: JSON.stringify({ verdict: "approve", reason: "No fatal flaw found." }) }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
       return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [BULL_PROPOSAL] }) }), {
         status: 200,
         headers: { "content-type": "application/json" }
@@ -165,7 +175,7 @@ function stubFetch(openAiBodies: OpenAiBody[]): void {
 
 async function setupBrokerPaperDecide(): Promise<void> {
   const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
   upsertConnectedAccount({
     id: accountId,
@@ -184,10 +194,11 @@ async function setupBrokerPaperDecide(): Promise<void> {
     systemState: "active",
     activeBroker: "alpaca",
     accountNumber: "TEST",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     maxOrderPctOfNav: 100,
     maxDailyNotional: 400_000,
     maxDailyPctOfNav: 0,
@@ -214,10 +225,12 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
       defaultDedupeSimilarity: () => 0.6,
       formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
       storeContext: async () => {},
-      storeContexts: async () => ({ attempted: 0, indexed: 0 })
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
     }));
 
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     const openAiBodies: OpenAiBody[] = [];
     stubFetch(openAiBodies);
     await setupBrokerPaperDecide();
@@ -233,17 +246,31 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
 
     const payload = coverageAudits[0]!.payload as { emptyDocTypes?: string[]; requestedDocTypes?: string[] };
     expect(payload.emptyDocTypes).toEqual(["10-k"]);
-    expect(payload.requestedDocTypes).toEqual(["10-k", "10-q", "8-k", "earnings-transcript"]);
+    // filing_narrative widens with the corpus (2026-09-27): DEF 14A, S-1, ownership and 13F
+    // holdings are ingested now, so the coverage receipt has to name them as requested doc types.
+    expect(payload.requestedDocTypes).toEqual([
+      "10-k",
+      "10-q",
+      "8-k",
+      "def 14a",
+      "s-1",
+      "13f-holdings",
+      "insider-filing",
+      "document-summary"
+    ]);
 
     const cases = listSocraticDecisionCases("local", { runId: result.runId });
     expect(cases.length).toBeGreaterThanOrEqual(1);
     const coverageItems = cases[0]!.evidence.filter(
-      (item) => item.kind === "safety" && item.title === "Requested filings doc type never ingested"
+      (item) => item.kind === "safety" && item.title === "Filings library still warming up"
     );
     expect(coverageItems.length).toBe(1);
     expect(coverageItems[0]!.summary).toContain("10-k");
-    expect(coverageItems[0]!.tone).toBe("warning");
-  }, 30_000);
+    // Warm-up receipt is advisory context, not a safety alarm — neutral tone by design
+    // (owner report 2026-07-09: the warning-orange "never ingested" card on every stock
+    // read as a per-symbol lookup failure).
+    expect(coverageItems[0]!.tone).toBe("neutral");
+  }, 75_000);
 
   it("(b) THE KEY LOW-NOISE CASE: 10-k requested, NOT retrieved this run, but HAS >=1 ingested_accessions '10-K' row -> receipt does NOT fire", async () => {
     // Proves normal-run silence: a coverage-checked type that simply didn't rank this run's
@@ -261,10 +288,12 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
       defaultDedupeSimilarity: () => 0.6,
       formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
       storeContext: async () => {},
-      storeContexts: async () => ({ attempted: 0, indexed: 0 })
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
     }));
 
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     const openAiBodies: OpenAiBody[] = [];
     stubFetch(openAiBodies);
     await setupBrokerPaperDecide();
@@ -285,7 +314,7 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
     // 10-k didn't retrieve this run, but DOES have a producer row -> both-conditions guard keeps
     // the receipt silent. This is the normal-run case and must never fire.
     expect(coverageAudits.length).toBe(0);
-  }, 30_000);
+  }, 75_000);
 
   it("(c) 8-k never triggers a coverage receipt regardless of retrieval/accession state (excluded from COVERAGE_CHECKED_DOC_TYPES)", async () => {
     // Mirrors the default production config exactly: the 8-K summary writer (sec8k.ts,
@@ -307,10 +336,12 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
       defaultDedupeSimilarity: () => 0.6,
       formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
       storeContext: async () => {},
-      storeContexts: async () => ({ attempted: 0, indexed: 0 })
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
     }));
 
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     const openAiBodies: OpenAiBody[] = [];
     stubFetch(openAiBodies);
     await setupBrokerPaperDecide();
@@ -324,11 +355,11 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
     const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
     const coverageAudits = runAudits.filter((e) => e.kind === "rag_doc_type_coverage_empty");
     expect(coverageAudits.length).toBe(0);
-  }, 30_000);
+  }, 75_000);
 
-  it("(d) does NOT fire for earnings-transcript even though it retrieves nothing every run (no producer, excluded from coverage checking)", async () => {
-    // Both coverage-checked types (10-k/10-q) retrieve chunks; earnings-transcript (not
-    // coverage-checked) retrieves nothing, as it always will until a producer exists.
+  it("(d1) does NOT fire for earnings-transcript while its default-off producer is disabled", async () => {
+    // Both always-checked types retrieve chunks; transcript refresh is explicitly off, so the
+    // producer cannot be expected to have populated the corpus and coverage stays quiet.
     vi.doMock("../src/lib/vector-db", () => ({
       findRelevantExperiences: async () => [],
       upsertExperiences: async () => {},
@@ -342,10 +373,13 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
       defaultDedupeSimilarity: () => 0.6,
       formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
       storeContext: async () => {},
-      storeContexts: async () => ({ attempted: 0, indexed: 0 })
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
     }));
 
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
+    vi.stubEnv("WEB_SOURCE_FMP_TRANSCRIPTS", "off");
     const openAiBodies: OpenAiBody[] = [];
     stubFetch(openAiBodies);
     await setupBrokerPaperDecide();
@@ -357,7 +391,43 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
     const { listAudit } = await import("../src/lib/db");
     const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
     expect(runAudits.filter((e) => e.kind === "rag_doc_type_coverage_empty").length).toBe(0);
-  }, 30_000);
+  }, 75_000);
+
+  it("(d2) names earnings-transcript when the producer is enabled but no transcript was ever ingested", async () => {
+    vi.doMock("../src/lib/vector-db", () => ({
+      findRelevantExperiences: async () => [],
+      upsertExperiences: async () => {},
+      retrieveContext: async () => [],
+      retrieveContextDetailed: async () => [
+        { id: "chunk-10k", text: "Risk factors.", score: 0.5, doc_type: "10-k", source: "sec-filings", as_of: "2026-01-01" },
+        { id: "chunk-10q", text: "Quarterly.", score: 0.5, doc_type: "10-q", source: "sec-filings", as_of: "2026-01-01" }
+      ],
+      defaultMinScore: () => 0.3,
+      defaultRelevanceFloor: () => 0.3,
+      defaultDedupeSimilarity: () => 0.6,
+      formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
+      storeContext: async () => {},
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
+    }));
+
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
+    vi.stubEnv("WEB_SOURCE_FMP_TRANSCRIPTS", "on");
+    vi.stubEnv("FMP_TRANSCRIPT_STORAGE_RIGHTS_CONFIRMED", "on");
+    const openAiBodies: OpenAiBody[] = [];
+    stubFetch(openAiBodies);
+    await setupBrokerPaperDecide();
+
+    const { runStrategyOnce } = await import("../src/lib/strategy");
+    const result = await runStrategyOnce();
+    expect(result.status).toBe("completed");
+
+    const { listAudit } = await import("../src/lib/db");
+    const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
+    const coverage = runAudits.find((e) => e.kind === "rag_doc_type_coverage_empty");
+    expect((coverage?.payload as { emptyDocTypes?: string[] })?.emptyDocTypes).toEqual(["earnings-transcript"]);
+  }, 75_000);
 
   it("(e) advisory invariant: the receipt firing does not change ragContext content or proposal count", async () => {
     vi.doMock("../src/lib/vector-db", () => ({
@@ -372,10 +442,12 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
       defaultDedupeSimilarity: () => 0.6,
       formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
       storeContext: async () => {},
-      storeContexts: async () => ({ attempted: 0, indexed: 0 })
+      storeContexts: async () => ({ attempted: 0, indexed: 0 }),
+      getCurrentVectorProviderAuthority: () => "test-provider",
+      managedVectorLedgerAuthority: () => "test-ledger"
     }));
 
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     const openAiBodies: OpenAiBody[] = [];
     stubFetch(openAiBodies);
     await setupBrokerPaperDecide();
@@ -396,9 +468,9 @@ describe("corpus-coverage receipt — strategy.ts integration (advisory only)", 
     // producer and didn't retrieve) so this doubles as a same-run advisory-invariant check.
     const ragField = String(bullUser.retrievedFinancialContext ?? "");
     expect(ragField).toContain("Risk factors for AAPL.");
-    expect(ragField).not.toContain("never ingested");
+    expect(ragField).not.toContain("warming up");
     expect(ragField).not.toContain("earnings-transcript");
-  }, 30_000);
+  }, 75_000);
 });
 
 // Placed AFTER the strategy integration tests above — see the ordering note near that block's

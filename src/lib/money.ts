@@ -10,6 +10,17 @@ export function roundCents(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+/**
+ * Alpaca price increment: >= $1 must be pennies; below $1 may be $0.0001.
+ * Sub-penny limits on names like T (24.865) 422 with
+ * "limit price must be increment of 0.01".
+ */
+export function roundAlpacaPrice(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  if (Math.abs(value) >= 1) return Math.round(value * 100) / 100;
+  return Math.round(value * 10_000) / 10_000;
+}
+
 export function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
 }

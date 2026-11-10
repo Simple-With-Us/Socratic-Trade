@@ -10,27 +10,39 @@ import { resolveRequestUserId } from "@/lib/request-user";
 import {
   audit,
   dailyExecutionStats,
-  findProposedIdByRunId,
+  findProposalIdByRunId,
   getActiveConnectedAccount,
+  getDb,
   getPolicy,
+  getProposal,
+  getSocraticDecisionCase,
   insertProposal,
-  notionalInLastMinutes
+  listConnectedAccounts,
+  notionalInLastMinutes,
+  upsertSocraticDecisionCase
 } from "@/lib/db";
 import { getBrokerGateway } from "@/lib/broker";
 import { dynamicIndexUniversesForPolicy } from "@/lib/index-universes";
 import { allowedSymbolsForPolicy, evaluateTradeProposal } from "@/lib/policy";
-import { shouldEscalateDecision } from "@/lib/strategy";
 import { emitDashboardEvent } from "@/lib/events";
 import { chatDraftToProposal } from "@/lib/chat/promote-draft";
 import { deriveExecutionState } from "@/lib/execution-mode";
+import { indexSocraticDecisionMemory } from "@/lib/socratic-memory";
+import { buildSocraticDecisionCase, socraticStatusFromProposalStatus } from "@/lib/socratic-runtime";
 import type { ChatDraft } from "@/lib/chat/types";
 import type { PolicyDecision, ReviewedOrder } from "@/lib/types";
+import { shouldEscalateDecision } from "@/lib/strategy-risk";
+import { fetchFreshQuotesCascade } from "@/lib/quotes-cascade";
+import { normalizeSymbol } from "@/lib/money";
+import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { draft?: ChatDraft; dryRun?: boolean; userId?: unknown };
   const userId = resolveRequestUserId(request, body);
+  const limited = enforceRateLimit(userId, "proposals/from-draft", RATE_LIMITS.orders);
+  if (limited) return limited;
 
   if (!body.draft || typeof body.draft !== "object") {
     return NextResponse.json({ error: "draft is required" }, { status: 400 });
@@ -39,6 +51,90 @@ export async function POST(request: Request) {
   if (!mapped.ok) return NextResponse.json({ error: mapped.error }, { status: 400 });
   const proposal = mapped.proposal;
 
+  // A chat draft's synthetic runId is its durable idempotency key. For non-dry-run requests, resolve
+  // and repair that historical row before consulting the currently selected account or any broker,
+  // policy, or symbol gate: a halted, unavailable, or incompatible current account must not block a
+  // retry of an already-staged/executed draft (or repair of its missing Socratic case).
+  const runId = `chat:${body.draft.draft_id}`;
+  const database = getDb();
+  const buildChatCaseFile = (
+    id: string,
+    caseProposal: typeof proposal,
+    caseDecision: PolicyDecision,
+    caseReview: ReviewedOrder | undefined,
+    context: {
+      accountNumber: string;
+      connectedAccountId?: string;
+      authority: "propose" | "decide";
+      proposalStatus?: string;
+      notional?: number;
+    }
+  ) => {
+    const timestamp = new Date().toISOString();
+    const caseFile = {
+      ...buildSocraticDecisionCase({
+        userId,
+        connectedAccountId: context.connectedAccountId,
+        runId,
+        proposalId: id,
+        accountNumber: context.accountNumber,
+        proposal: caseProposal,
+        status: socraticStatusFromProposalStatus(context.proposalStatus ?? "proposed"),
+        authority: context.authority,
+        decision: caseDecision,
+        review: caseReview,
+        ragAttributions: []
+      }),
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    return typeof context.notional === "number" ? { ...caseFile, notional: context.notional } : caseFile;
+  };
+  const findAndRepairExisting = () => {
+    const existingId = findProposalIdByRunId(runId, userId);
+    if (!existingId) return undefined;
+    const existingRow = getProposal(existingId, userId);
+    if (!existingRow) return undefined;
+    if (getSocraticDecisionCase(existingId, userId)) return { existingRow };
+    const matchingAccounts = listConnectedAccounts(userId).filter((account) => account.accountNumber === existingRow.accountNumber);
+    const historicalAccount = matchingAccounts.length === 1 ? matchingAccounts[0] : undefined;
+    const historicalPolicy = historicalAccount ? getPolicy(userId, historicalAccount.id) : undefined;
+    const repairedCase = buildChatCaseFile(existingId, existingRow.proposal, existingRow.decision, existingRow.review, {
+      accountNumber: existingRow.accountNumber,
+      connectedAccountId: historicalAccount?.id,
+      // If the historical account was deleted/ambiguous, fail toward ask-first rather than stamp
+      // the currently selected account's autonomy doctrine onto an older decision.
+      authority: historicalPolicy?.strategyAuthority ?? "propose",
+      proposalStatus: existingRow.status,
+      notional: existingRow.estimatedNotional
+    });
+    upsertSocraticDecisionCase(repairedCase);
+    return { existingRow, repairedCase };
+  };
+  const existingResponse = (existing: NonNullable<ReturnType<typeof findAndRepairExisting>>) => {
+    if (existing.repairedCase) {
+      const repairedCase = existing.repairedCase;
+      void indexSocraticDecisionMemory(repairedCase).catch((error) => {
+        console.warn("[from-draft] repaired Socratic case indexing failed:", error instanceof Error ? error.message : String(error));
+      });
+    }
+    return NextResponse.json(
+      {
+        proposalId: existing.existingRow.id,
+        deduped: true,
+        status: existing.existingRow.status,
+        decision: existing.existingRow.decision,
+        estimatedNotional: existing.existingRow.estimatedNotional,
+        proposal: existing.existingRow.proposal
+      },
+      { status: 200 }
+    );
+  };
+  if (!body.dryRun) {
+    const existing = database.transaction(findAndRepairExisting).immediate();
+    if (existing) return existingResponse(existing);
+  }
+
   const policy = getPolicy(userId);
   const activeAccount = getActiveConnectedAccount(userId);
   const executionState = deriveExecutionState(policy, activeAccount);
@@ -46,6 +142,7 @@ export async function POST(request: Request) {
   if (!policy.accountNumber) {
     return NextResponse.json({ error: "NO_ACCOUNT", reasons: ["No account is selected."] }, { status: 400 });
   }
+  const accountNumber = policy.accountNumber;
   if (policy.systemState === "halted") {
     return NextResponse.json({ error: "HALTED", reasons: ["System is stopped — press Start to enable orders."] }, { status: 409 });
   }
@@ -80,6 +177,7 @@ export async function POST(request: Request) {
   const now = new Date();
   const daily = dailyExecutionStats(policy.accountNumber, now, userId);
   const hourly = notionalInLastMinutes(policy.accountNumber, 60, now, userId);
+
   // NB: this is a PREVIEW evaluation (no full market scan); the authoritative gate runs again inside
   // executeProposal at approve time against fresh data.
   let decision = evaluateTradeProposal(proposal, {
@@ -115,14 +213,16 @@ export async function POST(request: Request) {
     estimatedNotional = undefined;
   }
 
-  // The commit-time preview runs WITHOUT a market scan, so the staleness gate (which treats a missing
-  // quote/scan timestamp as stale) would fail closed on EVERY draft when maxQuoteAgeSec/
-  // maxFundamentalsAgeSec are enabled. The authoritative gate re-runs at approve time against fresh
-  // data, so a draft blocked ONLY by staleness is effectively stageable. Compute one effective decision
-  // shared by BOTH the dry-run preview (which drives the assistant's Stage button) and the commit path,
-  // so they agree — otherwise dry-run returns approved:false and the UI hides Stage even though the
-  // commit path below would accept it. (Review: PR #278.)
-  const blockingReasons = decision.reasons.filter((r) => !r.startsWith("staleness_gate:"));
+  // The commit-time preview runs WITHOUT a market scan, so a missing provider observation
+  // (quote_age_unknown / the older staleness_gate prefix) would fail closed on EVERY draft when
+  // maxQuoteAgeSec is enabled. The authoritative gate re-runs at approve time against a fresh
+  // scan and blocks the order there when that scan still has no observation time. A draft blocked
+  // ONLY by that preview miss is stageable. Compute one effective decision shared by BOTH the
+  // dry-run preview (which drives the assistant's Stage button) and the commit path, so they
+  // agree. (Review: PR #278.)
+  const blockingReasons = decision.reasons.filter(
+    (r) => !r.startsWith("staleness_gate:") && !r.startsWith("quote_age_unknown:")
+  );
   const stalenessOnly = !decision.approved && blockingReasons.length === 0;
   const effectiveDecision = stalenessOnly ? { ...decision, approved: true } : decision;
 
@@ -148,15 +248,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ dryRun: true, decision: effectiveDecision, estimatedNotional, proposal, escalatable });
   }
 
-  // Commit: idempotent on the synthetic runId so one draft can't mint duplicate proposed rows. Dedupe
-  // BEFORE the policy rejection below so a normal retry of an already-staged draft returns the existing
-  // proposalId (200) rather than a 409 if the preview has since become blocked. (Review: PR #278.)
-  const runId = `chat:${body.draft.draft_id}`;
-  const existing = findProposedIdByRunId(runId, userId);
-  if (existing) {
-    return NextResponse.json({ proposalId: existing, deduped: true, decision: effectiveDecision, estimatedNotional, proposal }, { status: 200 });
-  }
-
   if (!effectiveDecision.approved && !escalatable) {
     return NextResponse.json(
       { error: "POLICY_BLOCKED", reasons: blockingReasons, decision: effectiveDecision, estimatedNotional, proposal },
@@ -176,19 +267,36 @@ export async function POST(request: Request) {
     : decision;
 
   const proposalId = crypto.randomUUID();
-  insertProposal({
-    userId,
-    id: proposalId,
-    runId,
-    accountNumber: policy.accountNumber,
-    proposal,
-    decision: storedDecision,
-    review,
-    estimatedNotional,
-    status: "proposed",
-    tradeThesisTag: proposal.tradeThesisTag,
-    entryMarketRegime: proposal.entryMarketRegime,
-    executionMode
+  const caseFile = buildChatCaseFile(proposalId, proposal, storedDecision, review, {
+    accountNumber,
+    connectedAccountId: policy.connectedAccountId ?? activeAccount?.id,
+    authority: policy.strategyAuthority
+  });
+  const staged = database.transaction(() => {
+    // A concurrent retry may have staged or even executed this draft after the first lookup. Check
+    // again under the same write lock as insertion so two processes cannot mint duplicate cards.
+    const racedExisting = findAndRepairExisting();
+    if (racedExisting) return { created: false as const, existing: racedExisting };
+    insertProposal({
+      userId,
+      id: proposalId,
+      runId,
+      accountNumber,
+      proposal,
+      decision: storedDecision,
+      review,
+      estimatedNotional,
+      status: "proposed",
+      tradeThesisTag: proposal.tradeThesisTag,
+      entryMarketRegime: proposal.entryMarketRegime,
+      executionMode
+    });
+    upsertSocraticDecisionCase(caseFile);
+    return { created: true as const };
+  }).immediate();
+  if (!staged.created) return existingResponse(staged.existing);
+  void indexSocraticDecisionMemory(caseFile).catch((error) => {
+    console.warn("[from-draft] Socratic case indexing failed:", error instanceof Error ? error.message : String(error));
   });
   if (escalatable) {
     audit(

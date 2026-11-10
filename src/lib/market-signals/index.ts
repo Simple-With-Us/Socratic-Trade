@@ -15,6 +15,8 @@ export interface MarketSignals {
   skew?: number;
   /** Cboe VVIX — volatility of VIX (uncertainty about volatility itself). */
   vvix?: number;
+  /** Cboe VIX9D — 9-day implied vol; below VIX is normal contango, above VIX (backwardation) signals near-term stress. */
+  vix9d?: number;
   /** E-mini S&P 500 large-speculator net contracts (+ long / − short). */
   cotSpNonCommNet?: number;
   /** …as a % of total open interest. */
@@ -54,6 +56,7 @@ export async function getMarketSignals(userId?: string): Promise<MarketSignals> 
     const b: MarketSignals = {};
     if (typeof cboe.skew === "number") b.skew = cboe.skew;
     if (typeof cboe.vvix === "number") b.vvix = cboe.vvix;
+    if (typeof cboe.vix9d === "number") b.vix9d = cboe.vix9d;
     if (cot?.nonCommNet !== undefined) b.cotSpNonCommNet = cot.nonCommNet;
     if (cot?.nonCommNetPctOI !== undefined) b.cotSpNonCommNetPctOI = cot.nonCommNetPctOI;
     if (cot?.reportDate) b.cotReportDate = cot.reportDate;

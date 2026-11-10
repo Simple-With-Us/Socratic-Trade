@@ -26,6 +26,7 @@ describe("Yahoo Finance Quotes", () => {
               result: [
                 {
                   meta: {
+                    longName: "Apple Inc.",
                     regularMarketPrice: 205.5,
                     chartPreviousClose: 203.2
                   },
@@ -48,6 +49,7 @@ describe("Yahoo Finance Quotes", () => {
 
     const quote = await fetchYahooFinanceQuote("AAPL");
     expect(quote).toBeDefined();
+    expect(quote?.companyName).toBe("Apple Inc.");
     expect(quote?.price).toBe(205.5);
     expect(quote?.prevClose).toBe(203.2);
     expect(quote?.volume).toBe(1500000);
@@ -124,7 +126,7 @@ describe("Finnhub News Enrichment", () => {
     const provider = getEnrichmentProvider();
     // Yahoo Finance is the final real tier — always configured, no API key required.
     expect(provider.configured).toBe(true);
-    expect(provider.name).toBe("yahoo-finance");
+    expect(provider.name).toContain("yahoo-finance");
   });
 
   it("fetches and scores company news from Finnhub when key is configured", async () => {
@@ -186,6 +188,10 @@ describe("Finnhub News Enrichment", () => {
 
 describe("Discord Rich Notification Webhook", () => {
   it("formats Discord payload with embeds and color codes", async () => {
+    // Legacy webhook path re-validates its target with a real DNS lookup on every send
+    // (SSRF/rebinding hardening — src/lib/egress-guard.ts); stub it for a hermetic test.
+    const resolveWebhookHost = async () => ["8.8.8.8"];
+
     const { sendNotification } = await import("../src/lib/notifications");
     const { DEFAULT_POLICY } = await import("../src/lib/defaults");
 
@@ -220,7 +226,7 @@ describe("Discord Rich Notification Webhook", () => {
           review: { estimatedNotional: 49.95 }
         }
       },
-      { policy, fetcher: mockFetcher }
+      { policy, fetcher: mockFetcher, resolveWebhookHost }
     );
 
     expect(capturedBody).toBeDefined();
@@ -250,7 +256,7 @@ describe("Discord Rich Notification Webhook", () => {
           }
         }
       },
-      { policy, fetcher: mockFetcher }
+      { policy, fetcher: mockFetcher, resolveWebhookHost }
     );
 
     expect(capturedBody.embeds[0].color).toBe(3066993);

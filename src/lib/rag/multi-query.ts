@@ -1,3 +1,4 @@
+import { llmFetch } from "../llm-request";
 /**
  * HyDE + evidence-derived multi-query retrieval for the filings RAG pass (hyde-multiquery-retrieval,
  * 2026-07-05). Flag-gated, DEFAULT OFF — every helper here is additive; the existing single-static-
@@ -24,26 +25,28 @@ import { buildLlmRequestBody, extractLlmText, llmAuthHeaders, type LlmJsonSchema
 import { isOverLlmBudget } from "../llm-budget";
 import { resolveLlmEndpoint } from "../llm-provider";
 import { LLM_TIMEOUT_MS } from "../llm-request";
-import { recordLlmUsage, extractLlmUsage } from "../llm-usage";
+import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "../llm-usage";
 import { getPolicy } from "../db";
-import { envFlagOn } from "./env-flag";
+import { resolveSourceBool } from "../source-settings";
 
-/** Returns true when RAG_MULTIQUERY is truthy. Default OFF — single-query retrieval is unaffected. */
+/** Returns true when RAG_MULTIQUERY is truthy via Settings override or env. Catalog default OFF. */
 export function multiQueryEnabled(): boolean {
-  return envFlagOn("RAG_MULTIQUERY", false);
+  return resolveSourceBool("RAG_MULTIQUERY");
 }
 
 /**
- * Returns true when RAG_HYDE is truthy. Default OFF. NOT independent of RAG_MULTIQUERY: the
- * `strategy.ts` call site only drafts HyDE passages from the variants `deriveQueryVariants`
- * produced inside its `wantMultiQuery` branch, so RAG_HYDE=on with RAG_MULTIQUERY off is a no-op
- * (nothing to draft HyDE passages from) — turning on RAG_HYDE alone requires RAG_MULTIQUERY too.
+ * Returns true when RAG_HYDE is truthy via Settings override or env. Catalog default OFF.
+ * NOT independent of RAG_MULTIQUERY: the `strategy.ts` call site only drafts HyDE passages
+ * from the variants `deriveQueryVariants` produced inside its `wantMultiQuery` branch, so
+ * RAG_HYDE=on with RAG_MULTIQUERY off is a no-op.
  */
 export function hydeEnabled(): boolean {
-  return envFlagOn("RAG_HYDE", false);
+  return resolveSourceBool("RAG_HYDE");
 }
 
-/** Cheap default model for HyDE passage drafting; overridable via RAG_HYDE_MODEL. */
+/** Cheap default model for HyDE passage drafting; overridable via RAG_HYDE_MODEL. Deliberately
+ * remains GPT-5.4 Mini instead of a GPT-5.6 tier: this is short retrieval-query synthesis, and Mini
+ * is both sufficient and currently cheaper than 5.6 Luna. */
 const DEFAULT_HYDE_MODEL = "gpt-5.4-mini";
 
 function hydeModel(): string {
@@ -221,11 +224,15 @@ export async function generateHydePassages(
         systemPrompt: HYDE_SYSTEM_PROMPT,
         userContent,
         schema: HYDE_SCHEMA,
-        maxOutputTokens: HYDE_MAX_OUTPUT_TOKENS
+        maxOutputTokens: HYDE_MAX_OUTPUT_TOKENS,
+        userId,
+        keyRef: endpoint.keyRef,
+        service: "rag",
+        feature: "rag-hyde"
       }
     );
 
-    const response = await fetch(endpoint.url, {
+    const response = await llmFetch(endpoint.url, {
       method: "POST",
       headers: llmAuthHeaders({ provider: endpoint.provider, key: endpoint.key }),
       body: JSON.stringify(body),
@@ -253,6 +260,7 @@ export async function generateHydePassages(
         keySource: endpoint.keySource,
         keyRef: endpoint.keyRef,
         connectedAccountId: opts.connectedAccountId,
+        providerRequestId: providerRequestIdFromPayload(endpoint.provider, payload),
         ...extractLlmUsage(payload)
       });
     } catch {

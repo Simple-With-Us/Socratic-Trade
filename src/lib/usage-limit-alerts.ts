@@ -1,7 +1,7 @@
 import { audit, getInternalSetting, getNotifyPrefs, getPolicy, setInternalSetting } from "./db";
 import { sendNotification } from "./notifications";
-import { loadNotifyConfig, notify } from "./notify";
-import type { NotifyPrefs, TradingPolicy } from "./types";
+import { isPushoverDeliverable, loadNotifyConfig, notify, operatorPushoverUserKey } from "./notify";
+import type { NotifyPrefs } from "./types";
 
 export interface UsageLimitAlertInput {
   userId?: string;
@@ -16,6 +16,21 @@ export interface UsageLimitAlertInput {
   unit?: string;
   recommendation?: string;
   payload?: Record<string, unknown>;
+}
+
+interface UsageLimitAlertOptions {
+  /** Cooperative ownership fence for callers whose work may be superseded while delivery awaits. */
+  assertActive?: () => void;
+  /** Cancels in-flight channel delivery and retry waits after ownership moves. */
+  signal?: AbortSignal;
+}
+
+function assertUsageAlertActive(options: UsageLimitAlertOptions): void {
+  options.assertActive?.();
+  if (!options.signal?.aborted) return;
+  throw options.signal.reason instanceof Error
+    ? options.signal.reason
+    : new Error("Usage-limit alert ownership was lost.");
 }
 
 const ALERT_KEY_PREFIX = "usageLimitAlert:lastSent";
@@ -34,22 +49,18 @@ function normalizedProvider(provider: string): string {
   return provider.trim().toLowerCase().replace(/\s+/g, "-") || "unknown";
 }
 
-function shouldSend(input: Required<Pick<UsageLimitAlertInput, "userId" | "provider" | "operation" | "limitName">>): boolean {
-  const key = `${ALERT_KEY_PREFIX}:${input.userId}:${normalizedProvider(input.provider)}:${input.operation}:${input.limitName}`;
-  const last = getInternalSetting<string>(key);
-  if (last && Date.now() - Date.parse(last) < cooldownMs()) return false;
-  setInternalSetting(key, new Date().toISOString());
-  return true;
+function usageAlertKey(input: Required<Pick<UsageLimitAlertInput, "userId" | "provider" | "operation" | "limitName">>): string {
+  return `${ALERT_KEY_PREFIX}:${input.userId}:${normalizedProvider(input.provider)}:${input.operation}:${input.limitName}`;
 }
 
-function forcedBudgetAlertPolicy(policy: TradingPolicy): TradingPolicy {
-  return {
-    ...policy,
-    notificationSettings: {
-      ...policy.notificationSettings,
-      enabledEvents: Array.from(new Set([...policy.notificationSettings.enabledEvents, "budget_alert"]))
-    }
-  };
+/** Read-only. A prior FAILED/SKIPPED attempt must not latch this cooldown. */
+function recentlyAlerted(input: Required<Pick<UsageLimitAlertInput, "userId" | "provider" | "operation" | "limitName">>): boolean {
+  const last = getInternalSetting<string>(usageAlertKey(input));
+  return Boolean(last && Date.now() - Date.parse(last) < cooldownMs());
+}
+
+function markAlerted(input: Required<Pick<UsageLimitAlertInput, "userId" | "provider" | "operation" | "limitName">>): void {
+  setInternalSetting(usageAlertKey(input), new Date().toISOString());
 }
 
 function operatorAlertEmail(): string | undefined {
@@ -81,14 +92,41 @@ function bodyFor(input: UsageLimitAlertInput): string {
   return parts.join("\n");
 }
 
-async function notifyOperatorEmailFallback(userId: string, title: string, body: string, data: unknown): Promise<void> {
+async function notifyOperatorEmailFallback(
+  userId: string,
+  title: string,
+  body: string,
+  data: unknown,
+  options: UsageLimitAlertOptions
+): Promise<boolean> {
+  assertUsageAlertActive(options);
   const prefs = getNotifyPrefs(userId);
-  if (prefs.channels.includes("email") && prefs.email.trim()) return;
-
-  const fallbackEmail = operatorAlertEmail();
-  if (!fallbackEmail) return;
   const config = loadNotifyConfig();
-  if (!config.email.resendKey || !config.email.from) return;
+  if (isPushoverDeliverable(prefs, config)) {
+    // sendNotification already attempted Pushover when the user enabled that channel.
+    if (prefs.channels.includes("pushover")) return false;
+    const forcedPrefs: NotifyPrefs = {
+      ...prefs,
+      channels: ["pushover"],
+      pushoverTarget: operatorPushoverUserKey(prefs),
+      updatedAt: prefs.updatedAt
+    };
+    assertUsageAlertActive(options);
+    await notify(userId, { title, body, kind: "budget_alert", data }, {
+      config,
+      prefs: forcedPrefs,
+      assertActive: options.assertActive,
+      signal: options.signal
+    });
+    assertUsageAlertActive(options);
+    return true;
+  }
+  if (prefs.channels.includes("email") && prefs.email.trim()) return false;
+
+  assertUsageAlertActive(options);
+  const fallbackEmail = operatorAlertEmail();
+  if (!fallbackEmail) return false;
+  if (!config.email.resendKey || !config.email.from) return false;
 
   const forcedPrefs: NotifyPrefs = {
     ...prefs,
@@ -96,7 +134,15 @@ async function notifyOperatorEmailFallback(userId: string, title: string, body: 
     email: fallbackEmail,
     updatedAt: prefs.updatedAt
   };
-  await notify(userId, { title, body, kind: "budget_alert", data }, { config, prefs: forcedPrefs });
+  assertUsageAlertActive(options);
+  await notify(userId, { title, body, kind: "budget_alert", data }, {
+    config,
+    prefs: forcedPrefs,
+    assertActive: options.assertActive,
+    signal: options.signal
+  });
+  assertUsageAlertActive(options);
+  return true;
 }
 
 /**
@@ -104,17 +150,23 @@ async function notifyOperatorEmailFallback(userId: string, title: string, body: 
  * attempts the user's configured channels, and falls back to an operator email
  * target when email delivery is configured but the user has not opted into email.
  */
-export async function alertUsageLimitHit(input: UsageLimitAlertInput): Promise<void> {
+export async function alertUsageLimitHit(
+  input: UsageLimitAlertInput,
+  options: UsageLimitAlertOptions = {}
+): Promise<void> {
   const userId = input.userId ?? "local";
   try {
+    assertUsageAlertActive(options);
     const sendKey = {
       userId,
       provider: input.provider,
       operation: input.operation,
       limitName: input.limitName
     };
-    if (!shouldSend(sendKey)) return;
+    assertUsageAlertActive(options);
+    if (recentlyAlerted(sendKey)) return;
 
+    assertUsageAlertActive(options);
     const status = input.status ?? "exceeded";
     const title =
       status === "warning"
@@ -134,13 +186,29 @@ export async function alertUsageLimitHit(input: UsageLimitAlertInput): Promise<v
       ...(input.payload ?? {})
     };
     const body = bodyFor(input);
+    assertUsageAlertActive(options);
     audit("usage_limit_alert", payload, userId);
-    await sendNotification(
+    assertUsageAlertActive(options);
+    // Delivery honors the user's real enabledEvents toggle (owner ruling 2026-08-12, "ALL toggles
+    // must be real" — no force-include). A legacy stored enabledEvents array predating this event
+    // type was backfilled once by migration 78 (db.ts); after that the toggle is genuinely the
+    // user's.
+    const event = await sendNotification(
       { type: "budget_alert", title, payload },
-      { userId, policy: forcedBudgetAlertPolicy(getPolicy(userId)) }
+      {
+        userId,
+        policy: getPolicy(userId),
+        assertActive: options.assertActive,
+        signal: options.signal
+      }
     );
-    await notifyOperatorEmailFallback(userId, title, body, payload);
+    assertUsageAlertActive(options);
+    const fallbackSent = await notifyOperatorEmailFallback(userId, title, body, payload, options);
+    assertUsageAlertActive(options);
+    if (event.status === "sent" || fallbackSent) markAlerted(sendKey);
   } catch {
+    // A failed ownership fence is control flow, not a best-effort alert failure.
+    assertUsageAlertActive(options);
     // Usage alerts must never block trading, ingestion, or provider fallback.
   }
 }

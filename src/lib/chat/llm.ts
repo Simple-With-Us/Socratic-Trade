@@ -1,3 +1,6 @@
+import { z } from "zod";
+import { llmRouteFor } from "../llm-route";
+import { codeCliUrl } from "../code-cli";
 // Provider-agnostic LLM contract: run({ system, message, tools, executeTool, context }) drives a
 // tool loop and returns { text, toolCalls, citations }. The model can only call the tools it is
 // given (read-only get_quote/kb_search, draft-only draft_order, reversible create_alert/
@@ -8,10 +11,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { canonicalTicker } from "../rag/chunk";
 import { resolveLlmCredential } from "../db";
-import { recordLlmUsage, extractLlmUsage } from "../llm-usage";
-import { llmFetch, isReasoningModel } from "../llm-request";
+import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "../llm-usage";
+import { isAbortOrTimeoutError } from "../network-errors";
+import { applyOpenRouterClassifierEnrichment, applyOpenRouterProviderRouting } from "../llm-call";
+import { llmFetch, LLM_TIMEOUT_MS, normalizeReasoningEffortForModel, reasoningCapabilityForModel, withLlmRequestBounds } from "../llm-request";
+import { isCodeCliOnlyModel } from "../llm-model-catalog";
+// Reuse the SAME model-family + OpenRouter-wire-id helpers the strategy engine's
+// resolveLlmEndpoint uses (llm-provider.ts), so the Coach's provider precedence and model-id
+// normalization can never drift from the engine's.  See llmForModel / chatProviderForModel below.
+import { llmModelFamily, normalizeOpenRouterModelId, nativeSlugFor, modelRequiresOpenRouter, resolveMetaNative, minimaxDirectRoute, META_MODEL_API_URL } from "../llm-provider";
+import type { LlmReasoningEffort } from "../types";
 import { DISCLAIMER, SYSTEM_PROMPT } from "./prompt";
 import type { ChatLLM, Citation, LlmResult, LlmRunArgs, ToolCall } from "./types";
+import { decideStageBudget } from "./stage-budget";
 
 /** Per-user attribution for the LLM usage ledger. When `userId` is set, run() records a usage row. */
 export interface LlmUsageOpts {
@@ -23,11 +35,70 @@ export interface LlmUsageOpts {
 }
 
 /** The chat providers. All but Anthropic are OpenAI-compatible (chat/completions tool loop). */
-export type ChatProvider = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek";
+export type ChatProvider = "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter";
 
-/** Sum usage across the (possibly multi-step) tool loop and record one ledger row. */
-function recordChatUsage(opts: LlmUsageOpts, provider: ChatProvider, model: string, prompt: number, completion: number, saw: boolean): void {
+/** Running provider-usage totals for one chat run (a possibly multi-step tool loop). */
+export interface ChatUsageTotals {
+  prompt: number;
+  completion: number;
+  /** True once any step reported prompt or completion tokens (otherwise the row records NULLs). */
+  saw: boolean;
+  cached?: number;
+  cacheCreation?: number;
+  cacheCreation1h?: number;
+  reasoning?: number;
+  /** Sum of OpenRouter `usage.cost` across the loop; only meaningful when `billedComplete`. */
+  billedCostUsd: number;
+  /** Steps that reported usage; every one must also have reported `usage.cost` for the sum to be
+   *  the whole run's charge (a partial sum would understate spend and be labelled "billed"). */
+  usageSteps: number;
+  billedSteps: number;
+  /** Provider requests issued by the run. */
+  requests: number;
+  servedModel?: string;
+}
+
+export function newChatUsageTotals(): ChatUsageTotals {
+  return { prompt: 0, completion: 0, saw: false, billedCostUsd: 0, usageSteps: 0, billedSteps: 0, requests: 0 };
+}
+
+function addOptional(total: number | undefined, add: number | undefined): number | undefined {
+  return add === undefined ? total : (total ?? 0) + add;
+}
+
+/** Fold one provider response's `extractLlmUsage` result into the run totals. */
+export function addChatUsage(totals: ChatUsageTotals, u: ReturnType<typeof extractLlmUsage>): void {
+  if (u.servedModel) totals.servedModel = u.servedModel;
+  if (u.promptTokens === undefined && u.completionTokens === undefined) return;
+  totals.saw = true;
+  totals.prompt += u.promptTokens ?? 0;
+  totals.completion += u.completionTokens ?? 0;
+  totals.cached = addOptional(totals.cached, u.cachedPromptTokens);
+  totals.cacheCreation = addOptional(totals.cacheCreation, u.cacheCreationTokens);
+  totals.cacheCreation1h = addOptional(totals.cacheCreation1h, u.cacheCreation1hTokens);
+  totals.reasoning = addOptional(totals.reasoning, u.reasoningTokens);
+  totals.usageSteps += 1;
+  if (u.billedCostUsd !== undefined) {
+    totals.billedSteps += 1;
+    totals.billedCostUsd += u.billedCostUsd;
+  }
+}
+
+/** Sum usage across the (possibly multi-step) tool loop and record one ledger row.
+ *  `providerRequestId` is only meaningful when the loop made exactly ONE provider request
+ *  (the ledger row is a per-run aggregate; a single generation id can only verify a single
+ *  call's cost, so multi-step runs pass undefined rather than a misleading partial id). */
+function recordChatUsage(
+  opts: LlmUsageOpts,
+  provider: ChatProvider,
+  model: string,
+  totals: ChatUsageTotals,
+  providerRequestId?: string,
+  latencyMs?: number,
+  status?: "success" | "error" | "timeout" | "canceled"
+): void {
   if (!opts.userId) return;
+  const billedComplete = totals.usageSteps > 0 && totals.billedSteps === totals.usageSteps;
   recordLlmUsage({
     userId: opts.userId,
     provider,
@@ -35,12 +106,31 @@ function recordChatUsage(opts: LlmUsageOpts, provider: ChatProvider, model: stri
     context: opts.context ?? "chat",
     keySource: opts.keySource ?? "user",
     keyRef: opts.keyRef,
-    promptTokens: saw ? prompt : undefined,
-    completionTokens: saw ? completion : undefined
+    promptTokens: totals.saw ? totals.prompt : undefined,
+    completionTokens: totals.saw ? totals.completion : undefined,
+    cachedPromptTokens: totals.cached,
+    cacheCreationTokens: totals.cacheCreation,
+    cacheCreation1hTokens: totals.cacheCreation1h,
+    reasoningTokens: totals.reasoning,
+    billedCostUsd: billedComplete ? totals.billedCostUsd : undefined,
+    servedModel: totals.servedModel,
+    requestCount: totals.requests > 1 ? totals.requests : undefined,
+    providerRequestId,
+    latencyMs,
+    status
   });
 }
 
 const MAX_STEPS = 5;
+
+/** Chat-completions envelope fetchCodeCli (code-cli.ts) builds from a validated broker reply.
+ *  Strict and exact, so any other shape fails before indexing. */
+const CodeCliChatResponseSchema = z.object({
+  choices: z.array(z.object({
+    message: z.object({ role: z.literal("assistant"), content: z.string() }).strict(),
+    finish_reason: z.enum(["stop", "length"])
+  }).strict()).min(1)
+}).strict();
 
 export interface Intent {
   intent: "alert" | "order" | "watchlist_add" | "kb" | "positions" | "watchlist_view" | "alerts_view" | "advice" | "quote" | "fundamentals" | "market_signals" | "chat";
@@ -252,7 +342,7 @@ export class MockLLM implements ChatLLM {
       const lead = result?.blocked
         ? `I've drafted this order but it can't proceed as-is — ${(result.warnings ?? []).join("; ")}.`
         : `I've prepared a draft order for your review — it won't go through until you confirm.` +
-          ` (Account: ${result.account_label}${result.is_real ? "" : " — simulated, not a real broker"}.)`;
+          ` (Account: ${result.account_label}${result.is_real ? "" : " — broker paper account"}.)`;
       return { text: `${lead}\n\n${DISCLAIMER}`, toolCalls, citations: [] };
     }
 
@@ -268,7 +358,7 @@ export class MockLLM implements ChatLLM {
       return {
         text: `${lines.join("\n")}\n\n${DISCLAIMER}`,
         toolCalls,
-        citations: chunks.map((c: any) => ({ source: c.source, chunk_id: c.chunk_id, as_of: c.as_of, url: c.url }))
+        citations: chunks.map((c: any) => ({ source: c.source, chunk_id: c.chunk_id, evidence_ref: c.evidence_ref, as_of: c.as_of, url: c.url }))
       };
     }
 
@@ -320,9 +410,21 @@ export class MockLLM implements ChatLLM {
   }
 }
 
-type Transport = (body: any, apiKey: string) => Promise<any>;
+type Transport = (body: any, apiKey: string, signal?: AbortSignal) => Promise<any>;
 
-async function defaultTransport(body: any, apiKey: string): Promise<any> {
+function composeChatAbortSignal(callerSignal?: AbortSignal): AbortSignal | undefined {
+  const timeoutSignal =
+    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(LLM_TIMEOUT_MS)
+      : undefined;
+  if (!callerSignal) return timeoutSignal;
+  if (!timeoutSignal) return callerSignal;
+  return typeof AbortSignal.any === "function"
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : callerSignal;
+}
+
+async function defaultTransport(body: any, apiKey: string, signal?: AbortSignal): Promise<any> {
   const res = await llmFetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -332,7 +434,8 @@ async function defaultTransport(body: any, apiKey: string): Promise<any> {
       // Enable prompt-caching beta so cache_control blocks are honoured by the API.
       "anthropic-beta": "prompt-caching-2024-07-31"
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: composeChatAbortSignal(signal)
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}`);
   return res.json();
@@ -340,17 +443,28 @@ async function defaultTransport(body: any, apiKey: string): Promise<any> {
 
 /** Real Anthropic Messages API tool loop (server-side only). */
 export class AnthropicLLM implements ChatLLM {
-  constructor(private apiKey: string, private model: string, private transport: Transport = defaultTransport, private usage: LlmUsageOpts = {}) {}
+  constructor(
+    private apiKey: string,
+    private model: string,
+    private transport: Transport = defaultTransport,
+    private usage: LlmUsageOpts = {},
+    private reasoningEffort?: LlmReasoningEffort
+  ) {}
 
   get modelName(): string {
     return this.model;
   }
 
-  async run({ system, message, tools, executeTool, history }: LlmRunArgs): Promise<LlmResult> {
+  async run(args: LlmRunArgs): Promise<LlmResult> {
+    const { system, message, tools, executeTool, history } = args;
+    // 2026-09-23 MM (llm-stats feature): capture total wall-clock latency for this chat run
+    // (covers the entire multi-step tool loop, not just the last provider request) so the
+    // LLM stats console can render p50/p95/p99 per model alias.  status reflects whether the
+    // run returned a usable assistant message vs. threw / was canceled / timed out.
+    const startedAt = performance.now();
+    let chatStatus: "success" | "error" | "timeout" | "canceled" = "success";
     const messages: any[] = [];
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let sawUsage = false;
+    const usageTotals = newChatUsageTotals();
     // Replay prior turns for multi-turn context. Anthropic requires the first message to be user, so
     // drop any leading assistant turn from the (chronological) history before appending the new message.
     const prior = (history ?? []).slice();
@@ -378,16 +492,56 @@ export class AnthropicLLM implements ChatLLM {
             [{ type: "text", text: system }];
 
     for (let step = 0; step < MAX_STEPS; step++) {
-      const resp = await this.transport(
-        { model: this.model, max_tokens: 1024, system: anthropicSystem, messages, ...(tools?.length ? { tools } : {}) },
-        this.apiKey
-      );
-      const u = extractLlmUsage(resp);
-      if (u.promptTokens !== undefined || u.completionTokens !== undefined) {
-        sawUsage = true;
-        promptTokens += u.promptTokens ?? 0;
-        completionTokens += u.completionTokens ?? 0;
+      if (args.abortSignal?.aborted) {
+        args.onStage?.({ stage: "error", reason: "cancelled" });
+        chatStatus = "canceled";
+        break;
       }
+      if (typeof args.deadlineMs === "number") {
+        const budget = decideStageBudget({
+          stepIndex: step,
+          deadlineMs: args.deadlineMs,
+          minStageBudgetMs: args.minStageBudgetMs
+        });
+        if (budget.action === "skip") {
+          args.onStage?.({
+            stage: "stage_skipped",
+            reason: budget.reason,
+            remainingMs: budget.remainingMs,
+            minStageMs: budget.minStageMs
+          });
+          // Deadline budget ran out before this step could start, so the reply was cut short.
+          chatStatus = "timeout";
+          break;
+        }
+      }
+      args.onStage?.({ stage: "thinking" });
+      const baseBody = { model: this.model, system: anthropicSystem, messages, ...(tools?.length ? { tools } : {}) };
+      const requestBody = withLlmRequestBounds(baseBody, "anthropic-messages", {
+        model: this.model,
+        maxOutputTokens: 1024,
+        reasoningEffort: this.reasoningEffort
+      });
+      let resp: any;
+      try {
+        usageTotals.requests += 1;
+        resp = await this.transport(requestBody, this.apiKey, args.abortSignal);
+      } catch (e) {
+        // Record the failed run (tokens billed on earlier steps + wall-clock latency) so
+        // error / timeout / canceled rows reach the LLM stats console, then rethrow unchanged.
+        chatStatus = args.abortSignal?.aborted ? "canceled" : isAbortOrTimeoutError(e) ? "timeout" : "error";
+        recordChatUsage(
+          this.usage,
+          "anthropic",
+          this.model,
+          usageTotals,
+          undefined,
+          performance.now() - startedAt,
+          chatStatus
+        );
+        throw e;
+      }
+      addChatUsage(usageTotals, extractLlmUsage(resp));
       const content = resp.content || [];
       messages.push({ role: "assistant", content });
       text = content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
@@ -413,22 +567,31 @@ export class AnthropicLLM implements ChatLLM {
       .filter((c) => c.name === "get_quote" && c.result && !c.result.error)
       .map((c) => ({ source: "get_quote", as_of: c.result.as_of }));
     for (const c of toolCalls.filter((tc) => tc.name === "kb_search" && tc.result?.chunks?.length)) {
-      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, as_of: chunk.as_of, url: chunk.url });
+      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, evidence_ref: chunk.evidence_ref, as_of: chunk.as_of, url: chunk.url });
     }
-    recordChatUsage(this.usage, "anthropic", this.model, promptTokens, completionTokens, sawUsage);
+    recordChatUsage(
+      this.usage,
+      "anthropic",
+      this.model,
+      usageTotals,
+      undefined,
+      performance.now() - startedAt,
+      chatStatus
+    );
     return { text: withDisclaimer(text), toolCalls, citations };
   }
 }
 
 // OpenAI Chat Completions transport — injectable for offline testing.
-type OpenAITransport = (body: any, apiKey: string) => Promise<any>;
+type OpenAITransport = (body: any, apiKey: string, signal?: AbortSignal) => Promise<any>;
 
-async function defaultOpenAITransport(body: any, apiKey: string): Promise<any> {
+async function defaultOpenAITransport(body: any, apiKey: string, signal?: AbortSignal): Promise<any> {
   const url = process.env.OPENAI_CHAT_URL ?? "https://api.openai.com/v1/chat/completions";
   const res = await llmFetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: composeChatAbortSignal(signal)
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
@@ -442,7 +605,7 @@ async function defaultOpenAITransport(body: any, apiKey: string): Promise<any> {
  * injectable-transport approach as AnthropicLLM so it is fully testable offline.
  *
  * Tool calling follows the OpenAI function-calling protocol (tools/tool_calls).
- * CHAT_LLM_MODEL defaults to the app's current OpenAI default when CHAT_LLM=openai.
+ * CHAT_LLM_MODEL is required when CHAT_LLM=openai; the app never silently chooses a model.
  */
 export class OpenAILLM implements ChatLLM {
   constructor(
@@ -452,19 +615,25 @@ export class OpenAILLM implements ChatLLM {
     private usage: LlmUsageOpts = {},
     // OpenAI-compatible provider serving this model (xAI/Gemini/Mistral/DeepSeek all share this tool loop),
     // recorded on the usage ledger so cost is attributed to the right provider, not always "openai".
-    private provider: "openai" | "xai" | "gemini" | "mistral" | "deepseek" = "openai"
+    private provider: OpenAiCompatProvider = "openai",
+    private reasoningEffort?: LlmReasoningEffort
   ) {}
 
   get modelName(): string {
     return this.model;
   }
 
-  async run({ system, message, tools, executeTool, history }: LlmRunArgs): Promise<LlmResult> {
+  async run(args: LlmRunArgs): Promise<LlmResult> {
+    const { system, message, tools, executeTool, history } = args;
+    // 2026-09-23 MM (llm-stats feature): capture total wall-clock latency for this chat run
+    // (covers the entire multi-step tool loop, not just the last provider request) so the
+    // LLM stats console can render p50/p95/p99 per model alias.  status reflects whether the
+    // run returned a usable assistant message vs. threw / was canceled / timed out.
+    const startedAt = performance.now();
+    let chatStatus: "success" | "error" | "timeout" | "canceled" = "success";
     // Build OpenAI messages array. Prior user/assistant turns first, then the current message.
     const messages: any[] = [];
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let sawUsage = false;
+    const usageTotals = newChatUsageTotals();
     if (system) messages.push({ role: "system", content: system });
     const prior = (history ?? []).slice();
     // OpenAI requires alternating user/assistant; drop a leading assistant turn if present.
@@ -489,38 +658,101 @@ export class OpenAILLM implements ChatLLM {
 
     const toolCalls: ToolCall[] = [];
     let text = "";
-
-    // OpenAI's reasoning models (gpt-5 / o-series) REJECT `max_tokens` ("use max_completion_tokens
-    // instead") and spend part of the budget on hidden reasoning, so they need both the renamed
-    // param and a higher cap to leave room for a visible answer. Other providers (and OpenAI's
-    // classic models) keep `max_tokens`. Gated on provider too so we never send the OpenAI-only param
-    // to an OpenAI-compatible endpoint (xAI/Gemini/Mistral).
-    const tokenCap =
-      this.provider === "openai" && isReasoningModel(this.model)
-        ? { max_completion_tokens: 4096 }
-        : { max_tokens: 1024 };
+    const generationIds: string[] = [];
 
     for (let step = 0; step < MAX_STEPS; step++) {
-      const resp = await this.transport(
-        {
-          model: this.model,
-          ...tokenCap,
-          messages,
-          ...(oaiTools ? { tools: oaiTools, tool_choice: "auto" } : {})
-        },
-        this.apiKey
-      );
-
-      const u = extractLlmUsage(resp);
-      if (u.promptTokens !== undefined || u.completionTokens !== undefined) {
-        sawUsage = true;
-        promptTokens += u.promptTokens ?? 0;
-        completionTokens += u.completionTokens ?? 0;
+      if (args.abortSignal?.aborted) {
+        args.onStage?.({ stage: "error", reason: "cancelled" });
+        chatStatus = "canceled";
+        break;
       }
+      if (typeof args.deadlineMs === "number") {
+        const budget = decideStageBudget({
+          stepIndex: step,
+          deadlineMs: args.deadlineMs,
+          minStageBudgetMs: args.minStageBudgetMs
+        });
+        if (budget.action === "skip") {
+          args.onStage?.({
+            stage: "stage_skipped",
+            reason: budget.reason,
+            remainingMs: budget.remainingMs,
+            minStageMs: budget.minStageMs
+          });
+          // Deadline budget ran out before this step could start, so the reply was cut short.
+          chatStatus = "timeout";
+          break;
+        }
+      }
+      args.onStage?.({ stage: "thinking" });
+      const baseBody: Record<string, any> = {
+        model: this.model,
+        messages,
+        ...(oaiTools ? { tools: oaiTools, tool_choice: "auto" } : {})
+      };
+      if (this.provider === "openrouter") {
+        // Shared classifier enrichment (user + flat trace) — replaces the old hand-built bare
+        // `metadata` object this path used to duplicate alongside llm-call.ts. Fail-open: an
+        // enrichment error degrades to an un-enriched request, never a failed chat call.
+        applyOpenRouterClassifierEnrichment(baseBody, {
+          userId: this.usage.userId,
+          keyRef: this.usage.keyRef,
+          service: "chat",
+          feature: this.usage.context ?? "chat"
+        });
+      } else if (this.usage.userId) {
+        if (this.provider === "openai" || this.provider === "deepseek" || this.provider === "gemini") {
+          baseBody.user = this.usage.userId;
+        }
+      }
+      if (this.provider === "minimax") baseBody.reasoning_split = true;
+      const requestBody = reasoningCapabilityForModel(this.model) || /^(minimax|meta)$/.test(llmModelFamily(this.model))
+        ? withLlmRequestBounds(baseBody, "chat-completions", {
+            model: this.model,
+            maxOutputTokens: 1024,
+            reasoningEffort: this.reasoningEffort,
+            endpointProvider: this.provider
+          })
+        : { ...baseBody, max_tokens: 1024 };
+      if (this.provider === "openrouter") applyOpenRouterProviderRouting(requestBody);
+      let resp: any;
+      try {
+        usageTotals.requests += 1;
+        resp = await this.transport(
+          requestBody,
+          this.apiKey,
+          args.abortSignal
+        );
+      } catch (e) {
+        // Record the failed run (tokens billed on earlier steps + wall-clock latency) so
+        // error / timeout / canceled rows reach the LLM stats console, then rethrow unchanged.
+        chatStatus = args.abortSignal?.aborted ? "canceled" : isAbortOrTimeoutError(e) ? "timeout" : "error";
+        recordChatUsage(
+          this.usage,
+          this.provider,
+          this.model,
+          usageTotals,
+          generationIds.length === 1 ? generationIds[0] : undefined,
+          performance.now() - startedAt,
+          chatStatus
+        );
+        throw e;
+      }
+
+      const genId = providerRequestIdFromPayload(this.provider, resp);
+      if (genId) generationIds.push(genId);
+      addChatUsage(usageTotals, extractLlmUsage(resp));
       const choice = resp.choices?.[0];
       if (!choice) break;
       const assistantMsg = choice.message ?? {};
-      messages.push({ role: "assistant", content: assistantMsg.content ?? null, ...(assistantMsg.tool_calls ? { tool_calls: assistantMsg.tool_calls } : {}) });
+      messages.push({
+        role: "assistant",
+        content: assistantMsg.content ?? null,
+        ...(assistantMsg.tool_calls ? { tool_calls: assistantMsg.tool_calls } : {}),
+        ...(/^(minimax|meta)$/.test(llmModelFamily(this.model)) && assistantMsg.reasoning_details
+          ? { reasoning_details: assistantMsg.reasoning_details }
+          : {})
+      });
       text = typeof assistantMsg.content === "string" ? assistantMsg.content : "";
 
       const calls: any[] = assistantMsg.tool_calls ?? [];
@@ -552,9 +784,17 @@ export class OpenAILLM implements ChatLLM {
       .filter((c) => c.name === "get_quote" && c.result && !c.result.error)
       .map((c) => ({ source: "get_quote", as_of: c.result.as_of }));
     for (const c of toolCalls.filter((tc) => tc.name === "kb_search" && tc.result?.chunks?.length)) {
-      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, as_of: chunk.as_of, url: chunk.url });
+      for (const chunk of c.result.chunks) citations.push({ source: chunk.source, chunk_id: chunk.chunk_id, evidence_ref: chunk.evidence_ref, as_of: chunk.as_of, url: chunk.url });
     }
-    recordChatUsage(this.usage, this.provider, this.model, promptTokens, completionTokens, sawUsage);
+    recordChatUsage(
+      this.usage,
+      this.provider,
+      this.model,
+      usageTotals,
+      generationIds.length === 1 ? generationIds[0] : undefined,
+      performance.now() - startedAt,
+      chatStatus
+    );
     return { text: text || DISCLAIMER, toolCalls, citations };
   }
 }
@@ -562,16 +802,20 @@ export class OpenAILLM implements ChatLLM {
 /**
  * Provider is derived from the model name (no separate provider flag): claude-* → Anthropic
  * (its own Messages tool loop); grok-* → xAI; gemini-* → Gemini; mistral/ministral/codestral/…
- * → Mistral; everything else (gpt-*, o-series) → OpenAI. The latter four are all OpenAI-compatible
- * and share the OpenAILLM chat/completions tool loop, differing only by base URL + key.
+ * → Mistral; llama-* → Meta; kimi/moonshot-* → Moonshot; everything else (gpt-*, o-series) →
+ * OpenAI. All but Anthropic are OpenAI-compatible and share the OpenAILLM chat/completions tool
+ * loop, differing only by base URL + key.
+ *
+ * Family detection DELEGATES to `llmModelFamily` (llm-provider.ts) — the exact same helper
+ * `resolveLlmEndpoint` uses for the strategy engine — so this can never drift back out of sync
+ * with it. It previously re-derived its own anchored-regex prefix list here, which had no
+ * llama → meta case: a llama model silently fell through to the openai default and a Coach call
+ * for it hit the OpenAI API with a Meta model id (review finding llm-12).
  */
 export function chatProviderForModel(model: string): ChatProvider {
-  if (/^claude/i.test(model)) return "anthropic";
-  if (/^grok/i.test(model)) return "xai";
-  if (/^gemini/i.test(model)) return "gemini";
-  if (/^(mistral|ministral|magistral|codestral|devstral|pixtral|open-mistral|open-mixtral)/i.test(model)) return "mistral";
-  if (/^deepseek/i.test(model)) return "deepseek";
-  return "openai";
+  const trimmed = model?.trim() ?? "";
+  if (/^openrouter\//i.test(trimmed)) return "openrouter";
+  return llmModelFamily(trimmed);
 }
 
 /** OpenAI-compatible providers (everyone except Anthropic, which has its own Messages loop). */
@@ -582,17 +826,27 @@ function openAiCompatChatUrl(provider: OpenAiCompatProvider): string {  if (prov
   if (provider === "gemini")
     return process.env.GEMINI_API_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
   if (provider === "mistral") return process.env.MISTRAL_API_URL?.trim() || "https://api.mistral.ai/v1/chat/completions";
+  if (provider === "openrouter") return process.env.OPENROUTER_API_URL?.trim() || "https://openrouter.ai/api/v1/chat/completions";
   if (provider === "deepseek") return process.env.DEEPSEEK_API_URL?.trim() || "https://api.deepseek.com/v1/chat/completions";
+  if (provider === "moonshot") return process.env.MOONSHOT_API_URL?.trim() || "https://api.moonshot.cn/v1/chat/completions";
+  if (provider === "minimax") return process.env.MINIMAX_API_URL?.trim() || "https://api.minimax.io/v1/chat/completions";
+  if (provider === "meta") return process.env.META_API_URL?.trim() || META_MODEL_API_URL;
   return process.env.OPENAI_CHAT_URL?.trim() || "https://api.openai.com/v1/chat/completions";
 }
 
 /** Build an OpenAI-style transport bound to a specific provider base URL (Bearer auth). The thrown
  *  error names the provider so the UI can render it in plain English (see humanizeLlmError). */
-function makeOpenAITransport(url: string, provider: OpenAiCompatProvider): OpenAITransport {  return async (body: any, apiKey: string) => {
+function makeOpenAITransport(url: string, provider: OpenAiCompatProvider): OpenAITransport {  return async (body: any, apiKey: string, signal?: AbortSignal) => {
+    const headers: Record<string, string> = { "content-type": "application/json", authorization: `Bearer ${apiKey}` };
+    if (provider === "openrouter") {
+      headers["HTTP-Referer"] = "https://socratictrade.com";
+      headers["X-Title"] = "Socratic-Trade";
+    }
     const res = await llmFetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body)
+      headers,
+      body: JSON.stringify(body),
+      signal: composeChatAbortSignal(signal)
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
@@ -603,28 +857,96 @@ function makeOpenAITransport(url: string, provider: OpenAiCompatProvider): OpenA
 }
 
 /**
- * Build the chat LLM for an explicitly-chosen model, routed to its provider across all five
- * supported providers. The provider's key resolves per-user-first with the operator env key as a
- * flag-gated failover (resolveLlmCredential); usage is attributed to `userId` and the resolved
- * provider. Returns MockLLM for an empty/`"mock"` model or when the model's provider has no usable
- * key — so the assistant degrades to the deterministic offline path rather than erroring.
+ * Build the chat LLM for an explicitly-chosen model, routed with the SAME precedence
+ * `resolveLlmEndpoint` uses for the strategy engine (llm-provider.ts): an OpenRouter key, when
+ * present, serves EVERY model — universal routing, not a per-model native-provider lookup — so an
+ * owner who has only connected OpenRouter is never told "no key" for a Coach model that already
+ * works fine in the strategy engine (review finding llm-12). Only when no OpenRouter key resolves
+ * does the model fall back to its own native-provider key (openai/anthropic/xai/gemini/mistral/
+ * deepseek/meta/moonshot), exactly as before this fix. Usage is attributed to `userId` and the
+ * resolved provider either way. Returns MockLLM for an empty/`"mock"` model or when neither an
+ * OpenRouter key nor the model's native-provider key resolves — so the assistant degrades to the
+ * deterministic offline path rather than erroring.
  */
 export function llmForModel(
   model: string,
   userId?: string,
-  opts: { transport?: Transport; openAITransport?: OpenAITransport } = {}
+  opts: { transport?: Transport; openAITransport?: OpenAITransport; reasoningEffort?: LlmReasoningEffort } = {}
 ): ChatLLM {
   const trimmed = model?.trim();
   if (!trimmed || trimmed.toLowerCase() === "mock") return new MockLLM();
+
+  const cliFamily = llmModelFamily(trimmed);
+  if ((cliFamily === "meta" || cliFamily === "minimax") && llmRouteFor(cliFamily, userId ?? "local") === "code-cli") {
+    const url = codeCliUrl(cliFamily, userId ?? "local");
+    const cliModel = nativeSlugFor(trimmed);
+    // Explicit effort so the provider default (max on MiniMax-M3.1-Flash) never applies; undefined
+    // for models with no documented effort (MiniMax-M3), which the broker then receives without one.
+    const cliEffort = reasoningCapabilityForModel(cliModel)
+      ? normalizeReasoningEffortForModel(cliModel, opts.reasoningEffort)
+      : undefined;
+    // No agent tool loop: only existing plain-text context is sent. Never executeTool.
+    return { modelName: cliModel, async run(args) {
+      const res = await llmFetch(url, { method: "POST", signal: args.abortSignal,
+        body: JSON.stringify({ model: cliModel, max_tokens: 1500, ...(cliEffort ? { reasoning_effort: cliEffort } : {}), messages: [
+          { role: "system", content: args.system },
+          ...(args.history ?? []).map(turn => ({ role: turn.role, content: turn.text })),
+          { role: "user", content: args.message }
+        ] }) });
+      const result = CodeCliChatResponseSchema.parse(await res.json());
+      recordChatUsage({ userId: userId ?? "local", keySource: "user", keyRef: "code-cli", context: "chat" }, cliFamily,
+        cliModel, newChatUsageTotals());
+      return { text: result.choices[0].message.content, toolCalls: [], citations: [] };
+    } };
+  }
+
+  // Code CLI-only ids (muse-wonder-*-contributor) exist on no other route: never send them to
+  // OpenRouter or api.meta.ai.  Same offline fallback as a model with no usable key.
+  if (isCodeCliOnlyModel(trimmed)) return new MockLLM();
+
+  // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
+  //    goes straight to api.meta.ai.  Otherwise it falls through to the OpenRouter path below.
+  const metaNative = resolveMetaNative(trimmed, userId);
+  if (metaNative) {
+    const usage: LlmUsageOpts = { userId, keySource: metaNative.keySource, keyRef: metaNative.keyRef, context: "chat" };
+    const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl("meta"), "meta");
+    return new OpenAILLM(metaNative.key, metaNative.model, transport, usage, "meta", opts.reasoningEffort);
+  }
+
+  // 1. Primary path: an OpenRouter key (user or operator failover) serves ANY model. The wire
+  //    model id is normalized with the exact helper the engine uses (normalizeOpenRouterModelId)
+  //    so an availability probe and the actual call can never disagree about a model's id.
+  const openRouterCred = resolveLlmCredential("openrouter", userId);
+  if (openRouterCred.key && !minimaxDirectRoute(trimmed, userId)) {
+    const usage: LlmUsageOpts = {
+      userId,
+      keySource: openRouterCred.source === "operator" ? "operator" : "user",
+      keyRef: openRouterCred.keyRef,
+      context: "chat"
+    };
+    const modelForApi = normalizeOpenRouterModelId(trimmed);
+    const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl("openrouter"), "openrouter");
+    return new OpenAILLM(openRouterCred.key, modelForApi, transport, usage, "openrouter", opts.reasoningEffort);
+  }
+
+  // 2. Native-provider fallback (unchanged): no OpenRouter key resolved, so try the model's own
+  //    family key directly.
   const provider = chatProviderForModel(trimmed);
+  if (modelRequiresOpenRouter(trimmed) && !minimaxDirectRoute(trimmed, userId)) return new MockLLM();
   const { key, source, keyRef } = resolveLlmCredential(provider, userId);
   if (!key) return new MockLLM();
   const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
+  // Strip the `openrouter/` prefix before passing the model ID to the API; OpenRouter expects the
+  // bare model name. (Reached only for an explicit "openrouter/"-prefixed model when step 1 above
+  // already found no OpenRouter key, so `key` here is always falsy for provider === "openrouter"
+  // and this ternary's true branch is unreachable in practice — kept so a future caller that
+  // supplies its own resolved key for this provider still gets the right model id.)
+  const modelForApi = provider === "openrouter" ? trimmed.replace(/^openrouter\//i, "") : nativeSlugFor(trimmed);
   if (provider === "anthropic") {
-    return new AnthropicLLM(key, trimmed, opts.transport ?? defaultTransport, usage);
+    return new AnthropicLLM(key, modelForApi, opts.transport ?? defaultTransport, usage, opts.reasoningEffort);
   }
   const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl(provider), provider);
-  return new OpenAILLM(key, trimmed, transport, usage, provider);
+  return new OpenAILLM(key, modelForApi, transport, usage, provider, opts.reasoningEffort);
 }
 
 /**
@@ -632,23 +954,46 @@ export function llmForModel(
  * env key as a flag-gated failover (see resolveLlmCredential), and usage is attributed to `userId`.
  * Passing no userId resolves the operator (`local`) key — preserves single-operator behaviour.
  */
-export function getLLM(userId?: string, opts: { transport?: Transport; openAITransport?: OpenAITransport } = {}): ChatLLM {
+export function getLLM(userId?: string, opts: { transport?: Transport; openAITransport?: OpenAITransport; reasoningEffort?: LlmReasoningEffort } = {}): ChatLLM {
   const chatLlm = process.env.CHAT_LLM;
   // No hardcoded chat model default (owner 2026-07-07): the env-default chat path requires an
   // explicit CHAT_LLM_MODEL. Without it, fall through to MockLLM rather than silently pick a model.
   const chatModel = process.env.CHAT_LLM_MODEL?.trim();
+  if (chatModel) {
+    const family = llmModelFamily(chatModel);
+    if ((family === "meta" || family === "minimax") && llmRouteFor(family, userId ?? "local") === "code-cli") {
+      return llmForModel(chatModel, userId, opts);
+    }
+  }
   if (chatLlm === "anthropic" && chatModel) {
     const { key, source, keyRef } = resolveLlmCredential("anthropic", userId);
     if (key) {
       const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
-      return new AnthropicLLM(key, chatModel, opts.transport ?? defaultTransport, usage);
+      return new AnthropicLLM(key, chatModel, opts.transport ?? defaultTransport, usage, opts.reasoningEffort);
     }
   }
   if (chatLlm === "openai" && chatModel) {
     const { key, source, keyRef } = resolveLlmCredential("openai", userId);
     if (key) {
       const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
-      return new OpenAILLM(key, chatModel, opts.openAITransport ?? defaultOpenAITransport, usage);
+      return new OpenAILLM(key, chatModel, opts.openAITransport ?? defaultOpenAITransport, usage, "openai", opts.reasoningEffort);
+    }
+  }
+  if (chatLlm === "minimax" && chatModel) {
+    const { key, source, keyRef } = resolveLlmCredential("minimax", userId);
+    if (key) {
+      const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
+      const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl("minimax"), "minimax");
+      return new OpenAILLM(key, nativeSlugFor(chatModel), transport, usage, "minimax", opts.reasoningEffort);
+    }
+  }
+  if (chatLlm === "openrouter" && chatModel) {
+    const { key, source, keyRef } = resolveLlmCredential("openrouter", userId);
+    if (key) {
+      const usage: LlmUsageOpts = { userId, keySource: source === "operator" ? "operator" : "user", keyRef, context: "chat" };
+      const transport = opts.openAITransport ?? makeOpenAITransport(openAiCompatChatUrl("openrouter"), "openrouter");
+      const modelForApi = normalizeOpenRouterModelId(chatModel);
+      return new OpenAILLM(key, modelForApi, transport, usage, "openrouter", opts.reasoningEffort);
     }
   }
   return new MockLLM();

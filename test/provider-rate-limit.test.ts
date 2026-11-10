@@ -1,13 +1,30 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderRateLimiter,
+  RequestQuota,
+  admitProviderRequests,
   appendErrorCause,
   redactApiKeyParams,
   redactSecretValue,
+  refundProviderRequests,
+  resetProviderQuotaState,
   resolveProviderLimiterConfig,
+  resolveProviderLimiterConfigForCall,
+  resolveProviderLimiterKey,
+  resolveProviderQuota,
   scrubProviderErrorText,
+  simulateProviderQuotaRestartForTests,
   type ProviderLimiterClock,
 } from "../src/lib/provider-rate-limit";
+import { flushDurableStateNow } from "../src/lib/durable-state";
+import { getUsageMonitorKnobsCached, resetUsageMonitorKnobsCacheForTests } from "../src/lib/usage-monitor-knobs";
+
+beforeAll(() => {
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-provider-rate-limit-${randomUUID()}.db`)}`;
+});
 
 /** Drain every currently-queued microtask (including ones scheduled BY other microtasks
  *  along the way) before returning. A macrotask boundary (real setTimeout) always runs
@@ -59,6 +76,38 @@ const ENV_KEYS = [
 function clearEnv() {
   for (const key of ENV_KEYS) delete process.env[key];
 }
+
+describe("resolveProviderLimiterKey", () => {
+  it("maps RapidAPI hostnames to per-host limiter buckets", () => {
+    expect(
+      resolveProviderLimiterKey("mboum-finance", "https://mboum-finance.p.rapidapi.com/v1/market/quotes")
+    ).toBe("rapidapi-host:mboum-finance.p.rapidapi.com");
+    expect(resolveProviderLimiterKey("finnhub", "https://finnhub.io/api/v1/quote")).toBe("finnhub");
+  });
+
+  it("applies rapidapi-host pacing defaults to derived host keys", () => {
+    const config = resolveProviderLimiterConfig("rapidapi-host:example.p.rapidapi.com");
+    expect(config).toEqual({ minIntervalMs: 1100, concurrency: 1 });
+  });
+
+  it("keeps alpha-vantage-rapidapi's 5/min cap on a RapidAPI host bucket", () => {
+    const limiterKey = resolveProviderLimiterKey(
+      "alpha-vantage-rapidapi",
+      "https://alpha-vantage.p.rapidapi.com/query"
+    );
+    expect(limiterKey).toBe("rapidapi-host:alpha-vantage.p.rapidapi.com");
+    expect(resolveProviderLimiterConfigForCall("alpha-vantage-rapidapi", limiterKey)).toEqual({
+      minIntervalMs: Math.ceil(60_000 / 5),
+      concurrency: 1
+    });
+  });
+
+  it("uses the rapidapi-host default only when the service has no own cap", () => {
+    expect(
+      resolveProviderLimiterConfigForCall("unknown-rapidapi", "rapidapi-host:example.p.rapidapi.com")
+    ).toEqual({ minIntervalMs: 1100, concurrency: 1 });
+  });
+});
 
 describe("resolveProviderLimiterConfig", () => {
   beforeEach(clearEnv);
@@ -124,6 +173,12 @@ describe("resolveProviderLimiterConfig", () => {
   it("uppercases and normalizes non-alphanumeric characters into the env var name", () => {
     process.env.PROVIDER_RATE_LIMIT_ALPHA_VANTAGE_MIN_INTERVAL_MS = "2500";
     expect(resolveProviderLimiterConfig("alpha-vantage")?.minIntervalMs).toBe(2500);
+  });
+
+  it("uses roic burst pacer (200ms, concurrency 1); free budget is RATE_QUOTAS 5/min", () => {
+    // Free 5/min is enforced by quota windows, not a 12s minInterval (that would throttle paid).
+    expect(resolveProviderLimiterConfig("roic")).toEqual({ minIntervalMs: 200, concurrency: 1 });
+    expect(resolveProviderLimiterConfig("filingapi")).toEqual({ minIntervalMs: 400, concurrency: 1 });
   });
 });
 
@@ -437,5 +492,448 @@ describe("appendErrorCause", () => {
     expect(message.length).toBe("boom (cause: )".length + 20);
     expect(message).toContain("x".repeat(20));
     expect(message).not.toContain("x".repeat(21));
+  });
+});
+
+const QUOTA_ENV_KEYS = [
+  "PROVIDER_QUOTA_TWELVEDATA_PER_MIN",
+  "PROVIDER_QUOTA_TWELVEDATA_PER_DAY",
+  "PROVIDER_QUOTA_TIINGO_PER_HOUR",
+  "PROVIDER_QUOTA_TESTPROV_PER_MIN",
+  "PROVIDER_QUOTA_TESTPROV_PER_DAY",
+  "PROVIDER_QUOTA_FMP_PER_MIN",
+  "PROVIDER_QUOTA_FMP_PER_HOUR",
+  "PROVIDER_QUOTA_FMP_PER_DAY",
+  "TWELVEDATA_CREDITS_PER_MIN",
+  "PROVIDER_QUOTA_FILINGAPI_PER_DAY",
+  "PROVIDER_QUOTA_ROIC_PER_DAY",
+  "PROVIDER_QUOTA_MARKETSTACK_PER_DAY",
+];
+
+describe("resolveProviderQuota", () => {
+  beforeEach(() => { for (const k of QUOTA_ENV_KEYS) delete process.env[k]; });
+  afterEach(() => { for (const k of QUOTA_ENV_KEYS) delete process.env[k]; });
+
+  it("returns the built-in twelvedata windows (8/min + 800/day)", () => {
+    const windows = resolveProviderQuota("twelvedata");
+    expect(windows).toEqual([
+      { maxRequests: 8, windowMs: 60_000 },
+      { maxRequests: 800, windowMs: 86_400_000 },
+    ]);
+  });
+
+  it("returns the built-in tiingo windows (50/hour + 1000/day)", () => {
+    expect(resolveProviderQuota("tiingo")).toEqual([
+      { maxRequests: 50, windowMs: 3_600_000 },
+      { maxRequests: 1000, windowMs: 86_400_000 },
+    ]);
+  });
+
+  it("returns the built-in fmp window (290/min, no day cap by default)", () => {
+    expect(resolveProviderQuota("fmp")).toEqual([
+      { maxRequests: 290, windowMs: 60_000 },
+    ]);
+  });
+
+  it("lets PROVIDER_QUOTA_FMP_PER_MIN REPLACE the minute cap and =0 REMOVE it", () => {
+    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "100";
+    expect(resolveProviderQuota("fmp")).toEqual([{ maxRequests: 100, windowMs: 60_000 }]);
+    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "0";
+    // Removing the only window leaves an empty list → unlimited (undefined).
+    expect(resolveProviderQuota("fmp")).toBeUndefined();
+  });
+
+  it("lets PROVIDER_QUOTA_FMP_PER_DAY ADD a day window alongside the 290/min", () => {
+    process.env.PROVIDER_QUOTA_FMP_PER_DAY = "240";
+    expect(resolveProviderQuota("fmp")).toEqual([
+      { maxRequests: 290, windowMs: 60_000 },
+      { maxRequests: 240, windowMs: 86_400_000 },
+    ]);
+  });
+
+  it("PROVIDER_QUOTA_FMP_PER_DAY=0 is a no-op (no day window in the base)", () => {
+    process.env.PROVIDER_QUOTA_FMP_PER_DAY = "0";
+    expect(resolveProviderQuota("fmp")).toEqual([{ maxRequests: 290, windowMs: 60_000 }]);
+  });
+
+  it("returns the built-in filingapi window (45/day)", () => {
+    expect(resolveProviderQuota("filingapi")).toEqual([{ maxRequests: 45, windowMs: 86_400_000 }]);
+  });
+
+  it("returns the built-in roic free-safe window (5/min from vendor pricing)", () => {
+    // Paid Individual = 300/min via Connections plan tier, not the hard default.
+    expect(resolveProviderQuota("roic")).toEqual([{ maxRequests: 5, windowMs: 60_000 }]);
+    expect(resolveProviderQuota("roic", "individual")).toEqual([{ maxRequests: 300, windowMs: 60_000 }]);
+    expect(resolveProviderQuota("roic", "professional")).toBeUndefined(); // unlimited tier
+  });
+
+  it("returns the built-in marketstack window (100/month free tier)", () => {
+    expect(resolveProviderQuota("marketstack")).toEqual([{ maxRequests: 100, windowMs: 30 * 86_400_000 }]);
+  });
+
+  it("lets PROVIDER_QUOTA_<NAME>_PER_DAY override or add day windows on the new defaults", () => {
+    process.env.PROVIDER_QUOTA_FILINGAPI_PER_DAY = "10";
+    expect(resolveProviderQuota("filingapi")).toEqual([{ maxRequests: 10, windowMs: 86_400_000 }]);
+    // ROIC free default is per-minute; PER_DAY adds a second window rather than inventing a day-only map.
+    process.env.PROVIDER_QUOTA_ROIC_PER_DAY = "999";
+    expect(resolveProviderQuota("roic")).toEqual([
+      { maxRequests: 5, windowMs: 60_000 },
+      { maxRequests: 999, windowMs: 86_400_000 }
+    ]);
+    // Marketstack free default is monthly (30d); PER_DAY adds a day window alongside it.
+    process.env.PROVIDER_QUOTA_MARKETSTACK_PER_DAY = "1";
+    const ms = resolveProviderQuota("marketstack")!;
+    expect(ms.find((w) => w.windowMs === 86_400_000)?.maxRequests).toBe(1);
+    expect(ms.find((w) => w.windowMs === 30 * 86_400_000)?.maxRequests).toBe(100);
+  });
+
+  it("is undefined for an unconfigured provider (unlimited)", () => {
+    expect(resolveProviderQuota("yahoo-finance")).toBeUndefined();
+  });
+
+  it("lets an env override REPLACE an existing window's cap", () => {
+    process.env.PROVIDER_QUOTA_TWELVEDATA_PER_MIN = "3";
+    const windows = resolveProviderQuota("twelvedata");
+    expect(windows?.find((w) => w.windowMs === 60_000)?.maxRequests).toBe(3);
+    expect(windows?.find((w) => w.windowMs === 86_400_000)?.maxRequests).toBe(800); // untouched
+  });
+
+  it("lets an env override REMOVE a window when set to <= 0", () => {
+    process.env.PROVIDER_QUOTA_TWELVEDATA_PER_MIN = "0";
+    const windows = resolveProviderQuota("twelvedata");
+    expect(windows).toEqual([{ maxRequests: 800, windowMs: 86_400_000 }]); // only the daily cap remains
+  });
+
+  it("lets an env override ADD windows to an otherwise-unlimited provider", () => {
+    process.env.PROVIDER_QUOTA_TESTPROV_PER_MIN = "3";
+    process.env.PROVIDER_QUOTA_TESTPROV_PER_DAY = "5";
+    expect(resolveProviderQuota("testprov")).toEqual([
+      { maxRequests: 3, windowMs: 60_000 },
+      { maxRequests: 5, windowMs: 86_400_000 },
+    ]);
+  });
+
+  it("honors the legacy TWELVEDATA_CREDITS_PER_MIN as a per-minute alias when the new name is unset", () => {
+    process.env.TWELVEDATA_CREDITS_PER_MIN = "20";
+    expect(resolveProviderQuota("twelvedata")?.find((w) => w.windowMs === 60_000)?.maxRequests).toBe(20);
+  });
+
+  it("prefers the new PROVIDER_QUOTA_TWELVEDATA_PER_MIN over the legacy alias", () => {
+    process.env.PROVIDER_QUOTA_TWELVEDATA_PER_MIN = "12";
+    process.env.TWELVEDATA_CREDITS_PER_MIN = "20";
+    expect(resolveProviderQuota("twelvedata")?.find((w) => w.windowMs === 60_000)?.maxRequests).toBe(12);
+  });
+});
+
+// ── Usage Monitor knob fallback (Lane E: subscription -> knob) ──────────────────────
+// process.env still wins; a UM-sourced knob is consulted only when the corresponding env var is
+// unset; the built-in HARD_DEFAULTS/RATE_QUOTAS default is the final fallback.
+const UM_ENV_KEYS = [
+  "USAGE_MONITOR_BASE_URL",
+  "USAGE_INGEST_TOKEN",
+  "USAGE_READ_TOKEN",
+  "USAGE_MONITOR_KNOBS_ENABLED",
+  "PROVIDER_RATE_LIMIT_FINNHUB_PER_MIN",
+  "PROVIDER_RATE_LIMIT_FINNHUB_MIN_INTERVAL_MS",
+  "PROVIDER_QUOTA_TIINGO_PER_HOUR",
+  "PROVIDER_QUOTA_TESTPROV_PER_MIN",
+];
+
+/** Warm the in-process UM knob cache with a single "active" subscription row whose knobEnv is
+ *  `map`, via the real public getUsageMonitorKnobsCached path (mocked fetch, no real network) —
+ *  mirrors how resolveProviderLimiterConfig/resolveProviderQuota consume it in production, rather
+ *  than reaching into the cache's internals. The first call only TRIGGERS the fire-and-forget
+ *  refresh (and returns whatever was cached before, i.e. nothing) — awaiting a macrotask lets that
+ *  refresh's promise chain settle before the caller reads the now-populated cache. */
+async function warmUsageMonitorKnobs(map: Record<string, string>): Promise<void> {
+  process.env.USAGE_MONITOR_BASE_URL = "https://usage.example.test";
+  process.env.USAGE_INGEST_TOKEN = "test-token";
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify([{ status: "active", knobEnv: map, freeTierKnobEnv: {} }]), { status: 200 })
+  ) as unknown as typeof fetch;
+  getUsageMonitorKnobsCached({ fetchImpl });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("Usage Monitor knob fallback", () => {
+  beforeEach(() => {
+    for (const k of [...ENV_KEYS, ...QUOTA_ENV_KEYS, ...UM_ENV_KEYS]) delete process.env[k];
+    resetUsageMonitorKnobsCacheForTests();
+  });
+  afterEach(() => {
+    for (const k of [...ENV_KEYS, ...QUOTA_ENV_KEYS, ...UM_ENV_KEYS]) delete process.env[k];
+    resetUsageMonitorKnobsCacheForTests();
+  });
+
+  it("resolveProviderLimiterConfig falls back to a UM PER_MIN knob when no env override exists", async () => {
+    await warmUsageMonitorKnobs({ PROVIDER_RATE_LIMIT_FINNHUB_PER_MIN: "10" });
+    const config = resolveProviderLimiterConfig("finnhub");
+    expect(config?.minIntervalMs).toBe(6_000); // 60000 / 10, NOT the hard default's 1200ms (50/min)
+  });
+
+  it("resolveProviderLimiterConfig: process.env still wins over a UM knob", async () => {
+    process.env.PROVIDER_RATE_LIMIT_FINNHUB_PER_MIN = "50"; // the hard default's own value, but via env
+    await warmUsageMonitorKnobs({ PROVIDER_RATE_LIMIT_FINNHUB_PER_MIN: "10" });
+    const config = resolveProviderLimiterConfig("finnhub");
+    expect(config?.minIntervalMs).toBe(1_200); // 60000 / 50 (env), not 60000 / 10 (UM)
+  });
+
+  it("resolveProviderQuota falls back to a UM knob for a provider with no hard default", async () => {
+    await warmUsageMonitorKnobs({ PROVIDER_QUOTA_TESTPROV_PER_MIN: "7" });
+    expect(resolveProviderQuota("testprov")).toEqual([{ maxRequests: 7, windowMs: 60_000 }]);
+  });
+
+  it("resolveProviderQuota: process.env still wins over a UM knob", async () => {
+    process.env.PROVIDER_QUOTA_TIINGO_PER_HOUR = "20";
+    await warmUsageMonitorKnobs({ PROVIDER_QUOTA_TIINGO_PER_HOUR: "999" });
+    const windows = resolveProviderQuota("tiingo");
+    expect(windows?.find((w) => w.windowMs === 3_600_000)?.maxRequests).toBe(20);
+  });
+
+  it("multiple UM knobs for the same unconfigured provider add multiple windows", async () => {
+    await warmUsageMonitorKnobs({
+      PROVIDER_QUOTA_TESTPROV_PER_MIN: "3",
+      PROVIDER_QUOTA_TESTPROV_PER_DAY: "5",
+    });
+    expect(resolveProviderQuota("testprov")).toEqual([
+      { maxRequests: 3, windowMs: 60_000 },
+      { maxRequests: 5, windowMs: 86_400_000 },
+    ]);
+  });
+
+  it("an empty UM knob map leaves an unrelated provider unaffected", async () => {
+    await warmUsageMonitorKnobs({});
+    expect(resolveProviderQuota("some-random-provider")).toBeUndefined();
+  });
+
+  it("UM outage/failure during refresh is fail-open — resolution stays at the hard default", async () => {
+    process.env.USAGE_MONITOR_BASE_URL = "https://usage.example.test";
+    process.env.USAGE_INGEST_TOKEN = "test-token";
+    const fetchImpl = (async () => { throw new Error("network down"); }) as unknown as typeof fetch;
+    getUsageMonitorKnobsCached({ fetchImpl });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(resolveProviderLimiterConfig("finnhub")).toEqual({ minIntervalMs: 1_200, concurrency: Infinity });
+  });
+
+  it("a lapsed (non-active) subscription's knobEnv is ignored in favor of freeTierKnobEnv", async () => {
+    process.env.USAGE_MONITOR_BASE_URL = "https://usage.example.test";
+    process.env.USAGE_INGEST_TOKEN = "test-token";
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify([
+          {
+            status: "canceled",
+            knobEnv: { PROVIDER_QUOTA_TESTPROV_PER_MIN: "999" }, // stale paid override — must NOT apply
+            freeTierKnobEnv: { PROVIDER_QUOTA_TESTPROV_PER_MIN: "4" },
+          },
+        ]),
+        { status: 200 }
+      )
+    ) as unknown as typeof fetch;
+    getUsageMonitorKnobsCached({ fetchImpl });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(resolveProviderQuota("testprov")).toEqual([{ maxRequests: 4, windowMs: 60_000 }]);
+  });
+
+  it("USAGE_MONITOR_KNOBS_ENABLED=off disables the lane even with a base URL configured", async () => {
+    process.env.USAGE_MONITOR_KNOBS_ENABLED = "off";
+    await warmUsageMonitorKnobs({ PROVIDER_QUOTA_TESTPROV_PER_MIN: "7" });
+    expect(resolveProviderQuota("testprov")).toBeUndefined();
+  });
+});
+
+describe("RequestQuota (sliding-window, fake clock)", () => {
+  beforeEach(() => { for (const k of QUOTA_ENV_KEYS) delete process.env[k]; });
+  afterEach(() => { for (const k of QUOTA_ENV_KEYS) delete process.env[k]; });
+
+  it("admits up to the tightest window and records the hits", () => {
+    const clock = new FakeClock();
+    const quota = new RequestQuota(clock);
+    // twelvedata: 8/min is tighter than 800/day.
+    expect(quota.admit("twelvedata", "k1", 20)).toBe(8);
+    expect(quota.admit("twelvedata", "k1", 20)).toBe(0); // budget spent in this minute
+  });
+
+  it("binds on the MINIMUM headroom across all windows, and each window depletes independently", async () => {
+    process.env.PROVIDER_QUOTA_TESTPROV_PER_MIN = "3";
+    process.env.PROVIDER_QUOTA_TESTPROV_PER_DAY = "5";
+    const clock = new FakeClock();
+    const quota = new RequestQuota(clock);
+
+    expect(quota.admit("testprov", "k", 10)).toBe(3); // per-min binds (3 < 5)
+    await clock.advance(60_000);
+    // per-min window rolled over (fresh 3), but the day window has 3 recorded → 5-3 = 2 headroom.
+    expect(quota.admit("testprov", "k", 10)).toBe(2);
+    await clock.advance(60_000);
+    // day budget now fully spent (5), even though the minute has room.
+    expect(quota.admit("testprov", "k", 10)).toBe(0);
+  });
+
+  it("keeps a separate budget per credential", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("twelvedata", "keyA", 8)).toBe(8);
+    expect(quota.admit("twelvedata", "keyA", 8)).toBe(0);
+    expect(quota.admit("twelvedata", "keyB", 8)).toBe(8); // keyB untouched by keyA's spend
+  });
+
+  it("admits up to the fmp 290/min cap, reopens after 60s, and refund/per-cred lanes work", async () => {
+    const clock = new FakeClock();
+    const quota = new RequestQuota(clock);
+    expect(quota.admit("fmp", "credA", 300)).toBe(290); // 290/min ceiling
+    expect(quota.admit("fmp", "credA", 300)).toBe(0);   // minute spent
+    expect(quota.admit("fmp", "credB", 300)).toBe(290); // credB is an independent lane
+    quota.refund("fmp", "credA", 10);                   // hand back 10 (partial remainder / breaker skip)
+    expect(quota.admit("fmp", "credA", 300)).toBe(10);  // exactly the refunded 10
+    await clock.advance(60_000);
+    expect(quota.admit("fmp", "credA", 300)).toBe(290); // window reopened
+  });
+
+  it("enforces an opt-in PROVIDER_QUOTA_FMP_PER_DAY cap alongside the minute window", async () => {
+    process.env.PROVIDER_QUOTA_FMP_PER_DAY = "240"; // free-tier 250/day, 240 headroom
+    const clock = new FakeClock();
+    const quota = new RequestQuota(clock);
+    expect(quota.admit("fmp", "k", 1000)).toBe(240); // day cap (240) binds under the 290/min
+    await clock.advance(60_000);
+    expect(quota.admit("fmp", "k", 1000)).toBe(0);   // minute refreshed but the day budget is spent
+  });
+
+  it("admits up to filingapi's 45/day default and denies once the day's budget is spent", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("filingapi", "k", 100)).toBe(45); // capped to the 45/day default
+    expect(quota.admit("filingapi", "k", 100)).toBe(0); // day's budget already spent
+  });
+
+  it("admits up to roic's free-safe 5/min default and denies once the minute is spent", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("roic", "k", 15000)).toBe(5);
+    expect(quota.admit("roic", "k", 15000)).toBe(0);
+  });
+
+  it("admits up to marketstack's 100/month default and denies once the month window is spent", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("marketstack", "k", 200)).toBe(100);
+    expect(quota.admit("marketstack", "k", 200)).toBe(0);
+  });
+
+  it("lets a PROVIDER_QUOTA_<NAME>_PER_DAY env override constrain alongside defaults", () => {
+    process.env.PROVIDER_QUOTA_FILINGAPI_PER_DAY = "2";
+    process.env.PROVIDER_QUOTA_ROIC_PER_DAY = "1";
+    process.env.PROVIDER_QUOTA_MARKETSTACK_PER_DAY = "5";
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("filingapi", "k", 100)).toBe(2); // overridden default (45) does not apply
+    // ROIC still has 5/min free default; day override of 1 is the tighter bound.
+    expect(quota.admit("roic", "k", 100)).toBe(1);
+    // Marketstack still has 100/month; day override of 5 is tighter.
+    expect(quota.admit("marketstack", "k", 100)).toBe(5);
+  });
+
+  it("refills as older hits slide out of the window", async () => {
+    const clock = new FakeClock();
+    const quota = new RequestQuota(clock);
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8); // fill the minute at t=0
+    await clock.advance(59_000);
+    expect(quota.admit("twelvedata", "k", 8)).toBe(0); // still inside the 60s window → nothing
+    await clock.advance(2_000); // t=61_000: the t=0 hits are now > 60s old → they slide out
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8); // fully refilled
+  });
+
+  it("passes unlimited providers through unchanged", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("yahoo-finance", "k", 1000)).toBe(1000);
+  });
+
+  it("admits nothing for a non-positive request count", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("twelvedata", "k", 0)).toBe(0);
+    expect(quota.admit("twelvedata", "k", -5)).toBe(0);
+  });
+
+  it("reset(provider) clears only that provider's lanes", () => {
+    const quota = new RequestQuota(new FakeClock());
+    quota.admit("twelvedata", "k", 8);
+    quota.admit("tiingo", "k", 50);
+    quota.reset("twelvedata");
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8); // twelvedata budget restored
+    expect(quota.admit("tiingo", "k", 50)).toBe(0);    // tiingo still spent
+  });
+
+  it("reset() with no argument clears every lane", () => {
+    const quota = new RequestQuota(new FakeClock());
+    quota.admit("twelvedata", "k", 8);
+    quota.admit("tiingo", "k", 50);
+    quota.reset();
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8);
+    expect(quota.admit("tiingo", "k", 50)).toBe(50);
+  });
+
+  it("refund() returns admitted-but-undispatched requests to the budget", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8); // spend the whole minute
+    expect(quota.admit("twelvedata", "k", 8)).toBe(0); // nothing left
+    quota.refund("twelvedata", "k", 3);                // hand back 3 (e.g. a breaker skip / partial remainder)
+    expect(quota.admit("twelvedata", "k", 8)).toBe(3); // exactly the 3 refunded are available again
+  });
+
+  it("refund() is clamped to what was recorded and is per-credential", () => {
+    const quota = new RequestQuota(new FakeClock());
+    quota.admit("twelvedata", "k", 5);
+    quota.refund("twelvedata", "k", 100); // over-refund can't exceed recorded hits
+    expect(quota.admit("twelvedata", "k", 8)).toBe(8); // fully restored, not more
+    quota.admit("twelvedata", "k", 8);
+    quota.refund("twelvedata", "other", 4); // refunding an unknown credential is a no-op
+    expect(quota.admit("twelvedata", "k", 8)).toBe(0);
+  });
+
+  it("refund() is a no-op for unlimited providers and non-positive amounts", () => {
+    const quota = new RequestQuota(new FakeClock());
+    expect(() => quota.refund("yahoo-finance", "k", 5)).not.toThrow();
+    quota.admit("twelvedata", "k", 8);
+    quota.refund("twelvedata", "k", 0);
+    quota.refund("twelvedata", "k", -3);
+    expect(quota.admit("twelvedata", "k", 8)).toBe(0); // unchanged
+  });
+});
+
+describe("admitProviderRequests (the module singleton) — survives a simulated process restart", () => {
+  beforeEach(() => { process.env.PROVIDER_QUOTA_TESTQUOTA_PER_MIN = "8"; });
+  afterEach(() => {
+    delete process.env.PROVIDER_QUOTA_TESTQUOTA_PER_MIN;
+    resetProviderQuotaState("testquota");
+  });
+
+  it("a lane's spend from a PRIOR process is hydrated and enforced, not reset to a fresh budget", () => {
+    const credKey = `cred-${randomUUID()}`;
+    expect(admitProviderRequests("testquota", credKey, 8)).toBe(8); // spend the whole per-minute budget
+    expect(admitProviderRequests("testquota", credKey, 8)).toBe(0); // none left, pre-"restart"
+    flushDurableStateNow(); // debounced write lands in SQLite (what a graceful shutdown hook does)
+
+    // Simulate a restart: forget the in-memory RequestQuota state AND durable-state's hydration flag
+    // for this namespace, WITHOUT touching the persisted SQLite rows (a real restart doesn't touch
+    // disk) — this is exactly what protects against a redeploy re-granting an already-burned budget.
+    simulateProviderQuotaRestartForTests();
+
+    // A fresh process must still see the spend from before the "restart" — not a clean 8/8 budget.
+    expect(admitProviderRequests("testquota", credKey, 8)).toBe(0);
+  });
+
+  it("refundProviderRequests' effect also survives a restart (a partial-remainder/breaker-skip refund isn't lost)", () => {
+    const credKey = `cred-${randomUUID()}`;
+    expect(admitProviderRequests("testquota", credKey, 8)).toBe(8);
+    refundProviderRequests("testquota", credKey, 3); // e.g. a breaker skip handing 3 back
+    flushDurableStateNow();
+
+    simulateProviderQuotaRestartForTests();
+
+    // The refunded 3 must still be available post-"restart" — a lost refund would under-count the
+    // real remaining budget and needlessly defer symbols that should have been admitted.
+    expect(admitProviderRequests("testquota", credKey, 8)).toBe(3);
+  });
+
+  it("an unrelated credential's lane is unaffected by another lane's restart-survived spend", () => {
+    const credA = `cred-a-${randomUUID()}`;
+    const credB = `cred-b-${randomUUID()}`;
+    admitProviderRequests("testquota", credA, 8);
+    simulateProviderQuotaRestartForTests();
+    expect(admitProviderRequests("testquota", credB, 8)).toBe(8); // credB's own fresh budget, untouched
   });
 });

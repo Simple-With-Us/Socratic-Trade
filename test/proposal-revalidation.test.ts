@@ -11,8 +11,8 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_URL;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_URL;
 });
 
 const baseProposal: TradeProposal = {
@@ -92,6 +92,36 @@ describe("expireStalePendingProposals", () => {
     expect(res.expired).toBe(0);
     expect(getProposal("off-1")?.status).toBe("proposed");
   });
+
+  it("stops before mutating the next stale row when strategy ownership is lost", async () => {
+    const { getProposal } = await import("../src/lib/db");
+    const { expireStalePendingProposals } = await import("../src/lib/proposal-revalidation");
+    const { StrategyLockOwnershipLostError } = await import("../src/lib/strategy-lock-guard");
+    const account = `EXPIRE-LEASE-${randomUUID()}`;
+    const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalExpiryMinutes: 1 };
+    await seedPending(account, `${account}-first`);
+    await seedPending(account, `${account}-second`);
+
+    let ownershipChecks = 0;
+    const assertOwned = () => {
+      ownershipChecks++;
+      // first row: before mutation + after notification; fail before row two mutates.
+      if (ownershipChecks >= 3) throw new StrategyLockOwnershipLostError();
+    };
+
+    await expect(expireStalePendingProposals({
+      userId: "local",
+      policy,
+      accountNumber: account,
+      now: Date.now() + 60 * 60 * 1000,
+      assertOwned
+    })).rejects.toBeInstanceOf(StrategyLockOwnershipLostError);
+
+    expect([
+      getProposal(`${account}-first`)?.status,
+      getProposal(`${account}-second`)?.status
+    ].sort()).toEqual(["expired", "proposed"]);
+  });
 });
 
 describe("revalidatePendingProposals", () => {
@@ -99,7 +129,7 @@ describe("revalidatePendingProposals", () => {
     const { setPolicy, listPendingProposals, getProposal } = await import("../src/lib/db");
     const { revalidatePendingProposals } = await import("../src/lib/proposal-revalidation");
     const account = "REVAL-LLM";
-    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalRevalidateCadenceHours: 0 };
     setPolicy(policy);
     await seedPending(account, "keep-1", { symbol: "MSFT" });
@@ -136,7 +166,7 @@ describe("revalidatePendingProposals", () => {
     const { setPolicy, getProposal } = await import("../src/lib/db");
     const { revalidatePendingProposals } = await import("../src/lib/proposal-revalidation");
     const account = "REVAL-NOKEY";
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalRevalidateCadenceHours: 0 };
     setPolicy(policy);
     await seedPending(account, "nokey-1");
@@ -151,7 +181,7 @@ describe("revalidatePendingProposals", () => {
     const { setPolicy, getProposal } = await import("../src/lib/db");
     const { revalidatePendingProposals } = await import("../src/lib/proposal-revalidation");
     const account = "REVAL-YOUNG";
-    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalRevalidateCadenceHours: 24 };
     setPolicy(policy);
     await seedPending(account, "young-1");
@@ -169,7 +199,7 @@ describe("revalidatePendingProposals", () => {
     const { setPolicy, getProposal } = await import("../src/lib/db");
     const { revalidatePendingProposals } = await import("../src/lib/proposal-revalidation");
     const account = "REVAL-CLOSED";
-    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalRevalidateCadenceHours: 0 };
     setPolicy(policy);
     await seedPending(account, "closed-1");
@@ -181,5 +211,44 @@ describe("revalidatePendingProposals", () => {
     expect(res.skipped).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(getProposal("closed-1")?.status).toBe("proposed");
+  });
+
+  it("does not swallow ownership loss after the LLM returns or mutate the pending row", async () => {
+    const { getProposal } = await import("../src/lib/db");
+    const { revalidatePendingProposals } = await import("../src/lib/proposal-revalidation");
+    const { StrategyLockOwnershipLostError } = await import("../src/lib/strategy-lock-guard");
+    const account = `REVAL-LEASE-${randomUUID()}`;
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
+    const policy: TradingPolicy = { ...DEFAULT_POLICY, accountNumber: account, proposalRevalidateCadenceHours: 0 };
+    const proposalId = `${account}-pending`;
+    await seedPending(account, proposalId);
+
+    let ownershipLost = false;
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      ownershipLost = true;
+      return new Response(
+        JSON.stringify({
+          output_text: JSON.stringify({
+            assessments: [{ proposalId, verdict: "withdraw", confidence: 99, note: "stale" }]
+          })
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const assertOwned = () => {
+      if (ownershipLost) throw new StrategyLockOwnershipLostError();
+    };
+    await expect(revalidatePendingProposals({
+      userId: "local",
+      policy,
+      accountNumber: account,
+      now: Date.now() + 60 * 60 * 1000,
+      marketOpen: true,
+      assertOwned
+    })).rejects.toBeInstanceOf(StrategyLockOwnershipLostError);
+
+    expect(getProposal(proposalId)?.status).toBe("proposed");
   });
 });

@@ -8,8 +8,8 @@ export const runtime = "nodejs";
 
 // Dev/ops route to inspect the event-driven trigger engine and preview the admitRun gate.
 // GET = show engine state + the admit decision for a sample event. POST = submit a test event
-// (no-op unless TRIGGER_ENGINE=on and mode != interval). Admin-gated: verified ADMIN_USER_EMAILS /
-// primary operator, or x-admin-token, or non-production.
+// (no-op unless TRIGGER_ENGINE=on and mode != interval). Admin-gated by a middleware-verified
+// primary/allowlisted admin email or a timing-safe x-admin-token; there is no environment bypass.
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;

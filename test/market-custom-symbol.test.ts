@@ -1,6 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { resetDbForTesting } from "../src/lib/db";
+
+beforeAll(() => {
+  resetDbForTesting();
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-market-custom-symbol-${randomUUID()}.db`)}`;
+});
 
 afterEach(() => {
+  resetDbForTesting();
   vi.unstubAllGlobals();
   vi.resetModules();
   delete process.env.FINNHUB_API_KEY;
@@ -27,7 +37,8 @@ describe("market scan custom symbols", () => {
     expect(scan.topCandidates.map((quote) => quote.symbol)).toEqual(["SPCX"]);
     expect(scan.quotesBySymbol.SPCX?.price).toBe(161.84);
     expect(scan.source).toContain("yahoo-finance");
-    expect(scan.warnings).toEqual([]);
+    // Durable field store may note seed/shortfall; must not error on the custom ticker path.
+    expect(scan.warnings.every((w) => !/failed|error/i.test(w))).toBe(true);
   });
 
   it("lists yahoo-finance as a source from the quote-only fallback even when enrichment contributes nothing", async () => {
@@ -105,20 +116,16 @@ describe("market scan custom symbols", () => {
     expect(summary?.sectorRelStrength).toBe(full.sectorRelStrength);
   });
 
-  it("shows a concrete warning when a custom ticker cannot be priced", async () => {
+  it("throws when the screener is empty, quote fallback fails, and no seed remains", async () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("api.nasdaq.com")) return nasdaqRows([]);
       return new Response("not found", { status: 404 });
     });
 
-    const { clearMarketCache, scanMarket } = await import("../src/lib/market");
+    const { clearMarketCache, scanMarket, ScanQuotesUnavailableError } = await import("../src/lib/market");
     clearMarketCache();
-    const scan = await scanMarket(["DSADLAS"], []);
-
-    expect(scan.returnedQuotes).toBe(0);
-    expect(scan.topCandidates).toEqual([]);
-    expect(scan.warnings.join(" ")).toContain("DSADLAS");
+    await expect(scanMarket(["DSADLAS"], [])).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 });
 

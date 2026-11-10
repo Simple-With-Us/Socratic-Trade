@@ -1,60 +1,38 @@
 #!/usr/bin/env node
-// Launches a command with secrets injected from Infisical, then propagates the
-// child's exit code. Sets SECRETS_SOURCE=infisical (read by the REQUIRE_SECRETS_MANAGER
-// boot guard, src/lib/secrets-source.ts).
-//
-// Auth (per project): prefer a machine-identity **Client ID + Client Secret**
-// (universal auth — the long-lived credential). A Client Secret is NOT an access
-// token: we exchange the Client ID + Secret for a short-lived access token via
-// `infisical login --method=universal-auth … --plain` and pass it to the CLI as
-// INFISICAL_TOKEN (the documented machine-identity flow; the CLI's run/export read
-// INFISICAL_TOKEN, so we resolve to a concrete token rather than relying on env-var
-// auto-auth). A pre-minted INFISICAL_TOKEN is accepted as a fallback.
-//
-// Two modes:
-//   • Single project (default): `infisical run --projectId $INFISICAL_PROJECT_ID …`.
-//   • App + shared overlay: when INFISICAL_SHARED_PROJECT_ID is set, fetch BOTH the
-//     shared project and the app project with `infisical export` and merge them
-//     ourselves so precedence is deterministic — **the app project wins** on any key
-//     present in both (shared is the fallback). Each project authenticates with its
-//     own machine identity.
-//
-// Env:
-//   App project:    INFISICAL_PROJECT_ID
-//                   INFISICAL_CLIENT_ID + INFISICAL_CLIENT_SECRET   (preferred)
-//                   …or INFISICAL_TOKEN                             (fallback; expires)
-//   Shared project: INFISICAL_SHARED_PROJECT_ID                     (enables the overlay)
-//                   INFISICAL_SHARED_CLIENT_ID + INFISICAL_SHARED_CLIENT_SECRET
-//                   …or INFISICAL_SHARED_TOKEN  (else falls back to the app identity)
-//   INFISICAL_ENV (def NODE_ENV|dev) / INFISICAL_PATH (def /)
-//   INFISICAL_SHARED_ENV (def INFISICAL_ENV) / INFISICAL_SHARED_PATH (def INFISICAL_PATH)
-//   INFISICAL_WATCH=true                              single-project mode only
-//
-// Usage: node scripts/infisical-run.mjs -- npm run start
+// Launch a command with secrets injected from Infisical and propagate its exit.
+// Long-lived machine credentials are used only to mint short-lived tokens. No
+// bootstrap credential is allowed to reach the final application process.
 
 import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  INFISICAL_FINAL_APP_MASK_KEYS,
+  InfisicalBootstrapError,
+  prepareInfisicalBootstrapEnvironment,
+} from "./infisical-bootstrap-env.mjs";
 
 const separatorIndex = process.argv.indexOf("--");
 const command = separatorIndex >= 0 ? process.argv.slice(separatorIndex + 1) : process.argv.slice(2);
+const finalChildScript = fileURLToPath(new URL("./infisical-app-child.mjs", import.meta.url));
+const MAX_EXPORT_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 if (command.length === 0) {
   console.error("Usage: node scripts/infisical-run.mjs -- <command...>");
   process.exit(2);
 }
 
-const probe = spawnSync("infisical", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-if (probe.error?.code === "ENOENT") {
-  console.error("Infisical CLI is not installed or is not on PATH. Install it, then rerun this command.");
-  process.exit(127);
+try {
+  // Next loads .env.local only after the app starts, which is too late for this
+  // runner's authentication. Resolve the narrow bootstrap first.
+  prepareInfisicalBootstrapEnvironment();
+} catch (error) {
+  const message = error instanceof InfisicalBootstrapError
+    ? error.message
+    : "[infisical-bootstrap] Bootstrap resolution failed without exposing credential details.";
+  console.error(message);
+  process.exit(2);
 }
 
-const envName = process.env.INFISICAL_ENV || process.env.NODE_ENV || "dev";
-const secretsPath = process.env.INFISICAL_PATH || "/";
-const appProjectId = process.env.INFISICAL_PROJECT_ID;
-const sharedProjectId = process.env.INFISICAL_SHARED_PROJECT_ID;
-
-// Per-project credentials. The shared identity is distinct from the app's, so we
-// only borrow the app identity when no shared-specific credential is supplied.
 const appAuth = {
   clientId: process.env.INFISICAL_CLIENT_ID,
   clientSecret: process.env.INFISICAL_CLIENT_SECRET,
@@ -66,19 +44,136 @@ const sharedAuthOwn = {
   token: process.env.INFISICAL_SHARED_TOKEN,
 };
 
-function hasAuth(a) {
-  return Boolean((a.clientId && a.clientSecret) || a.token);
+// prod is the only Infisical environment (owner 2026-10-10: dev and staging are
+// retired).  Refuse anything else before any CLI call, so a stale INFISICAL_ENV
+// or INFISICAL_SHARED_ENV can never read a retired environment.
+function requireProdEnvironment(name, value) {
+  if (value === "prod") return value;
+  console.error(
+    `[infisical] ${name} must be "prod" (dev and staging are retired); got "${String(value).slice(0, 32)}". ` +
+      "Unset it or set it to prod."
+  );
+  process.exit(2);
 }
 
-// Fail closed on a half-configured universal-auth pair (one of id/secret without the
-// other) — don't silently fall back to a stale token or a cached CLI login while still
-// marking SECRETS_SOURCE=infisical.
-function assertCompletePair(a, label) {
-  if (Boolean(a.clientId) !== Boolean(a.clientSecret)) {
-    const p = label === "shared" ? "_SHARED" : "";
+// Capture only nonsecret selectors before credential scrubbing.
+const envName = requireProdEnvironment("INFISICAL_ENV", process.env.INFISICAL_ENV || "prod");
+const secretsPath = process.env.INFISICAL_PATH || "/";
+const appProjectId = process.env.INFISICAL_PROJECT_ID;
+const sharedProjectId = process.env.INFISICAL_SHARED_PROJECT_ID;
+const sharedEnv = requireProdEnvironment("INFISICAL_SHARED_ENV", process.env.INFISICAL_SHARED_ENV || envName);
+const sharedPath = process.env.INFISICAL_SHARED_PATH || secretsPath;
+const watchEnabled = process.env.INFISICAL_WATCH === "true";
+const nodeOptions = process.env.NODE_OPTIONS;
+const cliEndpointEnvironment = Object.fromEntries(
+  ["INFISICAL_DOMAIN", "INFISICAL_API_URL", "INFISICAL_BASE_URL"]
+    .filter((key) => process.env[key] !== undefined)
+    .map((key) => [key, process.env[key]])
+);
+
+function scrubBootstrapEnvironment(env) {
+  for (const key of INFISICAL_FINAL_APP_MASK_KEYS) delete env[key];
+}
+
+// The runner remains alive while the app runs, so remove long-lived credentials
+// from its own environment immediately after the one required snapshot.
+scrubBootstrapEnvironment(process.env);
+const applicationBaseEnv = { ...process.env };
+
+const CLI_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TERM",
+  "COLORTERM",
+  "FORCE_COLOR",
+  "CI",
+  "XDG_CONFIG_HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+];
+
+const WATCH_RUNTIME_ALLOWLIST = [
+  "NODE_ENV",
+  "PORT",
+  "HOST",
+  "HOSTNAME",
+  "NEXT_TELEMETRY_DISABLED",
+  "WATCHPACK_POLLING",
+];
+
+function pickEnvironment(source, keys) {
+  const selected = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) selected[key] = source[key];
+  }
+  return selected;
+}
+
+// Probe/login/export receive a strict operating-system allowlist plus the one
+// authentication value explicitly supplied by the caller. Provider, GitHub,
+// Slack, broker, and cross-app credentials never cross this CLI boundary.
+function minimalCliEnvironment(extra = {}) {
+  return {
+    ...pickEnvironment(applicationBaseEnv, CLI_ENV_ALLOWLIST),
+    ...cliEndpointEnvironment,
+    INFISICAL_DISABLE_UPDATE_CHECK: "true",
+    ...extra,
+  };
+}
+
+function tokenCliEnvironment(token, extra = {}) {
+  return minimalCliEnvironment({
+    ...extra,
+    ...(token ? { INFISICAL_TOKEN: token } : {}),
+  });
+}
+
+const probe = spawnSync("infisical", ["--version"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+  env: minimalCliEnvironment(),
+});
+if (probe.error?.code === "ENOENT") {
+  console.error("Infisical CLI is not installed or is not on PATH. Install it, then rerun this command.");
+  process.exit(127);
+}
+if (probe.error) {
+  console.error("[infisical] Could not invoke the Infisical CLI availability check.");
+  process.exit(1);
+}
+if (probe.status !== 0) {
+  console.error(`[infisical] Infisical CLI availability check failed (exit ${probe.status ?? "unknown"}).`);
+  process.exit(probe.status || 1);
+}
+
+function hasAuth(auth) {
+  return Boolean((auth.clientId && auth.clientSecret) || auth.token);
+}
+
+function assertCompletePair(auth, label) {
+  if (Boolean(auth.clientId) !== Boolean(auth.clientSecret)) {
+    const infix = label === "shared" ? "_SHARED" : "";
     console.error(
       `[infisical] Partial ${label} universal-auth credentials: set BOTH ` +
-      `INFISICAL${p}_CLIENT_ID and INFISICAL${p}_CLIENT_SECRET (or neither).`
+      `INFISICAL${infix}_CLIENT_ID and INFISICAL${infix}_CLIENT_SECRET (or neither).`
     );
     process.exit(2);
   }
@@ -86,175 +181,262 @@ function assertCompletePair(a, label) {
 assertCompletePair(appAuth, "app");
 if (sharedProjectId) assertCompletePair(sharedAuthOwn, "shared");
 
-// Exchange a machine-identity Client ID + Client Secret for a short-lived access
-// token (universal auth). `--plain --silent` prints just the raw token. The creds
-// are passed via the child ENV (INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET), NOT on
-// argv, so the long-lived Client Secret never appears in `ps`/`/proc/<pid>/cmdline`.
+function clearAuth(auth) {
+  auth.clientId = undefined;
+  auth.clientSecret = undefined;
+  auth.token = undefined;
+}
+
 function mintToken(clientId, clientSecret, label) {
-  const r = spawnSync(
+  const result = spawnSync(
     "infisical",
     ["login", "--method=universal-auth", "--silent", "--plain"],
     {
       encoding: "utf8",
-      // Sanitized base + ONLY this identity's pair, so the app mint never sees the shared
-      // Client Secret (and vice versa) and no secret lands on argv.
-      env: {
-        ...sanitizedBase({}),
+      env: minimalCliEnvironment({
         INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: clientId,
         INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: clientSecret,
-      },
+      }),
     }
   );
-  if (r.error) {
-    console.error(`[infisical] failed to run 'infisical login' for the ${label} identity:`, r.error.message);
+  if (result.error) {
+    console.error(`[infisical] Could not invoke 'infisical login' for the ${label} identity.`);
     process.exit(1);
   }
-  if (r.status !== 0) {
+  if (result.status !== 0) {
     console.error(
-      `[infisical] universal-auth login failed for the ${label} identity (exit ${r.status}). ` +
-      `Check the Client ID + Client Secret pairing/access:`, (r.stderr || "").trim()
+      `[infisical] universal-auth login failed for the ${label} identity (exit ${result.status}). ` +
+      "Check the Client ID + Client Secret pairing/access. CLI output was suppressed because it may contain credentials."
     );
-    process.exit(r.status || 1);
+    process.exit(result.status || 1);
   }
-  const token = (r.stdout || "").trim();
-  if (!token) {
-    console.error(`[infisical] universal-auth login for the ${label} identity returned an empty token.`);
+  const token = (result.stdout || "").trim();
+  if (!token || token.includes("\0")) {
+    console.error(`[infisical] universal-auth login for the ${label} identity returned an empty or invalid token.`);
     process.exit(1);
   }
   return token;
 }
 
-// A usable access token for an identity: Client ID + Secret (minted) wins so a stale
-// INFISICAL_TOKEN can't take precedence; otherwise a pre-supplied token; else null
-// (let the CLI fall back to a stored `infisical login` session, e.g. local dev).
-function resolveToken(a, label) {
-  if (a.clientId && a.clientSecret) return mintToken(a.clientId, a.clientSecret, label);
-  if (a.token) return a.token;
-  return null;
+function resolveToken(auth, label) {
+  try {
+    if (auth.clientId && auth.clientSecret) return mintToken(auth.clientId, auth.clientSecret, label);
+    if (auth.token) return auth.token;
+    return null;
+  } finally {
+    // Best-effort lifetime minimization: after synchronous mint/copy, the
+    // long-lived pair and input token are no longer retained by the runner.
+    clearAuth(auth);
+  }
 }
 
-// Every Infisical credential var. Stripped from any subprocess env we build so a child
-// only ever receives the exact credential it needs (no cross-identity / stale leakage).
-const CREDENTIAL_ENV_KEYS = [
-  "INFISICAL_TOKEN",
-  "INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
-  "INFISICAL_SHARED_CLIENT_ID", "INFISICAL_SHARED_CLIENT_SECRET", "INFISICAL_SHARED_TOKEN",
-  "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
-];
-
-// A copy of process.env with all Infisical credentials removed — the base for any
-// subprocess we spawn, onto which we add only the one credential that call needs.
-function sanitizedBase(extra) {
-  const env = { ...process.env, ...extra };
-  for (const k of CREDENTIAL_ENV_KEYS) delete env[k];
-  env.INFISICAL_DISABLE_UPDATE_CHECK = env.INFISICAL_DISABLE_UPDATE_CHECK || "true";
+function buildFinalApplicationEnvironment(extra) {
+  const env = { ...applicationBaseEnv, ...extra };
+  scrubBootstrapEnvironment(env);
   return env;
 }
 
-// Build a child/CLI env that authenticates purely via the resolved token, and never
-// leaks the machine-identity Client Secret(s) into the spawned process.
-function childEnv(extra, token) {
-  const env = sanitizedBase(extra);
-  if (token) env.INFISICAL_TOKEN = token;
-  return env;
-}
+const SIGNAL_EXIT_CODES = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGKILL: 9, SIGTERM: 15 };
 
-function runChild(env) {
-  const child = spawn(command[0], command.slice(1), { stdio: "inherit", env });
-  child.on("error", (err) => {
-    console.error("[infisical] Failed to start command:", err instanceof Error ? err.message : err);
+function managedChild(child, errorMessage) {
+  const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const signalHandlers = new Map();
+  for (const signal of forwardedSignals) {
+    const handler = () => child.kill(signal);
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  const removeSignalHandlers = () => {
+    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+  };
+  child.on("error", () => {
+    removeSignalHandlers();
+    console.error(errorMessage);
     process.exit(1);
   });
   child.on("exit", (code, signal) => {
-    if (signal) { process.kill(process.pid, signal); return; }
+    removeSignalHandlers();
+    if (signal) {
+      // Never re-raise the signal on ourselves. This runner is container pid 1 in
+      // production, and the kernel IGNORES default-disposition signals for pid 1 --
+      // the re-raise silently no-ops, the event loop drains, and node exits 0.
+      // Docker then records a "clean" exit and production stays down (2026-08-02
+      // outage; see docs/rollouts/2026-08-02-exit0-outage-audit.md). Translate to
+      // the conventional 128+N so the exit status stays honest at every layer.
+      const exitCode = 128 + (SIGNAL_EXIT_CODES[signal] ?? 15);
+      console.error(`[infisical] child terminated by ${signal}; exiting ${exitCode}`);
+      process.exit(exitCode);
+    }
     process.exit(code ?? 1);
   });
 }
 
-if (!sharedProjectId) {
-  // ── Single project: the proven `infisical run` path (supports --watch) ──────
-  const appToken = resolveToken(appAuth, "app");
-  const infisicalArgs = ["run", "--env", envName, "--path", secretsPath];
-  if (appProjectId) infisicalArgs.push("--projectId", appProjectId);
-  if (process.env.INFISICAL_WATCH === "true") infisicalArgs.push("--watch");
-  infisicalArgs.push("--", ...command);
-  // Marks that secrets came from a manager (read by the REQUIRE_SECRETS_MANAGER boot guard).
-  const env = childEnv({ SECRETS_SOURCE: "infisical" }, appToken);
-  const child = spawn("infisical", infisicalArgs, { stdio: "inherit", env });
-  child.on("exit", (code, signal) => {
-    if (signal) { process.kill(process.pid, signal); return; }
-    process.exit(code ?? 1);
-  });
-} else {
-  // ── App + shared overlay: fetch both, merge with the APP winning ────────────
-  if (!appProjectId) {
-    console.error("[infisical] INFISICAL_SHARED_PROJECT_ID is set but INFISICAL_PROJECT_ID (the app project) is not.");
+function finalWrapperArguments(finalNodeOptions) {
+  const args = [finalChildScript];
+  if (finalNodeOptions !== undefined) {
+    args.push("--node-options-base64", Buffer.from(finalNodeOptions, "utf8").toString("base64"));
+  }
+  args.push("--", ...command);
+  return args;
+}
+
+function runFinalApplication(env) {
+  const finalNodeOptions = env.NODE_OPTIONS;
+  delete env.NODE_OPTIONS;
+  const child = spawn(
+    "/usr/bin/env",
+    [
+      "-u", "NODE_OPTIONS",
+      "-u", "BASH_ENV",
+      "-u", "ENV",
+      process.execPath,
+      ...finalWrapperArguments(finalNodeOptions),
+    ],
+    { stdio: "inherit", env }
+  );
+  managedChild(child, "[infisical] Failed to start the final application wrapper.");
+}
+
+function fetchProject(projectId, token, environment, path, label, { allowStoredSession = false } = {}) {
+  if (!token && !allowStoredSession) {
+    const infix = label === "shared" ? "_SHARED" : "";
+    console.error(
+      `[infisical] No credentials for the ${label} project ${projectId}. ` +
+      `Set INFISICAL${infix}_CLIENT_ID + INFISICAL${infix}_CLIENT_SECRET (or INFISICAL${infix}_TOKEN).`
+    );
     process.exit(2);
   }
-  const sharedAuth = hasAuth(sharedAuthOwn) ? sharedAuthOwn : appAuth;
-  const sharedEnv = process.env.INFISICAL_SHARED_ENV || envName;
-  const sharedPath = process.env.INFISICAL_SHARED_PATH || secretsPath;
+  const result = spawnSync(
+    "infisical",
+    ["export", "--silent", "--projectId", projectId, "--env", environment, "--path", path, "--format", "json"],
+    {
+      encoding: "utf8",
+      env: tokenCliEnvironment(token),
+      // Keep a hard bound while avoiding Node's ~1 MiB default regression for
+      // legitimate projects with larger multiline/certificate secret sets.
+      maxBuffer: MAX_EXPORT_OUTPUT_BYTES,
+    }
+  );
+  if (result.error) {
+    console.error(`[infisical] Could not invoke 'infisical export' for project ${projectId}.`);
+    process.exit(1);
+  }
+  if (result.status !== 0) {
+    console.error(
+      `[infisical] 'infisical export' failed for project ${projectId} (exit ${result.status}). ` +
+      "CLI output was suppressed because it may contain credentials."
+    );
+    process.exit(result.status || 1);
+  }
+  try {
+    const parsed = JSON.parse(result.stdout || "");
+    // Infisical CLI v0.43.98 serializes `--format json` as an array of
+    // SingleEnvironmentVariable records (`{ key, value, ...metadata }`), not
+    // as a flat key/value object. Keep this parser pinned to that documented
+    // wire shape so metadata can never be mistaken for application secrets.
+    if (!Array.isArray(parsed)) throw new Error("invalid shape");
+    const secrets = Object.create(null);
+    for (const entry of parsed) {
+      if (!entry || Array.isArray(entry) || typeof entry !== "object") {
+        throw new Error("invalid entry");
+      }
+      const { key, value } = entry;
+      if (
+        typeof key !== "string" || !key || key.includes("=") || key.includes("\0") ||
+        typeof value !== "string" || value.includes("\0")
+      ) {
+        throw new Error("invalid entry");
+      }
+      if (Object.prototype.hasOwnProperty.call(secrets, key)) {
+        throw new Error("duplicate entry");
+      }
+      secrets[key] = value;
+    }
+    return secrets;
+  } catch {
+    console.error(
+      `[infisical] 'infisical export' returned invalid JSON for project ${projectId}. ` +
+      "Raw output was suppressed because it may contain credentials."
+    );
+    process.exit(1);
+  }
+}
 
-  const appToken = resolveToken(appAuth, "app");
-  const sharedToken = resolveToken(sharedAuth, "shared");
+if (!sharedProjectId) {
+  let appToken = resolveToken(appAuth, "app");
+  clearAuth(sharedAuthOwn);
+
+  if (watchEnabled) {
+    // The CLI must own the watch/restart loop. Give it only nonsecret process
+    // controls; Infisical supplies managed secrets and the final wrapper masks
+    // every bootstrap credential before it starts the requested command.
+    const runEnv = tokenCliEnvironment(appToken, {
+      ...pickEnvironment(applicationBaseEnv, WATCH_RUNTIME_ALLOWLIST),
+      SECRETS_SOURCE: "infisical",
+    });
+    const infisicalArgs = ["run", "--env", envName, "--path", secretsPath];
+    if (appProjectId) infisicalArgs.push("--projectId", appProjectId);
+    infisicalArgs.push(
+      "--watch",
+      "--",
+      "/usr/bin/env",
+      "-u", "NODE_OPTIONS",
+      "-u", "BASH_ENV",
+      "-u", "ENV",
+      process.execPath,
+      ...finalWrapperArguments(nodeOptions)
+    );
+    const child = spawn("infisical", infisicalArgs, { stdio: "inherit", env: runEnv });
+    delete runEnv.INFISICAL_TOKEN;
+    appToken = undefined;
+    managedChild(child, "[infisical] Failed to start the Infisical watch process.");
+  } else {
+    // Export with the minimal CLI environment, then launch directly from the
+    // runner so unrelated ambient app secrets never transit the third-party CLI.
+    const appSecrets = fetchProject(
+      appProjectId,
+      appToken,
+      envName,
+      secretsPath,
+      "app",
+      { allowStoredSession: true }
+    );
+    appToken = undefined;
+    console.log(`[infisical] exported ${Object.keys(appSecrets).length} app secret(s) from ${appProjectId}.`);
+    runFinalApplication(buildFinalApplicationEnvironment({
+      ...appSecrets,
+      SECRETS_SOURCE: "infisical",
+    }));
+  }
+} else {
+  if (!appProjectId) {
+    console.error("[infisical] INFISICAL_SHARED_PROJECT_ID is set but INFISICAL_PROJECT_ID is not.");
+    process.exit(2);
+  }
+
+  const sharedHasOwnAuth = hasAuth(sharedAuthOwn);
+  let appToken = resolveToken(appAuth, "app");
+  let sharedToken;
+  if (sharedHasOwnAuth) {
+    sharedToken = resolveToken(sharedAuthOwn, "shared");
+  } else {
+    clearAuth(sharedAuthOwn);
+    sharedToken = appToken;
+  }
 
   const sharedSecrets = fetchProject(sharedProjectId, sharedToken, sharedEnv, sharedPath, "shared");
   const appSecrets = fetchProject(appProjectId, appToken, envName, secretsPath, "app");
+  sharedToken = undefined;
+  appToken = undefined;
 
-  // Precedence: process env < shared < app. The app project overrides shared on
-  // any shared key, so an app-specific value always wins; shared-only keys fall
-  // through. Counts only — values are never logged.
-  const merged = { ...childEnv({}, appToken), ...sharedSecrets, ...appSecrets, SECRETS_SOURCE: "infisical" };
-  const overlap = Object.keys(appSecrets).filter((k) => k in sharedSecrets).length;
+  const overlap = Object.keys(appSecrets).filter((key) => key in sharedSecrets).length;
   console.log(
     `[infisical] merged ${Object.keys(sharedSecrets).length} shared (${sharedProjectId}) + ` +
     `${Object.keys(appSecrets).length} app (${appProjectId}) secret(s); app wins ${overlap} overlap(s).`
   );
-  runChild(merged);
-}
-
-function fetchProject(projectId, token, env, path, label) {
-  if (!token) {
-    const p = label === "shared" ? "_SHARED" : "";
-    console.error(
-      `[infisical] No credentials for the ${label} project ${projectId}. ` +
-      `Set INFISICAL${p}_CLIENT_ID + INFISICAL${p}_CLIENT_SECRET (or INFISICAL${p}_TOKEN).`
-    );
-    process.exit(2);
-  }
-  // childEnv strips every client secret / universal-auth var so the export subprocess
-  // authenticates with only the short-lived token — same scoping as the app launch.
-  const spawnEnv = childEnv({}, token);
-  const r = spawnSync(
-    "infisical",
-    ["export", "--projectId", projectId, "--env", env, "--path", path, "--format", "dotenv"],
-    { encoding: "utf8", env: spawnEnv }
-  );
-  if (r.error) {
-    console.error(`[infisical] failed to run 'infisical export' for ${projectId}:`, r.error.message);
-    process.exit(1);
-  }
-  if (r.status !== 0) {
-    console.error(`[infisical] 'infisical export' failed for project ${projectId} (exit ${r.status}):`, (r.stderr || "").trim());
-    process.exit(r.status || 1);
-  }
-  return parseDotenv(r.stdout || "");
-}
-
-function parseDotenv(text) {
-  const out = {};
-  for (let line of text.split("\n")) {
-    line = line.trim();
-    if (!line || line.startsWith("#")) continue;
-    if (line.startsWith("export ")) line = line.slice(7).trim();
-    const eq = line.indexOf("=");
-    if (eq < 1) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if (val.length >= 2 && ((val[0] === "'" && val[val.length - 1] === "'") || (val[0] === '"' && val[val.length - 1] === '"'))) {
-      val = val.slice(1, -1);
-    }
-    out[key] = val;
-  }
-  return out;
+  runFinalApplication(buildFinalApplicationEnvironment({
+    ...sharedSecrets,
+    ...appSecrets,
+    SECRETS_SOURCE: "infisical",
+  }));
 }

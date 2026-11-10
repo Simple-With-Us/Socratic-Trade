@@ -24,12 +24,16 @@ describe("run-budget (R16)", () => {
     delete process.env.RAG_RUN_BUDGET_WINDOW_MS;
   });
 
-  it("is disabled by default", async () => {
+  it("is enabled by default (owner enablement 2026-07-24); set off to disable", async () => {
     const { runBudgetEnabled } = await freshModule();
-    expect(runBudgetEnabled()).toBe(false);
+    expect(runBudgetEnabled()).toBe(true);
+    process.env.RAG_RUN_BUDGET_ENABLED = "off";
+    const mod = await freshModule();
+    expect(mod.runBudgetEnabled()).toBe(false);
   });
 
   it("recordRagOperation is a no-op and shouldDegradeForBudget always false when disabled", async () => {
+    process.env.RAG_RUN_BUDGET_ENABLED = "off";
     const { recordRagOperation, shouldDegradeForBudget, resetRunBudget } = await freshModule();
     resetRunBudget();
     for (let i = 0; i < 10_000; i++) recordRagOperation();

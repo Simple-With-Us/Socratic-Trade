@@ -10,6 +10,8 @@ beforeAll(() => {
 
 // Capture vector-memory re-index calls without Pinecone/Voyage credentials.
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   storeContexts: async (documents: Array<{ text: string }>) => ({ attempted: documents.length, indexed: documents.length })
 }));
 

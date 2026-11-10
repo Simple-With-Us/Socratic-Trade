@@ -15,11 +15,11 @@ export const BROWSER_UA =
  * SEC requires a descriptive User-Agent with contact info (fair-access policy).
  * Overridable via SEC_EDGAR_USER_AGENT for users who want to use their own contact.
  */
+/** Contact email is required. EDGAR 403s a User-Agent that has no address. */
+export const SEC_EDGAR_FALLBACK_UA = "Socratic Trade research jay@socratic.trade";
+
 export function secUserAgent(): string {
-  return (
-    resolveApiKey("sec_edgar_user_agent", "local") ??
-    "Socratic Trade (personal research; set SEC_EDGAR_USER_AGENT for real contact)"
-  );
+  return resolveApiKey("sec_edgar_user_agent", "local") ?? SEC_EDGAR_FALLBACK_UA;
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -39,12 +39,33 @@ export interface FetchOptions {
 export async function politeFetch(url: string, options: FetchOptions = {}): Promise<Response> {
   const { headers, method = "GET", body, timeoutMs = 9000, retries = 1, redirect = "follow" } = options;
   let lastError: unknown;
+  const isSec = url.includes(".sec.gov");
+  // EDGAR hard-403s requests without a descriptive User-Agent (fair-access policy), and a call
+  // site that forgets to pass one is invisible until production traffic dies — the SEC ingest
+  // worker shipped exactly that way. Inject the shared SEC UA whenever the caller didn't set one.
+  let effectiveHeaders = headers;
+  if (isSec && !Object.keys(headers ?? {}).some((k) => k.toLowerCase() === "user-agent")) {
+    effectiveHeaders = { ...(headers ?? {}), "user-agent": secUserAgent() };
+  }
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (isSec) {
+      const { secLimiter } = await import("./sec-limiter");
+      await secLimiter.acquire();
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { method, body, headers, redirect, cache: "no-store", signal: controller.signal });
+      const res = await fetch(url, { method, body, headers: effectiveHeaders, redirect, cache: "no-store", signal: controller.signal });
       clearTimeout(timer);
+      if (res.status === 429 && isSec) {
+        const { secLimiter } = await import("./sec-limiter");
+        secLimiter.report429(res.headers.get("retry-after"));
+      }
+      if (res.status === 403 && isSec) {
+        // EDGAR signals automated-access blocks with 403, not 429 — an IP-level stop signal.
+        const { secLimiter } = await import("./sec-limiter");
+        secLimiter.report403();
+      }
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         await sleep(600 * (attempt + 1));
         continue;

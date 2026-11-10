@@ -1,15 +1,28 @@
-import { Card, Chip, Dot } from "socratic-trade-dashboard";
+import { Card } from "socratic-trade-dashboard";
+
+const badgeStyle = (color: string): React.CSSProperties => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  borderRadius: 999,
+  padding: "2px 8px",
+  fontSize: 11,
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+  color,
+  background: `color-mix(in oklab, ${color} 15%, transparent)`
+});
 
 export const PositionCard = () => (
   <Card style={{ width: 320, padding: 16 }}>
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
       <div style={{ fontSize: 14, fontWeight: 600 }}>NVDA — NVIDIA Corp</div>
-      <Chip tone="up">+4.2%</Chip>
+      <span style={badgeStyle("var(--pos)")}>+4.2%</span>
     </div>
     <div style={{ marginTop: 8, fontSize: 22, fontWeight: 600 }}>$118.42</div>
     <div style={{ marginTop: 4, fontSize: 12, color: "var(--faint)" }}>142 shares · cost basis $102.10</div>
     <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6 }}>
-      <Dot tone="up" pulse />
+      <span style={{ display: "inline-flex", height: 8, width: 8, borderRadius: "50%", background: "var(--pos)" }} />
       <span style={{ fontSize: 12, color: "var(--muted)" }}>Live · updated 2s ago</span>
     </div>
   </Card>
@@ -25,8 +38,8 @@ export const ThesisCard = () => (
       post-print drift window.
     </p>
     <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-      <Chip tone="accent">Momentum</Chip>
-      <Chip tone="info">Earnings drift</Chip>
+      <span style={badgeStyle("var(--accent)")}>Momentum</span>
+      <span style={badgeStyle("var(--info)")}>Earnings drift</span>
     </div>
   </Card>
 );

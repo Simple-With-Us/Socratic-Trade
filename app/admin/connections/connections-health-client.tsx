@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Card, Chip, Dot, Tabs } from "../../ui/primitives";
+import { Card, Chip, Dot, Segmented } from "../../console/ui/primitives";
+import { cx } from "../../console/lib/format";
+import { describeProbeNetworkError, describeProbeStatus, type ProbeErrorDescription } from "../lib/probe-error";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -16,6 +18,15 @@ interface ServiceHealthSummary {
   callsLast24h: number;
   stoppedWorking: boolean;
   stoppedReason: string | null;
+  // Mirrors src/lib/db-health.ts's HealthStoppedReasonKind / HEALTH_LOG_LANE_CAP, re-declared here
+  // rather than imported: this is a "use client" component and importing db-health would drag
+  // better-sqlite3 into the browser bundle. Both arrive verbatim on the /api/admin/connections-health
+  // `services` payload. Optional because that route also synthesizes placeholder rows for lanes that
+  // have never logged a call.
+  stoppedReasonKind?: "consecutive-failures" | "no-success-ever" | "no-success-this-hour" | "expected-limit" | null;
+  laneLogCap?: number;
+  /** Product-retired vendor (FMP / Quiver / UW) — render muted OFF, never red STOPPED. */
+  intentionalOff?: boolean;
 }
 
 interface HealthLogRow {
@@ -55,14 +66,73 @@ function relTime(iso: string | null): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-function statusTone(s: ServiceHealthSummary): "pos" | "neg" | "warn" | "neutral" {
-  if (s.stoppedWorking) return "neg";
-  if (!s.lastSuccessTs) return s.callsLast24h > 0 ? "warn" : "neutral";
+/** The health store sets `stoppedWorking` for three different conditions, only one of which is
+ *  strong evidence the lane is actually broken: five consecutive failures. The other two ("active
+ *  this hour but no success yet" / "no success in 60 min") are soft heuristics that a SINGLE cold
+ *  first call can trip, so counting them as "stopped" inflates the header count with lanes that are
+ *  merely warming up. This is the same hard/soft split app/api/health/route.ts already uses to
+ *  decide what fails liveness versus what is only `degraded` — keep the two consistent.
+ *  A stopped lane with no `stoppedReasonKind` (never-seen shape) counts as HARD: fail loud rather
+ *  than silently demoting a real outage to a muted chip.
+ *  "expected-limit" is soft by definition — a KNOWN quota window (e.g. the Pinecone monthly
+ *  write-unit breaker) with a stamped resume date, not a broken integration.
+ *  Product-retired vendors (intentionalOff) never count as hard-stopped. */
+export function isHardStopped(s: ServiceHealthSummary): boolean {
+  if (s.intentionalOff) return false;
+  if (!s.stoppedWorking) return false;
+  return (
+    s.stoppedReasonKind !== "no-success-ever" &&
+    s.stoppedReasonKind !== "no-success-this-hour" &&
+    s.stoppedReasonKind !== "expected-limit"
+  );
+}
+
+/** Soft degraded only — excludes intentional OFF and hard stops. Exported for unit tests. */
+export function isSoftDegraded(s: ServiceHealthSummary): boolean {
+  if (s.intentionalOff) return false;
+  return Boolean(s.stoppedWorking) && !isHardStopped(s);
+}
+
+/** Window call counts come from a log capped at `laneLogCap` rows per lane, so a count that reached
+ *  the cap is a floor. Render it as "500+" — a busy lane pegged at the cap otherwise reads as an
+ *  exact (and permanently wrong) total. Exported for direct unit testing. */
+export function formatLaneCallCount(count: number, laneLogCap: number | undefined): string {
+  if (typeof laneLogCap === "number" && laneLogCap > 0 && count >= laneLogCap) return `${laneLogCap}+`;
+  return String(count);
+}
+
+function callCountTitle(laneLogCap: number | undefined): string | undefined {
+  if (typeof laneLogCap !== "number" || laneLogCap <= 0) return undefined;
+  return `Only the most recent ${laneLogCap} calls per lane are retained, so these counts saturate at ${laneLogCap}+.`;
+}
+
+/** Exported for unit tests — intentional OFF is always muted grey, never red/yellow alarm. */
+export function statusTone(s: ServiceHealthSummary): "pos" | "neg" | "warn" | "muted" {
+  if (s.intentionalOff) return "muted";
+  if (isHardStopped(s)) return "neg";
+  if (s.stoppedWorking) return "warn";
+  if (!s.lastSuccessTs) return s.callsLast24h > 0 ? "warn" : "muted";
   if (s.lastFailureTs && s.lastFailureTs > s.lastSuccessTs) return "warn";
   return "pos";
 }
 
+/** Sort weight: hard stops first, then soft degraded, then active, then intentional OFF last. */
+export function laneSortRank(s: ServiceHealthSummary): number {
+  if (s.intentionalOff) return 3;
+  if (isHardStopped(s)) return 0;
+  if (s.stoppedWorking) return 1;
+  return 2;
+}
+
 // ── Service card ──────────────────────────────────────────────────────────────
+
+export function formatServiceName(service: string): string {
+  if (service === "congress.trade") return "Congress.Trade (Public API)";
+  if (service === "earningscalls-dev-rapidapi" || service === "earningscalls" || service === "earningscall") return "EarningsCalls.dev";
+  if (service === "roic.ai" || service === "roic") return "ROIC.ai";
+  if (service === "usage-monitor") return "Usage-Monitor";
+  return service;
+}
 
 function ServiceCard({
   summary,
@@ -74,47 +144,69 @@ function ServiceCard({
   selected: boolean;
 }) {
   const tone = statusTone(summary);
+  const hardStopped = isHardStopped(summary);
+  const intentionalOff = Boolean(summary.intentionalOff);
+  const capTitle = callCountTitle(summary.laneLogCap);
 
+  // Hand-authored card recipe (not .con-card): the con-card class sets
+  // background/border in unlayered CSS, which beats Tailwind's layered
+  // utilities — so the selected/hover tints would silently never apply.
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left transition-colors rounded-2xl border ${
+      className={cx(
+        "w-full rounded-[var(--con-radius)] border p-4 text-left shadow-[var(--con-shadow)] transition-colors",
         selected
-          ? "border-accent bg-accent/8"
-          : "border-line bg-surface/80 hover:bg-surface-2"
-      } p-4 backdrop-blur-sm`}
+          ? "border-[color:var(--con-accent)] bg-[color:var(--con-accent-soft)]"
+          : "border-[color:var(--con-line)] bg-[color:var(--con-surface)] hover:bg-[color:var(--con-surface-2)]"
+      )}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <Dot tone={tone} pulse={summary.stoppedWorking} />
-          <span className="font-medium text-sm truncate">
-            {summary.service}
+        <div className="flex min-w-0 items-center gap-2">
+          <Dot tone={tone} pulse={hardStopped} />
+          <span className="truncate text-[length:var(--con-fs-sm)] font-medium">
+            {formatServiceName(summary.service)}
             {summary.keySource && (
-              <span className="ml-1 text-xs font-normal text-muted">({summary.keySource})</span>
+              <span className="ml-1 text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-muted)]">({summary.keySource})</span>
             )}
           </span>
         </div>
-        {summary.stoppedWorking && (
-          <Chip tone="neg">STOPPED</Chip>
-        )}
+        {intentionalOff ? (
+          <Chip tone="muted">OFF</Chip>
+        ) : summary.stoppedWorking ? (
+          hardStopped ? (
+            <Chip tone="neg">STOPPED</Chip>
+          ) : summary.stoppedReasonKind === "expected-limit" ? (
+            <Chip tone="warn">LIMIT</Chip>
+          ) : (
+            <Chip tone="warn">DEGRADED</Chip>
+          )
+        ) : null}
       </div>
 
-      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted">
-        <span>Last OK: <span className="text-fg">{relTime(summary.lastSuccessTs)}</span></span>
-        <span>Last fail: <span className="text-fg">{relTime(summary.lastFailureTs)}</span></span>
-        <span>1h calls: <span className="text-fg">{summary.callsLastHour}</span></span>
-        <span>24h calls: <span className="text-fg">{summary.callsLast24h}</span></span>
+      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+        <span>Last OK: <span className="text-[color:var(--con-fg)]">{relTime(summary.lastSuccessTs)}</span></span>
+        <span>Last fail: <span className="text-[color:var(--con-fg)]">{relTime(summary.lastFailureTs)}</span></span>
+        <span title={capTitle}>1h calls: <span className="text-[color:var(--con-fg)]">{formatLaneCallCount(summary.callsLastHour, summary.laneLogCap)}</span></span>
+        <span title={capTitle}>24h calls: <span className="text-[color:var(--con-fg)]">{formatLaneCallCount(summary.callsLast24h, summary.laneLogCap)}</span></span>
       </div>
 
       {summary.lastSuccessLatencyMs !== null && (
-        <div className="mt-1 text-xs text-faint">
+        <div className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           Last latency: {summary.lastSuccessLatencyMs}ms
         </div>
       )}
 
-      {summary.stoppedWorking && summary.stoppedReason && (
-        <div className="mt-2 text-xs text-neg">{summary.stoppedReason}</div>
+      {intentionalOff && summary.stoppedReason && (
+        <div className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+          {summary.stoppedReason}
+        </div>
+      )}
+      {!intentionalOff && summary.stoppedWorking && summary.stoppedReason && (
+        <div className={cx("mt-2 text-[length:var(--con-fs-xs)]", hardStopped ? "text-[color:var(--con-neg)]" : "text-[color:var(--con-warn)]")}>
+          {summary.stoppedReason}
+        </div>
       )}
     </button>
   );
@@ -151,53 +243,54 @@ function ServiceDetail({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-sm">
-          {summary.service}
+        <h3 className="text-[length:var(--con-fs-sm)] font-semibold">
+          {formatServiceName(summary.service)}
           {summary.keySource && (
-            <span className="ml-1.5 text-xs font-normal text-muted">({summary.keySource})</span>
+            <span className="ml-1.5 text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-muted)]">({summary.keySource})</span>
           )}
         </h3>
-        <Tabs<DrawerTab>
+        <Segmented<DrawerTab>
           value={tab}
           onChange={setTab}
-          tabs={[
-            { id: "log", label: "Raw Log" },
-            { id: "errors", label: `Error Patterns (${errorPatterns.length})` },
+          ariaLabel="Service detail view"
+          options={[
+            { value: "log", label: "Raw Log" },
+            { value: "errors", label: `Error Patterns (${errorPatterns.length})` },
           ]}
         />
       </div>
 
       {tab === "log" && (
-        <div className="overflow-x-auto rounded-xl border border-line">
+        <div className="overflow-x-auto rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)]">
           {loadingLog ? (
-            <div className="py-8 text-center text-xs text-muted">Loading…</div>
+            <div className="py-8 text-center text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">Loading…</div>
           ) : log.length === 0 ? (
-            <div className="py-8 text-center text-xs text-muted">No log entries</div>
+            <div className="py-8 text-center text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">No log entries</div>
           ) : (
-            <table className="w-full text-xs">
+            <table className="con-table">
               <thead>
-                <tr className="border-b border-line bg-surface-2">
-                  <th className="px-3 py-2 text-left text-muted font-medium">Time</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">Status</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">Latency</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">Error</th>
+                <tr>
+                  <th>Time</th>
+                  <th>Status</th>
+                  <th className="num">Latency</th>
+                  <th>Error</th>
                 </tr>
               </thead>
               <tbody>
                 {log.map((row) => (
-                  <tr key={row.id} className="border-b border-line/50 hover:bg-surface-2">
-                    <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(row.ts)}</td>
-                    <td className="px-3 py-1.5">
+                  <tr key={row.id}>
+                    <td className="whitespace-nowrap text-[color:var(--con-faint)]">{relTime(row.ts)}</td>
+                    <td>
                       {row.ok ? (
                         <Chip tone="pos">OK</Chip>
                       ) : (
                         <Chip tone="neg">FAIL</Chip>
                       )}
                     </td>
-                    <td className="px-3 py-1.5 text-muted">
+                    <td className="num text-[color:var(--con-muted)]">
                       {row.latency_ms !== null ? `${row.latency_ms}ms` : "—"}
                     </td>
-                    <td className="px-3 py-1.5 text-neg truncate max-w-xs">
+                    <td className="max-w-xs truncate text-[color:var(--con-neg)]">
                       {row.error_text ?? "—"}
                     </td>
                   </tr>
@@ -209,26 +302,26 @@ function ServiceDetail({
       )}
 
       {tab === "errors" && (
-        <div className="overflow-x-auto rounded-xl border border-line">
+        <div className="overflow-x-auto rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)]">
           {errorPatterns.length === 0 ? (
-            <div className="py-8 text-center text-xs text-muted">No error patterns</div>
+            <div className="py-8 text-center text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">No error patterns</div>
           ) : (
-            <table className="w-full text-xs">
+            <table className="con-table">
               <thead>
-                <tr className="border-b border-line bg-surface-2">
-                  <th className="px-3 py-2 text-left text-muted font-medium">Error</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">Count</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">First seen</th>
-                  <th className="px-3 py-2 text-left text-muted font-medium">Last seen</th>
+                <tr>
+                  <th>Error</th>
+                  <th className="num">Count</th>
+                  <th>First seen</th>
+                  <th>Last seen</th>
                 </tr>
               </thead>
               <tbody>
                 {errorPatterns.map((p) => (
-                  <tr key={p.id} className="border-b border-line/50 hover:bg-surface-2">
-                    <td className="px-3 py-1.5 text-neg font-mono truncate max-w-xs">{p.error_text}</td>
-                    <td className="px-3 py-1.5 font-semibold">{p.count}</td>
-                    <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(p.first_seen)}</td>
-                    <td className="px-3 py-1.5 text-faint whitespace-nowrap">{relTime(p.last_seen)}</td>
+                  <tr key={p.id}>
+                    <td className="con-mono max-w-xs truncate text-[color:var(--con-neg)]">{p.error_text}</td>
+                    <td className="num font-semibold">{p.count}</td>
+                    <td className="whitespace-nowrap text-[color:var(--con-faint)]">{relTime(p.first_seen)}</td>
+                    <td className="whitespace-nowrap text-[color:var(--con-faint)]">{relTime(p.last_seen)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -245,21 +338,24 @@ function ServiceDetail({
 export function ConnectionsHealthClient() {
   const [data, setData] = useState<HealthData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ProbeErrorDescription | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
 
-  const fetch_ = useCallback(() => {
-    fetch("/api/admin/connections-health")
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((d: HealthData) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+  const fetch_ = useCallback(async () => {
+    try {
+      const r = await fetch("/api/admin/connections-health");
+      if (!r.ok) {
+        setError(describeProbeStatus(r.status));
+        return;
+      }
+      const d: HealthData = await r.json();
+      setData(d);
+      setError(null);
+    } catch {
+      setError(describeProbeNetworkError());
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -270,39 +366,46 @@ export function ConnectionsHealthClient() {
 
   const laneKey = (s: ServiceHealthSummary) => `${s.service}:${s.keySource ?? ""}`;
   const selectedSummary = data?.services.find((s) => laneKey(s) === selected) ?? null;
-  const stoppedCount = data?.services.filter((s) => s.stoppedWorking).length ?? 0;
+  // Split rather than one flat "N stopped": a lane tripped by the soft "no success yet this hour"
+  // heuristic (one cold failure is enough) is not the same event as a lane that failed five calls in
+  // a row, and merging them made the header count read alarmingly high for a healthy box.
+  // Intentional OFF (retired FMP/Quiver/UW) never contributes to stopped/degraded header chips.
+  const activeLanes = data?.services.filter((s) => !s.intentionalOff) ?? [];
+  const stoppedLanes = activeLanes.filter((s) => s.stoppedWorking);
+  const hardStoppedCount = stoppedLanes.filter(isHardStopped).length;
+  const degradedCount = stoppedLanes.filter(isSoftDegraded).length;
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 space-y-6">
+    <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold">API Connections Health</h1>
+          <h1 className="text-xl font-semibold">API Connections</h1>
           {data?.asOf && (
-            <p className="text-xs text-muted mt-0.5">Last updated {relTime(data.asOf)}</p>
+            <p className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">Last updated {relTime(data.asOf)}</p>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          {stoppedCount > 0 && (
-            <Chip tone="neg">{stoppedCount} stopped</Chip>
+        <div className="flex items-center gap-1.5">
+          {hardStoppedCount > 0 && (
+            <Chip tone="neg">{hardStoppedCount} stopped</Chip>
           )}
-          <a
-            href="/"
-            className="text-xs text-muted hover:text-fg transition-colors"
-          >
-            ← Dashboard
-          </a>
+          {degradedCount > 0 && (
+            <Chip tone="warn">{degradedCount} degraded</Chip>
+          )}
         </div>
       </div>
 
       {loading && !data && (
-        <div className="py-16 text-center text-sm text-muted">Loading…</div>
+        <div className="py-16 text-center text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">Loading…</div>
       )}
 
       {error && (
-        <Card className="p-4 border-neg/40 bg-neg/5">
-          <p className="text-sm text-neg">{error}</p>
-        </Card>
+        <div
+          className="rounded-[var(--con-radius-sm)] border border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] p-3 text-[length:var(--con-fs-sm)] text-[color:var(--con-neg)]"
+          title={error.rawLabel}
+        >
+          {error.message}
+        </div>
       )}
 
       {data && (
@@ -310,9 +413,9 @@ export function ConnectionsHealthClient() {
           {/* Service grid */}
           <div className="space-y-3">
             {data.services.length === 0 ? (
-              <Card className="p-8 text-center">
-                <p className="text-sm text-muted">No API calls recorded yet.</p>
-                <p className="text-xs text-faint mt-1">
+              <Card className="text-center">
+                <p className="py-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">No API calls recorded yet.</p>
+                <p className="pb-4 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
                   Health data appears after the first scan or enrichment fetch.
                 </p>
               </Card>
@@ -322,7 +425,10 @@ export function ConnectionsHealthClient() {
                 {data.services
                   .slice()
                   .sort((a, b) => {
-                    if (a.stoppedWorking !== b.stoppedWorking) return a.stoppedWorking ? -1 : 1;
+                    // Hard-stopped first, then soft-degraded, then healthy, then intentional OFF —
+                    // same weighting as the header chips, so the list order matches the counts.
+                    const rankDiff = laneSortRank(a) - laneSortRank(b);
+                    if (rankDiff !== 0) return rankDiff;
                     const svcCmp = a.service.localeCompare(b.service);
                     if (svcCmp !== 0) return svcCmp;
                     return (a.keySource ?? "").localeCompare(b.keySource ?? "");
@@ -341,7 +447,7 @@ export function ConnectionsHealthClient() {
 
           {/* Detail panel */}
           {selectedSummary && (
-            <Card className="p-4 self-start sticky top-4">
+            <Card className="sticky top-16 self-start">
               <ServiceDetail
                 summary={selectedSummary}
                 errorPatterns={data.errorPatterns[laneKey(selectedSummary)] ?? []}

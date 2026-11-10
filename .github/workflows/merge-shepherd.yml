@@ -24,25 +24,22 @@ permissions:
   pull-requests: write
   actions: write
   issues: write
+  # Referencing `environment: merge-shepherd` below makes GitHub create/update a
+  # deployment record for each run; grant deployments:write explicitly since this
+  # workflow already narrows GITHUB_TOKEN to an explicit allow-list (unlisted
+  # scopes default to none).
+  deployments: write
 
 concurrency:
   group: merge-shepherd
   cancel-in-progress: false
 
 jobs:
-  shepherd:
-    runs-on: ubuntu-latest
-    steps:
-      # Pin to main regardless of which ref the dispatch was run against, so a
-      # workflow_dispatch from a non-main branch can never run a branch-modified
-      # copy of the script with this job's write-scoped token.
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - name: Run merge shepherd
-        env:
-          GH_TOKEN: ${{ secrets.SHEPHERD_TOKEN || secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          SHEPHERD_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
-          SHEPHERD_HAS_PAT: ${{ secrets.SHEPHERD_TOKEN != '' && '1' || '0' }}
-        run: bash scripts/merge-shepherd.sh
+  call-shepherd:
+    # Run the trusted default-branch implementation even when a maintainer dispatches
+    # this wrapper against another ref; the called workflow inherits write permissions
+    # and repository secrets.
+    uses: Simple-With-Us/Socratic-Trade/.github/workflows/_merge-shepherd-impl.yml@main
+    with:
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit

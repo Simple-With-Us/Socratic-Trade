@@ -43,6 +43,7 @@ describe("scoreCongressSignal", () => {
     const result = scoreCongressSignal({
       congressAnalytics: {
         netFlowUsd: 1_000_000_000,
+        memberCount: 1,
         topMemberScore: 100,
         convictionScore: 100,
         convictionDirection: "BUY"

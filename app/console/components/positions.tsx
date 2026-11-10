@@ -4,8 +4,11 @@
  *  from the snapshot (resting broker stop order, app-managed stop rule, or
  *  "—" when nothing protects). Money in tabular numerals; missing = "—". */
 
+import { memo } from "react";
+import Link from "next/link";
 import type { DashboardSnapshot } from "../../dashboard-types";
-import { deriveProtection } from "../lib/derive";
+import type { OptionPosition } from "@/lib/types";
+import { deriveProtection, deriveUnmanagedShorts, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
 import { fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
 import { Card, Dash, Empty, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
@@ -30,13 +33,21 @@ function exposureCue(weightPct: number | undefined, capPct: number | undefined):
   };
 }
 
-export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
+export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
   const positions = snapshot.positions ?? [];
   const equity = snapshot.portfolio?.totalMarketValue;
   const exposureCap = snapshot.policy.maxSymbolExposurePct;
+  // Advisory only (mirrors the per-row muted protection state): shorts the app's stop
+  // monitors deliberately skip while short selling is off. Same copy as Guardrails.
+  const unmanaged = deriveUnmanagedShorts(positions, snapshot.policy);
+  const unmanagedShorts = unmanagedShortNotice(unmanaged.count, unmanaged.reason ?? undefined);
 
   // Computed once per position and shared by both the ≥lg table and the
   // <lg card list below, so the two layouts can never drift out of sync.
+  // Weight is the UNSIGNED share of gross exposure (owner decision 2026-08-08):
+  // a signed weight rendered "-0.0%"/"-1.8%" artifacts for shorts, whose
+  // direction the SHORT tag already carries.
+  const grossTotal = grossExposure(positions);
   const rows = positions.map((p) => {
     const short = p.quantity < 0;
     const costBasis = p.averageCost * p.quantity;
@@ -44,16 +55,30 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
       Number.isFinite(p.marketValue) && Number.isFinite(costBasis) ? p.marketValue - costBasis : undefined;
     const unrealizedPct =
       unrealized !== undefined && costBasis !== 0 ? (unrealized / Math.abs(costBasis)) * 100 : undefined;
-    const weightPct = equity && equity !== 0 ? (p.marketValue / equity) * 100 : undefined;
-    const protection = deriveProtection(p, snapshot.orders ?? [], snapshot.policy);
+    const weightPct = grossExposureWeightPct(p.marketValue, grossTotal);
+    // The over-cap cue keeps the policy cap's own basis — |value| as a share of ACCOUNT
+    // value (maxSymbolExposurePct is defined against account value, not gross exposure);
+    // its tooltip spells out that percentage.
+    const equitySharePct =
+      equity && equity !== 0 && Number.isFinite(p.marketValue) ? (Math.abs(p.marketValue) / Math.abs(equity)) * 100 : undefined;
+    const protection = deriveProtection(p, snapshot.orders ?? [], snapshot.policy, snapshot.stopPlanBySymbol?.[p.symbol]);
     const meta = snapshot.symbolMetaBySymbol?.[p.symbol];
-    const exposure = exposureCue(weightPct, exposureCap);
+    const exposure = exposureCue(equitySharePct, exposureCap);
     return { p, short, unrealized, unrealizedPct, weightPct, protection, meta, exposure };
   });
 
   return (
-    <Card title={`Positions (${positions.length})`} padded={false}>
-      {positions.length === 0 ? (
+    <>
+      <Card title={`Positions (${positions.length})`} padded={false}>
+        {unmanagedShorts && (
+          <div className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
+            {unmanagedShorts}{" "}
+            <Link href="/console/guardrails" className="font-semibold text-[color:var(--con-accent)]">
+              Open Guardrails
+            </Link>
+          </div>
+        )}
+        {positions.length === 0 ? (
         <Empty>No open positions in this account.</Empty>
       ) : (
         <>
@@ -65,7 +90,7 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
                   <th className="num" title="Shares held; negative means a short position.">Qty</th>
                   <th className="num" title="Average price paid per share.">Avg cost</th>
                   <th className="num" title="Current market value of the position.">Value</th>
-                  <th className="num" title="Share of the account's total market value currently tied to this position.">Weight</th>
+                  <th className="num" title="Share of gross exposure (absolute): this position's |market value| as a percent of the sum of |market value| across all open positions.  Direction is carried by the SHORT tag, so shorts never show a negative weight.">Weight</th>
                   <th className="num" title="Market value minus cost basis — the gain or loss if you closed now.">Unrealized</th>
                   <th title="What protects this position: a resting broker stop order, an app-managed stop rule, or nothing (—).">Protection</th>
                 </tr>
@@ -92,7 +117,7 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
                         <Dash />
                       ) : (
                         <span style={exposure.tone ? { color: exposure.tone === "neg" ? "var(--con-neg)" : "var(--con-warn)" } : undefined}>
-                          {fmtPct(weightPct, 1, true)}
+                          {fmtPct(weightPct, 1, false)}
                           {exposure.label && (
                             <span className="ml-1 text-[length:var(--con-fs-xs)] font-semibold">({exposure.label})</span>
                           )}
@@ -138,12 +163,12 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
                     <div className="flex items-center gap-1.5">
                       <SymbolButton symbol={p.symbol} />
                       {short && <span className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">SHORT</span>}
+                      {meta?.companyName && (
+                        <span className="truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                          {meta.companyName}
+                        </span>
+                      )}
                     </div>
-                    {meta?.companyName && (
-                      <div className="mt-0.5 max-w-48 truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                        {meta.companyName}
-                      </div>
-                    )}
                   </div>
                   {weightPct !== undefined && (
                     <span
@@ -151,23 +176,17 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
                       style={exposure.tone ? { color: exposure.tone === "neg" ? "var(--con-neg)" : "var(--con-warn)" } : undefined}
                       title={exposure.title}
                     >
-                      {fmtPct(weightPct, 1, true)}
+                      <span className="font-normal text-[color:var(--con-faint)]">Weight:</span>&nbsp;&nbsp;{fmtPct(weightPct, 1, false)}
                       {exposure.label && <span className="block text-[length:var(--con-fs-xs)]">{exposure.label}</span>}
                     </span>
                   )}
                 </div>
-                <div className="con-num grid grid-cols-2 gap-x-3 gap-y-1.5">
+                <div className="con-num grid grid-cols-2 gap-x-3 gap-y-1.5 mt-1">
                   <div>
-                    <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Qty</div>
-                    <div>{fmtQty(p.quantity)}</div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Qty:</span>&nbsp;&nbsp;<span>{fmtQty(p.quantity)}</span>
                   </div>
                   <div className="text-right">
-                    <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Value</div>
-                    <div>{fmtMoney(p.marketValue)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">P&amp;L</div>
-                    <div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">P&amp;L:</span>&nbsp;&nbsp;<span>
                       {unrealized === undefined ? (
                         <Dash />
                       ) : (
@@ -176,22 +195,24 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
                           {unrealizedPct !== undefined ? ` (${fmtPct(unrealizedPct, 1, true)})` : ""}
                         </SignedText>
                       )}
-                    </div>
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Value:</span>&nbsp;&nbsp;<span>{fmtMoney(p.marketValue)}</span>
                   </div>
                   <div className="text-right" title={protection.detail}>
-                    <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Protection</div>
-                    <div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Protection:</span>&nbsp;&nbsp;<span>
                       {protection.label === null ? (
                         <span className="text-[color:var(--con-faint)]">{EM_DASH}</span>
                       ) : (
                         <span
-                          className="text-[length:var(--con-fs-xs)] font-semibold"
+                          className="font-semibold"
                           style={{ color: protection.tone === "warn" ? "var(--con-warn)" : protection.tone === "pos" ? "var(--con-pos)" : "var(--con-muted)" }}
                         >
                           {protection.label}
                         </span>
                       )}
-                    </div>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -200,5 +221,106 @@ export function PositionsCard({ snapshot }: { snapshot: DashboardSnapshot }) {
         </>
       )}
     </Card>
-  );
-}
+    {snapshot.options && snapshot.options.length > 0 && (
+      <Card title="Unmanaged Options (no automated exit protection)" padded={false} className="mt-4">
+        <div className="hidden overflow-x-auto lg:block">
+          <table className="con-table">
+            <thead>
+              <tr>
+                <th title="OCC option symbol.">Symbol</th>
+                <th title="Underlying symbol.">Underlying</th>
+                <th title="Option type (Call/Put) and strike price.">Strike / Type</th>
+                <th title="Expiration date.">Expiration</th>
+                <th className="num" title="Number of contracts held; negative means short/written.">Qty</th>
+                <th className="num" title="Average price paid per contract (not multiplier-adjusted).">Avg cost</th>
+                <th className="num" title="Current market value of the option position (multiplier-adjusted).">Value</th>
+                <th className="num" title="Gain or loss if closed now.">Unrealized P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshot.options.map((opt) => {
+                const qty = opt.quantity;
+                const costBasis = opt.averageCost * qty * 100;
+                const unrealized = opt.marketValue - costBasis;
+                const unrealizedPct = costBasis !== 0 ? (unrealized / Math.abs(costBasis)) * 100 : undefined;
+
+                return (
+                  <tr key={opt.symbol}>
+                    <td className="font-mono text-xs">{opt.symbol}</td>
+                    <td>
+                      <SymbolButton symbol={opt.underlyingSymbol} />
+                    </td>
+                    <td>
+                      <span className="font-semibold">${opt.strikePrice}</span>{" "}
+                      <span className={opt.optionType === "call" ? "text-indigo-400" : "text-pink-400"}>
+                        {opt.optionType.toUpperCase()}
+                      </span>
+                    </td>
+                    <td>{opt.expirationDate}</td>
+                    <td className="num con-num">{fmtQty(qty)}</td>
+                    <td className="num con-num">{fmtMoney(opt.averageCost)}</td>
+                    <td className="num con-num">{fmtMoney(opt.marketValue)}</td>
+                    <td className="num">
+                      <SignedText value={unrealized}>
+                        {`${unrealized > 0 ? "+" : ""}${fmtMoney(unrealized)}`}
+                        {unrealizedPct !== undefined ? ` (${fmtPct(unrealizedPct, 1, true)})` : ""}
+                      </SignedText>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex flex-col divide-y divide-[color:var(--con-line)] lg:hidden">
+          {snapshot.options.map((opt) => {
+            const qty = opt.quantity;
+            const short = qty < 0;
+            const costBasis = opt.averageCost * qty * 100;
+            const unrealized = opt.marketValue - costBasis;
+            const unrealizedPct = costBasis !== 0 ? (unrealized / Math.abs(costBasis)) * 100 : undefined;
+
+            return (
+              <div key={opt.symbol} className="flex flex-col gap-2 px-4 py-3 text-[length:var(--con-fs-sm)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-xs">{opt.symbol}</span>
+                      {short && <span className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">SHORT</span>}
+                    </div>
+                    <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] flex items-center gap-1">
+                      <span>Underlying:</span>
+                      <SymbolButton symbol={opt.underlyingSymbol} />
+                      <span>| Strike: ${opt.strikePrice} | {opt.optionType.toUpperCase()} | Exp: {opt.expirationDate}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="con-num grid grid-cols-2 gap-x-3 gap-y-1.5 mt-1">
+                  <div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Qty:</span>&nbsp;&nbsp;<span>{fmtQty(qty)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">P&amp;L:</span>&nbsp;&nbsp;<span>
+                      <SignedText value={unrealized}>
+                        {`${unrealized > 0 ? "+" : ""}${fmtMoney(unrealized)}`}
+                        {unrealizedPct !== undefined ? ` (${fmtPct(unrealizedPct, 1, true)})` : ""}
+                      </SignedText>
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Value:</span>&nbsp;&nbsp;<span>{fmtMoney(opt.marketValue)}</span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">Avg Cost:</span>&nbsp;&nbsp;<span>{fmtMoney(opt.averageCost)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    )}
+  </>
+);
+});

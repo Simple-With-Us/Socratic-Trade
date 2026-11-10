@@ -5,6 +5,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -105,7 +107,7 @@ function redTeamOk(): Response {
 function stubFetchE2E(): void {
   vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
       const body = String(init?.body ?? "");
       const isRedTeam = body.includes("Red Team Risk Agent") || body.includes("rigorously critique");
       const isBear = body.includes("Bear Agent") || body.includes("bear_proposals");
@@ -127,7 +129,7 @@ async function setupBrokerLiveAutonomous(label: string): Promise<void> {
   // the live-trading opt-in can't leak into subsequent tests/files.
   vi.stubEnv("ALLOW_LIVE_TRADING", "true");
   const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
   // Broker "alpaca" with environment "live" so this resolves broker/live
   upsertConnectedAccount({
@@ -147,11 +149,11 @@ async function setupBrokerLiveAutonomous(label: string): Promise<void> {
     systemState: "active",
     activeBroker: "alpaca",
     accountNumber: "TEST",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
     // No-defaults world: the single Red Team reviewer must be an explicit pick or the risk-adding
     // opening fails closed to human review. Same OpenAI-family model as the proposer so the fetch
-    // stub serves its "Red Team Risk Agent" call through the api.openai.com endpoint.
-    redTeamLlmModel: "gpt-4.1-mini",
+    // stub serves its "Red Team Risk Agent" call through the openrouter.ai endpoint.
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
@@ -166,7 +168,7 @@ async function setupBrokerLiveAutonomous(label: string): Promise<void> {
 
 describe("E2E money-path integration test", () => {
   it("runs strategy through to execution", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     // Keys for both LLM families present so Red Team credential resolution never fails-closed; the
     // fetch stub actually serves the Red Team through the OpenAI-family endpoint.
     vi.stubEnv("GEMINI_API_KEY", "test-gemini-key");
@@ -176,7 +178,7 @@ describe("E2E money-path integration test", () => {
     stubFetchE2E();
     await setupBrokerLiveAutonomous("E2E Live");
     const { runStrategyOnce } = await import("../src/lib/strategy");
-    const { listAudit } = await import("../src/lib/db");
+    const { getProposal, listAudit } = await import("../src/lib/db");
 
     const result = await runStrategyOnce("local", { manual: false });
 
@@ -184,11 +186,12 @@ describe("E2E money-path integration test", () => {
 
     const aaplProposal = result.proposals.find((p) => p.proposal.symbol === "AAPL");
     expect(aaplProposal).toBeDefined();
+    expect(aaplProposal?.id).toEqual(expect.any(String));
+    expect(getProposal(aaplProposal!.id!, "local")?.id).toBe(aaplProposal!.id);
 
-    // On the broker/live decide path a successfully submitted order is surfaced in result.proposals
-    // with the terminal status "placed" (the DB-only "placing"/"filled" states are never pushed here),
-    // so assert that exact status to actually validate the money-path execution.
-    expect(aaplProposal?.status).toBe("placed");
+    // The Test broker completes synchronously, so result.proposals keeps the terminal `filled`
+    // truth instead of collapsing it back to the less-specific `placed` state.
+    expect(aaplProposal?.status).toBe("filled");
     
     // Check audit logs for the money path success
     const runKinds = listAudit(500)

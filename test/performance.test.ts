@@ -63,6 +63,50 @@ describe("calculatePnl", () => {
     // execution (status flips to "filled") — verified above via calculatePnl directly.
   });
 
+  it("does not substitute proposal or review prices into an unpriced broker receipt", () => {
+    const pending = recordFillFromProposal({
+      accountNumber: `UNPRICED-${randomUUID()}`,
+      source: "live",
+      executionMode: "broker/live",
+      proposal: {
+        symbol: "AAPL",
+        side: "buy",
+        type: "limit",
+        quantity: 1,
+        limitPrice: 200,
+        timeInForce: "gfd",
+        marketHours: "regular_hours",
+        rationale: "broker price still unknown",
+        tradeThesisTag: "test",
+        entryMarketRegime: "test"
+      },
+      review: { estimatedNotional: 200, alerts: [], raw: { price: 200 } },
+      marketScan: marketScanWithQuote("AAPL", 201),
+      execution: { orderId: "unpriced-order", refId: "unpriced-ref", state: "filled", filledQuantity: 1, raw: {} },
+      status: "pending_reconciliation"
+    });
+
+    expect(pending).toMatchObject({ status: "pending_reconciliation", quantity: 1, price: 0, notional: 0 });
+  });
+
+  it("accounts for the executed quantity of a still-working partial fill", () => {
+    const partial = fill({
+      id: "live-partial",
+      source: "live",
+      executionMode: "broker/live",
+      brokerOrderId: "broker-partial-1",
+      status: "partially_filled",
+      side: "buy",
+      quantity: 2,
+      price: 100,
+      notional: 200
+    });
+
+    const pnl = calculatePnl([partial], { AAPL: 110 });
+    expect(pnl.openLots).toMatchObject([{ symbol: "AAPL", quantity: 2, entryPrice: 100 }]);
+    expect(pnl.unrealized).toBe(20);
+  });
+
   it("turns approved dollar Paper orders into quantity fills when a market quote is present", () => {
     const fill = recordFillFromProposal({
       accountNumber: "APPROVAL1",
@@ -83,10 +127,10 @@ describe("calculatePnl", () => {
       status: "filled"
     });
 
-    // With default-ON execution cost (1 bps base, no spread/volume data here):
-    // price = 420 * (1 + 0.0001) = 420.042; quantity = 10 / 420.042.
-    expect(fill.price).toBeCloseTo(420.042, 1); // 1 bps cost applied to buy
-    expect(fill.quantity).toBeCloseTo(10 / 420.042, 4);
+    // With default-ON execution cost (20 bps base, no spread/volume data here):
+    // price = 420 * (1 + 0.002) = 420.84; quantity = 10 / 420.84.
+    expect(fill.price).toBeCloseTo(420.84, 2); // 20 bps cost applied to buy
+    expect(fill.quantity).toBeCloseTo(10 / 420.84, 4);
   });
 
   it("keeps broker-only approval quotes in the market scan price map", () => {
@@ -298,12 +342,12 @@ describe("getThesisScorecard", () => {
     const userId = `redteam-eff-${randomUUID()}`;
 
     // Veto 1 (model A): would have LOST money — the Bear added value.
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-1", symbol: "AAPL", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-1", symbol: "AAPL", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "openai/gpt-4.1-mini" }, userId);
     insertSkippedCounterfactualCandidate({ userId, runId: "run-rt-1", symbol: "AAPL", snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06" });
     markSkippedCounterfactualMatured({ id: `${userId}:run-rt-1:AAPL:5`, userId, exitDate: "2026-06-06", exitPrice: 90, returnPct: -10 });
 
     // Veto 2 (model A): would have WON — a survivor-risk hit (the veto missed a winner).
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-2", symbol: "MSFT", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-2", symbol: "MSFT", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "openai/gpt-4.1-mini" }, userId);
     insertSkippedCounterfactualCandidate({ userId, runId: "run-rt-2", symbol: "MSFT", snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 200, horizonDays: 5, targetDate: "2026-06-06" });
     markSkippedCounterfactualMatured({ id: `${userId}:run-rt-2:MSFT:5`, userId, exitDate: "2026-06-06", exitPrice: 220, returnPct: 10 });
 
@@ -319,7 +363,7 @@ describe("getThesisScorecard", () => {
     expect(efficacy.survivorRiskHitRate).toBe(50); // 1 of 2 matured vetoes missed a winner
     expect(efficacy.avgReturnPct).toBe(0); // (-10 + 10) / 2
 
-    const modelA = efficacy.byModel.find((m) => m.model === "gpt-4.1-mini");
+    const modelA = efficacy.byModel.find((m) => m.model === "gpt-mini-latest");
     expect(modelA?.maturedVetoes).toBe(2);
     expect(modelA?.vetoValueAddRate).toBe(50);
     expect(modelA?.survivorRiskHitRate).toBe(50);
@@ -329,13 +373,34 @@ describe("getThesisScorecard", () => {
     expect(efficacy.records).toHaveLength(2);
   });
 
+  it("getRedTeamEfficacy merges Gemini Flash version slugs onto gemini-flash-latest", async () => {
+    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
+    const userId = `redteam-eff-flash-${randomUUID()}`;
+
+    audit("proposal_rejected_by_red_team", { runId: "run-flash-1", symbol: "AAPL", side: "buy", model: "google/gemini-3.7-flash" }, userId);
+    insertSkippedCounterfactualCandidate({ userId, runId: "run-flash-1", symbol: "AAPL", snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06" });
+    markSkippedCounterfactualMatured({ id: `${userId}:run-flash-1:AAPL:5`, userId, exitDate: "2026-06-06", exitPrice: 90, returnPct: -10 });
+
+    audit("proposal_rejected_by_red_team", { runId: "run-flash-2", symbol: "MSFT", side: "buy", model: "gemini-flash-latest" }, userId);
+    insertSkippedCounterfactualCandidate({ userId, runId: "run-flash-2", symbol: "MSFT", snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 200, horizonDays: 5, targetDate: "2026-06-06" });
+    markSkippedCounterfactualMatured({ id: `${userId}:run-flash-2:MSFT:5`, userId, exitDate: "2026-06-06", exitPrice: 180, returnPct: -10 });
+
+    const efficacy = getRedTeamEfficacy(userId);
+    expect(efficacy.byModel).toHaveLength(1);
+    expect(efficacy.byModel[0]).toMatchObject({
+      model: "gemini-flash-latest",
+      maturedVetoes: 2,
+      vetoValueAddRate: 100
+    });
+  });
+
   it("getRedTeamEfficacy side-adjusts SHORT vetoes (a short's counterfactual close-price-up is a value-add)", async () => {
     const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
     const userId = `redteam-eff-short-${randomUUID()}`;
 
     // A vetoed SHORT whose price ROSE (raw returnPct positive) means the short thesis would have
     // LOST money — the veto added value. Side-adjusted returnPct should be negative.
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-short", symbol: "TSLA", side: "short", thesisTag: "Breakdown", reason: "Squeeze risk.", model: "gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-short", symbol: "TSLA", side: "short", thesisTag: "Breakdown", reason: "Squeeze risk.", model: "openai/gpt-4.1-mini" }, userId);
     insertSkippedCounterfactualCandidate({ userId, runId: "run-rt-short", symbol: "TSLA", snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06" });
     markSkippedCounterfactualMatured({ id: `${userId}:run-rt-short:TSLA:5`, userId, exitDate: "2026-06-06", exitPrice: 120, returnPct: 20 });
 
@@ -371,7 +436,7 @@ describe("getThesisScorecard", () => {
     const { audit } = await import("../src/lib/db");
     const userId = `redteam-eff-kind-${randomUUID()}`;
 
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-old", symbol: "AAPL", side: "buy", reason: "Overbought.", model: "gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-old", symbol: "AAPL", side: "buy", reason: "Overbought.", model: "openai/gpt-4.1-mini" }, userId);
     // Ten newer audit rows of OTHER kinds — more than the auditLimit below. Under the old
     // all-kind scan (LIMIT applied before the kind filter), these would push the veto out
     // of the window entirely and the scorecard would report zero veto history.
@@ -383,14 +448,40 @@ describe("getThesisScorecard", () => {
     expect(efficacy.totalVetoes).toBe(1);
   });
 
+  // 2026-09-18: the audit-kind scan defaulted to a 500-row LIMIT. That was a soft ceiling while
+  // proposal_rejected_by_red_team rows were also being hard-deleted after 90 days (audit-prune.ts)
+  // — the prune bug always evicted history long before 500 accumulated. Once that exemption
+  // landed (AUDIT_PRUNE_NEVER_PRUNED_KINDS), lifetime veto history can genuinely exceed 500 on any
+  // account with sustained Red Team activity, and the old default would have silently truncated
+  // this rollup back down to the newest 500 — the exact failure mode the prune fix was meant to
+  // end. Proves the DEFAULT (no auditLimit override) now reaches every one of >500 matured vetoes.
+  it("getRedTeamEfficacy's default audit scan reaches every matured veto past the old 500-row cap", async () => {
+    const { audit, insertSkippedCounterfactualCandidate, markSkippedCounterfactualMatured } = await import("../src/lib/db");
+    const userId = `redteam-eff-past500-${randomUUID()}`;
+    const total = 520;
+
+    for (let i = 0; i < total; i += 1) {
+      const runId = `run-rt-past500-${i}`;
+      const symbol = `SYM${i}`;
+      audit("proposal_rejected_by_red_team", { runId, symbol, side: "buy", reason: "Overbought.", model: "openai/gpt-4.1-mini" }, userId);
+      insertSkippedCounterfactualCandidate({ userId, runId, symbol, snapshotAt: "2026-06-01T00:00:00.000Z", refPrice: 100, horizonDays: 5, targetDate: "2026-06-06" });
+      markSkippedCounterfactualMatured({ id: `${userId}:${runId}:${symbol}:5`, userId, exitDate: "2026-06-06", exitPrice: 90, returnPct: -10 });
+    }
+
+    const efficacy = getRedTeamEfficacy(userId);
+    expect(efficacy.totalVetoes).toBe(total);
+    expect(efficacy.maturedVetoes).toBe(total);
+    expect(efficacy.byModel.find((m) => m.model === "gpt-mini-latest")?.maturedVetoes).toBe(total);
+  });
+
   it("getRedTeamEfficacy excludes EXIT vetoes from totals (no counterfactual is ever recorded for them)", async () => {
     const { audit } = await import("../src/lib/db");
     const userId = `redteam-eff-exit-${randomUUID()}`;
 
     // A vetoed SELL (exit) is audited by the strategy but never gets a counterfactual row —
     // counting it in totalVetoes would permanently depress maturation coverage.
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-exit", symbol: "AAPL", side: "sell", reason: "Premature exit.", model: "gpt-4.1-mini" }, userId);
-    audit("proposal_rejected_by_red_team", { runId: "run-rt-open", symbol: "MSFT", side: "buy", reason: "Overbought.", model: "gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-exit", symbol: "AAPL", side: "sell", reason: "Premature exit.", model: "openai/gpt-4.1-mini" }, userId);
+    audit("proposal_rejected_by_red_team", { runId: "run-rt-open", symbol: "MSFT", side: "buy", reason: "Overbought.", model: "openai/gpt-4.1-mini" }, userId);
 
     const efficacy = getRedTeamEfficacy(userId);
     expect(efficacy.totalVetoes).toBe(1);
@@ -662,10 +753,10 @@ describe("recordFillFromProposal — T9 short/cover boundaries", () => {
     });
     expect(f.side).toBe("short");
     expect(f.quantity).toBeCloseTo(2);
-    // With default-ON execution cost (1 bps base, no spread/volume): short receives DOWN.
-    // price = 100 * (1 - 0.0001) = 99.99; notional = 2 * 99.99 = 199.98.
-    expect(f.price).toBeCloseTo(99.99, 1);
-    expect(f.notional).toBeCloseTo(199.98, 1); // notional is always recorded as a positive magnitude
+    // With default-ON execution cost (20 bps base, no spread/volume): short receives DOWN.
+    // price = 100 * (1 - 0.002) = 99.8; notional = 2 * 99.8 = 199.6.
+    expect(f.price).toBeCloseTo(99.8, 2);
+    expect(f.notional).toBeCloseTo(199.6, 1); // notional is always recorded as a positive magnitude
   });
 
   it("books a cover fill as a partial short close", async () => {

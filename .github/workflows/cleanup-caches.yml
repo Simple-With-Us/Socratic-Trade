@@ -1,21 +1,3 @@
-# Actions-cache hygiene (2026-07-04). The repo hit its 10 GB per-repo cache cap because
-# (a) every PR's cache-save (before ci.yml's restore/save split landed) left a ~340MB `.next`
-# entry scoped to that PR's ref that outlived the PR — GitHub only evicts caches when the
-# 10 GB cap is exceeded, oldest-first, so stale PR entries just accumulated; and (b) even
-# on `main`, every push saved a brand-new entry (the key includes a source-tree hash) without
-# ever removing the previous one, so `main` itself accumulated a growing entry list rather
-# than a single rolling one.
-#
-# ci.yml's `verify` job now only SAVES a new `.next/cache` entry on pushes to `main` (PR and
-# merge_group runs restore-only). This workflow is the backstop / cleanup layer:
-#   1. On every PR close (merged or not), delete all caches scoped to that PR's ref
-#      (`refs/pull/<n>/merge`) so a forgotten PR cache can't linger.
-#   2. On a daily schedule, prune every branch/tool cache down to just its single most
-#      recently created entry — covers `main`'s Next.js/npm caches, and incidentally also
-#      catches the small long-lived tool caches (gitleaks, bun) if they ever start
-#      duplicating. This is a backstop, not the primary control (the ci.yml restore/save
-#      split is): safe to run even if item 1 already did its job, since there is nothing left
-#      to prune on well-behaved refs.
 name: Cleanup Actions Caches
 
 on:
@@ -38,6 +20,30 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      - name: Ensure GitHub CLI is on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            gh --version
+            exit 0
+          fi
+          # Pin gh CLI by version + sha256. Do not curl /releases/latest (mutable).
+          ver="2.76.2"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) arch=amd64; want=62544b0f3759bbf1155c0ac3d75838b5fe23d66dfb75cf8368f84fff8f82b93e ;;
+            aarch64|arm64) arch=arm64; want=a77f6d709c5100cda8e9bbb8d8b7143120121233d9102ba2f2bc254134db18dc ;;
+            *) echo "::error::unsupported arch $arch"; exit 1 ;;
+          esac
+          mkdir -p "$HOME/.local/bin" /tmp/gh-cli-pin
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz" \
+            -o "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz"
+          echo "${want}  /tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz" | sha256sum -c -
+          tar -xz -C /tmp/gh-cli-pin -f "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz"
+          install -m 0755 "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}/bin/gh" "$HOME/.local/bin/gh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gh" --version
       - name: Delete every cache scoped to this PR's ref
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,11 +58,31 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            scripts/prune-stale-actions-caches.py
-          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@v7
+      - name: Ensure GitHub CLI is on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            gh --version
+            exit 0
+          fi
+          # Pin gh CLI by version + sha256. Do not curl /releases/latest (mutable).
+          ver="2.76.2"
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) arch=amd64; want=62544b0f3759bbf1155c0ac3d75838b5fe23d66dfb75cf8368f84fff8f82b93e ;;
+            aarch64|arm64) arch=arm64; want=a77f6d709c5100cda8e9bbb8d8b7143120121233d9102ba2f2bc254134db18dc ;;
+            *) echo "::error::unsupported arch $arch"; exit 1 ;;
+          esac
+          mkdir -p "$HOME/.local/bin" /tmp/gh-cli-pin
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz" \
+            -o "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz"
+          echo "${want}  /tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz" | sha256sum -c -
+          tar -xz -C /tmp/gh-cli-pin -f "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}.tar.gz"
+          install -m 0755 "/tmp/gh-cli-pin/gh_${ver}_linux_${arch}/bin/gh" "$HOME/.local/bin/gh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/gh" --version
       - name: Keep only the newest entry per cache key prefix
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

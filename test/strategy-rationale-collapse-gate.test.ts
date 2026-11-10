@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+process.env.OPENROUTER_API_KEY = "test-key";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 
 // Item 7 (Chat A): the rationale-diversity collapse detector was advisory-only (console.warn). Behind
@@ -14,6 +15,8 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
   return { ...actual, getBrokerGateway: (_policy: unknown, userId: string = "local") => getTestGateway(userId) };
 });
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -74,11 +77,11 @@ function nasdaqRows(): Response {
 }
 
 async function runCollapse(gateOn: boolean) {
-  vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+  vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
   vi.stubGlobal("fetch", async (url: string | URL | Request) => {
     const href = String(url);
     // Both the Bull and the surviving-Bear response return the two identical-rationale buys.
-    if (href.includes("api.openai.com")) {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
       return new Response(JSON.stringify(bullBearProposals()), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (href.includes("nasdaq.com")) return nasdaqRows();
@@ -86,7 +89,7 @@ async function runCollapse(gateOn: boolean) {
   });
 
   const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey, listAudit } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
   upsertConnectedAccount({ id: accountId, userId: "local", broker: "alpaca", environment: "paper", accountNumber: "TEST", label: `collapse ${gateOn}`, apiKey: "PK", apiSecret: "sk", isActive: true });
   setActiveConnectedAccount(accountId);
@@ -95,7 +98,7 @@ async function runCollapse(gateOn: boolean) {
     systemState: "active",
     activeBroker: "alpaca",
     accountNumber: "TEST",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL", "XOM"],
     strategyAuthority: "decide",

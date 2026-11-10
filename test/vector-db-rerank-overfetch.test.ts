@@ -11,6 +11,7 @@
  *
  * Full-mock integration pattern mirrors test/vector-db-rerank-floor.test.ts.
  */
+import { pinRagQualityFlagsOff } from "./rag-test-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -45,6 +46,7 @@ vi.mock("../src/lib/db", () => ({
 }));
 
 beforeEach(() => {
+  pinRagQualityFlagsOff();
   vi.resetModules();
   vi.clearAllMocks();
   process.env.PINECONE_API_KEY = "pinecone-test";

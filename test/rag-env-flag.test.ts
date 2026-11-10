@@ -7,6 +7,11 @@ import { envFlagOn } from "../src/lib/rag/env-flag";
 const FLAG = "TEST_ENV_FLAG_ON_PROBE";
 
 describe("envFlagOn", () => {
+  it("can read an explicit environment without mutating process state", () => {
+    expect(envFlagOn(FLAG, false, { [FLAG]: "yes" })).toBe(true);
+    expect(envFlagOn(FLAG, true, { [FLAG]: "off" })).toBe(false);
+  });
+
   beforeEach(() => {
     delete process.env[FLAG];
   });

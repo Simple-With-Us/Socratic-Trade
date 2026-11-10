@@ -1,6 +1,7 @@
 import type { EquityOrder, EquityPosition, FillEvent, NotificationEvent, PendingProposal, TradeProposal } from "./types";
 import { formatQuantity } from "./money";
-import { isActiveBrokerOrderState } from "./broker-held-orders";
+import { humanizeFailureText } from "./strategy-run-failure";
+import { isWorkingOrderState } from "./broker-held-orders";
 import { shortOrderLabel } from "./order-labels";
 
 export interface SymbolMeta {
@@ -30,9 +31,15 @@ interface SourceAuditEvent {
 export interface StrategyDecisionLike {
   runId: string;
   createdAt?: string;
-  status: "completed" | "failed";
+  status:
+    | "completed"
+    | "failed"
+    | "skipped"
+    | "skipped_budget"
+    | "skipped_market_closed"
+    | "skipped_broker_unhealthy";
   summary: string;
-  proposals: Array<{ proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
+  proposals: Array<{ id?: string; proposal: TradeProposal; status: string; reasons: string[]; orderId?: string }>;
   marketScan?: {
     topCandidates: Array<{ symbol: string; companyName?: string }>;
     quotesBySymbol?: Record<string, { symbol: string; companyName?: string }>;
@@ -105,14 +112,16 @@ export function buildAuditFeed(input: {
 function formatAuditEvent(
   kind: string,
   payload: Record<string, unknown>,
-  context: { symbol?: string; side?: "buy" | "sell"; companyName?: string }
+  context: { symbol?: string; side?: "buy" | "sell" | "short" | "cover"; companyName?: string }
 ): { title: string; detail: string; fullText?: string } {
   if (kind === "strategy_run") {
     const llm = formatLlmSteps(payload.llmSteps);
     const summary = stringValue(payload.summary) ?? "No summary";
+    const failed = payload.status === "failed";
+    const detail = failed ? humanizeFailureText(summary) ?? summary : summary;
     return {
-      title: payload.status === "failed" ? "Strategy run failed" : "Strategy run completed",
-      detail: joinDetail([summary, llm]) ?? summary
+      title: failed ? "Strategy Run Failed" : "Strategy Run Completed",
+      detail: joinDetail([detail, llm]) ?? detail
     };
   }
 
@@ -137,6 +146,13 @@ function formatAuditEvent(
     return {
       title: `Vetoed by Bear Risk: ${context.symbol ?? "Trade"}`,
       detail: stringValue(payload.reason) ?? "Market regime blocked proposal"
+    };
+  }
+
+  if (kind === "red_team_veto_override_requested") {
+    return {
+      title: `Red Team Override Requested: ${context.symbol ?? "Trade"}`,
+      detail: stringValue(payload.reason) ?? "Override request recorded"
     };
   }
 
@@ -182,7 +198,9 @@ function formatAuditEvent(
     const title =
       result === "blocked"
         ? `${titlePrefix} Blocked`
-        : result === "placed" || result === "paper"
+        : result === "filled"
+          ? `${titlePrefix} Filled`
+          : result === "placed" || result === "paper"
           ? `${titlePrefix} Approved`
           : `${titlePrefix} ${capitalize(result)}`;
     const orderId = stringValue(payload.orderId);
@@ -191,9 +209,10 @@ function formatAuditEvent(
         // "paper" here is a legacy result value from before the local-simulation execution path was
         // removed — no code path writes it anymore, but old audit rows can still carry it.
         result === "paper" ? "Local simulation (legacy)" : undefined,
+        result === "filled" ? "Order filled" : undefined,
         result === "placed" && stringValue(payload.fillStatus) === "pending_reconciliation" ? "Broker accepted order; pending execution" : undefined,
         result === "placed" && stringValue(payload.fillStatus) !== "pending_reconciliation" ? "Order placed" : undefined,
-        result === "placed" && stringValue(payload.brokerState) ? `Broker state ${readableBrokerState(stringValue(payload.brokerState))}` : undefined,
+        (result === "placed" || result === "filled") && stringValue(payload.brokerState) ? `Broker state ${readableBrokerState(stringValue(payload.brokerState))}` : undefined,
         orderIdFragment,
         firstReason(payload)
       ]);
@@ -282,9 +301,18 @@ function formatAuditEvent(
   }
 
   if (kind === "post_mortem_reflection") {
+    const provider = stringValue(payload.provider);
+    const model = stringValue(payload.model);
+    const modelAttribution = model && provider ? `${model} via ${capitalize(provider)}` : model ?? provider;
+    if (payload.status === "failed") {
+      return {
+        title: "Post-mortem reflection failed",
+        detail: joinDetail([modelAttribution, stringValue(payload.reason)]) ?? "The reflection model call failed"
+      };
+    }
     return {
       title: "Post Mortem Reflection",
-      detail: stringValue(payload.summary) ?? "No reflection summary"
+      detail: joinDetail([modelAttribution, stringValue(payload.summary)]) ?? stringValue(payload.summary) ?? "No reflection summary"
     };
   }
 
@@ -437,6 +465,23 @@ function formatAuditEvent(
     };
   }
 
+  if (kind === "connection_health_alert") {
+    // Plain English instead of the scalar dump ("Key Source: none · User Id: local"):
+    // say WHICH connection is failing and why; the raw payload stays on the toggle.
+    const service = stringValue(payload.service);
+    const errorText = stringValue(payload.errorText);
+    const keySource = stringValue(payload.keySource);
+    return {
+      title: service ? `${capitalize(service)} connection is failing` : "A provider connection is failing",
+      detail:
+        joinDetail([
+          errorText,
+          keySource && keySource !== "none" ? `key from ${keySource}` : "no API key configured"
+        ]) ?? "The server's health check could not reach this provider.",
+      fullText: serializeAuditPayload(payload)
+    };
+  }
+
   // Unknown/unhandled audit kinds NEVER render raw JSON inline — the detail is either a
   // recognized generic field, up to 3 scalar payload fields as "Key: value" fragments, or a
   // plain "Event recorded". The full JSON payload stays available via the existing
@@ -486,8 +531,16 @@ function notificationSide(payload: Record<string, unknown>): string | undefined 
 
 function symbolFromTitle(title?: string): string | undefined {
   if (!title) return undefined;
-  const match = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/);
-  return match?.[0];
+  // Same denylist filter as dashboard-ui.ts: never treat a system identifier (RAG, FMP,
+  // OPENROUTER, …) as a tradable symbol even though it matches the all-caps token regex.
+  // Reuses the exported SYSTEM_SYMBOLS + isSystemSymbol from dashboard-ui so the two feed
+  // paths cannot drift out of sync.
+  const matches = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/g);
+  if (!matches) return undefined;
+  for (const candidate of matches) {
+    if (!isSystemSymbol(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function normalizeSymbol(symbol?: string): string | undefined {
@@ -495,14 +548,16 @@ function normalizeSymbol(symbol?: string): string | undefined {
   return value ? value : undefined;
 }
 
-function normalizeSide(side?: string): "buy" | "sell" | undefined {
-  return side === "buy" || side === "sell" ? side : undefined;
+function normalizeSide(side?: string): "buy" | "sell" | "short" | "cover" | undefined {
+  return side === "buy" || side === "sell" || side === "short" || side === "cover" ? side : undefined;
 }
 
-function sideLabel(side?: "buy" | "sell", symbol?: string): string | undefined {
+function sideLabel(side?: "buy" | "sell" | "short" | "cover", symbol?: string): string | undefined {
   if (!symbol) return undefined;
   if (!side) return symbol;
-  return `${side === "buy" ? "Buy" : "Sell"} ${symbol}`;
+  const word =
+    side === "buy" ? "Buy" : side === "sell" ? "Sell" : side === "short" ? "Short" : side === "cover" ? "Cover" : "Trade";
+  return `${word} ${symbol}`;
 }
 
 function capitalize(value: string): string {
@@ -522,11 +577,13 @@ function numberValue(value: unknown): number | undefined {
 }
 
 /** Plain-English fallback for an audit kind with no dedicated branch above (e.g.
- *  "notify.prefs.set", "run_skipped_market_closed"). De-underscores and capitalizes just the
- *  leading letter (sentence case), matching the decided-vocabulary style used elsewhere in this
- *  file ("Web source refresh", "Trade blocked", ...) rather than every-word Title Case. */
+ *  "notify.prefs.set", "run_skipped_market_closed"). De-underscores, de-dots (namespaced kinds
+ *  like "notification.delivery" or "watchlist.add" must never reach the UI as a raw
+ *  `Foo.bar` string), and capitalizes just the leading letter (sentence case), matching the
+ *  decided-vocabulary style used elsewhere in this file ("Web source refresh", "Trade
+ *  blocked", ...) rather than every-word Title Case. */
 function humanizeKind(kind: string): string {
-  const spaced = kind.replace(/_/g, " ");
+  const spaced = kind.replace(/[._]+/g, " ");
   return spaced.length > 0 ? `${spaced[0]!.toUpperCase()}${spaced.slice(1)}` : spaced;
 }
 
@@ -594,20 +651,46 @@ const WEB_SOURCE_LABELS: Record<string, string> = {
 /** Pure-ops audit kinds: background data refreshes and housekeeping that are not
  *  account decisions. The console collapses these into a "System" group. */
 // Housekeeping/background kinds: bundled into the collapsed System bucket instead of one card
-// each. notify.sent / notify.error are channel-DELIVERY mechanics — the `notification` panel row
-// (which carries the alert's content + status) still renders in the main feed; these are the
-// per-channel webhook/email/push plumbing that used to add 2-4 rows per alert.
+// each. notify.sent / notify.error / notification.delivery are channel-DELIVERY mechanics — the
+// `notification` panel row (which carries the alert's content + status) still renders in the
+// main feed; these are the per-channel webhook/email/push plumbing that used to add 2-4 rows per
+// alert. notification.delivery in particular used to render as its own standalone
+// "Notification.delivery" card duplicating the alert it belongs to (it carries no proposalId/
+// runId to fold into that alert's group, so it needs its own ops-kind entry rather than
+// piggybacking on another group's key).
 export const OPS_AUDIT_KINDS = new Set([
   "web_source_refresh",
   "congress_share_daily",
   "notify.bridge.error",
   "notify.sent",
   "notify.error",
+  "notification.delivery",
   "due_jobs_intraday_sample_drain",
   "vector_store",
   "recoverable_issue",
-  "llm_cache_usage"
+  "llm_cache_usage",
+  // Corpus ingest/embed receipts (#2553a): a 10-K backlog drain used to open TODAY with ~30
+  // "Sec filing ingest" cards plus per-cycle "Disclosure rag embed" rows before any trading
+  // event. None of these carry a runId/proposalId, so each rendered as its own standalone card
+  // instead of folding into the System collapse. They are pure data-pipeline housekeeping.
+  "sec_filing_ingest",
+  "sec_filing_refresh",
+  "disclosure_rag_embed",
+  "fmp_transcript_ingest",
+  "fmp_transcript_refresh",
+  "roic_transcript_ingested",
+  "roic_transcript_refresh",
+  "technical_signal_ingest",
+  "fundamentals_card_ingest",
+  "sec8k_rag_backlog_truncated"
 ]);
+
+/** Audit kinds that are a one-shot settings/preference log entry, not a lifecycle action with a
+ *  real completion state — the standalone-group fallback below must not paint these with a
+ *  misleading "Completed" chip (e.g. "Data pool consent — Completed" implies a finished process
+ *  where there is none, just a toggle that was set). These groups render with no status chip at
+ *  all (the console only draws a chip when `status` is non-empty). */
+const STATUS_LESS_AUDIT_KINDS = new Set(["data_pool_consent"]);
 
 /**
  * Consolidate ANY audit event that carries a `runId` into its `run-<runId>` group (owner request
@@ -711,8 +794,8 @@ function isTerminalBrokerState(state?: string): boolean {
 }
 
 function isPendingBrokerState(state?: string): boolean {
-  const normalized = String(state ?? "").trim().toLowerCase();
-  return isActiveBrokerOrderState(normalized) || ["done_for_day", "stopped", "calculated"].includes(normalized);
+  // Shared working-state set (excludes terminal done_for_day — see broker-held-orders.ts).
+  return isWorkingOrderState(state);
 }
 
 function brokerOrderDetail(order: EquityOrder | undefined, fillStatus?: string): string {
@@ -735,19 +818,42 @@ function brokerOrderDetail(order: EquityOrder | undefined, fillStatus?: string):
         : isTerminalBrokerState(order.state)
           ? `Broker reported ${readableBrokerState(order.state)}`
           : "Accepted by broker; awaiting fill";
-  return `${prefix}: ${readableBrokerState(order.state)} · Qty ${formattedFilled} / ${formattedTotal} · ${feedOrderTypeLabel(order.type)}`;
+  // Don't restate a state the prefix already names ("Broker reported Expired: Expired",
+  // "Filled by broker: Filled"); working states keep it ("Accepted by broker...: New").
+  const state = readableBrokerState(order.state);
+  const parts = [
+    prefix.toLowerCase().includes(state.toLowerCase()) ? null : state,
+    `Qty ${formattedFilled} / ${formattedTotal}`,
+    feedOrderTypeLabel(order.type)
+  ].filter(Boolean);
+  return `${prefix}: ${parts.join(" · ")}`;
 }
 
 function brokerOrderTitle(order: EquityOrder): string {
   const side = order.side.toUpperCase();
   const symbol = normalizeSymbol(order.symbol);
   if (order.state === "filled") return `Order Filled: ${side} ${symbol}`;
+
   if (order.state === "partially_filled") return `Order Partially Filled: ${side} ${symbol}`;
   if (isTerminalBrokerState(order.state)) return `Order ${readableBrokerState(order.state)}: ${side} ${symbol}`;
   return `Order Submitted: ${side} ${symbol}`;
 }
 
-import { feedStatusLabel, formatNotificationDisplay, notificationStatusLabel, notificationTypeLabel } from "./dashboard-ui";
+import { feedStatusLabel, formatNotificationDisplay, isSystemSymbol, notificationStatusLabel, notificationTypeLabel } from "./dashboard-ui";
+
+const KNOWN_GLOBAL_AUDIT_KINDS = new Set([
+  "vector_store",
+  "notify.sent",
+  "notify.error",
+  "congress_share_daily",
+  "market_scan_failed",
+  "regime_flip",
+  "storage_warning_alert",
+  "connection_health_alert",
+  "consent",
+  "prefs",
+  "daily_cleanup"
+]);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -763,6 +869,7 @@ export interface UnifiedActivitySubEvent {
   status?: string;
   error?: string;
   raw?: unknown;
+  count?: number;
 }
 
 export interface UnifiedActivityGroup {
@@ -771,7 +878,7 @@ export interface UnifiedActivityGroup {
   createdAt: string;
   updatedAt: string;
   symbol?: string;
-  side?: "buy" | "sell";
+  side?: "buy" | "sell" | "short" | "cover";
   companyName?: string;
   title: string;
   detail: string;
@@ -781,6 +888,7 @@ export interface UnifiedActivityGroup {
   events: UnifiedActivitySubEvent[];
   connectedAccountId?: string;
   accountLabel?: string;
+  count?: number;
 }
 
 /** Source-level cap on the PROPOSAL-LESS unified-feed tail (fills with no proposal + notifications),
@@ -829,8 +937,9 @@ export function buildUnifiedFeed(input: {
 
   const proposalIdByGroupId = new Map<string, string>();
   const symbolByGroupId = new Map<string, string>();
-  const sideByGroupId = new Map<string, "buy" | "sell" | undefined>();
+  const sideByGroupId = new Map<string, "buy" | "sell" | "short" | "cover" | undefined>();
   const accountIdByGroupId = new Map<string, string>();
+  const runIdByGroupId = new Map<string, string>();
 
   // Helper to extract symbol and side from a proposal lookup
   const lookupProposalInfo = (proposalId: string) => {
@@ -887,8 +996,25 @@ export function buildUnifiedFeed(input: {
     if (symbol) symbolByGroupId.set(groupId, symbol);
     if (side) sideByGroupId.set(groupId, side);
     if (event.connectedAccountId) accountIdByGroupId.set(groupId, event.connectedAccountId);
+    const auditRunId = stringValue(payload.runId);
+    if (auditRunId) runIdByGroupId.set(groupId, auditRunId);
 
-    addSubEvent(groupId, subEvent);
+    // P3 #1: Coalesce consecutive identical audit events (feed storm resilience)
+    const existingGroup = groupEvents[groupId];
+    const lastSubEvent = existingGroup ? existingGroup[existingGroup.length - 1] : undefined;
+    if (
+      lastSubEvent &&
+      lastSubEvent.type === "audit" &&
+      (lastSubEvent.raw as any)?.kind === event.kind &&
+      lastSubEvent.detail === feed.detail
+    ) {
+      lastSubEvent.count = (lastSubEvent.count ?? 1) + 1;
+      // Bring timestamp forward to most recent
+      lastSubEvent.createdAt = event.createdAt;
+      lastSubEvent.id = event.id;
+    } else {
+      addSubEvent(groupId, subEvent);
+    }
   }
 
   // 2. Process Notification Events
@@ -928,6 +1054,7 @@ export function buildUnifiedFeed(input: {
     }
     if (symbol) symbolByGroupId.set(groupId, symbol);
     if (side) sideByGroupId.set(groupId, side);
+    if (notifRunId) runIdByGroupId.set(groupId, notifRunId);
     // Notifications are USER-wide rows: carry their account attribution onto the group so
     // another account's proposal/fill alerts can be filtered out of this account's feed (#10).
     if (event.connectedAccountId) accountIdByGroupId.set(groupId, event.connectedAccountId);
@@ -960,6 +1087,7 @@ export function buildUnifiedFeed(input: {
     }
     if (symbol) symbolByGroupId.set(groupId, symbol);
     if (side) sideByGroupId.set(groupId, side);
+    if (fill.runId) runIdByGroupId.set(groupId, fill.runId);
 
     addSubEvent(groupId, subEvent);
   }
@@ -992,6 +1120,47 @@ export function buildUnifiedFeed(input: {
     addSubEvent(groupId, subEvent);
   }
 
+  // Pre-insert receipt fold (#2553b): the strategy loop generates a working proposal id up
+  // front, emits per-proposal receipts against it (quote-staleness warnings, escalation audits),
+  // and then REGENERATES the id just before persisting the row in several branches
+  // (src/lib/strategy.ts). Those pre-insert receipts carry a proposalId that never lands in
+  // trade_proposals, so one action used to render as TWO sibling rows — the persisted "BUY X"
+  // group plus a side-less orphan "TRADE X" group. Fold each orphan prop group (its proposalId
+  // does not resolve) into the persisted proposal group for the same run + symbol; every receipt
+  // survives as a sub-event of the one merged row. Orphans holding fill/order events are real
+  // money receipts and are never folded away.
+  if (input.getProposalById) {
+    const resolvedGroupByRunSymbol = new Map<string, string>();
+    const groupIds = Object.keys(groupEvents);
+    for (const groupId of groupIds) {
+      const pid = proposalIdByGroupId.get(groupId);
+      if (!pid || !input.getProposalById(pid)) continue;
+      const runId = runIdByGroupId.get(groupId);
+      const symbol = symbolByGroupId.get(groupId);
+      if (!runId || !symbol) continue;
+      const key = `${runId}|${symbol}`;
+      if (!resolvedGroupByRunSymbol.has(key)) resolvedGroupByRunSymbol.set(key, groupId);
+    }
+    for (const groupId of groupIds) {
+      const pid = proposalIdByGroupId.get(groupId);
+      if (!pid || input.getProposalById(pid)) continue;
+      const events = groupEvents[groupId];
+      if (!events || events.some((ev) => ev.type === "fill" || ev.type === "order")) continue;
+      const runId = runIdByGroupId.get(groupId);
+      const symbol = symbolByGroupId.get(groupId);
+      if (!runId || !symbol) continue;
+      const target = resolvedGroupByRunSymbol.get(`${runId}|${symbol}`);
+      if (!target || target === groupId) continue;
+      groupEvents[target]!.push(...events);
+      delete groupEvents[groupId];
+      proposalIdByGroupId.delete(groupId);
+      symbolByGroupId.delete(groupId);
+      sideByGroupId.delete(groupId);
+      accountIdByGroupId.delete(groupId);
+      runIdByGroupId.delete(groupId);
+    }
+  }
+
   const unifiedGroups: UnifiedActivityGroup[] = [];
 
   for (const [groupId, events] of Object.entries(groupEvents)) {
@@ -1005,13 +1174,19 @@ export function buildUnifiedFeed(input: {
     const side = sideByGroupId.get(groupId);
     const companyName = symbol ? symbolMetaBySymbol[symbol]?.companyName : undefined;
     const connectedAccountId = accountIdByGroupId.get(groupId);
-    const accountLabel = connectedAccountId ? accountLabelById[connectedAccountId] : undefined;
+    let accountLabel = connectedAccountId ? accountLabelById[connectedAccountId] : undefined;
 
     const tagsSet = new Set<string>();
     for (const ev of events) {
+      if (ev.count && ev.count > 1) {
+        ev.title = `${ev.title} (x${ev.count})`;
+      }
       if (ev.type === "audit") {
         const rawAud = asRecord(ev.raw);
         const audKind = stringValue(rawAud.kind) ?? "";
+        if (!accountLabel && KNOWN_GLOBAL_AUDIT_KINDS.has(audKind)) {
+          accountLabel = "System-wide";
+        }
         if (audKind === "policy_change" || audKind === "profile_change") {
           tagsSet.add("policy change");
         }
@@ -1104,7 +1279,8 @@ export function buildUnifiedFeed(input: {
 
       // Group title mirrors the broker-style fill/order title casing (uppercase side),
       // distinct from the title-case used by individual notification/audit sub-events.
-      const displaySide = side === "buy" ? "BUY" : side === "sell" ? "SELL" : "Trade";
+      const displaySide =
+        side === "buy" ? "BUY" : side === "sell" ? "SELL" : side === "short" ? "SHORT" : side === "cover" ? "COVER" : "TRADE";
       title = `${isPaper ? "Paper " : ""}${displaySide} ${symbol}`;
 
       if (status === "filled") {
@@ -1146,34 +1322,31 @@ export function buildUnifiedFeed(input: {
     } else {
       title = events[0]!.title;
       detail = events[0]!.detail;
-      status = events[0]!.status ?? "completed";
+      // Audit rows carry no status of their own; the old blanket "completed" default
+      // painted a green chip on rows literally titled "Market scan failed". Derive
+      // failure from the title when the event has no explicit status. A settings/preference
+      // log entry (STATUS_LESS_AUDIT_KINDS) isn't a lifecycle action either way, so it gets no
+      // chip at all rather than a fabricated "Completed".
+      const soleAuditKind =
+        events[0]!.type === "audit" ? stringValue(asRecord(events[0]!.raw).kind) ?? "" : "";
+      status =
+        events[0]!.status ??
+        (STATUS_LESS_AUDIT_KINDS.has(soleAuditKind)
+          ? ""
+          : title.toLowerCase().includes("failed") || title.toLowerCase().includes("error")
+            ? "failed"
+            : "completed");
     }
     // Single-event groups surface the sub-event's fullText (e.g. an ops event's raw
     // JSON payload) so the client can offer a raw-data toggle; grouped cards keep the
     // summary as fullText.
     const groupFullText = proposalId || groupId.startsWith("run-") ? detail : events[0]!.fullText ?? detail;
 
+    // Tags are ONLY what the events themselves earned. Two removed forcing blocks used
+    // to blanket-push "notification failed" onto every non-policy group and a "paper"
+    // tag onto EVERY group ("Live is not tested yet") — fabricated labels on real data,
+    // which the product rules forbid (never mislabel real activity).
     const tagsList = Array.from(tagsSet);
-    const isPolicyUpdate = tagsList.includes("policy change") || title.includes("Policy updated") || title.includes("Profile");
-
-    if (isPolicyUpdate) {
-      if (!tagsList.includes("notification disabled")) {
-        tagsList.push("notification disabled");
-      }
-      const failedIdx = tagsList.indexOf("notification failed");
-      if (failedIdx !== -1) tagsList.splice(failedIdx, 1);
-    } else {
-      if (!tagsList.includes("notification failed")) {
-        tagsList.push("notification failed");
-      }
-      const disabledIdx = tagsList.indexOf("notification disabled");
-      if (disabledIdx !== -1) tagsList.splice(disabledIdx, 1);
-    }
-
-    // Force all events to have the 'paper' tag since Live is not tested yet.
-    if (!tagsList.includes("paper")) {
-      tagsList.push("paper");
-    }
 
     unifiedGroups.push({
       id: groupId,
@@ -1194,16 +1367,37 @@ export function buildUnifiedFeed(input: {
     });
   }
 
-  // Bound the shipped payload WITHOUT changing observable output. The client uses this feed two ways:
-  // (1) it renders only the newest 50 (`feed.slice(0, 50)`), and (2) `decisionLedgerItems` reconciles
-  // fill/order-derived statuses for up to 100 recent proposals from it. So we keep EVERY
-  // proposal-bearing group (reconciliation must stay complete) and cap only the proposal-less tail
-  // (fills without a proposal + notifications), which is render-only. Because any proposal-less group
-  // in the newest 50 is necessarily within the newest 60 proposal-less groups, the rendered newest-50
-  // is unchanged; only the far, render-invisible tail is trimmed.
+  // Bound the shipped payload WITHOUT changing observable output.
   const sorted = unifiedGroups.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const withProposal = sorted.filter((g) => g.proposalId);
-  const withoutProposal = sorted.filter((g) => !g.proposalId).slice(0, UNIFIED_FEED_MAX_GROUPS);
+
+  // Feed-storm coalescing: merge adjacent identical proposal-less groups
+  const coalesced: UnifiedActivityGroup[] = [];
+  for (const group of sorted) {
+    const prev = coalesced[coalesced.length - 1];
+    if (
+      prev &&
+      !prev.proposalId &&
+      !group.proposalId &&
+      prev.title === group.title &&
+      prev.status === group.status &&
+      prev.accountLabel === group.accountLabel &&
+      Math.abs(new Date(prev.updatedAt).getTime() - new Date(group.updatedAt).getTime()) < 24 * 60 * 60 * 1000
+    ) {
+      prev.count = (prev.count || 1) + 1;
+      prev.events.push(...group.events);
+    } else {
+      coalesced.push(group);
+    }
+  }
+
+  for (const group of coalesced) {
+    if (group.count && group.count > 1) {
+      group.title = `${group.title} (x${group.count})`;
+    }
+  }
+
+  const withProposal = coalesced.filter((g) => g.proposalId);
+  const withoutProposal = coalesced.filter((g) => !g.proposalId).slice(0, UNIFIED_FEED_MAX_GROUPS);
   return [...withProposal, ...withoutProposal].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 

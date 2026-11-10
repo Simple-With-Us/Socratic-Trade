@@ -3,10 +3,6 @@ import type { Metadata, Viewport } from "next";
 import { ConsoleShell } from "./components/shell";
 
 export const metadata: Metadata = {
-  title: {
-    default: "Autonomy Desk",
-    template: "%s · Socratic Trade"
-  },
   description: "Socratic Trade autonomy desk: live thesis, decision trace, evidence, coaching, and framework learning."
 };
 
@@ -14,9 +10,12 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  interactiveWidget: "resizes-content",
+  // Keep in lockstep with --con-bg in console.css (light :root / dark override) —
+  // a mismatched themeColor tints the phone status bar a different shade than the app.
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#eef1f6" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b0e14" }
+    { media: "(prefers-color-scheme: light)", color: "#f1f4f6" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" }
   ]
 };
 

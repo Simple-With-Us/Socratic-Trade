@@ -11,9 +11,21 @@
 //
 // Role mapping conventions (see recordLlmUsage call sites + recordLlmOutcome):
 //   llm_usage.context: "strategy" = green/proposer; "strategy-bear" and
-//   "red-team" = red/reviewer. Other contexts (chat, coach, …) are ignored —
-//   this rollup exists for the Proposer/Reviewer pickers.
-//   llm_call_latency payload.step: "bull" = green, "bear" = red.
+//   "red-team" = red/reviewer; "strategy-tuning" = strategist (the AI review /
+//   strategy-tune seat, src/lib/strategy-tuning.ts). Other contexts (chat,
+//   coach, …) are ignored — this rollup exists for the Proposer/Reviewer/
+//   Strategist pickers. These raw context strings are NEVER changed here —
+//   only mapped to a picker role.
+//   llm_call_latency payload.step: "bull" = green, "bear" = red. Strategist has
+//   no latency audit events (AI review is a one-shot call, not a scored step),
+//   so strategist rows always carry latencySamples: 0 / p50LatencyMs: null.
+//
+// Strategist rows carry cost/call + total cost over the window (the owner's
+// explicit ask: historical spend on running AI review, per model) via the SAME
+// live cost aggregation as green/red — just keyed under the "strategist" role.
+// They never carry latency, benchmark, perf, or reviewerPerf: there's no
+// offline benchmark for the tuning seat and no closed-trade/veto attribution
+// concept for it either.
 //
 // Performance gating contract (owner request 2026-07-08): the API always
 // reports `closedTrades`, and includes `perf` whenever closedTrades >= 1 —
@@ -25,7 +37,21 @@
 // negative avg return = the veto added value). The UI applies the same
 // 20/50-resolved-veto gates as the Results page 'Red Team veto efficacy' card.
 
-export type ModelRole = "green" | "red";
+// Canonicalize a (possibly OpenRouter-route-qualified) model id to its bare catalog name so
+// live/historical/benchmark stats align across the routing cutover. One shared definition in
+// ./model-identity — aliased to `cleanModelId` here so the call sites below stay unchanged.
+import { canonicalModelId as cleanModelId } from "./model-identity";
+import { getPredecessorModelIds, modelClassFor, modelClassLabel } from "./llm-model-catalog";
+
+/** Owner ruling (ST-4589): Llama models are gone; they never appear in the rollup. */
+const DROPPED_MODEL_RE = /llama/i;
+
+/** Own live samples needed before a model's own cost / latency figures stand without an estimate. */
+export const MODEL_STATS_LIVE_MIN_SAMPLES = 3;
+/** Own closed trades / matured vetoes needed before own realized performance stands alone. */
+export const MODEL_STATS_PERF_MIN = 20;
+
+export type ModelRole = "green" | "red" | "strategist";
 
 /** The "unattributed" reviewer bucket from getRedTeamEfficacy — matured vetoes with no
  *  persisted reviewer model. It never matches a catalog model, so it's dropped from the
@@ -39,6 +65,13 @@ export interface UsageRowLike {
   context: string | null;
   calls: number;
   costUsd: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  /** Calls that reported token telemetry (total_tokens IS NOT NULL). Used so avgTokensPerCall
+   *  excludes missing-usage rows instead of treating them as zero-token calls. */
+  callsWithTokens?: number;
+  billedCostUsd?: number;
 }
 
 /** One llm_call_latency audit event (payload is the raw audit JSON). */
@@ -59,7 +92,9 @@ export interface BenchmarkRoleSummary {
 /** Subset of ClosedLot the rollup needs. */
 export interface ClosedLotLike {
   /** Model that proposed the ENTRY (proposedByModel stamped on the opening proposal). */
-  entryModel?: string;
+  entryModel?: string | null;
+  /** Model that reviewed the ENTRY (reviewedByModel stamped on the opening proposal). */
+  reviewedByModel?: string | null;
   pnl: number;
   returnPct: number;
 }
@@ -95,6 +130,10 @@ export interface ModelRoleStats {
   liveCalls: number;
   /** Live avg cost per call (USD); null when liveCalls === 0. */
   avgCostUsd: number | null;
+  /** Live TOTAL cost (USD) summed over the window; null when liveCalls === 0. Primarily for the
+   *  Strategist section (historical spend on running AI review, per model) but computed for every
+   *  role from the same cost aggregation. */
+  totalCostUsd: number | null;
   /** Live p50 latency (ms) from llm_call_latency audits; null when no samples. */
   p50LatencyMs: number | null;
   /** Number of successful live latency samples behind p50LatencyMs. */
@@ -108,12 +147,60 @@ export interface ModelRoleStats {
   /** Reviewer veto value-add — present on RED rows with any matured vetoes for this model; always
    *  null on GREEN rows. The UI hides it below 20 matured vetoes and caveats it below 50. */
   reviewerPerf: ReviewerPerf | null;
+  /** Total tokens consumed in the window; null when liveCalls === 0. */
+  totalTokens: number | null;
+  /** Mean tokens per call; null when liveCalls === 0. */
+  avgTokensPerCall: number | null;
+  /** Prompt / input tokens consumed in the window. */
+  promptTokens: number | null;
+  /** Completion / output tokens consumed in the window. */
+  completionTokens: number | null;
+  /** Calls in the window that reported token telemetry (denominator for avgTokensPerCall). */
+  callsWithTokens: number;
+
+  // ---- Same-class predecessor ESTIMATES (ST-4589) ---------------------------------------------
+  // Every figure above is this model's OWN data, never blended with a predecessor's. When the own
+  // sample is too small, the figures below carry an explicitly separate estimate taken from the
+  // predecessor's OWN numbers (never a chained, already-inherited row, never another model class).
+  /** First predecessor that supplied ANY estimate below (display slug); null when none. */
+  inheritedFrom: string | null;
+  /** True when any estimate below is present. */
+  isInherited: boolean;
+  /** Predecessor behind the cost / token estimate; null when none. */
+  costInheritedFrom: string | null;
+  /** Predecessor behind the latency estimate; null when none. */
+  latencyInheritedFrom: string | null;
+  /** Predecessor behind the realized-performance estimate; null when none. */
+  perfInheritedFrom: string | null;
+  /** Predecessor behind the reviewer-veto estimate; null when none. */
+  vetoInheritedFrom: string | null;
+  /** The predecessor's OWN live call count behind the cost / token estimate (n of the estimate). */
+  inheritedCalls: number;
+  /** Predecessor's avg cost per call (USD). */
+  inheritedCostPerCall: number | null;
+  /** Predecessor's avg tokens per call, and its prompt / completion split per call. */
+  inheritedAvgTokensPerCall: number | null;
+  inheritedPromptTokensPerCall: number | null;
+  inheritedCompletionTokensPerCall: number | null;
+  /** Predecessor's live p50 latency and the samples behind it. */
+  inheritedP50LatencyMs: number | null;
+  inheritedLatencySamples: number;
+  /** Predecessor's own realized performance (green) and its closed-trade count (n of the estimate). */
+  inheritedPerf: ModelPerf | null;
+  inheritedClosedTrades: number;
+  /** Predecessor's own reviewer veto value-add (red). */
+  inheritedReviewerPerf: ReviewerPerf | null;
+  /** Catalog model class (lineage) of this model, e.g. "openai-astra"; null for non-catalog ids. */
+  modelClass: string | null;
+  /** Short human label of the class, e.g. "Astra"; null when modelClass is null. */
+  modelClassLabel: string | null;
 }
 
 /** Map an llm_usage context to a picker role; null = not a strategy-loop context. */
 export function roleForUsageContext(context: string | null | undefined): ModelRole | null {
   if (context === "strategy") return "green";
   if (context === "strategy-bear" || context === "red-team") return "red";
+  if (context === "strategy-tuning") return "strategist";
   return null;
 }
 
@@ -160,19 +247,52 @@ export interface AggregateModelStatsInput {
  * UI can look up any dropdown option and always find a row.
  */
 export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleStats[] {
-  const modelSet = new Set<string>(input.models ?? []);
+  const modelSet = new Set<string>((input.models ?? []).map(cleanModelId));
 
-  // Live cost per (model, role) from llm_usage rows.
-  const cost = new Map<string, { calls: number; totalCostUsd: number }>();
+  // Live cost and token usage per (model, role) from llm_usage rows.
+  const usageData = new Map<
+    string,
+    {
+      calls: number;
+      totalCostUsd: number;
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      callsWithTokens: number;
+    }
+  >();
   for (const row of input.usageRows) {
     const role = roleForUsageContext(row.context);
     if (!role || !row.model) continue;
-    modelSet.add(row.model);
-    const k = key(row.model, role);
-    const bucket = cost.get(k) ?? { calls: 0, totalCostUsd: 0 };
-    bucket.calls += Number.isFinite(row.calls) ? row.calls : 0;
+    const model = cleanModelId(row.model);
+    modelSet.add(model);
+    const k = key(model, role);
+    const bucket = usageData.get(k) ?? {
+      calls: 0,
+      totalCostUsd: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      callsWithTokens: 0
+    };
+    const calls = Number.isFinite(row.calls) ? row.calls : 0;
+    bucket.calls += calls;
     bucket.totalCostUsd += Number.isFinite(row.costUsd) ? row.costUsd : 0;
-    cost.set(k, bucket);
+    bucket.promptTokens += Number.isFinite(row.promptTokens) ? Number(row.promptTokens) : 0;
+    bucket.completionTokens += Number.isFinite(row.completionTokens) ? Number(row.completionTokens) : 0;
+    bucket.totalTokens += Number.isFinite(row.totalTokens) ? Number(row.totalTokens) : 0;
+    // Prefer explicit callsWithTokens; otherwise, if any token field was reported on the row,
+    // treat all of that row's calls as token-bearing (legacy summaries without the column).
+    if (typeof row.callsWithTokens === "number" && Number.isFinite(row.callsWithTokens)) {
+      bucket.callsWithTokens += Math.max(0, row.callsWithTokens);
+    } else if (
+      (typeof row.totalTokens === "number" && Number.isFinite(row.totalTokens)) ||
+      (typeof row.promptTokens === "number" && Number.isFinite(row.promptTokens)) ||
+      (typeof row.completionTokens === "number" && Number.isFinite(row.completionTokens))
+    ) {
+      bucket.callsWithTokens += calls;
+    }
+    usageData.set(k, bucket);
   }
 
   // Live latency samples per (model, role). Only successful calls count — an instant
@@ -182,9 +302,10 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
     const p = event.payload as { step?: unknown; model?: unknown; durationMs?: unknown; ok?: unknown } | null | undefined;
     if (!p || typeof p !== "object") continue;
     const role = roleForLatencyStep(typeof p.step === "string" ? p.step : undefined);
-    const model = typeof p.model === "string" && p.model ? p.model : undefined;
+    const modelRaw = typeof p.model === "string" && p.model ? p.model : undefined;
     const durationMs = typeof p.durationMs === "number" && Number.isFinite(p.durationMs) && p.durationMs > 0 ? p.durationMs : undefined;
-    if (!role || !model || durationMs === undefined || p.ok !== true) continue;
+    if (!role || !modelRaw || durationMs === undefined || p.ok !== true) continue;
+    const model = cleanModelId(modelRaw);
     modelSet.add(model);
     const k = key(model, role);
     const bucket = latency.get(k);
@@ -196,19 +317,29 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
   const benchmark = new Map<string, BenchmarkRoleSummary>();
   for (const summary of input.benchmarkSummaries) {
     if (!summary.model) continue;
-    modelSet.add(summary.model);
-    benchmark.set(key(summary.model, summary.role), summary);
+    const model = cleanModelId(summary.model);
+    modelSet.add(model);
+    benchmark.set(key(model, summary.role), { ...summary, model });
   }
 
-  // Realized performance per entry model — GREEN only by construction (entryModel is the
-  // Bull's proposedByModel stamped on the opening proposal).
-  const lotsByModel = new Map<string, ClosedLotLike[]>();
+  // Realized performance per entry model — GREEN (proposer) and RED (reviewer).
+  const proposerLotsByModel = new Map<string, ClosedLotLike[]>();
+  const reviewerLotsByModel = new Map<string, ClosedLotLike[]>();
   for (const lot of input.closedLots) {
-    if (!lot.entryModel) continue;
-    modelSet.add(lot.entryModel);
-    const bucket = lotsByModel.get(lot.entryModel);
-    if (bucket) bucket.push(lot);
-    else lotsByModel.set(lot.entryModel, [lot]);
+    if (lot.entryModel) {
+      const entryModel = cleanModelId(lot.entryModel);
+      modelSet.add(entryModel);
+      const bucket = proposerLotsByModel.get(entryModel);
+      if (bucket) bucket.push(lot);
+      else proposerLotsByModel.set(entryModel, [lot]);
+    }
+    if (lot.reviewedByModel) {
+      const reviewedByModel = cleanModelId(lot.reviewedByModel);
+      modelSet.add(reviewedByModel);
+      const bucket = reviewerLotsByModel.get(reviewedByModel);
+      if (bucket) bucket.push(lot);
+      else reviewerLotsByModel.set(reviewedByModel, [lot]);
+    }
   }
 
   // Reviewer (Red Team) veto value-add per model — RED role only by construction. The
@@ -217,26 +348,46 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
   const reviewerByModel = new Map<string, ReviewerPerf>();
   for (const row of input.reviewerPerfByModel ?? []) {
     if (!row.model || row.model === REVIEWER_UNATTRIBUTED_MODEL) continue;
-    modelSet.add(row.model);
-    reviewerByModel.set(row.model, {
+    const model = cleanModelId(row.model);
+    modelSet.add(model);
+    const incoming: ReviewerPerf = {
       maturedVetoes: row.maturedVetoes,
       vetoValueAddRate: row.vetoValueAddRate,
       survivorRiskHitRate: row.survivorRiskHitRate,
       avgReturnPct: row.avgReturnPct
+    };
+    const existing = reviewerByModel.get(model);
+    if (!existing) {
+      reviewerByModel.set(model, incoming);
+      continue;
+    }
+    const n1 = existing.maturedVetoes;
+    const n2 = incoming.maturedVetoes;
+    const n = n1 + n2;
+    reviewerByModel.set(model, {
+      maturedVetoes: n,
+      vetoValueAddRate: n > 0 ? (existing.vetoValueAddRate * n1 + incoming.vetoValueAddRate * n2) / n : 0,
+      survivorRiskHitRate: n > 0 ? (existing.survivorRiskHitRate * n1 + incoming.survivorRiskHitRate * n2) / n : 0,
+      avgReturnPct: n > 0 ? (existing.avgReturnPct * n1 + incoming.avgReturnPct * n2) / n : 0
     });
   }
 
   const out: ModelRoleStats[] = [];
-  const models = Array.from(modelSet).sort();
+  const models = Array.from(modelSet)
+    .filter((m) => m.length > 0 && !DROPPED_MODEL_RE.test(m))
+    .sort();
   for (const model of models) {
-    for (const role of ["green", "red"] as ModelRole[]) {
-      const c = cost.get(key(model, role));
+    for (const role of ["green", "red", "strategist"] as ModelRole[]) {
+      const c = usageData.get(key(model, role));
       const lat = latency.get(key(model, role)) ?? [];
       const bench = benchmark.get(key(model, role));
-      const lots = role === "green" ? (lotsByModel.get(model) ?? []) : [];
+      // Strategist has no closed-trade/veto attribution concept — only green (proposer entries)
+      // and red (reviewer vetoes) ever carry lots; strategist always sees an empty list here.
+      const lots =
+        role === "green" ? (proposerLotsByModel.get(model) ?? []) : role === "red" ? (reviewerLotsByModel.get(model) ?? []) : [];
       const closedTrades = lots.length;
       let perf: ModelPerf | null = null;
-      if (role === "green" && closedTrades >= 1) {
+      if (closedTrades >= 1) {
         const wins = lots.filter((l) => l.returnPct > 0).length;
         perf = {
           closedTrades,
@@ -250,6 +401,7 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
         role,
         liveCalls: c?.calls ?? 0,
         avgCostUsd: c && c.calls > 0 ? Number((c.totalCostUsd / c.calls).toFixed(6)) : null,
+        totalCostUsd: c && c.calls > 0 ? Number(c.totalCostUsd.toFixed(6)) : null,
         p50LatencyMs: medianMs(lat),
         latencySamples: lat.length,
         benchmarkCostUsd: typeof bench?.benchmarkCostUsd === "number" ? bench.benchmarkCostUsd : null,
@@ -257,10 +409,129 @@ export function aggregateModelStats(input: AggregateModelStatsInput): ModelRoleS
         closedTrades,
         perf,
         // Mirror the green-perf guard: reviewer veto value-add is a RED-only measure.
-        reviewerPerf: role === "red" ? (reviewerByModel.get(model) ?? null) : null
+        reviewerPerf: role === "red" ? (reviewerByModel.get(model) ?? null) : null,
+        totalTokens: c && c.callsWithTokens > 0 ? c.totalTokens : null,
+        avgTokensPerCall:
+          c && c.callsWithTokens > 0 && c.totalTokens > 0 ? Math.round(c.totalTokens / c.callsWithTokens) : null,
+        promptTokens: c && c.callsWithTokens > 0 ? c.promptTokens : null,
+        completionTokens: c && c.callsWithTokens > 0 ? c.completionTokens : null,
+        callsWithTokens: c?.callsWithTokens ?? 0,
+        inheritedFrom: null,
+        isInherited: false,
+        costInheritedFrom: null,
+        latencyInheritedFrom: null,
+        perfInheritedFrom: null,
+        vetoInheritedFrom: null,
+        inheritedCalls: 0,
+        inheritedCostPerCall: null,
+        inheritedAvgTokensPerCall: null,
+        inheritedPromptTokensPerCall: null,
+        inheritedCompletionTokensPerCall: null,
+        inheritedP50LatencyMs: null,
+        inheritedLatencySamples: 0,
+        inheritedPerf: null,
+        inheritedClosedTrades: 0,
+        inheritedReviewerPerf: null,
+        modelClass: modelClassFor(model) ?? null,
+        modelClassLabel: modelClassFor(model) ? modelClassLabel(modelClassFor(model)) : null
       });
     }
   }
+
+  // Same-class predecessor ESTIMATES (ST-4589). Rules:
+  //  1. A model's own fields (liveCalls, cost, tokens, latency, closedTrades, perf, reviewerPerf)
+  //     are NEVER touched here, so n always means this model's own calls / trades / vetoes.
+  //  2. Estimates come from an immutable snapshot of each predecessor's OWN numbers taken before
+  //     any estimate is attached: no chaining (astra-pro never sees what astra "inherited").
+  //  3. Predecessors of a different model class are skipped (terra is its own class and never
+  //     feeds sol or astra), as are ids that canonicalize to the model itself (aliases).
+  const ownSnapshot = new Map<string, Readonly<ModelRoleStats>>();
+  for (const row of out) {
+    ownSnapshot.set(key(row.model, row.role), Object.freeze({ ...row }));
+  }
+  const lotStats = (lots: ClosedLotLike[]): ModelPerf => ({
+    closedTrades: lots.length,
+    winRate: Number(((lots.filter((l) => l.returnPct > 0).length / lots.length) * 100).toFixed(1)),
+    avgPnlPct: Number((lots.reduce((s, l) => s + l.returnPct, 0) / lots.length).toFixed(2)),
+    totalPnlUsd: Number(lots.reduce((s, l) => s + l.pnl, 0).toFixed(2))
+  });
+  for (const stat of out) {
+    const selfId = cleanModelId(stat.model);
+    const selfClass = modelClassFor(stat.model);
+    const preds = [
+      ...new Set(
+        getPredecessorModelIds(stat.model)
+          .map(cleanModelId)
+          .filter((pred) => {
+            if (pred.length === 0 || pred === selfId || DROPPED_MODEL_RE.test(pred)) return false;
+            const predClass = modelClassFor(pred);
+            return !(selfClass && predClass && selfClass !== predClass);
+          })
+      )
+    ];
+    if (preds.length === 0) continue;
+    const note = (predecessor: string) => {
+      stat.isInherited = true;
+      stat.inheritedFrom = stat.inheritedFrom ?? predecessor;
+    };
+
+    // Cost / tokens: estimate while this model's own live sample is thin.
+    if (stat.liveCalls < MODEL_STATS_LIVE_MIN_SAMPLES) {
+      for (const pred of preds) {
+        const p = ownSnapshot.get(key(pred, stat.role));
+        if (!p || p.liveCalls <= 0) continue;
+        stat.inheritedCalls = p.liveCalls;
+        stat.inheritedCostPerCall = p.avgCostUsd;
+        stat.inheritedAvgTokensPerCall = p.avgTokensPerCall;
+        stat.inheritedPromptTokensPerCall =
+          p.promptTokens != null && p.callsWithTokens > 0 ? Math.round(p.promptTokens / p.callsWithTokens) : null;
+        stat.inheritedCompletionTokensPerCall =
+          p.completionTokens != null && p.callsWithTokens > 0 ? Math.round(p.completionTokens / p.callsWithTokens) : null;
+        stat.costInheritedFrom = p.model;
+        note(p.model);
+        break;
+      }
+    }
+
+    // Latency: same idea, driven by the model's own latency samples.
+    if (stat.latencySamples < MODEL_STATS_LIVE_MIN_SAMPLES) {
+      for (const pred of preds) {
+        const p = ownSnapshot.get(key(pred, stat.role));
+        if (!p || p.latencySamples <= 0 || p.p50LatencyMs === null) continue;
+        stat.inheritedP50LatencyMs = p.p50LatencyMs;
+        stat.inheritedLatencySamples = p.latencySamples;
+        stat.latencyInheritedFrom = p.model;
+        note(p.model);
+        break;
+      }
+    }
+
+    // Realized performance (green): the predecessor's OWN closed lots, shown separately.
+    if (stat.role === "green" && stat.closedTrades < MODEL_STATS_PERF_MIN) {
+      for (const pred of preds) {
+        const predLots = proposerLotsByModel.get(pred) ?? [];
+        if (predLots.length === 0) continue;
+        stat.inheritedPerf = lotStats(predLots);
+        stat.inheritedClosedTrades = predLots.length;
+        stat.perfInheritedFrom = pred;
+        note(pred);
+        break;
+      }
+    }
+
+    // Reviewer veto value-add (red): the predecessor's OWN matured vetoes, shown separately.
+    if (stat.role === "red" && (stat.reviewerPerf?.maturedVetoes ?? 0) < MODEL_STATS_PERF_MIN) {
+      for (const pred of preds) {
+        const p = ownSnapshot.get(key(pred, "red"));
+        if (!p?.reviewerPerf || p.reviewerPerf.maturedVetoes <= 0) continue;
+        stat.inheritedReviewerPerf = { ...p.reviewerPerf };
+        stat.vetoInheritedFrom = p.model;
+        note(p.model);
+        break;
+      }
+    }
+  }
+
   return out;
 }
 
@@ -287,9 +558,10 @@ export function normalizeBenchmarkSummaries(raw: RawBenchmarkSummary[]): Benchma
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
   const out: BenchmarkRoleSummary[] = [];
   for (const s of raw) {
-    const model = typeof s.model === "string" ? s.model : undefined;
+    const modelRaw = typeof s.model === "string" ? s.model : undefined;
     const role = s.role === "green" || s.role === "red" ? (s.role as ModelRole) : undefined;
-    if (!model || !role) continue;
+    if (!modelRaw || !role) continue;
+    const model = cleanModelId(modelRaw);
     const benchmarkColdP50Ms = num(s.coldP50LatencyMs) ?? num(s.p50LatencyMs);
     const benchmarkCostUsd = num(s.avgEstCostUsd) ?? num(s.coldAvgCostUsd) ?? num(s.warmAvgCostUsd);
     if (benchmarkColdP50Ms === undefined && benchmarkCostUsd === undefined) continue;

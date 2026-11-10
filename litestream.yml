@@ -12,9 +12,11 @@ dbs:
       retention: 720h       # 30 days of snapshot history
     replicas:
       - type: s3
-        bucket: ${LITESTREAM_S3_BUCKET}
+        bucket: ${AWS_S3_BUCKET_NAME}
         path: trading-live/app.db
-        region: ${LITESTREAM_S3_REGION:-auto}
-        endpoint: ${LITESTREAM_S3_ENDPOINT}
-        access-key-id: ${LITESTREAM_S3_ACCESS_KEY_ID}
-        secret-access-key: ${LITESTREAM_S3_SECRET_ACCESS_KEY}
+        # Literal: litestream does its own ${VAR} substitution and does NOT support
+        # bash `:-` defaults — that form resolves to an EMPTY region. R2 wants "auto".
+        region: auto
+        endpoint: ${AWS_S3_ENDPOINT}
+        access-key-id: ${AWS_ACCESS_KEY_ID}
+        secret-access-key: ${AWS_SECRET_ACCESS_KEY}

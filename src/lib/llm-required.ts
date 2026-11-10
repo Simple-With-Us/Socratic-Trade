@@ -14,11 +14,25 @@ export const LLM_REQUIRED_CHAT_MESSAGE = "Connect an LLM provider in Settings to
 /**
  * Shown when a strategy session is attempted with either team model unchosen. NO MODEL DEFAULTS
  * (owner directive 2026-07-07): both the Green (strategist) and Red (reviewer) models must be
- * explicitly chosen in Settings — the strategy never invents one, so it fails closed with this
- * actionable message instead of sending an empty-model request.
+ * explicitly chosen on the Strategy page — the strategy never invents one, so it fails closed
+ * with this actionable message instead of sending an empty-model request.
  */
 export const LLM_MODEL_REQUIRED_STRATEGY_MESSAGE =
-  "Choose both the Strategist (green team) and Reviewer (red team) models under Settings → LLM models to run a strategy session.";
+  "Choose both the Green Team (strategist) and Red Team (reviewer) models under Strategy → Models to run a strategy session.";
+
+/**
+ * Shown when the Strategist model is the rotation sentinel ("__rotate__") but no provider
+ * credential resolves for ANY catalog model, so rotation has nothing concrete to serve
+ * (eligibleRotationPool is empty). Distinct from LLM_MODEL_REQUIRED_STRATEGY_MESSAGE: the model
+ * CHOICE is made (rotate); it's the provider KEYS that are missing.
+ */
+export const LLM_ROTATION_EMPTY_POOL_STRATEGY_MESSAGE =
+  "Rotation is selected, but no provider key resolves for any catalog model, so rotation has nothing to serve.  Add a provider key under Connections → API keys (or choose a specific model) to run a strategy session.";
+
+/** Shown only when rotation still has nothing to serve after fail-open — a /models/user
+ *  timeout, empty list, or alias miss must not claim models are missing from the account. */
+export const LLM_ROTATION_AVAILABILITY_UNAVAILABLE_STRATEGY_MESSAGE =
+  "Rotation couldn't check which models are ready.  Try again shortly or choose a specific model under Strategy → Models.";
 
 /**
  * Thrown deep in the strategy path (the old silent no-key fallback site) so the no-LLM-credential

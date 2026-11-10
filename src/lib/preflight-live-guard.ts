@@ -69,7 +69,7 @@ export function assertLivePreflight(input: LivePreflightInput): void {
     throw new LivePreflightError(
       `Live-order pre-flight BLOCKED${where}: live trading has been explicitly DISABLED for this run ` +
       `(ALLOW_LIVE_TRADING=false or an allowLive:false override). Unset ALLOW_LIVE_TRADING — or set it to ` +
-      `any value other than "false" — to permit live order placement. (Paper mode is unaffected.)`
+      `any value other than "false" — to permit live order placement. (Paper-environment accounts are unaffected.)`
     );
   }
 }

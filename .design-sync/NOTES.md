@@ -3,9 +3,16 @@
 This repo is the **Socratic Trade Next.js app**, not a published component library.
 The synced "design system" is the two hand-built primitive sets:
 
-- `app/ui/primitives.tsx` — the main app UI kit (group **UI**).
+- `app/ui/primitives.tsx` — the public/marketing renderer's primitive layer (group **UI**).
+  Slimmed 2026-07-16 to its real app consumers: `Card`, `Button`, `buttonClass`. Everything
+  else that used to live here (`IconButton`, `PanelHeader`, `Chip`, `Dot`, `Switch`,
+  `Segmented`, `Tabs`, `Field`, `StatTile`, `EmptyState`, `inputClass`, `ICON`) was consumer-free
+  dead code and was deleted; see
+  `docs/rollouts/2026-07-16-public-renderer-decision-legacy-primitives-slim.md`. A design-sync
+  re-sync of the "Socratic Trade UI Kit" project to drop the removed cards is a pending
+  follow-up — not done as part of this slim-down.
 - `app/console/ui/primitives.tsx` — the `/console` UI kit (group **Console**). Its own
-  design system, deliberately independent of `app/ui/*`.
+  design system, deliberately independent of `app/ui/*`. Untouched by the 2026-07-16 slim-down.
 
 ## How the sync is wired (why the odd bits exist)
 
@@ -93,11 +100,13 @@ time — do the accounts serially. Both got the identical bundle on 2026-07-05.
 
 ## Bundle helper exports
 
-- `.design-sync/ds-src/index.tsx` also re-exports the non-component helpers `inputClass`,
-  `buttonClass`, and `ICON` from `app/ui/primitives.tsx` (they're on `window.SocraticTradeDS`
-  but are NOT components — `componentSrcMap` defines the component set, so they don't get cards).
-  `inputClass` is the shared text-input class string for composing DS-styled `<input>`s with the
-  UI `Field`.
+- `.design-sync/ds-src/index.tsx` also re-exports the non-component helper `buttonClass` from
+  `app/ui/primitives.tsx` (it's on `window.SocraticTradeDS` but is NOT a component —
+  `componentSrcMap` defines the component set, so it doesn't get a card). `buttonClass` is the
+  shared button-look class string for composing DS-styled non-`<button>` elements (e.g. an `<a>`
+  styled as a button).
+- `inputClass` and `ICON` were also re-exported here until 2026-07-16, when both were deleted
+  from `app/ui/primitives.tsx` as consumer-free dead code (see "How the sync is wired" above).
 
 ## Re-sync risks (what can silently go stale)
 

@@ -78,7 +78,7 @@ describe("sentry integration is inert without env vars", () => {
     const scheduler = await import("../src/lib/scheduler");
     expect(scheduler.getSchedulerState("local")).toEqual({ lastRunAt: null, nextRunAt: null });
     // Boot interlock is DB-only and must work with zero Sentry configuration.
-    expect(() => scheduler.reconcileAutonomyOnBoot()).not.toThrow();
+    await expect(scheduler.reconcileAutonomyOnBoot()).resolves.toBeUndefined();
     expect(sentryMock.imported).toBe(false);
   });
 
@@ -110,12 +110,31 @@ describe("sentry integration is inert without env vars", () => {
     process.env.SENTRY_DSN = "https://public@example.ingest.sentry.io/1";
     process.env.SENTRY_CRONS_ENABLED = "1";
 
-    await expect(sendSentrySchedulerCheckIn()).resolves.toBeUndefined();
+    await expect(sendSentrySchedulerCheckIn()).resolves.toBe("check-in-id");
     expect(SENTRY_CRON_MONITOR_SLUG).toBe("scheduler-tick");
     expect(sentryMock.captureCheckIn).toHaveBeenCalledTimes(1);
     expect(sentryMock.captureCheckIn).toHaveBeenCalledWith(
       { monitorSlug: "scheduler-tick", status: "ok" },
       expect.objectContaining({ schedule: { type: "interval", value: 1, unit: "minute" } })
+    );
+  });
+
+  it("scheduler cron check-in can open in_progress and close error with the same checkInId", async () => {
+    const { sendSentrySchedulerCheckIn } = await import("../src/lib/scheduler");
+    process.env.SENTRY_DSN = "https://public@example.ingest.sentry.io/1";
+    process.env.SENTRY_CRONS_ENABLED = "1";
+
+    await expect(sendSentrySchedulerCheckIn("in_progress")).resolves.toBe("check-in-id");
+    await expect(sendSentrySchedulerCheckIn("error", "check-in-id")).resolves.toBe("check-in-id");
+    expect(sentryMock.captureCheckIn).toHaveBeenNthCalledWith(
+      1,
+      { monitorSlug: "scheduler-tick", status: "in_progress" },
+      expect.objectContaining({ maxRuntime: 10 })
+    );
+    expect(sentryMock.captureCheckIn).toHaveBeenNthCalledWith(
+      2,
+      { monitorSlug: "scheduler-tick", status: "error", checkInId: "check-in-id" },
+      expect.objectContaining({ maxRuntime: 10 })
     );
   });
 

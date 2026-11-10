@@ -1,0 +1,1517 @@
+
+> socratic-trade-dashboard@0.1.0 lint
+> eslint .
+
+
+/Users/jay/apps/trading-antigravity/app/admin/connections/connections-health-client.tsx
+  186:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/connections/connections-health-client.tsx:186:5
+  184 |   useEffect(() => {
+  185 |     if (tab !== "log") return;
+> 186 |     setLoadingLog(true);
+      |     ^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  187 |     const ksParam = summary.keySource !== null ? `&keySource=${encodeURIComponent(summary.keySource)}` : "&keySource=";
+  188 |     fetch(`/api/admin/connections-health?service=${encodeURIComponent(summary.service)}&limit=100${ksParam}`)
+  189 |       .then((r) => r.json())  react-hooks/set-state-in-effect
+  314:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/connections/connections-health-client.tsx:314:5
+  312 |
+  313 |   useEffect(() => {
+> 314 |     fetch_();
+      |     ^^^^^^ Avoid calling setState() directly within an effect
+  315 |     const interval = setInterval(fetch_, 30_000);
+  316 |     return () => clearInterval(interval);
+  317 |   }, [fetch_]);                                                                                                                                                                                                          react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/admin/enrichment-coverage/enrichment-coverage-client.tsx
+  50:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/enrichment-coverage/enrichment-coverage-client.tsx:50:10
+  48 |
+  49 |   useEffect(() => {
+> 50 |     void fetchData();
+     |          ^^^^^^^^^ Avoid calling setState() directly within an effect
+  51 |   }, [fetchData]);
+  52 |
+  53 |   const fields = report  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/admin/layout.tsx
+  97:9  warning  'activeItem' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/admin/llm-usage/llm-usage-client.tsx
+  313:21  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/llm-usage/llm-usage-client.tsx:313:21
+  311 |   }, [days, endpoint, operatorOnly, scope]);
+  312 |
+> 313 |   useEffect(() => { fetchData(); }, [fetchData]);
+      |                     ^^^^^^^^^ Avoid calling setState() directly within an effect
+  314 |
+  315 |   // Distinct accounts present in this window (incl. an "Unattributed" bucket) drive the filter.
+  316 |   const accountOptions = data  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/admin/page.tsx
+  148:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/page.tsx:148:5
+  146 |
+  147 |   useEffect(() => {
+> 148 |     fetchDashboardData();
+      |     ^^^^^^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  149 |   }, []);
+  150 |
+  151 |   const handleRefresh = () => {  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/admin/rag-coverage/rag-coverage-client.tsx
+  262:21  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/rag-coverage/rag-coverage-client.tsx:262:21
+  260 |   }, [days]);
+  261 |
+> 262 |   useEffect(() => { fetchData(); }, [fetchData]);
+      |                     ^^^^^^^^^ Avoid calling setState() directly within an effect
+  263 |
+  264 |   const filtered = data
+  265 |     ? data.perTicker.filter((t) =>  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/admin/transcript/transcript-client.tsx
+  46:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/admin/transcript/transcript-client.tsx:46:10
+  44 |
+  45 |   useEffect(() => {
+> 46 |     void load();
+     |          ^^^^ Avoid calling setState() directly within an effect
+  47 |   }, [load]);
+  48 |
+  49 |   return (  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/api/policy/route.ts
+  11:10  warning  'llmModelFamily' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/api/proposals/bulk-approve/route.ts
+  84:16  warning  '_id' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/api/proposals/from-draft/route.ts
+  35:10  warning  'fetchFreshQuotesCascade' is defined but never used  @typescript-eslint/no-unused-vars
+  36:10  warning  'normalizeSymbol' is defined but never used          @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/console/approvals/page.tsx
+  10:10  warning  'fetchPendingLearnedContext' is defined but never used  @typescript-eslint/no-unused-vars
+  56:19  warning  'setReality' is assigned a value but never used         @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/console/assistant/chat.tsx
+  147:16   warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/assistant/chat.tsx:147:16
+  145 |     const saved = window.localStorage.getItem(CHAT_MODEL_STORAGE_KEY);
+  146 |     const selected = saved || "";
+> 147 |     if (saved) setModel(saved);
+      |                ^^^^^^^^ Avoid calling setState() directly within an effect
+  148 |     const savedEffort = window.localStorage.getItem(CHAT_REASONING_STORAGE_KEY) as LlmReasoningEffort | null;
+  149 |     setReasoningEffort(
+  150 |       savedEffort && ALL_LLM_REASONING_EFFORTS.includes(savedEffort)  react-hooks/set-state-in-effect
+  483:151  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/console/components/approval-card.tsx
+  665:86  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/console/components/command-palette.tsx
+   35:5   warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/command-palette.tsx:35:5
+  33 |   useEffect(() => {
+  34 |     const p = typeof navigator !== "undefined" ? `${navigator.platform} ${navigator.userAgent}` : "";
+> 35 |     setApple(/Mac|iPhone|iPad|iPod/i.test(p));
+     |     ^^^^^^^^ Avoid calling setState() directly within an effect
+  36 |   }, []);
+  37 |   return apple;
+  38 | }  react-hooks/set-state-in-effect
+  127:5   warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/command-palette.tsx:127:5
+  125 |
+  126 |   useEffect(() => {
+> 127 |     setActive(0);
+      |     ^^^^^^^^^ Avoid calling setState() directly within an effect
+  128 |   }, [query, open]);
+  129 |
+  130 |   useEffect(() => {                                                                                                               react-hooks/set-state-in-effect
+  131:15  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/command-palette.tsx:131:15
+  129 |
+  130 |   useEffect(() => {
+> 131 |     if (open) setQuery("");
+      |               ^^^^^^^^ Avoid calling setState() directly within an effect
+  132 |   }, [open]);
+  133 |
+  134 |   useEffect(() => {                                                                                                  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/components/nav.tsx
+  195:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/nav.tsx:195:7
+  193 |   useEffect(() => {
+  194 |     if (!open) {
+> 195 |       setEntered(false);
+      |       ^^^^^^^^^^ Avoid calling setState() directly within an effect
+  196 |       return;
+  197 |     }
+  198 |     const raf = requestAnimationFrame(() => setEntered(true));  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/components/policy-form.tsx
+  211:21  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/policy-form.tsx:211:21
+  209 |   // Sync draft mode when the policy mode changes (e.g. account switch) so the first
+  210 |   // keystroke after the switch doesn't snap back to the stale previous account's mode.
+> 211 |   useEffect(() => { setDraftMode(policyMode); }, [policyMode]);
+      |                     ^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  212 |   // A mode choice is interaction state only while this field pair has an active draft. After
+  213 |   // discard/save or an account switch, derive from that account's persisted policy immediately;
+  214 |   // this avoids a stale selector without an effect-driven synchronization render  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/components/positions.tsx
+  8:15  warning  'OptionPosition' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/console/components/shell.tsx
+  219:5   warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/shell.tsx:219:5
+  217 |   const [phase, setPhase] = useState<IntroPhase>(getIntroPhase);
+  218 |   useEffect(() => {
+> 219 |     setPhase(getIntroPhase()); // catch a phase change between render and subscribe
+      |     ^^^^^^^^ Avoid calling setState() directly within an effect
+  220 |     return subscribeIntroPhase(setPhase);
+  221 |   }, []);
+  222 |   const shown = phase === "landed" || phase === "done";                react-hooks/set-state-in-effect
+  247:26  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/components/shell.tsx:247:26
+  245 |     try { shown = sessionStorage.getItem("st.introShown") === "1"; } catch { /* ignore */ }
+  246 |     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+> 247 |     if (shown || reduce) setSkipped(true);
+      |                          ^^^^^^^^^^ Avoid calling setState() directly within an effect
+  248 |   }, []);
+  249 |   if (!skipped) return null;
+  250 |   return (  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/lessons/learned-context.tsx
+  417:49  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+  424:32  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/console/lib/derive.ts
+  376:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/app/console/lib/mobile-tabs.ts
+  78:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/lib/mobile-tabs.ts:78:5
+  76 |     const validSet = new Set(validHrefs);
+  77 |     const stored = readStored(validSet);
+> 78 |     setHrefs(stored ?? DEFAULT_MOBILE_TAB_HREFS.filter((href) => validSet.has(href)));
+     |     ^^^^^^^^ Avoid calling setState() directly within an effect
+  79 |     setMounted(true);
+  80 |     // validKey is the stable dependency; validHrefs itself is a fresh array each render.
+  81 |     // eslint-disable-next-line react-hooks/exhaustive-deps  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/lib/useConsoleData.tsx
+  241:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/lib/useConsoleData.tsx:241:7
+  239 |   useEffect(() => {
+  240 |     if (typeof window === "undefined" || typeof EventSource === "undefined") {
+> 241 |       setStream(UNSUPPORTED_STREAM);
+      |       ^^^^^^^^^ Avoid calling setState() directly within an effect
+  242 |       return;
+  243 |     }
+  244 |     setStream((prev) => ({ ...prev, status: "connecting" }));  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/lib/useTickerLogoDisplay.ts
+  27:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/lib/useTickerLogoDisplay.ts:27:5
+  25 |
+  26 |   useEffect(() => {
+> 27 |     setDisplayState(readStored());
+     |     ^^^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  28 |     const sync = () => setDisplayState(readStored());
+  29 |     window.addEventListener(CHANGE_EVENT, sync);
+  30 |     window.addEventListener("storage", sync);  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/page.tsx
+    9:3    warning  'AlertTriangle' is defined but never used         @typescript-eslint/no-unused-vars
+   38:10   warning  'decisionActionLabel' is defined but never used   @typescript-eslint/no-unused-vars
+   44:28   warning  'isNotPlacedStatus' is defined but never used     @typescript-eslint/no-unused-vars
+  506:14   warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  507:14   warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  520:10   warning  'deriveThesisHeadline' is defined but never used  @typescript-eslint/no-unused-vars
+  691:140  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  786:10   warning  'deriveDissentRows' is defined but never used     @typescript-eslint/no-unused-vars
+  894:17   warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/app/console/results/page.tsx
+  48:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/results/page.tsx:48:7
+  46 |   useEffect(() => {
+  47 |     if (!accountId) {
+> 48 |       setState({ status: "idle" });
+     |       ^^^^^^^^ Avoid calling setState() directly within an effect
+  49 |       return;
+  50 |     }
+  51 |     let cancelled = false;  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/scan/scan-table.tsx
+  249:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/scan/scan-table.tsx:249:7
+  247 |       if (!saved) return;
+  248 |       const next = sanitizeVisibleScanColumns(JSON.parse(saved));
+> 249 |       setVisible((current) => (sameScanColumns(current, next) ? current : next));
+      |       ^^^^^^^^^^ Avoid calling setState() directly within an effect
+  250 |     } catch {
+  251 |       /* ignore storage failures */
+  252 |     }  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/scan/smart-money.tsx
+  220:106  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/console/scan/use-live-scan.ts
+  105:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/scan/use-live-scan.ts:105:10
+  103 |
+  104 |   useEffect(() => {
+> 105 |     void refresh();
+      |          ^^^^^^^ Avoid calling setState() directly within an effect
+  106 |     const controllers = inFlight;
+  107 |     return () => controllers.current?.abort();
+  108 |   }, [refresh]);  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/settings/api-keys.tsx
+  59:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/settings/api-keys.tsx:59:10
+  57 |
+  58 |   useEffect(() => {
+> 59 |     void load();
+     |          ^^^^ Avoid calling setState() directly within an effect
+  60 |   }, [load]);
+  61 |
+  62 |   const byCategory = useMemo(() => {  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/settings/brokers.tsx
+   18:44  warning  'AlertTriangle' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             @typescript-eslint/no-unused-vars
+   18:77  warning  'Info' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      @typescript-eslint/no-unused-vars
+   98:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/settings/brokers.tsx:98:10
+   96 |
+   97 |   useEffect(() => {
+>  98 |     void loadRhHealth();
+      |          ^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+   99 |   }, [loadRhHealth]);
+  100 |
+  101 |   const syncRobinhood = useCallback(async () => {                                                                                                                                   react-hooks/set-state-in-effect
+  123:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/settings/brokers.tsx:123:10
+  121 |     const qs = params.toString();
+  122 |     window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+> 123 |     void syncRobinhood().then(() => loadRhHealth());
+      |          ^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  124 |   }, [syncRobinhood, loadRhHealth]);
+  125 |
+  126 |   if (!snapshot) return null;  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/settings/delivery.tsx
+  160:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/settings/delivery.tsx:160:10
+  158 |
+  159 |   useEffect(() => {
+> 160 |     void load();
+      |          ^^^^ Avoid calling setState() directly within an effect
+  161 |   }, [load]);
+  162 |
+  163 |   const prefs = local ?? saved;  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/ui/drilldown-sections.tsx
+  236:64  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`  react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/console/ui/provider-logo.tsx
+  40:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/ui/provider-logo.tsx:40:5
+  38 |   const [failed, setFailed] = useState(false);
+  39 |   useEffect(() => {
+> 40 |     setFailed(false);
+     |     ^^^^^^^^^ Avoid calling setState() directly within an effect
+  41 |   }, [provider]);
+  42 |   const meta = PROVIDER_META[provider];
+  43 |  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/ui/symbol-drilldown.tsx
+  60:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/ui/symbol-drilldown.tsx:60:5
+  58 |     if (!enabled) return;
+  59 |     let cancelled = false;
+> 60 |     setState({ status: "loading" });
+     |     ^^^^^^^^ Avoid calling setState() directly within an effect
+  61 |     (async () => {
+  62 |       try {
+  63 |         const res = await fetch(`/api/history?symbol=${encodeURIComponent(symbol)}`);  react-hooks/set-state-in-effect
+  96:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/ui/symbol-drilldown.tsx:96:7
+  94 |   useEffect(() => {
+  95 |     if (!enabled) {
+> 96 |       setState({ status: "idle" });
+     |       ^^^^^^^^ Avoid calling setState() directly within an effect
+  97 |       return;
+  98 |     }
+  99 |     let cancelled = false;                                                                                    react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/ui/ticker-logo.tsx
+  90:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/ui/ticker-logo.tsx:90:5
+  88 |
+  89 |   useEffect(() => {
+> 90 |     setFailed(false);
+     |     ^^^^^^^^^ Avoid calling setState() directly within an effect
+  91 |   }, [normalized]);
+  92 |
+  93 |   if (!normalized || display === "off") {  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/console/watchlist/page.tsx
+  76:10  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/console/watchlist/page.tsx:76:10
+  74 |
+  75 |   useEffect(() => {
+> 76 |     void refresh();
+     |          ^^^^^^^ Avoid calling setState() directly within an effect
+  77 |     const interval = setInterval(() => {
+  78 |       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+  79 |       void refresh();  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/framework/framework-viewer.tsx
+  35:7  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/framework/framework-viewer.tsx:35:7
+  33 |     let cancelled = false;
+  34 |     if (!passesBrowserChecks()) {
+> 35 |       setState({ phase: "unavailable" });
+     |       ^^^^^^^^ Avoid calling setState() directly within an effect
+  36 |       return;
+  37 |     }
+  38 |     // Small real-time delay so the fetch demonstrably comes from executing  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/app/login/page.tsx
+  9:15  warning  'ReactNode' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/app/mobile/mobile-pwa-client.tsx
+   468:5   warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/mobile/mobile-pwa-client.tsx:468:5
+  466 |
+  467 |   useEffect(() => {
+> 468 |     setIsOnline(navigator.onLine);
+      |     ^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  469 |     const onOnline = () => {
+  470 |       setIsOnline(true);
+  471 |       void load();  react-hooks/set-state-in-effect
+  1169:29  warning  `'` can be escaped with `&apos;`, `&lsquo;`, `&#39;`, `&rsquo;`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           react/no-unescaped-entities
+
+/Users/jay/apps/trading-antigravity/app/ui/theme.tsx
+  20:5  warning  Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+/Users/jay/apps/trading-antigravity/app/ui/theme.tsx:20:5
+  18 |   useEffect(() => {
+  19 |     const current = (document.documentElement.dataset.theme as Theme) || "dark";
+> 20 |     setThemeState(current);
+     |     ^^^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  21 |   }, []);
+  22 |
+  23 |   const set = useCallback((next: Theme) => {  react-hooks/set-state-in-effect
+
+/Users/jay/apps/trading-antigravity/eslint.config.mjs
+  17:1  warning  Assign array to a variable before exporting as module default  import/no-anonymous-default-export
+
+/Users/jay/apps/trading-antigravity/scripts/eval/rag-eval-harness.ts
+  37:116  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  41:121  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/scripts/eval/rag-production-eval.ts
+  574:36  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  575:42  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  576:41  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  577:40  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  578:42  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  579:43  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+
+/Users/jay/apps/trading-antigravity/scripts/eval/run-congress-score.ts
+  73:36  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  74:40  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  75:48  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  76:47  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  77:45  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  78:54  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  79:52  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  80:45  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  81:47  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  82:63  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  84:48  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+
+/Users/jay/apps/trading-antigravity/scripts/hoard-5y-universe.ts
+  41:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/scripts/refactor-strategy.ts
+  1:19  warning  'SyntaxKind' is defined but never used  @typescript-eslint/no-unused-vars
+  2:13  warning  'fs' is defined but never used          @typescript-eslint/no-unused-vars
+  3:13  warning  'path' is defined but never used        @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/scripts/test-fmp-integration.ts
+  30:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  30:34  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  41:56  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/alpaca.ts
+   10:3   warning  'MarketHours' is defined but never used    @typescript-eslint/no-unused-vars
+  210:20  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  235:47  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  235:62  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  299:35  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  315:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  325:19  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  341:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  363:19  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  381:28  warning  'accountNumber' is defined but never used  @typescript-eslint/no-unused-vars
+  382:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  385:19  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  393:25  warning  'accountNumber' is defined but never used  @typescript-eslint/no-unused-vars
+  394:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  427:19  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  427:61  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  643:37  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  674:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  674:74  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  690:25  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  693:19  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+  711:14  warning  Unexpected any. Specify a different type   @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/congress-stream.ts
+  25:7  warning  'DEFAULT_PATH' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/dashboard-feed.ts
+  966:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/data-providers.ts
+  1471:13  warning  'fieldDates' is assigned a value but never used       @typescript-eslint/no-unused-vars
+  3255:19  warning  'analystBySource' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  3255:36  warning  'analystRating' is assigned a value but never used    @typescript-eslint/no-unused-vars
+  3255:51  warning  'analystScore' is assigned a value but never used     @typescript-eslint/no-unused-vars
+  6138:20  warning  'err' is defined but never used                       @typescript-eslint/no-unused-vars
+  6219:73  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  6223:36  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  6246:20  warning  'err' is defined but never used                       @typescript-eslint/no-unused-vars
+  6330:40  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  6346:20  warning  'err' is defined but never used                       @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/db-document-abstracts.ts
+  49:42  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  73:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/db-health.ts
+  586:43   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  602:127  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  607:52   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  618:127  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  623:57   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  664:41   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  680:123  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  685:50   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/db-learning.ts
+  1435:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1502:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/db-profiles.ts
+  249:19  warning  '_legacyDryRun' is assigned a value but never used             @typescript-eslint/no-unused-vars
+  249:45  warning  '_legacyPaperMode' is assigned a value but never used          @typescript-eslint/no-unused-vars
+  249:82  warning  '_legacyPaperStartingCash' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/db-socratic.ts
+  145:10  warning  'updateDecisionLifecycle' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/db.ts
+  2502:16  warning  'e' is defined but never used                                  @typescript-eslint/no-unused-vars
+  2522:16  warning  'e' is defined but never used                                  @typescript-eslint/no-unused-vars
+  2539:16  warning  'e' is defined but never used                                  @typescript-eslint/no-unused-vars
+  3922:19  warning  '_legacyDryRun' is assigned a value but never used             @typescript-eslint/no-unused-vars
+  3922:45  warning  '_legacyPaperMode' is assigned a value but never used          @typescript-eslint/no-unused-vars
+  3922:82  warning  '_legacyPaperStartingCash' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/durable-state.ts
+  20:10  warning  'getDurableStateValue' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/earningscalls-transcripts.ts
+  528:50  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/fmp-alpha.ts
+   7:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  17:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  25:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  33:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  44:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/fmp-delta.ts
+  33:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/fmp-gamma.ts
+  96:65  warning  'year' is defined but never used     @typescript-eslint/no-unused-vars
+  96:80  warning  'quarter' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/history.ts
+   25:8   warning  'zlib' is defined but never used                                      @typescript-eslint/no-unused-vars
+   42:7   warning  'KEYED_HISTORY_SERVICES' is assigned a value but only used as a type  @typescript-eslint/no-unused-vars
+  716:15  warning  Unexpected any. Specify a different type                              @typescript-eslint/no-explicit-any
+  725:12  warning  'err' is defined but never used                                       @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/llm-call.ts
+  12:37  warning  'LlmTransport' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/llm-request.ts
+  610:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  698:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/macro.ts
+  640:46  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/market-calendar.ts
+  245:9  warning  'startStr' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/model-reasoning-recommendations.ts
+  38:7  warning  'GPT_55_INTERACTIVE_HIGH_ADVICE' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/money.ts
+  32:66  warning  '_symbol' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/notifications.ts
+  561:12  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  819:12  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/ops-snapshot.ts
+  126:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/order-replacement.ts
+  188:17  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  199:17  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  301:27  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  302:36  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  388:13  warning  'staleOrders' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  688:15  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+  817:17  warning  Unexpected any. Specify a different type          @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/policy-caps.ts
+  25:3  warning  'side' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/policy.ts
+  346:64  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/post-mortem.ts
+    2:43  warning  'providerRequestIdFromPayload' is defined but never used  @typescript-eslint/no-unused-vars
+   51:36  warning  Unexpected any. Specify a different type                  @typescript-eslint/no-explicit-any
+  531:3   warning  'allAccounts' is defined but never used                   @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/rag/hybrid.ts
+  164:52  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  164:60  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  203:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  204:19  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/rag/recall-fusion.ts
+   5:12  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  11:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  16:29  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  16:54  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  27:81  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  45:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  55:17  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  76:32  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/rag/search-fusion.ts
+    2:35  warning  'getClients' is defined but never used    @typescript-eslint/no-unused-vars
+    9:8   warning  'crypto' is defined but never used        @typescript-eslint/no-unused-vars
+   82:27  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   90:13  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  106:22  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  138:16  warning  'err' is defined but never used           @typescript-eslint/no-unused-vars
+  156:18  warning  'innerErr' is defined but never used      @typescript-eslint/no-unused-vars
+  162:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  181:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  235:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  254:40  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  266:14  warning  'err' is defined but never used           @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/rag/sec-ingest-worker.ts
+   53:103  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   65:23   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  161:21   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/robinhood.ts
+    8:3   warning  'MarketHours' is defined but never used             @typescript-eslint/no-unused-vars
+   13:3   warning  'TimeInForce' is defined but never used             @typescript-eslint/no-unused-vars
+   24:10  warning  'fetchYahooFinanceQuote' is defined but never used  @typescript-eslint/no-unused-vars
+  307:28  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  610:15  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  613:12  warning  'e' is defined but never used                       @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/strategy-execution.ts
+  318:11  warning  'currentPrices' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/strategy-tuning.ts
+  816:54  warning  '_e' is defined but never used  @typescript-eslint/no-unused-vars
+  816:77  warning  '_x' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/strategy.ts
+    11:3    warning  'claimProposalForExecution' is defined but never used             @typescript-eslint/no-unused-vars
+    23:3    warning  'listPendingBrokerReconciliationFills' is defined but never used  @typescript-eslint/no-unused-vars
+    24:3    warning  'listStalePlacingProposals' is defined but never used             @typescript-eslint/no-unused-vars
+    26:3    warning  'listFillEventsByProposalId' is defined but never used            @typescript-eslint/no-unused-vars
+    32:3    warning  'transitionProposalIfPending' is defined but never used           @typescript-eslint/no-unused-vars
+    36:3    warning  'updatePendingProposalReprice' is defined but never used          @typescript-eslint/no-unused-vars
+    38:3    warning  'updateFillEvent' is defined but never used                       @typescript-eslint/no-unused-vars
+    55:112  warning  'LLM_REQUEST_DEFAULTS' is defined but never used                  @typescript-eslint/no-unused-vars
+    55:134  warning  'LLM_TIMEOUT_MS' is defined but never used                        @typescript-eslint/no-unused-vars
+    55:150  warning  'llmFetch' is defined but never used                              @typescript-eslint/no-unused-vars
+    69:10   warning  'notify' is defined but never used                                @typescript-eslint/no-unused-vars
+    73:3    warning  'calibratedConviction' is defined but never used                  @typescript-eslint/no-unused-vars
+    91:10   warning  'fractionalKellySuggestion' is defined but never used             @typescript-eslint/no-unused-vars
+    93:15   warning  'ThesisStat' is defined but never used                            @typescript-eslint/no-unused-vars
+    93:27   warning  'ThesisRegimeStat' is defined but never used                      @typescript-eslint/no-unused-vars
+    98:10   warning  'assessProtectiveExitRepriceDrift' is defined but never used      @typescript-eslint/no-unused-vars
+    98:98   warning  'repriceStoredProtectiveExit' is defined but never used           @typescript-eslint/no-unused-vars
+   102:32   warning  'positionRiskUsd' is defined but never used                       @typescript-eslint/no-unused-vars
+   102:65   warning  'volTargetScale' is defined but never used                        @typescript-eslint/no-unused-vars
+   109:10   warning  'notifyStaleLimitOrders' is defined but never used                @typescript-eslint/no-unused-vars
+   111:10   warning  'avgReturnCorrelation' is defined but never used                  @typescript-eslint/no-unused-vars
+   111:32   warning  'correlationProfile' is defined but never used                    @typescript-eslint/no-unused-vars
+   112:10   warning  'stressScenario' is defined but never used                        @typescript-eslint/no-unused-vars
+   112:31   warning  'StressPositionInput' is defined but never used                   @typescript-eslint/no-unused-vars
+   130:15   warning  'BrokerGateway' is defined but never used                         @typescript-eslint/no-unused-vars
+   137:178  warning  'recordStopPlan' is defined but never used                        @typescript-eslint/no-unused-vars
+   161:10   warning  'isEscalationRegime' is defined but never used                    @typescript-eslint/no-unused-vars
+   164:10   warning  'isRiskOffFilterRegime' is defined but never used                 @typescript-eslint/no-unused-vars
+   164:33   warning  'regimeFromLabel' is defined but never used                       @typescript-eslint/no-unused-vars
+   178:15   warning  'ApprovedEscalation' is defined but never used                    @typescript-eslint/no-unused-vars
+   178:151  warning  'MarketFactorBreakdown' is defined but never used                 @typescript-eslint/no-unused-vars
+   182:10   warning  'isMarketOpen' is defined but never used                          @typescript-eslint/no-unused-vars
+   184:10   warning  'reconcilePendingFills' is defined but never used                 @typescript-eslint/no-unused-vars
+   184:33   warning  'flagStalePlacingIntents' is defined but never used               @typescript-eslint/no-unused-vars
+  1264:69   warning  Unexpected any. Specify a different type                          @typescript-eslint/no-explicit-any
+  1458:14   warning  'e' is defined but never used                                     @typescript-eslint/no-unused-vars
+  1733:11   warning  'fundingSells' is assigned a value but never used                 @typescript-eslint/no-unused-vars
+  1737:11   warning  'reviewResults' is assigned a value but never used                @typescript-eslint/no-unused-vars
+  2014:27   warning  Unexpected any. Specify a different type                          @typescript-eslint/no-explicit-any
+  2016:29   warning  Unexpected any. Specify a different type                          @typescript-eslint/no-explicit-any
+  5111:49   warning  Unexpected any. Specify a different type                          @typescript-eslint/no-explicit-any
+  5111:83   warning  Unexpected any. Specify a different type                          @typescript-eslint/no-explicit-any
+  5790:22   warning  'parseError' is defined but never used                            @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/triggers.ts
+  589:15  warning  'userId' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/vector-db.ts
+   121:74  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   128:33  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   151:39  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   167:33  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   639:32  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   642:42  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   644:26  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   655:39  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   665:10  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   667:22  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   668:4   warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   669:27  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   669:35  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   672:36  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   673:17  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   674:30  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   689:19  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+   691:34  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  1156:15  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  1164:48  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  1277:16  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2150:11  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2157:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2166:9   warning  'isSiliconFlow' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  2263:11  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2268:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2283:11  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2285:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2289:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2307:9   warning  'isSiliconFlow' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  2381:22  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2624:34  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  2626:35  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  3040:45  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  3078:63  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  4581:51  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  5377:37  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  5386:48  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  5822:9   warning  'vectorUserId' is assigned a value but never used   @typescript-eslint/no-unused-vars
+  6123:52  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6129:62  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6145:23  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6234:25  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6349:47  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6394:18  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6406:61  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6421:29  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6437:43  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6439:33  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6448:87  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6453:68  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6472:39  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6478:46  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6480:54  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6773:27  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6928:57  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6928:89  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6987:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  6991:12  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7002:26  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7019:33  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7030:30  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7043:29  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7107:16  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+  7121:49  warning  Unexpected any. Specify a different type            @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/congress.ts
+  192:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  274:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/index.ts
+  44:3   warning  'setTechnicalWatchlist' is defined but never used  @typescript-eslint/no-unused-vars
+  54:10  warning  'isFilingIngestDue' is defined but never used      @typescript-eslint/no-unused-vars
+  54:29  warning  'refreshFilingBodies' is defined but never used    @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/sec-facts.ts
+   60:38  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   81:39  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   93:35  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   94:41  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   95:35  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   96:36  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+   97:19  warning  'filed' is assigned a value but never used  @typescript-eslint/no-unused-vars
+   97:37  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  107:38  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  107:65  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  107:92  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  108:37  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  109:40  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  111:39  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  111:79  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  136:17  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/sec-filings.ts
+   37:27  warning  'runRateLimited' is defined but never used  @typescript-eslint/no-unused-vars
+  891:19  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  899:64  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+  955:16  warning  Unexpected any. Specify a different type    @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/sec-parser.ts
+   59:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   59:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  263:27  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  263:38  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  294:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  294:42  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  302:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  302:52  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  310:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  310:59  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/sec.ts
+  236:35  warning  'now' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/src/lib/web-sources/sec8k.ts
+  852:3  warning  '_now' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/alpaca-brackets.test.ts
+  12:26  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  14:22  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  16:27  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  27:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  32:43  warning  '_query' is defined but never used        @typescript-eslint/no-unused-vars
+  32:61  warning  '_body' is defined but never used         @typescript-eslint/no-unused-vars
+  32:78  warning  '_method' is defined but never used       @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/alpaca-limit-stop-price-guard.test.ts
+  18:26  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  28:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/alpaca-mcp.test.ts
+   19:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   52:45  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  129:18  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/alpaca-tif-normalization.test.ts
+  16:26  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  26:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/alpha-vantage-quota-alert-cooldown.test.ts
+   16:5    warning  'sendNotificationSpy' is defined but never used  @typescript-eslint/no-unused-vars
+   16:26   warning  Unexpected any. Specify a different type         @typescript-eslint/no-explicit-any
+  117:104  warning  Unexpected any. Specify a different type         @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/alternative-data.test.ts
+  198:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  199:37  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  201:53  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  207:94  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/antigravity-cheap-wins.test.ts
+  4:10  warning  'afterEach' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/api-clients-congress.test.ts
+  53:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  53:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  62:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  62:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  77:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  77:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  92:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  92:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/apple-auth-route.test.ts
+  19:27  warning  '_token' is defined but never used  @typescript-eslint/no-unused-vars
+  19:44  warning  '_jwks' is defined but never used   @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/approval-limit-reprice.test.ts
+  290:31  warning  '_omitted' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  340:31  warning  '_omitted' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/benchmark.test.ts
+  3:34  warning  'FLOW_MATERIALITY_MIN_USD' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/broker-protective-stops.test.ts
+  30:35  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/cache-provenance.test.ts
+   35:18  warning  '_url' is defined but never used  @typescript-eslint/no-unused-vars
+  516:20  warning  '_url' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/chat-llm.test.ts
+   15:32  warning  '_name' is defined but never used         @typescript-eslint/no-unused-vars
+   15:47  warning  '_input' is defined but never used        @typescript-eslint/no-unused-vars
+  209:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  210:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  221:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  222:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  229:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  236:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  237:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  245:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  256:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  257:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  264:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/chat-orchestrator.test.ts
+  157:29  warning  'symbol' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/coarse-credit.test.ts
+  166:11  warning  'buyFill' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/congress-analytics.test.ts
+  152:65  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/congress-share.test.ts
+  286:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  286:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  338:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  338:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  358:18  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  358:32  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  422:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  422:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  459:48  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  532:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  532:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  558:35  warning  '_u' is defined but never used     @typescript-eslint/no-unused-vars
+  558:47  warning  '_i' is defined but never used     @typescript-eslint/no-unused-vars
+  581:35  warning  '_u' is defined but never used     @typescript-eslint/no-unused-vars
+  581:47  warning  '_i' is defined but never used     @typescript-eslint/no-unused-vars
+  629:35  warning  '_u' is defined but never used     @typescript-eslint/no-unused-vars
+  629:47  warning  '_i' is defined but never used     @typescript-eslint/no-unused-vars
+  653:35  warning  '_u' is defined but never used     @typescript-eslint/no-unused-vars
+  653:47  warning  '_i' is defined but never used     @typescript-eslint/no-unused-vars
+  727:48  warning  'init' is defined but never used   @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/congress-trade-events.test.ts
+  199:35  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  199:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/connection-health-routing.test.ts
+   66:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   99:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  123:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  355:106  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  374:106  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  390:106  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  414:106  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/corpus-reembed-adversarial.test.ts
+  25:31  warning  '_input' is defined but never used  @typescript-eslint/no-unused-vars
+  28:35  warning  '_input' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/corpus-reembed.test.ts
+  12:31  warning  '_input' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/dashboard-feed.test.ts
+  6:15  warning  'EquityPosition' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/data-providers.test.ts
+    31:10  warning  'deleteUserApiKey' is defined but never used  @typescript-eslint/no-unused-vars
+    31:56  warning  'upsertUserApiKey' is defined but never used  @typescript-eslint/no-unused-vars
+    31:74  warning  'LOCAL_USER' is defined but never used        @typescript-eslint/no-unused-vars
+  1710:26  warning  Unexpected any. Specify a different type      @typescript-eslint/no-explicit-any
+  1712:56  warning  Unexpected any. Specify a different type      @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/destination-shim.test.ts
+  38:7  warning  'ALL_FEED_TABS' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/fmp-rights-derived-artifacts.test.ts
+  14:46  warning  '_options' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/history.test.ts
+  130:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  163:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  216:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  240:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  255:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  355:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  376:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  400:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  425:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  453:49  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/llm-call.test.ts
+   96:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  110:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  118:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  135:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  149:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  174:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  184:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  191:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  200:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  209:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  229:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  235:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  243:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  249:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  262:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  285:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  292:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  300:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  315:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  316:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  317:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  319:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  320:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  322:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  323:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  373:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  374:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  375:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  386:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  387:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  388:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  393:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  394:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  405:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  423:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  437:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  453:27  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/llm-fetch-timeout.test.ts
+   8:24  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+   8:38  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+  18:24  warning  '_url' is defined but never used   @typescript-eslint/no-unused-vars
+  18:38  warning  '_init' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/llm-provider.test.ts
+  6:43  warning  'vi' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/milestone-4-challenger.test.ts
+    9:3  warning  'isTransientError' is defined but never used    @typescript-eslint/no-unused-vars
+  296:9  warning  'callIndex' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/notification-body-fixes.test.ts
+  70:21  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/openai-model-catalog.test.ts
+  6:3  warning  'reasoningAdviceForModel' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/option-alert-dedupe.test.ts
+  33:27  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/order-replacement.test.ts
+  277:13   warning  'MarketReplacePreconditionError' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  814:118  warning  Unexpected any. Specify a different type                             @typescript-eslint/no-explicit-any
+  838:11   warning  'out' is assigned a value but never used                             @typescript-eslint/no-unused-vars
+  846:118  warning  Unexpected any. Specify a different type                             @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/pdt.test.ts
+  61:16  warning  'seedDayTrades' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/pending-fill-reconcile-refire.test.ts
+  15:35  warning  '_documents' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/persist-candidate-pool-v2.test.ts
+  179:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  180:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  182:36  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  216:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  240:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  278:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  313:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  342:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  370:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  373:53  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  414:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  476:29  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  503:37  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  522:37  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/persist-candidate-pool.test.ts
+  167:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  168:24  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  170:36  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  206:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  240:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  267:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  305:41  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  325:29  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/persistence-notification.test.ts
+  464:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  538:56  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  539:65  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  555:48  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  671:26  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/policy.test.ts
+  10:40  warning  '_userId' is defined but never used  @typescript-eslint/no-unused-vars
+  11:41  warning  '_userId' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/post-mortem.test.ts
+   60:22  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   74:62  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  104:35  warning  'url' is defined but never used           @typescript-eslint/no-unused-vars
+  104:64  warning  'init' is defined but never used          @typescript-eslint/no-unused-vars
+  160:22  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  168:62  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/proposal-revalidation.test.ts
+  228:35  warning  'input' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/quotes-cascade.test.ts
+  1:1  error  Do not use "@ts-nocheck" because it alters compilation errors  @typescript-eslint/ban-ts-comment
+
+/Users/jay/apps/trading-antigravity/test/rag-eval-harness.test.ts
+  19:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/rag-hyde.test.ts
+   74:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   84:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  103:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  133:47   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  140:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  172:47   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  180:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  195:78   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  206:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  223:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  237:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  249:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/rag-metering.test.ts
+    3:8   warning  'Database' is defined but never used      @typescript-eslint/no-unused-vars
+  144:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/rag-recall-fusion.test.ts
+  66:58  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/rag-retrieval-eval.test.ts
+  106:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  149:43  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/rag-retrieval-regression.test.ts
+   51:91  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   52:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   52:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  161:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  180:38  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  343:48  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  361:48  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/reconciliation-risk.test.ts
+  807:9  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/red-team-empty-failover.test.ts
+  24:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/red-team.test.ts
+   28:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  317:19  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  382:78  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  410:12  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/redteam-observability-g10.test.ts
+  26:38  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  30:46  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/reindex-10k-clear-cache.test.ts
+  85:32  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/robinhood-tenant-isolation.test.ts
+  1:10  warning  'getDb' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/run-state-override.test.ts
+  12:40  warning  '_userId' is defined but never used  @typescript-eslint/no-unused-vars
+  13:41  warning  '_userId' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/runtime-health.test.ts
+   6:10  warning  'once' is defined but never used          @typescript-eslint/no-unused-vars
+  25:29  warning  'root' is defined but never used          @typescript-eslint/no-unused-vars
+  37:30  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  43:17  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  56:38  warning  'e' is defined but never used             @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/salience-llm.test.ts
+   67:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   82:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   95:78   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  108:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  123:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  141:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  224:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  247:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  262:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  277:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  287:11   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  299:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/scan-table-columns.test.ts
+  50:78  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  51:74  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/search-fusion.test.ts
+  17:39   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  35:145  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/sec-facts.test.ts
+   60:124  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  103:120  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  138:172  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  175:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  178:90   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  187:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  195:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  245:10   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  249:111  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/sec-filings.test.ts
+  141:12  warning  'err' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/sec-ingest-worker.test.ts
+   70:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   76:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  104:70  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  117:46  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/staleness-gate.test.ts
+  11:40   warning  '_userId' is defined but never used       @typescript-eslint/no-unused-vars
+  12:41   warning  '_userId' is defined but never used       @typescript-eslint/no-unused-vars
+  62:129  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  64:78   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/strategy-candidate-enforcement.test.ts
+  168:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  168:85  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/strategy-held-position-retrieval-scope.test.ts
+  144:64  warning  'init' is defined but never used  @typescript-eslint/no-unused-vars
+  244:64  warning  'init' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/strategy-money-path-f-g.test.ts
+  102:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/strategy-prompt-safety.test.ts
+  138:55  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/strategy-tuning.test.ts
+  298:57  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  414:57  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  548:36  warning  'MAX_WEIGHT_STEP' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  605:49  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  658:49  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+  723:49  warning  Unexpected any. Specify a different type              @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/synthetic-stops.test.ts
+  1291:111  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  1297:136  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/thesis-tag-persistence.test.ts
+  80:29  warning  '_tag' is assigned a value but never used     @typescript-eslint/no-unused-vars
+  80:54  warning  '_regime' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/usage-budget-strategy-integration.test.ts
+   96:25   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  183:19   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  222:57   warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  222:112  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-backlog-c-integration.test.ts
+  118:61  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  444:50  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-document-receipts.test.ts
+  9:31  warning  '_input' is defined but never used  @typescript-eslint/no-unused-vars
+
+/Users/jay/apps/trading-antigravity/test/vector-db-embedding-integrity.test.ts
+  88:44  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-hybrid.test.ts
+   92:46  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  169:39  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  179:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  194:51  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-retrieval.test.ts
+  133:77  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  134:33  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  134:57  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-scope.test.ts
+  70:29  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db-voyage-dispatch-cost.test.ts
+   40:37  warning  '_input' is defined but never used        @typescript-eslint/no-unused-vars
+   40:45  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  138:48  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/jay/apps/trading-antigravity/test/vector-db.test.ts
+  449:104  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  456:102  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+✖ 669 problems (1 error, 668 warnings)
+

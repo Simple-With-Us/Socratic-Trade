@@ -84,13 +84,15 @@ const portfolio: Portfolio = {
 
 const held: EquityPosition[] = [{ symbol: "HELD", quantity: 10, averageCost: 100, marketValue: 10_000 }];
 
-describe("applyRiskReceipts — flag OFF (default)", () => {
+describe("applyRiskReceipts — flag OFF (explicit opt-out)", () => {
   it("is byte-identical: no [Risk] notes, no preVetoReasons, and fetchDailyOHLC is never called", async () => {
     const { fetchDailyOHLC } = await import("../src/lib/history");
     const { applyRiskReceipts } = await import("../src/lib/strategy");
 
     const proposals = [buy("AAA")];
-    const policy = { ...DEFAULT_POLICY, accountNumber: "X" }; // tuning undefined -> both flags off
+    // riskReceipts defaulted ON 2026-07-28 (guard enablement); pin it OFF to keep testing the
+    // flag-off code path.
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: false } };
     const marketScan = scan([quote("AAA", { beta: 1.2 })]);
 
     const out = await applyRiskReceipts(proposals, policy, held, portfolio, marketScan, "local");
@@ -108,7 +110,9 @@ describe("applyRiskReceipts — flag OFF (default)", () => {
     // test documents that: the note appears, but no tag and no correlation/stress notes.
     const { applyRiskReceipts } = await import("../src/lib/strategy");
     const proposals = [buy("AAA")];
-    const policy = { ...DEFAULT_POLICY, accountNumber: "X" };
+    // riskReceipts pinned OFF (it defaults ON since the 2026-07-28 guard enablement) so this test
+    // keeps isolating the unconditional earnings note from the correlation/stress receipts.
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: false } };
     const marketScan = scan([quote("AAA", { daysToEarnings: 5 })]);
 
     const out = await applyRiskReceipts(proposals, policy, held, portfolio, marketScan, "local");
@@ -144,8 +148,8 @@ describe("applyRiskReceipts — riskReceipts ON", () => {
     expect(out[0].rationale).toContain("HELD");
     expect(out[0].rationale).toContain("[Risk] Stress");
     expect(out[0].rationale).toContain("% (mkt): book");
-    expect(auditSpy).toHaveBeenCalledWith("correlation_receipt", expect.objectContaining({ symbol: "AAA" }), "local");
-    expect(auditSpy).toHaveBeenCalledWith("stress_receipt", expect.objectContaining({ symbol: "AAA" }), "local");
+    expect(auditSpy).toHaveBeenCalledWith("correlation_receipt", expect.objectContaining({ symbol: "AAA" }), "local", policy.connectedAccountId);
+    expect(auditSpy).toHaveBeenCalledWith("stress_receipt", expect.objectContaining({ symbol: "AAA" }), "local", policy.connectedAccountId);
   });
 
   it("never appends a correlation note when there are no holdings or bar data is insufficient (never fabricates)", async () => {
@@ -174,6 +178,33 @@ describe("applyRiskReceipts — riskReceipts ON", () => {
     const out = await applyRiskReceipts(proposals, policy, held, portfolio, marketScan, "local");
     expect(out[0].rationale).toBe("base rationale");
     expect(out[0].preVetoReasons ?? []).toHaveLength(0);
+  });
+
+  it("re-proves ownership after correlation IO before mutating rationale or auditing", async () => {
+    const { fetchDailyOHLC } = await import("../src/lib/history");
+    const candBars = barsFromReturns(R);
+    (fetchDailyOHLC as Mock).mockImplementation(async () => candBars);
+    const dbModule = await import("../src/lib/db");
+    const auditSpy = vi.spyOn(dbModule, "audit");
+    const { applyRiskReceipts } = await import("../src/lib/strategy");
+    const proposal = buy("AAA");
+    let checks = 0;
+    const assertOwned = () => {
+      checks++;
+      if (checks === 2) throw new Error("lease lost after risk IO");
+    };
+
+    await expect(applyRiskReceipts(
+      [proposal],
+      { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: true } },
+      held,
+      portfolio,
+      scan([quote("AAA")]),
+      "local",
+      assertOwned
+    )).rejects.toThrow("lease lost after risk IO");
+    expect(proposal.rationale).toBe("base rationale");
+    expect(auditSpy).not.toHaveBeenCalledWith("correlation_receipt", expect.anything(), expect.anything(), expect.anything());
   });
 });
 

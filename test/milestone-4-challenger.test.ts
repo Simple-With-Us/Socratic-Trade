@@ -1,8 +1,8 @@
+import { pinRagQualityFlagsOff } from "./rag-test-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sanitizeUserId, retrieveContext, retryAfterMs } from "../src/lib/vector-db";
 import {
   FinnhubEnrichmentProvider,
-  FmpEnrichmentProvider,
   AlphaVantageEnrichmentProvider,
   clearEnrichmentCache,
   isTransientError
@@ -41,8 +41,17 @@ vi.mock("../src/lib/db", () => ({
   resolveApiKey: mocks.resolveApiKey,
   resolveApiKeyWithSource: vi.fn((service: string) => ({ key: mocks.resolveApiKey(service), source: "env" as const })),
   hasDataPoolConsent: vi.fn(() => false),
+  reserveProviderDispatch: vi.fn(() => ({
+    admitted: true as const,
+    attemptId: "test-provider-attempt",
+    authorityId: "test"
+  })),
+  markProviderDispatchStarted: vi.fn(),
+  settleProviderDispatch: vi.fn(),
+  cancelUndispatchedProviderReservation: vi.fn(() => true),
   audit: vi.fn(),
-  setInternalSetting: vi.fn()
+  setInternalSetting: vi.fn(),
+  getDb: vi.fn(() => ({ prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn(() => undefined), all: vi.fn(() => []) })) }))
 }));
 
 describe("Milestone 4 Challenger: User ID Sanitization Edge Cases", () => {
@@ -82,6 +91,7 @@ describe("Milestone 4 Challenger: User ID Sanitization Edge Cases", () => {
 
 describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correctness", () => {
   beforeEach(() => {
+  pinRagQualityFlagsOff();
     vi.clearAllMocks();
     process.env.PINECONE_API_KEY = "pinecone-key";
     process.env.VOYAGE_API_KEY = "voyage-key";
@@ -99,15 +109,15 @@ describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correct
     // User query returns doc-1 with score 0.7
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.7, metadata: { text: "Doc 1 User Version" } },
-        { id: "doc-2", score: 0.5, metadata: { text: "Doc 2 User Version" } }
+        { id: "doc-1", score: 0.7, metadata: { text: "Doc 1 User Version", userId: "user-1", scope: "private" } },
+        { id: "doc-2", score: 0.5, metadata: { text: "Doc 2 User Version", userId: "user-1", scope: "private" } }
       ]
     });
     // Local query returns doc-1 with score 0.9 (higher) and doc-3 with score 0.4
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.9, metadata: { text: "Doc 1 Local/Public Version" } },
-        { id: "doc-3", score: 0.4, metadata: { text: "Doc 3 Local Version" } }
+        { id: "doc-1", score: 0.9, metadata: { text: "Doc 1 Local/Public Version", userId: "local", scope: "shared" } },
+        { id: "doc-3", score: 0.4, metadata: { text: "Doc 3 Local Version", userId: "local", scope: "shared" } }
       ]
     });
 
@@ -126,12 +136,12 @@ describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correct
 
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.95, metadata: { text: "Doc 1 User Version" } }
+        { id: "doc-1", score: 0.95, metadata: { text: "Doc 1 User Version", userId: "user-1", scope: "private" } }
       ]
     });
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.8, metadata: { text: "Doc 1 Local/Public Version" } }
+        { id: "doc-1", score: 0.8, metadata: { text: "Doc 1 Local/Public Version", userId: "local", scope: "shared" } }
       ]
     });
 
@@ -145,13 +155,13 @@ describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correct
 
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: undefined, metadata: { text: "Doc 1 User Version" } },
-        { id: "doc-2", score: 0.5, metadata: { text: "Doc 2 User Version" } }
+        { id: "doc-1", score: undefined, metadata: { text: "Doc 1 User Version", userId: "user-1", scope: "private" } },
+        { id: "doc-2", score: 0.5, metadata: { text: "Doc 2 User Version", userId: "user-1", scope: "private" } }
       ]
     });
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-3", score: 0.2, metadata: { text: "Doc 3 Local Version" } }
+        { id: "doc-3", score: 0.2, metadata: { text: "Doc 3 Local Version", userId: "local", scope: "shared" } }
       ]
     });
 
@@ -170,13 +180,13 @@ describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correct
 
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.9, metadata: { text: "Doc 1" } },
-        { id: "doc-2", score: 0.8, metadata: { text: "Doc 2" } }
+        { id: "doc-1", score: 0.9, metadata: { text: "Doc 1", userId: "user-1", scope: "private" } },
+        { id: "doc-2", score: 0.8, metadata: { text: "Doc 2", userId: "user-1", scope: "private" } }
       ]
     });
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-3", score: 0.7, metadata: { text: "Doc 3" } }
+        { id: "doc-3", score: 0.7, metadata: { text: "Doc 3", userId: "local", scope: "shared" } }
       ]
     });
 
@@ -190,8 +200,8 @@ describe("Milestone 4 Challenger: Pinecone Query Merging & Deduplication Correct
 
     mocks.query.mockResolvedValueOnce({
       matches: [
-        { id: "doc-1", score: 0.9, metadata: {} },
-        { id: "doc-2", score: 0.8, metadata: { text: "Doc 2" } }
+        { id: "doc-1", score: 0.9, metadata: { userId: "user-1", scope: "private" } },
+        { id: "doc-2", score: 0.8, metadata: { text: "Doc 2", userId: "user-1", scope: "private" } }
       ]
     });
     mocks.query.mockResolvedValueOnce({
@@ -275,7 +285,7 @@ describe("Milestone 4 Challenger: Voyage API Jitter Distribution Analysis", () =
   });
 });
 
-describe("Milestone 4 Challenger: Finnhub & FMP Cache Poisoning Protection", () => {
+describe("Milestone 4 Challenger: Finnhub Cache Poisoning Protection", () => {
   beforeEach(() => {
     clearEnrichmentCache();
     vi.stubGlobal("fetch", vi.fn());
@@ -298,42 +308,20 @@ describe("Milestone 4 Challenger: Finnhub & FMP Cache Poisoning Protection", () 
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new FinnhubEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    
+    // coveredFields hint suppresses the /calendar/earnings daysToEarnings fallback (added
+    // 2026-08-02) so it doesn't perturb the exact fetch counts this test asserts on.
+    const skipCalendar = { coveredFields: { AAPL: new Set(["daysToEarnings"]) } };
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
+
     // We expect some fields to still map (like companyName/sector from the succeeded profile2 call)
     expect(res1.AAPL).toEqual({ companyName: "Apple Inc.", sector: "Technology", industry: "Technology" });
     // Verify that the fetch happened 6 times (5 calls plus 1 retry on HTTP 429 on recommendation)
     expect(mockFetch).toHaveBeenCalledTimes(6);
 
     // Call it a second time. If it was NOT cached, it should call fetch 6 more times.
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({ companyName: "Apple Inc.", sector: "Technology", industry: "Technology" });
     expect(mockFetch).toHaveBeenCalledTimes(12); // Cache was bypassed!
-  });
-
-  it("prevents cache writes on FMP when a transient error occurs in at least one promise", async () => {
-    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
-      if (url.includes("ratios-ttm")) {
-        return new Response("Timeout", { status: 504 }); // transient error
-      }
-      if (url.includes("insider-trading")) {
-        return new Response(JSON.stringify([{ transactionType: "Buy", acquistionOrDisposition: "A" }]));
-      }
-      return new Response(JSON.stringify([]));
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-
-    expect(res1.AAPL).toEqual({ insiderSentiment: 100 });
-    // FMP calls 4 endpoints: ratios-ttm, grades-consensus, insider-trading, senate-trading.
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-
-    // Call second time to ensure cache bypass
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({ insiderSentiment: 100 });
-    expect(mockFetch).toHaveBeenCalledTimes(8); // Bypassed cache!
   });
 
   it("caches normally on Finnhub when all queries are successful or have non-transient errors", async () => {
@@ -350,12 +338,15 @@ describe("Milestone 4 Challenger: Finnhub & FMP Cache Poisoning Protection", () 
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new FinnhubEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    // coveredFields hint suppresses the /calendar/earnings daysToEarnings fallback (added
+    // 2026-08-02) so it doesn't perturb the exact fetch counts this test asserts on.
+    const skipCalendar = { coveredFields: { AAPL: new Set(["daysToEarnings"]) } };
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res1.AAPL).toEqual({ companyName: "Apple Inc.", sector: "Technology", industry: "Technology" });
     expect(mockFetch).toHaveBeenCalledTimes(5);
 
     // Call second time. It should be cached, so fetch count remains 5.
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({ companyName: "Apple Inc.", sector: "Technology", industry: "Technology" });
     expect(mockFetch).toHaveBeenCalledTimes(5); // Cache worked!
   });
@@ -366,6 +357,13 @@ describe("Milestone 4 Challenger: Alpha Vantage Warning Detection & Cache Bypass
     clearEnrichmentCache();
   });
 
+  // Every enrich() call below passes a coveredFields hint marking daysToEarnings already
+  // covered upstream — these tests are specifically about the NEWS_SENTIMENT warning/cache-bypass
+  // contract, not the EARNINGS_CALENDAR fallback (2026-08-02, separately covered in
+  // test/data-providers.test.ts's "EARNINGS_CALENDAR fallback" describe block), so this keeps
+  // that fallback's own fetch from firing and perturbing the exact mockFetch call counts here.
+  const skipCalendar = { coveredFields: { AAPL: new Set(["daysToEarnings"]) } };
+
   it("throws error and bypasses cache when Alpha Vantage returns Note warning", async () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       Note: "Thank you for using Alpha Vantage! Standard rate limit is 5 requests per minute..."
@@ -373,11 +371,11 @@ describe("Milestone 4 Challenger: Alpha Vantage Warning Detection & Cache Bypass
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new AlphaVantageEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res1.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(2); // Cache was bypassed!
   });
@@ -389,11 +387,11 @@ describe("Milestone 4 Challenger: Alpha Vantage Warning Detection & Cache Bypass
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new AlphaVantageEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res1.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(2); // Cache was bypassed!
   });
@@ -405,11 +403,11 @@ describe("Milestone 4 Challenger: Alpha Vantage Warning Detection & Cache Bypass
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new AlphaVantageEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res1.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({});
     expect(mockFetch).toHaveBeenCalledTimes(2); // Cache was bypassed!
   });
@@ -426,13 +424,12 @@ describe("Milestone 4 Challenger: Alpha Vantage Warning Detection & Cache Bypass
     vi.stubGlobal("fetch", mockFetch);
 
     const provider = new AlphaVantageEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res1.AAPL).toEqual({ headlines: ["Great AAPL news"], sentiment: 80 });
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({ headlines: ["Great AAPL news"], sentiment: 80 });
     expect(mockFetch).toHaveBeenCalledTimes(1); // Cached!
   });
 });
-

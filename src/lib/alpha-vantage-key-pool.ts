@@ -278,7 +278,7 @@ const poolsByKeySetFingerprint = new Map<string, AlphaVantageKeyPool>();
  *  in a different order, or with defensive duplicates, must resolve to the same registry entry. */
 function fingerprintKeySet(keys: readonly string[]): string {
   const normalized = Array.from(new Set(keys.filter((key): key is string => Boolean(key)))).sort();
-  return crypto.createHash("sha256").update(normalized.join(" ")).digest("hex").slice(0, 16);
+  return crypto.createHash("sha256").update(normalized.join("\x00")).digest("hex").slice(0, 16);
 }
 
 /**
@@ -306,4 +306,128 @@ export function getPoolForKeys(keys: readonly string[]): AlphaVantageKeyPool {
  *  same key literal set. Mirrors `resetProviderRateLimiterState`'s test-only reset pattern. */
 export function __resetKeyPoolRegistryForTests(): void {
   poolsByKeySetFingerprint.clear();
+}
+
+// ── Proactive daily call budget (persisted, GLOBAL, survives restarts) ────────────────────
+//
+// Alpha Vantage's real free-tier cap (25/day) is enforced PER SOURCE IP, not per key — pooling
+// multiple keys was retired for exactly this reason (see resolveAlphaVantageKeyPool in
+// db-api-keys.ts): extra keys never multiplied real throughput, they only shared the same IP's
+// one true budget. The reactive machinery above (markExhausted/allExhausted) only reacts AFTER
+// AV itself has already rejected a call with the daily-cap message — it does nothing to stop
+// this app from being the process that pushes the shared IP over 25 in the first place (other
+// processes on the same IP, past scans this same day, etc.). This section adds a PROACTIVE,
+// self-imposed ceiling — default 23/day, 2-call headroom below AV's real 25 — checked BEFORE a
+// call is dispatched.
+//
+// Must be PERSISTED, not an in-memory sliding window (contrast provider-rate-limit.ts's
+// RequestQuota, which every other provider here uses): this app deploys and restarts several
+// times a day, and an in-memory counter forgets every restart — it would let the day's real
+// total quietly creep past budget across deploys. The persisted setting below survives process
+// restarts exactly like the exhaustion map above (same getInternalSetting/setInternalSetting
+// pattern), and is scoped GLOBALLY (one counter, not one per key/pool/user) because the thing
+// being budgeted — the shared source IP's real daily cap — is itself global.
+
+const BUDGET_SETTING_KEY = "alpha_vantage_daily_call_budget";
+const DEFAULT_DAILY_CALL_BUDGET = 23;
+
+interface PersistedCallBudget {
+  dayKey: string; // see currentAlphaVantageQuotaDayKey — identifies the active AV quota "day"
+  used: number;
+}
+
+/** Env-overridable daily call budget. Falls back to DEFAULT_DAILY_CALL_BUDGET on anything
+ *  unset/unparsable/non-integer/negative. 0 is a valid override (proactively block all AV
+ *  calls for the rest of today without touching ALPHAVANTAGE_API_KEY itself).
+ *
+ *  Name trap: PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY also matches provider-rate-limit.ts's
+ *  generic resolveProviderQuota env pattern. Nothing calls
+ *  admitProviderRequests("alpha-vantage", ...) today; if that is ever wired, TWO counters with
+ *  DIFFERENT day semantics (its rolling 24h window vs this ET-midnight quota day) would engage
+ *  silently under one env var — pick one owner before wiring it there. */
+export function alphaVantageDailyCallBudget(): number {
+  const raw = process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_DAILY_CALL_BUDGET;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_DAILY_CALL_BUDGET;
+}
+
+/**
+ * Identifies the currently active Alpha Vantage quota "day" — the period between one daily
+ * reset instant and the next. Deliberately reuses `millisUntilNextAlphaVantageDailyReset`'s own
+ * DST-safe date math instead of re-deriving a calendar day independently: for any `nowMs` within
+ * the same quota period, `nowMs + millisUntilNextAlphaVantageDailyReset(nowMs)` resolves to the
+ * SAME absolute next-reset instant (only the distance to it shrinks as `nowMs` advances), so that
+ * absolute instant makes a stable, collision-free key for "which quota day is this" without
+ * duplicating any tz/DST logic.
+ */
+function currentAlphaVantageQuotaDayKey(nowMs: number): string {
+  return String(nowMs + millisUntilNextAlphaVantageDailyReset(nowMs));
+}
+
+function loadPersistedBudget(): PersistedCallBudget {
+  try {
+    return getInternalSetting<PersistedCallBudget>(BUDGET_SETTING_KEY) ?? { dayKey: "", used: 0 };
+  } catch {
+    // A settings read must never break enrichment — worst case, this process under-counts
+    // today's usage for one call and re-derives from the real persisted row on the next.
+    return { dayKey: "", used: 0 };
+  }
+}
+
+function savePersistedBudget(usage: PersistedCallBudget): void {
+  try {
+    setInternalSetting(BUDGET_SETTING_KEY, usage);
+  } catch {
+    // Best-effort — the reservation this process just computed still holds for its own
+    // lifetime even if the persist failed; only a later restart would under-count.
+  }
+}
+
+/**
+ * Reserves up to `n` calls against today's proactive Alpha Vantage budget, returning the number
+ * actually admitted (0 <= admitted <= n) — the caller must treat any symbols beyond the admitted
+ * count exactly like the reactive `allExhausted()` skip path (never dispatch them). Rolls the
+ * counter over to 0 the moment `now` crosses into a new quota day. Persists the reservation
+ * immediately (not just in-memory) so a restart mid-day can never forget calls already spent.
+ */
+export function tryReserveAlphaVantageCalls(n: number, now: number = Date.now()): number {
+  if (n <= 0) return 0;
+  const budget = alphaVantageDailyCallBudget();
+  if (budget <= 0) return 0;
+  const dayKey = currentAlphaVantageQuotaDayKey(now);
+  const persisted = loadPersistedBudget();
+  const used = persisted.dayKey === dayKey ? persisted.used : 0;
+  const remaining = Math.max(0, budget - used);
+  const admitted = Math.min(n, remaining);
+  if (admitted <= 0) return 0;
+  savePersistedBudget({ dayKey, used: used + admitted });
+  return admitted;
+}
+
+/**
+ * Returns `n` previously reserved-but-not-actually-dispatched calls to today's budget (e.g. a
+ * chunk whose dispatch was skipped by the reactive key-pool exhaustion check, a per-credential
+ * circuit-breaker skip, or a fetch that threw before reaching the network). A call that WAS
+ * dispatched and merely returned an error/warning is NOT refunded — it still consumed Alpha
+ * Vantage's real quota. No-ops across a day rollover (a reservation made yesterday has no
+ * meaningful bucket to credit back into once a new quota day has started) rather than crediting
+ * calls into a fresh day's unrelated counter.
+ */
+export function refundAlphaVantageCalls(n: number, now: number = Date.now()): void {
+  if (n <= 0) return;
+  const dayKey = currentAlphaVantageQuotaDayKey(now);
+  const persisted = loadPersistedBudget();
+  if (persisted.dayKey !== dayKey) return;
+  savePersistedBudget({ dayKey, used: Math.max(0, persisted.used - n) });
+}
+
+/** Test-only: clears the persisted daily-budget usage so it never leaks across unrelated
+ *  tests/files sharing a temp DB. Mirrors `__resetKeyPoolRegistryForTests`'s pattern. */
+export function __resetAlphaVantageDailyBudgetForTests(): void {
+  try {
+    setInternalSetting(BUDGET_SETTING_KEY, { dayKey: "", used: 0 } satisfies PersistedCallBudget);
+  } catch {
+    // Best-effort, matching the rest of this module's persistence failure handling.
+  }
 }

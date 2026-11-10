@@ -1,14 +1,8 @@
 "use client";
 
-/** Data sharing — the two independent sharing surfaces, each stated honestly:
- *  1. Shared market-data pool (GET/POST /api/consent): GENERAL market data
- *     pulled through your keys/broker is pooled with other consenting users.
- *     Personal account data is never pooled. This is the same consent the
- *     first-run gate asks for — this card is where you change your answer.
- *  2. Learned-context sharing (GET/PUT /api/learned-context/sharing): only
- *     FACT-tier learnings are ever shared; risk/strategy directives always
- *     stay in your private confirmation queue.
- *  Self-contained fetch helpers on purpose (no changes to lib.ts). */
+/** Data sharing — market-data pool is mandatory (accept-or-cannot-use).
+ *  Learned-context sharing remains two independent opt-in/out switches.
+ *  Personal account data is never pooled. */
 
 import { useEffect, useState } from "react";
 import { useToast } from "../ui/toast";
@@ -16,7 +10,10 @@ import { Card, Toggle } from "../ui/primitives";
 
 interface PoolConsentState {
   accepted: boolean;
+  acceptedAt?: string | null;
+  version?: number;
   needsConsent?: boolean;
+  mandatory?: boolean;
 }
 
 interface LcSharingState {
@@ -60,7 +57,7 @@ function SharingRow({
 }) {
   return (
     <div
-      className="con-row flex items-center justify-between gap-4 rounded-md px-1.5 py-1.5"
+      className="con-row flex items-center justify-between gap-4 rounded-control px-1.5 py-1.5"
       title={rowTitle}
     >
       <div>
@@ -94,26 +91,6 @@ export function DataSharingCard() {
     };
   }, []);
 
-  const setPoolConsent = async (accepted: boolean) => {
-    if (busy || pool === null) return;
-    setBusy(true);
-    try {
-      const record = await sendJson<PoolConsentState>("/api/consent", "POST", { accepted });
-      setPool(record);
-      toast.push(
-        accepted ? "pos" : "info",
-        accepted ? "Market-data pooling on" : "Market-data pooling off",
-        accepted
-          ? "You contribute general market data and read what others contribute. Personal account data is never pooled."
-          : "You use only your own data. Nothing you pull is contributed."
-      );
-    } catch (error) {
-      toast.push("neg", "Not saved", error instanceof Error ? error.message : undefined);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const setLcSharing = async (patch: Partial<LcSharingState>) => {
     if (busy || lc === null) return;
     setBusy(true);
@@ -128,33 +105,34 @@ export function DataSharingCard() {
     }
   };
 
+  const poolAccepted = pool?.accepted === true && pool.needsConsent !== true;
+  const poolBody =
+    pool === null
+      ? "Loading current state…"
+      : poolAccepted
+        ? "Required — general market data (quotes, fundamentals, history, news) you pull through your own keys or broker is pooled with other users who accepted the same terms.  Personal account data is never pooled."
+        : "Required to use the app.  Accept the terms notice to contribute and read the shared market-data pool.";
+
   return (
     <Card title="Data sharing">
       <p className="mb-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
-        Two separate switches, two separate kinds of data. Neither ever shares your personal account data — positions,
-        orders, balances, P&amp;L, and credentials stay private to you, always.
+        Market-data pooling is required.  Learned-fact sharing is optional.  Neither ever shares your
+        personal account data — positions, orders, balances, P&amp;L, and credentials stay private
+        to you, always.
       </p>
       {loadFailed && (
         <p className="mb-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
-          Sharing state could not be loaded — the affected controls stay locked rather than showing a guess. Reload to
-          retry.
+          Sharing state could not be loaded — the affected controls stay locked rather than showing a
+          guess.  Reload to retry.
         </p>
       )}
       <div className="flex flex-col gap-1">
-        <SharingRow
-          title="Shared market-data pool"
-          body={
-            pool === null
-              ? "Loading current state…"
-              : pool.accepted
-                ? "On — general market data (quotes, fundamentals, history, news) you pull through your own keys or broker is pooled with other consenting users, and you read theirs. This is the consent the first-run notice asked for."
-                : "Off — you use only your own data; nothing you pull is contributed to the pool."
-          }
-          checked={pool?.accepted ?? false}
-          loading={busy || pool === null}
-          onChange={(v) => void setPoolConsent(v)}
-          rowTitle="Pool GENERAL market data with other consenting users to cut API spend. Personal account data is never pooled. Same consent as the first-run notice."
-        />
+        <div className="con-row rounded-control px-1.5 py-1.5">
+          <div className="text-[length:var(--con-fs-sm)] font-semibold">Shared market-data pool</div>
+          <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+            {poolBody}
+          </p>
+        </div>
         <SharingRow
           title="Use facts shared by others"
           body={
@@ -167,7 +145,7 @@ export function DataSharingCard() {
           checked={lc?.includeShared ?? false}
           loading={busy || lc === null}
           onChange={(v) => void setLcSharing({ includeShared: v })}
-          rowTitle="Read the shared learned-fact pool. Only fact-tier items exist there — risk and strategy directives are never shared by anyone."
+          rowTitle="Read the shared learned-fact pool.  Only fact-tier items exist there — risk and strategy directives are never shared by anyone."
         />
         <SharingRow
           title="Contribute your learned facts"
@@ -175,13 +153,13 @@ export function DataSharingCard() {
             lc === null
               ? "Loading current state…"
               : lc.contributeShared
-                ? "On — new fact-tier learnings from your runs are shared with opted-in users. Risk and strategy directives never leave your private queue."
+                ? "On — new fact-tier learnings from your runs are shared with opted-in users.  Risk and strategy directives never leave your private queue."
                 : "Off — everything you learn stays private to your account."
           }
           checked={lc?.contributeShared ?? false}
           loading={busy || lc === null}
           onChange={(v) => void setLcSharing({ contributeShared: v })}
-          rowTitle="Share your fact-tier learnings back to the pool. Only facts qualify; anything risk-bearing goes to your private confirmation queue instead."
+          rowTitle="Share your fact-tier learnings back to the pool.  Only facts qualify; anything risk-bearing goes to your private confirmation queue instead."
         />
       </div>
     </Card>

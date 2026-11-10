@@ -2,6 +2,7 @@
  * Tests for the query-embedding LRU cache (R9, 2026-07-01 RAG backlog).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { hashContent } from "../src/lib/rag/chunk";
 import {
   clearQueryEmbedCache,
   getCachedQueryEmbedding,
@@ -58,10 +59,11 @@ describe("query-embed-cache", () => {
       expect(getCachedQueryEmbedding("voyage-finance-2", "AAPL risk")).toEqual([0.5]);
     });
 
-    it("the cache key omits userId and any per-user/filter context — only model+normalized query", () => {
+    it("the cache key omits userId and any per-user/filter context — only model+hash of the normalized query", () => {
       const key = queryEmbedCacheKey("voyage-finance-2", "AAPL risk");
-      expect(key).toBe("voyage-finance-2:aapl risk"); // normalized: lowercased + whitespace-collapsed
+      expect(key).toBe(`voyage-finance-2:${hashContent("aapl risk")}`);
       expect(key).not.toMatch(/user/i);
+      expect(key).not.toContain("aapl risk");
     });
 
     it("normalizes casing and internal whitespace so trivial variants share a cache entry", () => {

@@ -10,7 +10,9 @@ describe("citationStalenessEnabled (R13)", () => {
   beforeEach(() => delete process.env.RAG_CITATION_STALENESS);
   afterEach(() => delete process.env.RAG_CITATION_STALENESS);
 
-  it("is off by default", () => {
+  it("is on by default (owner enablement 2026-07-24); set off to disable", () => {
+    expect(citationStalenessEnabled()).toBe(true);
+    process.env.RAG_CITATION_STALENESS = "off";
     expect(citationStalenessEnabled()).toBe(false);
   });
   it("turns on with a truthy value", () => {
@@ -70,6 +72,23 @@ describe("embedCleanTextEnabled (R17)", () => {
   it("turns on with a truthy value", () => {
     process.env.VECTOR_EMBED_CLEAN_TEXT = "on";
     expect(embedCleanTextEnabled()).toBe(true);
+  });
+});
+
+describe("currentEmbedRev (clean-text migration safety)", () => {
+  beforeEach(() => delete process.env.VECTOR_EMBED_CLEAN_TEXT);
+  afterEach(() => delete process.env.VECTOR_EMBED_CLEAN_TEXT);
+
+  it("stays at 1 when clean-text is off", async () => {
+    const { currentEmbedRev } = await import("../src/lib/vector-db");
+    expect(currentEmbedRev()).toBe(1);
+  });
+
+  it("bumps to 2 when VECTOR_EMBED_CLEAN_TEXT is on so mixed populations stay distinguishable", async () => {
+    process.env.VECTOR_EMBED_CLEAN_TEXT = "on";
+    const { currentEmbedRev, embeddingSpaceRevisionForModel } = await import("../src/lib/vector-db");
+    expect(currentEmbedRev()).toBe(2);
+    expect(embeddingSpaceRevisionForModel("voyage-finance-2")).toBe("v2");
   });
 });
 

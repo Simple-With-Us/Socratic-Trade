@@ -47,3 +47,41 @@ describe("pivotDayAggsToSeries", () => {
     expect(series.get("AAPL")?.[0].close).toBe(200);
   });
 });
+
+import { isBarSeriesFresh, mergeOHLCBars, type OHLCBar } from "../src/lib/history";
+
+describe("isBarSeriesFresh & mergeOHLCBars", () => {
+  it("isBarSeriesFresh evaluates series freshness by trading session, not calendar days", () => {
+    const mondayBar: OHLCBar = { time: "2026-08-03", close: 100 }; // Monday
+    const fridayBar: OHLCBar = { time: "2026-07-31", close: 90 };
+    const wednesdayNow = new Date("2026-08-05T16:00:00Z").getTime(); // Wed during session
+
+    expect(isBarSeriesFresh([fridayBar, mondayBar], wednesdayNow)).toBe(false);
+    expect(isBarSeriesFresh([mondayBar, { time: "2026-08-04", close: 101 }], wednesdayNow)).toBe(true);
+    expect(isBarSeriesFresh(null)).toBe(false);
+    expect(isBarSeriesFresh([])).toBe(false);
+  });
+
+  it("isBarSeriesFresh treats a recent session bar as fresh across a weekend gap", () => {
+    const thursdayBar: OHLCBar = { time: "2026-08-20", close: 99 };
+    const fridayBar: OHLCBar = { time: "2026-08-21", close: 100 };
+    const mondayMorning = new Date("2026-08-24T14:00:00Z").getTime(); // Mon 10:00 ET (EDT)
+    expect(isBarSeriesFresh([thursdayBar, fridayBar], mondayMorning)).toBe(true);
+  });
+
+  it("mergeOHLCBars deduplicates by YYYY-MM-DD date and sorts ascending", () => {
+    const existing: OHLCBar[] = [
+      { time: "2026-08-01", close: 100, open: 98, high: 101, low: 97 },
+      { time: "2026-08-02", close: 102, open: 100, high: 103, low: 99 }
+    ];
+    const incoming: OHLCBar[] = [
+      { time: "2026-08-02", close: 102.5, open: 100, high: 103, low: 99 }, // update L2
+      { time: "2026-08-03", close: 105, open: 103, high: 106, low: 102 }   // new L3
+    ];
+
+    const merged = mergeOHLCBars(existing, incoming);
+    expect(merged).toHaveLength(3);
+    expect(merged.map((b) => b.time)).toEqual(["2026-08-01", "2026-08-02", "2026-08-03"]);
+    expect(merged[1].close).toBe(102.5);
+  });
+});

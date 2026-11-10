@@ -2,6 +2,11 @@
 
 Branch `agent/claude-scheduler-lease`. Improvement-program item #3 (durable/locked autonomy scheduler).
 
+> Historical note: this initial rollout intentionally shipped default-off. The 2026-07-11
+> correctness follow-up changed current behavior to default-on (including unset/empty env values)
+> and added strategy-lock heartbeat-loss enforcement. See
+> `docs/rollouts/2026-07-11-strategy-lease-correctness.md`.
+
 ## Summary
 Prevents two app processes from double-firing the scheduler tick — specifically the synthetic-stop monitor,
 which can place broker **EXIT** orders and was only guarded in-process (a second process has its own

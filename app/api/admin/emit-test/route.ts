@@ -6,8 +6,9 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 // Dev/ops route: emit a synthetic dashboard event to verify the SSE push path end-to-end
-// (open /api/events/stream, hit this, watch the `dirty` event arrive). Admin-gated: verified
-// ADMIN_USER_EMAILS / primary operator, or the legacy x-admin-token, or non-production.
+// (open /api/events/stream, hit this, watch the `dirty` event arrive). Admin-gated by a
+// middleware-verified primary/allowlisted admin email or the timing-safe legacy x-admin-token;
+// there is no environment bypass.
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;

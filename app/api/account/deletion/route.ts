@@ -18,7 +18,7 @@ export async function DELETE(request: Request) {
   const user = resolveRequestUser(request);
   const body = (await request.json().catch(() => ({}))) as AccountDeletionConfirmation;
   try {
-    return NextResponse.json(confirmAndDeleteAccount({ userId: user.userId, email: user.email, body }));
+    return NextResponse.json(await confirmAndDeleteAccount({ userId: user.userId, email: user.email, body }));
   } catch (error) {
     const status = typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : 400;
     return NextResponse.json(

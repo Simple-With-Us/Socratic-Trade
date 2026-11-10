@@ -2,6 +2,159 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-10-15 Restart sweep stays off other instances' live runs (ST-8)
+
+PR #3138 closed every `strategy_runs` row that started before this process booted, on the first tick, on every process.  That marked a run another node had just adopted as `failed` and freed its request for a duplicate.  The restart arm now stays quiet for two minutes after boot (`RESTART_SWEEP_BOOT_GRACE_MS`).  A sweep with `reapUnowned` false only updates rows whose `owner_instance` is this process, so a follower cannot close the leader's runs.  The leader reaps other instances only after it holds the scheduler lease.  A pre-boot row whose `strategy_run_requests` row is still `running` and is not a restart retry is left for the drain to adopt.  A time-stale run this process owns is still swept at 30 minutes, including while its lock guard keeps renewing.  Rollout: `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.
+
+## 2026-10-15 Approve success is a placed order
+
+`POST /api/proposals/[id]/approve` returns HTTP 200 only when `executeProposal` reports `placed`, `filled`, or `paper`.  Busy, blocked, not placed, retryable, and terminal results return 409 with the same structured body, so a client can still tell them apart.  Timeouts, HTTP 5xx, and Tradier's HTTP 400 "Unexpected server error" classify as retryable.  Timeouts, HTTP 5xx, HTTP 408, and that Tradier sentence reconcile by refId before anyone books `not_placed`, so a lost response cannot mint a second order.  HTTP 429 and the 16-minute sandbox open deferral never reached a live order.  `isTradierTransientServerError` still excludes HTTP 5xx, so the adapter does not retry a 500 as the sandbox 400 and broker-health can still halt.  Plain HTTP 400, HTTP 403, and buying-power rejects stay terminal.  Rollout: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
+
+## 2026-10-14 Embed token budget, ingest windows, retrieval pressure
+
+OpenRouter `baai/bge-m3` still sums every string in one embed `input[]` against 8192 tokens.  Bytes/4 under-counted digit and pipe runs, and a single over-budget string was posted whole, so the provider returned `maximum context length`.  Each string is now estimated with a denser floor, truncated (queries) or chunked (documents) to 7500 tokens and 18750 bytes, then packed.  Document chunks are mean-pooled back to one vector.  Pinecone cardinality is unchanged.  The daily ingest cap stays 20000 and now counts windows of that 7500, so a text that needs two windows costs two.  Strategy symbol waves use the retrieval concurrency cap (default 4).  A timeout opens a short backoff; callers that arrive during it degrade without another retrieval-failed page.  A success clears that backoff only when no newer timeout opened it after the call took its slot.  A context-length 400 on a multi-text group splits the group instead of resending it.  Do not raise `RAG_QUERY_IO_DEADLINE_MS`.  Do not raise `RAG_INGEST_MAX_TEXTS_PER_DAY` as the fix.  Rollout: `docs/rollouts/2026-10-14-embed-context-retrieval-pressure.md`.
+
+## 2026-10-14 Tradier sandbox open HTTP 400 does not auto-halt
+
+Tradier Sandbox HTTP 400 "Unexpected server error" is a transient broker error.  The order-capability probe and a real equity, bracket, or option POST retry it (three attempts, 400ms then 1200ms).  A write looks up its tag before a second POST and again before giving up.  An escaped "Unexpected server error" reconciles by refId before anyone books `not_placed`.  `applyBrokerOrderPlacementPause` leaves `systemState` active and does not touch the connectivity streak.  The run skip is `skipped` / `run_skipped_broker_transient`, not `skipped_broker_unhealthy`.  Sandbox strategy runs and equity, bracket, and option posts wait until 16 minutes after the regular open (9:46am ET), because sandbox quotes are 15 minutes delayed.  The health gate skips the run (`skipped` / `run_skipped_sandbox_open_deferral`) instead of failing it.  Live Tradier still places.  Buying power, plain HTTP 400, HTTP 403, and HTTP 5xx still fail loudly and can still halt.  Rollout: `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`.
+
+## 2026-09-04 Gather internal time budget (do not raise the 8-minute cap)
+
+Board `06df80cf` leftover after #3013/#3018 abort + last-good.  `gatherStrategyMarket` still has an 8-minute wall.  The walk now plans remaining time after a 50s quote-refresh reserve: skip live enrich under 20s usable, skip keyed Finnhub Wave B under 90s, skip scarce RapidAPI Wave C under 20s, and shrink the enrichment pool to the ranked cut under 3 minutes.  A trimmed live tape is preferred over racing timeout then last-good.  Scheduler `broker-health-gate` auto-halt of an active account (including equity 0) now writes one `skipped_broker_unhealthy` `strategy_runs` row.  Skip rows are not liveness completions.  Rollout: `docs/rollouts/2026-09-04-gather-internal-budget.md`.
+
+## 2026-08-21 Gather deadline must abort + last-good tape
+
+Ops snapshot 2026-08-21 19:18Z: Roth 12 and Paper 27 consecutive `strategy gather timeout` after both completed the prior close (20:16Z / 20:22Z).  Scheduler was ticking.  LLM keys were configured.  Live sha `e0a4959a` already included #2852 (Robinhood max-10) and #2854 (no Pinecone inventory).  The 8-minute gather `withDeadline` was a pure race: the run failed and the Nasdaq/enrichment/broker walk kept going, so the next account's gather stacked on top until nothing finished.  `gatherStrategyMarket` now aborts that controller, stops cascade/enrichment waves on the signal (keyed/scarce waves keep that signal — Finnhub is the slow paced free-tier wave), and if a last completed MarketScan exists continues the run with that real tape plus a 45s quote refresh so Green can start.  No last-good row still fails the run.  Do not raise the 8-minute cap as the fix.  Rollout: `docs/rollouts/2026-08-21-gather-timeout-abort.md`.
+
+## 2026-08-21 Native weekly screens (advisory DATA)
+
+Green may see `weeklyScreens`: native large-cap value (trailing P/E ≤ 10, within 10% of the 52-week low) and 5-day momentum names from THIS account's scan tape.  Compacted next to `marketSignals`.  Named in the DATA-NOT-COMMAND boundary.  Never a standalone trigger and never a reason to change risk limits or sizing.  Prompt `agentic-strategy@2.15.0`.  Engine: `src/lib/weekly-market-digest.ts`.  Rollout: `docs/rollouts/2026-08-21-weekly-market-screens.md`.
+
+## 2026-08-19 Gather must not inventory Pinecone or latch on 502/429
+
+Same Roth `9d71dda4` terminal.  Robinhood `too many symbols (max 10, got 250)` at +18s remains the first hard fail (#2852 `c7b775c5`, folded in, not replaced).  The same window also listed/fetched the whole Pinecone index, 502'd congress.trade, and 429'd Massive.  There was no OpenRouter strategy/completion call — only run-scoped `usage_budget_status` at +10s, then the crash.  Gather retrieval stays query/id scoped.  `managed-vector-reconcile` and `inventoryVectorRecordsByMetadata` skip whole-index list/fetch while any strategy run/request is queued or running (account deletion still inventories).  Do not flip `RAG_PINECONE_WRITE_CLASS`.  Do not prune the live index.  Do not reopen #2840.  congress.trade 502 and Massive 429 fail-open so Green can start.  Rebased onto `52add2ae` after #2856/#2857/#2858.  GitHub `DIRTY` was docs-union (`STATUS.md` / `PLAN.md` / `docs/EFFORT-LOG.md`); `git merge-tree` was clean; no iOS overlap.  Rollout: `docs/rollouts/2026-08-19-gather-no-pinecone-inventory.md`.
+## 2026-08-19 Robinhood quote chunk (250-name gather)
+Live Roth `9d71dda4` reached gather, then Robinhood `get_equity_quotes` rejected `too many symbols (max 10, got 250)`.  That emptied the Robinhood quote pass, so a full-scan universe never priced through the broker and Green/`llm_usage` never started.  Requests are chunked to 10 symbols; the universe stays 250 (or the full scan).  A congress.trade HTTP 404 is a miss, not a latch on the free enrichment wave.  Drain handoff is merged (#2853 `df1f5a37`).  Rollout: `docs/rollouts/2026-08-19-robinhood-quote-chunk.md`.
+## 2026-08-19 Manual Run once drain handoff (claimed worker)
+#2848 paused ROIC/FTS.  Live `c55c2e64` Roth `9d71dda4` still sat llm=0 after embed was already skipped, then sweep-failed 01:29:44Z `stalled_no_progress` (~31m, same process 00:51:39Z).  `POST /api/strategy/run` claims the durable request in a request-scoped `void` kick.  `processPendingStrategyRunRequests` then selected only `queued`, so `strategy-run-drain` journaled skipped on every tick (1372/1372, avg 8ms) while the run row stayed `running`.  Drain now heartbeats a live worker, resumes a claimed request with no heartbeat on the same run id (the 202 UUID Activity polls), and the route kicks again via `after()`.  Scan + quote cascade has an 8m deadline so gather cannot sit until the 30m sweep.  Pre-Green Alpaca positions/orders use the 16s+8s budget; the strategy snapshot has a 45s deadline.  Robinhood max-10 quote chunk is this PR (#2852).  Rollout: `docs/rollouts/2026-08-19-manual-run-drain-handoff.md`.
+## 2026-08-18 Manual Run once request/run status coupling
+`POST /api/strategy/run` writes `strategy_run_requests` first, then `runStrategyOnce` uses that same UUID as `strategy_runs.id`.  `queueStrategyRunRequest` dedupes while any request for that user is `queued` or `running`.  `markStaleRunningRuns` used to fail only the `strategy_runs` row.  After #2845, ASC saw 0 new Roth `strategy_runs` after 22:06:43Z because orphan `0e5ccd66` was sweep-failed at 22:13:05Z (0 LLM) while its request stayed `running`.  The sweep and `finishStrategyRun` now close the matching open request.  The next scheduler tick and the next Manual Run once click both heal an already-terminal run whose request is still open.  Do not hide the lock by ignoring `running`.  Rollout: `docs/rollouts/2026-08-18-sweep-failed-request-lock.md`.
+## 2026-08-18 getAccounts 6s abort + ROIC/FTS must not starve Green
+Manual Run once fail-closes on `accountReadiness` when dashboard `getAccounts` / portfolio times out.  Same process `581467e1`: exact `gateway.getAccounts timed out after 6000ms — serving degraded snapshot` then `Failed to fetch accounts` (11 times); first wait is 16s on those broker reads.  After #2847 (`4abfb7fa`) Roth wrote `b3b83913` at 23:13:25Z but sat llm=0 ~17m with no gather/Green: `roic-transcript-refresh` since 23:11:45Z plus 78 `ftsMirrorSlice` 6–13s owned the loop.  FTS tick is 2s / 6 chunks / 1-row.  ROIC and FTS now skip or pause while any strategy run/request is queued or running, and the ROIC walk yields between periods.  The getAccount retry test mocks a short `alpacaAccountReadBudgetMs` so it can finish; live first wait stays 16s.  Stale-run sweep calls a run a restart only when `started_at` predates this process (`b3b83913` on the same `4abfb7fa` process was a stall, not a restart).  Do not reopen #2840.  Credential throws still fail immediately.  Rollout: `docs/rollouts/2026-08-18-getaccounts-loop-budget.md`.
+## 2026-08-18 rag-embed DeepInfra batch window (ingest)
+OpenRouter `baai/bge-m3` (DeepInfra) sums every string in one embed `input[]` against 8192 tokens.  A count-only batch of 32 ordinary chunks hit 8193 and 400'd `embed documents` after the 2026-08-18 2:12pm CT deploy.  That is a batch-sum, not one unchunked 10-K.  Hybrid still condenses first (`chunkDocument` 480 / `VECTOR_CONTEXT_MAX_CHARS`); packing is only a batch-window fix after that step.  `storeContexts` packs already-condensed texts under ~7500 `approxTokens` and embeds each group on its own lane.  One over-limit condensed text is isolated as its own POST and cannot skip the companions.  Local store-more is unchanged.  `VECTOR_EMBED_BATCH_SIZE=32` in Infisical is safe.  The #2812 health gate, #2820 producer order, write-class, and #2800 fuse are unchanged.  Rollout: `docs/rollouts/2026-08-18-rag-embed-batch-window.md`.
+## 2026-08-18 Green 400 must fail over to the next stored call
+#2829 made 404/403 failover-eligible and stopped the account-miss liar.  It left HTTP 400 out.  Live Paper after that deploy (`7f5890a5-bc21-4474-87eb-9b595de04ed1`, sha `6429d984`): Green pick `gpt-5.6-terra` → `openai/gpt-5.6-terra`, OpenRouter 400 "Provider returned error", one `llm_call_latency`, then "Failover chain exhausted (3 Green Team endpoints)".  Red never ran.
+`isFailoverLlmStatus` now includes 400 (same-model `isRetryableLlmStatus` still does not).  The exhausted suffix cites stored Green attempts only.  `gpt-5.6-terra` is demoted from first Green pick when Gemini Flash / Mistral Medium class seats remain; those seats lead implicit rotation fallbacks.  A 400 "Provider returned error" is not an account-allowlist miss.  Rebased onto `12e8dcd` (#2812 rag-embed soft-degrade kept).  Rollout: `docs/rollouts/2026-08-18-green-400-failover.md`.
+## 2026-08-18 Alpaca getAccount coalescing
+Dashboard and strategy both `Promise.all` `getAccounts` + `getPortfolio`.  Each used to call Alpaca `GET /v2/account`, so the dashboard's 6s getAccounts deadline lost to a duplicate in-flight read (Roth IRA recoverable_issue storm).  REST `getAccount` is now in-flight coalesced and reused for 15s per connected account.  Rollout: `docs/rollouts/2026-08-18-prod-triage-alpaca-account-cache.md`.
+## 2026-08-18 IRA Ignore/Block already existed — they were not wired
+`iraWashSaleHandling` is Ignore / Auto / Block.  `washSaleMinLossUsd` is optional (blank = every loss).  Ignore does not steer Green.  Auto feeds priced lock costs so Green can weigh them.  Block refuses.  Prompt `agentic-strategy@2.14.0`.  Rollout: `docs/rollouts/2026-08-18-ira-wash-sale-existing-options.md`.
+## 2026-08-18 rag-embed soft-degrade (health + store)
+A hard-stopped `rag-embed` / `rag-rerank` lane no longer 503s `/api/health`.  Coolify treats a 503 as container death; the restart re-halts autonomy via the boot interlock.  Those lanes now degrade like OpenRouter credits (`ok: false`, `degraded: true`, HTTP 200).  `pinecone` and `alpaca-broker` stay the only critical liveness deps.  One dead document-embed batch skips that batch and continues later batches; a thrown query embed returns empty retrieval.  Green/Red already skip RAG on lookup failure and do not halt.  Rollout: `docs/rollouts/2026-08-18-rag-embed-soft-degrade.md`.
+## 2026-08-18 OpenRouter 404s are not "not on your account"
+Coolify 2026-08-18 (sha `cda485ff`): today's Green 404s are valid public slugs `google/gemini-3.7-flash` (86ms) and `mistralai/mistral-medium-3-5` (82ms).  Claude/Grok/Kimi/mini-latest were skipped, not called — tilde restore does not clear today's fails.  Live #2771 set `require_parameters=true` on every OpenRouter body; that empties the endpoint set and 404s models that exist.  Strategy now omits `require_parameters` except the nano `max_completion_tokens` case.  Classifier: bare 404 / “No endpoints found matching your request” is not an account miss; `model_not_found` is a bad slug.  Secondary: dated / `~` wire ids for the skipped seats.  Rollout: `docs/rollouts/2026-08-18-openrouter-rotation-alias-failopen.md`.
+## 2026-08-18 Pinecone store-more vs condense-first (report)
+Green/Red consume 8/1 chunks and a 24k filings-family budget via `retrieveContextDetailed`.  More raw 10-K/Q/transcript vectors are not better for those decisions.  Operational path is **hybrid**: processed proposer corpus (extractive highlights + form-aware signal sections + speaker-turn slices; latest full call for high-interest names until transcript FTS exists) in Pinecone, full bodies in SQLite/artifacts.  Minimum writer split is landed; `RAG_PINECONE_WRITE_CLASS` still defaults to `full-body` until PR B hydrate exists — do not flip the env in this PR.  Live prune is junk/HTML/duplicate/low-value only; useful full-body vectors that are the only copy stay.  Builder is 10 GB / 5M WU with a hard cap.  Full argument: `docs/audits/2026-08-18-pinecone-store-vs-condense.md`.  Writer-split design: `docs/designs/2026-08-16-proposer-corpus-storage.md`.  Implementation: `docs/rollouts/2026-08-18-hybrid-and-prune.md`.
+The rolling-24h write fuse must not treat local month-to-date WUs as Pinecone's bill.  That remainder clamp produced the 15-WU / 1-text skip (used 0, attempted 28) while the Standard trial still had credit.  Hybrid processed writes continue; do not raise a fake daily/monthly ceiling.  See `docs/rollouts/2026-08-17-pinecone-write-deadlock.md`.
+## 2026-08-17 trading-outcomes audit
+Read-only validation review: `docs/audits/2026-08-17-trading-outcomes.md`.  It records that the paper→live transfer gate described in the 2026-07-13 block below was later superseded by owner-directed per-user pooling (`post-mortem.ts`, `outcome-engine.ts`, 2026-07-23 / 2026-08-04).  Docs and retrieval currently disagree.  Reconcile before treating Phase 7 as the live learning contract.
+## 2026-08-17 RAG / learning / recall residual gaps
+Read-only audit: `docs/audits/2026-08-17-rag-learning-recall.md`.  P0 follow-ups landed 2026-08-20 (`docs/rollouts/2026-08-20-rag-p0-followups.md`): one parsed-text SEC writer, ticker→CIK without sentinel, chat `asOf` default now, eval harness on `retrieveContextDetailed`.  Still open: transcript FTS join, memory decay/lifecycle, learning vector retry, 8-K feed dual-class.  Production strategy passes `runAsOf = now`.  Do not flip `RAG_PINECONE_WRITE_CLASS` off full-body until corpus-storage PR A/B land (`docs/designs/2026-08-16-proposer-corpus-storage.md`).
+
+## 2026-07-13 evidence-contract and learning-boundary update
+
+The implemented decision path now treats evidence routing as a first-class contract:
+
+- a wider cheap preselection is enriched before the final candidate rank;
+- enriched fields carry availability, timestamp, provenance, disagreement, and provider-failure
+  receipts while preserving scalar consumers;
+- buy/short openings are deterministically limited to the exact final candidate set;
+- Green and Red receive one content-addressed evidence manifest and the complete same evidence
+  object, with a parity hash recorded in the run audit;
+- SEC/RAG, learned prose, reflections, and episodic memories share one run-wide context budget and
+  instruction-like external text is quarantined as data;
+- realized and skipped outcomes join to decision-time source ablations, producing explicitly
+  observational source-value telemetry; and
+- structured lessons (`learned_context` + lesson vectors) are per-user and pool paper and live
+  closed lots across the owner's connected accounts. There is no 20-paper+5-live transfer gate;
+  paper trains live. The product Test Account is removed and purged.
+
+See `docs/reviews/2026-07-13-decision-evidence-architecture.md` for the source-by-source audit,
+invariants, and residual gaps.
+
+## 2026-07-13 sizing-arithmetic and outcome-semantics update
+
+- The app computes and persists finalized notional, decision-time NAV, order percentage of NAV,
+  daily cap mode/effective dollars, used budget, and remaining budget before Red Team review.
+- Migration v27 stores the exact Green rationale and sizing snapshot on the durable Socratic case;
+  refreshes and later coach/outcome/lesson writes preserve both receipts.
+- Red Team receives those deterministic values as authoritative arithmetic, so prose such as
+  "$4 is 0.04% of a $100 account" cannot be treated as a model-derived fact.
+- A Red approval means only that the adversarial thesis review approved the stated size; policy,
+  broker preflight, and placement remain separate deterministic outcomes in data and UI.
+- A Red rejection is called overridden only when the final policy decision records an applied
+  override; the earlier model request is not proof that hard gates allowed it.
+- Override-request audits likewise say `red_team_veto_override_requested`; the existing
+  `socratic_override_applied`/`socratic_override_refused` events remain final-outcome truth, while
+  historical `red_team_veto_overridden` rows remain readable for longitudinal metrics.
+- Alpaca sub-share dollar entries clear whole-share bracket fields when the app declares the native
+  bracket skipped, preventing the receipt/transport contradiction that previously blocked EXE.
+
+## 2026-07-14 final-size and lifecycle invariant update
+
+- A successful broker-minimum bump on a risk-adding opening refreshes the exact sizing receipt and
+  reruns Red once on Green-only prose plus structured evidence. Red's half-size result may apply one
+  down-only haircut; the broker reviews that haircut, and the strategy never bumps it back up.
+- Reject, unavailable, or broker-unplaceable half-size results hold the final broker-adjusted order
+  for one explicit owner decision. That second approval is stamped and audited as an override
+  without recursively rerunning Red.  Risk-reducing exits remain exempt.  Owner Approve of a
+  still-pending opening on an Exit-only (`close_only`) account is the same override: the agent
+  stays barred from opening new risk; the click places that one opening.  Halted and liquidating
+  still block openings on the human path.  Retry Red Team now applies the same half-size /
+  reject-hold / unavailable-hold receipts as the strategy loop (llm-06).
+- That owner decision is scoped to the broker estimate shown on the pending card. Downward drift
+  and upward quote noise no greater than the larger of 1%/$0.01 remain inside the approved risk
+  envelope; a larger upward requote persists the new amount and requires one fresh click.
+- Sell-to-fund planning cannot run ahead of that decision. Every otherwise autonomous opening is
+  correlation-gated, broker-reviewed, minimum-adjusted, exact-size Red-reviewed, and
+  policy/override-preflighted before its notional can request a funding sale. Correlation-dropped,
+  broker-unplaceable, human-held, and non-funding policy-blocked openings contribute zero demand;
+  the intended cumulative buying-power shortfall remains fundable. Placement consumes the cached
+  exact broker shape rather than rerunning a review that could create a post-sale hold.
+- Human-review reasons are independent. A later Red approval clears only the superseded Red hold,
+  never rationale-collapse or owner-preference holds.
+- Before any autonomous broker submission, the durable `trade_proposals` intent and initial
+  `socratic_decisions` case commit in one SQLite transaction. Subsequent placement, broker decline,
+  expiry, withdrawal, and recovery transitions update both ledgers transactionally.
+- Human approval uses the same invariant: the atomic `proposed -> placing` claim requires a
+  proposed Socratic case, creates a legacy fallback case inside that transaction when necessary,
+  and fails before the broker boundary when the receipt cannot be committed.
+- Uncertain submissions remain `placing` until reconciliation proves the result. Same-decision
+  vector-memory writes are serialized and re-read current SQLite state before embedding, preventing
+  a slow older lifecycle write from overwriting a newer terminal result.
+- A synchronous broker fill remains `filled` end to end while still consuming daily/hourly limits
+  and placement counts. Outcome coverage, run summaries, ops diagnostics, and the decision-memory
+  lifecycle include it rather than dropping the most useful realized cases.
+- A chat draft's synthetic run id is permanent idempotency, not merely pending-card dedupe. Retries
+  after approval or fill return the original proposal, and the final lookup plus insert share an
+  immediate SQLite transaction so concurrent requests cannot create a second approvable order.
+- Crash recovery uses `(proposalId, brokerOrderId)` to prevent duplicate fill rows, but still
+  reconciles the existing row forward. Broker-filled truth atomically advances a pending receipt,
+  proposal, and Socratic case before the uncertainty notification is resolved.
+- Terminal broker state is never interpreted without quantity: canceled/rejected/expired with a
+  positive broker-filled quantity is a final partial execution. Direct placement stores the fill
+  receipt before advancing proposal/case lifecycle in one transaction; persistence failure or a
+  nonterminal response lacking an order id stays `placing` under refId recovery.
+- A live `partially_filled` receipt is already accounting exposure and updates in place. Stale-limit
+  replacement receipts dedupe on user + account + replacement identity, not globally on a broker id.
+- Broker execution is not accounting truth until both cumulative quantity and a finite positive
+  realized price are known. Unpriced receipts persist zero price/notional plus the maximum
+  broker-reported quantity; later stale or terminal-zero snapshots cannot reduce that floor.
+- A replacement partial missing price or order id remains active under its durable replacement ref,
+  binds the eventual broker id onto the same receipt, and leaves recovery only after its known
+  execution is priced. The active replacement lock is scoped by user + account + original order.
+
 ## 1. Strategy Architecture: Evaluation Lenses
 
 To ensure balanced and resilient trade proposals, the LLM evaluates candidates
@@ -282,6 +435,15 @@ Feeding dozens of raw rationales, P&L lines, and redundant daily news into the t
   temperature and explicit output caps. Their prompts and payloads use
   `broker/paper` and `broker/live` wording so broker-hosted paper fills are
   never confused with real-capital fills.
+- **Green Team empty/malformed failover + credits hint (2026-08-17, #2577)** —
+  Green Team is the Bull proposer.  Empty HTTP-200 content already failed over
+  along `llmFallbackModels` (2026-07-31).  A malformed HTTP-200 JSON body now
+  fails over the same way (`strategy_llm_failover` reason `malformed_response`).
+  A rotating Green seat with no owner fallbacks appends two other eligible pool
+  models so a single glitching pick cannot kill the run.  When the cached
+  OpenRouter credits check is below threshold, the strategy `run_failed`
+  notification (and run summary) adds a distinct "credits look exhausted" hint
+  — empty responses are the observed symptom of a near-zero prepaid balance.
 - **LLM step timeout diagnostics (2026-06-30)** — strategy runs now audit
   `llm_step` start/failure rows and preserve failed Green Team context in the
   final `strategy_run` audit. Raw abort strings are translated into
@@ -445,9 +607,11 @@ conviction sizing multiplier — de-risking persistent over-confidence. Reduce-o
 composes as a reduction feeding the existing conviction cap.
 
 #### E.4 Execution cost on protective exits (Workstream B — correctness fix, ON)
-The paper/test execution-cost model now also debits EXIT fills booked by `synthetic-stops.ts` and
+The paper execution-cost model now also debits EXIT fills booked by `synthetic-stops.ts` and
 `order-replacement.ts` (previously they inserted raw-price exits with no cost), so the learning loop's
-realized edge is net-of-cost on both legs — not just entries.
+realized edge is net-of-cost on both legs — not just entries. The default paper floor is the same
+20 bps constant as OOS walk-forward (`OOS_ROUND_TRIP_COST_BPS` / `PAPER_DEFAULT_BASE_SLIPPAGE_BPS`);
+paper trains live, so a 1 bp paper default was dishonest.
 
 #### E.5 Unified learning-mutation ledger + admin revert (follow-on P0-4 — ledger ALWAYS-ON, revert admin-only)
 Every autonomous learning mutation now lands in ONE canonical append-only ledger (`learning_mutations`
@@ -460,7 +624,8 @@ via `setPolicy` ONLY (keeping `account_strategy_state` + the active-profile mirr
 `(user, account, subsystem)`, and marks the row reverted (idempotent). This GENERALIZES the #296
 tuning-specific revert — it does not duplicate it. Recording is passive/always-on (audit trail only — it
 changes no trading behavior). The one-click revert route `POST /api/admin/learning-ledger` is `requireAdmin`
-(this repo has prior IDOR history); `GET` lists entries for the caller's active account.
+(this repo has prior IDOR history); `GET` lists entries for the caller's active account. Console entry:
+`/console/lessons#learning-ledger` (operator-gated; same GET/POST, no server-behavior change).
 
 #### E.6 Paired-t significance on the autonomous OOS gate (follow-on P0-2 — DEFAULT no-op)
 The autonomous OOS gate (E.1) is extended with a proper effect-size + PAIRED-t significance test on the
@@ -489,8 +654,9 @@ Tuning` in `src/lib/strategy-tuning.ts`) consumed by both the real apply and a n
 OOS + paired-t + P2-5/P2-6 guards) and returns exactly what an apply WOULD do — `{ wouldApply, before, after,
 clampedDeltas, oosICCandidate/Baseline, oosReadout, invariantViolations }` — with ZERO writes (no `setPolicy`,
 ledger, audit, or cadence advance; asserted by spies). Exposed at `GET /api/admin/tuning-dry-run`
-(`requireAdmin`, mirrors the backtest-ic "suggestion only" pattern). The operator on-ramp: inspect the decision
-before enabling `autoApplyWeights`.
+(`requireAdmin`, mirrors the backtest-ic "suggestion only" pattern) and on `/console/strategy#weight-tuning-preview`.
+The operator on-ramp: inspect the decision before enabling `autoApplyWeights`. Factor IC diagnostics that used
+to be curl-only live at `/admin/backtest-ic`. Raw `GET /api/audit` is the Activity **Audit** tab.
 
 #### E.9 Purged & embargoed walk-forward split (broader-backlog P1-2 — DEFAULT off, byte-identical)
 `splitWalkForward` gained an opt-in `{ purge }` control and `runWalkForwardOOS` an `purgeEmbargo` option

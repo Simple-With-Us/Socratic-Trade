@@ -116,7 +116,7 @@ Monolith extraction; `useConsoleSnapshot` hook; dark-mode dual mechanism; `conso
 `@theme` migration; full primitive merge; React.memo pass; Vol-column semantics (needs a
 data-layer check first); order-columns spread. Coordination: lands AFTER merging forward
 PR #1107 (activity-feed consolidation, same `dashboard-feed.ts`) with a deliberate
-hand-resolve; AG PRs #1008/#989 will need rebases (flagged on #agent-sync twice).
+hand-resolve; AG PRs #1008/#989 will need rebases (flagged on #ag***-s**c twice).
 
 ## Files
 

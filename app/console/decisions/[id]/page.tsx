@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, BookOpen, Brain, Database, GitBranch, MessageSquare, Swords, TrendingUp } from "lucide-react";
-import type { SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
-import { fmtMoney, fmtPct, timeAgo, EM_DASH } from "../../lib/format";
+import type { ProposalScorecard, SocraticDecisionCase, SocraticDecisionTrace, SocraticEvidenceItem, SocraticFrameworkProposal, SocraticRagAttribution, StrategyRunRow } from "@/lib/types";
+import { ProposalScorecardBlock } from "../../components/proposal-scorecard";
+import { fmtExact, fmtMoney, fmtPct, timeAgo, EM_DASH } from "../../lib/format";
 import { authorityLabel, decisionStatusLabel, evidenceKindLabel, feedStatusLabel, frameworkStatusLabel, plainLabel, thesisTagLabel } from "../../lib/labels";
+import { dissentItemsForDisplay } from "../../lib/dissent";
 import { CONSOLE_PAGE_WIDTH } from "../../lib/page-width";
-import { redTeamFailureMeta } from "../../lib/red-team";
+import { redTeamFailureMeta, redTeamVerdictLabel } from "../../lib/red-team";
 import { Btn, Card, Chip, SignedText, TextArea } from "../../ui/primitives";
 import { ModelBadge } from "../../ui/provider-logo";
 import { SymbolButton } from "../../ui/symbol-drilldown";
@@ -15,7 +17,7 @@ import { SymbolButton } from "../../ui/symbol-drilldown";
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; decision: SocraticDecisionCase; framework: SocraticFrameworkProposal[]; run?: StrategyRunRow };
+  | { status: "ready"; decision: SocraticDecisionCase; framework: SocraticFrameworkProposal[]; run?: StrategyRunRow; scorecard?: ProposalScorecard };
 
 const SIDE_LABEL: Record<string, string> = { buy: "BUY", sell: "SELL", short: "SHORT", cover: "COVER" };
 
@@ -44,7 +46,8 @@ export default function DecisionTracePage() {
           status: "ready",
           decision,
           framework: framework.filter((proposal) => proposal.decisionId === decision.id),
-          ...(payload.run ? { run: payload.run } : {})
+          ...(payload.run ? { run: payload.run } : {}),
+          ...(payload.scorecard ? { scorecard: payload.scorecard } : {})
         });
       } catch (error) {
         setState({ status: "error", message: error instanceof Error ? error.message : "Could not load decision trace." });
@@ -144,8 +147,9 @@ export default function DecisionTracePage() {
     );
   }
 
-  const { decision, framework, run } = state;
+  const { decision, framework, run, scorecard } = state;
   const outcome = decision.outcome;
+  const visibleDissent = dissentItemsForDisplay(decision);
 
   // Intentionally wider than CONSOLE_PAGE_WIDTH: this page reuses the
   // con-thesis-hero + xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]
@@ -171,7 +175,7 @@ export default function DecisionTracePage() {
             {authorityLabel(decision.authority).label}
           </Chip>
           {decision.updatedAt && (
-            <Chip tone="muted" title={new Date(decision.updatedAt).toLocaleString()}>
+            <Chip tone="muted" title={fmtExact(decision.updatedAt)}>
               updated {timeAgo(decision.updatedAt)}
             </Chip>
           )}
@@ -189,7 +193,7 @@ export default function DecisionTracePage() {
             {decision.symbol && (
               <Chip tone="accent">
                 {decision.side ? `${SIDE_LABEL[decision.side] ?? decision.side.toUpperCase()} ` : ""}
-                <SymbolButton symbol={decision.symbol} showLogo={false} className="text-inherit" />
+                <SymbolButton symbol={decision.symbol} className="text-inherit" />
               </Chip>
             )}
             {decision.thesisTag && <Chip tone="muted">{thesisTagLabel(decision.thesisTag)}</Chip>}
@@ -219,6 +223,9 @@ export default function DecisionTracePage() {
             <EvidenceList items={decision.evidence} empty="No structured evidence items are attached to this case yet." />
           </TraceSection>
 
+          {/* Read-only render of the linked proposal's persisted decision scorecard (r3). */}
+          {scorecard && <ProposalScorecardBlock scorecard={scorecard} defaultOpen />}
+
           <TraceSection icon={<BookOpen size={13} />} title="Retrieved citations">
             {decision.ragAttributions.length > 0 ? (
               <div className="flex flex-col gap-2">
@@ -245,7 +252,22 @@ export default function DecisionTracePage() {
                       title="The adversarial reviewer model that produced this verdict"
                     />
                   </strong>
-                  <span>{redTeamTriggerLabel(decision.redTeamVerdict.trigger)}</span>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <Chip
+                      tone={decision.redTeamVerdict.rejected
+                        ? "neg"
+                        : decision.redTeamVerdict.verdict === "approve-at-half"
+                          ? "warn"
+                          : "pos"}
+                      title="Red Team verdict"
+                    >
+                      {redTeamVerdictLabel(
+                        decision.redTeamVerdict,
+                        decision.policyDecision?.socraticOverride?.applied
+                      )}
+                    </Chip>
+                    <span>{redTeamTriggerLabel(decision.redTeamVerdict.trigger)}</span>
+                  </div>
                 </div>
                 <p>{decision.redTeamVerdict.reason}</p>
               </article>
@@ -262,13 +284,18 @@ export default function DecisionTracePage() {
                     />
                   </strong>
                   <span title={redTeamFailureMeta(decision.redTeamVerdict.failureKind).title}>
-                    review failed ({redTeamFailureMeta(decision.redTeamVerdict.failureKind).label})
+                    {redTeamVerdictLabel(
+                      decision.redTeamVerdict,
+                      decision.policyDecision?.socraticOverride?.applied,
+                      decision.status
+                    )}{" "}
+                    ({redTeamFailureMeta(decision.redTeamVerdict.failureKind).label})
                   </span>
                 </div>
                 <p>{decision.redTeamVerdict.reason}</p>
               </article>
             )}
-            <EvidenceList items={decision.dissent} empty={decision.redTeamVerdict ? "" : "No dissent items are attached to this case yet — no adversarial review was triggered."} />
+            <EvidenceList items={visibleDissent} empty={decision.redTeamVerdict ? "" : "No dissent items are attached to this case yet — no adversarial review was triggered."} />
           </TraceSection>
         </div>
 
@@ -311,15 +338,15 @@ export default function DecisionTracePage() {
             }
           >
             {run ? (
-              <div className="mb-3 rounded-md border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-bg-elev)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-                Source run {timeAgo(run.startedAt)} · {run.status} · {run.totalCount} proposal{run.totalCount === 1 ? "" : "s"}
+              <div className="mb-3 rounded-control border border-[color:var(--con-line)] bg-[color:color-mix(in_srgb,var(--con-bg-elev)_80%,transparent)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                Source run {timeAgo(run.startedAt)} · {feedStatusLabel(run.status)} · {run.totalCount} proposal{run.totalCount === 1 ? "" : "s"}
                 {run.summary ? ` · ${run.summary}` : ""}
               </div>
             ) : null}
             {decision.coachNotes.length > 0 ? (
               <div className="mb-3 flex flex-col gap-2">
                 {decision.coachNotes.slice(-4).map((coachNote, index) => (
-                  <p key={`${coachNote}-${index}`} className="rounded-md border border-[color:var(--con-line)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+                  <p key={`${coachNote}-${index}`} className="rounded-control border border-[color:var(--con-line)] p-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
                     {coachNote}
                   </p>
                 ))}

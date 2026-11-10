@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { selectThesisStat, shouldSkipNegativeExpectancy } from "../src/lib/strategy";
 import type { ThesisStat, ThesisRegimeStat } from "../src/lib/performance";
 import type { TradeProposal, TradingPolicy } from "../src/lib/types";
+import { selectThesisStat, shouldSkipNegativeExpectancy } from "../src/lib/strategy-risk";
 
 // OPTIONAL negative-expectancy skip gate (policy.tuning.skipNegativeExpectancy, default OFF): skip an
 // opening proposal whose PROVEN thesis (>= minClosedLotsForWeightShift closed lots) has a shrunk

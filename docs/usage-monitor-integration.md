@@ -8,11 +8,10 @@ in `docs/reviews/2026-06-30-improvement-audit.md` (§6.9) and the work-split in
 ## Why
 
 The monitor's poll adapters are structurally **blind** to this app's biggest cost
-drivers: Anthropic (billing behind the Console), Voyage (no usage API), and
-Robinhood (no public retail API). App B already computes real per-call LLM/RAG
-cost locally (`recordLlmUsage`, `recordRagUsage`) and knows its market-data /
-broker call volume — but none of it left the box. This wires that data out, and
-adds a cost-aware feedback loop back in.
+drivers: Anthropic (billing behind the Console) and Voyage (no usage API). App B
+already computes real per-call LLM/RAG cost locally (`recordLlmUsage`,
+`recordRagUsage`) and knows paid market-data call volume. This wires that data
+out and adds a cost-aware feedback loop back in.
 
 ## Self-sufficiency (the hard rule)
 
@@ -36,7 +35,7 @@ integration is:
 | `USAGE_MONITOR_BASE_URL` | _(blank)_ | Monitor base URL. Blank → push + budget read disabled. |
 | `USAGE_INGEST_TOKEN` | _(blank)_ | Bearer token for `POST /api/ingest/usage` (the monitor's `USAGE_INGEST_TOKEN`). Also used for the budget read unless the monitor sets a separate `USAGE_READ_TOKEN`. Blank → disabled. |
 | `USAGE_MONITOR_ENV` | `NODE_ENV` | `environment` label stamped on pushed events (keeps preview vs prod spend separate). |
-| `USAGE_MONITOR_FLUSH_MS` | `2000` | Debounce before a batched flush. |
+| `USAGE_MONITOR_FLUSH_MS` | `2000` | Debounce before a batched flush. Multiplied by 2 (p50 > 2s) or 4 (p50 > 4s) via `peer-lane-backoff` so a 7s sink is not hit at the healthy cadence (#2550). |
 | `USAGE_MONITOR_TIMEOUT_MS` | `8000` | Per-POST timeout. |
 | `USAGE_BUDGET_ENFORCE` | `off` | Phase 2 enforcement. Off → over-budget only alerts (Phase 1). On → downgrade model / skip cycle. |
 | `USAGE_BUDGET_TTL_MS` | `300000` | Budget-status cache TTL. |
@@ -46,11 +45,14 @@ integration is:
 
 ```
 recordLlmUsage / recordRagUsage ─┐
-fetchWithRetry (market-data)     ├─► usage-monitor-push.ts (queue + per-provider
-alpaca.trackHealth / robinhood   ─┘   call-volume aggregate; debounced batch flush)
+fetchWithRetry (paid providers)  ├─► usage-monitor-push.ts (queue + per-provider
+provider-dispatch outbox         ─┘   call-volume aggregate; debounced batch flush)
                                         │  POST /api/ingest/usage  (Bearer)
                                         ▼
                               API Usage Monitor → ExternalUsageEvent
+
+llm_usage / rag_usage ──► usage-monitor-replay.ts (startup + 60s bounded replay;
+                          ordered durable settings watermarks) ──► same ingest endpoint
 
 runStrategyOnce entry ──► usage-budget.ts ──GET /api/budget-status──► monitor
    (Phase 1) over-budget → notify(budget_alert)
@@ -65,23 +67,74 @@ runStrategyOnce entry ──► usage-budget.ts ──GET /api/budget-status─�
   tokens>`, `costUsd` (from `estimateLlmCostUsd`), `metricType:"cost"|"usage"`,
   `metadata:{model,context,userId,keySource,prompt/completion tokens}`.
 - **RAG** (`recordRagUsage`): `provider` (voyage/pinecone), `service:"rag"`,
-  `label:<operation>`, `unit:"token"`, `costUsd` (from `estimateRagCost`).
-- **Call-volume** (market-data + broker): aggregated per provider per flush window as
+  `label:<operation>`, `unit:"token"`, `costUsd` (from `estimateRagCost`). This is the
+  **single cost authority** for Voyage/Pinecone spend.
+- **Provider dispatch** (`withDurableRagProviderDispatch` in `vector-db.ts`, `requestFmp` in
+  `fmp-common.ts`): `service:"provider-dispatch"`, `label:<operation>`, `unit:"request"`. This
+  lane is **quota/reservation-only externally** — the event actually pushed to the monitor
+  (`createProviderDispatchUsageMonitorEvent` in `usage-monitor-push.ts`) always carries
+  `metricType:"usage"` with no `costUsd`, for every provider, unconditionally — it exists purely to
+  report request volume against the durable per-credential rate window, never a dollar figure.
+  Cost for these providers is owned exclusively by their dedicated ledger lane (the RAG bullet
+  above for Voyage; FMP has none, it's poll-primary).
+  This is deliberately two-layered: Voyage embed/rerank call sites in `vector-db.ts` pass a real
+  `estimateVoyageDispatchCost(...)` estimate into the *local* reservation
+  (`reserveProviderDispatch`, `provider_dispatch_attempts.estimated_cost_usd`), because that number
+  still drives the LOCAL per-credential daily cost-cap fuse (`PROVIDER_DISPATCH_VOYAGE_*_MAX_COST_USD_PER_DAY`,
+  default $25/day) — zeroing it there would silently disable that fuse. `createProviderDispatchUsageMonitorEvent`
+  is the single choke point for every provider-dispatch event sent to the monitor (both the
+  immediate push on startup and the crash-durable replay/reconciliation pass run through it), and
+  it discards `estimatedCostUsd`/`actualCostUsd` before building the outbound event — so the same
+  real local estimate never reaches the wire. FMP's local estimate is already 0 (poll-primary, no
+  local fuse needed), so it was and remains unaffected by this zeroing.
+  A 2026-07-15 version of this fix briefly zeroed the Voyage dispatch calls' *local* estimate
+  instead of the push boundary, which fixed the double-count but silently disabled the local Voyage
+  cost-cap fuse — corrected the same day: the local estimate is real again, and the push-boundary
+  zero in `usage-monitor-push.ts` is what actually prevents the receiver (which aggregates
+  `ExternalUsageEvent.costUsd` by provider name, ignoring `service`) from double-counting the same
+  spend the RAG ledger lane already reported.
+- **Call-volume** (paid API providers): aggregated per provider per flush window as
   a single `metricType:"usage"`, `unit:"request"`, `requests:<count>` event —
-  never one POST per call. Brokers are tagged `provider:"alpaca"|"robinhood"`,
-  `service:"broker"`; market-data providers use their `fetchWithRetry` service label
-  (finnhub, fmp, yahoo-finance, tradier, …).
+  never one POST per call. Market-data providers use their `fetchWithRetry` service
+  label. Broker-bundled activity is deliberately excluded: Alpaca (including
+  `alpaca-news`/`alpaca-snapshot`), Robinhood, and Tradier have no separate monitored
+  subscription or meaningful quota/cost record in this app.
 
-The event shape mirrors `@jaywedgeworth22/congress-trading-shared`'s
-`UsageTelemetryEventSchema` and the monitor's server parser
-(`src/lib/usage-telemetry.ts`).
+Every delivery now carries a fixed-length explicit idempotency key: SHA-256 over
+the event kind plus its source identity. LLM and RAG source identities and
+`occurredAt` values come from the same durable local ledger row; each call-volume
+lane gets a UUID when its aggregate window opens. A failed or ambiguous POST is kept in
+memory and retried with the exact original payload (including key and timestamp),
+using bounded exponential backoff. This preserves transport retry deduplication
+and prevents distinct lanes in one flush from colliding just because they share
+`provider`, `metricType`, and `occurredAt`. The shared five-field fallback remains
+unchanged for other producers.
+
+Discrete LLM/RAG delivery is also crash-durable. `usage-monitor-replay.ts` reads the persisted
+ledgers in `(created_at,id)` order, reconstructs the exact event key/timestamp, and advances a
+per-ledger watermark in the existing internal `settings` table only after the batch is acknowledged.
+Every pass inclusively re-sends the last acknowledged row once; receiver idempotency makes that
+overlap safe if the app dies between remote acknowledgement and its local watermark write. The
+watermark update is monotonic inside `BEGIN IMMEDIATE`, so an overlapping deploy cannot regress it.
+The worker runs immediately at Node startup and every minute, bounded to ten 100-event pages per
+ledger per pass. It needs no schema migration or additional env variable.
+
+Every newly emitted event carries top-level `project:"socratic-trade"`. The raw `provider`
+value remains unchanged at the producer; canonical provider/project resolution belongs to the
+monitor receiver.
+
+The producer exact-pins immutable shared release `v2.0.0` and sends only the strict v2 envelope:
+`schemaVersion:2`, batch-level `producerId:"socratic-trade"`, and event-level `eventId` plus
+`producerKeyRef`. Deprecated v1 `sourceApp`, `idempotencyKey`, and `keyRef` fields never appear on
+the wire. An in-memory one-time normalizer preserves buffered pre-v2 events across hot reloads; the
+durable LLM/RAG/provider ledgers reconstruct fresh strict-v2 events from their source rows.
 
 ### Push-primary providers (item 3)
 
-No monitor code change is needed for Anthropic/Voyage/Robinhood to become
+No monitor code change is needed for Anthropic/Voyage to become
 "push-primary": items 1–2 simply set `provider` correctly so those events land in
 `ExternalUsageEvent`. The monitor keeps its poll adapters for providers where
-polling works (openai, alpaca, finnhub, …). The budget endpoint below combines
+polling works (openai, finnhub, …). The budget endpoint below combines
 both channels.
 
 ## Budget status (monitor)
@@ -92,7 +145,9 @@ both channels.
 double-counting**:
 
 ```
-spentUsd = fixedMonthlyCostUsd + max(latestSnapshot.totalCost, pushedMonthToDateUsd)
+spentUsd = fixedMonthlyCostUsd
+         + max(latestSnapshot.totalCost, pushedMeteredMonthToDateUsd)
+         + materializedSubscriptionMonthToDateUsd
 ```
 
 `max()` is deliberate: push-primary providers have no poll snapshot (so
@@ -143,27 +198,18 @@ cost even if App B also pushes some events for them. Budget alerts reuse
   e2e coverage of advisory-only / enforced-downgrade / enforced-skip /
   evaluator-failure-fail-open).
 
-## Migration to the shared client
+## Shared client and idempotency contract
 
-The push is hand-rolled here rather than importing `createUsageTelemetryClient`
-because App B's pinned `@jaywedgeworth22/congress-trading-shared@1.0.0` predates
-the `usageTelemetry` export (it landed on the shared repo's
-`feat/usage-telemetry-idempotency-key` branch, v1.1.0). The event shape is already
-the shared contract. To migrate once shared 1.1.0 is published to GitHub Packages
-and App B's pin is bumped:
-
-1. `import { createUsageTelemetryClient } from "@jaywedgeworth22/congress-trading-shared"`.
-2. Replace `postBatch()` in `src/lib/usage-monitor-push.ts` with
-   `createUsageTelemetryClient({ baseUrl, token }).send(events)` — that also gives
-   the deterministic idempotency key for free.
-
-(Note: the monitor's ingest route currently discards `idempotencyKey` — there is no
-dedup column on `ExternalUsageEvent` — so idempotency is a no-op server-side today.
-The push therefore does not retry, to avoid duplicate rows.)
+`src/lib/usage-monitor-push.ts` uses `createUsageTelemetryClient` from
+`@jaywedgeworth22/congress-trading-shared`. Every strict-v2 event has an explicit `eventId`;
+the receiver deduplicates on `(producerId,eventId)` and rejects conflicting replays. This producer
+derives IDs from durable source rows or one allocated aggregate-window ID, then hashes them before
+transmission so identity remains stable and below the ingest length cap. Provider credential
+identity is transmitted separately as `producerKeyRef` and never participates in replay identity.
 
 ## Operator setup notes
 
-- For a push-primary provider (Anthropic, Voyage, Robinhood) to appear in
+- For a push-primary provider (Anthropic, Voyage) to appear in
   `/api/budget-status` with a real budget, the monitor must have a **Provider row**
   named to match the pushed `provider` string (case-insensitive) **with a
   `monthlyBudgetUsd`** set. Pushed events for a provider that has no Provider row
@@ -173,11 +219,13 @@ The push therefore does not retry, to avoid duplicate rows.)
 
 ## Known follow-ups (from the 2026-07-01 adversarial review)
 
-- **Dashboard parity:** `/api/providers` + `/api/providers/[id]` compute alerts from
+- **Dashboard parity (being addressed on API Usage Monitor branch
+  `codex-app-wide-hardening`):** `/api/providers` + `/api/providers/[id]` compute alerts from
   the poll snapshot only, so a push-primary provider shows budget alerts in
   `/api/budget-status` but not on its dashboard card. Merging month-to-date
   `ExternalUsageEvent` cost into those endpoints (as `/api/budget-status` already
-  does) would align them. Deferred — it's dashboard-UI scope, explicitly out of C2.
+  does) aligns them; do not treat this as production-live until that monitor PR is merged and
+  its Render revision is verified.
 - **Orphaned pushed providers:** a pushed `provider` string with no matching Provider
   row is silently excluded from budget math (fails safe to 0). Consider surfacing
   unmatched providers for operator visibility.
@@ -185,5 +233,6 @@ The push therefore does not retry, to avoid duplicate rows.)
 ## Verification
 
 - **App B:** `npm run lint`, `npx tsc --noEmit`, `npm test`, `npm run build`.
-  New tests: `test/usage-monitor-push.test.ts`, `test/usage-budget.test.ts`.
+  New tests: `test/usage-monitor-push.test.ts`, `test/usage-monitor-replay.test.ts`,
+  `test/usage-budget.test.ts`.
 - **Monitor:** `npm run lint` (`tsc --noEmit`), `npm run build`.

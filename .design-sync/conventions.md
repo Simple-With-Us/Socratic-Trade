@@ -22,12 +22,14 @@ utilities so theming works automatically:
 - Surfaces: `bg-bg`, `bg-surface`, `bg-surface-2`, `bg-surface-3`
 - Text: `text-fg` (primary), `text-muted`, `text-faint`
 - Borders: `border-line`, `border-line-strong`
-- Accent / semantic: `bg-accent` · `text-accent` · `text-accent-fg`; `text-up` / `bg-up` (gains, green);
-  `text-down` / `bg-down` (losses, red); `text-warn`; `text-info`
+- Accent / semantic: `bg-accent` · `text-accent` · `text-accent-fg`; `text-pos` / `bg-pos` (gains, green);
+  `text-neg` / `bg-neg` (losses, red); `text-warn`; `text-info`
 - Focus ring: `focus-visible:ring-[var(--ring)]`
 
-Compose DS-styled text inputs with the exported `inputClass` string; button-looking links with
-`buttonClass({ variant, size })`. Icon sizing: `ICON.sm|md|lg` (14/16/20) with `lucide-react`.
+The UI set ships three exports: `Card`, `Button`, and the `buttonClass({ variant, size })` string
+for button-looking links (slimmed 2026-07-16 — `inputClass`, `ICON`, `StatTile`, and the other
+former UI exports were deleted with their dead app-side primitives). Icon sizing convention with
+`lucide-react`: 14 inline/dense, 16 default, 20 prominent.
 
 **Console set — bespoke `con-*` classes (inside `.console-root`).** The components apply their own
 classes; you don't add token utilities to them. For your own layout around them, plain Tailwind
@@ -46,19 +48,19 @@ layout utilities (`flex`, `gap-*`, `px-*`) work anywhere. Classes the components
 ## Build snippet
 
 ```tsx
-import { Card, StatTile, Button, ConBtn } from "socratic-trade-dashboard";
+import { Card, Button, ConBtn } from "socratic-trade-dashboard";
 
 // UI surface — document root, semantic tokens via utilities
 <Card className="p-4 space-y-3">
-  <div className="grid grid-cols-3 gap-3">
-    <StatTile label="Net liquidation" value="$128,430" sub="+$2,140 today" tone="up" />
-    <StatTile label="Day P/L" value="-$612" tone="down" />
-    <StatTile label="Buying power" value="$41,905" />
+  <div>
+    <div className="text-xs text-muted">Net liquidation</div>
+    <div className="text-xl font-semibold tnum">$128,430</div>
+    <div className="text-xs text-pos">+$2,140 today</div>
   </div>
   <Button variant="primary">Place order</Button>
 </Card>
 
-// Console surface — MUST wrap in .console-root
+// Console surface — MUST wrap in .console-root (stat tiles live here: ConStat)
 <div className="console-root">
   <ConBtn variant="pos">Approve buy</ConBtn>
 </div>

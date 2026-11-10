@@ -3,7 +3,7 @@
 /** Autonomy Desk — "what does Socratic Trade believe, what did it do,
  *  what evidence moved it, and how should the framework improve?" */
 
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -13,17 +13,21 @@ import {
   Database,
   GitBranch,
   MessageSquare,
+  RotateCcw,
   TrendingUp,
   X,
   Zap
 } from "lucide-react";
 import type { DashboardSnapshot, StrategyDecision } from "../dashboard-types";
 import { formatSourceList, friendlySource } from "@/lib/dashboard-ui";
-import type { MarketQuote, PendingProposal, SocraticDecisionCase, SocraticFrameworkProposal, TradeProposal } from "@/lib/types";
+import type { BenchmarkComparison, MarketQuote, PendingProposal, SocraticDecisionCase, SocraticFrameworkProposal, TradeProposal } from "@/lib/types";
+import { BenchmarkChart } from "./components/benchmark-chart";
 import { EquityChart } from "./components/equity-chart";
 import { PositionsCard } from "./components/positions";
+import { ReadinessChecklistHero } from "./components/readiness-checklist";
 import { deriveDayPnl, deriveMarkToMarket, deriveReality, deriveRiskUtilization, deriveSpend, deriveStateInfo, selectEquityWindow } from "./lib/derive";
-import { EM_DASH, fmtExact, fmtMoney, fmtMoneyWhole, fmtPct, fmtSignedMoney, timeUntil } from "./lib/format";
+import { cx, EM_DASH, fmtDay, fmtExact, fmtMoney, fmtMoneyWhole, fmtPct, fmtSignedMoney, SENTENCE_GAP, timeUntil } from "./lib/format";
+import { describeLastRun } from "./lib/last-run";
 import {
   decisionStatusLabel,
   evidenceKindLabel,
@@ -33,40 +37,108 @@ import {
   plainLabel,
   thesisTagLabel
 } from "./lib/labels";
-import { redTeamFailureMeta } from "./lib/red-team";
+import { redTeamFailureMeta, redTeamVerdictLabel } from "./lib/red-team";
+import { decisionActionLabel, deterministicOutcomePresentation, isSuccessfulApprovalResult, splitThesisRationale } from "./lib/thesis";
 import { useConsoleData } from "./lib/useConsoleData";
-import { RunOnceButton } from "./components/chrome";
+import { safeTopCandidates } from "./lib/evidence-rows";
+import { destinationLabel } from "./components/nav";
 import { Ago, Card, Chip, Dash, Meter, SignedText, Stat } from "./ui/primitives";
 import { SymbolButton } from "./ui/symbol-drilldown";
-
-const SIDE_LABEL: Record<string, string> = { buy: "Bought", sell: "Sold", short: "Shorted", cover: "Covered" };
+import { isExecutedStatus, isNotPlacedStatus, isProposalRowApprovable, proposalChipTone, sideVerb } from "./lib/action-verbs";
+import { approveProposal, LiveConfirmationRequiredError } from "./lib/api";
+import { toastForApproveResult } from "./lib/approval-honesty";
+import { applyCoachChipPrefill, COACH_NOTE_CHIPS } from "./lib/coach-chips";
+import { Sheet } from "./ui/sheet";
+import { useToast } from "./ui/toast";
 
 export default function ConsoleHomePage() {
   const { snapshot, refresh } = useConsoleData();
-  if (!snapshot) return null;
 
-  const reality = deriveReality(snapshot);
-  const state = deriveStateInfo(snapshot.policy);
-  const spend = deriveSpend(snapshot);
-  const portfolio = snapshot.portfolio;
-  const dayPnl = deriveDayPnl(snapshot.performance, reality.mode, portfolio?.totalMarketValue);
-  const markToMarket = deriveMarkToMarket(snapshot);
-  const risk = deriveRiskUtilization(snapshot);
-  const equityWindow = selectEquityWindow(
-    reality.mode === "broker/live"
-      ? snapshot.performance?.liveEquityCurve ?? []
-      : snapshot.performance?.paperEquityCurve ?? []
-  );
-  const latest = snapshot.latestStrategyRun;
-  const latestRow = snapshot.strategyRuns?.[0];
-  const nextRun = snapshot.scheduler?.nextRunAt;
-  const primaryDecision = snapshot.socratic?.decisions?.[0];
-  const primaryTrace = latest?.proposals?.[0];
-  const primaryProposal = primaryTrace?.proposal ?? snapshot.pendingProposals[0]?.proposal;
-  const evidenceRows = deriveEvidenceRows(snapshot, latest, primaryDecision);
-  const actionRows = deriveActionRows(snapshot, latest);
-  const frameworkRows = deriveFrameworkRows(snapshot);
-  const hasFrameworkProposals = (snapshot.socratic?.frameworkProposals?.length ?? 0) > 0;
+  // C4: memoize pure derives so a parent re-render with a stable snapshot object
+  // does not re-walk equity curves / risk meters / framework rows.
+  const derived = useMemo(() => {
+    if (!snapshot) return null;
+    const reality = deriveReality(snapshot);
+    const state = deriveStateInfo(snapshot.policy);
+    const spend = deriveSpend(snapshot);
+    const portfolio = snapshot.portfolio;
+    const dayPnl = deriveDayPnl(snapshot.performance, reality.mode, portfolio, undefined, snapshot.performance?.dayPnlHints);
+    const markToMarket = deriveMarkToMarket(snapshot);
+    const risk = deriveRiskUtilization(snapshot);
+    const equityWindow = selectEquityWindow(
+      reality.mode === "broker/live"
+        ? snapshot.performance?.liveEquityCurve ?? []
+        : snapshot.performance?.paperEquityCurve ?? []
+    );
+    const latest = snapshot.latestStrategyRun;
+    const latestRow = snapshot.strategyRuns?.[0];
+    const lastRun = latestRow ? describeLastRun(latestRow) : null;
+    const nextRun = snapshot.scheduler?.nextRunAt;
+    const primaryDecision = snapshot.socratic?.decisions?.[0];
+    const primaryTrace = latest?.proposals?.[0];
+    const primaryProposal = primaryTrace?.proposal ?? snapshot.pendingProposals[0]?.proposal;
+    const traceRows =
+      latest?.proposals?.slice(0, 5).map((item) =>
+        decisionFromProposal(
+          item.id ?? `${latest?.runId}-${item.proposal.symbol}-${item.status}`,
+          item.proposal,
+          item.status,
+          item.reasons,
+          latest.createdAt,
+          Boolean(item.id) && item.status === "proposed"
+        )
+      ) ?? [];
+    const latestProposals =
+      traceRows.length > 0
+        ? traceRows
+        : snapshot.pendingProposals.slice(0, 5).map((pending) => decisionFromPending(pending));
+    const previousTrades = snapshot.socratic?.decisions?.slice(0, 5).map(decisionFromSocratic) ?? [];
+    const frameworkRows = deriveFrameworkRows(snapshot);
+    const hasFrameworkProposals = (snapshot.socratic?.frameworkProposals?.length ?? 0) > 0;
+    return {
+      reality,
+      state,
+      spend,
+      portfolio,
+      dayPnl,
+      markToMarket,
+      risk,
+      equityWindow,
+      latest,
+      latestRow,
+      lastRun,
+      nextRun,
+      primaryDecision,
+      primaryProposal,
+      latestProposals,
+      previousTrades,
+      frameworkRows,
+      hasFrameworkProposals
+    };
+  }, [snapshot]);
+
+  if (!snapshot || !derived) return null;
+
+  const {
+    reality,
+    state,
+    spend,
+    portfolio,
+    dayPnl,
+    markToMarket,
+    risk,
+    equityWindow,
+    latest,
+    latestRow,
+    lastRun,
+    nextRun,
+    primaryDecision,
+    primaryProposal,
+    latestProposals,
+    previousTrades,
+    frameworkRows,
+    hasFrameworkProposals
+  } = derived;
 
   // Intentionally full-bleed (no CONSOLE_PAGE_WIDTH cap, see ./lib/page-width.ts):
   // this is a two-column dashboard (main column + aside, aside floored at
@@ -76,112 +148,151 @@ export default function ConsoleHomePage() {
   // floor. See docs/rollouts/2026-07-08-console-page-width-parity.md.
   return (
     <div className="flex flex-col gap-4">
-      <section className="con-thesis-hero">
-        <div className="min-w-0">
-          <div className="con-card-title flex items-center gap-1.5">
-            <Brain size={13} /> Live thesis
-          </div>
-          <h1>{deriveThesisHeadline(latest, primaryProposal, primaryDecision)}</h1>
-          <p>{deriveThesisBody(latest, primaryProposal, primaryDecision)}</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Chip tone={state.tone === "warn" ? "warn" : state.tone === "neg" ? "neg" : "pos"} title={state.detail}>
-              {state.label}
-            </Chip>
-            <Chip tone={reality.tone} title={reality.clarification}>
-              {reality.word} · {reality.phrase}
-            </Chip>
-            {primaryProposal?.tradeThesisTag && (
-              <Chip tone="accent" title="The thesis bucket this reasoning is filed under for later outcome scoring.">
-                {thesisTagLabel(primaryProposal.tradeThesisTag)}
-              </Chip>
-            )}
-            {primaryProposal?.entryMarketRegime && (
-              <Chip tone="muted" title="The regime Socratic Trade saw when it formed the thesis.">
-                {primaryProposal.entryMarketRegime}
-              </Chip>
-            )}
-          </div>
-        </div>
+      <h1 className="text-[length:var(--con-fs-lg)] font-bold">{destinationLabel("/console")}</h1>
+      {/* First-run checklist (PR-A3): when incomplete it dominates Thesis above the
+          strategy bar + two-column desk; when ready it collapses to "You're set". */}
+      <ReadinessChecklistHero snapshot={snapshot} />
 
-        <div className="con-autonomy-card">
-          <div className="con-card-title">Capital posture</div>
-          <div className="con-num mt-1 text-[length:var(--con-fs-xxl)] font-semibold">
-            {typeof spend.capNotional === "number"
-              ? fmtMoneyWhole(Math.max(0, spend.capNotional - spend.usedNotional))
-              : fmtMoney(portfolio?.buyingPower)}
-          </div>
-          <p>
-            {typeof spend.capNotional === "number"
-              ? `remaining opening authority today, out of ${fmtMoneyWhole(spend.capNotional)}`
-              : `buying power visible to the active account`}
-          </p>
-          <Meter value={spend.usedNotional} max={spend.capNotional} className="mt-3" />
-        </div>
+      <section className="con-strategy-bar">
+        <span className="con-card-title flex items-center gap-1.5">
+          <Brain size={13} /> Strategy
+        </span>
+        <Chip tone={state.tone === "warn" ? "warn" : state.tone === "neg" ? "neg" : state.tone === "muted" ? "muted" : "pos"} title={state.detail}>
+          {state.label}
+        </Chip>
+        {primaryProposal?.redTeamVerdict?.available && (
+          <Chip tone={primaryProposal.redTeamVerdict.rejected ? "neg" : "pos"}>
+            {primaryProposal.redTeamVerdict.rejected ? "Red Team: thesis rejected" : "Red Team: thesis survived"}
+          </Chip>
+        )}
+        {latestRow && lastRun && (
+          <span
+            className={cx(
+              "text-[length:var(--con-fs-xs)]",
+              lastRun.failed
+                ? "text-[color:var(--con-neg)]"
+                : lastRun.skipped
+                  ? "text-[color:var(--con-warn)]"
+                  : "text-[color:var(--con-muted)]"
+            )}
+            title={lastRun.title}
+          >
+            Last run {lastRun.statusLabel} · <Ago iso={latestRow.finishedAt ?? latestRow.startedAt} />
+            {lastRun.cause && (
+              <>
+                {" "}
+                {EM_DASH} {lastRun.cause}
+              </>
+            )}
+          </span>
+        )}
+        {/* Only on failure. The "Latest strategy run" card below has its own Activity link,
+            but that card renders only when the run produced proposals — which a failed run
+            usually did not, so on exactly the occasion you most want the record there is no
+            way through to it from here. */}
+        {lastRun?.failed && (
+          <Link href="/console/activity" className="text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+            {destinationLabel("/console/activity")}
+          </Link>
+        )}
+        {state.state === "active" && nextRun && (
+          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+            Next {timeUntil(nextRun)} · {snapshot.policy.runCadenceMinutes}m cadence
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1.5 text-[length:var(--con-fs-xs)]">
+          {snapshot.portfolioReadError ? (
+            <Chip tone="warn" title={snapshot.portfolioReadError}>
+              Portfolio fetch failed: {snapshot.portfolioReadError.length > 50 ? snapshot.portfolioReadError.slice(0, 50) + "..." : snapshot.portfolioReadError}
+            </Chip>
+          ) : typeof spend.capNotional === "number" ? (
+            <>
+              <span className="con-num font-semibold text-[color:var(--con-fg)]">
+                {fmtMoneyWhole(Math.max(0, spend.capNotional - spend.usedNotional))}
+              </span>
+              <span className="text-[color:var(--con-muted)]">
+                opening authority of{" "}
+                {spend.capMode === "pct_nav"
+                  ? `${fmtPct(spend.capConfiguredValue, 1)} cap`
+                  : `${fmtMoneyWhole(spend.capNotional)} cap`}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="con-num font-semibold text-[color:var(--con-fg)]">
+                {fmtMoney(portfolio?.buyingPower)}
+              </span>
+              <span className="text-[color:var(--con-muted)]">buying power</span>
+            </>
+          )}
+        </span>
       </section>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
         <div className="flex min-w-0 flex-col gap-4">
-          <Card
-            title={
-              <span className="flex items-center gap-1.5">
-                <Zap size={13} /> Autonomous actions
-              </span>
-            }
-            action={
-              <Link href="/console/activity" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
-                Journal <ArrowRight size={12} />
-              </Link>
-            }
-          >
-            {actionRows.length > 0 ? (
-              <div className="con-decision-list">
-                {actionRows.map((row) => (
-                  <DecisionRow key={row.id} row={row} />
-                ))}
+          {latestProposals.length > 0 ? (
+            <Card
+              title={
+                <span className="flex items-center gap-1.5">
+                  <Zap size={13} /> Latest Strategy Run
+                </span>
+              }
+              action={
+                <Link href="/console/activity" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+                  {destinationLabel("/console/activity")} <ArrowRight size={12} />
+                </Link>
+              }
+            >
+              <div className="flex flex-col gap-2">
+                {latestProposals.map((row) => {
+                  const proposal = row.proposal ?? row.decision;
+                  const decision = row.decision;
+                  
+                  return (
+                    <ProposalRow
+                      key={row.id}
+                      row={row}
+                      latest={latest}
+                      proposal={proposal as TradeProposal}
+                      decision={decision}
+                      snapshot={snapshot}
+                      refresh={refresh}
+                    />
+                  );
+                })}
               </div>
-            ) : (
+            </Card>
+          ) : (
+            <Card
+              title={
+                <span className="flex items-center gap-1.5">
+                  <Zap size={13} /> Autonomous Actions
+                </span>
+              }
+              action={
+                <Link href="/console/activity" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+                  {destinationLabel("/console/activity")} <ArrowRight size={12} />
+                </Link>
+              }
+            >
               <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
-                No recent autonomous actions are in the snapshot yet. Run Socratic Trade once to create the first
+                No recent autonomous actions are in the snapshot yet.  Run Socratic Trade once to create the first
                 persisted decision trace.
               </p>
-            )}
-          </Card>
+            </Card>
+          )}
+
+          
 
           <Card
             title={
               <span className="flex items-center gap-1.5">
-                <Database size={13} /> Evidence
-              </span>
-            }
-            action={
-              <Link href="/console/scan" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
-                Evidence board <ArrowRight size={12} />
-              </Link>
-            }
-          >
-            {evidenceRows.length > 0 ? (
-              <div className="con-evidence-grid">
-                {evidenceRows.map((row) => (
-                  <EvidenceCard key={row.title} {...row} />
-                ))}
-              </div>
-            ) : (
-              <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
-                No decision evidence is available yet. The next run will persist scan evidence, policy reasoning,
-                retrieved evidence, and dissent per decision.
-              </p>
-            )}
-          </Card>
-
-          <Card
-            title={
-              <span className="flex items-center gap-1.5">
-                <TrendingUp size={13} /> Outcome learning loop
+                <TrendingUp size={13} /> Outcome Learning Loop
               </span>
             }
             action={
               <Link href="/console/results" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
-                Outcomes <ArrowRight size={12} />
+                {destinationLabel("/console/results")} <ArrowRight size={12} />
               </Link>
             }
           >
@@ -203,15 +314,28 @@ export default function ConsoleHomePage() {
                   )}
                 </div>
                 <div
-                  className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-                  title={dayPnl ? `Baseline: ${fmtMoney(dayPnl.baselineEquity)} at ${fmtExact(dayPnl.baselineAt)}` : undefined}
+                  className={cx(
+                    "mt-0.5 text-[length:var(--con-fs-xs)]",
+                    dayPnl?.isStaleBaseline ? "font-semibold text-[color:var(--con-warn)]" : "text-[color:var(--con-faint)]"
+                  )}
+                  title={
+                    dayPnl
+                      ? dayPnl.isStaleBaseline
+                        ? `Baseline: ${fmtMoney(dayPnl.baselineEquity)} at ${fmtExact(dayPnl.baselineAt)}.  No snapshot was persisted between then and today, so this compares across a real gap, not just "yesterday" — treat it as directional only.`
+                        : `Baseline: ${fmtMoney(dayPnl.baselineEquity)} at ${fmtExact(dayPnl.baselineAt)}`
+                      : undefined
+                  }
                 >
-                  {dayPnl ? "vs last snapshot before today" : "no prior-day snapshot yet"}
+                  {dayPnl
+                    ? dayPnl.isStaleBaseline
+                      ? `No recent baseline — comparing to ${fmtDay(dayPnl.baselineAt)}`
+                      : "vs last snapshot before today"
+                    : "no prior-day snapshot yet"}
                 </div>
               </div>
               <Stat label="Cash" value={fmtMoney(portfolio?.cash)} sub={`Buying power ${fmtMoney(portfolio?.buyingPower)}`} />
               <Stat
-                label="Closed thesis samples"
+                label="Closed Thesis Samples"
                 value={snapshot.thesisScorecard?.reduce((sum, t) => sum + t.trades, 0) ?? 0}
                 sub="basis for future framework changes"
               />
@@ -219,25 +343,38 @@ export default function ConsoleHomePage() {
           </Card>
 
           <MarkToMarketCard markToMarket={markToMarket} equityWindow={equityWindow} />
+          <VsMarketCard benchmark={snapshot.performance?.benchmark} />
           <PositionsCard snapshot={snapshot} />
+
+          {previousTrades.length > 0 && (
+            <div className="flex flex-col gap-4 mt-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-[length:var(--con-fs-lg)] font-semibold">Previous Trades</h2>
+                <Link href="/console/decisions" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+                  All Decisions <ArrowRight size={12} />
+                </Link>
+              </div>
+              {previousTrades.map((row) => (
+                <ProposalRow
+                  key={row.id}
+                  row={row}
+                  latest={latest}
+                  proposal={row.proposal}
+                  decision={row.decision}
+                  snapshot={snapshot}
+                  refresh={refresh}
+                  surface="raised"
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         <aside className="flex min-w-0 flex-col gap-4">
           <RiskUtilizationCard risk={risk} />
+          <MarketAnalysisCard snapshot={snapshot} />
 
-          <Card
-            title={
-              <span className="flex items-center gap-1.5">
-                <AlertTriangle size={13} /> Dissent
-              </span>
-            }
-          >
-            <div className="flex flex-col gap-2">
-              {deriveDissentRows(primaryProposal, latest, primaryDecision).map((row) => (
-                <EvidenceCard key={row.title} {...row} />
-              ))}
-            </div>
-          </Card>
+          
 
           <Card
             title={
@@ -255,13 +392,8 @@ export default function ConsoleHomePage() {
               <p>
                 {primaryDecision?.coachNotes?.length
                   ? primaryDecision.coachNotes.at(-1)
-                  : "Tell it what it overweighted, underweighted, ignored, or should refocus on. Coaching attaches to the decision case instead of disappearing into chat."}
+                  : "Tell it what it overweighted, underweighted, ignored, or should refocus on.  Coaching attaches to the decision case instead of disappearing into chat."}
               </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Chip tone="muted">Refocus mandate</Chip>
-                <Chip tone="muted">Critique thesis</Chip>
-                <Chip tone="muted">Promote lesson</Chip>
-              </div>
               <CoachNoteForm decision={primaryDecision} refresh={refresh} />
             </div>
           </Card>
@@ -269,7 +401,7 @@ export default function ConsoleHomePage() {
           <Card
             title={
               <span className="flex items-center gap-1.5">
-                <GitBranch size={13} /> Framework improvements
+                <GitBranch size={13} /> Framework Improvements
               </span>
             }
             action={
@@ -280,7 +412,7 @@ export default function ConsoleHomePage() {
                 href={hasFrameworkProposals ? "/console/strategy" : "/console/results#thesis-regime"}
                 className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]"
               >
-                {hasFrameworkProposals ? "Framework" : "Results"} <ArrowRight size={12} />
+                {hasFrameworkProposals ? "Strategy" : "Results"} <ArrowRight size={12} />
               </Link>
             }
           >
@@ -288,27 +420,34 @@ export default function ConsoleHomePage() {
               <FrameworkProposalList proposals={snapshot.socratic?.frameworkProposals ?? []} refresh={refresh} />
             ) : (
               <div className="flex flex-col gap-2">
-                {frameworkRows.map((row) => (
-                  <EvidenceCard key={row.title} {...row} />
+                {frameworkRows.map((row, idx) => (
+                  <EvidenceCard key={idx} {...row} />
                 ))}
               </div>
             )}
           </Card>
 
-          <Card title="Run cadence">
+          <Card title="Run Cadence">
+            {/* Run once lives only in the chrome bar (labeled desktop / icon-only phone).
+                A second button here stacked under the sticky header on mobile — two "Run once"
+                controls within ~1 inch (owner report). Cadence status chips stay local. */}
             <div className="flex flex-wrap items-center gap-2">
-              <div className="sm:hidden">
-                <RunOnceButton snapshot={snapshot} size="sm" />
-              </div>
-              <Chip tone={state.tone === "warn" ? "warn" : state.tone === "neg" ? "neg" : "pos"}>{state.label}</Chip>
-              {latestRow && (
-                <Chip tone={latestRow.status === "failed" ? "neg" : "muted"}>
-                  latest {latestRow.status} · <Ago iso={latestRow.finishedAt ?? latestRow.startedAt} />
+              <Chip tone={state.tone === "warn" ? "warn" : state.tone === "neg" ? "neg" : state.tone === "muted" ? "muted" : "pos"}>{state.label}</Chip>
+              {latestRow && lastRun && (
+                <Chip
+                  tone={
+                    lastRun.failed ? "neg" : lastRun.skipped ? "warn" : "muted"
+                  }
+                  title={lastRun.title}
+                >
+                  latest {lastRun.statusLabel} · <Ago iso={latestRow.finishedAt ?? latestRow.startedAt} />
                 </Chip>
               )}
             </div>
             <div className="mt-3 border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-              {state.state === "active" && nextRun ? (
+              {state.state === "active" && state.marketOpen === false ? (
+                <span title={state.detail}>{state.detail}</span>
+              ) : state.state === "active" && nextRun ? (
                 <span title={fmtExact(nextRun)}>Next scheduled run {timeUntil(nextRun)} · cadence {snapshot.policy.runCadenceMinutes} min</span>
               ) : state.state === "active" ? (
                 <span title={`Configured cadence: every ${snapshot.policy.runCadenceMinutes} minutes.`}>
@@ -327,6 +466,57 @@ export default function ConsoleHomePage() {
   );
 }
 
+function VsMarketCard({ benchmark }: { benchmark?: BenchmarkComparison }) {
+  if (!benchmark) return null;
+  const symbol = benchmark.benchmarkSymbol;
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-1.5">
+          <TrendingUp size={13} /> Versus {symbol}
+        </span>
+      }
+      action={
+        <Link href="/console/results" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+          Results <ArrowRight size={12} />
+        </Link>
+      }
+    >
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Stat
+          label="Your account"
+          value={fmtPct(benchmark.accountReturnPct, 2, true)}
+          sub={`${benchmark.startDate} → ${benchmark.endDate}`}
+        />
+        <Stat label={symbol} value={fmtPct(benchmark.benchmarkReturnPct, 2, true)} sub="same cash, chained" />
+        <div>
+          <div className="con-card-title">You vs that</div>
+          <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight">
+            <SignedText value={benchmark.dollarExcess}>{fmtSignedMoney(benchmark.dollarExcess)}</SignedText>
+            <span className="mt-0.5 block text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-faint)]">
+              {fmtPct(benchmark.excessReturnPct, 2, true)} time-weighted
+            </span>
+          </div>
+        </div>
+      </div>
+      {benchmark.accountEquitySeries.length >= 2 && benchmark.shadowBenchmarkSeries.length >= 2 && (
+        <div className="mt-4 border-t border-[color:var(--con-line)] pt-3">
+          <BenchmarkChart
+            account={benchmark.accountEquitySeries}
+            shadow={benchmark.shadowBenchmarkSeries}
+            accountLabel="Your account"
+            benchmarkLabel={symbol}
+          />
+        </div>
+      )}
+      <p className="mt-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+        Same deposits and withdrawals as this account, counted from the start of the day they land.{SENTENCE_GAP}
+        The dashed line is what those dollars would be if they had tracked {symbol}.
+      </p>
+    </Card>
+  );
+}
+
 function MarkToMarketCard({
   markToMarket,
   equityWindow
@@ -338,7 +528,7 @@ function MarkToMarketCard({
     <Card
       title={
         <span className="flex items-center gap-1.5">
-          <TrendingUp size={13} /> Mark to market
+          <TrendingUp size={13} /> Mark to Market
         </span>
       }
     >
@@ -349,7 +539,7 @@ function MarkToMarketCard({
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Open market value" value={fmtMoney(markToMarket.marketValue)} />
+            <Stat label="Open Market Value" value={fmtMoney(markToMarket.marketValue)} />
             <div>
               <div className="con-card-title">Open P&amp;L</div>
               <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight">
@@ -358,12 +548,15 @@ function MarkToMarketCard({
                   {markToMarket.unrealizedPct !== undefined ? ` (${fmtPct(markToMarket.unrealizedPct, 2, true)})` : ""}
                 </SignedText>
               </div>
-              <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                vs open cost basis {fmtMoney(markToMarket.costBasis)}
+              <div
+                className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
+                title="Gross cost basis: the sum of |average entry price × quantity| across open positions, long and short alike.  The percentage above divides by this, not the net signed basis — a short position's capital is still capital at risk, not a subtraction from a long position's."
+              >
+                vs gross open cost basis {fmtMoney(markToMarket.costBasis)}
               </div>
             </div>
             <Stat label="Cash" value={fmtMoney(markToMarket.cash)} />
-            <Stat label="Buying power" value={fmtMoney(markToMarket.buyingPower)} />
+            <Stat label="Buying Power" value={fmtMoney(markToMarket.buyingPower)} />
           </div>
           <div className="mt-4 border-t border-[color:var(--con-line)] pt-3">
             <div className="mb-2 flex items-center justify-between gap-3">
@@ -383,19 +576,19 @@ function MarkToMarketCard({
 function RiskUtilizationCard({ risk }: { risk: ReturnType<typeof deriveRiskUtilization> }) {
   const rows = [
     {
-      label: "Daily notional",
+      label: "Daily Notional",
       used: fmtMoney(risk.dailyNotional.used),
       limit: typeof risk.dailyNotional.limit === "number" ? fmtMoneyWhole(risk.dailyNotional.limit) : "no cap",
       pct: risk.dailyNotional.pct
     },
     {
-      label: "Opening orders",
+      label: "Opening Orders",
       used: String(risk.dailyOrders.used),
       limit: String(risk.dailyOrders.limit ?? 0),
       pct: risk.dailyOrders.pct
     },
     {
-      label: "Capital deployed",
+      label: "Capital Deployed",
       used: fmtMoney(risk.investedCapital.used),
       limit: typeof risk.investedCapital.limit === "number" ? fmtMoney(risk.investedCapital.limit) : "n/a",
       pct: risk.investedCapital.pct
@@ -405,7 +598,7 @@ function RiskUtilizationCard({ risk }: { risk: ReturnType<typeof deriveRiskUtili
     <Card
       title={
         <span className="flex items-center gap-1.5">
-          <Database size={13} /> Risk utilization
+          <Database size={13} /> Risk Utilization
         </span>
       }
     >
@@ -419,9 +612,39 @@ function RiskUtilizationCard({ risk }: { risk: ReturnType<typeof deriveRiskUtili
                 {row.pct !== undefined ? ` · ${fmtPct(row.pct, 1)}` : ""}
               </span>
             </div>
-            <Meter value={row.pct !== undefined ? row.pct : 0} max={100} />
+            <Meter value={row.pct !== undefined ? row.pct : 0} max={100} label={row.label} />
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+function MarketAnalysisCard({ snapshot }: { snapshot: DashboardSnapshot }) {
+  const { macroBoard, latestScan } = snapshot;
+  if (!macroBoard) return null;
+
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-1.5">
+          <TrendingUp size={13} /> Market Analysis
+        </span>
+      }
+      action={
+        <Link href="/console/macro" className="flex items-center gap-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
+          Details <ArrowRight size={12} />
+        </Link>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <Stat label="Regime" value={macroBoard.regime || "Unknown"} />
+        {latestScan?.breadthPct != null && (
+          <Stat label="Market Breadth" value={fmtPct(latestScan.breadthPct, 1)} />
+        )}
+        {macroBoard.macro?.vix && (
+          <Stat label="VIX" value={macroBoard.macro.vix} />
+        )}
       </div>
     </Card>
   );
@@ -437,9 +660,10 @@ type DecisionRowData = {
   href?: string;
   title?: string;
   confidence?: number;
-  /** ISO timestamp of the decision/proposal — rendered top-right as a relative
-   *  "15m ago" (like Journal entries); absent for rows with no known time. */
   at?: string;
+  approvable?: boolean;
+  proposal?: any;
+  decision?: any;
 };
 
 type EvidenceRow = {
@@ -459,20 +683,128 @@ function deriveThesisHeadline(latest: StrategyDecision | undefined, proposal: Tr
   if (proposal?.tradeThesisTag) {
     return `Market thesis: ${formatMarketThesis(proposal.tradeThesisTag, proposal.symbol)}`;
   }
+  if (latest?.status && /skipped/.test(latest.status)) {
+    return "Latest run was skipped before a decision — not a successful evaluation.";
+  }
   if (latest?.summary) return "Latest run completed; Socratic Trade is holding its current posture.";
   return "Waiting for the next market thesis.";
 }
 
-function deriveThesisBody(latest: StrategyDecision | undefined, proposal: TradeProposal | undefined, decision?: SocraticDecisionCase): string {
-  if (decision?.rationale) {
-    const expression = decision.symbol ? `Current expression: ${decision.side ? `${decision.side.toUpperCase()} ` : ""}${decision.symbol}. ` : "";
-    return `${expression}${decision.rationale}`;
+function ThesisNarrative({
+  latest,
+  proposal,
+  decision,
+  status
+}: {
+  latest: StrategyDecision | undefined;
+  proposal: TradeProposal | undefined;
+  decision?: SocraticDecisionCase;
+  status?: string;
+}) {
+  const rationale = decision?.rationale ?? proposal?.rationale;
+  if (!rationale) {
+    return (
+      <p>
+        {latest?.summary ?? "Run Socratic Trade to form a thesis from the current market, portfolio, evidence, and remembered outcomes."}
+      </p>
+    );
   }
-  if (proposal?.rationale) {
-    return `Current expression: ${proposal.side.toUpperCase()} ${proposal.symbol}. ${proposal.rationale}`;
-  }
-  if (latest?.summary) return latest.summary;
-  return "Run Socratic Trade to form a thesis from the current market, portfolio, evidence, and remembered outcomes.";
+
+  const parts = splitThesisRationale(
+    rationale,
+    decision?.greenTeamRationale ?? proposal?.greenTeamRationale
+  );
+  const redTeam = decision?.redTeamVerdict ?? proposal?.redTeamVerdict;
+  const sizing = decision?.sizingSnapshot ?? proposal?.sizingSnapshot;
+  const outcome = deterministicOutcomePresentation(status, decision?.policyDecision);
+  const symbol = decision?.symbol ?? proposal?.symbol;
+  const side = decision?.side ?? proposal?.side;
+  const expression = symbol ? `Current expression: ${side ? `${side.toUpperCase()} ` : ""}${symbol}. ` : "";
+
+  return (
+    <div className="mt-3 grid gap-3 text-[length:var(--con-fs-sm)] leading-relaxed">
+      <section className="rounded-control border border-[color:var(--con-pos-border)] border-l-4 border-l-[color:var(--con-pos)] bg-[color:var(--con-pos-soft)] px-3 py-2.5">
+        <div className="text-[length:var(--con-fs-xs)] font-bold uppercase tracking-[0.12em] text-[color:var(--con-pos)]">
+          Green Team proposal
+        </div>
+        <p className="mt-1">{expression}{parts.greenTeam}</p>
+      </section>
+
+      {(parts.checks || sizing) && (
+        <section className="rounded-control border border-[color:var(--con-line)] px-3 py-2.5">
+          <div className="text-[length:var(--con-fs-xs)] font-bold uppercase tracking-[0.12em] text-[color:var(--con-faint)]">
+            Deterministic sizing &amp; risk receipts
+          </div>
+          {sizing && (
+            <p className="mt-1 font-semibold">
+              App-calculated at decision time: {fmtMoney(sizing.estimatedNotional)} = {fmtPct(sizing.estimatedPctOfNav, 2)} of {fmtMoney(sizing.portfolioValue)} NAV.
+              {sizing.sizeBasis === "quantity" && sizing.quantity != null
+                ? ` Broker route: ${sizing.quantity} share${sizing.quantity === 1 ? "" : "s"}.`
+                : sizing.sizeBasis === "notional" && sizing.dollarAmount != null
+                  ? ` Broker route: ${fmtMoney(sizing.dollarAmount)} notional.`
+                  : ""}
+              {sizing.dailyOpeningCap
+                ? ` Daily opening cap: ${
+                    sizing.dailyOpeningCap.mode === "pct_nav"
+                      ? `${fmtPct(sizing.dailyOpeningCap.configuredValue, 1)} of NAV`
+                      : `${fmtMoney(sizing.dailyOpeningCap.configuredValue)} fixed (${fmtPct(sizing.dailyOpeningCap.pctOfNav, 1)} of NAV)`
+                  } = ${fmtMoney(sizing.dailyOpeningCap.effectiveNotional)}.`
+                : ""}
+              {sizing.dailyNotionalUsed != null
+                ? ` Used today: ${fmtMoney(sizing.dailyNotionalUsed)}${
+                    sizing.remainingDailyNotional != null
+                      ? `; remaining: ${fmtMoney(sizing.remainingDailyNotional)}`
+                      : ""
+                  }.`
+                : ""}
+            </p>
+          )}
+          {parts.checks && <p className="mt-1">{parts.checks}</p>}
+        </section>
+      )}
+
+      {redTeam && (
+        <section className="rounded-control border border-[color:var(--con-neg-border)] border-l-4 border-l-[color:var(--con-neg)] bg-[color:var(--con-neg-soft)] px-3 py-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-[length:var(--con-fs-xs)] font-bold uppercase tracking-[0.12em] text-[color:var(--con-neg)]">
+              Red Team review
+            </div>
+            <Chip
+              tone={!redTeam.available ? "warn" : redTeam.rejected ? "neg" : "pos"}
+              title={!redTeam.available ? redTeamFailureMeta(redTeam.failureKind).title : undefined}
+            >
+              {redTeamVerdictLabel(redTeam, decision?.policyDecision?.socraticOverride?.applied, status)}
+            </Chip>
+          </div>
+          {!redTeam.available && (
+            // #2552 parity with the PWA: name the CAUSE (which reviewer, which failure) instead
+            // of only the outcome — the reviewer model is only shown when one actually ran.
+            <p className="mt-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
+              Red Team failed{redTeam.model ? ` — ${redTeam.model}` : ""} ({redTeamFailureMeta(redTeam.failureKind).label})
+            </p>
+          )}
+          <p className="mt-1">{redTeam.reason}</p>
+        </section>
+      )}
+
+      {outcome && (
+        <section
+          className={`rounded-control border px-3 py-2.5 ${
+            outcome.tone === "pos"
+              ? "border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)]"
+              : outcome.tone === "neg"
+                ? "border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)]"
+                : "border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)]"
+          }`}
+        >
+          <div className="text-[length:var(--con-fs-xs)] font-bold uppercase tracking-[0.12em] text-[color:var(--con-faint)]">
+            Deterministic outcome · {outcome.label}
+          </div>
+          <p className="mt-1">{outcome.body}</p>
+        </section>
+      )}
+    </div>
+  );
 }
 
 function formatMarketThesis(raw: string, symbol?: string | null): string {
@@ -485,19 +817,6 @@ function formatMarketThesis(raw: string, symbol?: string | null): string {
     .replace(/\b[a-z]/g, (char) => char.toUpperCase());
 }
 
-function deriveActionRows(snapshot: DashboardSnapshot, latest: StrategyDecision | undefined): DecisionRowData[] {
-  const persisted = snapshot.socratic?.decisions?.slice(0, 5).map(decisionFromSocratic) ?? [];
-  if (persisted.length > 0) return persisted;
-  const latestRows =
-    latest?.proposals
-      ?.slice(0, 5)
-      .map((item) =>
-        decisionFromProposal(`${latest.runId}-${item.proposal.symbol}-${item.status}`, item.proposal, item.status, item.reasons, latest.createdAt)
-      ) ?? [];
-  if (latestRows.length > 0) return latestRows;
-  return snapshot.pendingProposals.slice(0, 5).map((pending) => decisionFromPending(pending));
-}
-
 function decisionFromSocratic(decision: SocraticDecisionCase): DecisionRowData {
   const reasons = decision.policyDecision?.reasons ?? [];
   const rationale = decision.policyDecision?.socraticOverride?.applied
@@ -506,43 +825,55 @@ function decisionFromSocratic(decision: SocraticDecisionCase): DecisionRowData {
   return {
     id: decision.id,
     symbol: decision.symbol ?? "Portfolio",
-    verb: decision.side ? SIDE_LABEL[decision.side] ?? decision.side : "Observed",
+    verb: sideVerb(decision.side, decision.status),
     size: decision.notional ? fmtMoney(decision.notional) : EM_DASH,
     status: decision.status,
     rationale: withBlockReasons(rationale, decision.status, reasons),
     href: `/console/decisions/${encodeURIComponent(decision.id)}`,
     title: reasons.length > 0 ? `Policy reasons:\n${reasons.join("\n")}` : undefined,
     confidence: decision.confidenceScore,
-    at: decision.createdAt
+    at: decision.createdAt,
+    decision,
+    approvable: false
   };
 }
 
-function decisionFromProposal(id: string, proposal: TradeProposal, status: string, reasons: string[] = [], at?: string): DecisionRowData {
+function decisionFromProposal(
+  id: string,
+  proposal: TradeProposal,
+  status: string,
+  reasons: string[] = [],
+  at?: string,
+  approvable = false
+): DecisionRowData {
   return {
     id,
     symbol: proposal.symbol,
-    verb: SIDE_LABEL[proposal.side] ?? proposal.side,
+    verb: sideVerb(proposal.side, status),
     size: proposal.dollarAmount ? fmtMoney(proposal.dollarAmount) : proposal.quantity ? `${proposal.quantity} sh` : EM_DASH,
     status,
     rationale: withBlockReasons(proposal.rationale, status, reasons),
     title: reasons.length > 0 ? `Policy reasons:\n${reasons.join("\n")}` : undefined,
     confidence: proposal.confidenceScore,
-    at
+    at,
+    proposal,
+    approvable
   };
 }
 
 function decisionFromPending(pending: PendingProposal): DecisionRowData {
   const proposal = pending.proposal;
   return {
-    ...decisionFromProposal(pending.id, proposal, "pending", [], pending.createdAt),
+    ...decisionFromProposal(pending.id, proposal, "pending", [], pending.createdAt, true),
     size: pending.estimatedNotional ? fmtMoney(pending.estimatedNotional) : proposal.dollarAmount ? fmtMoney(proposal.dollarAmount) : EM_DASH
   };
 }
 
-function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecision | undefined, decision?: SocraticDecisionCase): EvidenceRow[] {
+function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecision | undefined, decision?: SocraticDecisionCase, proposal?: any): EvidenceRow[] {
   const rows: EvidenceRow[] = [];
   if (decision) {
-    for (const item of decision.evidence.slice(0, 5)) {
+    // Persisted decision cases can predate evidence/rag arrays or arrive partial from older rows.
+    for (const item of (decision.evidence ?? []).slice(0, 5)) {
       const source = evidenceSourceLabel(item.source);
       rows.push({
         title: item.title,
@@ -552,7 +883,8 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
         tone: toneFromSocratic(item.tone)
       });
     }
-    for (const rag of decision.ragAttributions.slice(0, 2)) {
+    for (const rag of (decision.ragAttributions ?? []).slice(0, 2)) {
+      if (rows.some((r) => r.body === rag.contribution)) continue;
       const source = evidenceSourceLabel(rag.source);
       rows.push({
         title: rag.docType ? `Retrieved ${plainLabel(rag.docType)}` : "Retrieved evidence",
@@ -564,7 +896,7 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
     }
     if (rows.length > 0) return rows.slice(0, 6);
   }
-  const scan = latest?.marketScan;
+  const scan = snapshot.latestScan;
   if (scan) {
     const sources = formatSourceList(scan.source);
     rows.push({
@@ -577,20 +909,22 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
           : "The latest thesis links to a captured scan, with source attribution preserved.",
       tone: "accent"
     });
-    for (const candidate of scan.topCandidates.slice(0, 3)) rows.push(evidenceFromCandidate(candidate));
+    // latestScan can be a truthy partial audit shape without topCandidates (strategy_run /
+    // market_scan history). Never call .slice on a missing array — that white-screened /console.
+    for (const candidate of safeTopCandidates(scan).slice(0, 3)) rows.push(evidenceFromCandidate(candidate));
   }
 
-  const proposal = latest?.proposals?.[0]?.proposal ?? snapshot.pendingProposals[0]?.proposal;
-  if (proposal?.proposedByModel) {
+  const p = proposal ?? latest?.proposals?.[0]?.proposal ?? snapshot.pendingProposals[0]?.proposal;
+  if (p?.proposedByModel) {
     rows.push({
       title: "Model attribution",
-      meta: proposal.proposedByModel,
+      meta: p.proposedByModel,
       body: "The proposal stores the model that actually generated it, so later outcome review can score models instead of guessing.",
       tone: "pos"
     });
   }
-  if (proposal?.redTeamVerdict) {
-    const verdict = proposal.redTeamVerdict;
+  if (p?.redTeamVerdict) {
+    const verdict = p.redTeamVerdict;
     if (verdict.available) {
       rows.push({
         title: "Adversarial review",
@@ -615,16 +949,18 @@ function deriveEvidenceRows(snapshot: DashboardSnapshot, latest: StrategyDecisio
 function evidenceFromCandidate(candidate: MarketQuote): EvidenceRow {
   const bullet = candidate.evidenceBulletins?.[0] ?? candidate.headlines?.[0];
   const sources = sourceListFromQuote(candidate) || evidenceSourceLabel(candidate.provider);
+  const score = typeof candidate.score === "number" && Number.isFinite(candidate.score) ? candidate.score : 0;
+  const changePct = typeof candidate.intradayChangePct === "number" && Number.isFinite(candidate.intradayChangePct) ? candidate.intradayChangePct : 0;
   return {
     title: candidate.symbol,
     symbol: candidate.symbol,
     quote: candidate,
-    meta: `score ${Math.round(candidate.score)}${sources ? ` · ${sources}` : ""}`,
+    meta: `score ${Math.round(score)}${sources ? ` · ${sources}` : ""}`,
     metaTitle: sources ? `Data sources: ${sources}` : undefined,
     body:
       bullet ??
-      `${candidate.companyName ?? candidate.symbol} was in the latest candidate set with ${fmtPct(candidate.intradayChangePct, 2, true)} intraday change.`,
-    tone: candidate.intradayChangePct < 0 ? "warn" : "pos"
+      `${candidate.companyName ?? candidate.symbol} was in the latest candidate set with ${fmtPct(changePct, 2, true)} intraday change.`,
+    tone: changePct < 0 ? "warn" : "pos"
   };
 }
 
@@ -640,8 +976,8 @@ function deriveDissentRows(proposal: TradeProposal | undefined, latest: Strategy
   }
   if (proposal?.redTeamVerdict?.available) {
     rows.push({
-      title: "Red-team objection",
-      meta: proposal.redTeamVerdict.rejected ? "critical" : "survived",
+      title: "Red Team review",
+      meta: redTeamVerdictLabel(proposal.redTeamVerdict),
       body: proposal.redTeamVerdict.reason,
       tone: proposal.redTeamVerdict.rejected ? "neg" : "warn"
     });
@@ -670,8 +1006,8 @@ function deriveFrameworkRows(snapshot: DashboardSnapshot): EvidenceRow[] {
     rows.push({
       title: topThesis.thesisTag,
       meta: `${topThesis.trades} closed · ${fmtPct(topThesis.winRate, 1)} win rate`,
-      metaTitle: "Raw realized return for closed lots in this thesis bucket, not benchmark-relative. The SPY comparison lives on Results.",
-      body: `Raw average return ${fmtPct(topThesis.avgReturnPct, 2, true)}. Socratic Trade should use this as earned evidence before changing sizing or thesis weight.`,
+      metaTitle: "Raw realized return for closed lots in this thesis bucket, not benchmark-relative.  The SPY comparison lives on Results.",
+      body: `Raw average return ${fmtPct(topThesis.avgReturnPct, 2, true)}.  Socratic Trade should use this as earned evidence before changing sizing or thesis weight.`,
       tone: topThesis.avgReturnPct >= 0 ? "pos" : "warn"
     });
   }
@@ -680,8 +1016,8 @@ function deriveFrameworkRows(snapshot: DashboardSnapshot): EvidenceRow[] {
     rows.push({
       title: topRegime.regime,
       meta: `${topRegime.trades} closed in regime`,
-      metaTitle: "Raw realized return for closed lots opened in this regime, not benchmark-relative. The SPY comparison lives on Results.",
-      body: `Raw regime average return ${fmtPct(topRegime.avgReturnPct, 2, true)}. Use this to challenge or support future regime-specific autonomy.`,
+      metaTitle: "Raw realized return for closed lots opened in this regime, not benchmark-relative.  The SPY comparison lives on Results.",
+      body: `Raw regime average return ${fmtPct(topRegime.avgReturnPct, 2, true)}.  Use this to challenge or support future regime-specific autonomy.`,
       tone: topRegime.avgReturnPct >= 0 ? "pos" : "warn"
     });
   }
@@ -704,44 +1040,178 @@ function toneFromSocratic(tone: string | undefined): EvidenceRow["tone"] {
   return "accent";
 }
 
-function DecisionRow({ row }: { row: DecisionRowData }) {
+function ProposalRow({
+  row,
+  latest,
+  proposal,
+  decision,
+  snapshot,
+  refresh,
+  surface = "inset"
+}: {
+  row: DecisionRowData;
+  latest: StrategyDecision | undefined;
+  proposal: TradeProposal | undefined;
+  decision: SocraticDecisionCase | undefined;
+  snapshot: DashboardSnapshot;
+  refresh: () => void;
+  /**
+   * Where the row sits. "inset" (default) is the subtle --con-surface-2 fill used
+   * when the row lives INSIDE a white card (Latest Strategy Run) — there it reads as
+   * a recessed lane. "raised" is --con-surface, for rows sitting bare on the page
+   * background (Previous Trades): --con-surface-2 (#f4f6fa) is within a few RGB steps
+   * of --con-bg (#f1f4f6), so on the page those rows had no visible fill at all and
+   * read as unstyled strips.
+   */
+  surface?: "inset" | "raised";
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [liveConfirm, setLiveConfirm] = useState<string | null>(null);
+  const [confirmKey, setConfirmKey] = useState(0);
+  const toast = useToast();
+
+  const handleApprove = async () => {
+    setBusy(true);
+    try {
+      const confirmBody = liveConfirm ? {
+        proposalId: row.id,
+        executionMode: "broker/live" as const,
+        typedText: liveConfirm
+      } : undefined;
+      const res = await approveProposal(row.id, confirmBody);
+      const outcome = toastForApproveResult({ status: res.status, reasons: res.reasons });
+      toast.push(outcome.tone, outcome.title, outcome.detail);
+      if (isSuccessfulApprovalResult(res.status)) {
+        setOpen(false);
+        refresh();
+      } else {
+        refresh();
+      }
+    } catch (e: any) {
+      if (e instanceof LiveConfirmationRequiredError) {
+        setLiveConfirm(e.expectedText);
+      } else {
+        toast.push("neg", "Approval failed", e.message || String(e));
+        // Remount the phrase field so a leftover matching value cannot dead-end
+        // the sheet.  Keep Approve disabled while the ritual is showing — enabling
+        // it would send the expected phrase without the owner typing it.
+        setConfirmKey((key) => key + 1);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const showApprove = isProposalRowApprovable(row.approvable, row.status);
+  const evidenceRows = deriveEvidenceRows(snapshot, latest, decision);
+
+  let combinedStatus = "";
+  if (isExecutedStatus(row.status)) {
+    combinedStatus = row.verb;
+  } else {
+    let statusText = decisionStatusLabel(row.status);
+    if (statusText === "Placement pending" || statusText === "Proposed" || statusText === "Planned") {
+      statusText = "Pending";
+    }
+    const sideNoun = row.verb === "Sell" ? "Sale" : row.verb;
+    combinedStatus = `${sideNoun} ${statusText}`;
+  }
+  const chipTone = proposalChipTone(row.status);
+
+  // Literal class strings (not interpolated tokens) so Tailwind's scanner sees both.
+  const rowBg = surface === "raised" ? "bg-[color:var(--con-surface)]" : "bg-[color:var(--con-surface-2)]";
+  const rowRingOffset =
+    surface === "raised" ? "ring-offset-[color:var(--con-surface)]" : "ring-offset-[color:var(--con-surface-2)]";
+
   return (
-    <article className="con-decision-row" title={row.title}>
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          {row.symbol === "Portfolio" ? <strong>{row.symbol}</strong> : <SymbolButton symbol={row.symbol} showLogo={false} />}
-          <span>{row.verb}</span>
-          <Chip tone={row.status === "blocked" || row.status === "failed" ? "warn" : row.status === "pending" ? "accent" : "pos"}>
-            {decisionStatusLabel(row.status)}
-          </Chip>
+    <>
+      <div className={`flex items-stretch gap-0 rounded-md border border-[color:var(--con-line)] ${rowBg}`}>
+        <div className="flex shrink-0 items-center px-2.5 py-2.5">
+          {row.symbol === "Portfolio" ? <strong>{row.symbol}</strong> : <SymbolButton symbol={row.symbol} />}
         </div>
-        <p>{row.rationale}</p>
+        <button
+          type="button"
+          className={`flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-r-md p-2.5 text-left transition-colors hover:bg-[color:var(--con-surface-3)] focus-visible:bg-[color:var(--con-surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)] focus-visible:ring-offset-2 ${rowRingOffset}`}
+          onClick={() => setOpen(true)}
+          aria-label={`View ${row.symbol} proposal details`}
+        >
+          <Chip tone={chipTone}>
+            {combinedStatus}
+          </Chip>
+          <span className="flex items-center gap-1 whitespace-nowrap text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            View details <ArrowRight size={12} />
+          </span>
+        </button>
       </div>
-      <div className="text-right">
-        {/* relative decision time, top-right — same treatment as Journal entries */}
-        {row.at && (
-          <div className="text-[length:var(--con-fs-xs)] font-normal text-[color:var(--con-faint)]">
-            <Ago iso={row.at} />
-          </div>
-        )}
-        <div className="con-num font-semibold">{row.size}</div>
-        {typeof row.confidence === "number" && <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">conf {row.confidence}</div>}
-        {row.href && (
-          <Link href={row.href} className="mt-1 inline-flex text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-accent)]">
-            Trace
-          </Link>
-        )}
-      </div>
-    </article>
+      
+      <Sheet open={open} onClose={() => setOpen(false)} title={<span className="flex items-center gap-1.5"><Brain size={13} /> Proposal Details</span>} wide>
+        <div className="flex flex-col gap-4 mt-2">
+          <ThesisNarrative
+            latest={latest}
+            proposal={proposal}
+            decision={decision}
+            status={row.status}
+          />
+          {proposal?.tradeThesisTag && (
+            <div className="flex flex-wrap gap-2">
+              <Chip tone="accent" title="The thesis bucket this reasoning is filed under for later outcome scoring.">
+                {thesisTagLabel(proposal.tradeThesisTag)}
+              </Chip>
+            </div>
+          )}
+          {evidenceRows.length > 0 && (
+            <div className="border-t border-[color:var(--con-line)] pt-4 mt-2">
+              <h3 className="font-semibold text-[length:var(--con-fs-sm)] flex items-center gap-1.5 mb-3">
+                <Database size={13} /> Relevant Evidence
+              </h3>
+              <div className="flex flex-col gap-3">
+                {evidenceRows.map((er, idx) => (
+                  <EvidenceCard key={idx} {...er} />
+                ))}
+              </div>
+            </div>
+          )}
+          {showApprove && (
+            <div className="border-t border-[color:var(--con-line)] pt-4 mt-2 flex flex-col gap-2">
+              {liveConfirm && (
+                <div className="text-[length:var(--con-fs-sm)] p-3 bg-[color:var(--con-warn-soft)] border border-[color:var(--con-warn-border)] rounded-md">
+                  <p className="mb-2 font-semibold text-[color:var(--con-warn)]">Live trading requires confirmation.  Type <strong>{liveConfirm}</strong> to proceed.</p>
+                  <input
+                    key={confirmKey}
+                    type="text"
+                    className="con-input w-full mb-2"
+                    placeholder={liveConfirm}
+                    onChange={(e) => {
+                      if (e.target.value === liveConfirm) {
+                        handleApprove();
+                      }
+                    }}
+                  />
+                </div>
+              )}
+              <button 
+                className="con-btn con-btn-primary w-full justify-center" 
+                onClick={handleApprove}
+                disabled={busy || !!liveConfirm}
+              >
+                {busy ? "Approving..." : "Approve Proposal"}
+              </button>
+            </div>
+          )}
+        </div>
+      </Sheet>
+    </>
   );
 }
+
 
 function EvidenceCard({ title, meta, metaTitle, body, symbol, quote, tone = "accent" }: EvidenceRow) {
   return (
     <article className={`con-evidence-card con-evidence-${tone}`}>
       <div className="flex items-start justify-between gap-3">
         {symbol ? (
-          <SymbolButton symbol={symbol} quote={quote} showLogo={false}>
+          <SymbolButton symbol={symbol} quote={quote}>
             {title}
           </SymbolButton>
         ) : (
@@ -775,7 +1245,14 @@ function CoachNoteForm({ decision, refresh }: { decision?: SocraticDecisionCase;
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
   if (!decision) return null;
+
+  const applyChip = (prefill: string) => {
+    setNote((current) => applyCoachChipPrefill(current, prefill));
+    noteRef.current?.focus();
+  };
+
   return (
     <form
       className="mt-3 flex flex-col gap-2"
@@ -802,7 +1279,20 @@ function CoachNoteForm({ decision, refresh }: { decision?: SocraticDecisionCase;
         }
       }}
     >
+      <div className="flex flex-wrap gap-2">
+        {COACH_NOTE_CHIPS.map((chip) => (
+          <button
+            key={chip.id}
+            type="button"
+            className="con-chip con-chip-muted cursor-pointer"
+            onClick={() => applyChip(chip.prefill)}
+          >
+            {chip.label}
+          </button>
+        ))}
+      </div>
       <textarea
+        ref={noteRef}
         className="con-textarea"
         rows={3}
         value={note}
@@ -811,7 +1301,7 @@ function CoachNoteForm({ decision, refresh }: { decision?: SocraticDecisionCase;
       />
       <div className="flex flex-wrap items-center gap-2">
         <button type="submit" className="con-btn con-btn-primary con-btn-sm" disabled={busy || !note.trim()}>
-          <MessageSquare size={14} /> Save note
+          <MessageSquare size={14} /> Save Note
         </button>
         {message && <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{message}</span>}
       </div>
@@ -823,10 +1313,39 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, string>>({});
+  const [reviewing, setReviewing] = useState(false);
+
+  const pendingCount = proposals.filter((p) => p.status === "pending").length;
+
+  const runAiReview = async () => {
+    setReviewing(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/socratic/framework/review", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { reviewed?: number; skippedReason?: string };
+      await refresh();
+      setMessage(
+        data.reviewed
+          ? `AI reviewed ${data.reviewed} pending proposal${data.reviewed === 1 ? "" : "s"}.`
+          : data.skippedReason === "no_pending"
+            ? "No pending proposals to review."
+            : data.skippedReason === "no_llm_key"
+              ? "AI review needs an LLM key configured."
+              : data.skippedReason === "over_budget"
+                ? "AI review skipped: LLM budget spent."
+                : "AI review produced no recommendations."
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not run AI review.");
+    } finally {
+      setReviewing(false);
+    }
+  };
 
   const update = async (
     proposal: SocraticFrameworkProposal,
-    status: "accepted" | "rejected" | "applied",
+    status: "pending" | "accepted" | "rejected" | "applied",
     ownerVerb?: "accept" | "reject" | "rewrite"
   ) => {
     setBusyId(proposal.id);
@@ -853,13 +1372,60 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
 
   return (
     <div className="flex flex-col gap-2">
-      {proposals.slice(0, 5).map((proposal) => (
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+          Learning proposals across all accounts{pendingCount > 0 ? ` · ${pendingCount} shown pending` : ""}
+        </span>
+        {/* Not gated on the shown pendingCount: this list is truncated to the 25 most recent
+            (mixed status), but the review route works on the FULL pending backlog server-side —
+            so keep the button live whenever we're not already reviewing. */}
+        <button
+          type="button"
+          className="con-btn con-btn-outline con-btn-sm"
+          disabled={reviewing}
+          onClick={() => void runAiReview()}
+          title="Review every pending proposal (across all accounts) in a single LLM call and attach an advisory recommendation to each."
+        >
+          <Brain size={14} /> {reviewing ? "Reviewing…" : "AI review pending"}
+        </button>
+      </div>
+      <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+        <strong>Accept</strong> = agree this change should be made (intent only — nothing auto-implements).{" "}
+        <strong>Applied</strong> = you already put that change into policy/prompt/code.{" "}
+        <strong>Rewrite</strong> = accept your edited text.{" "}
+        <strong>Reject</strong> = discard.  Decisions can be changed anytime.
+      </p>
+      {proposals.slice(0, 5).map((proposal) => {
+        const responseText = (responses[proposal.id] ?? proposal.ownerResponse ?? "").trim();
+        const busy = busyId === proposal.id;
+        return (
         <article key={proposal.id} className="con-evidence-card con-evidence-accent">
           <div className="flex items-start justify-between gap-3">
             <strong>{proposal.title}</strong>
             <span>{frameworkStatusLabel(proposal.status)}</span>
           </div>
           <p>{proposal.proposedChange}</p>
+          {proposal.aiReview && (
+            <div className="mt-2 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)]">
+              <div className="flex items-center gap-2 font-semibold">
+                <Brain size={13} /> AI recommends: {proposal.aiReview.verdict}
+              </div>
+              <p className="mt-1 text-[color:var(--con-muted)]">{proposal.aiReview.rationale}</p>
+              {proposal.aiReview.verdict === "rewrite" && proposal.aiReview.rewrittenChange && (
+                <div className="mt-2">
+                  <p className="text-[color:var(--con-fg)]">{proposal.aiReview.rewrittenChange}</p>
+                  <button
+                    type="button"
+                    className="con-btn con-btn-outline con-btn-sm mt-2"
+                    disabled={busy}
+                    onClick={() => setResponses((current) => ({ ...current, [proposal.id]: proposal.aiReview!.rewrittenChange ?? "" }))}
+                  >
+                    <MessageSquare size={13} /> Use suggested rewrite
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <textarea
             className="con-textarea mt-3"
             rows={3}
@@ -877,7 +1443,8 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
             <button
               type="button"
               className="con-btn con-btn-pos con-btn-sm"
-              disabled={busyId === proposal.id || proposal.status !== "pending"}
+              disabled={busy}
+              title="Agree this proposed change should be made.  Does not auto-edit policy or prompts."
               onClick={() => void update(proposal, "accepted", "accept")}
             >
               <Check size={14} /> Accept
@@ -885,7 +1452,8 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
             <button
               type="button"
               className="con-btn con-btn-outline con-btn-sm"
-              disabled={busyId === proposal.id || proposal.status !== "pending" || !(responses[proposal.id] ?? proposal.ownerResponse ?? "").trim()}
+              disabled={busy || !responseText}
+              title="Accept using the text in Owner response as the rewritten proposed change."
               onClick={() => void update(proposal, "accepted", "rewrite")}
             >
               <MessageSquare size={14} /> Rewrite
@@ -893,7 +1461,8 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
             <button
               type="button"
               className="con-btn con-btn-outline con-btn-sm"
-              disabled={busyId === proposal.id || proposal.status !== "accepted"}
+              disabled={busy || (proposal.status !== "accepted" && proposal.status !== "applied")}
+              title="Mark that you already implemented the accepted change (policy, prompt, or code)."
               onClick={() => void update(proposal, "applied")}
             >
               <GitBranch size={14} /> Applied
@@ -901,15 +1470,29 @@ function FrameworkProposalList({ proposals, refresh }: { proposals: SocraticFram
             <button
               type="button"
               className="con-btn con-btn-danger-outline con-btn-sm"
-              disabled={busyId === proposal.id || proposal.status !== "pending"}
+              disabled={busy}
+              title="Discard this proposal.  You can change your mind later."
               onClick={() => void update(proposal, "rejected", "reject")}
             >
               <X size={14} /> Reject
             </button>
+            {proposal.status !== "pending" && (
+              <button
+                type="button"
+                className="con-btn con-btn-outline con-btn-sm"
+                disabled={busy}
+                title="Return this proposal to Pending so it can be re-reviewed."
+                onClick={() => void update(proposal, "pending")}
+              >
+                <RotateCcw size={14} /> Reopen
+              </button>
+            )}
           </div>
         </article>
-      ))}
+        );
+      })}
       {message && <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{message}</span>}
     </div>
   );
 }
+// PR trigger

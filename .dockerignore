@@ -1,0 +1,66 @@
+# Keep the build context tiny so Coolify's ~30m docker-build budget is spent on
+# npm ci + next build, not on shipping local caches / agent worktrees / tests.
+# Without this the COPY . . step + the runtime COPY --chown of multi-GB trees
+# was timing out every deploy after 2026-08-03 (images ~4 GB; Horizon job dies
+# at ~30 min on the slow COPY --chown layer).
+
+# Dependencies & build output (rebuilt inside the image)
+node_modules
+.next
+out
+.turbo
+.swc
+coverage
+playwright-report
+test-results
+.nyc_output
+
+# VCS / editor / agent local state
+.git
+.github
+.claude
+.cursor
+.codex
+.grok
+.vscode
+.idea
+*.xcuserstate
+**/.DS_Store
+
+# Local env & secrets (must never land in an image layer)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dev-only / non-runtime trees
+test
+# docs/* is large and mostly non-runtime, BUT the app imports benchmark JSON
+# at build time (app/api/llm-usage/model-stats/route.ts → docs/benchmarks/*.json).
+# Keep those JSON files; drop the rest of docs.
+docs/**
+!docs/benchmarks/
+!docs/benchmarks/**
+ios
+pdf_pages
+*.PDF
+*.pdf
+data
+tmp
+temp
+logs
+*.log
+
+# Agent / worktree noise
+apps
+_ragproof.ts
+Picsew_*
+
+# Large local history hoards (prod reads from volume / providers, not image)
+data/history-5y
+data/massive-history
+data/fmp-*
+
+# Eval runners import test fixtures; not needed in prod image
+scripts/eval

@@ -2,26 +2,20 @@
 // systems under a single namespace. The app/console set is renamed Con* so its
 // Card/Chip/Dot/Field don't collide with the app/ui set in the shared
 // window.SocraticTradeDS namespace. See .design-sync/NOTES.md for the full why.
+//
+// The UI group was slimmed 2026-07-16 alongside app/ui/primitives.tsx: that
+// file now only implements Card, Button, and buttonClass (its real app
+// consumers) — every other former export (IconButton, PanelHeader, Chip, Dot,
+// Switch, Segmented, Tabs, Field, StatTile, EmptyState, inputClass, ICON) was
+// deleted as dead code and is no longer re-exported here.
 
 // ── app/ui primitives (group: UI) ──────────────────────────────────────────
 export {
   Button,
-  IconButton,
   Card,
-  PanelHeader,
-  Chip,
-  Dot,
-  Switch,
-  Segmented,
-  Tabs,
-  Field,
-  StatTile,
-  EmptyState,
-  // Styling helpers (not components) — available on window.SocraticTradeDS for
-  // composing DS-styled form inputs / button-looking links.
-  inputClass,
-  buttonClass,
-  ICON
+  // Styling helper (not a component) — available on window.SocraticTradeDS for
+  // composing button-looking links.
+  buttonClass
 } from "../../app/ui/primitives";
 
 // ── app/console primitives (group: Console), renamed Con* ───────────────────

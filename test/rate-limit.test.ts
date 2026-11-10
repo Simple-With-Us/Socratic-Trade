@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { enforceRateLimit, rateLimit, resetRateLimiter } from "../src/lib/rate-limit";
+import {
+  enforceRateLimit,
+  RATE_LIMIT_BUCKET_CAP,
+  rateLimit,
+  rateLimiterBucketCount,
+  resetRateLimiter
+} from "../src/lib/rate-limit";
 
 describe("rateLimit (sliding window)", () => {
   afterEach(() => resetRateLimiter());
@@ -33,6 +39,26 @@ describe("rateLimit (sliding window)", () => {
     expect(rateLimit("u:r", opts, t0).allowed).toBe(false);
     // Advance beyond the window — the two old hits age out.
     expect(rateLimit("u:r", opts, t0 + 1_001).allowed).toBe(true);
+  });
+
+  it("evicts fully expired subjects when the next request arrives", () => {
+    const opts = { limit: 2, windowMs: 1_000 };
+    const t0 = 3_500_000;
+    rateLimit("expired-a", opts, t0);
+    rateLimit("expired-b", opts, t0 + 1);
+    expect(rateLimiterBucketCount()).toBe(2);
+
+    rateLimit("current", opts, t0 + 1_002);
+    expect(rateLimiterBucketCount()).toBe(1);
+  });
+
+  it("keeps the subject map at its hard cap under unique-key churn", () => {
+    const opts = { limit: 1, windowMs: 60_000 };
+    const t0 = 3_750_000;
+    for (let i = 0; i < RATE_LIMIT_BUCKET_CAP + 25; i++) {
+      rateLimit(`unique-${i}`, opts, t0);
+    }
+    expect(rateLimiterBucketCount()).toBe(RATE_LIMIT_BUCKET_CAP);
   });
 
   it("enforceRateLimit returns a 429 Response with Retry-After when over limit, null otherwise", () => {

@@ -7,7 +7,11 @@ import {
   getPoolForKeys,
   isAlphaVantageDailyCapMessage,
   millisUntilNextAlphaVantageDailyReset,
-  __resetKeyPoolRegistryForTests
+  tryReserveAlphaVantageCalls,
+  refundAlphaVantageCalls,
+  alphaVantageDailyCallBudget,
+  __resetKeyPoolRegistryForTests,
+  __resetAlphaVantageDailyBudgetForTests
 } from "../src/lib/alpha-vantage-key-pool";
 import { resolveAlphaVantageKeyPool } from "../src/lib/db-api-keys";
 
@@ -70,6 +74,14 @@ describe("millisUntilNextAlphaVantageDailyReset", () => {
     // 2026-07-08T20:00:00Z = 16:00 EDT (UTC-4, summer) -> 8h until next ET midnight.
     const fromMs = Date.parse("2026-07-08T20:00:00Z");
     expect(millisUntilNextAlphaVantageDailyReset(fromMs)).toBe(8 * 60 * 60_000);
+  });
+
+  it("is correct for a plain January date (EST, standard time, no transition nearby)", () => {
+    // 2026-01-15T20:00:00Z = 15:00 EST (UTC-5, standard time) -> 9h until next ET midnight.
+    // Distinct from the July case above (EDT, UTC-4) so both halves of the US DST year are
+    // exercised directly, not just the transition-day edge cases below.
+    const fromMs = Date.parse("2026-01-15T20:00:00Z");
+    expect(millisUntilNextAlphaVantageDailyReset(fromMs)).toBe(9 * 60 * 60_000);
   });
 
   it("is DST-safe across the US spring-forward transition (2026-03-08, EST->EDT)", () => {
@@ -281,29 +293,36 @@ describe("resolveAlphaVantageKeyPool", () => {
     expect(resolved).toEqual({ keys: ["single-key-value"], source: "env", envVar: "ALPHAVANTAGE_API_KEY" });
   });
 
-  it("parses the plural ALPHAVANTAGE_API_KEYS, trimming whitespace", () => {
+  it("uses ONLY the first key of a legacy plural ALPHAVANTAGE_API_KEYS (no longer pools)", () => {
     process.env.ALPHAVANTAGE_API_KEYS = " key-1 , key-2 ,key-3";
     const resolved = resolveAlphaVantageKeyPool();
-    expect(resolved).toEqual({ keys: ["key-1", "key-2", "key-3"], source: "env", envVar: "ALPHAVANTAGE_API_KEYS" });
+    expect(resolved).toEqual({ keys: ["key-1"], source: "env", envVar: "ALPHAVANTAGE_API_KEYS" });
   });
 
-  it("dedupes the plural list while preserving first-seen order", () => {
-    process.env.ALPHAVANTAGE_API_KEYS = "key-1,key-2,key-1,key-3,key-2";
+  it("skips empty leading entries when taking the first plural key", () => {
+    process.env.ALPHAVANTAGE_API_KEYS = ",,key-1,key-2";
     const resolved = resolveAlphaVantageKeyPool();
-    expect(resolved.keys).toEqual(["key-1", "key-2", "key-3"]);
+    expect(resolved.keys).toEqual(["key-1"]);
   });
 
-  it("drops empty entries from the plural list (trailing/double commas)", () => {
-    process.env.ALPHAVANTAGE_API_KEYS = "key-1,,key-2,";
-    const resolved = resolveAlphaVantageKeyPool();
-    expect(resolved.keys).toEqual(["key-1", "key-2"]);
-  });
-
-  it("prefers the plural list over the singular fallback when both are set", () => {
+  it("prefers the singular ALPHAVANTAGE_API_KEY over a legacy plural list when both are set", () => {
     process.env.ALPHAVANTAGE_API_KEYS = "key-1,key-2";
     process.env.ALPHAVANTAGE_API_KEY = "single-key-value";
     const resolved = resolveAlphaVantageKeyPool();
-    expect(resolved).toEqual({ keys: ["key-1", "key-2"], source: "env", envVar: "ALPHAVANTAGE_API_KEYS" });
+    expect(resolved).toEqual({ keys: ["single-key-value"], source: "env", envVar: "ALPHAVANTAGE_API_KEY" });
+  });
+
+  it("prefers ALPHAVANTAGE_API_KEY env over local key fallback, and falls back to local when env is absent", async () => {
+    const { upsertUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey("local", "alphavantage", "local-av-key");
+
+    // With env set, it prefers env over local fallback
+    process.env.ALPHAVANTAGE_API_KEY = "env-av-key";
+    expect(resolveAlphaVantageKeyPool("u_tenant")).toEqual({ keys: ["env-av-key"], source: "env", envVar: "ALPHAVANTAGE_API_KEY" });
+
+    // With env absent, it falls back to local key
+    delete process.env.ALPHAVANTAGE_API_KEY;
+    expect(resolveAlphaVantageKeyPool("u_tenant")).toEqual({ keys: ["local-av-key"], source: "env", envVar: "ALPHAVANTAGE_API_KEY" });
   });
 });
 
@@ -312,11 +331,19 @@ describe("resolveAlphaVantageKeyPool", () => {
 describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
   const originalRateLimitDisabled = process.env.PROVIDER_RATE_LIMIT_DISABLED;
   const originalCircuitBreakerDisabled = process.env.API_CIRCUIT_BREAKER_DISABLED;
+  const originalDailyBudget = process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
 
   beforeEach(() => {
     // Isolate from real-world pacing/circuit-breaker behavior — mirrors test/data-providers.test.ts.
     process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
     process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    // This describe block's tests assume every dispatched symbol is admitted — give the new
+    // proactive daily budget (default 23/day, see the dedicated "proactive daily call budget"
+    // describe below) effectively unlimited headroom so it never interferes here, and reset the
+    // persisted counter so consumption from any earlier describe in this shared-temp-DB file
+    // never eats into it either.
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "1000000";
+    __resetAlphaVantageDailyBudgetForTests();
   });
 
   afterEach(() => {
@@ -324,6 +351,8 @@ describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
     else delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
     if (originalCircuitBreakerDisabled !== undefined) process.env.API_CIRCUIT_BREAKER_DISABLED = originalCircuitBreakerDisabled;
     else delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    if (originalDailyBudget !== undefined) process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = originalDailyBudget;
+    else delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
     vi.unstubAllGlobals();
   });
 
@@ -340,6 +369,13 @@ describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
 
     const requestedKeys: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("function=EARNINGS_CALENDAR")) {
+        // The EARNINGS_CALENDAR fallback (2026-08-02) shares this pool/budget but is orthogonal
+        // to this test's NEWS_SENTIMENT key-rotation assertions — give it a valid, one-shot
+        // response so it neither shows up in `requestedKeys` nor re-fires on the second call.
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
       const key = new URL(url).searchParams.get("apikey") ?? "";
       requestedKeys.push(key);
       if (key === KEY_1) {
@@ -372,6 +408,10 @@ describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
 
     const requestedKeys: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
       const key = new URL(url).searchParams.get("apikey") ?? "";
       requestedKeys.push(key);
       return new Response(JSON.stringify({
@@ -455,7 +495,10 @@ describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
     // NOT wrapped in an array — mirrors every pre-existing call site (see
     // test/data-providers.test.ts's "Alpha Vantage Warning Detection" suite).
     const provider = new AlphaVantageEnrichmentProvider("bare-string-key");
-    const res = await provider.enrich(["AAPL"]);
+    // This test is specifically about the bare-string-key backward-compat path, not the
+    // EARNINGS_CALENDAR fallback (2026-08-02) — tell AV daysToEarnings is already covered
+    // upstream so that fallback's own (separately-tested) fetch never fires here.
+    const res = await provider.enrich(["AAPL"], { coveredFields: { AAPL: new Set(["daysToEarnings"]) } });
     expect(fetchCount).toBe(1);
     expect(res.AAPL.headlines).toEqual(["AAPL headline"]);
   });
@@ -472,6 +515,7 @@ describe("AlphaVantageEnrichmentProvider multi-key integration", () => {
 describe("getPoolForKeys", () => {
   const originalRateLimitDisabled = process.env.PROVIDER_RATE_LIMIT_DISABLED;
   const originalCircuitBreakerDisabled = process.env.API_CIRCUIT_BREAKER_DISABLED;
+  const originalDailyBudget = process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
 
   beforeEach(() => {
     __resetKeyPoolRegistryForTests();
@@ -481,6 +525,11 @@ describe("getPoolForKeys", () => {
     // "AlphaVantageEnrichmentProvider multi-key integration" describe block above).
     process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
     process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    // Same rationale as the multi-key integration describe above: this block's real enrich()
+    // calls must never be limited/refused by the proactive daily budget, and must never eat
+    // into the budget the later "proactive daily call budget" describe needs to control exactly.
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "1000000";
+    __resetAlphaVantageDailyBudgetForTests();
   });
 
   afterEach(() => {
@@ -488,6 +537,8 @@ describe("getPoolForKeys", () => {
     else delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
     if (originalCircuitBreakerDisabled !== undefined) process.env.API_CIRCUIT_BREAKER_DISABLED = originalCircuitBreakerDisabled;
     else delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    if (originalDailyBudget !== undefined) process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = originalDailyBudget;
+    else delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
     vi.unstubAllGlobals();
   });
 
@@ -533,6 +584,13 @@ describe("getPoolForKeys", () => {
     const requestedKeys: string[] = [];
 
     vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("function=EARNINGS_CALENDAR")) {
+        // Valid, empty market-wide calendar — satisfies the EARNINGS_CALENDAR fallback added
+        // alongside NEWS_SENTIMENT (2026-08-02) without perturbing this test's own key-rotation
+        // assertions below, which track ONLY the NEWS_SENTIMENT dispatch key order.
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
       const key = new URL(url).searchParams.get("apikey") ?? "";
       requestedKeys.push(key);
       if (key === ENV_KEY_1) {
@@ -567,10 +625,22 @@ describe("getPoolForKeys", () => {
 
 describe("AlphaVantageEnrichmentProvider mid-chunk fast-stop", () => {
   const originalCircuitBreakerDisabled = process.env.API_CIRCUIT_BREAKER_DISABLED;
+  const originalDailyBudget = process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
+
+  beforeEach(() => {
+    // This test's fetchCount assertion (exactly 2 real dispatches, the 3rd short-circuited by
+    // REACTIVE key-pool exhaustion) must not be perturbed by the separate PROACTIVE daily budget
+    // gate — give it effectively unlimited headroom and reset the persisted counter so earlier
+    // describes in this shared-temp-DB file never eat into it.
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "1000000";
+    __resetAlphaVantageDailyBudgetForTests();
+  });
 
   afterEach(() => {
     if (originalCircuitBreakerDisabled !== undefined) process.env.API_CIRCUIT_BREAKER_DISABLED = originalCircuitBreakerDisabled;
     else delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    if (originalDailyBudget !== undefined) process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = originalDailyBudget;
+    else delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
   });
 
   it("stops dispatching remaining symbols in the SAME chunk once the pool exhausts mid-chunk", async () => {
@@ -634,5 +704,229 @@ describe("AlphaVantageEnrichmentProvider mid-chunk fast-stop", () => {
       resetProviderRateLimiterState("alpha-vantage");
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// ── Proactive daily call budget (persisted, GLOBAL, survives restarts) ───────────────────
+//
+// Alpha Vantage's real 25/day cap is enforced PER SOURCE IP, not per key (see
+// resolveAlphaVantageKeyPool's doc comment in db-api-keys.ts) — the reactive machinery above
+// only reacts AFTER AV itself has already rejected a call. This section covers the proactive,
+// self-imposed ceiling that runs ahead of that: admission math, restart-durability, refund,
+// day-rollover, and the shared once-per-enrich()-call operator-alert guard.
+
+describe("proactive daily call budget (tryReserveAlphaVantageCalls / refundAlphaVantageCalls)", () => {
+  const originalDailyBudget = process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
+  const originalRateLimitDisabled = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+  const originalCircuitBreakerDisabled = process.env.API_CIRCUIT_BREAKER_DISABLED;
+
+  beforeEach(async () => {
+    __resetAlphaVantageDailyBudgetForTests();
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    // This file shares ONE temp DB across every describe block, and getServiceHealthLog()
+    // filters only by (service, keySource) — not by which test/key literal wrote a row. Earlier
+    // describes in this file (and earlier tests within THIS describe, e.g. (a) above, which
+    // itself exhausts the budget as a side effect) leave "alpha-vantage" api_health_log rows
+    // behind that would otherwise pollute the (e) tests' exact-row-count assertions below.
+    // Mirrors test/alpha-vantage-quota-alert-cooldown.test.ts's own isolation pattern.
+    const { getDb } = await import("../src/lib/db");
+    getDb().prepare("DELETE FROM api_health_log WHERE service = 'alpha-vantage'").run();
+  });
+
+  afterEach(() => {
+    if (originalDailyBudget !== undefined) process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = originalDailyBudget;
+    else delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
+    if (originalRateLimitDisabled !== undefined) process.env.PROVIDER_RATE_LIMIT_DISABLED = originalRateLimitDisabled;
+    else delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    if (originalCircuitBreakerDisabled !== undefined) process.env.API_CIRCUIT_BREAKER_DISABLED = originalCircuitBreakerDisabled;
+    else delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    __resetAlphaVantageDailyBudgetForTests();
+    vi.unstubAllGlobals();
+  });
+
+  describe("alphaVantageDailyCallBudget (env parsing)", () => {
+    it("defaults to 23/day when PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY is unset", () => {
+      delete process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY;
+      expect(alphaVantageDailyCallBudget()).toBe(23);
+    });
+
+    it("honors a valid override, including 0 (proactively block every call)", () => {
+      process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "5";
+      expect(alphaVantageDailyCallBudget()).toBe(5);
+      process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "0";
+      expect(alphaVantageDailyCallBudget()).toBe(0);
+    });
+
+    it("falls back to the default on an invalid override (non-integer, negative, empty, garbage)", () => {
+      for (const bad of ["not-a-number", "-1", "3.5", "  ", "Infinity"]) {
+        process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = bad;
+        expect(alphaVantageDailyCallBudget()).toBe(23);
+      }
+    });
+  });
+
+  it("tryReserveAlphaVantageCalls admits up to the configured budget, then 0", () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    const now = 10_000_000;
+    expect(tryReserveAlphaVantageCalls(2, now)).toBe(2); // 2/3 used
+    expect(tryReserveAlphaVantageCalls(5, now)).toBe(1); // only 1 left — caps the request, doesn't reject it outright
+    expect(tryReserveAlphaVantageCalls(1, now)).toBe(0); // fully spent
+  });
+
+  it("(a) admits exactly N dispatches for N+k symbols through the real provider, spanning a chunk boundary; the remainder is left unenriched", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    __resetAlphaVantageDailyBudgetForTests();
+
+    const pool = new AlphaVantageKeyPool();
+    const KEY = "budget-admit-key"; // gitleaks:allow — obviously-fake test fixture, not a credential
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ feed: [] }));
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider([KEY], "env", undefined, pool);
+    // 7 symbols (CONCURRENCY=5, so this spans 2 chunks: 5 then 2) against a budget of 3 — the
+    // 1st chunk's reserve(5) admits only 3, the 2nd chunk's reserve(2) admits 0.
+    const symbols = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG"];
+    const res = await provider.enrich(symbols);
+
+    expect(fetchCount).toBe(3); // exactly N=3 real dispatches
+    for (const s of symbols) expect(res[s]).toEqual({}); // every symbol resolves — dispatched-and-empty or budget-skipped look identical
+  });
+
+  it("(a2) an HTTP 429 costs exactly ONE dispatch and ONE budget unit — no built-in retry under the same reservation, no refund of a dispatched call", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    __resetAlphaVantageDailyBudgetForTests();
+
+    const pool = new AlphaVantageKeyPool();
+    const KEY = "budget-429-key"; // gitleaks:allow — obviously-fake test fixture, not a credential
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetchCount++;
+      return new Response("rate limited", { status: 429 });
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider([KEY], "env", undefined, pool);
+    // The EARNINGS_CALENDAR fallback (added 2026-08-02) also draws on this SAME budget/pool — this
+    // test is specifically about the NEWS_SENTIMENT 429/reservation contract, so tell AV its
+    // daysToEarnings is already covered upstream to keep that fallback from touching the exact
+    // single-reservation math below (its own budget-sharing behavior has dedicated coverage in
+    // test/data-providers.test.ts's "EARNINGS_CALENDAR fallback" describe block).
+    const res = await provider.enrich(["AAA"], { coveredFields: { AAA: new Set(["daysToEarnings"]) } });
+
+    // fetchWithRetry defaults to one internal 429 retry; the AV site must pin retries: 0 so a
+    // single reservation can never turn into two real AV calls (headroom is only 25-23=2).
+    expect(fetchCount).toBe(1);
+    expect(res.AAA).toEqual({});
+    // The 429 call DID reach Alpha Vantage, so its reservation stays spent (no refund):
+    // exactly 2 of the 3-call budget must remain.
+    expect(tryReserveAlphaVantageCalls(3, Date.now())).toBe(2);
+  });
+
+  it("(b) counter persists across a module reset within the same DB (simulates a process restart)", async () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "5";
+    const now = 20_000_000;
+    expect(tryReserveAlphaVantageCalls(3, now)).toBe(3); // 3/5 used
+
+    // Simulate a fresh process: reset the module registry so re-importing this module re-derives
+    // its state from the persisted DB row rather than any in-memory module-level state.
+    vi.resetModules();
+    const fresh = await import("../src/lib/alpha-vantage-key-pool");
+    expect(fresh.tryReserveAlphaVantageCalls(5, now)).toBe(2); // only 2/5 remained
+  });
+
+  it("(c) refund restores budget", () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    const now = 30_000_000;
+    expect(tryReserveAlphaVantageCalls(3, now)).toBe(3); // fully spent
+    expect(tryReserveAlphaVantageCalls(1, now)).toBe(0); // confirm exhausted
+    refundAlphaVantageCalls(2, now);
+    expect(tryReserveAlphaVantageCalls(2, now)).toBe(2); // the refunded 2 are available again
+    expect(tryReserveAlphaVantageCalls(1, now)).toBe(0); // and only those 2
+  });
+
+  it("(d) day rollover resets the counter to 0", () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    const day1 = Date.parse("2026-07-08T20:00:00Z"); // mid-day ET, matches the reset-instant test above
+    expect(tryReserveAlphaVantageCalls(3, day1)).toBe(3); // fully spent for day 1
+    expect(tryReserveAlphaVantageCalls(1, day1)).toBe(0);
+
+    const day2 = day1 + millisUntilNextAlphaVantageDailyReset(day1) + 1_000; // just after the reset instant
+    expect(tryReserveAlphaVantageCalls(3, day2)).toBe(3); // fresh budget for the new day
+  });
+
+  it("(d) a stale refund does not resurrect budget into a NEW day's counter once the day has rolled over", () => {
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "3";
+    const day1 = Date.parse("2026-07-08T20:00:00Z");
+    expect(tryReserveAlphaVantageCalls(2, day1)).toBe(2);
+
+    const day2 = day1 + millisUntilNextAlphaVantageDailyReset(day1) + 1_000;
+    refundAlphaVantageCalls(2, day2); // a day-1 reservation refunded after day 2 has already started
+    // Day 2's budget must be untouched by the stale refund — no negative/inflated carryover.
+    expect(tryReserveAlphaVantageCalls(3, day2)).toBe(3);
+  });
+
+  it("(e) proactive exhaustion spanning multiple chunks logs the operator alert exactly once per enrich() call", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    const { getServiceHealthLog } = await import("../src/lib/db-health");
+    clearEnrichmentCache();
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "1";
+    __resetAlphaVantageDailyBudgetForTests();
+
+    const pool = new AlphaVantageKeyPool();
+    const KEY = "budget-alert-key"; // gitleaks:allow — obviously-fake test fixture, not a credential
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ feed: [] }));
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider([KEY], "env", undefined, pool);
+    // 6 symbols, budget=1: chunk 1 (5 symbols) admits 1 dispatch and marks the other 4
+    // unenriched; chunk 2 (1 symbol) admits 0 and is where the alert actually fires.
+    const symbols = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"];
+    const res = await provider.enrich(symbols);
+
+    expect(fetchCount).toBe(1);
+    for (const s of symbols) expect(res[s]).toEqual({});
+
+    const rows = getServiceHealthLog("alpha-vantage", 20);
+    const budgetRows = rows.filter((r) => (r.error_text ?? "").includes("proactive daily call budget exhausted"));
+    expect(budgetRows.length).toBe(1); // exactly one row for this whole enrich() call, not once per chunk/symbol
+  });
+
+  it("(e) when the reactive key-pool is ALSO already exhausted, only ONE alert fires (shared once-per-call guard; reactive check runs first)", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    const { getServiceHealthLog } = await import("../src/lib/db-health");
+    clearEnrichmentCache();
+    process.env.PROVIDER_QUOTA_ALPHA_VANTAGE_PER_DAY = "0"; // proactive budget already exhausted too
+    __resetAlphaVantageDailyBudgetForTests();
+
+    const pool = new AlphaVantageKeyPool();
+    pool.configure(["already-dead-key"]);
+    pool.markExhausted("already-dead-key", Date.now()); // reactive exhaustion already in effect
+
+    let fetchCount = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ feed: [] }));
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider(["already-dead-key"], "env", undefined, pool);
+    const res = await provider.enrich(["AAA", "BBB", "CCC"]);
+
+    expect(fetchCount).toBe(0);
+    for (const s of ["AAA", "BBB", "CCC"]) expect(res[s]).toEqual({});
+
+    const rows = getServiceHealthLog("alpha-vantage", 20);
+    const exhaustionRows = rows.filter((r) => (r.error_text ?? "").includes("exhausted"));
+    expect(exhaustionRows.length).toBe(1); // the reactive allExhausted() gate runs first and wins — no second (budget) alert
+    expect(exhaustionRows[0].error_text).toContain("entire key pool exhausted");
   });
 });

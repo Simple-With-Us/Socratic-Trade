@@ -1,5 +1,27 @@
 # Voyage + Pinecone: production tuning & gated upgrades
 
+> **RECONCILIATION NOTE (2026-07-19, added by the PR #1773 review-fix pass — not a rewrite, see
+> below).** This doc's "what's on by default" section describes the **pre-2026-07-18 default**:
+> Voyage `voyage-finance-2` embeddings + Voyage rerank. **As of the `bge-m3-metering-gate` /
+> `corpus-reembed` work (PR #1766, landed 2026-07-18), production is no longer running that
+> default.** Provider selection is key-presence precedence in `resolveActiveRagProvider`
+> (`src/lib/vector-db.ts:154-165`): an explicit `RAG_EMBED_PROVIDER` pin wins, else OpenRouter key
+> present → `baai/bge-m3` (rerank `cohere/rerank-v3.5`), else SiliconFlow key → `BAAI/bge-m3`, else
+> falls back to Voyage. Prod has an OpenRouter key configured, so **prod actively runs bge-m3 via
+> OpenRouter today**, not Voyage — confirmed both by `/api/health`'s `dependencies.openrouter`
+> lane and by a live Pinecone `describe-index-stats` check during this same review-fix pass: the
+> legacy (Voyage) namespace still holds ~8.7k intact vectors (no purge has run — Voyage remains a
+> live fallback, so the mechanics below stay accurate for it) while the managed (bge-m3) namespace
+> is separately growing via ongoing ingest. **Everything below this note is Voyage-specific
+> config/cost/tuning knowledge — it is accurate for the Voyage PATH (fallback + historical/paid-tier
+> guidance) but does NOT describe the current production default.** See
+> `docs/rollouts/2026-07-18-bge-m3-metering-gate.md`, `docs/rollouts/2026-07-18-corpus-reembed.md`,
+> and `docs/rollouts/2026-07-19-monet-session-handoff.md` for the bge-m3/OpenRouter state, cost
+> comparison (~12x cheaper per token than Voyage), and the mandatory post-flip corpus re-embed this
+> doc predates. This note deliberately does NOT delete or rewrite the Voyage content below — the
+> tuning/cost/gated-upgrade mechanics remain correct for whichever provider ends up active, and
+> Voyage is still the code-level default when no OpenRouter/SiliconFlow key is configured.
+
 The RAG/memory stack uses **Voyage** for embeddings + reranking and **Pinecone** for the vector
 store. Out of the box it runs at high quality with the current key; two upgrades are **gated** behind
 an owner decision because they cost money and/or require a reindex.

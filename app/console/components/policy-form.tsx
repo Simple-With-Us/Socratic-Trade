@@ -7,7 +7,7 @@
  *  commit a change. The diff/classification logic lives in ../lib/policy-diff
  *  (pure, unit-tested); this file is the React skin over it. */
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Lock, Unlock } from "lucide-react";
 import { DEFAULT_POLICY } from "@/lib/defaults";
 import type { TradingPolicy } from "@/lib/types";
@@ -74,10 +74,21 @@ function fmtValue(def: FieldDef, v: unknown): string {
   return String(v);
 }
 
-export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: TradingPolicy; draft: PolicyDraft }) {
+export function PolicyFieldRow({
+  def,
+  policy,
+  draft,
+  hint
+}: {
+  def: FieldDef;
+  policy: TradingPolicy;
+  draft: PolicyDraft;
+  hint?: string;
+}) {
   const current = getAtPath(policy, def.path);
   const touched = def.path in draft.values;
   const value = touched ? draft.values[def.path] : current;
+  const effectiveHint = hint ?? def.hint;
   // While the input is focused we render the raw typed text, so transient
   // states like "0." or "12." survive keystrokes (Number() would collapse
   // them). The parsed number is still committed to the draft on every change;
@@ -92,7 +103,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
             {def.label}
             {touched && <span className="ml-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">edited</span>}
           </div>
-          {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+          {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
         </div>
         <Toggle checked={value === true} onChange={(next) => draft.set(def.path, next)} label={def.label} />
       </div>
@@ -101,7 +112,12 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
 
   if (def.kind === "select") {
     const fallback = String(getAtPath(DEFAULT_POLICY, def.path) ?? "");
-    const selected = isBlank(value) ? fallback : String(value);
+    // Reverse-map a typed value (boolean/null) back to its string option key when optionValues is
+    // present; plain string-valued selects need no mapping.
+    const selectedKey = def.optionValues
+      ? (Object.keys(def.optionValues).find((key) => def.optionValues![key] === value) ?? "")
+      : String(value);
+    const selected = isBlank(value) ? fallback : selectedKey;
     return (
       <div className="py-2">
         <div className="flex items-end justify-between gap-4">
@@ -110,7 +126,19 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
             {touched && <span className="ml-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">edited</span>}
           </label>
           <div className="w-52">
-            <Select id={`pf-${def.path}`} value={selected} onChange={(e) => draft.set(def.path, e.target.value)}>
+            <Select
+              id={`pf-${def.path}`}
+              value={selected}
+              onChange={(e) => {
+                const raw = e.target.value;
+                // hasOwnProperty (not ??): an explicit null mapping ("" → clear-to-global) must
+                // survive, and ?? would fall through to the raw string for exactly that case.
+                const mapped = def.optionValues && Object.prototype.hasOwnProperty.call(def.optionValues, raw)
+                  ? def.optionValues[raw]
+                  : raw;
+                draft.set(def.path, mapped);
+              }}
+            >
               {(def.options ?? []).map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -119,7 +147,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
             </Select>
           </div>
         </div>
-        {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+        {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
       </div>
     );
   }
@@ -159,7 +187,7 @@ export function PolicyFieldRow({ def, policy, draft }: { def: FieldDef; policy: 
           {unit && unit !== "$" && <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{unit}</span>}
         </div>
       </div>
-      {def.hint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{def.hint}</p>}
+      {effectiveHint && <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">{effectiveHint}</p>}
     </div>
   );
 }
@@ -183,8 +211,19 @@ export function PolicyDualModeRow({
   const pctTouched = pctDef.path in draft.values;
   const moneyValue = moneyTouched ? draft.values[moneyDef.path] : getAtPath(policy, moneyDef.path);
   const pctValue = pctTouched ? draft.values[pctDef.path] : getAtPath(policy, pctDef.path);
-  const [mode, setModeState] = useState<"money" | "pct">(() => (!isBlank(pctValue) ? "pct" : "money"));
+  // Percentage is the safe, account-relative default. Preserve an explicit
+  // dollar mode for legacy/custom policies, but never default a blank pair to
+  // an arbitrary dollar field.
+  const policyMode: "money" | "pct" = !isBlank(getAtPath(policy, pctDef.path)) || isBlank(getAtPath(policy, moneyDef.path)) ? "pct" : "money";
+  const [draftMode, setDraftMode] = useState<"money" | "pct">(policyMode);
   const [editText, setEditText] = useState<string | null>(null);
+  // Sync draft mode when the policy mode changes (e.g. account switch) so the first
+  // keystroke after the switch doesn't snap back to the stale previous account's mode.
+  useEffect(() => { setDraftMode(policyMode); }, [policyMode]);
+  // A mode choice is interaction state only while this field pair has an active draft. After
+  // discard/save or an account switch, derive from that account's persisted policy immediately;
+  // this avoids a stale selector without an effect-driven synchronization render.
+  const mode = moneyTouched || pctTouched ? draftMode : policyMode;
   const activeDef = mode === "money" ? moneyDef : pctDef;
   const activeValue = mode === "money" ? moneyValue : pctValue;
   const touched = moneyTouched || pctTouched;
@@ -192,7 +231,7 @@ export function PolicyDualModeRow({
   const unit = mode === "money" ? "$" : "%";
 
   const setMode = (next: "money" | "pct") => {
-    setModeState(next);
+    setDraftMode(next);
     setEditText(null);
     if (next === "money") {
       draft.set(pctDef.path, null);
@@ -275,7 +314,8 @@ export function PolicySaveBar({
   draft,
   defs,
   reality,
-  extraPatch
+  extraPatch,
+  onDiscard
 }: {
   policy: TradingPolicy;
   draft: PolicyDraft;
@@ -283,6 +323,8 @@ export function PolicySaveBar({
   reality: RealityInfo;
   /** Extra body merged into the PUT (e.g. full arrays that aren't diffable). */
   extraPatch?: PolicyPatchBody;
+  /** Called with draft.clear() so pages that keep a sibling draft (Universe) reset it too. */
+  onDiscard?: () => void;
 }) {
   const { refresh } = useConsoleData();
   const toast = useToast();
@@ -293,9 +335,10 @@ export function PolicySaveBar({
   const diff = useMemo(() => computeDiff(policy, draft.values, defs), [policy, draft, defs]);
   const extraEntries: ExtraDiffEntry[] = useMemo(() => classifyExtraPatch(policy, extraPatch), [policy, extraPatch]);
   const changeCount = diff.length + extraEntries.length;
-  // Register the uncommitted draft with the shell's unsaved-changes guard
-  // (beforeunload + nav interception). Must run before the early return.
-  useUnsavedChanges(changeCount > 0);
+  // Register the uncommitted draft with the shell's unsaved-changes guard (beforeunload + nav
+  // interception). The onReview opener powers the nav prompt's "Review & save" option. Must run
+  // before the early return.
+  useUnsavedChanges(changeCount > 0, () => setReviewOpen(true));
   if (changeCount === 0) return null;
 
   // extraPatch changes (universe, blocklist, order types, sell-to-fund-buy) can
@@ -308,9 +351,13 @@ export function PolicySaveBar({
   const commit = async () => {
     setBusy(true);
     try {
-      await savePolicy({ ...buildPatch(diff, policy), ...(extraPatch ?? {}) });
+      await savePolicy(
+        { ...buildPatch(diff, policy), ...(extraPatch ?? {}) },
+        policy.connectedAccountId
+      );
       await refresh();
-      draft.clear();
+      if (onDiscard) onDiscard();
+      else draft.clear();
       setReviewOpen(false);
       setTyped("");
       toast.push("pos", "Guardrails updated", "Takes effect from the next policy-gate evaluation.");
@@ -323,13 +370,20 @@ export function PolicySaveBar({
 
   return (
     <>
-      <div className="sticky bottom-16 z-40 lg:bottom-4">
+      <div className="sticky bottom-[calc(3.75rem+env(safe-area-inset-bottom,0px))] z-40 lg:bottom-4">
         <div className="con-card flex items-center justify-between gap-3 border-[color:var(--con-warn)] px-4 py-2.5">
           <span className="text-[length:var(--con-fs-sm)] font-semibold">
             {changeCount} uncommitted {changeCount === 1 ? "change" : "changes"}
           </span>
           <div className="flex gap-2">
-            <Btn variant="ghost" size="sm" onClick={() => draft.clear()}>
+            <Btn
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (onDiscard) onDiscard();
+                else draft.clear();
+              }}
+            >
               Discard
             </Btn>
             <Btn variant="primary" size="sm" onClick={() => setReviewOpen(true)}>
@@ -381,7 +435,7 @@ export function PolicySaveBar({
                 Commit changes <LiveTag />
               </>
             }
-            note="At least one change expands authority on a brokerage account. Unlocking authority costs a typed word; locking things down never does."
+            note="At least one change expands authority on a brokerage account.  Unlocking authority costs a typed word; locking things down never does."
             onConfirm={() => void commit()}
           />
         ) : (

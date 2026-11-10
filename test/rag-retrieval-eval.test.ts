@@ -103,6 +103,15 @@ function meanReciprocalRank(results: string[][], goldIds: string[][]): number {
   return results.length === 0 ? 0 : sum / results.length;
 }
 
+function hasTopLevelUserId(obj: any): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  if ("userId" in obj) return true;
+  if (Array.isArray(obj.$and)) {
+    return obj.$and.some(hasTopLevelUserId);
+  }
+  return false;
+}
+
 // ── Harness: run retrieveContextDetailed against each fixture's recorded pool ──────────────────
 
 async function runFixture(
@@ -137,20 +146,25 @@ async function runFixture(
   const gold: string[][] = [];
 
   for (const testCase of fixtureCases) {
-    mocks.query.mockResolvedValueOnce({
-      matches: testCase.pool.map((m: FixtureMatch) => ({
-        id: m.id,
-        score: m.score,
-        metadata: {
-          text: m.text,
-          userId: "local",
-          scope: "shared",
-          doc_type: m.doc_type,
-          section: m.section,
-          source: m.source,
-          acceptance_datetime: m.acceptance_datetime
-        }
-      }))
+    mocks.query.mockImplementation((args: any) => {
+      if (hasTopLevelUserId(args?.filter)) {
+        return { matches: [] };
+      }
+      return {
+        matches: testCase.pool.map((m: FixtureMatch) => ({
+          id: m.id,
+          score: m.score,
+          metadata: {
+            text: m.text,
+            userId: "local",
+            scope: "shared",
+            doc_type: m.doc_type,
+            section: m.section,
+            source: m.source,
+            acceptance_datetime: m.acceptance_datetime
+          }
+        }))
+      };
     });
 
     const chunks = await retrieveContextDetailed(testCase.query, testCase.symbol, limit, "local", testCase.asOf ? { asOf: testCase.asOf } : undefined);
@@ -523,8 +537,10 @@ async function runSingleVsMultiQuery(
       }
     }));
 
-  // Single-query path: exactly one Pinecone query() round-trip (options.queries omitted).
-  mocks.query.mockResolvedValueOnce({ matches: poolMatches() });
+  // Single-query path: one private/shared Pinecone pair (options.queries omitted).
+  mocks.query
+    .mockResolvedValueOnce({ matches: [] })
+    .mockResolvedValueOnce({ matches: poolMatches() });
   const singleChunks = await retrieveContextDetailed(
     testCase.query,
     testCase.symbol,
@@ -533,8 +549,7 @@ async function runSingleVsMultiQuery(
     testCase.asOf ? { asOf: testCase.asOf } : undefined
   );
 
-  // Multi-query path: one query() round-trip PER fan-out variant (primary + derived), per
-  // embedAndMatchOneQuery's one-call-per-query contract (src/lib/vector-db.ts ~1734-1783).
+  // Multi-query path: one private/shared pair per fan-out variant (primary + derived).
   vi.clearAllMocks();
   mocks.resolveApiKey.mockImplementation((service: string) => {
     if (service === "pinecone") return process.env.PINECONE_API_KEY;
@@ -546,7 +561,9 @@ async function runSingleVsMultiQuery(
   installMockRerank();
   const fanOutCount = new Set([testCase.query, ...derivedQueries]).size;
   for (let i = 0; i < fanOutCount; i++) {
-    mocks.query.mockResolvedValueOnce({ matches: poolMatches() });
+    mocks.query
+      .mockResolvedValueOnce({ matches: [] })
+      .mockResolvedValueOnce({ matches: poolMatches() });
   }
   const multiChunks = await retrieveContextDetailed(
     testCase.query,
@@ -636,7 +653,7 @@ describe("item #822: single-query vs multi-query (RetrieveOptions.queries / rrfF
     // (mocks.query was called once per fan-out variant, per the harness above) — this is the
     // observable proxy from outside vector-db.ts that fan-out + fusion actually ran (not the
     // single-query short-circuit), since every id in the pool appears in every variant's list here.
-    expect(mocks.query).toHaveBeenCalledTimes(new Set([testCase.query, ...derived]).size);
+    expect(mocks.query).toHaveBeenCalledTimes(new Set([testCase.query, ...derived]).size * 2);
     // Order-insensitive by construction: assert no duplicate ids (rrfFuse actually de-duped) and
     // that every returned id is a real pool member — not a brittle fixed-array .slice() that
     // silently stops catching drift once the array and multi.length happen to line up.
@@ -646,4 +663,3 @@ describe("item #822: single-query vs multi-query (RetrieveOptions.queries / rrfF
     expect(multi.length).toBeGreaterThan(0);
   });
 });
-

@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { coerceProtectiveExitToMarket } from "../src/lib/strategy";
 import type { TradeProposal } from "../src/lib/types";
+import { coerceProtectiveExitToMarket } from "../src/lib/strategy-execution";
 
 // A protective Risk-Exit must execute as a MARKET order so it cannot rest unfilled the way the MU
 // Risk-Exit limit @ $991 did (never filled as MU fell to -8%, then blocked every re-exit). Other

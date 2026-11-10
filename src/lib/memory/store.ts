@@ -14,6 +14,7 @@ import {
 } from "../db";
 import type { MemoryItem } from "../types";
 import { extractCandidates, score } from "./salience";
+import { captureUserWriteEpoch, runWithUserWriteEpoch, type UserWriteEpoch } from "../user-write-fence";
 
 export interface IngestResult {
   written: Array<{ item: MemoryItem; op: "append" | "supersede" | "upsert"; score: number }>;
@@ -25,14 +26,16 @@ export interface IngestResult {
  * Apply the write policy to a message: extract candidates, score, WRITE/HOLD/SKIP. A candidate
  * matching an existing (kind, subject) upserts if identical, else supersedes the prior value.
  */
-export function ingestMessage(userId: string, message: string): IngestResult {
-  const written: IngestResult["written"] = [];
-  const held: IngestResult["held"] = [];
-  const skipped: IngestResult["skipped"] = [];
+export function ingestMessage(userId: string, message: string, writeEpoch?: UserWriteEpoch): IngestResult {
+  const epoch = writeEpoch ?? captureUserWriteEpoch(userId);
+  return runWithUserWriteEpoch(userId, epoch, () => {
+    const written: IngestResult["written"] = [];
+    const held: IngestResult["held"] = [];
+    const skipped: IngestResult["skipped"] = [];
 
-  for (const c of extractCandidates(message)) {
-    const existing = findLiveMemoryBySubject(userId, c.kind, c.subject);
-    const { score: s, decision } = score(c, existing);
+    for (const c of extractCandidates(message)) {
+      const existing = findLiveMemoryBySubject(userId, c.kind, c.subject);
+      const { score: s, decision } = score(c, existing);
 
     if (decision === "SKIP") {
       skipped.push({ subject: c.subject, score: s });
@@ -65,8 +68,9 @@ export function ingestMessage(userId: string, message: string): IngestResult {
     if (existing) supersedeMemory(existing.id, item.id);
     written.push({ item, op: existing ? "supersede" : "append", score: s });
     audit("memory.write", { userId, kind: item.kind, subject: item.subject, op: existing ? "supersede" : "append" }, userId);
-  }
-  return { written, held, skipped };
+    }
+    return { written, held, skipped };
+  });
 }
 
 /** For prompt assembly: hard constraints ALWAYS included, then most-recent live items up to a budget. */
@@ -86,7 +90,10 @@ export function listMemories(userId: string): MemoryItem[] {
 }
 
 export function forget(userId: string, id: string): boolean {
-  const removed = deleteMemory(userId, id);
-  if (removed) audit("memory.forget", { userId, id }, userId);
-  return removed;
+  const epoch = captureUserWriteEpoch(userId);
+  return runWithUserWriteEpoch(userId, epoch, () => {
+    const removed = deleteMemory(userId, id);
+    if (removed) audit("memory.forget", { userId, id }, userId);
+    return removed;
+  });
 }

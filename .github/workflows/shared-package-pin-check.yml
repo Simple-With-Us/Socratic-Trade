@@ -1,98 +1,51 @@
 name: Shared package pin check
 
-# Guards against @jaywedgeworth22/congress-trading-shared drifting between its two consumers:
-# App B = agentic-trading (this repo, spec in package.json) and App A = Congress.Trade (spec in
-# app/package.json). Both must pin the SAME version so the contract they compile against cannot
-# silently diverge. The OLD version of this check only compared a git-SHA pin against
-# congress-trading-shared@main and no-oped for semver-range/registry pins -- so it could not catch
-# the "^1.0.0 in one repo vs a newer version in the other" drift this workflow now covers.
+# Guards @jaywedgeworth22/congress-trading-shared across the three consumers:
+#   ST  = this repo (npm git tag in package.json + lock SHA)
+#   UM  = Usage-Monitor (public npm git tag)
+#   CT  = Congress.Trade vendor tree (VENDOR-PROVENANCE.md; no npm dep)
 #
-# What it does:
-#   1. Reads THIS repo's shared-package dependency spec (package.json).
-#   2. Fetches the PEER repo's spec (Congress.Trade app/package.json) via the GitHub API.
-#   3. FAILS (exit 1) when the two normalized versions differ -- the divergence guard. Run it
-#      on demand (workflow_dispatch) for a dry-run, or let it run on PRs / weekly.
-# Requires the GH_PACKAGES_TOKEN repo secret: a PAT with read access to the private
-# peer repo. Without it the peer comparison is skipped with a notice (the default
-# GITHUB_TOKEN cannot read other private repos), so an unauthenticated run never hard-fails.
+# A missing CT npm spec is NOT "skip and pass" -- CT is vendor-only. The
+# script fails if CT cannot be read, if versions diverge, or if CT
+# reintroduces an npm dependency. See scripts/check-shared-package-pin.mjs.
 #
-# NOTE: this workflow is intentionally NOT part of the branch-protection ruleset, so a red result
-# flags divergence loudly without hard-blocking a coordinated two-repo bump (bump one repo, open
-# its PR, then the other). Promote it to a required check once bumps always land as a matched pair.
+# Required check name: `check-pin` (ruleset main-protection). Both consumers pin a public
+# git dependency, so this job must RUN on fork PRs too -- a skipped required check is
+# treated as satisfied. Congress.Trade is public. The script reads it with the Actions
+# installation token first. GH_PACKAGES_TOKEN is a user PAT fallback only. Preferring
+# that PAT makes a burst of pull requests share one rate limit and fail together.
 #
-# Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near shell $VARs.
+# Keep this file ASCII-only (AGENTS.md) -- no em dashes / arrows near $VARs.
 
 on:
   pull_request:
-    paths:
-      - 'package.json'
-      - 'package-lock.json'
-      - '.github/workflows/shared-package-pin-check.yml'
   push:
     branches: [main]
   schedule:
-    - cron: '0 13 * * 1' # Mondays
+    - cron: '0 13 * * 1'
   workflow_dispatch:
-
-env:
-  PKG: '@jaywedgeworth22/congress-trading-shared'
-  PEER_REPO: jaywedgeworth22/Congress.Trade
-  PEER_PACKAGE_JSON_PATH: app/package.json
-  LOCAL_PACKAGE_JSON_PATH: package.json
 
 jobs:
   check-pin:
+    # Must run on fork PRs. GitHub treats a skipped required check as satisfied.
+    # Congress.Trade is public, so GITHUB_TOKEN can read the peer package.json.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Compare shared-package version against the peer consumer
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+
+      # Keep the consumer manifest present even if cleanup from a prior job
+      # overlaps this long-lived runner workspace after the first checkout.
+      - name: Refresh checkout before reading package metadata
+        uses: actions/checkout@v7
+
+      - name: Compare ST / UM / CT shared-package pins
         env:
-          GH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Git dependencies compare by ref after '#'; registry ranges compare by version core.
-          # Normalize tag refs like v1.2.0 and semver refs like semver:^1.2.x.
-          norm() {
-            local spec="$1"
-            case "$1" in
-              github:*|git+*|*"#"*)
-                spec=$(printf '%s' "$spec" | sed -E 's/^.*#//')
-                ;;
-            esac
-            printf '%s' "$spec" | sed -E 's/^semver://; s/^[[:space:]]*[~^><=]+//; s/^v//; s/[[:space:]]//g'
-          }
-
-          LOCAL_SPEC=$(node -p "require('./${LOCAL_PACKAGE_JSON_PATH}').dependencies['${PKG}'] ?? ''")
-          if [ -z "$LOCAL_SPEC" ]; then
-            echo "::warning::${PKG} not found in ${LOCAL_PACKAGE_JSON_PATH} dependencies"
-            exit 0
-          fi
-          echo "Local spec (${LOCAL_PACKAGE_JSON_PATH}): $LOCAL_SPEC"
-
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "::notice::GH_PACKAGES_TOKEN is unset - skipping the peer divergence check (it needs read access to ${PEER_REPO})."
-            exit 0
-          fi
-
-          # Fetch the peer repo's package.json raw (Accept: raw returns file content, not base64).
-          if ! PEER_JSON=$(gh api "repos/${PEER_REPO}/contents/${PEER_PACKAGE_JSON_PATH}" -H "Accept: application/vnd.github.raw" 2>/dev/null); then
-            echo "::warning::could not fetch ${PEER_REPO}/${PEER_PACKAGE_JSON_PATH} (auth/scope/transient error) - skipping peer check"
-            exit 0
-          fi
-          PEER_SPEC=$(printf '%s' "$PEER_JSON" | PKG="$PKG" node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).dependencies||{})[process.env.PKG]||'')}catch{console.log('')}})")
-          if [ -z "$PEER_SPEC" ]; then
-            echo "::warning::${PKG} not found in ${PEER_REPO}/${PEER_PACKAGE_JSON_PATH} - cannot compare"
-            exit 0
-          fi
-          echo "Peer spec  (${PEER_REPO}/${PEER_PACKAGE_JSON_PATH}): $PEER_SPEC"
-
-          LOCAL_V=$(norm "$LOCAL_SPEC")
-          PEER_V=$(norm "$PEER_SPEC")
-          if [ "$LOCAL_V" = "$PEER_V" ]; then
-            echo "OK: both consumers pin ${PKG}@${LOCAL_V}."
-          else
-            echo "::error::${PKG} pin DIVERGED: this repo pins '${LOCAL_SPEC}' but ${PEER_REPO} pins '${PEER_SPEC}'. Pin BOTH repos to the same exact version (bump them as a matched pair)."
-            exit 1
-          fi
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+        run: node scripts/check-shared-package-pin.mjs

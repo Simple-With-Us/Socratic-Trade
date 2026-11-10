@@ -39,6 +39,7 @@ if [[ -z "${HOOKS_ALLOW_MAIN_PUSH:-}" ]]; then
     Claude      → ~/apps/trading-claude   (branch agent/claude)
     Codex       → ~/apps/trading-codex    (branch agent/codex)
     Antigravity → ~/apps/trading-antigravity (branch agent/antigravity)
+    Kimi        -> ~/apps/trading-kimi     (branch agent/kimi-lane)
   If you are the human integrator and need to push from here (e.g. a hotfix):
     HOOKS_ALLOW_MAIN_PUSH=1 git push $REMOTE ..."
   fi

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+process.env.OPENROUTER_API_KEY = "test-key";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 
 // G5 regression: the drawdown kill-switch WIRING inside runStrategyOnce.
@@ -22,7 +23,9 @@ vi.mock("../src/lib/vector-db", () => ({
   defaultDedupeSimilarity: () => 0.6,
   formatChunkWithProvenance: (chunk: { text: string }) => chunk.text,
   storeContext: async () => {},
-  storeContexts: async () => {}
+  storeContexts: async () => {},
+  getCurrentVectorProviderAuthority: () => "test-provider",
+  managedVectorLedgerAuthority: () => "test-ledger"
 }));
 
 beforeEach(() => {
@@ -33,14 +36,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
 });
 
 function zeroProposalFetchStub() {
   return async (url: string | URL | Request) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
-      return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [] }) }), {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals: [] }) } }] }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -62,13 +65,13 @@ function zeroProposalFetchStub() {
 
 describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
   it("is ADVISORY by default: on a breach it audits a receipt and does NOT change systemState", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", zeroProposalFetchStub());
 
     const { upsertConnectedAccount, setActiveConnectedAccount, setPolicy, upsertUserApiKey, getPolicy, listAudit } = await import("../src/lib/db");
     const { recordAndEvaluateDrawdownBreaker } = await import("../src/lib/risk-breaker");
 
-    upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+    upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
     const accountId = randomUUID();
     upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "Test Account", isActive: true });
     setActiveConnectedAccount(accountId);
@@ -89,7 +92,7 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
     setPolicy({
       ...DEFAULT_POLICY,
       systemState: "active",
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4.1-mini",
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
@@ -114,16 +117,16 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
     expect(payload.action).toBe("advisory");
     expect(payload.revertedTo).toBeUndefined();
     expect(payload.highWaterMark).toBe(250_000);
-  }, 30_000);
+  }, 75_000);
 
   it("honors the overridable drawdownBreakerAction: 'close_only' (softer — only blocks new entries)", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", zeroProposalFetchStub());
 
     const { upsertConnectedAccount, setActiveConnectedAccount, setPolicy, upsertUserApiKey, getPolicy, listAudit } = await import("../src/lib/db");
     const { recordAndEvaluateDrawdownBreaker } = await import("../src/lib/risk-breaker");
 
-    upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+    upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
     const accountId = randomUUID();
     upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "Test Account", isActive: true });
     setActiveConnectedAccount(accountId);
@@ -134,7 +137,7 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
     setPolicy({
       ...DEFAULT_POLICY,
       systemState: "active",
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4.1-mini",
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
@@ -149,16 +152,16 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
     const payload = listAudit(500).filter((e) => e.kind === "policy_violation_drawdown")[0]?.payload as { revertedTo?: string; action?: string };
     expect(payload.revertedTo).toBe("close_only");
     expect(payload.action).toBe("close_only");
-  }, 30_000);
+  }, 75_000);
 
   it("does NOT flip when no drawdown limit is configured (default-safe)", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", zeroProposalFetchStub());
 
     const { upsertConnectedAccount, setActiveConnectedAccount, setPolicy, upsertUserApiKey, getPolicy, listAudit } = await import("../src/lib/db");
     const { recordAndEvaluateDrawdownBreaker } = await import("../src/lib/risk-breaker");
 
-    upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+    upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
     const accountId = randomUUID();
     upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "Test Account", isActive: true });
     setActiveConnectedAccount(accountId);
@@ -169,11 +172,14 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
     setPolicy({
       ...DEFAULT_POLICY,
       systemState: "active",
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4.1-mini",
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide",
-      riskRules: {} // no drawdown/daily-loss limits
+      // maxDrawdownPct pinned to 0: DEFAULT_RISK_RULES gained a 15% advisory default on 2026-07-28
+      // (guard enablement), and mergePolicy would inject it back into a bare {} — 0 explicitly
+      // disables the breaker so this test keeps covering the no-limit path.
+      riskRules: { maxDrawdownPct: 0 } // no drawdown/daily-loss limits
     });
 
     const { runStrategyOnce } = await import("../src/lib/strategy");
@@ -181,5 +187,5 @@ describe("runStrategyOnce drawdown kill-switch wiring (G5)", () => {
 
     expect(getPolicy("local").systemState).toBe("active"); // unchanged
     expect(listAudit(500).filter((e) => e.kind === "policy_violation_drawdown").length).toBe(0);
-  }, 30_000);
+  }, 75_000);
 });

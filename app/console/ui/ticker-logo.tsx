@@ -11,32 +11,16 @@ import type { TickerLogoDisplay } from "@/lib/ticker-logos";
 import { normalizeTickerLogoSymbol } from "@/lib/ticker-logos";
 import { cx } from "../lib/format";
 import { Tooltip } from "./primitives";
+import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
+import { useTheme } from "../../ui/theme";
 
 export type { TickerLogoDisplay };
 
 /** Resolved light/dark for the console subtree containing `ref`. Reacts to both
  *  the explicit data-theme attribute (chrome toggle) and system changes. */
-export function useConsoleResolvedTheme(ref: RefObject<HTMLElement | null>): "dark" | "light" {
-  const [theme, setTheme] = useState<"dark" | "light">("dark"); // SSR default: dark
-
-  useEffect(() => {
-    const root = ref.current?.closest<HTMLElement>(".console-root") ?? null;
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const update = () => {
-      const explicit = root?.getAttribute("data-theme");
-      setTheme(explicit === "light" || explicit === "dark" ? explicit : mq.matches ? "dark" : "light");
-    };
-    update();
-    const observer = root ? new MutationObserver(update) : null;
-    if (root) observer!.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-    mq.addEventListener("change", update);
-    return () => {
-      observer?.disconnect();
-      mq.removeEventListener("change", update);
-    };
-  }, [ref]);
-
-  return theme;
+export function useConsoleResolvedTheme(): "dark" | "light" {
+  const { resolvedTheme } = useTheme();
+  return resolvedTheme;
 }
 
 export type TickerLogoSize = "sm" | "md" | "lg";
@@ -48,21 +32,33 @@ const SIZE_CLASS: Record<TickerLogoSize, string> = {
 };
 
 const MONOGRAM_FONT_CLASS: Record<TickerLogoSize, string> = {
-  sm: "text-[9px]",
-  md: "text-[11px]",
+  sm: "text-[length:var(--con-fs-2xs)]",
+  md: "text-[length:var(--con-fs-xs)]",
   lg: "text-base"
 };
 
-/** First 1–2 letters of the base symbol (before any class-share separator),
- *  e.g. "BRK.B" → "BR", "F" → "F". */
+/** The full base symbol (before any class-share separator), e.g. "BRK.B" → "BRK",
+ *  "ZTS" → "ZTS", "F" → "F". Truncating to two letters made the fallback read as a
+ *  DIFFERENT ticker ("ZTS" → "ZT") — longer symbols shrink to fit the tile instead
+ *  (fallbackFontPx below). */
 function monogram(symbol: string): string {
-  const base = symbol.split(/[.\-_]/)[0] || symbol;
-  return base.slice(0, 2);
+  return symbol.split(/[.\-_]/)[0] || symbol;
+}
+
+const TILE_PX: Record<TickerLogoSize, number> = { sm: 20, md: 28, lg: 48 };
+
+/** Fit font size (px) for fallback symbols longer than two characters: ~0.62em
+ *  advance per semibold uppercase glyph, 4px breathing room, floored at 5px so a
+ *  5-letter symbol still renders complete inside the fixed tile. Two characters
+ *  or fewer keep the token font classes (undefined). */
+function fallbackFontPx(size: TickerLogoSize, chars: number): number | undefined {
+  if (chars <= 2) return undefined;
+  return Math.max(5, Math.floor((TILE_PX[size] - 4) / (chars * 0.62)));
 }
 
 export function TickerLogo({
   symbol,
-  display = "tile",
+  display: explicitDisplay,
   size = "sm",
   className,
   title,
@@ -78,10 +74,12 @@ export function TickerLogo({
   title?: string;
   fallback?: ReactNode;
 }) {
+  const { tickerLogoDisplay: storedDisplay } = useTickerLogoDisplay();
+  const display = explicitDisplay ?? storedDisplay;
   const normalized = useMemo(() => normalizeTickerLogoSymbol(symbol), [symbol]);
   const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
-  const theme = useConsoleResolvedTheme(ref);
+  const theme = useConsoleResolvedTheme();
 
   useEffect(() => {
     setFailed(false);
@@ -95,6 +93,8 @@ export function TickerLogo({
   // fallback, otherwise a monogram tile so the slot is never a bare gap.
   if (failed) {
     if (fallback) return <>{fallback}</>;
+    const label = monogram(normalized);
+    const fontPx = fallbackFontPx(size, label.length);
     return (
       <Tooltip content={title}>
         <span
@@ -102,12 +102,13 @@ export function TickerLogo({
           className={cx(
             "con-logo-tile inline-flex shrink-0 select-none items-center justify-center overflow-hidden font-semibold uppercase leading-none",
             SIZE_CLASS[size],
-            MONOGRAM_FONT_CLASS[size],
+            fontPx === undefined && MONOGRAM_FONT_CLASS[size],
             className
           )}
+          style={fontPx === undefined ? undefined : { fontSize: fontPx, letterSpacing: "-0.02em" }}
           aria-hidden="true"
         >
-          {monogram(normalized)}
+          {label}
         </span>
       </Tooltip>
     );

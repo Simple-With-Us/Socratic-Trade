@@ -24,7 +24,10 @@ vi.mock("../src/lib/macro-history", () => ({ fetchMacroHistory: vi.fn(async () =
 vi.mock("../src/lib/market-signals", () => ({ getMarketSignals: vi.fn(async () => ({})) }));
 vi.mock("../src/lib/market-signals/massive", () => ({ fetchMassiveNews: vi.fn(async () => []) }));
 vi.mock("../src/lib/market-internals", () => ({ computeMarketInternals: vi.fn(() => ({ medianEarnYld: undefined })) }));
-vi.mock("../src/lib/benchmark", () => ({ computeSpyBenchmark: vi.fn(async () => null) }));
+vi.mock("../src/lib/benchmark", () => ({
+  computeSpyBenchmark: vi.fn(async () => null),
+  computeSpyBenchmarkDetailed: vi.fn(async () => ({ comparison: null }))
+}));
 vi.mock("../src/lib/web-sources", () => ({
   getCongressDataset: vi.fn(() => undefined),
   getInsiderDataset: vi.fn(() => undefined),
@@ -59,8 +62,12 @@ beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-dashboard-batch-${randomUUID()}.db`)}`;
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  // C1 snapshot TTL would otherwise collapse a second getDashboardSnapshot into a cache hit
+  // and under-count fill/proposal calls in call-count assertions.
+  const { resetDashboardSnapshotCacheForTests } = await import("../src/lib/dashboard-snapshot-cache");
+  resetDashboardSnapshotCacheForTests();
 });
 
 describe("getDashboardSnapshot fill/proposal batching", () => {
@@ -166,7 +173,7 @@ describe("getDashboardSnapshot fill/proposal batching", () => {
 
     db.audit(
       "proposal_rejected_by_red_team",
-      { runId: "run-rt-1", symbol: "AAPL", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "gpt-4.1-mini" },
+      { runId: "run-rt-1", symbol: "AAPL", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "openai/gpt-4.1-mini" },
       userId,
       connectedAccountId
     );
@@ -189,7 +196,7 @@ describe("getDashboardSnapshot fill/proposal batching", () => {
     });
 
     db.audit(
-      "red_team_veto_overridden",
+      "red_team_veto_override_requested",
       { runId: "run-rt-2", symbol: "MSFT", side: "buy", thesisTag: "Momentum", reason: "Too early.", model: "claude-opus", mode: "execute" },
       userId,
       connectedAccountId
@@ -201,6 +208,7 @@ describe("getDashboardSnapshot fill/proposal batching", () => {
       connectedAccountId
     );
     db.audit(
+      // Historical rows used this name before request and applied states were separated.
       "red_team_veto_overridden",
       { runId: "run-rt-3", symbol: "TSLA", side: "buy", thesisTag: "Momentum", reason: "Crowded.", model: "claude-opus", mode: "execute" },
       userId,

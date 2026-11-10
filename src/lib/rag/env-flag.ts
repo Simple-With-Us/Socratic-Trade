@@ -20,6 +20,8 @@
 
 const TRUTHY = new Set(["1", "true", "on", "yes"]);
 
+export type EnvSource = Readonly<Record<string, string | undefined>>;
+
 /**
  * Resolve a boolean env flag. Accepts (case/whitespace-insensitive) "1", "true", "on", "yes" as
  * truthy; everything else (including unset) resolves to `default_`.
@@ -32,8 +34,8 @@ const TRUTHY = new Set(["1", "true", "on", "yes"]);
  * quirk to silently no-op with a "look-alike" value will now see disclosures actually embed
  * (real Voyage/Pinecone cost). Called out explicitly in the rollout note.
  */
-export function envFlagOn(name: string, default_: boolean): boolean {
-  const raw = process.env[name];
+export function envFlagOn(name: string, default_: boolean, env: EnvSource = process.env): boolean {
+  const raw = env[name];
   if (raw == null) return default_;
   const v = raw.trim().toLowerCase();
   if (v === "") return default_;

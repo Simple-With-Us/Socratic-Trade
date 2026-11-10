@@ -131,16 +131,16 @@ describe("B. Red Team fails closed (surfaces availability) — never silently dr
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
   });
 
   it("reports available:false (and rejected:false) when OpenAI is not configured", async () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     // No-defaults world: the Red model must be an EXPLICIT choice for this test to exercise the
     // missing-KEY path (a blank model is its own earlier not_configured exit).
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOKEY", llmModel: "gpt-4.1-mini", redTeamLlmModel: "gpt-4.1-mini" });
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOKEY", llmModel: "openai/gpt-4.1-mini", redTeamLlmModel: "openai/gpt-4.1-mini" });
     setStrategyPrompt("BASE STRATEGY");
 
     const result = await debateProposal(buyProposal(), undefined);
@@ -151,8 +151,8 @@ describe("B. Red Team fails closed (surfaces availability) — never silently dr
   it("reports available:false on a non-OK provider response", async () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    process.env.OPENAI_API_KEY = "sk-test";
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_FAIL", llmModel: "gpt-4.1-mini", redTeamLlmModel: "gpt-4.1-mini" });
+    process.env.OPENROUTER_API_KEY = "sk-test";
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_FAIL", llmModel: "openai/gpt-4.1-mini", redTeamLlmModel: "openai/gpt-4.1-mini" });
     setStrategyPrompt("BASE STRATEGY");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("rate limited", { status: 429 })));
 

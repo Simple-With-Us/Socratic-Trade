@@ -1,7 +1,7 @@
 // Bearer-secret verification for the congress.trade (App A) securities-import receiver.
 //
 // Kept in its OWN module (imported only by the Node route handler) so the `crypto` dependency stays
-// out of any edge-bundled chain — mirrors congress-webhook-auth.ts. The receiver is DEFAULT-CLOSED:
+// out of any edge-bundled chain. The receiver is DEFAULT-CLOSED:
 // with no APP_B_INGEST_TOKEN configured, every write is rejected (no unauthenticated write path).
 
 import crypto from "crypto";

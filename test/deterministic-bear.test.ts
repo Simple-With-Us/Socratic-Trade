@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deterministicBearFilter } from "../src/lib/strategy";
 import type { EquityPosition, MarketFactorBreakdown, MarketQuote, TradeProposal } from "../src/lib/types";
+import { deterministicBearFilter } from "../src/lib/strategy-risk";
 
 function makeProposal(overrides: Partial<TradeProposal>): TradeProposal {
   return {

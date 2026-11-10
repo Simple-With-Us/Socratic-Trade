@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 import {
+  SOCRATIC_DEFAULT_LOGO_SOURCE_ORDER,
+  remoteLogoSources,
+  sourceOrderFor
+} from "@/lib/ticker-logo-policy";
+import {
   logoDevTickerUrl,
   normalizeTickerLogoSymbol,
   tickerLogoCandidates,
@@ -14,19 +19,24 @@ const FETCH_TIMEOUT_MS = 5_000;
 
 const LOGO_CACHE_DIR = path.join(process.cwd(), "data", "logos");
 
-async function readDiskCache(symbol: string, theme: string): Promise<Buffer | null> {
+async function readDiskCache(symbol: string, theme: string, source: string): Promise<Buffer | null> {
   try {
-    return await fs.readFile(path.join(LOGO_CACHE_DIR, `${symbol}-${theme}.png`));
+    return await fs.readFile(path.join(LOGO_CACHE_DIR, `${symbol}-${theme}-${source}.png`));
   } catch {
     return null;
   }
 }
 
-async function writeDiskCache(symbol: string | null | undefined, theme: string, buf: ArrayBuffer): Promise<void> {
+async function writeDiskCache(
+  symbol: string | null | undefined,
+  theme: string,
+  source: string,
+  buf: ArrayBuffer
+): Promise<void> {
   if (!symbol) return;
   try {
     await fs.mkdir(LOGO_CACHE_DIR, { recursive: true });
-    await fs.writeFile(path.join(LOGO_CACHE_DIR, `${symbol}-${theme}.png`), Buffer.from(buf));
+    await fs.writeFile(path.join(LOGO_CACHE_DIR, `${symbol}-${theme}-${source}.png`), Buffer.from(buf));
   } catch { /* ignore write failures — cache is best-effort */ }
 }
 
@@ -63,29 +73,16 @@ export async function GET(request: Request) {
   const baseSymbol = normalizeTickerLogoSymbol(rawSymbol);
   const rawTheme = searchParams.get("theme");
   const theme = rawTheme === "light" || rawTheme === "dark" ? rawTheme : "dark";
-
-  // Disk cache: survives PM2 restarts and builds; populated on first fetch
-  if (baseSymbol) {
-    const cached = await readDiskCache(baseSymbol, theme);
-    if (cached) {
-      return new NextResponse(new Uint8Array(cached), {
-        headers: {
-          "cache-control": `public, max-age=${ONE_DAY_SECONDS}, stale-while-revalidate=${ONE_WEEK_SECONDS}`,
-          "content-type": "image/png",
-          "x-logo-source": "disk-cache"
-        }
-      });
-    }
-  }
-
-  // Capture as non-optional for use in inner async closures (narrowing is lost across async boundaries)
   const cacheKey = baseSymbol ?? null;
+  const order = cacheKey
+    ? remoteLogoSources(sourceOrderFor(cacheKey, theme, undefined, SOCRATIC_DEFAULT_LOGO_SOURCE_ORDER))
+    : ["github", "logodev"] as const;
 
   async function tryGitHub() {
     for (const sym of candidates) {
       const r = await fetchImage(tickerLogoRawUrl(sym), ONE_WEEK_SECONDS);
       if (r) {
-        if (cacheKey) writeDiskCache(cacheKey, theme, r.buf);
+        if (cacheKey) writeDiskCache(cacheKey, theme, "github", r.buf);
         return new NextResponse(r.buf, {
           headers: {
             "cache-control": `public, max-age=${ONE_DAY_SECONDS}, stale-while-revalidate=${ONE_WEEK_SECONDS}`,
@@ -104,7 +101,7 @@ export async function GET(request: Request) {
     const referer = `${protocol}//${host}/`;
     const r = await fetchImage(logoUrl, ONE_WEEK_SECONDS, { Referer: referer });
     if (!r) return null;
-    writeDiskCache(cacheKey, theme, r.buf);
+    writeDiskCache(cacheKey, theme, "logodev", r.buf);
     return new NextResponse(r.buf, {
       headers: {
         "cache-control": `public, max-age=${ONE_DAY_SECONDS}, stale-while-revalidate=${ONE_WEEK_SECONDS}`,
@@ -114,9 +111,24 @@ export async function GET(request: Request) {
     });
   }
 
-  const result = (await tryGitHub()) ?? (await tryLogoDev());
+  for (const source of order) {
+    if (cacheKey) {
+      const cached = await readDiskCache(cacheKey, theme, source);
+      if (cached) {
+        return new NextResponse(new Uint8Array(cached), {
+          headers: {
+            "cache-control": `public, max-age=${ONE_DAY_SECONDS}, stale-while-revalidate=${ONE_WEEK_SECONDS}`,
+            "content-type": "image/png",
+            "x-logo-source": `disk-cache:${source}`
+          }
+        });
+      }
+    }
+    const hit = source === "github" ? await tryGitHub() : await tryLogoDev();
+    if (hit) return hit;
+  }
 
-  return result ?? new NextResponse(null, {
+  return new NextResponse(null, {
     status: 404,
     headers: { "cache-control": `public, max-age=${ONE_DAY_SECONDS}` }
   });

@@ -1,6 +1,6 @@
 // prompt-safety.ts — deterministic, ADVISORY-ONLY receipts for the money-path prompts.
 //
-// Three pure scanners live here (CR-H prompt-safety lane, 2026-07-05; corpus-coverage-receipt,
+// Four pure scanners/primitives live here (CR-H prompt-safety lane, 2026-07-05; corpus-coverage-receipt,
 // 2026-07-06):
 //   1. scanForInjectionAttempts — a small, curated regex sweep over the UNTRUSTED text blocks
 //      that get assembled into the Bull/Bear prompts (headlines, smart-money bulletins, RAG
@@ -9,15 +9,17 @@
 //   2. collectEvidenceAgeAnomalies — flags evidence that is suspiciously FRESH (first seen <24h
 //      before the run): a high-relevance RAG chunk dated today, or a learned fact asserted today.
 //   3. computeEmptyDocTypes — flags a COVERAGE-CHECKED filings doc type (a static allowlist of
-//      types whose PRODUCER LEDGER IS COMPLETE, currently 10-k/10-q — see COVERAGE_CHECKED_DOC_TYPES
-//      in strategy.ts) that is BOTH not retrieved this run AND has zero ever-ingested producer rows.
-//      "8-k" and "earnings-transcript" are deliberately excluded from that allowlist — see
-//      COVERAGE_CHECKED_DOC_TYPES's comment for why (8-k's default-on writer doesn't record a
-//      producer row at all; earnings-transcript has no producer anywhere).
+//      types whose PRODUCER LEDGER IS COMPLETE — see coverageCheckedFilingsDocTypes in strategy.ts)
+//      that is BOTH not retrieved this run AND has zero ever-ingested producer rows. "8-k" remains
+//      excluded because its default-on writer does not record a producer row. Earnings transcripts
+//      join the allowlist only while their default-off FMP producer is explicitly enabled.
+//   4. containPromptText — classifies a source as owner-authored instructions or untrusted data,
+//      then deterministically quarantines only instruction-like spans from untrusted data.
 //
-// OWNER PHILOSOPHY (binding): detection IS the control. Findings become audit rows and
-// decision-case evidence items — the scanned text is NEVER altered, dropped, or blocked, and
-// generation always proceeds. This is a receipt printer, not a gate.
+// OWNER PHILOSOPHY (binding): detection and narrow containment are the controls. Findings become
+// audit rows and decision-case evidence items. Trusted owner strategy text is never altered;
+// instruction-like spans in untrusted data are replaced with explicit quarantine markers and the
+// removed excerpts are retained only in bounded receipts. Generation always proceeds.
 //
 // This is a LEAF module: no imports, no DB, no I/O — so it is trivially unit-testable and can
 // never entangle the strategy money path.
@@ -51,6 +53,12 @@ const EXCERPT_RADIUS = 80;
  * that write has no length cap of its own, so the cap has to live here, at the source.
  */
 const MAX_EXCERPT_LENGTH = 400;
+/** Work cap for the containment primitive. The result makes truncation explicit. */
+export const MAX_PROMPT_CONTAINMENT_INPUT_LENGTH = 32_000;
+/** Max quarantined spans from one input; enough for review without becoming a forensic dump. */
+const MAX_CONTAINMENT_FINDINGS = 12;
+/** A malformed unpunctuated input may not cause an unbounded span removal. */
+const MAX_INSTRUCTION_SPAN_LENGTH = 2_048;
 
 /**
  * The curated pattern set. Deliberately SMALL and low-false-positive: every pattern targets an
@@ -122,6 +130,16 @@ function excerptAround(text: string, index: number, matchLength: number): string
 }
 
 /**
+ * NFKC catches practical, width/spacing-based evasions (for example `ｓｙｓｔｅｍ：`). We only
+ * use it when UTF-16 offsets stay aligned, so every resulting span can safely index the original
+ * source text. The raw source is never normalized or otherwise rewritten by detection.
+ */
+function normalizeForDetection(text: string): string {
+  const normalized = text.normalize("NFKC");
+  return normalized.length === text.length ? normalized : text;
+}
+
+/**
  * Scan untrusted prompt fields for instruction-hijack idioms. Pure + deterministic; at most one
  * finding per (field, pattern) pair, capped at MAX_FINDINGS total. NEVER throws on weird input —
  * a scanner crash must not take down a strategy run — and never modifies the scanned text.
@@ -130,9 +148,10 @@ export function scanForInjectionAttempts(fields: UntrustedPromptField[]): Inject
   const findings: InjectionFinding[] = [];
   for (const field of fields) {
     if (!field || typeof field.text !== "string" || field.text.length === 0) continue;
+    const detectionText = normalizeForDetection(field.text);
     for (const pattern of INJECTION_PATTERNS) {
       if (findings.length >= MAX_FINDINGS) return findings;
-      const match = pattern.re.exec(field.text);
+      const match = pattern.re.exec(detectionText);
       if (!match) continue;
       findings.push({
         name: field.name,
@@ -142,6 +161,220 @@ export function scanForInjectionAttempts(fields: UntrustedPromptField[]): Inject
     }
   }
   return findings;
+}
+
+// ── Prompt-injection containment ────────────────────────────────────────────────────────────
+
+/** Source trust is deliberately a property of the source label, not source text. */
+export type PromptSourceTrust = "trusted_owner" | "untrusted_data";
+
+/**
+ * `owner_strategy` is intentionally the only trusted source. In particular, reflection, coach,
+ * learned, RAG, news, and web content remain data even when they were originally authored by an
+ * owner or an LLM: they can contain relayed or persistent untrusted material.
+ *
+ * `web` labels text the app fetched from an arbitrary host (a coach-pasted article URL). It is
+ * the most attacker-controllable source family in the app, which is why it is scanned at INGEST —
+ * before anything durable is written — and not only at prompt-assembly read time.
+ */
+export type PromptTextSource =
+  | "owner_strategy"
+  | "rag"
+  | "news"
+  | "web"
+  | "learned"
+  | "reflection"
+  | "coach"
+  | "unknown";
+
+export interface PromptContainmentInput {
+  /** Source family, not a user-controlled claim embedded in the source text. */
+  source: PromptTextSource | string;
+  text: string;
+}
+
+export type PromptContainmentStatus =
+  | "trusted"
+  | "clean"
+  | "quarantined"
+  | "truncated"
+  | "quarantined_truncated";
+
+export interface PromptContainmentFinding {
+  /** Curated detector id, stable across regex tuning. */
+  pattern: string;
+  /** UTF-16 offsets into the original source text. */
+  start: number;
+  end: number;
+  /** Bounded source excerpt for review; never placed in sanitizedText. */
+  excerpt: string;
+}
+
+export interface QuarantinedPromptExcerpt extends PromptContainmentFinding {
+  /** The deterministic marker substituted into sanitizedText. */
+  replacement: string;
+}
+
+export interface PromptContainmentResult {
+  source: string;
+  trust: PromptSourceTrust;
+  status: PromptContainmentStatus;
+  /** True only when untrusted input exceeded MAX_PROMPT_CONTAINMENT_INPUT_LENGTH. */
+  truncated: boolean;
+  findings: PromptContainmentFinding[];
+  /** Safe-to-compose data text. Quarantined spans become explicit non-instruction markers. */
+  sanitizedText: string;
+  quarantinedExcerpts: QuarantinedPromptExcerpt[];
+}
+
+const TRUSTED_OWNER_SOURCES = new Set(["owner_strategy"]);
+
+/** Unknown labels fail closed into the data tier; only the canonical owner strategy is trusted. */
+export function classifyPromptSourceTrust(source: PromptTextSource | string): PromptSourceTrust {
+  return TRUSTED_OWNER_SOURCES.has(String(source).trim().toLowerCase()) ? "trusted_owner" : "untrusted_data";
+}
+
+interface InstructionMatch {
+  pattern: string;
+  start: number;
+  end: number;
+}
+
+function clampExcerpt(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= MAX_EXCERPT_LENGTH) return compact;
+  const half = Math.floor((MAX_EXCERPT_LENGTH - 5) / 2);
+  return `${compact.slice(0, half)} ... ${compact.slice(compact.length - half)}`;
+}
+
+function expandInstructionSpan(text: string, match: InstructionMatch): InstructionMatch {
+  // A blob is already the suspicious payload. Expanding it would hide nearby filing prose.
+  if (match.pattern === "base64-instruction-blob") return match;
+
+  const minimumStart = Math.max(0, match.start - MAX_INSTRUCTION_SPAN_LENGTH);
+  const before = text.slice(minimumStart, match.start);
+  const previousBoundary = Math.max(before.lastIndexOf("\n"), before.lastIndexOf("."), before.lastIndexOf("!"), before.lastIndexOf("?"));
+  let start = previousBoundary >= 0 ? minimumStart + previousBoundary + 1 : minimumStart;
+  while (start < match.start && /\s/.test(text[start]!)) start += 1;
+
+  const after = text.slice(match.end, match.end + MAX_INSTRUCTION_SPAN_LENGTH);
+  const nextBoundary = after.search(/[.!?\n]/);
+  const end = nextBoundary >= 0 ? match.end + nextBoundary + 1 : Math.min(text.length, match.end + MAX_INSTRUCTION_SPAN_LENGTH);
+  return { ...match, start, end };
+}
+
+function findInstructionSpans(text: string): InstructionMatch[] {
+  const detectionText = normalizeForDetection(text);
+  const matches: InstructionMatch[] = [];
+  for (const pattern of INJECTION_PATTERNS) {
+    const flags = pattern.re.flags.includes("g") ? pattern.re.flags : `${pattern.re.flags}g`;
+    const re = new RegExp(pattern.re.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(detectionText)) !== null) {
+      matches.push(expandInstructionSpan(text, { pattern: pattern.name, start: match.index, end: match.index + match[0].length }));
+      if (matches.length >= MAX_CONTAINMENT_FINDINGS * 3) break;
+      if (match[0].length === 0) re.lastIndex += 1;
+    }
+    if (matches.length >= MAX_CONTAINMENT_FINDINGS * 3) break;
+  }
+
+  matches.sort((a, b) => a.start - b.start || b.end - a.end || a.pattern.localeCompare(b.pattern));
+  const nonOverlapping: InstructionMatch[] = [];
+  for (const match of matches) {
+    const previous = nonOverlapping.at(-1);
+    if (previous && match.start < previous.end) continue;
+    nonOverlapping.push(match);
+    if (nonOverlapping.length >= MAX_CONTAINMENT_FINDINGS) break;
+  }
+  return nonOverlapping;
+}
+
+function quarantineReplacement(pattern: string): string {
+  return `[QUARANTINED_INSTRUCTION_LIKE_DATA:${pattern}]`;
+}
+
+/**
+ * Deterministically separate untrusted source data from instruction-like spans without silently
+ * discarding it: removed spans are represented in `sanitizedText` and returned as bounded,
+ * reviewable excerpts. This is a composition primitive, not an execution gate. Trusted owner
+ * strategy text is returned byte-for-byte unchanged and is never scanned, truncated, or mutated.
+ */
+export function containPromptText(input: PromptContainmentInput): PromptContainmentResult {
+  const source = typeof input?.source === "string" ? input.source : "unknown";
+  const text = typeof input?.text === "string" ? input.text : "";
+  const trust = classifyPromptSourceTrust(source);
+  if (trust === "trusted_owner") {
+    return { source, trust, status: "trusted", truncated: false, findings: [], sanitizedText: text, quarantinedExcerpts: [] };
+  }
+
+  const truncated = text.length > MAX_PROMPT_CONTAINMENT_INPUT_LENGTH;
+  const boundedText = truncated ? text.slice(0, MAX_PROMPT_CONTAINMENT_INPUT_LENGTH) : text;
+  const spans = findInstructionSpans(boundedText);
+  const quarantinedExcerpts = spans.map((span) => {
+    const replacement = quarantineReplacement(span.pattern);
+    return { ...span, excerpt: clampExcerpt(boundedText.slice(span.start, span.end)), replacement };
+  });
+
+  let sanitizedText = "";
+  let cursor = 0;
+  for (const quarantined of quarantinedExcerpts) {
+    sanitizedText += boundedText.slice(cursor, quarantined.start);
+    sanitizedText += quarantined.replacement;
+    cursor = quarantined.end;
+  }
+  sanitizedText += boundedText.slice(cursor);
+  if (truncated) sanitizedText += "\n[INPUT_TRUNCATED: untrusted source data exceeded containment limit]";
+
+  const status: PromptContainmentStatus = quarantinedExcerpts.length > 0
+    ? truncated ? "quarantined_truncated" : "quarantined"
+    : truncated ? "truncated" : "clean";
+  return {
+    source,
+    trust,
+    status,
+    truncated,
+    findings: quarantinedExcerpts.map(({ pattern, start, end, excerpt }) => ({ pattern, start, end, excerpt })),
+    sanitizedText,
+    quarantinedExcerpts
+  };
+}
+
+export interface PromptDataContainmentReceipt {
+  path: string;
+  result: PromptContainmentResult;
+}
+
+/** Recursively contain instruction-like strings inside a structured data payload. */
+export function containPromptDataTree(
+  value: unknown,
+  source: PromptTextSource | string = "unknown",
+  path = "data",
+  depth = 0
+): { value: unknown; receipts: PromptDataContainmentReceipt[] } {
+  if (typeof value === "string") {
+    const result = containPromptText({ source, text: value });
+    return {
+      value: result.sanitizedText,
+      receipts: result.status === "clean" || result.status === "trusted" ? [] : [{ path, result }]
+    };
+  }
+  if (depth >= 8 || value === null || typeof value !== "object") return { value, receipts: [] };
+  if (Array.isArray(value)) {
+    const receipts: PromptDataContainmentReceipt[] = [];
+    const contained = value.map((item, index) => {
+      const result = containPromptDataTree(item, source, `${path}[${index}]`, depth + 1);
+      receipts.push(...result.receipts);
+      return result.value;
+    });
+    return { value: contained, receipts };
+  }
+  const receipts: PromptDataContainmentReceipt[] = [];
+  const entries = Object.entries(value as Record<string, unknown>).map(([key, item]) => {
+    const result = containPromptDataTree(item, source, `${path}.${key}`, depth + 1);
+    receipts.push(...result.receipts);
+    return [key, result.value] as const;
+  });
+  return { value: Object.fromEntries(entries), receipts };
 }
 
 // ── Evidence-age anomaly receipts ────────────────────────────────────────────────────────────
@@ -158,11 +391,12 @@ export const EVIDENCE_AGE_HIGH_RELEVANCE_MARGIN = 0.2;
 const MAX_AGE_ANOMALIES = 12;
 
 export interface EvidenceAgeInput {
-  kind: "rag_chunk" | "learned_fact";
+  /** rag_chunk / learned_fact as of #816; headline first-seen added #837. */
+  kind: "rag_chunk" | "learned_fact" | "headline";
   id: string;
   /** Compact human label for the receipt, e.g. "AAPL 8-K 2026-07-05" or "NVDA fact:NVDA". */
   label: string;
-  /** ISO timestamp: chunk.as_of for RAG, row.assertedAt for learned facts. */
+  /** ISO timestamp: chunk.as_of for RAG, row.assertedAt for learned facts, first-seen for headlines. */
   timestamp?: string;
   /** RAG only: post-rerank relevance (falls back to cosine score at the call site). */
   relevanceScore?: number;
@@ -171,7 +405,7 @@ export interface EvidenceAgeInput {
 }
 
 export interface EvidenceAgeAnomaly {
-  kind: "rag_chunk" | "learned_fact";
+  kind: "rag_chunk" | "learned_fact" | "headline";
   id: string;
   label: string;
   ageHours: number;

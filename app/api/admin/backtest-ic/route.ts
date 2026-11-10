@@ -3,12 +3,14 @@ import { buildFactorObservations, computeFactorICs, computePerFactorIC, computeP
 import { getPolicy } from "@/lib/db";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
+import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
 export const dynamic = "force-dynamic";
 
 // Admin/diagnostic route: validate the scan's factor weights against realized forward returns.
 // READ-ONLY — never applies weights (auto-tuner's 20-closed-lot gate governs that).
-// Gated: only runs outside production, OR when ADMIN_REINDEX_TOKEN matches x-admin-token header.
+// Admin-gated by a middleware-verified primary/allowlisted admin email or a timing-safe
+// ADMIN_REINDEX_TOKEN match; there is no environment bypass. Cost admission runs after authorization.
 //
 // Query params:
 //   horizonDays       Forward-return horizon in business days (default 5)
@@ -30,54 +32,55 @@ export async function GET(request: Request) {
   const costRoundTripBps = Number(url.searchParams.get("costRoundTripBps")) || 20;
   const taxRate = Number(url.searchParams.get("taxRate")) || 0.24;
   const topK = Number(url.searchParams.get("topK")) || 3;
+  return withAdminOperationGuard(request, "backtest-ic", async () => {
+    const observations = await buildFactorObservations(userId, { horizonDays, auditLimit });
+    const ics = computeFactorICs(observations);
+    // Item 7 (report-only): per-regime factor ICs. Application of regime-conditioned weights is intentionally
+    // left OFF — per-regime buckets are almost always too thin to act on without overfitting. `sufficient`
+    // flags which regimes even have enough distinct snapshot dates to be worth reading.
+    const perRegimeICs = computePerRegimeFactorICs(observations);
+    // computePerFactorIC is an alias for computeFactorICs; derive weights using the minN gate.
+    const perFactorIC = computePerFactorIC(observations);
+    const suggestedWeightsGated = deriveWeightsFromIC(perFactorIC);
+    const current = getPolicy(userId).scoringWeights;
+    const suggestedWeights = deriveWeightsFromICs(ics, current);
 
-  const observations = await buildFactorObservations(userId, { horizonDays, auditLimit });
-  const ics = computeFactorICs(observations);
-  // Item 7 (report-only): per-regime factor ICs. Application of regime-conditioned weights is intentionally
-  // left OFF — per-regime buckets are almost always too thin to act on without overfitting. `sufficient`
-  // flags which regimes even have enough distinct snapshot dates to be worth reading.
-  const perRegimeICs = computePerRegimeFactorICs(observations);
-  // computePerFactorIC is an alias for computeFactorICs; derive weights using the minN gate.
-  const perFactorIC = computePerFactorIC(observations);
-  const suggestedWeightsGated = deriveWeightsFromIC(perFactorIC);
-  const current = getPolicy(userId).scoringWeights;
-  const suggestedWeights = deriveWeightsFromICs(ics, current);
+    const oosResult = includeOOS
+      ? await runWalkForwardOOS(userId, { horizonDays, auditLimit, trainFraction, costRoundTripBps, taxRate, topK })
+      : null;
 
-  const oosResult = includeOOS
-    ? await runWalkForwardOOS(userId, { horizonDays, auditLimit, trainFraction, costRoundTripBps, taxRate, topK })
-    : null;
-
-  return NextResponse.json({
-    ok: true,
-    horizonDays,
-    observationCount: observations.length,
-    informationCoefficients: ics,
-    currentWeights: current ?? null,
-    suggestedWeights,
-    suggestedWeightsGated,
-    perRegimeICs,
-    perRegimeNote: "Report only. Per-regime weight APPLICATION is intentionally not wired (per-regime samples are typically too thin to act on without overfitting); read `sufficient` before drawing any conclusion.",
-    note: "Suggestion only. Apply via the strategy tuner, which holds weight shifts to the 20-closed-lot gate.",
-    oos: oosResult
-      ? {
-          trainObservations: oosResult.trainObservations,
-          testObservations: oosResult.testObservations,
-          trainDates: oosResult.trainDates,
-          testDates: oosResult.testDates,
-          oosIC: oosResult.oosIC,
-          oosICIR: oosResult.oosICIR,
-          oosICDefault: oosResult.oosICDefault,
-          icWeights: oosResult.icWeights,
-          equityCurve: oosResult.equityCurve,
-          annualizedReturn: oosResult.annualizedReturn,
-          benchmarkAnnualizedReturn: oosResult.benchmarkAnnualizedReturn,
-          activeReturn: oosResult.activeReturn,
-          sharpeRatio: oosResult.sharpeRatio,
-          maxDrawdownPct: oosResult.maxDrawdownPct,
-          note: oosResult.note
-        }
-      : oosResult === null && includeOOS
-        ? { note: "Insufficient data: fewer than 4 unique snapshot dates available for a walk-forward split." }
-        : null
+    return NextResponse.json({
+      ok: true,
+      horizonDays,
+      observationCount: observations.length,
+      informationCoefficients: ics,
+      currentWeights: current ?? null,
+      suggestedWeights,
+      suggestedWeightsGated,
+      perRegimeICs,
+      perRegimeNote: "Report only. Per-regime weight APPLICATION is intentionally not wired (per-regime samples are typically too thin to act on without overfitting); read `sufficient` before drawing any conclusion.",
+      note: "Suggestion only. Apply via the strategy tuner, which holds weight shifts to the 20-closed-lot gate.",
+      oos: oosResult
+        ? {
+            trainObservations: oosResult.trainObservations,
+            testObservations: oosResult.testObservations,
+            trainDates: oosResult.trainDates,
+            testDates: oosResult.testDates,
+            oosIC: oosResult.oosIC,
+            oosICIR: oosResult.oosICIR,
+            oosICDefault: oosResult.oosICDefault,
+            icWeights: oosResult.icWeights,
+            equityCurve: oosResult.equityCurve,
+            annualizedReturn: oosResult.annualizedReturn,
+            benchmarkAnnualizedReturn: oosResult.benchmarkAnnualizedReturn,
+            activeReturn: oosResult.activeReturn,
+            sharpeRatio: oosResult.sharpeRatio,
+            maxDrawdownPct: oosResult.maxDrawdownPct,
+            note: oosResult.note
+          }
+        : oosResult === null && includeOOS
+          ? { note: "Insufficient data: fewer than 4 unique snapshot dates available for a walk-forward split." }
+          : null
+    });
   });
 }

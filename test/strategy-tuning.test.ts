@@ -21,8 +21,8 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_URL;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_URL;
   // Reset OOS mock to "no data" after each test.
   mockRunWalkForwardOOS.mockResolvedValue(null);
 });
@@ -32,7 +32,7 @@ describe("proposeStrategyTuning", () => {
     const { insertFillEvent, getStrategyPrompt, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("BASE STRATEGY");
     setPolicy({
       ...DEFAULT_POLICY,
@@ -67,7 +67,7 @@ describe("proposeStrategyTuning", () => {
     // Keyed, but the (un-migrated) policy has NO Green or Red model selected. resolveLlmEndpoint
     // returns a truthy key with model "" — the tuning path must treat that as unconfigured and use
     // deterministic local rules, never send `model:""` and 400 the provider.
-    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENROUTER_API_KEY = "test-key";
     vi.stubGlobal("fetch", async () => {
       throw new Error("tuning must NOT call the provider with a blank model");
     });
@@ -100,21 +100,21 @@ describe("proposeStrategyTuning", () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     setStrategyPrompt("RED TEAM REVIEW STRATEGY", userWithRedTeam);
     setPolicy({
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-RED-INHERIT",
-      llmModel: "gpt-4.1-mini",
-      redTeamLlmModel: "gpt-4.1",
+      llmModel: "openai/gpt-4o-mini",
+      redTeamLlmModel: "openai/gpt-4.1",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userWithRedTeam);
     setStrategyPrompt("GREEN TEAM REVIEW STRATEGY", userWithGreenOnly);
     setPolicy({
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-GREEN-INHERIT",
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       redTeamLlmModel: undefined,
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userWithGreenOnly);
@@ -167,7 +167,7 @@ describe("proposeStrategyTuning", () => {
     await proposeStrategyTuning(userWithRedTeam);
     await proposeStrategyTuning(userWithGreenOnly);
 
-    expect(requestedModels).toEqual(["gpt-4.1", "gpt-4.1-mini"]);
+    expect(requestedModels).toEqual(["openai/gpt-4.1", "openai/gpt-4o-mini"]);
   });
 
   it("skips the rotation sentinel and reviews with the concrete Green model (no local-rules degradation)", async () => {
@@ -180,13 +180,13 @@ describe("proposeStrategyTuning", () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     setStrategyPrompt("ROTATE REVIEW STRATEGY", userId);
     setPolicy({
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-ROTATE-INHERIT",
-      llmModel: "gpt-5.5",
+      llmModel: "openai/gpt-5.5",
       redTeamLlmModel: "__rotate__",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userId);
@@ -223,8 +223,8 @@ describe("proposeStrategyTuning", () => {
 
     const proposal = await proposeStrategyTuning(userId);
     // The reviewer used the concrete Green model, NOT the "__rotate__" sentinel — and did NOT degrade
-    // to local rules (which would mean generatedBy "local_rules" and zero fetch calls).
-    expect(requestedModels).toEqual(["gpt-5.5"]);
+    // to local rules (which would mean generatedBy "local_rules" and model-tracking ignored).
+    expect(requestedModels).toEqual(["openai/gpt-5.5"]);
     expect(proposal.generatedBy).toBe("llm");
   });
 
@@ -232,7 +232,7 @@ describe("proposeStrategyTuning", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("BASE STRATEGY");
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "TUNE-GATE", scoringWeights: { ...DEFAULT_POLICY.scoringWeights } });
 
@@ -256,8 +256,8 @@ describe("proposeStrategyTuning", () => {
     const { insertFillEvent, setActiveConnectedAccount, setPolicy, setStrategyPrompt, upsertConnectedAccount } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     // TEST INFRASTRUCTURE: a connected test-broker account (broker: "test", environment: "paper") so
     // execution/tuning context flows through the normal broker path — an account is an account.
     upsertConnectedAccount({
@@ -275,7 +275,7 @@ describe("proposeStrategyTuning", () => {
       ...DEFAULT_POLICY,
       accountNumber: "TUNE-LLM",
       // Classic model: this asserts temperature + exact caps (reasoning bounds → test/llm-request.test.ts).
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights },
       // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert clamped weights
       tuning: { oosWithholdUnvalidated: false }
@@ -292,9 +292,9 @@ describe("proposeStrategyTuning", () => {
     let sawMockLocalContext = false;
     vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      expect(body.max_output_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyTuning);
+      expect(body.max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyTuning);
       expect(body.temperature).toBe(LLM_REQUEST_DEFAULTS.deterministicTemperature);
-      expect(body.max_completion_tokens).toBeUndefined();
+      expect(body.max_output_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyTuning);
       const context = JSON.parse(body.input.find((item: any) => item.role === "user")?.content ?? "{}");
       // An account is an account: the connected test-broker account's environment is "paper", so
       // execution mode is broker/paper — there is no separate "test/local" mode anymore.
@@ -375,8 +375,8 @@ describe("proposeStrategyTuning", () => {
     const { insertFillEvent, setActiveConnectedAccount, setPolicy, setStrategyPrompt, upsertConnectedAccount } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     upsertConnectedAccount({
       id: accountId,
       userId,
@@ -392,7 +392,7 @@ describe("proposeStrategyTuning", () => {
       ...DEFAULT_POLICY,
       accountNumber,
       activeBroker: "alpaca",
-      llmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4o-mini",
       scoringWeights: { ...DEFAULT_POLICY.scoringWeights }
     }, userId);
     insertFillEvent({
@@ -470,10 +470,10 @@ describe("proposeStrategyTuning", () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     setStrategyPrompt("CURRENT PROMPT");
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "TUNE-LLM-GATE", llmModel: "gpt-4.1-mini", scoringWeights: { ...DEFAULT_POLICY.scoringWeights } });
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "TUNE-LLM-GATE", llmModel: "openai/gpt-4.1-mini", scoringWeights: { ...DEFAULT_POLICY.scoringWeights } });
     // No fills => 0 closed lots; even if the model ignores the prompt and returns weights, they must be stripped.
     vi.stubGlobal("fetch", async () => new Response(
       JSON.stringify({
@@ -498,13 +498,13 @@ describe("proposeStrategyTuning", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning, MAX_WEIGHT_STEP } = await import("../src/lib/strategy-tuning");
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
     setStrategyPrompt("CLAMP TEST PROMPT");
     // Use custom weights so we can assert the clamp precisely.
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert clamped weights
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "TUNE-CLAMP", llmModel: "gpt-4.1-mini", scoringWeights: customWeights, tuning: { oosWithholdUnvalidated: false } });
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "TUNE-CLAMP", llmModel: "openai/gpt-4.1-mini", scoringWeights: customWeights, tuning: { oosWithholdUnvalidated: false } });
     // Seed 20 closed lots so the §3.E gate passes.
     let n = 0;
     for (let i = 0; i < 20; i++) {
@@ -547,7 +547,7 @@ describe("localRulesProposal factor scorecard integration", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning, MAX_WEIGHT_STEP } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("FACTOR SCORECARD TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert the weight nudge
@@ -581,7 +581,7 @@ describe("OOS walk-forward gate (Task 1)", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS GATE TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "OOS-NOIMPROVE", scoringWeights: customWeights });
@@ -597,6 +597,11 @@ describe("OOS walk-forward gate (Task 1)", () => {
     // weights IC (0.10). The gate now reads oosICCandidate vs oosICBaseline (not oosIC vs default).
     mockRunWalkForwardOOS.mockResolvedValueOnce({
       trainObservations: 100, testObservations: 40, trainDates: 10, testDates: 4,
+      window: {
+        trainStartDate: "2026-05-01", trainEndDate: "2026-06-01",
+        embargoDates: 2, purgedTrainDates: 0,
+        testStartDate: "2026-06-05", testEndDate: "2026-06-15"
+      },
       trainICs: [], icWeights: customWeights as any,
       oosIC: 0.99, oosICDefault: 0.01,        // data-derived vs default — must be IGNORED by the gate now
       oosICCandidate: 0.05,                    // proposed weights: worse than current
@@ -630,7 +635,7 @@ describe("OOS walk-forward gate (Task 1)", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS IMPROVE TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "OOS-IMPROVE", scoringWeights: customWeights });
@@ -645,6 +650,11 @@ describe("OOS walk-forward gate (Task 1)", () => {
     // OOS result where the CANDIDATE (proposed) weights IC (0.15) beats the current/baseline IC (0.10).
     mockRunWalkForwardOOS.mockResolvedValueOnce({
       trainObservations: 100, testObservations: 40, trainDates: 10, testDates: 4,
+      window: {
+        trainStartDate: "2026-05-01", trainEndDate: "2026-06-01",
+        embargoDates: 2, purgedTrainDates: 0,
+        testStartDate: "2026-06-05", testEndDate: "2026-06-15"
+      },
       trainICs: [], icWeights: customWeights as any,
       oosIC: 0.01, oosICDefault: 0.99,        // data-derived vs default — must be IGNORED by the gate now
       oosICCandidate: 0.15,                    // proposed weights: better than current
@@ -667,13 +677,73 @@ describe("OOS walk-forward gate (Task 1)", () => {
     // An OOS info-caution must be present.
     const cautions = proposal.cautions.join(" ");
     expect(cautions).toMatch(/OOS-validated|improved OOS IC over the current/i);
+    // §6 slice 3: the readout names the exact held-out window and discloses the partial in-sample overlap.
+    expect(cautions).toMatch(/held-out window 2026-06-05→2026-06-15 \(4 dates; train 2026-05-01→2026-06-01, 10 dates; embargo 2, purge 0\)/);
+    expect(cautions).toMatch(/Partially in-sample/i);
+  });
+
+  it("PIT evidence cutoff (§6 follow-up): stamps the proposal and retires the in-sample caveat", async () => {
+    const { insertFillEvent, setPolicy, audit } = await import("../src/lib/db");
+    const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
+
+    delete process.env.OPENROUTER_API_KEY;
+    // Dedicated userId so the seeded snapshot history cannot leak into other tests' cutoff math.
+    const userId = `pit-swap-${randomUUID()}`;
+    const accountNumber = "PIT-SWAP";
+    const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
+    setPolicy({ ...DEFAULT_POLICY, accountNumber, scoringWeights: customWeights, tuning: { oosWithholdUnvalidated: false } }, userId);
+
+    // 20 matured June-2026 snapshot dates → fold cutoff 2026-06-26 (mirrors the unit test in
+    // pit-evidence.test.ts; "now" is the real clock, well past the horizon for these dates).
+    const juneDates = [
+      "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05",
+      "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12",
+      "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19",
+      "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26"
+    ];
+    for (const date of juneDates) {
+      audit("signal_snapshot", { runId: `run-${date}`, asOf: `${date}T15:00:00Z`, signals: [{ symbol: "AAPL", refPrice: 100, factorBreakdown: { momentum: 50 } }] }, userId);
+    }
+    // 20 losing lots closed 2026-06-15 (BEFORE the 06-26 cutoff → PIT-clean evidence) so the
+    // local-rules path proposes weight changes.
+    let t = 0;
+    for (let i = 0; i < 20; i++) {
+      const sym = `PS${i}`;
+      insertFillEvent({ accountNumber, source: "paper", symbol: sym, side: "buy", quantity: 1, price: 100, notional: 100, status: "filled", filledAt: `2026-06-15T00:0${Math.floor(t / 60)}:${String(t++ % 60).padStart(2, "0")}.000Z`, userId });
+      insertFillEvent({ accountNumber, source: "paper", symbol: sym, side: "sell", quantity: 1, price: 90, notional: 90, status: "filled", filledAt: `2026-06-15T00:0${Math.floor(t / 60)}:${String(t++ % 60).padStart(2, "0")}.000Z`, userId });
+    }
+
+    mockRunWalkForwardOOS.mockResolvedValueOnce({
+      trainObservations: 100, testObservations: 40, trainDates: 10, testDates: 4,
+      window: {
+        trainStartDate: "2026-05-01", trainEndDate: "2026-06-01",
+        embargoDates: 2, purgedTrainDates: 0,
+        testStartDate: "2026-06-26", testEndDate: "2026-07-15"
+      },
+      trainICs: [], icWeights: customWeights as any,
+      oosIC: 0.01, oosICDefault: 0.99,
+      oosICCandidate: 0.15,
+      oosICBaseline: 0.10,
+      oosICIR: 0.8,
+      equityCurve: [], annualizedReturn: null, benchmarkAnnualizedReturn: null,
+      activeReturn: null, sharpeRatio: null, maxDrawdownPct: 3,
+      note: "test"
+    });
+
+    const proposal = await proposeStrategyTuning(userId);
+
+    // The proposal carries the cutoff, and the OOS readout discloses IT instead of the caveat.
+    expect(proposal.evidenceCutoffDate).toBe("2026-06-26");
+    const cautions = proposal.cautions.join(" ");
+    expect(cautions).toMatch(/PIT evidence cutoff 2026-06-26/);
+    expect(cautions).not.toMatch(/Partially in-sample/i);
   });
 
   it("keeps proposed weights but flags them NOT out-of-sample validated when OOS has insufficient snapshots", async () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS NULL TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior (this test documents that opt-out path)
@@ -697,7 +767,7 @@ describe("OOS walk-forward gate (Task 1)", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS THROW TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior (this test documents that opt-out path)
@@ -721,7 +791,7 @@ describe("regime-segmented tuning evidence (Task 2)", () => {
     const { insertFillEvent, audit, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("REGIME SEG TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert weights are defined
@@ -760,7 +830,7 @@ describe("regime-segmented tuning evidence (Task 2)", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("REGIME FALLBACK TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // oosWithholdUnvalidated: false → legacy keep-behavior so this test can assert weights are defined

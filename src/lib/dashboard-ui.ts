@@ -1,6 +1,8 @@
 import type { EnrichmentSources, EquityPosition, MarketQuote, NotificationEvent, NotificationEventType, NotificationStatus, OrderSide } from "./types";
 import type { SymbolMeta } from "./dashboard-feed";
+import { SUPPORTED_INDEX_UNIVERSES, indexUniverseLabel } from "./index-universes";
 import { formatQuantity } from "./money";
+import { notificationFailureDetail } from "./strategy-run-failure";
 
 export interface EnrichedPosition extends EquityPosition {
   costBasis: number;
@@ -17,19 +19,26 @@ export interface NotificationDisplayItem {
   companyName?: string;
 }
 
+/** Scan source tags are `${IndexUniverse}-universe` (market.ts).  Keys are
+ *  lowercased because `normalizeSourceKey` never re-hyphenates camelCase ids.
+ *  Labels come from `indexUniverseLabel` so every slug — not just sp500 —
+ *  prints `S&P 500 Universe` / `Nasdaq Composite Universe`, never the id. */
+const INDEX_UNIVERSE_SOURCE_LABELS: Record<string, string> = Object.fromEntries(
+  SUPPORTED_INDEX_UNIVERSES.map((id) => [`${id.toLowerCase()}-universe`, `${indexUniverseLabel(id)} Universe`])
+);
+
 const SOURCE_LABELS: Record<string, string> = {
+  ...INDEX_UNIVERSE_SOURCE_LABELS,
   finnhub: "Finnhub",
   fmp: "FMP",
   "yahoo-finance": "Yahoo Finance",
   "yahoo-finance-delayed": "Yahoo Finance Delayed",
   "yahoo-finance-delayed-quotes": "Yahoo Finance Delayed Quotes",
+  "yahoo-finance-batch": "Yahoo Finance Batch",
+  "yahoo-finance-single": "Yahoo Finance Single",
   "yahoo-finance-synthetic": "Yahoo Finance Synthetic",
   "nasdaq-delayed-screener": "NASDAQ Delayed Screener",
   "nasdaq-delayed-screener-universe": "NASDAQ Delayed Screener Universe",
-  "sp500-universe": "S&P 500 Universe",
-  "sp100-universe": "S&P 100 Universe",
-  "nasdaq100-universe": "NASDAQ 100 Universe",
-  "nasdaq-composite-universe": "NASDAQ Composite Universe",
   "alpaca-quotes": "Alpaca Quotes",
   "alpaca-snapshot": "Alpaca Snapshot",
   "alpaca-news": "Alpaca News",
@@ -201,9 +210,13 @@ export function receivedLabel(ts?: string): string {
 
 export function cellTitle(label: string, source?: string, asOf?: string): string {
   const parts = [label];
-  if (source) parts.push(`Source: ${friendlySource(source)}`);
-  const received = receivedLabel(asOf);
-  if (received) parts.push(received);
+  // Freshness rides provenance: no recorded source means no provider returned the
+  // field, so a "Received <time>" stamp would claim freshness for data we never got.
+  if (source) {
+    parts.push(`Source: ${friendlySource(source)}`);
+    const received = receivedLabel(asOf);
+    if (received) parts.push(received);
+  }
   return parts.join("\n");
 }
 
@@ -236,13 +249,21 @@ export function ratingTitle(candidate: MarketQuote): string {
 
 export function sentimentTitle(candidate: MarketQuote): string {
   const src = candidate.sources ?? {};
-  return typeof candidate.sentiment === "number"
-    ? cellTitle(
-        `News-tone ${candidate.sentiment}/100 (locally computed from recent Finnhub headlines using keyword scoring)` +
-          `\n\nRecent Headlines:\n${candidate.headlines?.map((headline) => `• ${headline}`).join("\n") ?? "None"}`,
-        src.sentiment
-      )
-    : "No recent news";
+  if (typeof candidate.sentiment === "number") {
+    const headlineText = candidate.headlines?.length
+      ? `\n\nRecent Headlines:\n${candidate.headlines.map((headline) => `• ${headline}`).join("\n")}`
+      : "";
+    return cellTitle(`News sentiment score ${candidate.sentiment}/100${headlineText}`, src.sentiment);
+  }
+  return "No recent news sentiment score recorded";
+}
+
+export function insiderSentimentTitle(candidate: MarketQuote): string {
+  const src = candidate.sources ?? {};
+  if (typeof candidate.insiderSentiment === "number") {
+    return cellTitle(`Insider sentiment score ${candidate.insiderSentiment}/100`, src.insiderSentiment ?? "sec-edgar");
+  }
+  return "No recent insider sentiment score recorded";
 }
 
 export function scanQuoteAsOf(candidates: MarketQuote[]): string | undefined {
@@ -278,6 +299,8 @@ const FEED_STATUS_LABELS: Record<string, string> = {
   partially_filled: "Partially filled",
   pending_order: "Order pending",
   pending_reconciliation: "Awaiting reconciliation",
+  // Terminal: broker_order_id was unusable (empty / literal "undefined") — cannot reconcile.
+  unreconcilable: "Unreconcilable",
   pending_approval: "Awaiting approval",
   approved: "Approved",
   blocked: "Blocked",
@@ -293,7 +316,13 @@ const FEED_STATUS_LABELS: Record<string, string> = {
   placed: "Placed",
   paper: "Paper trade",
   completed: "Completed",
+  skipped: "Skipped",
+  // Strategy-run pre-decision skips (UX PR-A1) — never success-ish "Completed".
+  skipped_budget: "Skipped — LLM budget",
+  skipped_market_closed: "Skipped — market closed",
+  skipped_broker_unhealthy: "Skipped — broker unhealthy",
   placing_failed: "Placement failed",
+  not_placed: "Not placed - safe to retry",
   running: "Running"
 };
 
@@ -306,22 +335,34 @@ export function feedStatusLabel(raw?: string | null): string {
 
 // ── Notifications (decided vocabulary) ──────────────────────────────────────────────────────
 
-const NOTIFICATION_EVENT_TYPE_LABELS: Record<NotificationEventType, string> = {
+export const NOTIFICATION_EVENT_TYPE_LABELS: Record<NotificationEventType, string> = {
   fill: "Order filled",
   block: "Trade blocked",
-  run_failed: "Run failed",
+  run_failed: "Strategy Run Failed",
   pending_approval: "Awaiting your approval",
   kill_switch: "Kill switch",
   price_alert: "Price alert",
   proposal_withdrawn: "Proposal withdrawn",
   limit_order_stale: "Stale limit order",
   provider_degraded: "Data provider degraded",
+  liveness_warning: "Liveness warning",
   budget_alert: "Budget alert",
   learning_review: "Learning review",
   deterministic_bear_veto: "Vetoed by Bear risk",
+  red_team_veto_override_requested: "Red Team override requested",
   red_team_veto_overridden: "Red Team veto overridden",
   prompt_injection_suspected: "Prompt injection suspected",
-  evidence_age_anomaly: "Evidence age anomaly"
+  evidence_age_anomaly: "Evidence age anomaly",
+  storage_warning: "Storage warning",
+  autonomy_halted_on_boot: "Autonomy halted on boot",
+  option_alert: "Option alert",
+  earningscalls_entitlement_blocked: "EarningsCalls.dev plan entitlement blocked",
+  roic_status_advisory: "ROIC.ai program status",
+  risk_advisory: "Risk advisory",
+  protective_exit_failing: "Protective exit failing",
+  signal_health: "Signal health drift",
+  lookahead_leak: "Lookahead leak suspected",
+  watchlist_digest: "Daily watchlist digest"
 };
 
 export function notificationTypeLabel(type?: string | null): string {
@@ -366,7 +407,8 @@ export function formatNotificationDisplay(
     // Red-Team-unavailable signal must survive into the feed — append the indicator instead of
     // discarding it with the generic overwrite.
     const adversaryUnavailable = payload.adversaryUnavailable === true;
-    title = `${actionLabel(side)} ${symbol ?? "Proposal"} Awaiting Approval${adversaryUnavailable ? " — Red Team Unavailable" : ""}`;
+    const humanReviewReasonTitle = stringValue(payload.humanReviewReasonTitle);
+    title = `${actionLabel(side)} ${symbol ?? "Proposal"} Awaiting Approval${humanReviewReasonTitle ? ` — ${humanReviewReasonTitle}` : adversaryUnavailable ? " — Red Team Unavailable" : ""}`;
   } else if (event.type === "kill_switch") {
     title = "Kill Switch Triggered";
   } else if (event.type === "run_failed") {
@@ -376,12 +418,16 @@ export function formatNotificationDisplay(
     title = `${actionLabel(side)} ${symbol ?? "Proposal"} ${expired ? "Expired" : "Withdrawn"}`;
   } else if (event.type === "deterministic_bear_veto") {
     title = `${actionLabel(side)} ${symbol ?? "Trade"} Vetoed by Bear Risk`;
+  } else if (event.type === "red_team_veto_override_requested") {
+    title = `Red Team Override Requested ${symbol ? `for ${symbol}` : ""}`;
   } else if (event.type === "red_team_veto_overridden") {
     title = `Red Team Veto Overridden ${symbol ? `for ${symbol}` : ""}`;
   } else if (event.type === "prompt_injection_suspected") {
     title = `Prompt Injection Suspected ${symbol ? `for ${symbol}` : ""}`;
   } else if (event.type === "evidence_age_anomaly") {
     title = `Evidence Age Anomaly ${symbol ? `for ${symbol}` : ""}`;
+  } else if (event.type === "option_alert") {
+    title = event.title;
   }
 
   return {
@@ -394,8 +440,13 @@ export function formatNotificationDisplay(
 }
 
 function notificationDetail(event: NotificationEvent): string {
+  if (event.type === "option_alert") {
+    const payload = asRecord(event.payload);
+    return stringValue(payload.detail) || "Option alert";
+  }
   if (
     event.type === "deterministic_bear_veto" ||
+    event.type === "red_team_veto_override_requested" ||
     event.type === "red_team_veto_overridden" ||
     event.type === "prompt_injection_suspected" ||
     event.type === "evidence_age_anomaly"
@@ -404,6 +455,12 @@ function notificationDetail(event: NotificationEvent): string {
     const reason = stringValue(payload.reason) || stringValue(payload.detail);
     return reason ? `Audit logged: ${reason}` : "Advisory audit logged";
   }
+  const failure = notificationFailureDetail({
+    type: event.type,
+    payload: event.payload,
+    title: event.title
+  });
+  if (failure) return failure;
   const prefix = notificationStatusLabel(event.status);
   const reason = notificationReason(event.error);
   return reason ? `${prefix} - ${reason}` : prefix;
@@ -411,21 +468,35 @@ function notificationDetail(event: NotificationEvent): string {
 
 function notificationReason(error?: string): string | undefined {
   if (!error) return undefined;
-  if (error === "Notifications Webhook Not Configured") return "Notifications Webhook Not Configured";
+  if (error === "Notifications Webhook Not Configured") return "No notification channels enabled.";
+  if (error === "not_configured") return "Notification channel is not configured by the operator.";
+  if (error === "no_target") return "Notification channel has no delivery target.";
   if (error === "Notification type is disabled.") return "Type Disabled";
   return error;
 }
 
 function actionLabel(side?: OrderSide): string {
-  return side === "sell" ? "Sell" : side === "buy" ? "Buy" : "Trade";
+  if (side === "sell") return "Sell";
+  if (side === "buy") return "Buy";
+  if (side === "short") return "Short";
+  if (side === "cover") return "Cover";
+  return "Trade";
 }
 
 function executedActionLabel(side?: OrderSide): string {
-  return side === "sell" ? "Sold" : side === "buy" ? "Bought" : "Traded";
+  if (side === "sell") return "Sold";
+  if (side === "buy") return "Bought";
+  if (side === "short") return "Shorted";
+  if (side === "cover") return "Covered";
+  return "Traded";
 }
 
 function paperActionLabel(side?: OrderSide): string {
-  return side === "sell" ? "Paper Sell" : side === "buy" ? "Paper Buy" : "Paper Trade";
+  if (side === "sell") return "Paper Sell";
+  if (side === "buy") return "Paper Buy";
+  if (side === "short") return "Paper Short";
+  if (side === "cover") return "Paper Cover";
+  return "Paper Trade";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -436,10 +507,46 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** Tokens that look like a ticker (all-caps 1-10 chars) but are actually system identifiers
+ *  that should never be linked to a symbol drilldown drawer.  `symbolFromTitle` skips every
+ *  match in this set so an alert titled "Usage limit hit: openrouter RAG ingest hit daily
+ *  cap" no longer surfaces a "RAG" symbol button that opens a phantom SymbolDrilldown for
+ *  the AI feature.  Includes LLM/data-provider names that share the casing pattern of real
+ *  tickers (RAG, FMP, VOYAGE, OPENROUTER, ALPACA, TRADIER) and common infra acronyms
+ *  (API, DB, CPU, GPU, MCP, LLM, HTTP, URL, SQL, SSH, TLS, VPN, CDN, AWS, GCP, AZ).
+ *  Exported so the alerts console can render a non-clickable Chip for the same set
+ *  (alert-center.tsx: renderSymbolChip). */
+export const SYSTEM_SYMBOLS: ReadonlySet<string> = new Set([
+  // The AI feature itself (Retrieval-Augmented Generation) — surfaced as "RAG" in alerts.
+  "RAG",
+  // Data + AI provider / service names
+  "FMP", "ALPACA", "ALPAC", "TRADIER", "POLYGON", "VOYAGE", "OPENROUTER",
+  "OPENAI", "ANTHROPIC", "GEMINI", "COHERE", "MISTRAL", "DEEPSEEK",
+  // Infra acronyms that would otherwise be rendered as if they were tickers
+  "API", "DB", "CPU", "GPU", "RAM", "MCP", "LLM", "HTTP", "HTTPS",
+  "URL", "URI", "SQL", "SSH", "TLS", "SSL", "VPN", "CDN", "AWS", "GCP", "AZ"
+]);
+
+/** True when `value` is a system identifier that must never be treated as a tradable symbol.
+ *  Returns false for undefined / empty / lowercase / numeric input. */
+export function isSystemSymbol(value: string | undefined | null): value is string {
+  if (!value) return false;
+  const upper = value.trim().toUpperCase();
+  if (!upper) return false;
+  return SYSTEM_SYMBOLS.has(upper);
+}
+
 function symbolFromTitle(title?: string): string | undefined {
   if (!title) return undefined;
-  const match = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/);
-  return match?.[0];
+  // Pull every all-caps token 1-10 chars and pick the first one that isn't a known system
+  // identifier.  A naive single-match regex used to swallow "RAG" from the RAG-ingest alert
+  // title and route the user into a phantom SymbolDrilldown for the AI feature.
+  const matches = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/g);
+  if (!matches) return undefined;
+  for (const candidate of matches) {
+    if (!isSystemSymbol(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function normalizeSymbol(symbol?: string): string | undefined {
@@ -448,5 +555,5 @@ function normalizeSymbol(symbol?: string): string | undefined {
 }
 
 function normalizeSide(side?: string): OrderSide | undefined {
-  return side === "buy" || side === "sell" ? side : undefined;
+  return side === "buy" || side === "sell" || side === "short" || side === "cover" ? side : undefined;
 }

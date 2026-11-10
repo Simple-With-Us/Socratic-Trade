@@ -13,8 +13,9 @@ export const dynamic = "force-dynamic";
 //          `entryId` reverts a specific row; otherwise the most-recent non-reverted row for the subsystem
 //          (default `scoring_weights`) on the caller's active account is reverted.
 //
-// Admin-gated because a revert mutates live policy and this repo has prior IDOR history. requireAdmin accepts
-// the ADMIN_USER_EMAILS allowlist / primary operator, the legacy x-admin-token, or non-production.
+// Admin-gated because a revert mutates live policy and this repo has prior IDOR history. requireAdmin
+// accepts a middleware-verified primary/allowlisted admin email or the timing-safe legacy
+// x-admin-token; there is no environment bypass.
 
 export async function GET(request: Request) {
   const denied = requireAdmin(request);

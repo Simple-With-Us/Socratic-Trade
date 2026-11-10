@@ -26,7 +26,7 @@ can actually help place orders — safely, behind the same gates as the strategy
   eval; the authoritative gate is still `executeProposal` at approve). `dryRun:true` returns
   `{decision, estimatedNotional}` without inserting; commit inserts a `proposed` row (idempotent on
   `runId='chat:'+draft_id`), audits, and emits the `proposal` SSE event.
-- **`src/lib/db.ts`** — `findProposedIdByRunId(runId, userId)` for the idempotency dedupe.
+- **`src/lib/db.ts`** — `findProposalIdByRunId(runId, userId)` for whole-lifecycle idempotency.
 - **`app/ui/assistant-console.tsx`** (new) — the `AssistantView`: history load, composer → `/api/chat`,
   message bubbles + citation chips, and a `DraftOrderCard` with the staged flow (Check policy → Stage
   for approval → Confirm & place). The destination pill is derived from the **live** `executionState`

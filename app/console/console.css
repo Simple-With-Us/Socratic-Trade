@@ -4,11 +4,13 @@
 
    THEMING MODEL
    - Semantic tokens only (surface/fg/muted/line/accent/up-down/warn/reality).
-     Components never hardcode raw hex — they reference var(--con-*).
+     Components never hardcode raw hex — they reference the semantic console tokens.
    - Light is the base set; dark overrides it. Resolution order:
        1. explicit choice via [data-theme="light"|"dark"] on .console-root
-          (persisted in localStorage under a console-scoped key), else
-       2. prefers-color-scheme.
+          (persisted in localStorage under a console-scoped key; default light
+          per owner 2026-08-10 — never invent dark from OS on first visit),
+       2. when unset (user chose System only): prefers-color-scheme,
+       3. otherwise stay on the light base tokens.
      The dark token block therefore appears twice (explicit + media query) —
      KEEP THE TWO BLOCKS IDENTICAL.
    - Soft fills and borders are derived from the base palette with color-mix,
@@ -24,8 +26,8 @@
   --con-surface: #ffffff;
   --con-surface-2: #f4f6fa;
   --con-surface-3: #e9edf4;
-  --con-line: rgba(23, 32, 46, 0.1);
-  --con-line-strong: rgba(23, 32, 46, 0.2);
+  --con-line: rgba(23, 32, 46, 0.14);
+  --con-line-strong: rgba(23, 32, 46, 0.5);
 
   --con-fg: #17202e;
   --con-muted: #46556b;   /* ≥7:1 on surface */
@@ -35,22 +37,27 @@
      is the canonical value the whole app's brand accent derives from. */
   --con-accent: var(--brand-accent);
   --con-accent-contrast: #ffffff;
-  --con-pos: #157f4e;
+  /* Light tonal text is validated on the matching *-soft fill (chips are
+     11px/600), not on the plain surface — #2561. One step darker than the
+     2026-07 tokens so each tone clears WCAG AA (4.5:1) on its soft wash. */
+  --con-pos: #0f5c38;
   --con-pos-contrast: #ffffff;
-  --con-neg: #d1332e;
+  --con-neg: #b02b27;
   --con-neg-contrast: #ffffff;
-  --con-warn: #9a6209;
+  --con-warn: #734907;
   --con-warn-contrast: #ffffff;
-  --con-info: #0891b2;
+  --con-info: #056478;
   --con-info-contrast: #ffffff;
 
   /* Money-reality tones (reinforcement only — the word is load-bearing) */
-  --con-none: #64748b;
+  --con-none: #536073;
   --con-paper: #4f46e5;
   --con-live: #d1332e;
 
   --con-shadow: 0 8px 24px -12px rgba(23, 32, 46, 0.18);
   --con-shadow-lg: 0 24px 60px -24px rgba(23, 32, 46, 0.28);
+  /* Upward shadow for bottom-anchored sticky surfaces (.ac-actions). */
+  --con-shadow-up: 0 -10px 24px -14px rgba(23, 32, 46, 0.28);
   --con-scrim: rgba(23, 32, 46, 0.4);
 
   color-scheme: light;
@@ -80,6 +87,10 @@
   --con-radius-sm: var(--radius-control);
 
   /* Type scale */
+  /* 2xs is the sanctioned MICRO tier: captions, timestamps, axis/sub-labels only —
+     never interactive text or anything the owner must read to act. Added 2026-07-16
+     to replace ad-hoc text-[9px]/text-[10px] arbitrary values. */
+  --con-fs-2xs: 10px;
   --con-fs-xs: 11px;
   --con-fs-sm: 12.5px;
   --con-fs-base: 13.5px;
@@ -89,7 +100,12 @@
   --con-fs-xxl: 30px;
 
   /* Font stacks */
-  --con-font-ui: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* --con-font-ui is the console's default face and now resolves to Lato (app/fonts/lato.ts
+     injects --font-lato on <html>), matching the rest of the site and the native iOS app.
+     --con-font-lato is the same stack under an explicit name so the font picker can offer
+     "Lato" as a named choice rather than only as the unnamed default. */
+  --con-font-lato: var(--font-lato), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --con-font-ui: var(--con-font-lato);
   --con-font-system: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --con-font-serif: Georgia, "Times New Roman", serif;
   --con-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
@@ -105,6 +121,23 @@
   min-height: 100dvh;
 }
 
+/* Phone type-scale override */
+@media (max-width: 639px) {
+  .console-root {
+    --con-fs-2xs: 11px;
+    --con-fs-xs: 12.5px;
+    --con-fs-sm: 14px;
+    --con-fs-base: 15px;
+    --con-fs-md: 17px;
+    --con-fs-lg: 20px;
+    --con-fs-xl: 24px;
+    --con-fs-xxl: 32px;
+  }
+}
+
+.console-root[data-textbox-font="lato"] {
+  --con-control-font: var(--con-font-lato);
+}
 .console-root[data-textbox-font="system"] {
   --con-control-font: var(--con-font-system);
 }
@@ -118,6 +151,9 @@
 /* Console font: the whole console UI's font (nav, chrome, cards, copy) — kept
    independent from --con-control-font/[data-textbox-font] above, which only
    governs editable inputs/textareas. */
+.console-root[data-console-font="lato"] {
+  --con-body-font: var(--con-font-lato);
+}
 .console-root[data-console-font="system"] {
   --con-body-font: var(--con-font-system);
 }
@@ -128,37 +164,40 @@
   --con-body-font: var(--con-font-mono);
 }
 
-/* ── DARK (explicit choice) — keep IDENTICAL to the media-query block below ── */
+/* ── DARK (explicit choice) — keep IDENTICAL to the media-query block below ──
+   Near-black neutral charcoal (no teal/navy cast). Surfaces step up in grey only. */
 .console-root[data-theme="dark"] {
-  --con-bg: #0b1114;
-  --con-surface: #11191d;
-  --con-surface-2: #162127;
-  --con-surface-3: #1c2b31;
-  --con-line: rgba(148, 163, 184, 0.13);
-  --con-line-strong: rgba(148, 163, 184, 0.26);
+  --con-bg: #0a0a0a;
+  --con-surface: rgba(22, 22, 22, 0.78);
+  --con-surface-2: rgba(30, 30, 30, 0.72);
+  --con-surface-3: rgba(42, 42, 42, 0.68);
+  --con-line: rgba(255, 255, 255, 0.12);
+  --con-line-strong: rgba(255, 255, 255, 0.35);
 
-  --con-fg: #e8edf4;
-  --con-muted: #a5b2c4;
-  --con-faint: #8492a6;
+  --con-fg: #f0f0f0;
+  --con-muted: #b0b0b0;
+  /* One step above the 4.5:1 line on surface-3 (#2561). Keep both dark blocks identical. */
+  --con-faint: #a3a3a3;
 
   --con-accent: var(--brand-accent-dark);
-  --con-accent-contrast: #071316;
-  --con-pos: #37c58c;
+  --con-accent-contrast: #04130d;
+  --con-pos: #34d399;
   --con-pos-contrast: #04170e;
-  --con-neg: #f0635e;
+  --con-neg: #fb5e74;
   --con-neg-contrast: #1c0605;
-  --con-warn: #e5aa4b;
+  --con-warn: #fbbf24;
   --con-warn-contrast: #201302;
-  --con-info: #22d3ee;
+  --con-info: #60a5fa;
   --con-info-contrast: #061f26;
 
   --con-none: #94a3b8;
   --con-paper: #98a3ff;
-  --con-live: #ff5d5d;
+  --con-live: #fb5e74;
 
-  --con-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.65);
-  --con-shadow-lg: 0 28px 70px -20px rgba(0, 0, 0, 0.75);
-  --con-scrim: rgba(4, 6, 10, 0.66);
+  --con-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.7);
+  --con-shadow-lg: 0 28px 70px -20px rgba(0, 0, 0, 0.8);
+  --con-shadow-up: 0 -10px 30px -14px rgba(0, 0, 0, 0.7);
+  --con-scrim: rgba(0, 0, 0, 0.72);
 
   color-scheme: dark;
 }
@@ -167,35 +206,37 @@
       the block above ── */
 @media (prefers-color-scheme: dark) {
   .console-root:not([data-theme="light"]) {
-    --con-bg: #0b1114;
-    --con-surface: #11191d;
-    --con-surface-2: #162127;
-    --con-surface-3: #1c2b31;
-    --con-line: rgba(148, 163, 184, 0.13);
-    --con-line-strong: rgba(148, 163, 184, 0.26);
+    --con-bg: #0a0a0a;
+    --con-surface: rgba(22, 22, 22, 0.78);
+    --con-surface-2: rgba(30, 30, 30, 0.72);
+    --con-surface-3: rgba(42, 42, 42, 0.68);
+    --con-line: rgba(255, 255, 255, 0.12);
+    --con-line-strong: rgba(255, 255, 255, 0.35);
 
-    --con-fg: #e8edf4;
-    --con-muted: #a5b2c4;
-    --con-faint: #8492a6;
+    --con-fg: #f0f0f0;
+    --con-muted: #b0b0b0;
+    /* One step above the 4.5:1 line on surface-3 (#2561). Keep both dark blocks identical. */
+    --con-faint: #a3a3a3;
 
     --con-accent: var(--brand-accent-dark);
-    --con-accent-contrast: #071316;
-    --con-pos: #37c58c;
+    --con-accent-contrast: #04130d;
+    --con-pos: #34d399;
     --con-pos-contrast: #04170e;
-    --con-neg: #f0635e;
+    --con-neg: #fb5e74;
     --con-neg-contrast: #1c0605;
-    --con-warn: #e5aa4b;
+    --con-warn: #fbbf24;
     --con-warn-contrast: #201302;
-    --con-info: #22d3ee;
+    --con-info: #60a5fa;
     --con-info-contrast: #061f26;
 
     --con-none: #94a3b8;
     --con-paper: #98a3ff;
-    --con-live: #ff5d5d;
+    --con-live: #fb5e74;
 
-    --con-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.65);
-    --con-shadow-lg: 0 28px 70px -20px rgba(0, 0, 0, 0.75);
-    --con-scrim: rgba(4, 6, 10, 0.66);
+    --con-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.7);
+    --con-shadow-lg: 0 28px 70px -20px rgba(0, 0, 0, 0.8);
+    --con-shadow-up: 0 -10px 30px -14px rgba(0, 0, 0, 0.7);
+    --con-scrim: rgba(0, 0, 0, 0.72);
 
     color-scheme: dark;
   }
@@ -234,51 +275,20 @@
   font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
-  color: var(--con-faint);
+  color: var(--con-fg);
 }
 
 /* ── Autonomy desk home ── */
-.con-thesis-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
-  gap: 16px;
-  align-items: stretch;
+.con-strategy-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
   border: 1px solid var(--con-line);
-  /* Flat surface + accent left-rule, not a gradient wash (2026-07-08 UI-audit,
-     Package G item 4) — the gradient read as decoration without meaning. */
   border-left: 3px solid var(--con-accent);
   border-radius: var(--con-radius);
   background: var(--con-surface);
-  box-shadow: var(--con-shadow);
-  padding: 18px;
-}
-.con-thesis-hero h1 {
-  margin-top: 8px;
-  max-width: 760px;
-  font-size: var(--con-fs-xxl);
-  line-height: 1.12;
-  font-weight: 750;
-  color: var(--con-fg);
-}
-.con-thesis-hero p {
-  margin-top: 10px;
-  max-width: 820px;
-  color: var(--con-muted);
-  font-size: var(--con-fs-md);
-  line-height: 1.55;
-}
-.con-autonomy-card {
-  min-width: 0;
-  border: 1px solid var(--con-accent-border);
-  border-radius: var(--con-radius-sm);
-  background: color-mix(in oklab, var(--con-accent) 8%, var(--con-surface));
-  padding: 14px;
-}
-.con-autonomy-card p {
-  margin-top: 4px;
-  color: var(--con-muted);
-  font-size: var(--con-fs-sm);
-  line-height: 1.45;
+  padding: 10px 14px;
 }
 .con-decision-list {
   display: flex;
@@ -364,20 +374,14 @@
 }
 
 @media (max-width: 900px) {
-  .con-thesis-hero {
-    grid-template-columns: 1fr;
+  .con-strategy-bar {
+    /* Allow wrapping to stack naturally on narrow screens */
   }
 }
 
 @media (max-width: 640px) {
-  .con-thesis-hero {
-    padding: 14px;
-  }
-  .con-thesis-hero h1 {
-    font-size: var(--con-fs-xl);
-  }
-  .con-thesis-hero p {
-    font-size: var(--con-fs-base);
+  .con-strategy-bar {
+    padding: 8px 10px;
   }
   .con-decision-row {
     grid-template-columns: 1fr;
@@ -464,19 +468,66 @@
   font-size: var(--con-fs-xs);
 }
 
-/* Coarse-pointer (touch) 44px minimum target — WCAG 2.5.8/2.5.5. Mirrors the
-   `max-sm:min-h-11` floor app/ui/primitives.tsx already bakes in. Covers every
-   .con-btn variant (incl. .con-btn-sm) and the header run-state control below;
-   other chrome triggers (ScopeSelector/StateChip/UserMenu buttons in
-   chrome.tsx) are raw Tailwind utilities with no class hook here — see
-   followUps. */
+/* Coarse-pointer (touch) 44px minimum target — WCAG 2.5.8/2.5.5. Every
+   console interactive class, not just .con-btn. Scope rows stay full-width;
+   icon-only controls also get a 44px width floor. */
 @media (pointer: coarse) {
   .con-btn,
   .con-start-btn,
-  .con-stop-btn {
+  .con-stop-btn,
+  .con-bar-ctl,
+  .con-cmdk-trigger,
+  .con-icon-btn,
+  .con-nav-item,
+  .con-scope-row,
+  .con-cmdk-item,
+  .ac-expand-toggle,
+  .con-tab-item,
+  .con-watch-btn,
+  .con-toast-dismiss,
+  .con-theme-btn,
+  .con-segmented-btn,
+  .con-disclosure > summary {
     min-height: 44px;
+  }
+  .con-bar-ctl:not(.con-bar-ctl-scope),
+  .con-cmdk-trigger,
+  .con-icon-btn,
+  .con-watch-btn,
+  .con-toast-dismiss,
+  .con-theme-btn,
+  .con-segmented-btn {
     min-width: 44px;
   }
+}
+
+/* Chrome bar icon/square controls — visual size can stay compact; touch floor
+   comes from the coarse-pointer block above. Scope selector keeps flex width. */
+.con-bar-ctl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.con-bar-ctl-scope {
+  justify-content: flex-start;
+}
+
+/* Icon-only close / dismiss affordances (sheet, drawer, toast). */
+.con-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--con-radius-sm);
+  color: var(--con-faint);
+  transition: color 120ms ease, background 120ms ease;
+}
+.con-icon-btn:hover {
+  color: var(--con-fg);
+  background: var(--con-surface-2);
 }
 
 /* The header run-state control: Start/Resume when paused, STOP when stopping.
@@ -497,6 +548,15 @@
   padding: 7px 14px;
   cursor: pointer;
   transition: background 120ms ease;
+}
+/* Phones: icon-only run-state control so the account scope keeps readable width. */
+.con-run-state-label {
+  display: none;
+}
+@media (min-width: 640px) {
+  .con-run-state-label {
+    display: inline;
+  }
 }
 .con-stop-btn {
   border: 1.5px solid var(--con-neg-border);
@@ -532,6 +592,27 @@
 @media (prefers-reduced-motion: reduce) {
   .con-menu-drop {
     animation: none;
+  }
+}
+
+/* Account scope dropdown rows (chrome.tsx ScopeSelector). The panel itself
+   reuses .con-menu-drop for the slide-down entrance; these are the row
+   hover/selected states. The loaded account row is aria-checked + disabled and
+   keeps a soft accent tint; switchable rows light up on hover/focus. */
+.con-scope-row {
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.con-scope-row[aria-checked="true"] {
+  background: var(--con-accent-soft);
+}
+.con-scope-row:not([aria-checked="true"]):not([disabled]):hover,
+.con-scope-row:not([aria-checked="true"]):not([disabled]):focus-visible {
+  background: var(--con-surface-2);
+  border-color: var(--con-accent);
+}
+@media (pointer: coarse) {
+  .con-scope-row {
+    min-height: 44px;
   }
 }
 
@@ -616,11 +697,21 @@
   width: 100%;
   transition: border-color 120ms ease;
 }
+/* Keep a visible focus ring (WCAG 2.4.7) — border accent alone is easy to miss on
+   dark surfaces and money-critical typed-confirm fields. Prefer :focus-visible so
+   mouse clicks stay clean. */
 .con-input:focus,
 .con-select:focus,
 .con-textarea:focus {
   border-color: var(--con-accent);
   outline: none;
+}
+.con-input:focus-visible,
+.con-select:focus-visible,
+.con-textarea:focus-visible {
+  border-color: var(--con-accent);
+  outline: 2px solid var(--con-accent);
+  outline-offset: 2px;
 }
 .con-input::placeholder,
 .con-textarea::placeholder {
@@ -638,7 +729,11 @@
 @media (max-width: 640px) {
   .con-input,
   .con-select,
-  .con-textarea {
+  .con-textarea,
+  .con-cmdk-search input,
+  .console-root input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="range"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
+  .console-root select,
+  .console-root textarea {
     font-size: 16px;
   }
 }
@@ -685,6 +780,19 @@
 .con-toggle:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Touch hit target without deforming visual pill shape */
+@media (pointer: coarse) {
+  .con-toggle::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 /* ── Meter (spend / consumption gauges) ── */
@@ -765,15 +873,92 @@
   color: var(--con-accent);
 }
 
+/* Top bar top-inset if a leftover home-screen bookmark still opens standalone. */
+.con-topbar {
+  padding-top: 0;
+}
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  .con-topbar {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+/* Bottom tab bar.
+ *
+ * Keep bottom:0. Do NOT use a negative bottom / measured chrome-gap shift —
+ * that hid the label row under Safari's floating URL chrome (2026-08-05).
+ *
+ * Browser Safari already parks a position:fixed;bottom:0 bar above its own
+ * toolbar, so a full env(safe-area-inset-bottom) pad is a second clearance
+ * (2026-07-18). That pad plus a 94% surface-over-blur let --con-bg (#f1f4f6
+ * grey-blue) show as a band between the tab labels and the URL pill, and
+ * again around the translucent chrome. Owner 2026-08-18: remove ~75-80% of
+ * that band and paint the remainder the same white as the tab strip.
+ *
+ * Browser: keep ~22% of the inset as breathing room. Standalone/PWA: full
+ * env() so the home indicator stays inside the bar. Solid --con-surface
+ * (no blur) so the remaining pad and the ::after chrome underlay match the
+ * labels, not the page grey. */
+.con-tabbar {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) * 0.22);
+  background: var(--con-surface);
+}
+/* Paints under / around Safari's translucent URL chrome. Sits BELOW the bar
+ * so labels stay put. Height covers the floating pill + toolbar + home
+ * indicator without a min-height floor that reads as a dead band. */
+.con-tabbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: max(7.5rem, calc(env(safe-area-inset-bottom, 0px) + 4rem));
+  background: var(--con-surface);
+  pointer-events: none;
+}
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  .con-tabbar {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .con-tabbar::after {
+    content: none;
+  }
+}
+
+.con-skip-link {
+  position: absolute;
+  left: 0.75rem;
+  top: 0.75rem;
+  z-index: 80;
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  background: var(--con-surface);
+  color: var(--con-fg);
+  font-weight: 700;
+  box-shadow: var(--con-shadow);
+  transform: translateY(-220%);
+}
+.con-skip-link:focus {
+  transform: none;
+}
+.con-deep-link-focus {
+  outline: 2px solid var(--con-accent);
+  outline-offset: 2px;
+  scroll-margin-top: 6rem;
+}
+
 .con-tab-item {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  font-size: 10px;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--con-faint);
-  padding: 6px 0 4px;
+  /* Extra top padding vs. bottom gives the negative-positioned badge (see
+   * .con-badge below) clearance from the bar's top border so it doesn't read
+   * as clipped/cramped — a few px, not a bar-height change. */
+  padding: 9px 0 4px;
   flex: 1;
   position: relative;
 }
@@ -794,6 +979,11 @@
   line-height: 1;
 }
 
+/* Body scroll-lock while any console overlay is open (use-overlay.ts). */
+body.con-overlay-open {
+  overflow: hidden;
+}
+
 /* ── Sheets / dialogs ── */
 .con-scrim {
   position: fixed;
@@ -801,6 +991,7 @@
   background: var(--con-scrim);
   backdrop-filter: blur(2px);
   z-index: 100;
+  overscroll-behavior: contain;
 }
 .con-sheet {
   position: fixed;
@@ -812,8 +1003,9 @@
   top: 50%;
   transform: translate(-50%, -50%);
   width: min(560px, calc(100vw - 32px));
-  max-height: min(82dvh, 720px);
+  max-height: min(82dvh, calc(var(--con-vv-height, 100dvh) - 2rem), 720px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: var(--con-radius);
 }
 /* Opt-in wider variant for dialogs whose content needs more horizontal room
@@ -826,10 +1018,10 @@
     top: auto;
     left: 0;
     right: 0;
-    bottom: 0;
+    bottom: var(--con-vv-offset-top, 0px);
     transform: none;
     width: 100%;
-    max-height: 88dvh;
+    max-height: min(88dvh, var(--con-vv-height, 100dvh));
     border-radius: var(--con-radius) var(--con-radius) 0 0;
     border-left: none;
     border-right: none;
@@ -844,6 +1036,43 @@
   border-color: var(--con-accent-border);
 }
 
+/* ── Approval card sticky CTAs (PR-A2) ──
+ * Mobile: stick Approve/Reject above the fixed .con-tabbar so primary actions stay
+ * reachable while scrolling a dense (or expanded) receipt. Tab bar is ~3.25–3.75rem
+ * of content; in standalone/PWA it also pads env(safe-area-inset-bottom). Desktop
+ * (lg+) keeps a normal static footer at the card bottom.
+ * Shell already reserves pb-24 under the tab bar for page content clearance. */
+.ac-actions {
+  background: color-mix(in oklab, var(--con-surface) 94%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+@media (max-width: 1023px) {
+  .ac-actions {
+    position: sticky;
+    /* Clear fixed .con-tabbar (content ~3.25rem + optional home-indicator inset). */
+    bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+    z-index: 30;
+    box-shadow: var(--con-shadow-up);
+  }
+}
+@media (min-width: 1024px) {
+  .ac-actions {
+    position: static;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: transparent;
+  }
+}
+.ac-expand-toggle {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
 /* ── Symbol drawer ── */
 .con-drawer-scrim {
   position: fixed;
@@ -852,15 +1081,17 @@
   background: var(--con-scrim);
   backdrop-filter: blur(2px);
   animation: con-fade-in 140ms ease-out;
+  overscroll-behavior: contain;
 }
 .con-drawer {
   position: fixed;
   z-index: 111;
-  top: 0;
+  top: var(--con-vv-offset-top, 0px);
   right: 0;
   bottom: 0;
   display: flex;
   width: min(100vw, 640px);
+  max-height: var(--con-vv-height, 100dvh);
   flex-direction: column;
   overflow: hidden;
   border-left: 1px solid var(--con-line-strong);
@@ -1007,27 +1238,44 @@
 .con-disclosure > summary {
   cursor: pointer;
   list-style: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--con-fs-sm);
-  font-weight: 600;
-  color: var(--con-muted);
-  padding: 10px 0;
   user-select: none;
 }
 .con-disclosure > summary::-webkit-details-marker { display: none; }
-.con-disclosure > summary::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid var(--con-faint);
-  border-bottom: 1.5px solid var(--con-faint);
-  transform: rotate(-45deg);
-  transition: transform 140ms ease;
-  flex: none;
+/* Keyboard focus ring for collapsible-card headers.  Explicit rather than relying on the global
+ * `.console-root :focus-visible` rule: the <summary> used to carry Tailwind's `focus:outline-none`,
+ * and the only reason the ring still showed was that unlayered console.css beats `@layer utilities`
+ * — one CSS reorganisation away from an invisible focus target on every collapsible card.  Inset so
+ * the ring is not clipped by, or fighting with, the card border. */
+.con-disclosure > summary:focus-visible {
+  outline: 2px solid var(--con-accent);
+  outline-offset: -2px;
+  border-radius: var(--con-radius);
 }
-.con-disclosure[open] > summary::before { transform: rotate(45deg); }
+
+.con-disclosure-label {
+  font-size: var(--con-fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--con-faint);
+}
+.con-disclosure-label::after {
+  content: "EXPAND >";
+}
+.con-disclosure[open] .con-disclosure-label::after {
+  content: "COLLAPSE \02C5";
+}
+
+/* Collapsed collapsible cards are summary-only. The open-state header uses
+ * asymmetric pt-3.5 / pb-1 (tight bottom toward body content). When closed,
+ * that leaves "You're set" and similar one-line titles top-weighted and short.
+ * Balance vertical padding + a modest min-height so title/actions sit centered
+ * like other single-row card content. Open state unchanged. */
+.con-disclosure.con-card:not([open]) > summary > div {
+  padding-top: 0.875rem;
+  padding-bottom: 0.875rem;
+  min-height: 3.25rem;
+  box-sizing: border-box;
+}
 
 .con-hr {
   border: none;
@@ -1103,6 +1351,11 @@
 @media (prefers-reduced-motion: reduce) {
   .console-root * {
     animation-duration: 0.01ms !important;
+    /* Duration alone does not stop INFINITE animations (animate-pulse skeletons,
+       .con-dot-pulse): with 0.01ms duration each frame samples an arbitrary keyframe
+       phase, so they flicker per-frame instead of holding still. Clamp iterations
+       so they settle after one (instant) pass. */
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
 }
@@ -1115,14 +1368,16 @@
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 12vh 16px 16px;
+  padding: max(12px, var(--con-vv-offset-top, 0px)) 16px 16px;
+  height: var(--con-vv-height, 100dvh);
   background: var(--con-scrim);
   backdrop-filter: blur(2px);
+  overscroll-behavior: contain;
 }
 .con-cmdk {
   width: 100%;
   max-width: 560px;
-  max-height: 62vh;
+  max-height: min(62dvh, calc(var(--con-vv-height, 100dvh) - 2rem));
   display: flex;
   flex-direction: column;
   background: var(--con-surface);
@@ -1165,6 +1420,13 @@
   margin: 0;
   padding: 6px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.con-cmdk-group {
+  padding: 10px 11px 4px;
+  font-size: var(--con-fs-xs);
+  font-weight: 700;
+  color: var(--con-faint);
 }
 .con-cmdk-item {
   display: flex;
@@ -1208,9 +1470,13 @@
 .con-cmdk-trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+  /* Square icon hit target on phones (kbd hidden); expands when kbd shows at sm+. */
+  min-width: 32px;
+  min-height: 32px;
   height: 32px;
-  padding: 0 10px;
+  padding: 0 8px;
   border: 1px solid var(--con-line-strong);
   border-radius: var(--con-radius-sm);
   background: var(--con-surface-2);
@@ -1218,6 +1484,12 @@
   font-size: var(--con-fs-xs);
   cursor: pointer;
   transition: border-color 120ms ease, color 120ms ease;
+  flex-shrink: 0;
+}
+@media (min-width: 640px) {
+  .con-cmdk-trigger {
+    padding: 0 10px;
+  }
 }
 .con-cmdk-trigger:hover {
   border-color: var(--con-accent);

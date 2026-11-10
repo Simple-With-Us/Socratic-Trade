@@ -8,10 +8,12 @@
  *  minute while the app is running, and a trigger notifies through the
  *  price_alert event in Settings → Event notifications. */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
-import { fmtMoney, EM_DASH } from "../lib/format";
+import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
+import { cx, fmtMoney, EM_DASH } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Dash, Empty, Field, NumInput, Select, TextInput } from "../ui/primitives";
@@ -37,6 +39,15 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 export default function WatchlistPage() {
+  return (
+    <Suspense fallback={null}>
+      <WatchlistPageInner />
+    </Suspense>
+  );
+}
+
+function WatchlistPageInner() {
+  const searchParams = useSearchParams();
   const toast = useToast();
   const [data, setData] = useState<WatchlistData | null>(null);
   const [alerts, setAlerts] = useState<PriceAlert[] | null>(null);
@@ -176,6 +187,16 @@ export default function WatchlistPage() {
     if (a.status === "armed") armedBySymbol.set(a.symbol, (armedBySymbol.get(a.symbol) ?? 0) + 1);
   }
 
+  const focusedSymbol = readSymbolQuery(searchParams.get("symbol"));
+
+  useEffect(() => {
+    if (!focusedSymbol) return;
+    scrollDeepLinkTarget([
+      symbolElementId(focusedSymbol, "card"),
+      symbolElementId(focusedSymbol)
+    ]);
+  }, [focusedSymbol, data, alerts]);
+
   return (
     <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
       <div className="flex flex-wrap items-center gap-2">
@@ -210,7 +231,7 @@ export default function WatchlistPage() {
               spellCheck={false}
               className="con-mono w-28"
               aria-label="Symbol to add"
-              title="Ticker to follow. Watching a symbol never trades it — it only shows up here with a quote."
+              title="Ticker to follow.  Watching a symbol never trades it — it only shows up here with a quote."
             />
             <Btn variant="primary" size="sm" type="submit" disabled={busy || newSymbol.trim().length === 0} title="Add this ticker to your watchlist.">
               <Plus size={13} /> Add
@@ -222,87 +243,120 @@ export default function WatchlistPage() {
         {data === null ? (
           <Empty>Loading watchlist…</Empty>
         ) : data.items.length === 0 ? (
-          <Empty>Nothing watched yet. Add a ticker above — watching is free and never trades.</Empty>
+          <Empty>Nothing watched yet.  Add a ticker above — watching is free and never trades.</Empty>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="con-table">
-              <thead>
-                <tr>
-                  <th>Symbol</th>
-                  <th className="num" title="Latest known price from the active account's data source. '—' means no quote is available right now — never a made-up number.">
-                    Price
-                  </th>
-                  <th className="num" title="Armed price alerts on this symbol.">Alerts</th>
-                  <th title="When you added the symbol.">Added</th>
-                  <th aria-label="Row actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((item) => {
-                  const quote = data.quotes[item.symbol];
-                  const armed = armedBySymbol.get(item.symbol) ?? 0;
-                  return (
-                    <tr key={item.symbol}>
-                      <td className="con-mono font-semibold">
-                        <SymbolButton symbol={item.symbol} showLogo={false} />
-                      </td>
-                      <td
-                        className="num con-num"
-                        title={
-                          typeof quote?.price === "number"
-                            ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}. Quotes may be delayed.`
-                            : "No quote available — quotes come from the active account's data source and may be delayed."
-                        }
+          <>
+            <div className="hidden overflow-x-auto lg:block">
+              <table className="con-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th className="num" title="Latest known price from the active account's data source.  '—' means no quote is available right now — never a made-up number.">
+                      Price
+                    </th>
+                    <th className="num" title="Armed price alerts on this symbol.">Alerts</th>
+                    <th title="When you added the symbol.">Added</th>
+                    <th aria-label="Row actions" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.items.map((item) => {
+                    const quote = data.quotes[item.symbol];
+                    const armed = armedBySymbol.get(item.symbol) ?? 0;
+                    const focused = focusedSymbol === item.symbol.toUpperCase();
+                    return (
+                      <tr
+                        key={item.symbol}
+                        id={focused ? symbolElementId(item.symbol.toUpperCase()) : undefined}
+                        className={focused ? DEEP_LINK_FOCUS_CLASS : undefined}
                       >
+                        <td className="con-mono font-semibold">
+                          <SymbolButton symbol={item.symbol} />
+                        </td>
+                        <td
+                          className="num con-num"
+                          title={
+                            typeof quote?.price === "number"
+                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}.  Quotes may be delayed.`
+                              : "No quote available — quotes come from the active account's data source and may be delayed."
+                          }
+                        >
+                          {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
+                        </td>
+                        <td className="num con-num" title={armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"} on ${item.symbol} — listed below.` : `No armed alerts on ${item.symbol}.`}>
+                          {armed > 0 ? armed : <Dash />}
+                        </td>
+                        <td>
+                          <Ago iso={item.addedAt} />
+                        </td>
+                        <td className="num">
+                          <WatchlistRowActions
+                            symbol={item.symbol}
+                            busy={busy}
+                            onAlert={() => prefillAlert(item.symbol)}
+                            onRemove={() => void removeSymbol(item.symbol)}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-col gap-2 px-2 pb-3 pt-2 lg:hidden">
+              {data.items.map((item) => {
+                const quote = data.quotes[item.symbol];
+                const armed = armedBySymbol.get(item.symbol) ?? 0;
+                const focused = focusedSymbol === item.symbol.toUpperCase();
+                return (
+                  <div
+                    key={item.symbol}
+                    id={focused ? symbolElementId(item.symbol.toUpperCase(), "card") : undefined}
+                    className={cx(
+                      "con-row flex flex-col gap-2 rounded-control border border-[color:var(--con-line)] p-3",
+                      focused && DEEP_LINK_FOCUS_CLASS
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <SymbolButton symbol={item.symbol} />
+                        <span className="mt-1 block text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                          added <Ago iso={item.addedAt} />
+                        </span>
+                      </div>
+                      <div className="con-num text-right text-[length:var(--con-fs-md)] font-semibold">
                         {typeof quote?.price === "number" ? fmtMoney(quote.price) : EM_DASH}
-                      </td>
-                      <td className="num con-num" title={armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"} on ${item.symbol} — listed below.` : `No armed alerts on ${item.symbol}.`}>
-                        {armed > 0 ? armed : <Dash />}
-                      </td>
-                      <td>
-                        <Ago iso={item.addedAt} />
-                      </td>
-                      <td className="num">
-                        <div className="flex justify-end gap-1">
-                          <Btn
-                            size="sm"
-                            variant="ghost"
-                            disabled={busy}
-                            onClick={() => prefillAlert(item.symbol)}
-                            title={`Set a price alert for ${item.symbol} — prefills the form below with the current price.`}
-                          >
-                            <BellPlus size={13} /> Alert
-                          </Btn>
-                          <Btn
-                            size="sm"
-                            variant="ghost"
-                            disabled={busy}
-                            onClick={() => void removeSymbol(item.symbol)}
-                            title={`Stop watching ${item.symbol}. Its alerts are separate and stay armed until deleted.`}
-                          >
-                            <Trash2 size={13} />
-                          </Btn>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                        {armed > 0 ? `${armed} armed alert${armed === 1 ? "" : "s"}` : "no armed alerts"}
+                      </span>
+                      <WatchlistRowActions
+                        symbol={item.symbol}
+                        busy={busy}
+                        onAlert={() => prefillAlert(item.symbol)}
+                        onRemove={() => void removeSymbol(item.symbol)}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </Card>
 
       {/* ── Price alerts ── */}
-      <Card title="Price alerts">
+      <Card title="Price Alerts">
         <p className="mb-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
           Armed alerts are checked against live quotes about once a minute while the app&apos;s server is running. A
           trigger fires once, then the alert moves to &ldquo;triggered&rdquo; — it never re-arms by itself. Delivery
-          uses the <strong>price_alert</strong> event in Settings → Event notifications. Alerts only notify; they never
-          place orders.
+          uses the &ldquo;Price alert&rdquo; notification in Settings → Event notifications. Alerts only notify; they
+          never place orders.
         </p>
 
-        <div ref={alertFormRef} className="mb-4 grid gap-3 rounded-lg border border-[color:var(--con-line)] p-3 sm:grid-cols-[7rem_7rem_8rem_1fr_auto]">
+        <div ref={alertFormRef} className="mb-4 grid gap-3 rounded-control border border-[color:var(--con-line)] p-3 sm:grid-cols-[7rem_7rem_8rem_1fr_auto]">
           <Field label="Symbol" htmlFor="alert-symbol">
             <TextInput
               id="alert-symbol"
@@ -352,7 +406,7 @@ export default function WatchlistPage() {
               variant="primary"
               disabled={busy || alertSymbol.trim().length === 0 || alertPrice.trim().length === 0}
               onClick={() => void createAlert()}
-              title="Arm the alert. It notifies once when the level is crossed — it never trades."
+              title="Arm the alert.  It notifies once when the level is crossed — it never trades."
             >
               <BellPlus size={13} /> Arm alert
             </Btn>
@@ -362,7 +416,7 @@ export default function WatchlistPage() {
         {alerts === null ? (
           <Empty>Loading alerts…</Empty>
         ) : alerts.length === 0 ? (
-          <Empty>No price alerts yet. Arm one above, or use the Alert button on a watched symbol.</Empty>
+          <Empty>No price alerts yet.  Arm one above, or use the Alert button on a watched symbol.</Empty>
         ) : (
           <div className="flex flex-col">
             {[...alerts]
@@ -370,7 +424,10 @@ export default function WatchlistPage() {
               .map((alert) => (
                 <div
                   key={alert.id}
-                  className="con-row flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-1.5 py-2"
+                  className={cx(
+                    "con-row flex flex-wrap items-center gap-x-3 gap-y-1 rounded-control px-1.5 py-2",
+                    focusedSymbol === alert.symbol.toUpperCase() && DEEP_LINK_FOCUS_CLASS
+                  )}
                   title={
                     alert.status === "armed"
                       ? `Armed: notifies when ${alert.symbol} trades ${alert.op === ">" ? "above" : "below"} ${fmtMoney(alert.price)}.`
@@ -378,7 +435,7 @@ export default function WatchlistPage() {
                   }
                 >
                   <span className="con-mono font-semibold">
-                    <SymbolButton symbol={alert.symbol} showLogo={false} />
+                    <SymbolButton symbol={alert.symbol} />
                   </span>
                   <span className="con-num text-[length:var(--con-fs-sm)]">
                     {alert.op === ">" ? "above" : "below"} {fmtMoney(alert.price)}
@@ -408,7 +465,7 @@ export default function WatchlistPage() {
                     variant="ghost"
                     disabled={busy}
                     onClick={() => void removeAlert(alert)}
-                    title="Delete this alert. Armed alerts stop watching; triggered ones just leave the list."
+                    title="Delete this alert.  Armed alerts stop watching; triggered ones just leave the list."
                   >
                     <Trash2 size={13} />
                   </Btn>
@@ -417,6 +474,43 @@ export default function WatchlistPage() {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+function WatchlistRowActions({
+  symbol,
+  busy,
+  onAlert,
+  onRemove
+}: {
+  symbol: string;
+  busy: boolean;
+  onAlert: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex justify-end gap-1">
+      <Btn
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={onAlert}
+        title={`Set a price alert for ${symbol} — prefills the form below with the current price.`}
+        align="right"
+      >
+        <BellPlus size={13} /> Alert
+      </Btn>
+      <Btn
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        onClick={onRemove}
+        title={`Stop watching ${symbol}.  Its alerts are separate and stay armed until deleted.`}
+        align="right"
+      >
+        <Trash2 size={13} />
+      </Btn>
     </div>
   );
 }

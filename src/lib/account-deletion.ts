@@ -1,6 +1,20 @@
 import crypto from "crypto";
-import { getDb, getPolicy, releaseStrategyLock, setPolicy } from "./db";
+import { getDb, reconcileStaleProviderDispatches } from "./db";
 import { clearMcpOAuthForUser } from "./mcp-oauth";
+import {
+  OPERATION_LEASE_GROUPS,
+  assertOperationLeaseOwnership,
+  runWithOperationLease,
+  throwIfOperationLeaseCancelled
+} from "./operation-lease";
+import {
+  assertCurrentAccountIdentity,
+  countActiveUserOperations,
+  markAccountIdentityDeleted,
+  markUserDeletionCompleted,
+  markUserDeletionPrepared
+} from "./user-write-fence";
+import { userIdForEmail } from "./auth/identity";
 
 export const ACCOUNT_DELETE_PHRASE = "DELETE MY ACCOUNT";
 export const LOCAL_OPERATOR_DELETE_PHRASE = "DELETE LOCAL OPERATOR ACCOUNT";
@@ -31,23 +45,85 @@ const DELETE_TABLES_BY_USER_ID = [
   "user_watchlist",
   "price_alerts",
   "notification_prefs",
+  // Added 2026-08-12: registered APNs device tokens (native iOS push). A deleted account must not
+  // leave a live token behind that would keep delivering to that person's phone.
+  "device_push_tokens",
+  // Added 2026-11-09 (ST-2599): server-backed Auth.js session rows (migration 102).
+  "auth_sessions",
   "chat_turns",
   "llm_usage",
   "user_memory",
   "learned_context_pending",
+  // Added 2026-07-19: append-only archive of coach notes aged off the live socratic_decisions
+  // window (migration 53, db-socratic.ts). User-scoped like socratic_decisions itself.
+  "socratic_coach_note_archive",
   "socratic_decisions",
   "socratic_framework_proposals",
   "synthetic_trailing_stops",
+  // Added 2026-09-29: per-user data-source residential proxy settings (including the
+  // encrypted proxy password). A deleted account must not leave proxy credentials behind.
+  "user_proxy_settings",
   "broker_protective_stops",
   "audit_events",
   // Added by the G9(b) coverage cross-check (2026-07-01) — previously missing:
   "api_health_log",
   "mobile_commands",
+  "strategy_run_requests",
   "rag_usage",
   "take_profit_trims",
   // Added 2026-07-05: due_jobs (src/lib/db-jobs.ts) is user-scoped (nullable user_id — system-wide
   // jobs have none, matching the generic loop's `WHERE user_id = ?` no-op for those rows).
-  "due_jobs"
+  "due_jobs",
+  // Added 2026-07-10: position_stop_plans (src/lib/db-api-keys.ts) — per-position stop-plan rows,
+  // user-scoped like take_profit_trims.
+  "position_stop_plans",
+  // Added 2026-07-11: strategy_tuning_reviews (src/lib/db-tuning-reviews.ts) — persisted AI
+  // strategy-review results, user-scoped.
+  "strategy_tuning_reviews",
+  "order_replacements",
+  // Added 2026-07-14: managed-vector receipts and durable provider dispatch/usage telemetry are
+  // explicitly user-scoped. Delete the usage outbox before its attempt row so this remains safe if
+  // a future migration adds the natural foreign key between them.
+  "provider_usage_outbox",
+  "provider_dispatch_attempts",
+  "vector_ingest_commits",
+  // Licensed transcript derivatives and exact private-vector provider receipts are user-scoped.
+  // They must survive until provider-first vector erasure succeeds, then leave in the same local
+  // deletion transaction as the decision/chat rows they describe.
+  "fmp_transcript_derived_provider_work",
+  "fmp_transcript_derived_artifacts",
+  // Added 2026-07-15: retrieval-usefulness aggregates + per-decision credit ledger
+  // (src/lib/db-retrieval-usefulness.ts) — user-scoped learning telemetry.
+  "retrieval_usefulness_stats",
+  "retrieval_usefulness_credited",
+  // Added 2026-08-12: rolling signal-health diagnostics (src/lib/db-signal-health.ts) —
+  // user-scoped learning telemetry like the retrieval-usefulness tables above.
+  "signal_health_snapshot",
+  // Added 2026-08-12: truncated-replay lookahead-audit findings (src/lib/db-lookahead-audit.ts) —
+  // user-scoped audit telemetry like signal_health_snapshot.
+  "lookahead_audit_findings",
+  // Added 2026-07-16: pending_bracket_teardowns (src/lib/db.ts) — queued bracket sibling-leg
+  // teardowns are user-scoped like position_stop_plans.
+  "pending_bracket_teardowns",
+  // Added 2026-07-16: position_stop_plan_open_brackets (src/lib/db.ts) — tracked, not-yet-torn-down
+  // bracket orders are user-scoped like pending_bracket_teardowns.
+  "position_stop_plan_open_brackets",
+  // Added 2026-07-18: option_alert_reservations (src/lib/db.ts) — atomic option-alert dedupe claims
+  // are user-scoped (user_id column) like notification_events.
+  "option_alert_reservations",
+  // Added 2026-07-20: broker_stop_placement_intents (src/lib/db.ts) — user-scoped stop placement intents.
+  "broker_stop_placement_intents",
+  // Added 2026-07-29: task_journal (src/lib/db.ts, migration 62) — cron/task run journal rows are
+  // user-scoped when attributed (nullable user_id — system-wide runs have none, matching the
+  // generic loop's `WHERE user_id = ?` no-op for those rows, same as due_jobs).
+  "task_journal",
+  // Added 2026-08-05: headline_first_seen (src/lib/db.ts, migration 66) — per-user first
+  // observation timestamps for news headlines used by evidence-age receipts (#837).
+  "headline_first_seen",
+  // Added 2026-08-14: r5 scoped locks / memory lifecycle / overlays (migrations 79–81).
+  "trade_locks",
+  "vector_doc_lifecycle",
+  "strategy_overlays"
 ] as const;
 
 type DeleteTable = (typeof DELETE_TABLES_BY_USER_ID)[number];
@@ -76,6 +152,19 @@ export interface AccountDeletionBlockers {
    * running-strategy-run / placing-proposal / pending-fill blockers.
    */
   activeMobileCommands: number;
+  /**
+   * Non-terminal order-replacement state-machine rows. If deletion proceeds while a
+   * replacement is in-flight (order canceled but replacement not yet placed, or replacement
+   * submitted but not confirmed), the row is deleted and the maintenance pump can no longer
+   * complete the replacement — the broker order would be canceled without the intended
+   * market exit. Counted as a blocker so deletion waits for the row to reach a terminal
+   * status first.
+   */
+  activeReplacements: number;
+  /** Provider calls already reserved/dispatched before the prepared-deletion admission fence. */
+  activeProviderDispatches: number;
+  /** Chat/learning/other claimed user writes admitted before the prepared epoch fence. */
+  activeUserOperations: number;
 }
 
 export interface AccountDeletionPreview {
@@ -105,13 +194,31 @@ function normalizeEmail(value: string | undefined): string {
   return (value ?? "").trim().toLowerCase();
 }
 
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-
 function countTable(table: DeleteTable, userId: string): number {
+  if (table === "vector_ingest_commits") {
+    const selector = vectorCommitDeletionSelector(userId);
+    const row = getDb().prepare(`SELECT COUNT(*) AS count FROM vector_ingest_commits WHERE ${selector.where}`)
+      .get(...selector.bindings) as { count: number };
+    return row.count;
+  }
   const row = getDb().prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE user_id = ?`).get(userId) as { count: number };
   return row.count;
+}
+
+function privateVectorTenantScopes(userId: string): [string, string] {
+  return [
+    `private:${crypto.createHash("sha256").update(userId, "utf8").digest("hex")}`,
+    `private:${userId}`
+  ];
+}
+
+function vectorCommitDeletionSelector(userId: string): { where: string; bindings: string[] } {
+  if (userId !== "local") return { where: "user_id = ?", bindings: [userId] };
+  const scopes = privateVectorTenantScopes(userId);
+  return {
+    where: "user_id = ? AND tenant_scope IN (?, ?)",
+    bindings: [userId, ...scopes]
+  };
 }
 
 function countLearnedContext(userId: string): number {
@@ -122,14 +229,12 @@ function countLearnedContext(userId: string): number {
 }
 
 function countUserSettingsRows(userId: string): number {
-  const exactKeys = [`strategy_run_lock:${userId}`, `robinhood_mcp_oauth_token:${userId}`, `llm_budget_reservation:${userId}`];
-  const exactCount = getDb()
-    .prepare(`SELECT COUNT(*) AS count FROM settings WHERE key IN (${exactKeys.map(() => "?").join(",")})`)
-    .get(...exactKeys) as { count: number };
-  const stateCount = getDb()
-    .prepare("SELECT COUNT(*) AS count FROM settings WHERE key LIKE ? ESCAPE '\\'")
-    .get(`robinhood_mcp_oauth_state:${escapeLike(userId)}:%`) as { count: number };
-  return exactCount.count + stateCount.count;
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS count
+    FROM settings
+    WHERE account_setting_matches_subject(key, account_subject_token(?)) = 1
+  `).get(userId) as { count: number };
+  return row.count;
 }
 
 function latestPreparedRequest(userId: string): { id: string; requested_at: string } | undefined {
@@ -138,7 +243,7 @@ function latestPreparedRequest(userId: string): { id: string; requested_at: stri
       `SELECT id, requested_at
        FROM account_deletion_requests
        WHERE user_id = ? AND status = 'prepared'
-       ORDER BY requested_at DESC
+       ORDER BY requested_at DESC, rowid DESC
        LIMIT 1`
     )
     .get(userId) as { id: string; requested_at: string } | undefined;
@@ -146,6 +251,10 @@ function latestPreparedRequest(userId: string): { id: string; requested_at: stri
 
 export function getAccountDeletionBlockers(userId: string): AccountDeletionBlockers {
   const db = getDb();
+  // Release only proven-undispatched reservations and classify expired dispatched ownership as
+  // unknown. Unknown stale owners remain blockers until an operator explicitly attests the prior
+  // process is gone; elapsed time alone is not authority to erase external provider state.
+  reconcileStaleProviderDispatches(new Date().toISOString(), 5 * 60_000, userId);
   const runningStrategyRuns = db
     .prepare("SELECT COUNT(*) AS count FROM strategy_runs WHERE user_id = ? AND status = 'running'")
     .get(userId) as { count: number };
@@ -165,11 +274,31 @@ export function getAccountDeletionBlockers(userId: string): AccountDeletionBlock
   const activeMobileCommands = db
     .prepare("SELECT COUNT(*) AS count FROM mobile_commands WHERE user_id = ? AND status IN ('queued','running')")
     .get(userId) as { count: number };
+  const activeStrategyRunRequests = db
+    .prepare("SELECT COUNT(*) AS count FROM strategy_run_requests WHERE user_id = ? AND status IN ('queued','running')")
+    .get(userId) as { count: number };
+  const activeReplacements = db
+    .prepare("SELECT COUNT(*) AS count FROM order_replacements WHERE user_id = ? AND status IN ('cancel_requested', 'cancel_confirmed', 'replacement_claiming', 'replacement_submitted')")
+    .get(userId) as { count: number };
+  const activeProviderDispatches = db
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM provider_dispatch_attempts
+      WHERE user_id = ? AND (
+        status IN ('reserved','dispatched') OR
+        (status = 'unknown' AND outcome_code = 'stale-owner-unresolved')
+      )
+    `)
+    .get(userId) as { count: number };
+  const activeUserOperations = countActiveUserOperations(userId);
   return {
-    runningStrategyRuns: runningStrategyRuns.count,
+    runningStrategyRuns: runningStrategyRuns.count + activeStrategyRunRequests.count,
     placingProposals: placingProposals.count,
     pendingReconciliationFills: pendingReconciliationFills.count,
-    activeMobileCommands: activeMobileCommands.count
+    activeMobileCommands: activeMobileCommands.count,
+    activeReplacements: activeReplacements.count,
+    activeProviderDispatches: activeProviderDispatches.count,
+    activeUserOperations
   };
 }
 
@@ -219,20 +348,35 @@ export function getAccountDeletionPreview(input: { userId: string; email?: strin
 }
 
 export function prepareAccountDeletion(input: { userId: string; email?: string }): AccountDeletionPreview {
+  if (input.email) assertCurrentAccountIdentity(userIdForEmail(input.email), input.userId);
   const db = getDb();
   const now = new Date().toISOString();
-  const policy = getPolicy(input.userId);
-  if (policy.systemState !== "halted") {
-    setPolicy({ ...policy, systemState: "halted" }, input.userId);
-  }
-  releaseStrategyLock(input.userId);
+  const requestId = crypto.randomUUID();
   db.transaction(() => {
+    // Halt every account, not only whichever account is active in the UI. Do this before installing
+    // the write fence but in the same IMMEDIATE transaction: after commit no scheduler can observe
+    // an autonomous sibling account without also observing the prepared tombstone.
+    const states = db.prepare(`
+      SELECT connected_account_id, policy
+      FROM account_strategy_state
+      WHERE user_id = ?
+    `).all(input.userId) as Array<{ connected_account_id: string; policy: string }>;
+    const haltState = db.prepare(`
+      UPDATE account_strategy_state
+      SET policy = ?, system_state = 'halted', updated_at = ?
+      WHERE user_id = ? AND connected_account_id = ?
+    `);
+    for (const state of states) {
+      const policy = JSON.parse(state.policy) as Record<string, unknown>;
+      haltState.run(JSON.stringify({ ...policy, systemState: "halted" }), now, input.userId, state.connected_account_id);
+    }
     db.prepare("UPDATE account_deletion_requests SET status = 'cancelled' WHERE user_id = ? AND status = 'prepared'").run(input.userId);
     db.prepare(
       `INSERT INTO account_deletion_requests (id, user_id, email, requested_at, status)
        VALUES (?, ?, ?, ?, 'prepared')`
-    ).run(crypto.randomUUID(), input.userId, input.email ? normalizeEmail(input.email) : null, now);
-  })();
+    ).run(requestId, input.userId, input.email ? normalizeEmail(input.email) : null, now);
+    markUserDeletionPrepared(db, input.userId, requestId, now);
+  }).immediate();
   return getAccountDeletionPreview(input);
 }
 
@@ -245,14 +389,16 @@ function subjectHash(userId: string, email?: string): string {
   return crypto.createHmac("sha256", secret).update(`${userId}:${normalizeEmail(email)}`).digest("hex");
 }
 
-export function confirmAndDeleteAccount(input: {
+export async function confirmAndDeleteAccount(input: {
   userId: string;
   email?: string;
   body: AccountDeletionConfirmation;
-}): { ok: true; counts: Record<string, number>; logoutUrl: string } {
+}): Promise<{ ok: true; counts: Record<string, number>; logoutUrl: string }> {
   const email = normalizeEmail(input.email);
   if (!email) throw new Error("A verified sign-in email is required before account deletion.");
-  if (!latestPreparedRequest(input.userId)) throw new Error("Prepare account deletion first.");
+  assertCurrentAccountIdentity(userIdForEmail(email), input.userId);
+  const preparedRequest = latestPreparedRequest(input.userId);
+  if (!preparedRequest) throw new Error("Prepare account deletion first.");
   if (normalizeEmail(String(input.body.typedEmail ?? "")) !== email) throw new Error("Typed email does not match the signed-in account.");
   if (String(input.body.typedPhrase ?? "").trim() !== ACCOUNT_DELETE_PHRASE) throw new Error(`Type ${ACCOUNT_DELETE_PHRASE} to confirm.`);
   requireBoolean(input.body.deleteAppData, "Deleting app data");
@@ -270,40 +416,155 @@ export function confirmAndDeleteAccount(input: {
 
   const blockers = getAccountDeletionBlockers(input.userId);
   const blockerCount =
-    blockers.runningStrategyRuns + blockers.placingProposals + blockers.pendingReconciliationFills + blockers.activeMobileCommands;
+    blockers.runningStrategyRuns + blockers.placingProposals + blockers.pendingReconciliationFills +
+    blockers.activeMobileCommands + blockers.activeReplacements + blockers.activeProviderDispatches +
+    blockers.activeUserOperations;
   if (blockerCount > 0) {
     throw Object.assign(new Error("Account deletion is blocked by in-flight trading activity."), { status: 409, blockers });
   }
 
-  const db = getDb();
-  const counts = getAccountDeletionCounts(input.userId);
-  const completedAt = new Date().toISOString();
-  const schemaVersion = Number(db.pragma("user_version", { simple: true })) || 0;
+  const guarded = await runWithOperationLease(
+    { group: OPERATION_LEASE_GROUPS.RAG_REINDEX, operation: `account-private-vector-purge:${input.userId}` },
+    async (claim, signal) => {
+      const assertLease = () => {
+        throwIfOperationLeaseCancelled(signal);
+        assertOperationLeaseOwnership(claim);
+      };
+      assertLease();
+      const { purgePrivateVectorRecordsForUser } = await import("./vector-db");
+      const providerPurge = await purgePrivateVectorRecordsForUser({
+        userId: input.userId,
+        accountDeletionRequestId: preparedRequest.id,
+        maxScanned: 1_000_000,
+        leaseGuard: { signal, assertOwnership: assertLease }
+      });
+      assertLease();
 
-  db.transaction(() => {
-    db.prepare(
-      `INSERT INTO account_deletion_audit (id, subject_hash, requested_at, completed_at, counts_json, schema_version)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(
-      crypto.randomUUID(),
-      subjectHash(input.userId, email),
-      latestPreparedRequest(input.userId)?.requested_at ?? completedAt,
-      completedAt,
-      JSON.stringify(counts),
-      schemaVersion
-    );
+      // Re-check every non-RAG blocker after the provider await. The durable prepared request
+      // prevents new provider reservations, and this lease prevents a concurrent vector writer.
+      const refreshedBlockers = getAccountDeletionBlockers(input.userId);
+      const refreshedCount =
+        refreshedBlockers.runningStrategyRuns + refreshedBlockers.placingProposals +
+        refreshedBlockers.pendingReconciliationFills + refreshedBlockers.activeMobileCommands +
+        refreshedBlockers.activeReplacements + refreshedBlockers.activeProviderDispatches +
+        refreshedBlockers.activeUserOperations;
+      if (refreshedCount > 0) {
+        throw Object.assign(new Error("Account deletion is blocked by in-flight activity after provider purge."), {
+          status: 409,
+          blockers: refreshedBlockers
+        });
+      }
 
-    for (const table of DELETE_TABLES_BY_USER_ID) {
-      db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(input.userId);
+      // Revoke app-held OAuth material while the durable prepared request and write fence still
+      // exist. A crash/throw leaves a retry handle instead of silently stranding live credentials.
+      clearMcpOAuthForUser(input.userId);
+      assertLease();
+
+      const db = getDb();
+      const counts = getAccountDeletionCounts(input.userId);
+      const completedAt = new Date().toISOString();
+      const schemaVersion = Number(db.pragma("user_version", { simple: true })) || 0;
+      const vectorCommitSelector = vectorCommitDeletionSelector(input.userId);
+      // A prior attempt may have deleted provider vectors and then crashed before this transaction.
+      // In that case provider inventory correctly returns no metadata on retry, so recover every
+      // locally durable private content hash before deleting its occurrence receipts.
+      const localPrivateContentHashes = db.prepare(`
+        SELECT DISTINCT content_hash
+        FROM chunk_occurrences
+        WHERE commit_id IN (
+          SELECT id FROM vector_ingest_commits WHERE ${vectorCommitSelector.where}
+        )
+      `).all(...vectorCommitSelector.bindings) as Array<{ content_hash: string }>;
+      const contentHashesToDelete = new Set([
+        ...providerPurge.contentHashes,
+        ...localPrivateContentHashes.map((row) => row.content_hash)
+      ]);
+      assertLease();
+
+      db.transaction(() => {
+        assertLease();
+        // Hold the SQLite writer lock while checking one final time. Operational drainers may move
+        // already-admitted rows while deletion is prepared, so an out-of-transaction check leaves a
+        // query-to-delete race around irreversible broker operations (notably replacement_claiming).
+        const finalBlockers = getAccountDeletionBlockers(input.userId);
+        const finalBlockerCount =
+          finalBlockers.runningStrategyRuns + finalBlockers.placingProposals +
+          finalBlockers.pendingReconciliationFills + finalBlockers.activeMobileCommands +
+          finalBlockers.activeReplacements + finalBlockers.activeProviderDispatches +
+          finalBlockers.activeUserOperations;
+        if (finalBlockerCount > 0) {
+          throw Object.assign(new Error("Account deletion is blocked by in-flight activity at commit."), {
+            status: 409,
+            blockers: finalBlockers
+          });
+        }
+        db.prepare(
+          `INSERT INTO account_deletion_audit (id, subject_hash, requested_at, completed_at, counts_json, schema_version)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(
+          crypto.randomUUID(),
+          subjectHash(input.userId, email),
+          preparedRequest.requested_at,
+          completedAt,
+          JSON.stringify({ ...counts, provider_vectors: providerPurge.deleted }),
+          schemaVersion
+        );
+
+        // Public/shared corpus is application data, not personal account data. Delete only exact
+        // private generations; otherwise deleting the local operator would orphan every shared SEC
+        // vector in Pinecone and break relational receipt validation for later users.
+        const privateCommitWhere = `SELECT id FROM vector_ingest_commits WHERE ${vectorCommitSelector.where}`;
+        for (const table of [
+          "vector_document_heads",
+          "vector_reconcile_observations",
+          "vector_document_versions",
+          "chunk_occurrences"
+        ]) {
+          db.prepare(`DELETE FROM ${table} WHERE commit_id IN (${privateCommitWhere})`)
+            .run(...vectorCommitSelector.bindings);
+        }
+        for (const contentHash of contentHashesToDelete) {
+          // Content hashes are globally deduplicated. A private and shared occurrence can point at
+          // the same row, so remove source text only after the subject's occurrences are gone and
+          // no preserved occurrence still references it.
+          db.prepare(`
+            DELETE FROM document_chunks
+            WHERE content_hash = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM chunk_occurrences WHERE chunk_occurrences.content_hash = document_chunks.content_hash
+              )
+          `).run(contentHash);
+        }
+
+        for (const table of DELETE_TABLES_BY_USER_ID) {
+          if (table === "vector_ingest_commits") continue;
+          db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(input.userId);
+        }
+        db.prepare(`DELETE FROM vector_ingest_commits WHERE ${vectorCommitSelector.where}`)
+          .run(...vectorCommitSelector.bindings);
+        for (const tenantScope of privateVectorTenantScopes(input.userId)) {
+          db.prepare("DELETE FROM vector_private_namespace_manifests WHERE tenant_scope = ?").run(tenantScope);
+        }
+        db.prepare("DELETE FROM learned_context WHERE user_id = ? OR contributor_user_id = ?").run(input.userId, input.userId);
+        // Sweep every account-owned row in the global settings table using the same canonical
+        // ownership matcher that enforces the prepared/completed write fence.
+        db.prepare(`
+          DELETE FROM settings
+          WHERE account_setting_matches_subject(key, account_subject_token(?)) = 1
+        `).run(input.userId);
+        markUserDeletionCompleted(db, input.userId, preparedRequest.id, completedAt);
+        markAccountIdentityDeleted(db, userIdForEmail(email), input.userId, completedAt);
+        db.prepare("DELETE FROM account_deletion_requests WHERE user_id = ?").run(input.userId);
+      }).immediate();
+      assertLease();
+      return { counts };
     }
-    db.prepare("DELETE FROM learned_context WHERE user_id = ? OR contributor_user_id = ?").run(input.userId, input.userId);
-    // Remove the user's run lock AND every per-account run lock (strategy_run_lock:<user>:<account>).
-    db.prepare("DELETE FROM settings WHERE key = ? OR key LIKE ?").run(`strategy_run_lock:${input.userId}`, `strategy_run_lock:${input.userId}:%`);
-    // Remove the user's LLM budget reservation row (llm_budget_reservation:<user>).
-    db.prepare("DELETE FROM settings WHERE key = ?").run(`llm_budget_reservation:${input.userId}`);
-    db.prepare("DELETE FROM account_deletion_requests WHERE user_id = ?").run(input.userId);
-  })();
-
-  clearMcpOAuthForUser(input.userId);
-  return { ok: true, counts, logoutUrl: "/logout" };
+  );
+  if (!guarded.acquired) {
+    throw Object.assign(new Error("Account deletion is waiting for active RAG work to finish."), {
+      status: 409,
+      operationLease: guarded.busy
+    });
+  }
+  return { ok: true, counts: guarded.value.counts, logoutUrl: "/logout" };
 }

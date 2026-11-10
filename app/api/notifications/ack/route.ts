@@ -1,3 +1,4 @@
+import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { acknowledgeAllNotificationEvents, acknowledgeNotificationEvents } from "@/lib/db";
 import { NextResponse } from "next/server";
@@ -21,10 +22,12 @@ export async function POST(request: Request) {
     const filter = body.filter === "attention" ? "attention" : "attention";
     const connectedAccountId = typeof body.connectedAccountId === "string" && body.connectedAccountId.length > 0 ? body.connectedAccountId : undefined;
     const acknowledged = acknowledgeAllNotificationEvents(userId, filter, connectedAccountId);
+    invalidateDashboardSnapshotCache(userId);
     return NextResponse.json({ acknowledged });
   }
 
   const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
   const acknowledged = acknowledgeNotificationEvents(userId, ids);
+  invalidateDashboardSnapshotCache(userId);
   return NextResponse.json({ acknowledged });
 }

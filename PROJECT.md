@@ -5,7 +5,7 @@ Consolidated roadmap after merging public-repo ("Atlas") efforts into the privat
 ## Architecture (private repo — canonical)
 - **Tri-State Execution Safety**: Test / Paper / Brokerage driven by the active connected account; Start/Stop + approval-mode controls; autonomy gate.
 - **Trailing Stop-Loss Engine**: Synthetic trailing stops in SQLite for Robinhood MCP; Alpaca native path deferred (H3).
-- **IRA Taxation Settings**: `taxation_type` on connected accounts; 0% tax + wash-sale bypass for IRAs; cross-account taxable loss lockout.
+- **IRA Taxation Settings**: `taxation_type` on connected accounts; 0% tax + wash-sale bypass for IRAs; no tax-loss harvest; cross-account taxable loss lockout.
 - **Multi-Tenant RAG & Rate-Limit Hardening**: Pinecone user-or-public filter, Voyage jitter, publication dates on chunks.
 - **User Watchlist + Price Alerts** (ported from public repo): persisted symbols + threshold alerts evaluated on the scheduler tick.
 - **LLM Prompt Compaction & Consensus**: Bull → Bear → Red Team loop with deterministic parameters.

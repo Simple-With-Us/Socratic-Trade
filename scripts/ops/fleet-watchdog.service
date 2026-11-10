@@ -1,0 +1,14 @@
+[Unit]
+Description=Fleet multi-app site watchdog (alert-first; no deploy-time host reboot)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fleet-site-watchdog.sh
+Restart=always
+RestartSec=15
+SyslogIdentifier=fleet-watchdog
+
+[Install]
+WantedBy=multi-user.target

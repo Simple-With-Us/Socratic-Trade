@@ -1,5 +1,12 @@
+import { z } from "zod";
+import { dataSourceFetch } from "./data-source-fetch";
 import { resolveApiKeyWithSource, type ApiKeySource } from "./db";
-import { BROWSER_UA, politeFetchJson } from "./web-sources/http";
+import { apiCircuitBreakerShouldSkip } from "./api-circuit-breaker";
+import { logApiHealth } from "./db-health";
+import { expiresAtRespectingMarketClose } from "./market-hours";
+import { BROWSER_UA } from "./web-sources/http";
+import { fetchTreasuryYieldCurve } from "./market-signals/treasury";
+import { fetchBlsMacroSeries } from "./market-signals/bls";
 
 // Minimal Yahoo Finance chart shape — only the fields we read.
 interface VixYahooResponse {
@@ -24,6 +31,11 @@ export interface MacroData {
   wtiOil: string; // WTI crude spot
   housingStarts: string;
   consumerSentiment: string;
+  // Month-over-month change in total nonfarm payroll employment, thousands of jobs (e.g. "+57K") —
+  // the conventional "jobs report" headline. Sourced from BLS (see blsSourced); FRED's payroll
+  // series (PAYEMS) is a level, not this MoM delta, so a full FRED fetch does NOT populate this —
+  // it stays "" whenever blsSourced is not true, regardless of fredSourced.
+  nonfarmPayrollsChangeK: string;
   vix: string;
   vix3m: string; // 3-month VIX (for term structure)
   asOf: string;
@@ -33,11 +45,41 @@ export interface MacroData {
    *         failed is blanked to "" (never a fabricated value), so a partial fetch never renders
    *         one — the console shows those specific tiles as "—";
    * false = no FRED fetch happened — every FRED field is blanked to "". `vix` is a live reading
-   *         iff `asOf` is a real date (the key-free Yahoo ^VIX fallback succeeded);
+   *         iff `asOf` is a real date (the keyless ^VIX cascade succeeded);
    *         `asOf === "unavailable"` means even the VIX is blank.
    * undefined = payload from an older build; callers should fall back to the asOf heuristic.
    */
   fredSourced?: boolean;
+  /**
+   * Mirrors `fredSourced`'s honesty contract, but for the KEYLESS Treasury.gov par-yield fallback:
+   * true = dgs3moTreasury/dgs2Treasury/dgs10Treasury (and the curve3m10y/curve2s10s metrics derived
+   *        from them) are a real reading from home.treasury.gov's daily XML feed, fetched WITHOUT a
+   *        FRED key. Only ever set on the no-FRED-key fallback path — a full FRED fetch already marks
+   *        these fields `fredSourced` and doesn't need this flag.
+   * false/undefined = no keyless Treasury reading this session; those three fields follow the normal
+   *        fredSourced rule (blank unless a FRED key supplied them).
+   */
+  treasurySourced?: boolean;
+  /**
+   * Mirrors `treasurySourced`'s honesty contract, for the KEYLESS-CAPABLE BLS API v2 fallback:
+   * true = cpiInflation/unemploymentRate/nonfarmPayrollsChangeK are a real reading from BLS,
+   *        fetched WITHOUT a FRED key (BLS works keyless at a lower rate limit, or with a free
+   *        BLS_API_KEY at a higher one — either way this flag just means "BLS supplied it", not
+   *        which BLS tier). Only ever set on the no-FRED-key fallback path.
+   * false/undefined = no keyless/BLS reading this session; cpiInflation/unemploymentRate follow the
+   *        normal fredSourced rule, and nonfarmPayrollsChangeK (which FRED's own series don't cover
+   *        in this shape at all) stays blank.
+   */
+  blsSourced?: boolean;
+  /**
+   * Per-field provenance for non-empty macro values (source id only).
+   * `asOf` on the payload is the series observation/fetch day; pair with this map so
+   * dashboard/API consumers can retain source without a UI redesign.
+   * Preference ranks: source-capability-matrix (vix, treasury_yields, cpi_labor, …).
+   */
+  fieldSources?: Partial<Record<Exclude<keyof MacroData, "fieldSources" | "fredSourced" | "treasurySourced" | "blsSourced">, string>>;
+  /** When we assembled this payload (ISO). Distinct from asOf (market/release date). */
+  fetchedAt?: string;
 }
 
 /**
@@ -64,10 +106,13 @@ const BLANK_MACRO: MacroData = {
   wtiOil: "",
   housingStarts: "",
   consumerSentiment: "",
+  nonfarmPayrollsChangeK: "",
   vix: "",
   vix3m: "",
   asOf: "unavailable",
-  fredSourced: false
+  fredSourced: false,
+  treasurySourced: false,
+  blsSourced: false
 };
 
 // ── Cache-provenance scoping (mirrors src/lib/history.ts) ─────────────────────
@@ -200,6 +245,32 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
     // fields are real); the console blanks each empty field per-tile (its mv/mn helpers treat "" as
     // missing → EM_DASH), so no fredSourced-gated tile shows a placeholder. This closes the "partial
     // payload flagged fully sourced" gap without discarding the series that did resolve.
+    const asOf = new Date().toISOString().split("T")[0];
+    const fetchedAt = new Date(now).toISOString();
+    const fieldSources: NonNullable<MacroData["fieldSources"]> = {};
+    const stamp = (field: keyof NonNullable<MacroData["fieldSources"]>, raw: string | undefined) => {
+      if (raw) fieldSources[field] = "fred";
+    };
+    stamp("fedFundsRate", fedFunds);
+    stamp("dgs3moTreasury", dgs3mo);
+    stamp("dgs2Treasury", dgs2);
+    stamp("dgs10Treasury", dgs10);
+    stamp("inflationExpectation10y", breakeven10y);
+    stamp("cpiInflation", cpi);
+    stamp("corePCE", corePce);
+    stamp("realGDPGrowth", realGdp);
+    stamp("unemploymentRate", unemployment);
+    stamp("initialClaims", claims);
+    stamp("m2MoneySupply", m2);
+    stamp("m2GrowthYoY", m2Growth);
+    stamp("hyCreditSpread", hySpread);
+    stamp("usdIndex", usd);
+    stamp("wtiOil", oil);
+    stamp("housingStarts", houst);
+    stamp("consumerSentiment", umcsent);
+    stamp("vix", vix);
+    stamp("vix3m", vix3m);
+
     const data: MacroData = {
       fedFundsRate: fedFunds ? `${Number(fedFunds).toFixed(2)}%` : "",
       dgs3moTreasury: dgs3mo ? `${Number(dgs3mo).toFixed(2)}%` : "",
@@ -218,13 +289,18 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
       wtiOil: oil ? `$${Number(oil).toFixed(2)}` : "",
       housingStarts: houst ? `${(Number(houst) / 1000).toFixed(2)}M` : "",
       consumerSentiment: umcsent ? `${Number(umcsent).toFixed(1)}` : "",
+      // FRED's payroll series (PAYEMS) is a level, not the MoM delta this field represents — this
+      // field is BLS-only (see blsSourced), so a full FRED fetch never populates it.
+      nonfarmPayrollsChangeK: "",
       vix: vix ? `${Number(vix).toFixed(2)}` : "",
       vix3m: vix3m ? `${Number(vix3m).toFixed(2)}` : "",
-      asOf: new Date().toISOString().split("T")[0],
-      fredSourced: true
+      asOf,
+      fredSourced: true,
+      fieldSources,
+      fetchedAt
     };
 
-    writeMacroCache(scope, userId, data, now + CACHE_TTL_MS);
+    writeMacroCache(scope, userId, data, expiresAtRespectingMarketClose(new Date(now), CACHE_TTL_MS));
     return data;
   } catch (error) {
     console.error("[macro] failed to fetch macroeconomic data:", error);
@@ -236,12 +312,15 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
 
 /**
  * Fallback for "no usable FRED data" (no key, or a configured key whose every series fetch failed).
- * Tries to at least fetch a live ^VIX from Yahoo Finance (key-free) so the regime classifier gets a
- * real volatility reading instead of staying "Unknown"; every FRED field is blanked to "" (the
- * partial-fetch convention — em dash on the console, dropped from the prompt by pruneMacro) and
- * `fredSourced` is false either way. Blank, not placeholder: the old DEFAULT_MACRO constants
- * carried a fabricated inverted curve that distorted determineMarketRegime and fed the strategist
- * placeholder metrics via deriveMacroMetrics.
+ * Tries to at least fetch a live ^VIX from the keyless cascade (Cboe history CSV -> FRED VIXCLS
+ * when keyed -> Cboe delayed JSON -> Yahoo) AND the keyless
+ * Treasury.gov par-yield curve (3-month/2-year/10-year), so the regime classifier and the rates board
+ * get real readings instead of staying blank/"Unknown". Every FRED-only field (Fed funds, inflation,
+ * GDP, etc.) still blanks to "" (the partial-fetch convention — em dash on the console, dropped from
+ * the prompt by pruneMacro); `fredSourced` stays false either way — only `treasurySourced` flips true
+ * when the Treasury feed actually supplied a rate. Blank, not placeholder: the old DEFAULT_MACRO
+ * constants carried a fabricated inverted curve that distorted determineMarketRegime and fed the
+ * strategist placeholder metrics via deriveMacroMetrics.
  *
  * Cached under the CALLER's scope (not hardcoded "shared"): a configured per-USER key that failed
  * must write only that user's PRIVATE entry. Hardcoding "shared" here poisoned the global cache —
@@ -250,21 +329,64 @@ export async function fetchMacroData(userId?: string): Promise<MacroData> {
  * env-key path resolve to "shared" via macroCacheScopeForKeySource, so their behavior is unchanged.
  */
 async function fetchVixOnlyFallback(scope: MacroCacheScope, userId: string | undefined, now: number): Promise<MacroData> {
-  const liveVix = await fetchVixFromYahoo();
-  if (liveVix !== null) {
-    const lightMacro: MacroData = {
-      ...BLANK_MACRO,
-      vix: liveVix.toFixed(2),
-      asOf: new Date().toISOString().split("T")[0],
-      fredSourced: false // only the VIX is live; every FRED field is blank
-    };
-    writeMacroCache(scope, userId, lightMacro, now + CACHE_TTL_MS);
-    return lightMacro;
+  const [liveVix, treasury, bls] = await Promise.all([
+    fetchKeylessVix(),
+    fetchTreasuryYieldCurve(now).catch(() => null),
+    fetchBlsMacroSeries(now).catch(() => null)
+  ]);
+  const anyLive = liveVix !== null || treasury !== null || bls !== null;
+  if (!anyLive) {
+    // Every keyless source failed — everything blank ("unavailable") so the regime stays Unknown.
+    const fallback = { ...BLANK_MACRO };
+    writeMacroCache(scope, userId, fallback, expiresAtRespectingMarketClose(new Date(now), CACHE_TTL_MS));
+    return fallback;
   }
-  // VIX fetch also failed — everything blank ("unavailable") so the regime stays Unknown.
-  const fallback = { ...BLANK_MACRO };
-  writeMacroCache(scope, userId, fallback, now + CACHE_TTL_MS);
-  return fallback;
+  const fieldSources: NonNullable<MacroData["fieldSources"]> = {};
+  const lightMacro: MacroData = {
+    ...BLANK_MACRO,
+    asOf: new Date().toISOString().split("T")[0],
+    fredSourced: false,
+    fetchedAt: new Date(now).toISOString(),
+    fieldSources
+  };
+  if (liveVix !== null) {
+    lightMacro.vix = liveVix.toFixed(2);
+    fieldSources.vix = "vix-keyless";
+  }
+  if (treasury !== null) {
+    if (treasury.y3mo !== undefined) {
+      lightMacro.dgs3moTreasury = `${treasury.y3mo.toFixed(2)}%`;
+      fieldSources.dgs3moTreasury = "treasury.gov";
+    }
+    if (treasury.y2 !== undefined) {
+      lightMacro.dgs2Treasury = `${treasury.y2.toFixed(2)}%`;
+      fieldSources.dgs2Treasury = "treasury.gov";
+    }
+    if (treasury.y10 !== undefined) {
+      lightMacro.dgs10Treasury = `${treasury.y10.toFixed(2)}%`;
+      fieldSources.dgs10Treasury = "treasury.gov";
+    }
+    lightMacro.treasurySourced = true;
+  }
+  if (bls !== null) {
+    // BLS's own cpiInflation is already a YoY %, matching FRED's pc1-transformed CPIAUCSL semantics
+    // — safe to drop straight into the same field with no re-transform.
+    if (bls.cpiInflation !== undefined) {
+      lightMacro.cpiInflation = bls.cpiInflation;
+      fieldSources.cpiInflation = "bls";
+    }
+    if (bls.unemploymentRate !== undefined) {
+      lightMacro.unemploymentRate = bls.unemploymentRate;
+      fieldSources.unemploymentRate = "bls";
+    }
+    if (bls.nonfarmPayrollsChangeK !== undefined) {
+      lightMacro.nonfarmPayrollsChangeK = bls.nonfarmPayrollsChangeK;
+      fieldSources.nonfarmPayrollsChangeK = "bls";
+    }
+    lightMacro.blsSourced = true;
+  }
+  writeMacroCache(scope, userId, lightMacro, expiresAtRespectingMarketClose(new Date(now), CACHE_TTL_MS));
+  return lightMacro;
 }
 
 /** Clear both caches (test helper). */
@@ -274,23 +396,191 @@ export function clearMacroCacheForTests(): void {
   liveVixCache.entry = null;
 }
 
-/** Fetch the latest ^VIX close from Yahoo Finance (no API key required). Returns null on any failure. */
-async function fetchVixFromYahoo(): Promise<number | null> {
+// ── Keyless ^VIX cascade ──────────────────────────────────────────────────────
+// VIX is the regime classifier's primary axis and the vol panic brake's main gauge, so it must not
+// hinge on a single free endpoint: Yahoo's chart API is intermittently rate-limited/bot-challenged
+// from datacenter IPs (the driver of the 2026-07-28 prod regime flap). Note FMP is deliberately NOT
+// in this chain — the macro/VIX path never called it (the suspended FMP key only affected the
+// enrichment cascade), and a suspended paid key must not be hammered on every scheduler tick anyway.
+//
+// Lane order (first success wins):
+//   1. Cboe VIX_History.csv — daily close history on cdn-api.cboe.com (DC-friendly; primary).
+//   2. FRED VIXCLS — when a FRED API key is configured (env/db); same series as the macro suite.
+//   3. Cboe _VIX delayed JSON — publisher delayed quote CDN.
+//   4. Yahoo ^VIX chart — last resort (intermittently rate-limited/blocked from datacenter IPs).
+//
+// This is deliberately a TWO-lane cascade. The third-tier candidates were live-probed and rejected
+// (2026-07-29 verifier review): Stooq's quote endpoint (stooq.com/q/l/) 404s endpoint-level and its
+// daily CSV lane (q/d/l/, used by history.ts for equities) sits behind a JS anti-bot interstitial;
+// Nasdaq's keyless index quote API (api.nasdaq.com/api/quote/{sym}/info?assetclass=index, proven
+// in-repo for NDX) does not carry VIX (a CBOE product — "Symbol not exists"); Yahoo's v7 quote
+// endpoint requires crumb auth and shares Yahoo's failure domain anyway. A dead tier would only
+// emit phantom provider_degraded alerts during real double-outages, so honesty beats lane count.
+//
+// Every lane runs through the repo's shared per-lane circuit breaker (api-circuit-breaker.ts) with
+// failures/successes recorded in api_health_log: a lane whose recent history reads "stopped
+// working" (getLaneHealth: 5 consecutive failures, or active-this-hour with no success) trips for
+// API_CIRCUIT_BREAKER_BACKOFF_MS (default 60s), then ONE half-open probe is allowed — a dead
+// endpoint is retried on a probe cadence, not hammered every tick. ALL sources dead -> null, and
+// the caller's honest "unavailable" path (never a fabricated reading).
+
+// Both keyless lanes below intermittently rate-limit (HTTP 429) shared/datacenter egress IPs in
+// short bursts that usually clear within a second or two (live-verified 2026-08-02 against Yahoo's
+// v8/finance/chart endpoint — same finding as history.ts's fetchYahoo). fetchVixLane retries ONLY on
+// 429 with exponential backoff before giving up; any other failure (network error, timeout, non-429
+// status, unparseable body) still fails on the first attempt so a genuinely dead lane is logged and
+// the cascade falls through to the next source promptly, not after several wasted retries.
+const VIX_LANE_TIMEOUT_MS = 6000;
+const VIX_LANE_429_MAX_ATTEMPTS = 4; // 1 initial try + 3 retries
+const VIX_LANE_429_BASE_BACKOFF_MS = 400;
+
+/** One keyless VIX fetch through the circuit-breaker + health-log machinery. Null on any failure. */
+async function fetchVixLane(
+  lane: string,
+  url: string,
+  accept: string,
+  parse: (res: Response) => Promise<number | null>
+): Promise<number | null> {
+  const breaker = apiCircuitBreakerShouldSkip(lane, null);
+  if (breaker.skip) return null; // lane backed off — try the next source
+  const start = Date.now();
+  const log = (ok: boolean, errorText?: string, soft = false) =>
+    // keySource omitted -> stored as NULL, matching the breaker's (lane, null) keyless lane.
+    // Soft for 429 so vix-yahoo cannot hard-STOP.  Cboe is the preferred primary;
+    // Yahoo stays in the cascade for when Cboe dies.  A 429 is not a reason to
+    // abandon the backup, and it is not a healthy "expected" outcome.
+    logApiHealth({ service: lane, ok, latencyMs: Date.now() - start, errorText, soft });
   try {
-    const url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d";
-    const json = await politeFetchJson<VixYahooResponse>(url, {
-      headers: { "user-agent": BROWSER_UA, accept: "application/json" }
-    });
-    const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
-    // Walk back from the end to find the most recent non-null close.
-    for (let i = closes.length - 1; i >= 0; i--) {
-      const c = closes[i];
-      if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
+    for (let attempt = 0; attempt < VIX_LANE_429_MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), VIX_LANE_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await dataSourceFetch(url, {
+          cache: "no-store",
+          signal: controller.signal,
+          headers: { "user-agent": BROWSER_UA, accept }
+        }, { service: lane });
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (res.status === 429 && attempt < VIX_LANE_429_MAX_ATTEMPTS - 1) {
+        // Intermediate 429: no health row (same posture as fetchWithRetry) — only the final
+        // attempt records so retries don't invent a hard consecutive-failure streak.
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(4000, VIX_LANE_429_BASE_BACKOFF_MS * 2 ** attempt))
+        );
+        continue;
+      }
+      if (!res.ok) {
+        log(false, `HTTP ${res.status}`, res.status === 429);
+        return null;
+      }
+      const value = await parse(res);
+      // A 200 with no usable VIX value still counts against the lane's health: from this module's
+      // perspective the endpoint is not serving the reading we need.
+      log(value !== null, value === null ? "no usable VIX value in response" : undefined);
+      return value;
     }
+    // Unreachable in practice — every iteration above either returns or continues, and the final
+    // attempt (whether 429 or otherwise) always returns — but TS can't prove that statically.
     return null;
-  } catch {
+  } catch (err) {
+    log(false, err instanceof Error ? err.message : String(err));
     return null;
   }
+}
+
+export const VIX_HISTORY_CSV_URL =
+  "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv";
+
+/** Latest daily VIX close from Cboe's public history CSV. Returns null on any failure. */
+async function fetchVixFromCboeHistoryCsv(): Promise<number | null> {
+  return fetchVixLane(
+    "vix-cboe-history",
+    VIX_HISTORY_CSV_URL,
+    "text/csv,text/plain,*/*",
+    async (res) => {
+      const text = await res.text();
+      const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      if (lines.length < 2) return null;
+      const header = lines[0].split(",").map((h) => h.trim().toUpperCase());
+      const closeIdx = header.findIndex((h) => h === "CLOSE" || h === "VIX CLOSE");
+      if (closeIdx < 0) return null;
+      for (let i = lines.length - 1; i >= 1; i--) {
+        const parts = lines[i].split(",");
+        const raw = parts[closeIdx]?.trim();
+        const close = raw ? Number.parseFloat(raw) : NaN;
+        if (Number.isFinite(close) && close > 0) return Math.round(close * 100) / 100;
+      }
+      return null;
+    }
+  );
+}
+
+/** FRED VIXCLS when an API key is available; skipped when unkeyed. */
+async function fetchVixFromFredVixcls(): Promise<number | null> {
+  const apiKey = resolveApiKeyWithSource("fred").key;
+  if (!apiKey) return null;
+  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=VIXCLS&limit=1&sort_order=desc&api_key=${apiKey}&file_type=json`;
+  return fetchVixLane("vix-fred", url, "application/json", async (res) => {
+    // FRED adds realtime_start / units / count.  Strip those.  Do not `.strict()`
+    // or a documented extra key would drop the VIXCLS print.
+    const payload = z
+      .object({
+        observations: z.array(z.object({ value: z.string().optional() }).strip()).optional()
+      })
+      .strip()
+      .parse(await res.json());
+    const value = payload.observations?.[0]?.value;
+    if (!value || value === ".") return null;
+    const vix = Number.parseFloat(value);
+    return Number.isFinite(vix) && vix > 0 ? Math.round(vix * 100) / 100 : null;
+  });
+}
+
+/** Fetch the latest ^VIX close from Yahoo Finance (no API key required). Returns null on any failure. */
+async function fetchVixFromYahoo(): Promise<number | null> {
+  return fetchVixLane(
+    "vix-yahoo",
+    "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d",
+    "application/json",
+    async (res) => {
+      const json = (await res.json()) as VixYahooResponse;
+      const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+      // Walk back from the end to find the most recent non-null close.
+      for (let i = closes.length - 1; i >= 0; i--) {
+        const c = closes[i];
+        if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
+      }
+      return null;
+    }
+  );
+}
+
+/** Cboe delayed _VIX quote from the publisher's own keyless CDN. Returns null on any failure. */
+async function fetchVixFromCboe(): Promise<number | null> {
+  return fetchVixLane(
+    "vix-cboe",
+    "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json",
+    "application/json",
+    async (res) => {
+      const json = (await res.json()) as { data?: { current_price?: unknown } };
+      const px = json?.data?.current_price;
+      return typeof px === "number" && Number.isFinite(px) && px > 0 ? Math.round(px * 100) / 100 : null;
+    }
+  );
+}
+
+/** First successful keyless VIX reading across the cascade; null when every source is down. */
+async function fetchKeylessVix(): Promise<number | null> {
+  const fromHistory = await fetchVixFromCboeHistoryCsv();
+  if (fromHistory !== null) return fromHistory;
+  const fromFred = await fetchVixFromFredVixcls();
+  if (fromFred !== null) return fromFred;
+  const fromCboe = await fetchVixFromCboe();
+  if (fromCboe !== null) return fromCboe;
+  return fetchVixFromYahoo();
 }
 
 // ── Live ^VIX overlay (short TTL, independent of the 24h macro cache) ────────────────────────
@@ -298,8 +588,8 @@ async function fetchVixFromYahoo(): Promise<number | null> {
 // GDP), but VIX can move double digits intraday, so pinning it to the same day-old snapshot means
 // the volatility panic brake and the regime-flip detector could be up to a day blind on a crash
 // day (composite review D/high/S). This is a SEPARATE cache entry with a short TTL, keyed off the
-// same key-free Yahoo ^VIX chart call `fetchVixFromYahoo` already used by the no-FRED fallback path
-// — so no new upstream dependency, just a much shorter TTL and its own cache slot. Callers that
+// same keyless ^VIX cascade (`fetchKeylessVix`: Cboe CSV -> FRED VIXCLS -> Cboe JSON -> Yahoo)
+// already uses — so no new upstream dependency, just a much shorter TTL and its own cache slot. Callers that
 // need the freshest possible volatility read (the vol brake, regime-flip detection) should use
 // `fetchLiveVix`/`fetchMacroDataWithLiveVix` instead of trusting the 24h `fetchMacroData` snapshot.
 
@@ -310,7 +600,7 @@ const liveVixCache: { entry: LiveVixEntry | null } = { entry: null };
 
 /**
  * Live ^VIX reading with a short (10 min) TTL, independent of the 24h macro cache. Global/shared —
- * the Yahoo ^VIX chart endpoint is key-free and carries no per-user licensing concern (same
+ * every endpoint in the keyless cascade is key-free and carries no per-user licensing concern (same
  * provenance reasoning as the no-FRED-key VIX fallback in fetchMacroData). Returns `vix: null` when
  * the live fetch fails (never fabricates a reading); `asOf` is only a real ISO timestamp when the
  * fetch actually succeeded this call or a still-fresh cache entry is served.
@@ -319,7 +609,7 @@ export async function fetchLiveVix(now: number = Date.now()): Promise<{ vix: num
   const cached = liveVixCache.entry;
   if (cached && cached.expiresAt > now) return { vix: cached.vix, asOf: cached.vix !== null ? cached.asOf : null };
 
-  const vix = await fetchVixFromYahoo();
+  const vix = await fetchKeylessVix();
   const asOf = new Date(now).toISOString();
   liveVixCache.entry = { expiresAt: now + LIVE_VIX_TTL_MS, vix, asOf };
   return { vix, asOf: vix !== null ? asOf : null };
@@ -348,7 +638,21 @@ export async function fetchMacroDataWithLiveVix(userId?: string): Promise<MacroD
 }
 
 // Regime-critical fields that are always worth the tokens even when unchanged.
-const MACRO_ALWAYS_KEEP = new Set<keyof MacroData>(["vix", "fedFundsRate", "dgs10Treasury", "asOf"]);
+// Regime / risk-off axes that should stay visible even on quiet (unchanged) days — credit OAS,
+// VIX term (3M), and the short end of the curve matter as much as spot VIX / 10Y / Fed funds.
+const MACRO_ALWAYS_KEEP = new Set<keyof MacroData>([
+  "vix",
+  "vix3m",
+  "fedFundsRate",
+  "dgs3moTreasury",
+  "dgs2Treasury",
+  "dgs10Treasury",
+  "hyCreditSpread",
+  "asOf"
+]);
+
+/** Macro plus optional live-VIX freshness stamp (not a MacroData field). */
+export type MacroWithLiveVix = MacroData & { vixAsOf?: string };
 
 /**
  * Delta-only macro pruning: macro data moves slowly, so on repeat runs only send
@@ -356,21 +660,32 @@ const MACRO_ALWAYS_KEEP = new Set<keyof MacroData>(["vix", "fedFundsRate", "dgs1
  * and list the rest as "unchanged" instead of re-spending tokens on them.
  */
 export function pruneMacro(
-  current: MacroData,
-  previous?: MacroData | null
+  current: MacroWithLiveVix | null | undefined,
+  previous?: MacroWithLiveVix | null
 ): { macro: Record<string, string>; omitted: string[] } {
   // Only the string data fields go to the LLM. Meta/sourcing flags (fredSourced) are
   // dashboard-only, and empty-string fields (an unsourced/failed series — the value the console
   // renders as an em dash) are dropped entirely: the strategist must never see a blank or
   // placeholder reading presented as data.
-  const entries = (Object.entries(current) as Array<[keyof MacroData, MacroData[keyof MacroData]]>).filter(
+  //
+  // vixAsOf is stamp-only freshness from fetchMacroDataWithLiveVix; proposeTrades always
+  // re-applies it onto macroeconomicData. Strip it before entries so it never lands in
+  // macro/omitted (Instinct / Sentry MEDIUM on #3392). A `key === "vixAsOf"` check against
+  // keyof MacroData is a TS2367 — Object.entries still surfaces the stamp at runtime.
+  //
+  // Null-safe: ownership-loss / mock paths can hand us undefined (e.g. a test that stubs
+  // fetchMacroDataWithLiveVix to undefined). Never throw from the destructure — return empty.
+  if (current == null) return { macro: {}, omitted: [] };
+  const { vixAsOf: _vixAsOf, ...currentFields } = current;
+  const entries = (Object.entries(currentFields) as Array<[keyof MacroData, MacroData[keyof MacroData]]>).filter(
     (entry): entry is [keyof MacroData, string] => typeof entry[1] === "string" && entry[1] !== ""
   );
   if (!previous) return { macro: Object.fromEntries(entries), omitted: [] };
+  const { vixAsOf: _prevVixAsOf, ...previousFields } = previous;
   const macro: Record<string, string> = {};
   const omitted: string[] = [];
   for (const [key, value] of entries) {
-    if (MACRO_ALWAYS_KEEP.has(key) || previous[key] !== value) {
+    if (MACRO_ALWAYS_KEEP.has(key) || previousFields[key] !== value) {
       macro[key] = value;
     } else {
       omitted.push(key);
@@ -464,7 +779,10 @@ async function fetchFredSeries(seriesId: string, apiKey: string, units?: string)
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    // service: "fred" → direct egress via PROXY_EXCLUDED_SERVICES. FRED does
+    // NOT block datacenter IPs, and proxying adds latency when the residential
+    // proxy stalls (~10s observed in prod). See data-source-fetch.ts.
+    const response = await dataSourceFetch(url, { cache: "no-store", signal: controller.signal }, { service: "fred" });
     clearTimeout(timeout);
     if (!response.ok) return undefined;
     const payload = await response.json() as any;

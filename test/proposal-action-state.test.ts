@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  EXIT_ONLY_OWNER_APPROVE_NOTE,
   STOPPED_PROPOSAL_ACTION_DESCRIPTION,
   STOPPED_PROPOSAL_ACTION_MESSAGE,
   STOPPED_PROPOSAL_ACTION_TITLE,
@@ -17,5 +18,10 @@ describe("proposal action run-state gate", () => {
     expect(STOPPED_PROPOSAL_ACTION_TITLE).toBe("Start the system first.");
     expect(STOPPED_PROPOSAL_ACTION_DESCRIPTION).toContain("accepting or rejecting a proposal");
     expect(STOPPED_PROPOSAL_ACTION_MESSAGE).toContain("Start the system first");
+  });
+
+  it("names owner Approve as the Exit-only override on an opening card", () => {
+    expect(EXIT_ONLY_OWNER_APPROVE_NOTE).toContain("agent will not open new risk on its own");
+    expect(EXIT_ONLY_OWNER_APPROVE_NOTE).toContain("Approving this opening places it anyway");
   });
 });

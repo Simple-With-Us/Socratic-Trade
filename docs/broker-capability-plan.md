@@ -399,8 +399,8 @@ Concretely, against the current `CascadingEnrichmentProvider` order in
 2. Congress.Trade cache, Webull-unofficial (both opt-in, off by default) — unaffected.
 3. `RobinhoodEnrichmentProvider` ("robinhood-fundamentals", free) — coded, gated off,
    **verified and fixed this round (§0.5)**, not yet enabled pending deploy.
-4. `IntrinioEnrichmentProvider`, `TiingoEnrichmentProvider`, `FintechStudiosEnrichmentProvider`
-   (all paid) — positioned *after* the free Robinhood tier, which is correct ordering:
+4. `TiingoEnrichmentProvider`, `FintechStudiosEnrichmentProvider` (both paid) — positioned
+   *after* the free Robinhood tier, which is correct ordering:
    once Robinhood enrichment is live, these paid providers are only consulted for fields
    Robinhood didn't supply.
 5. `FinnhubEnrichmentProvider` — has a usable free tier (production: 268/500 calls
@@ -409,7 +409,7 @@ Concretely, against the current `CascadingEnrichmentProvider` order in
    (`HTTP 429`, rate-limited free tier). This is calling out to a service that delivers
    zero value today and costs a network round-trip on every enrichment pass for nothing.
 7. `AlpacaNewsEnrichmentProvider` (free, headlines/sentiment) — positioned *after* several
-   paid providers (Intrinio/Tiingo/FintechStudios/Finnhub/TwelveData) that don't even
+   paid providers (Tiingo/FintechStudios/Finnhub/TwelveData) that don't even
    supply headlines/sentiment, so this ordering doesn't cost anything in practice, but
    there's no reason it couldn't sit right after the Alpaca snapshot provider for clarity.
 8. `AlphaVantageEnrichmentProvider` — **confirmed 0/500 successes ever in production**

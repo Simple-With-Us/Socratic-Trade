@@ -1,8 +1,45 @@
+import "server-only";
+import { z } from "zod";
+import { codeCliReady } from "@/lib/code-cli";
+import { isPrimaryEmail } from "@/lib/auth/identity";
+import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
+import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
-import { apiKeyEnvVarForService, listUserApiKeys, normalizeApiKeyService, upsertUserApiKey, deleteUserApiKey, resolveApiKeyWithSource } from "@/lib/db";
+import {
+  apiKeyEnvVarForService,
+  listUserApiKeys,
+  maskApiKeyPreview,
+  normalizeApiKeyService,
+  upsertUserApiKey,
+  deleteUserApiKey,
+  setUserApiKeyPlanTier,
+  setUserSetting,
+  resolveApiKeyWithSource
+} from "@/lib/db";
+import { isNativeRouteService, llmRouteFor, llmRouteSettingKey } from "@/lib/llm-route";
+import { checkAdmin } from "@/lib/auth/admin";
 import { resolveRequestUserId } from "@/lib/request-user";
+import {
+  defaultPlanTierForService,
+  isRetiredMarketDataService,
+  isValidPlanTierForService,
+  planTierOptionsForService,
+  servicesWithPlanTierUi
+} from "@/lib/provider-tier-plan";
 
 export const dynamic = "force-dynamic";
+
+/** Display names for retired providers, which have no catalog row of their own. */
+const RETIRED_SERVICE_LABELS: Record<string, string> = {
+  fmp: "Financial Modeling Prep (FMP)",
+  quiverquant: "QuiverQuant",
+  quiver: "QuiverQuant",
+  unusual_whales: "Unusual Whales"
+};
+
+function retiredServiceLabel(service: string): string {
+  return RETIRED_SERVICE_LABELS[service] ?? service.toUpperCase();
+}
 
 /**
  * Multi-user API Key Management
@@ -14,7 +51,7 @@ export const dynamic = "force-dynamic";
  *
  * GET  /api/keys             → list all keys for the current user
  * GET  /api/keys?service=<s> → resolve key (user → env fallback)
- * POST /api/keys  { service, apiKey, label? }  → upsert key
+ * POST /api/keys  { service, apiKey?, label?, planTier? }  → upsert key and/or plan tier
  * DELETE /api/keys?service=<s>  → delete key
  */
 
@@ -64,8 +101,40 @@ const API_KEY_CATALOG = [
     label: "DeepSeek",
     category: "LLM",
     required: false,
-    unlocks: "DeepSeek V4 models (deepseek-v4-flash / deepseek-v4-pro) for the Assistant and strategy. Note: requests are processed on DeepSeek's servers (China).",
+    unlocks: "DeepSeek V4.1 Flash and V4 Pro models (deepseek-flash-latest / deepseek-pro-latest) for the Assistant and strategy.\u00A0 Note: requests are processed on DeepSeek's servers (China).",
     docsUrl: "https://platform.deepseek.com/api_keys"
+  },
+  {
+    service: "meta",
+    label: "Meta Model API",
+    category: "LLM",
+    required: false,
+    unlocks: "The Muse Spark contributor model (muse-spark-1.3-contributor) billed directly by Meta instead of through OpenRouter.\u00A0 Contributor models are much cheaper because Meta trains on your prompts and completions.\u00A0 The Muse Wonder contributor models run only through the Code CLI route.",
+    docsUrl: "https://dev.meta.ai/docs/overview"
+  },
+  {
+    service: "moonshot",
+    label: "Moonshot AI (Kimi)",
+    category: "LLM",
+    required: false,
+    unlocks: "Moonshot AI / Kimi models (kimi-latest) for the Assistant and strategy.",
+    docsUrl: "https://platform.moonshot.cn/console/api-keys"
+  },
+  {
+    service: "minimax",
+    label: "MiniMax",
+    category: "LLM",
+    required: false,
+    unlocks: "MiniMax models for the Assistant and strategy using a pay-as-you-go API key.",
+    docsUrl: "https://platform.minimax.io/user-center/basic-information/interface-key"
+  },
+  {
+    service: "openrouter",
+    label: "OpenRouter",
+    category: "LLM",
+    required: false,
+    unlocks: "Access to OpenRouter models including DeepSeek and Qwen for the Assistant and strategy.",
+    docsUrl: "https://openrouter.ai/keys"
   },
   {
     service: "finnhub",
@@ -74,14 +143,6 @@ const API_KEY_CATALOG = [
     required: false,
     unlocks: "News sentiment, analyst recommendations, company profile, and financial metrics.",
     docsUrl: "https://finnhub.io/dashboard"
-  },
-  {
-    service: "fmp",
-    label: "Financial Modeling Prep",
-    category: "Market data",
-    required: false,
-    unlocks: "Fundamentals, ratios, analyst grades, and earnings-related enrichment.",
-    docsUrl: "https://site.financialmodelingprep.com/developer/docs"
   },
   {
     service: "alphavantage",
@@ -98,14 +159,6 @@ const API_KEY_CATALOG = [
     required: false,
     unlocks: "Reliable daily OHLC fallback for price charts and computed technicals.",
     docsUrl: "https://marketstack.com/signup/free"
-  },
-  {
-    service: "tradier",
-    label: "Tradier",
-    category: "Price history",
-    required: false,
-    unlocks: "Primary keyed daily OHLC source for charts and in-house technical signals.",
-    docsUrl: "https://developer.tradier.com/"
   },
   {
     service: "fred",
@@ -131,73 +184,338 @@ const API_KEY_CATALOG = [
     required: false,
     unlocks: "Full-market breadth, broad liquid movers, news, and keyed price-history primary data.",
     docsUrl: "https://massive.com"
+  },
+  {
+    service: "tiingo",
+    label: "Tiingo",
+    category: "Market data",
+    required: false,
+    unlocks: "Cross-asset price history, fundamentals, IEX top-of-book quotes, and news sentiment.",
+    docsUrl: "https://api.tiingo.com/"
+  },
+  {
+    service: "twelvedata",
+    label: "Twelve Data",
+    category: "Market data",
+    required: false,
+    unlocks: "Real-time and intraday price feeds, forex, crypto, and technical indicators.",
+    docsUrl: "https://twelvedata.com/account/api-keys"
+  },
+  {
+    service: "roic",
+    label: "ROIC.ai",
+    category: "Market data",
+    required: false,
+    unlocks:
+      "Deep fundamentals, ratios, price history, and full earnings-call transcripts (RAG). Paste your key and set plan tier (Free vs Individual/Professional) so daily quotas match what you pay for.",
+    docsUrl: "https://www.roic.ai/api"
+  },
+  {
+    service: "filingapi",
+    label: "FilingAPI",
+    category: "Market data",
+    required: false,
+    unlocks:
+      "Optional. Sector/industry, earnings calendar proximity, and insider-sentiment summaries. Missing or 401 keys skip this lane; ROIC and SEC EDGAR cover the same class. Do not buy Plus here.",
+    docsUrl: "https://filingapi.dev"
+  },
+  {
+    service: "marketaux",
+    label: "MarketAux",
+    category: "Market sentiment",
+    required: false,
+    unlocks: "News stream with free-tier daily budget (scarce — use after free floors).",
+    docsUrl: "https://www.marketaux.com/"
+  },
+  {
+    service: "earningscalls",
+    label: "EarningsCalls.dev",
+    category: "Transcripts",
+    required: false,
+    unlocks: "Earnings-call transcripts (preview vs paid entitlement).",
+    docsUrl: "https://earningscalls.dev"
+  },
+  {
+    service: "rapidapi",
+    label: "RapidAPI",
+    category: "Market data",
+    required: false,
+    unlocks: "Shared marketplace key for RapidAPI-hosted finance hosts (scarce daily budgets).",
+    docsUrl: "https://rapidapi.com/"
+  },
+  {
+    service: "fintechstudios",
+    label: "Fintech Studios",
+    category: "Market sentiment",
+    required: false,
+    unlocks: "AI financial news analysis, institutional intelligence, and real-time market sentiment.",
+    docsUrl: "https://www.fintechstudios.com/"
+  },
+  {
+    service: "apify",
+    label: "Apify",
+    category: "Scrapers",
+    required: false,
+    unlocks: "Custom web scrapers, social intelligence, and automated market research actors.",
+    docsUrl: "https://console.apify.com/account/integrations"
+  },
+  {
+    service: "logodev",
+    label: "Logo.dev",
+    category: "Logos",
+    required: false,
+    credentialName: "publishable token",
+    unlocks: "High-resolution company and ticker logos across all market assets.",
+    docsUrl: "https://logo.dev"
   }
 ] as const;
 
 const VALID_SERVICES: ReadonlySet<string> = new Set(API_KEY_CATALOG.map((item) => item.service));
+const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
+
+const ServiceQueryParamSchema = z.string().min(1);
+
+function isAllowedService(canonical: string): boolean {
+  return VALID_SERVICES.has(canonical) || isRetiredMarketDataService(canonical);
+}
+
+function planTierFields(service: string, storedPlanTier?: string | null) {
+  if (!PLAN_TIER_SERVICES.has(service)) {
+    return { planTier: undefined as string | undefined, planTierOptions: undefined as undefined };
+  }
+  const options = planTierOptionsForService(service) ?? [];
+  const planTier = storedPlanTier && storedPlanTier.length > 0 ? storedPlanTier : defaultPlanTierForService(service);
+  return {
+    planTier,
+    planTierOptions: options
+  };
+}
+
+function canSelectCodeCli(request: NextRequest, userId: string): boolean {
+  const email = request.headers.get(AUTHENTICATED_EMAIL_HEADER)?.trim().toLowerCase();
+  return !!email && isPrimaryEmail(email) && email === process.env.CODE_CLI_OWNER_EMAIL?.trim().toLowerCase()
+    && isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER)) && codeCliReady(userId);
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
+  const rawService = searchParams.get("service");
+  let service: string | undefined;
+  if (rawService !== null) {
+    const parsedService = ServiceQueryParamSchema.safeParse(rawService);
+    if (!parsedService.success) {
+      return NextResponse.json({ error: "invalid service query parameter" }, { status: 400 });
+    }
+    service = parsedService.data;
+  }
+
+  // A key's masked preview (first 8 + last 4, never a usable value) answers "WHICH key is serving
+  // me?" — the question the write-only key store otherwise makes unanswerable when several keys
+  // exist for one provider. Your OWN stored key is always previewable to you; the operator's env
+  // credential is previewable only to an operator/admin, so a tenant riding the shared key can see
+  // that one is serving them ("server key") without learning anything about the operator's secret.
+  // Token-based admin is excluded on purpose: this is an interactive, identity-bound disclosure.
+  const isOperator = checkAdmin(request, { allowToken: false }).ok;
+  const previewFor = (resolved: { key?: string; source: string }): string | undefined =>
+    resolved.source === "user" || isOperator ? maskApiKeyPreview(resolved.key) : undefined;
 
   // If a specific service is requested, resolve the key (user DB → env fallback)
   if (service) {
     const canonical = normalizeApiKeyService(service);
+    if (isRetiredMarketDataService(canonical)) {
+      const keys = listUserApiKeys(userId);
+      const stored = keys.find((k) => normalizeApiKeyService(k.service) === canonical);
+      return NextResponse.json({
+        service: canonical,
+        configured: Boolean(stored),
+        source: stored ? "retired" : "none",
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete any stored key; product code never uses it."
+      });
+    }
     if (!VALID_SERVICES.has(canonical)) {
       return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
     const resolved = resolveApiKeyWithSource(canonical, userId);
+    const keys = listUserApiKeys(userId);
+    const stored = keys.find((k) => normalizeApiKeyService(k.service) === canonical);
+    const tiers = planTierFields(canonical, stored?.planTier);
     return NextResponse.json({
       service: canonical,
       configured: Boolean(resolved.key),
       source: resolved.source,
-      envVar: resolved.envVar
-      // NOTE: never return the actual key in a GET response for security
+      envVar: resolved.envVar,
+      preview: previewFor(resolved),
+      ...tiers,
+      retired: isRetiredMarketDataService(canonical)
+      // NOTE: never return the actual key in a GET response for security — `preview` is the
+      // elided first-8/last-4 form only (see maskApiKeyPreview).
     });
   }
 
   // List all keys for the user (mask the actual key values)
   const keys = listUserApiKeys(userId);
   const storedByService = new Map(keys.map((key) => [normalizeApiKeyService(key.service), key]));
+  // A key stored for a retired service before retirement is listed (as retired, never resolved)
+  // so the user can still see and delete it.  Retired services have no catalog row.
+  const retiredStored = keys
+    .map((key) => normalizeApiKeyService(key.service))
+    .filter((svc, i, all) => all.indexOf(svc) === i && !VALID_SERVICES.has(svc) && isRetiredMarketDataService(svc))
+    .map((svc) => {
+      const stored = storedByService.get(svc);
+      return {
+        service: svc,
+        label: retiredServiceLabel(svc),
+        category: "Market data",
+        required: false,
+        docsUrl: "",
+        unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
+        configured: true,
+        source: "retired" as const,
+        preview: stored?.apiKey ? maskApiKeyPreview(stored.apiKey) : undefined,
+        updatedAt: stored?.updatedAt,
+        savedLabel: stored?.label,
+        retired: true,
+        retiredNote: "Retired on Socratic-Trade.\u00A0 Delete this stored key; product code never uses it."
+      };
+    });
   return NextResponse.json({
-    keys: API_KEY_CATALOG.map((entry) => {
+    keys: [...API_KEY_CATALOG.map((entry) => {
       const stored = storedByService.get(entry.service);
       const resolved = resolveApiKeyWithSource(entry.service, userId);
       const envVar = apiKeyEnvVarForService(entry.service);
+      const tiers = planTierFields(entry.service, stored?.planTier);
+      const retired = "retired" in entry && entry.retired === true;
       return {
         ...entry,
         envVar,
         configured: Boolean(resolved.key),
         source: resolved.source,
+        preview: previewFor(resolved),
         updatedAt: stored?.updatedAt,
-        savedLabel: stored?.label
+        savedLabel: stored?.label,
+        ...tiers,
+        ...(isNativeRouteService(entry.service) ? { routeToggle: true, route: llmRouteFor(entry.service, userId), codeCliAvailable: canSelectCodeCli(request, userId) } : {}),
+        retired: retired || isRetiredMarketDataService(entry.service),
+        retiredNote: "retiredNote" in entry ? entry.retiredNote : undefined
       };
-    })
+    }), ...retiredStored]
   });
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { userId?: string; service?: string; apiKey?: string; label?: string };
-    const { service, apiKey, label } = body;
+    const body = (await request.json()) as {
+      userId?: string;
+      service?: string;
+      apiKey?: string;
+      label?: string;
+      planTier?: string | null;
+      route?: string;
+    };
+    const { service, apiKey, label, planTier, route } = body;
+    if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
+      return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
+    }
     const userId = resolveRequestUserId(request, body);
 
     const canonical = service ? normalizeApiKeyService(service) : "";
+
+    // A retired market-data service (or a catalog row marked retired) cannot be stored for
+    // product use — ST does not call those vendors.  Checked before the catalog gate so a retired
+    // service gets this guidance, not the generic service list.
+    if (canonical && (isRetiredMarketDataService(canonical) || API_KEY_CATALOG.some((e) => e.service === canonical && "retired" in e && e.retired === true))) {
+      return NextResponse.json(
+        {
+          error:
+            "This provider is retired on Socratic-Trade.\u00A0 Use Congress.Trade for congressional / alt-data; do not store a key here."
+        },
+        { status: 400 }
+      );
+    }
     if (!canonical || !VALID_SERVICES.has(canonical)) {
       return NextResponse.json({ error: `service is required and must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
     }
-    if (!apiKey || typeof apiKey !== "string" || apiKey.trim().length === 0) {
-      return NextResponse.json({ error: "apiKey is required and must be a non-empty string" }, { status: 400 });
+
+    // Route toggle (Meta / MiniMax): OpenRouter by default, or direct with the user's own key.
+    if (route !== undefined) {
+      if (!isNativeRouteService(canonical)) {
+        return NextResponse.json({ error: "route is only supported for meta and minimax" }, { status: 400 });
+      }
+      if (route !== "openrouter" && route !== "native" && route !== "code-cli") {
+        return NextResponse.json({ error: 'route must be openrouter, native or code-cli' }, { status: 400 });
+      }
+      if (route === "code-cli" && !canSelectCodeCli(request, userId)) {
+        return NextResponse.json({ error: "Code CLI is available only to the verified owner after server setup" }, { status: 403 });
+      }
+      setUserSetting(userId, llmRouteSettingKey(canonical), route);
+      if (!(typeof apiKey === "string" && apiKey.trim().length > 0) && planTier === undefined) {
+        return NextResponse.json({ success: true, route });
+      }
     }
 
-    const result = upsertUserApiKey(userId, canonical, apiKey.trim(), label);
+    if (planTier !== undefined && planTier !== null && planTier !== "") {
+      if (!isValidPlanTierForService(canonical, planTier)) {
+        const opts = planTierOptionsForService(canonical);
+        return NextResponse.json(
+          {
+            error: opts
+              ? `planTier must be one of: ${opts.map((o) => o.id).join(", ")}`
+              : "planTier is not supported for this service"
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    const hasKey = typeof apiKey === "string" && apiKey.trim().length > 0;
+    const hasTierUpdate = planTier !== undefined;
+
+    // Tier-only update: no secret re-paste when a user key exists, OR when a server env key
+    // is already serving this service (plan tier attaches to that env credential).
+    if (!hasKey && hasTierUpdate) {
+      const updated = setUserApiKeyPlanTier(userId, canonical, planTier === "" ? null : planTier);
+      if (!updated) {
+        return NextResponse.json(
+          {
+            error:
+              "No key for this service — paste an apiKey, or ensure a server env key exists before setting planTier alone."
+          },
+          { status: 400 }
+        );
+      }
+      return NextResponse.json({
+        success: true,
+        key: {
+          id: updated.id,
+          service: updated.service,
+          label: updated.label,
+          planTier: updated.planTier ?? defaultPlanTierForService(canonical),
+          createdAt: updated.createdAt,
+          updatedAt: updated.updatedAt
+        }
+      });
+    }
+
+    if (!hasKey) {
+      return NextResponse.json({ error: "apiKey is required and must be a non-empty string (or pass planTier alone to update tier)" }, { status: 400 });
+    }
+
+    const result = upsertUserApiKey(
+      userId,
+      canonical,
+      apiKey!.trim(),
+      label,
+      planTier === undefined ? undefined : planTier === "" ? null : planTier
+    );
     return NextResponse.json({
       success: true,
       key: {
         id: result.id,
         service: result.service,
         label: result.label,
+        planTier: result.planTier ?? (PLAN_TIER_SERVICES.has(canonical) ? defaultPlanTierForService(canonical) : undefined),
         createdAt: result.createdAt,
         updatedAt: result.updatedAt
       }
@@ -210,17 +528,30 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const userId = resolveRequestUserId(request);
-  const service = searchParams.get("service");
-
-  if (!service) {
-    return NextResponse.json({ error: "service query parameter is required" }, { status: 400 });
+  const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
+  if (!parsedService.success) {
+    const missing = searchParams.get("service") === null || searchParams.get("service") === "";
+    return NextResponse.json(
+      { error: missing ? "service query parameter is required" : "invalid service query parameter" },
+      { status: 400 }
+    );
   }
 
-  const canonical = normalizeApiKeyService(service);
-  if (!VALID_SERVICES.has(canonical)) {
+  const canonical = normalizeApiKeyService(parsedService.data);
+  // Retired services are not in the catalog, but a key stored before retirement must stay revocable.
+  if (!isAllowedService(canonical)) {
     return NextResponse.json({ error: `Invalid service. Must be one of: ${[...VALID_SERVICES].join(", ")}` }, { status: 400 });
   }
 
-  const deleted = deleteUserApiKey(userId, canonical);
+  // A row may be stored under a legacy alias id (e.g. "fmp_api_key" for "fmp").  Delete by each
+  // stored row's RAW service id as well as the canonical id, so alias rows cannot survive and reappear.
+  const matchesCanonical = (k: { service: string }) => normalizeApiKeyService(k.service) === canonical;
+  const storedRows = listUserApiKeys(userId).filter(matchesCanonical);
+  deleteUserApiKey(userId, canonical);
+  for (const row of storedRows) {
+    if (row.service !== canonical) deleteUserApiKey(userId, row.service);
+  }
+  // `deleted` is true only when a stored key existed and none remains, so a no-op is distinguishable.
+  const deleted = storedRows.length > 0 && !listUserApiKeys(userId).some(matchesCanonical);
   return NextResponse.json({ success: true, deleted });
 }

@@ -24,13 +24,19 @@ const compactUsd = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0
 });
 
+// Owner copy rule (docs/FLEET-UI-COPY.md "Money"): compact suffixes are
+// lowercase ($1.2m, not $1.2M) — Intl always emits uppercase K/M/B/T.
+function fmtCompactUsd(v: number): string {
+  return compactUsd.format(v).toLowerCase();
+}
+
 /** Congressional disclosures report a size BAND, not an exact amount. */
 function amountBand(low?: number, high?: number): string | undefined {
   const hasLow = typeof low === "number" && Number.isFinite(low);
   const hasHigh = typeof high === "number" && Number.isFinite(high);
-  if (hasLow && hasHigh) return low === high ? compactUsd.format(low!) : `${compactUsd.format(low!)}–${compactUsd.format(high!)}`;
-  if (hasLow) return `${compactUsd.format(low!)}+`;
-  if (hasHigh) return `up to ${compactUsd.format(high!)}`;
+  if (hasLow && hasHigh) return low === high ? fmtCompactUsd(low!) : `${fmtCompactUsd(low!)}–${fmtCompactUsd(high!)}`;
+  if (hasLow) return `${fmtCompactUsd(low!)}+`;
+  if (hasHigh) return `up to ${fmtCompactUsd(high!)}`;
   return undefined;
 }
 
@@ -67,7 +73,7 @@ function FeedFreshness({ meta }: { meta: FeedMeta | undefined }) {
   return (
     <span
       className="whitespace-nowrap text-[length:var(--con-fs-xs)] font-normal normal-case tracking-normal text-[color:var(--con-faint)]"
-      title="When this feed was last refreshed from its sources. It updates automatically in the background."
+      title="When this feed was last refreshed from its sources.  It updates automatically in the background."
     >
       updated <Ago iso={meta.fetchedAt} />
     </span>
@@ -78,7 +84,7 @@ function CongressRow({ t }: { t: CongressTrade }) {
   const band = amountBand(t.amountLow, t.amountHigh);
   const buy = t.side === "buy";
   return (
-    <div className="con-row flex items-center gap-2 rounded-md px-2 py-1.5 text-[length:var(--con-fs-sm)]">
+    <div className="con-row flex items-center gap-2 rounded-control px-2 py-1.5 text-[length:var(--con-fs-sm)]">
       <Chip tone={buy ? "pos" : "neg"} title={`A disclosed ${buy ? "purchase" : "sale"} by a member of Congress.`}>
         {buy ? "BUY" : "SELL"}
       </Chip>
@@ -109,7 +115,7 @@ function InsiderRow({ f }: { f: InsiderFiling }) {
   const tone = net > 0 ? "pos" : net < 0 ? "neg" : "muted";
   const word = net > 0 ? "BUY" : net < 0 ? "SELL" : "MIXED";
   return (
-    <div className="con-row flex items-center gap-2 rounded-md px-2 py-1.5 text-[length:var(--con-fs-sm)]">
+    <div className="con-row flex items-center gap-2 rounded-control px-2 py-1.5 text-[length:var(--con-fs-sm)]">
       <Chip tone={tone} title={`Net open-market direction across this insider's recent Form 4 filings: ${f.buyTx} buy / ${f.sellTx} sell transactions.`}>
         {word}
       </Chip>
@@ -142,6 +148,8 @@ export function SmartMoneySection({ snapshot }: { snapshot: DashboardSnapshot })
     (b.disclosedAt ?? b.tradedAt ?? "").localeCompare(a.disclosedAt ?? a.tradedAt ?? "")
   );
   const insider = snapshot.smartMoney?.insider ?? [];
+  const thirteenF = snapshot.smartMoney?.thirteenF ?? [];
+  const ark = snapshot.smartMoney?.ark ?? [];
   const ws = snapshot.webSources;
 
   return (
@@ -176,7 +184,7 @@ export function SmartMoneySection({ snapshot }: { snapshot: DashboardSnapshot })
       >
         {congress.length === 0 ? (
           <Empty>
-            No congressional disclosures cached yet. The feed refreshes automatically in the background — check back after
+            No congressional disclosures cached yet.  The feed refreshes automatically in the background — check back after
             the next refresh.
           </Empty>
         ) : (
@@ -217,11 +225,75 @@ export function SmartMoneySection({ snapshot }: { snapshot: DashboardSnapshot })
         padded={false}
       >
         {insider.length === 0 ? (
-          <Empty>No insider filings cached yet. Open-market Form 4 buys and sells accumulate here as they're filed.</Empty>
+          <Empty>No insider filings cached yet.  Open-market Form 4 buys and sells accumulate here as they're filed.</Empty>
         ) : (
           <div className="flex flex-col px-2 pb-3 pt-1">
             {insider.map((f, i) => (
               <InsiderRow key={`${f.symbol}-${f.owner}-${f.filedAt}-${i}`} f={f} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title={
+          <span className="flex items-center gap-2" title="Latest 13F-HR holdings from a curated set of official SEC filers.  Observe only — the app does not auto-copy these books.">
+            13F Superinvestors
+            <FeedFreshness meta={ws?.thirteenF} />
+          </span>
+        }
+        action={
+          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            {feedSubtitle(ws?.thirteenF, thirteenF.length, "SEC 13F-HR holdings")}
+          </span>
+        }
+        padded={false}
+      >
+        {thirteenF.length === 0 ? (
+          <Empty>No 13F holdings cached yet.  The weekly SEC pull fills this after the next refresh.</Empty>
+        ) : (
+          <div className="flex flex-col px-2 pb-3 pt-1">
+            {thirteenF.map((r, i) => (
+              <div key={`${r.ticker}-${r.filerName}-${r.periodEnd}-${i}`} className="con-row flex items-center gap-2 rounded-control px-2 py-1.5 text-[length:var(--con-fs-sm)]">
+                <SymbolButton symbol={r.ticker} />
+                <span className="min-w-0 truncate text-[color:var(--con-muted)]">{r.filerName}</span>
+                <span className="con-num hidden whitespace-nowrap text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] sm:inline">
+                  {r.shares.toLocaleString()} sh
+                </span>
+                <span className="ml-auto whitespace-nowrap text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{r.periodEnd}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title={
+          <span className="flex items-center gap-2" title="Official ARK ETF daily holdings CSVs.  Observe only.">
+            ARK Holdings
+            <FeedFreshness meta={ws?.ark} />
+          </span>
+        }
+        action={
+          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            {feedSubtitle(ws?.ark, ark.length, "ARK official CSVs")}
+          </span>
+        }
+        padded={false}
+      >
+        {ark.length === 0 ? (
+          <Empty>No ARK holdings cached yet.  The daily official CSV pull fills this after the next refresh.</Empty>
+        ) : (
+          <div className="flex flex-col px-2 pb-3 pt-1">
+            {ark.map((r, i) => (
+              <div key={`${r.fund}-${r.ticker}-${r.asOf}-${i}`} className="con-row flex items-center gap-2 rounded-control px-2 py-1.5 text-[length:var(--con-fs-sm)]">
+                <Chip tone="info">{r.fund}</Chip>
+                <SymbolButton symbol={r.ticker} />
+                <span className="con-num hidden whitespace-nowrap text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] sm:inline">
+                  {r.weightPct.toFixed(2)}%
+                </span>
+                <span className="ml-auto whitespace-nowrap text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{r.asOf}</span>
+              </div>
             ))}
           </div>
         )}

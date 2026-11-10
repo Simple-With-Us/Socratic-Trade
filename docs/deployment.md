@@ -1,152 +1,204 @@
 # Production Deployment
 
-> **Retired/rollback-only:** production cut over to Coolify on 2026-07-07 (app
-> `socratic-trade-prod` on the Hetzner box, ANNOUNCE-THEN-DEPLOY releases). The
-> current runbook is AGENTS.md's "PRODUCTION IS ON COOLIFY" stanza and
-> `docs/rollouts/2026-07-07-prod-coolify-migration.md`. Everything below this
-> point describes the earlier Mac/PM2 path, kept only as rollback reference.
+Production is **[socratictrade.com](https://socratictrade.com)** on Coolify app
+**uuid `socratic-app`** (name "Socratic-Trade", branch `main`, dockerfile build pack).
 
-Production is the self-hosted PM2 site at **socratictrade.com**, served by
-`next start` (PM2 app `trading`) from the `~/apps/trading-live` worktree on the
-owner's Apple Silicon Mac.
+**Host (current):** Coolify on the production fleet box (see private
+`jaywedgeworth22/fleet-ops:ATTACK-MAP.md`; dashboard/API `https://host.jays.services`).
 
-The pre-production beta route is **trading-beta.jays.services**, served by
-`next dev` (PM2 app `trading-main`) from the editable integration checkout
-`~/Code/Agentic Trading` on port `4001`. Production remains isolated on port
-`4000`; beta should never point at an agent worktree such as `trading-claude`.
+**Auto-deploy:** every push to `main` triggers Coolify via the repo webhook to
+Coolify's **manual** GitHub webhook endpoint
+(`https://host.jays.services/webhooks/source/github/events/manual`), not the
+GitHub-App integration alone.  HMAC must match the app's
+`manual_webhook_secret_github`.  Do **not** post deploy claims or manually
+trigger deploys (ANNOUNCE-THEN-DEPLOY is retired).
 
-Cloudflare DNS, Tunnel ingress, Access apps, redirect-rule exclusions, and
-documentation should use `trading-beta.jays.services` for the 4001 beta lane.
-Do not create a second dev/beta hostname for this preview.
+**Coolify `watch_paths` (already live, 2026-08-18):** ASC applied the list
+on `socratic-app` (see `fleet-ops:ATTACK-MAP.md`).  App stayed healthy.  No
+bounce.  Do **not** re-apply from a PR.  Watched: `Dockerfile`,
+`.dockerignore`, `package.json`, `package-lock.json`, `next.config.mjs`,
+`postcss.config.mjs`, `tsconfig.json`, `middleware.ts`,
+`instrumentation.ts`, `instrumentation-client.ts`,
+`sentry.server.config.ts`, `sentry.edge.config.ts`,
+`litestream.coolify.yml`, `src`, `src/**`, `app`, `app/**`, `public`,
+`public/**`, `scripts`, `scripts/**`.  Omitted: `docs/**`, `STATUS.md`,
+`PLAN.md`, `docs/rollouts`, `ios/`, `test/`.  Auto-deploy stays on.
+Stop-old-first stays.  `health_check_start_period` stays 60.
 
-## Configuration & secrets — Infisical is the source of truth
+**Weekday RTH latch:** Coolify still receives the webhook.  The Dockerfile
+refuses the **image build before `npm ci`** during regular US equity hours
+(Mon–Fri 09:30–16:00 ET, 09:30–13:00 ET on NYSE early-close days) unless
+`HOTFIX=1` or `RTH_DEPLOY_OVERRIDE=1`.  `watch_paths` does not know about
+market hours.  A refused build must not swap the named container.
 
-**Every secret lives in [Infisical](https://infisical.com) (Cloud, free tier),
-and the app launches through the Infisical runner, which injects them as env vars
-at startup.** `.env.local` is **not** a secret source — it is git-ignored
-(`.gitignore`: `.env`, `.env*.local`), never committed, and in production the app
-is configured to **refuse to boot** off it (see *Enforcement* below). Full
-runbook: `docs/secrets.md`; this is the deploy-side summary.
+Keep consistent container names and **stop-old-first**; do **not** enable
+rolling / zero-downtime (two Litestream writers).  Docker HEALTHCHECK is
+`GET /api/live` (process + SQLite).  Do not point Coolify HTTP health at
+`/api/health` — that probe can 503 or exceed 15s while Next is up, which
+is `running:unhealthy` and Cloudflare `no available server` (7:22–7:43pm
+CT after #2810 on 2026-08-17).  Do not add the latch to
+`scripts/coolify-prod-start.sh`.  Do not `FORCE_RESTORE`.  Do not bounce
+the live box from an agent.  This repo does not PATCH live Coolify — with
+exactly one documented exception, the **st-pull-guard** below.
 
-- **Run it:** `npm run start:secrets` (also `dev:secrets` / `build:secrets`) →
-  `scripts/infisical-run.mjs` → `infisical run --env $INFISICAL_ENV --path
-  $INFISICAL_PATH [--projectId …] -- next start`. The CLI authenticates, pulls the
-  project's secrets, injects them into `process.env` **before** Next boots, and
-  sets `SECRETS_SOURCE=infisical`. Injected values land before Next reads
-  `.env.local`, and Next never overrides an already-set var, so Infisical always
-  wins.
-- **Projects** (slugs/IDs are identifiers, not secrets):
-  - App secrets → **`Socratic.Trade`** (slug `socratic-trade`,
-    project ID `39d93bb7-76f9-498c-8b50-a7def52e072f`), machine identity for the
-    Socratic.Trade app project.
-  - Shared App-A/B (congress-trade) secrets → **`shared-at-ct`**
-    (`shared-at-ct-tg-v7`, `18f563a3-9c88-454c-96eb-28fc9678f3ba`), machine
-    identity `shared-at-ct`. Set `INFISICAL_SHARED_CLIENT_ID` +
-    `INFISICAL_SHARED_CLIENT_SECRET` (+ optional `INFISICAL_SHARED_PROJECT_ID`) and
-    the runner pulls both projects, merging with the **app project winning** any
-    overlapping key (shared is the fallback).
-- **Bootstrap** (the only secrets-related values on the box — written to
-  `deploy.env`/PM2 env, never in the repo): the machine identity's
-  `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET` (universal auth — the runner
-  mints a fresh access token each launch, so nothing expires), `INFISICAL_PROJECT_ID`,
-  `INFISICAL_ENV=prod`. A pre-minted `INFISICAL_TOKEN` is an accepted fallback but
-  expires — the Client Secret is **not** the access token (that mix-up is the
-  "malformed token" 403).
-- **Enforcement (ignore `.env.local`):** set `REQUIRE_SECRETS_MANAGER=1` on the
-  box. At boot (`instrumentation.ts` → `assertSecretsManagerIfRequired`,
-  `src/lib/secrets-source.ts`) the app **throws unless `SECRETS_SOURCE` is set** —
-  i.e. unless it was launched via `start:secrets` — so a credential can never be
-  silently served from a forgotten `.env.local`. Default off → no effect on local
-  dev, tests, or CI.
-- **`ENCRYPTION_KEY`** (decrypts the per-user `user_api_keys` and
-  `connected_accounts` tables) is itself an Infisical secret and MUST stay stable
-  — if it changes, every stored key becomes undecryptable after a restart.
-- **Litestream sidecar** (`scripts/run-litestream.sh` / `litestream-restore.sh`)
-  reads `LITESTREAM_*` from its **own** environment, not through the app's runner
-  — run that PM2 process under `infisical run` too (or export its vars) so its R2
-  credentials also come from Infisical.
+### The one sanctioned Coolify patch: `st-pull-guard`
 
-> Production cutover: run `scripts/infisical-prod-cutover.sh` on the box (idempotent;
-> needs your machine-identity `INFISICAL_CLIENT_ID` + `INFISICAL_CLIENT_SECRET`, or
-> run it interactively and it prompts). It writes the bootstrap to
-> `~/.config/agentic-trading/deploy.env`, imports `.env.local` into Infisical, and
-> switches PM2 `trading` to `start:secrets`. From then on `deploy.yml` sources that
-> bootstrap and builds via Infisical automatically — and falls back to a plain
-> build/restart while the file is absent, so nothing breaks pre-cutover. See
-> `docs/secrets.md`.
+ST and UM use Coolify's **Dockerfile build pack**, so the image is built on
+the box and tagged `{application_uuid}:{commit}`.  That name has no registry
+prefix and no copy in any registry, and Docker resolves it as
+`docker.io/library/<uuid>`.
 
-## How it deploys (automated)
+The 2026-09-25 P0 came from **`docker compose up` itself**, not from a
+pre-flight pull.  ST goes through `deploy_dockerfile_buildpack()`, which never
+calls `pull_docker_compose_images()`.  Compose's default `pull_policy` is
+`missing`, so when the built tag is not local, `up` reaches for a registry; and
+because Coolify stops the old container first, production is already down when
+the registry answers no.  That is the 2026-09-25 5.3-minute P0 (board
+`2c6a6a53`, Linear ST-3707).
 
-`.github/workflows/deploy.yml` deploys on **every push to `main`** (i.e. every
-merged PR) and via a manual **Actions → Deploy → Run workflow** button. The job
-runs on the self-hosted runner labeled `trading-live` and, in `~/apps/trading-live`:
-
-```
-git fetch https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git main
-git reset --hard FETCH_HEAD
-npm ci
-npm run build
-pm2 restart trading --update-env
-pm2 save
-```
-
-- A `deploy-production` concurrency group prevents overlapping deploys.
-- `npm run build` intentionally runs `next build --webpack` while production
-  still starts with `next start`; the default Next 16 Turbopack build did not
-  emit the root `BUILD_ID` / route manifest files consumed by this runtime path.
-- Only **tracked** files are reset, so `.env.local`, `data/app.db`, and
-  `data/logos/` on the box are preserved.
-- Auth uses the job's `GITHUB_TOKEN` (the headless launchd runner has no git
-  creds); it resets to `FETCH_HEAD` rather than checking out `main` because
-  `trading-live` is a linked worktree that can't share the `main` checkout held
-  by the integration worktree. See
-  `docs/rollouts/2026-06-22-deploy-workflow-activated.md` for the why.
-
-## Preview lane sync (RETIRED)
-
-Previews were retired (owner decision, 2026-07-08): there are no per-agent PM2
-`next dev` lanes and no `*.jays.services` preview hostnames. The machinery that
-kept them fresh — `.github/workflows/sync-previews.yml`, `scripts/sync-preview-lanes.sh`,
-`scripts/sync-watchdog.sh`, and `scripts/setup-agent-previews.sh` — was deleted
-2026-07-09. Review in-progress work with `npm run dev` in your own worktree plus
-the `verify` CI gate; production is the only hosted environment — see AGENTS.md's
-"PRODUCTION IS ON COOLIFY" stanza and
-`docs/rollouts/2026-07-07-prod-coolify-migration.md` for the current runbook
-(the Mac/PM2 + `deploy.yml` sections in this file are retired/rollback-only).
-
-## Runner
-
-A GitHub Actions self-hosted runner registered on the Mac:
-`~/actions-runner`, labels `self-hosted,trading-live`, installed as a LaunchAgent
-(`./svc.sh install && ./svc.sh start`, **no sudo** on macOS). Setup details and
-the SSH-from-hosted-runner alternative live in `ci-pending/README.md`.
-
-Optional repo **Variables** `DEPLOY_DIR` / `PM2_APP` override the defaults
-(`$HOME/apps/trading-live`, `trading`).
-
-## Manual deploy (fallback)
-
-If the runner is down, deploy by hand on the box:
+**The guard that protects ST is `pull_policy: never` in the generated
+compose.**  The companion change that skips `pull_docker_compose_images()`
+is inert: that method is reached only from the `dockercompose` deploy path
+(congress-trade), where the change's `dockerfile` condition cannot be true, and
+ST/UM never reach it.  Do not count on it to protect any app.
 
 ```bash
-cd ~/apps/trading-live
-git fetch origin main && git reset --hard origin/main
-npm ci && npm run build
-pm2 restart trading && pm2 save
+# run ON the Hetzner box as root
+scripts/ops/coolify-st-pull-guard.sh apply    # idempotent
+scripts/ops/coolify-st-pull-guard.sh verify
+scripts/ops/coolify-st-pull-guard.sh revert
+scripts/ops/coolify-st-pull-guard.selftest.sh # proves anchors still match a pristine file
 ```
 
-## Verifying a deploy
+It edits a **vendor PHP file inside the `coolify` container** and is therefore
+wiped by any Coolify container recreate or upgrade.  Re-run `--apply` after any
+Coolify version change and confirm with `--verify`.  **Do not add a Docker Hub
+credential to this host to "fix" this.**  There is no `/root/.docker/config.json`
+by design: an authenticated pull of a repo that does not exist returns
+`pull access denied, insufficient_scope` (the exact 2026-09-25 signature) while
+fixing nothing, so credential-less is the correct state for a local-only tag.
+Do not set `pull_policy` to anything that pulls on this app.
 
-- Actions → Deploy → latest run is green.
-- `curl -I https://socratictrade.com/` returns a response (a `302` to the
-  app `/login` page is expected for an unauthenticated request — it means the app is up).
-- `curl -I https://trading-beta.jays.services/` should reach the beta tunnel service
-  on `http://localhost:4001`.
-- Auth.js sign-in is the site auth layer. The Cloudflare tunnel may stay in
-  front of the app, but Cloudflare Access should not be the login gate for
-  `socratictrade.com`. As of 2026-06-28, the Zero Trust Access app
-  `agentic-trading-dashboard` keeps a bypass policy
-  `42c4adc9-1421-416b-b744-f291afc87938` for that root hostname.
-- The shared Infisical overlay still has legacy `CF_ACCESS_TRUST_EMAIL_HEADER=1`;
-  the app prod project overrides it to `0`. App code ignores the variable, but
-  keep the override while the shared key exists.
+Canonical detail:
+
+- `docs/rollouts/2026-07-10-auto-deploy-on.md`
+- `docs/rollouts/2026-10-15-coolify-st-pull-guard.md` (the registry-pull guard)
+- `docs/rollouts/2026-08-18-rth-deploy-latch.md` (weekday RTH build latch)
+- `docs/rollouts/2026-08-07-hetzner-fleet-cutover.md` (and ops follow-up notes)
+- `docs/rollouts/2026-08-02-deploy-webhook-secret-repair.md` (webhook signature drift)
+- `AGENTS.md` → production / Coolify stanzas
+
+## Deployment flow
+
+1. A pull request passes the required `verify` check and merges to `main`
+   (prefer `gh pr merge <n> --squash --auto`).
+2. GitHub delivers the push to Coolify's manual webhook (HMAC-validated).
+3. Coolify serializes builds (`concurrent_builds` pinned to **1**) and builds
+   with the app's **Dockerfile** pack.  The first app step (before `npm ci`)
+   is `tsx scripts/assert-rth-deploy-latch.ts`.  Unwatched paths (docs /
+   STATUS / PLAN / ios / test) do not start a deploy (`watch_paths` already
+   live).  Weekday RTH on a watched path exits 2 unless `HOTFIX=1` /
+   `RTH_DEPLOY_OVERRIDE=1`.  A refused build must keep the last healthy
+   named container.  Otherwise Coolify **stop-old-first** (consistent name,
+   one Litestream writer) and starts `scripts/coolify-prod-start.sh` with
+   `DB_BOOTSTRAP=live`.
+   Traefik must see Docker `healthy` via `/api/live` once the process is
+   up — a finished deploy must not sit `running:unhealthy` for extra
+   minutes.
+4. Boot injects Infisical secrets, restores SQLite when the marker-guarded
+   bootstrap requires it, and runs Litestream around Next.js.  Live replica is
+   Backblaze B2 (`jays-socratic-trade-eu`); R2 holds only the weekly
+   `cold-snapshots/` DR object (`app-YYYY-MM-DD.db.gz` since #3135).
+
+The retired Mac/PM2 publish path and Coolify PR previews are gone. Do not start
+Mac `pm2` `trading` while Coolify runs `DB_BOOTSTRAP=live` (dual schedulers).
+
+## Secrets and persistence
+
+- Infisical is authoritative for production secrets.
+- SQLite lives on the Coolify persistent volume at `/app/data`.
+- Litestream → Backblaze B2 (live replica, `jays-socratic-trade-eu`).  Cloudflare
+  R2 (`socratic-trade-bucket`) holds only the weekly `cold-snapshots/` DR lane
+  (gzipped `app-YYYY-MM-DD.db.gz` since #3135; restore needs gunzip first).  The
+  R2 free-tier kill-switch is R2-era only and does not apply once `AWS_S3_ENDPOINT`
+  is B2.  `ENCRYPTION_KEY` must remain stable or stored credentials become
+  undecryptable.
+
+## Verify after merge
+
+```bash
+bash scripts/verify-deploy-sha.sh   # live sha contains your commit
+curl -sS https://socratictrade.com/api/health
+```
+
+CI: GitHub-hosted `ubuntu-latest` only (no self-hosted Mac/Oracle runner labels).
+
+## Deploy freshness (silent-freeze watch)
+
+`verify-deploy-sha.sh` is the post-merge assertion (polls up to 25 min).  It does
+not watch the pipeline afterwards.  On 2026-08-06 five Coolify deploys died
+mid-build (SSH exec stream exit 255) while webhooks returned 200 and
+`/api/health` stayed green on the old sha for ~14h.
+
+`.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
+every 20 minutes.  It fails (Sentry fleet-infra + optional `#Work-In-Progress`) when
+the oldest commit on `origin/main` that is not live **and that changed a path
+Coolify watches** is older than 1 hour.  The watched set is Coolify's live
+`watch_paths` allow list, mirrored in `src/lib/deploy-image-impact.ts` as
+`COOLIFY_WATCH_PATHS_LIVE`; a commit outside it never owed a deployment, so it
+must never age the verdict.  A gap where nothing watched changed is fresh and
+exits 0.  Unreachable health is not this class (UptimeRobot pages site-down).
+The workflow never deploys and never calls Coolify.
+
+The classification walks the gap with `--first-parent`, so each commit is a
+state of `main` and its own diff decides what landed.  Without it a merge
+commit is compared against its branch tip and a docs-only pull request looks
+image-affecting.  See
+`docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md` for the
+false-positive class this replaced (ST-4575).
+
+Two edge cases are part of the contract.  A git failure while listing the gap is
+an operational error and exits 1, never a fresh pass:  git exits 0 with an empty
+list for a pathspec that matches nothing, which is the fresh verdict, so the
+exit status is what separates "no watched commit" from "git could not answer".
+And the fresh verdict posts the recovery notification, so the incident the
+watchdog opened is closed when production catches up instead of staying open.
+
+Manual one-shot:
+
+```bash
+bash scripts/alert-deploy-freshness.sh origin/main
+```
+
+## Shared-box OCR isolation
+
+ST, Congress.Trade, and Usage Monitor still share the Hetzner cx43 (8 vCPU).
+CT OCR / `scan-cpu-worker` batches on that box were the 2026-08-06 contention
+correlate.
+
+**Advised OCR ceiling: 5.0 of 8 vCPUs** (`--cpus=5`, cpu-shares 256).  That is
+as high as is reasonably advisable: unconstrained OCR peaked at 2.83 cores, so
+5.0 does not throttle normal work, and 3 cores stay free for Coolify SSH, ST
+(including `next build`), UM, and CT web.  6.0+ is too high -- that is the
+class that starved the Coolify exec stream.  CT compose today still pins the
+worker at 2.0, which *does* throttle below the measured peak; raise
+`scan-cpu-worker.cpus` to `5.0` there for the durable cap.
+
+```bash
+bash scripts/isolate-shared-box-batch.sh                  # dry-run; default 5 cpus
+ISOLATE_SHARED_BOX_APPLY=1 bash scripts/isolate-shared-box-batch.sh --apply
+```
+
+The script never restarts a container and never matches Socratic-Trade, Coolify,
+or Usage Monitor.  `--apply` requires the env latch.  `docker update` CPU limits
+are ephemeral: the next CT Coolify recreate overwrites them unless compose
+carries `cpus: '5.0'` on `scan-cpu-worker`.
+
+**Remaining host constraint (this repo cannot lift it):**
+
+- Durable isolation is that CT compose `cpus: '5.0'` (or the matching Coolify
+  CPU limit) on `scan-cpu-worker`.  `congress-app` stays at 2.0.
+- If OCR is in-process inside `congress-app-live`, this script finds no worker.
+  `--include-app` caps the whole CT app (also caps CT web).
+- Coolify has no job-level retry-on-exit-255 that this repo can set.  Do not
+  take prod down to experiment.

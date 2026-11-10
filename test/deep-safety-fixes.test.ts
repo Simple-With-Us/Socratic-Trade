@@ -5,13 +5,16 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   claimProposalForExecution,
   claimSyntheticStop,
+  getDb,
   getPolicy,
   getProposal,
+  getSocraticDecisionCase,
   insertProposal,
   revertSyntheticStopClaim,
   setPolicy,
   transitionProposalIfPending,
   updateProposalStatus,
+  upsertSocraticDecisionCase,
   upsertSyntheticStop,
   listSyntheticStops
 } from "../src/lib/db";
@@ -22,30 +25,88 @@ beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-deepfix-${randomUUID()}.db`)}`;
 });
 
-function seedProposed(userId = "local"): string {
+function seedProposed(userId = "local", withDecisionCase = false): string {
   const id = randomUUID();
   insertProposal({
     id,
     userId,
     runId: "r1",
     accountNumber: "ACC1",
-    proposal: { side: "buy", symbol: "AAPL" } as never,
+    proposal: {
+      side: "buy",
+      symbol: "AAPL",
+      type: "market",
+      dollarAmount: 1000,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      rationale: "Atomic claim test.",
+      tradeThesisTag: "test",
+      entryMarketRegime: "test"
+    },
     decision: { approved: true, reasons: [] },
     estimatedNotional: 1000,
     status: "proposed"
   });
+  if (withDecisionCase) {
+    upsertSocraticDecisionCase({
+      id,
+      userId,
+      proposalId: id,
+      runId: "r1",
+      accountNumber: "ACC1",
+      symbol: "AAPL",
+      side: "buy",
+      status: "proposed",
+      authority: "decide",
+      thesis: "test",
+      rationale: "test",
+      action: "BUY AAPL $1,000"
+    });
+  }
   return id;
 }
 
 // ── Fix T4: executeProposal double-execution (atomic CAS claim) ──────────────
 describe("claimProposalForExecution — atomic proposal claim", () => {
   it("only the first concurrent claim of a 'proposed' row wins; the loser sees false", () => {
-    const id = seedProposed();
+    const id = seedProposed("local", true);
     expect(claimProposalForExecution(id, "placing", "local", { refId: "rid-1" })).toBe(true);
     // Second claim loses — status is no longer 'proposed'.
     expect(claimProposalForExecution(id, "placing", "local", { refId: "rid-2" })).toBe(false);
     const row = getProposal(id, "local");
     expect(row?.status).toBe("placing");
+  });
+
+  it("fails closed when the proposal has no Socratic intent receipt", () => {
+    const id = seedProposed();
+    expect(claimProposalForExecution(id, "placing", "local", { refId: "rid-missing-case" })).toBe(false);
+    expect(getProposal(id, "local")?.status).toBe("proposed");
+  });
+
+  it("rolls back a fallback case when the proposal CAS loses", () => {
+    const id = seedProposed();
+    expect(
+      claimProposalForExecution(id, "placing", "local", {
+        refId: "rid-lost-fallback",
+        createSocraticDecisionCase: () => {
+          upsertSocraticDecisionCase({
+            id,
+            userId: "local",
+            proposalId: id,
+            status: "proposed",
+            authority: "decide",
+            thesis: "test",
+            rationale: "test",
+            action: "BUY AAPL $1,000"
+          });
+          // Deterministically emulate a competing terminal transition between fallback creation and
+          // the claim UPDATE. The transaction must roll back both writes when its CAS sees zero rows.
+          getDb().prepare("UPDATE trade_proposals SET status = 'blocked' WHERE id = ? AND user_id = ?").run(id, "local");
+        }
+      })
+    ).toBe(false);
+    expect(getProposal(id, "local")?.status).toBe("proposed");
+    expect(getSocraticDecisionCase(id, "local")).toBeUndefined();
   });
 
   it("refuses to claim a proposal that is not 'proposed'", () => {
@@ -170,24 +231,24 @@ describe("reconcileAutonomyOnBoot — boot-time autonomy interlock", () => {
     delete process.env.AUTONOMY_RESUME_ON_BOOT;
   });
 
-  it("reverts a persisted 'active' systemState to 'halted' when not opted in", () => {
+  it("reverts a persisted 'active' systemState to 'halted' when not opted in", async () => {
     delete process.env.AUTONOMY_RESUME_ON_BOOT;
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "ACC1", systemState: "active" }, userId);
-    reconcileAutonomyOnBoot();
+    await reconcileAutonomyOnBoot();
     expect(getPolicy(userId).systemState).toBe("halted");
   });
 
-  it("leaves 'active' alone when AUTONOMY_RESUME_ON_BOOT=1", () => {
+  it("leaves 'active' alone when AUTONOMY_RESUME_ON_BOOT=1", async () => {
     process.env.AUTONOMY_RESUME_ON_BOOT = "1";
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "ACC1", systemState: "active" }, userId);
-    reconcileAutonomyOnBoot();
+    await reconcileAutonomyOnBoot();
     expect(getPolicy(userId).systemState).toBe("active");
   });
 
-  it("does not touch non-'active' safe states (e.g. close_only)", () => {
+  it("does not touch non-'active' safe states (e.g. close_only)", async () => {
     delete process.env.AUTONOMY_RESUME_ON_BOOT;
     setPolicy({ ...DEFAULT_POLICY, accountNumber: "ACC1", systemState: "close_only" }, userId);
-    reconcileAutonomyOnBoot();
+    await reconcileAutonomyOnBoot();
     expect(getPolicy(userId).systemState).toBe("close_only");
   });
 });

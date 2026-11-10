@@ -20,11 +20,11 @@ not be assigned unless the agent is actively working on the effort."
 - `docs/EFFORT-LOG.md` — mirror synced
 - `docs/rollouts/2026-07-08-effort-log-assignment-rules.md` — this note
 
-**Slack message:** Posted (or queued for posting) to #agent-sync — see below.
+**Slack message:** Posted (or queued for posting) to #ag***-s**c — see below.
 
 **Verification:** Manual review of the live board confirms no inactive agent tags
 remain in the Planned section.
 
 **Follow-ups:**
-- Slack message to #agent-sync needs posting (SLACK_BOT_TOKEN unavailable in this session)
+- Slack message to #ag***-s**c needs posting (SLACK_BOT_TOKEN unavailable in this session)
 - Owner-decision items compiled below need owner response

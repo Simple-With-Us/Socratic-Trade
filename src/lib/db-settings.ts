@@ -1,10 +1,13 @@
 // db-settings.ts — user/global settings, internal settings, DataPoolConsent, MarketDataDemand
 // All functions depend on getDb() and audit() from "./db" (the core barrel).
+import "server-only";
 import { audit } from "./db";
+import { activeAlertMutes, ALERT_MUTE_DURATION_MS, ALERT_MUTE_SETTING_KEY, type AlertMuteMap } from "./alert-mutes";
 import { getDrizzle } from "./db/client";
 import { settings, userSettings, marketDataDemands } from "./db/schema";
-import { eq, like, and, lte, gt } from "drizzle-orm";
+import { eq, and, lte, gt } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { LEGAL_NOTICE_VERSION } from "./legal-notice";
 
 // ── Global settings (legacy/internal) ─────────────────────────────────────────
 
@@ -55,12 +58,19 @@ export function deleteInternalSetting(key: string): void {
   getDrizzle().delete(settings).where(eq(settings.key, key)).run();
 }
 
-/** Find the first settings row whose key matches a LIKE pattern.  Used for
- *  state-recovery during OAuth callbacks where userId is not yet in scope. */
-export function findInternalSettingByKeyLike<T>(pattern: string): { key: string; value: T } | undefined {
-  const row = getDrizzle().select().from(settings).where(like(settings.key, pattern)).limit(1).get();
-  if (!row) return undefined;
-  return { key: row.key, value: JSON.parse(row.value) as T };
+/**
+ * Exact-prefix scan over internal setting keys.  Deliberately `substr(...) = ?` rather than
+ * `LIKE 'prefix%'`: our internal keys contain `_`, which SQLite's LIKE treats as a
+ * single-character wildcard, so a LIKE prefix would over-match neighbouring key families.
+ */
+export function listInternalSettingKeysByPrefix(prefix: string): string[] {
+  if (!prefix) return [];
+  const rows = getDrizzle()
+    .select({ key: settings.key })
+    .from(settings)
+    .where(sql`substr(${settings.key}, 1, ${prefix.length}) = ${prefix}`)
+    .all();
+  return rows.map((row) => row.key);
 }
 
 // ── Per-user settings ──────────────────────────────────────────────────────────
@@ -71,7 +81,7 @@ export function getUserSetting<T>(userId: string, key: string, fallback: T): T {
   try { return JSON.parse(row.value) as T; } catch { return row.value as unknown as T; }
 }
 
-export function setUserSetting(userId: string, key: string, value: unknown): void {
+export function setUserSetting(userId: string, key: string, value: unknown, options?: { auditPolicyChange?: boolean }): void {
   const id = `${userId}_${key}`;
   const updated_at = new Date().toISOString();
   const stringValue = JSON.stringify(value);
@@ -85,7 +95,38 @@ export function setUserSetting(userId: string, key: string, value: unknown): voi
     target: [userSettings.user_id, userSettings.key],
     set: { value: stringValue, updated_at }
   }).run();
-  audit("policy_change", { userId, key, value }, userId);
+  // auditPolicyChange=false is for machine-generated state (e.g. the hourly reflection_summary
+  // write) that would otherwise flood the activity feed with "policy_change" cards the user
+  // never made. User-driven settings writes must keep the default (audited).
+  if (options?.auditPolicyChange !== false) audit("policy_change", { userId, key, value }, userId);
+}
+
+export function deleteUserSetting(userId: string, key: string): void {
+  getDrizzle().delete(userSettings).where(and(eq(userSettings.user_id, userId), eq(userSettings.key, key))).run();
+}
+
+// ── Alert Center per-condition mutes (#2555) ──────────────────────────────────
+// Rendering-only, reversible 24h mutes keyed by alertConditionKey — detection, recording,
+// and delivery are untouched. Key/expiry logic is the pure module src/lib/alert-mutes.ts.
+
+/** Active (non-expired) Alert Center mutes for the user. Read-only — expired entries are
+ *  filtered out of the returned map but only actually deleted on the next write. */
+export function getAlertMutes(userId: string, nowMs: number = Date.now()): AlertMuteMap {
+  const stored = getUserSetting<AlertMuteMap>(userId, ALERT_MUTE_SETTING_KEY, {});
+  return activeAlertMutes(stored && typeof stored === "object" ? stored : {}, nowMs);
+}
+
+/** Set (mute=true, 24h from now) or clear (mute=false) one condition's mute; expired entries
+ *  are pruned on every write. Returns the resulting active mute map. */
+export function setAlertMute(userId: string, conditionKey: string, mute: boolean, nowMs: number = Date.now()): AlertMuteMap {
+  const active = getAlertMutes(userId, nowMs);
+  if (mute) {
+    active[conditionKey] = new Date(nowMs + ALERT_MUTE_DURATION_MS).toISOString();
+  } else {
+    delete active[conditionKey];
+  }
+  setUserSetting(userId, ALERT_MUTE_SETTING_KEY, active);
+  return active;
 }
 
 // ── Shared market-data pool consent ───────────────────────────────────────────
@@ -100,10 +141,21 @@ export interface DataPoolConsent {
   version: number;
 }
 /** Bump when the consent terms materially change so prior acceptances must be re-confirmed. */
-export const DATA_POOL_CONSENT_VERSION = 1;
+export const DATA_POOL_CONSENT_VERSION = 2;
+
+/**
+ * Mandatory share (owner 2026-08-17): unset users do NOT silently pool.
+ * hasDataPoolConsent is true only after an explicit accept at the current version.
+ * The first-run gate is accept-or-cannot-use — decline does not resolve it.
+ */
+const DATA_POOL_CONSENT_DEFAULT: DataPoolConsent = {
+  accepted: false,
+  acceptedAt: null,
+  version: 0
+};
 
 export function getDataPoolConsent(userId: string = "local"): DataPoolConsent {
-  return getUserSetting<DataPoolConsent>(userId, "data_pool_consent", { accepted: false, acceptedAt: null, version: 0 });
+  return getUserSetting<DataPoolConsent>(userId, "data_pool_consent", DATA_POOL_CONSENT_DEFAULT);
 }
 
 export function setDataPoolConsent(userId: string, accepted: boolean): DataPoolConsent {
@@ -117,10 +169,65 @@ export function setDataPoolConsent(userId: string, accepted: boolean): DataPoolC
   return record;
 }
 
-/** True only when the user has accepted the CURRENT consent version (re-prompt on a version bump). */
+/**
+ * True when market-data pooling is allowed for cache scope (shared store / pool tier).
+ * Explicit accept at the current version only.  Unset / declined / stale version → false.
+ */
 export function hasDataPoolConsent(userId: string = "local"): boolean {
   const c = getDataPoolConsent(userId);
   return c.accepted === true && (c.version ?? 0) >= DATA_POOL_CONSENT_VERSION;
+}
+
+/** First-run / version-bump gate: true until the user accepts the current terms. */
+export function needsDataPoolConsent(userId: string = "local"): boolean {
+  return !hasDataPoolConsent(userId);
+}
+
+// ── Versioned legal clickwrap ─────────────────────────────────────────────────
+// Same {accepted, acceptedAt, version} record as the data-pool gate.  Accepting
+// the current LEGAL_NOTICE_VERSION dismisses the notice until the copy bumps.
+
+export interface LegalNoticeConsent {
+  accepted: boolean;
+  acceptedAt: string | null;
+  version: number;
+}
+
+const LEGAL_NOTICE_SETTING_KEY = "legal_notice_consent";
+
+const LEGAL_NOTICE_CONSENT_DEFAULT: LegalNoticeConsent = {
+  accepted: false,
+  acceptedAt: null,
+  version: 0
+};
+
+export function getLegalNoticeConsent(userId: string = "local"): LegalNoticeConsent {
+  return getUserSetting<LegalNoticeConsent>(userId, LEGAL_NOTICE_SETTING_KEY, LEGAL_NOTICE_CONSENT_DEFAULT);
+}
+
+export function setLegalNoticeConsent(userId: string, accepted: boolean): LegalNoticeConsent {
+  const record: LegalNoticeConsent = {
+    accepted,
+    acceptedAt: accepted ? new Date().toISOString() : null,
+    version: LEGAL_NOTICE_VERSION
+  };
+  setUserSetting(userId, LEGAL_NOTICE_SETTING_KEY, record);
+  audit("legal_notice_consent", { userId, accepted, version: LEGAL_NOTICE_VERSION }, userId);
+  return record;
+}
+
+export function hasLegalNoticeConsent(userId: string = "local"): boolean {
+  const c = getLegalNoticeConsent(userId);
+  return c.accepted === true && (c.version ?? 0) >= LEGAL_NOTICE_VERSION;
+}
+
+export function needsLegalNoticeConsent(userId: string = "local"): boolean {
+  return !hasLegalNoticeConsent(userId);
+}
+
+/** Combined first-use gate: legal clickwrap + mandatory data-pool. */
+export function needsAppConsent(userId: string = "local"): boolean {
+  return needsLegalNoticeConsent(userId) || needsDataPoolConsent(userId);
 }
 
 // ── Learned-context sharing preferences ──────────────────────────────────────

@@ -42,6 +42,8 @@ const DAY_MS = 86_400_000;
 export const CONGRESS_SCORE_VERSION = "congress-score-v1-research";
 
 export const CONGRESS_SCORE_WEIGHTS: CongressScoreComponents = {
+  // Research weights (docs/congress-score-evaluation.md). memberSkill uses App A dual
+  // performance with filing-date (copy-trade) preferred over trade-date timing.
   conviction: 0.25,
   consensus: 0.2,
   memberSkill: 0.2,
@@ -160,8 +162,14 @@ function consensusComponent(
 
 function memberSkillComponent(analytics: CongressAnalytics | undefined, provenance: CongressScoreProvenance): number {
   if (typeof analytics?.topMemberScore === "number" && Number.isFinite(analytics.topMemberScore)) {
-    if (analytics.topMemberScoreSource === "realized_skill") {
-      provenance.sourced.push("member realized skill");
+    const src = analytics.topMemberScoreSource;
+    if (src === "realized_skill_filing" || src === "realized_skill") {
+      provenance.sourced.push("member realized skill (filing-date copy-trade)");
+      if (typeof analytics.topMemberFilingAvgExcess === "number") {
+        provenance.sourced.push(`filing avgExcess=${analytics.topMemberFilingAvgExcess}`);
+      }
+    } else if (src === "realized_skill_trade") {
+      provenance.sourced.push("member realized skill (trade-date timing; filing unscored)");
     } else {
       provenance.inferred.push("member activity prominence fallback");
     }

@@ -115,4 +115,24 @@ describe("applyCorrelationClusterGate", () => {
     const kept = await applyCorrelationClusterGate([buy("AAA")], { ...DEFAULT_POLICY, accountNumber: "X", maxAvgCorrelation: 0.8 }, held, "local");
     expect(kept.length).toBe(1);
   });
+
+  it("re-proves ownership after the correlation await before auditing or keeping the proposal", async () => {
+    const { fetchDailyOHLC } = await import("../src/lib/history");
+    const candBars = barsFromReturns(R);
+    (fetchDailyOHLC as Mock).mockImplementation(async () => candBars);
+    const { applyCorrelationClusterGate } = await import("../src/lib/strategy");
+    let checks = 0;
+    const assertOwned = () => {
+      checks++;
+      if (checks === 2) throw new Error("lease lost after correlation");
+    };
+
+    await expect(applyCorrelationClusterGate(
+      [buy("AAA")],
+      { ...DEFAULT_POLICY, accountNumber: "X", maxAvgCorrelation: 0.8 },
+      held,
+      "local",
+      assertOwned
+    )).rejects.toThrow("lease lost after correlation");
+  });
 });

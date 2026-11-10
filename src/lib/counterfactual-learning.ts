@@ -127,7 +127,11 @@ export async function materializeSkippedCandidateCounterfactuals(
   const nowDate = new Date(now).toISOString().slice(0, 10);
   // One SPY series per run for the spyExcessPct of every matured row's daily horizons. A failed
   // SPY fetch simply omits spyExcessPct (never fabricated) — the symbol's own return still lands.
+  // Intentionally left on plain SPY (not the ^GSPC-index/sector-aware benchmark outcome-engine.ts
+  // now uses, r4): this pipeline feeds missed-opportunity analytics, not the primary alpha-grading
+  // loop — upgrading it is a follow-up, not this slice.
   const spyBars = pending.length > 0 ? normalizeDailyBars(await fetchOHLC("SPY", now, userId).catch(() => null)) : [];
+  const spyBenchmark = spyBars.length > 0 ? { bars: spyBars, basis: "SPY" } : null;
 
   for (const candidate of pending) {
     let bars = barsBySymbol.get(candidate.symbol);
@@ -152,9 +156,11 @@ export async function materializeSkippedCandidateCounterfactuals(
         }),
         ...computeDailyHorizonRows({
           basisPrice: candidate.refPrice,
-          basisDate: candidate.snapshotAt.slice(0, 10),
+          // Market (America/New_York) day, not the UTC date: an after-hours ET snapshot must anchor
+          // on its own session, same as targetBusinessDate below (ST-4589 B12).
+          basisDate: marketDateOf(candidate.snapshotAt) ?? candidate.snapshotAt.slice(0, 10),
           bars: normalizedBars,
-          spyBars,
+          benchmark: spyBenchmark,
           nowDate,
           priceBasisPrefix: "ref_price",
           measuredAt: nowIso

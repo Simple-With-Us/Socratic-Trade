@@ -11,6 +11,21 @@ in `src/lib/market-hours.ts` (the Phase 1 documented limitation is resolved).
 Scheduler behavior is local single-process, and any dev-server `EMFILE` watcher
 issue is operational rather than a strategy-loop feature gap.
 
+2026-07-21 hardening note: the LLM provider cooldown planner preserves the invariant that a
+non-empty Green/Red failover chain never becomes empty when every lane is cooling, including
+all-billing cooldowns. A manual billing/credit fix can therefore recover on the next run instead
+of waiting out the cooldown TTL.
+
+2026-10-15 broker-call bounds (Linear ST-2570): every broker read and write has a deadline and
+an abort signal, order listings are page-capped and row-capped, and quote batches are chunked.
+The scheduler launches stops, stale exits, and fill reconcile for every eligible account before
+it awaits that account's health probe, so one hung probe cannot delay the next account's
+protection.  A hung read releases the stop and exit in-flight guards.  A broker write that has
+already started keeps its guard so the next tick cannot send it twice.  A strategy run whose
+health probe or pre-decision snapshot never returns is finished `failed` with a timeout summary.
+An abort that lands after the stop is claimed, and before `placeEquityOrder`, reverts that claim
+and keeps the attempt id, so the position is not left `triggered` until the 15-minute re-arm grace.
+
 ## Objective
 
 Make `policy.enabled` actually drive autonomous strategy runs on a schedule, safely:
@@ -160,6 +175,10 @@ Create `src/lib/scheduler.ts`:
      respects the run lock); set `nextRunAt = now + cadence`. Wrap in try/catch so a thrown
      error never kills the timer.
 - Use `.unref()` on the timer so it doesn't hold the process open in dev.
+- 2026-08-31:  a whole-tick in-flight guard must not skip lease renew / lastTick / Sentry
+  forever.  `startScheduler()` also starts a 15s watchdog (2-minute budget, generation token)
+  that unwedges a hung `tickInner`; Sentry Crons opens `in_progress` and closes `ok`/`error`.
+  See `docs/rollouts/2026-08-31-hung-scheduler-tick-watchdog.md`.
 - Export `getSchedulerState(): { lastRunAt: string | null; nextRunAt: string | null }`.
 
 **Dev caveat to document in code:** Next dev with HMR may call `register()` more than once

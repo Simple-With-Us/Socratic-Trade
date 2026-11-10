@@ -29,21 +29,13 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
     expect(routing.holdForHuman).toBe(true);
   });
 
-  describe("default (policy.tuning.deRiskExitsOnAdversaryUnavailable is OFF/undefined)", () => {
-    it("still holds a de-risking SELL for human review — byte-identical to main", () => {
-      const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429");
-      expect(routing.holdForHuman).toBe(true);
-      expect(routing.note).toContain("routed to human approval");
-    });
-
-    it("still holds a de-risking COVER for human review — byte-identical to main", () => {
-      const routing = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", false);
-      expect(routing.holdForHuman).toBe(true);
-      expect(routing.note).toContain("routed to human approval");
-    });
-  });
-
-  describe("opted in (policy.tuning.deRiskExitsOnAdversaryUnavailable === true)", () => {
+  // Owner ruling 2026-09-24 (board 687a5fb4): the default flipped from OFF to ON — see
+  // src/lib/defaults.ts's DEFAULT_POLICY.tuning.deRiskExitsOnAdversaryUnavailable and
+  // test/model-defaults-derisk-exits.test.ts for the merge-inheritance coverage. This file keeps
+  // testing the PURE routeOnAdversaryUnavailable helper directly, so "default" here means the
+  // boolean value mergePolicy now actually threads through (`true`), plus the bare-`undefined`
+  // case for a caller that bypasses the merged policy entirely (same behavior as `true`).
+  describe("default (policy.tuning.deRiskExitsOnAdversaryUnavailable is true, or undefined)", () => {
     it("does NOT hold a de-risking SELL — appends a loud 'RED TEAM FAILED' note instead", () => {
       const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429", true);
       expect(routing.holdForHuman).toBe(false);
@@ -59,6 +51,16 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(routing.note).toContain("malformed response");
     });
 
+    it("a bare undefined 4th arg (no policy override reached this call) also does NOT hold — matches the new merged-policy default, never silently reverts to the old hold-by-default", () => {
+      const sell = routeOnAdversaryUnavailable("sell", "rate_limited", "429");
+      expect(sell.holdForHuman).toBe(false);
+      expect(sell.note).toContain("RED TEAM FAILED");
+
+      const cover = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", undefined);
+      expect(cover.holdForHuman).toBe(false);
+      expect(cover.note).toContain("RED TEAM FAILED");
+    });
+
     it("handles an absent failureKind (legacy/unclassified unavailability) with a generic label", () => {
       const opening = routeOnAdversaryUnavailable("buy", undefined, "unknown error", true);
       expect(opening.holdForHuman).toBe(true);
@@ -69,7 +71,7 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(exit.note).toContain("RED TEAM FAILED");
     });
 
-    it("under propose authority (autoExecutes=false) an opt-in de-risk exit is NOT held but the note says 'surfaced for approval', never 'proceeding'", () => {
+    it("under propose authority (autoExecutes=false) a de-risk exit is NOT held but the note says 'surfaced for approval', never 'proceeding'", () => {
       const decide = routeOnAdversaryUnavailable("sell", "timeout", "timed out", true, true);
       expect(decide.holdForHuman).toBe(false);
       expect(decide.note).toContain("proceeding because this order reduces risk");
@@ -79,6 +81,20 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(propose.note).toContain("RED TEAM FAILED");
       expect(propose.note).toContain("surfaced for your approval");
       expect(propose.note).not.toContain("proceeding because"); // never falsely claims it proceeds
+    });
+  });
+
+  describe("opted OUT (policy.tuning.deRiskExitsOnAdversaryUnavailable === false)", () => {
+    it("holds a de-risking SELL for human review — the pre-2026-09-24 behavior, still available per-account", () => {
+      const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429", false);
+      expect(routing.holdForHuman).toBe(true);
+      expect(routing.note).toContain("routed to human approval");
+    });
+
+    it("holds a de-risking COVER for human review", () => {
+      const routing = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", false);
+      expect(routing.holdForHuman).toBe(true);
+      expect(routing.note).toContain("routed to human approval");
     });
   });
 });
@@ -100,6 +116,8 @@ describe("describeRedTeamFailureKind", () => {
 // for human review with the failureKind visible in its persisted reason, and the parity audit event
 // (strategy_red_team_unavailable) is emitted.
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -120,7 +138,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
 });
 
 const BULL_OPENING_PROPOSAL = {
@@ -142,13 +160,13 @@ const BULL_OPENING_PROPOSAL = {
 function makeUnavailableFetchStub(proposals: unknown[] = [BULL_OPENING_PROPOSAL]) {
   return async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       const systemContent = JSON.stringify(body);
       if (systemContent.includes("Red Team Risk Agent")) {
         return new Response("Too Many Requests", { status: 429 });
       }
-      return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals }) }), {
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals }) } }] }), {
         status: 200,
         headers: { "content-type": "application/json" }
       });
@@ -182,7 +200,7 @@ function makeUnavailableFetchStub(proposals: unknown[] = [BULL_OPENING_PROPOSAL]
 
 async function seedTestAccountAndPolicy() {
   const { upsertConnectedAccount, setActiveConnectedAccount, setPolicy, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
   upsertConnectedAccount({
     id: accountId,
@@ -197,10 +215,10 @@ async function seedTestAccountAndPolicy() {
   setPolicy({
     ...DEFAULT_POLICY,
     systemState: "active",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
     // Required explicit Red model (no-defaults world) — the stub answers it with a 429 so the
     // review is unavailable with failureKind "rate_limited".
-    redTeamLlmModel: "gpt-4.1-mini",
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide"
@@ -209,7 +227,7 @@ async function seedTestAccountAndPolicy() {
 
 describe("Red Team unavailable — opening routing + audit parity (decide authority)", () => {
   it("holds a high-conviction OPENING for human review with failureKind visible, and audits strategy_red_team_unavailable", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", makeUnavailableFetchStub());
 
     await seedTestAccountAndPolicy();
@@ -233,6 +251,20 @@ describe("Red Team unavailable — opening routing + audit parity (decide author
     // Deliverable D: the loud, human-facing reason includes the failureKind, not just a generic
     // "unavailable" message.
     expect(aaplProposal?.proposal.rationale).toMatch(/rate limited/i);
+
+    // Regression: the "Why your approval is required" summary used to double its terminal
+    // punctuation whenever the Red Team's own reason string already ended in a period (which it
+    // always does — humanizeLlmError's rate-limit message ends "...check OpenRouter billing.").
+    // The old template hard-appended another "." right after it: "...billing.. No model
+    // critiqued...".
+    const initialRedTeamReason = aaplProposal?.proposal.humanReviewReasons?.find((r) => r.code === "initial_red_team");
+    expect(initialRedTeamReason?.summary).toBeDefined();
+    expect(initialRedTeamReason?.summary).not.toMatch(/\.\./);
+    expect(initialRedTeamReason?.summary).toContain("No model critiqued this opening");
+
+    // lane G3: an initial_red_team hold (decide authority's fail-closed requiresHumanReview
+    // branch) classifies as the "red_team_unavailable" holdReason bucket (hold-reason.ts).
+    expect(aaplProposal?.proposal.holdReason).toBe("red_team_unavailable");
 
     // Deliverable B: audit parity with strategy_bear_review_unavailable.
     const unavailableAudits = listAudit(500).filter((e) => e.kind === "strategy_red_team_unavailable");
@@ -286,7 +318,7 @@ async function seedExistingAaplLongPosition() {
 
 describe("Red Team unavailable — exits are STRUCTURALLY EXEMPT (§3.5: never reviewed, never holdable)", () => {
   it("a de-risking SELL of an existing position proceeds to placement with NO review call, no verdict, no unavailable audit — even while the reviewer is down", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", makeUnavailableFetchStub([SELL_PROPOSAL]));
 
     await seedTestAccountAndPolicy();
@@ -303,7 +335,7 @@ describe("Red Team unavailable — exits are STRUCTURALLY EXEMPT (§3.5: never r
     const proposals = listRecentProposals("TEST", 100, "local");
     const aaplSell = proposals.find((p) => p.proposal.symbol === "AAPL" && p.proposal.side === "sell");
     expect(aaplSell).toBeDefined();
-    expect(aaplSell?.status).toBe("placed");
+    expect(aaplSell?.status).toBe("filled");
     // No verdict is ever stamped on an exit (it was never reviewed) and no unavailable audit fires.
     expect(aaplSell?.proposal.redTeamVerdict).toBeUndefined();
     const unavailableAudits = listAudit(500).filter(
@@ -315,7 +347,7 @@ describe("Red Team unavailable — exits are STRUCTURALLY EXEMPT (§3.5: never r
 
 describe("Red Team unavailable — propose authority surfaces the flag on the pending card", () => {
   it("appends a RED TEAM FAILED note to a propose-mode card so the approver sees the adversary never ran", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", makeUnavailableFetchStub());
 
     await seedTestAccountAndPolicy();
@@ -331,5 +363,9 @@ describe("Red Team unavailable — propose authority surfaces the flag on the pe
     expect(aaplProposal).toBeDefined();
     expect(aaplProposal?.status).toBe("proposed");
     expect(aaplProposal?.proposal.rationale).toContain("RED TEAM FAILED");
+    // lane G3: the "propose" authority branch classifies holdReason from whatever
+    // HumanReviewReasonCode(s) it carries — an opening's Red-Team-unavailable hold still fires
+    // here (routeOnAdversaryUnavailable holds every OPENING regardless of authority).
+    expect(aaplProposal?.proposal.holdReason).toBe("red_team_unavailable");
   }, 30_000);
 });

@@ -25,6 +25,7 @@
  */
 
 import { isReasoningModel, LLM_TIMEOUT_MS } from "../../src/lib/llm-request";
+import { extractLlmUsage, recordLlmUsage } from "../../src/lib/llm-usage";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -163,7 +164,7 @@ export async function judgeFaithfulness(evalCase: FaithfulnessCase): Promise<Fai
     return { ran: false, pass: false, detail: "skipped (RAG_EVAL_FAITHFULNESS_JUDGE off or OPENAI_API_KEY unset)" };
   }
   const apiKey = process.env.OPENAI_API_KEY!;
-  const model = process.env.RAG_EVAL_FAITHFULNESS_JUDGE_MODEL || "gpt-4o-mini";
+  const model = process.env.RAG_EVAL_FAITHFULNESS_JUDGE_MODEL || "gpt-5.4-mini";
   const context = evalCase.retrievedChunks.map((c) => `[${c.chunk_id}] ${c.text}`).join("\n\n");
   const prompt = [
     "You are a faithfulness judge for a RAG system. Given retrieved context and a model answer,",
@@ -194,7 +195,24 @@ export async function judgeFaithfulness(evalCase: FaithfulnessCase): Promise<Fai
       const text = await res.text().catch(() => "");
       return { ran: true, pass: false, detail: `judge error ${res.status}: ${text.slice(0, 120)}` };
     }
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const payload = await res.json();
+    // Every LLM call is hardwired into the usage ledger + external telemetry (owner directive),
+    // including this dev-only faithfulness judge. Runs against whatever DATABASE_URL is set —
+    // intended. recordLlmUsage never throws, but wrapped anyway so a ledger hiccup can never fail
+    // the eval run.
+    try {
+      recordLlmUsage({
+        userId: "local",
+        provider: "openai",
+        model,
+        context: "eval-faithfulness",
+        keySource: "operator",
+        ...extractLlmUsage(payload)
+      });
+    } catch {
+      /* usage ledger is best-effort; never break the eval run */
+    }
+    const data = payload as { choices?: Array<{ message?: { content?: string } }> };
     const verdict = (data?.choices?.[0]?.message?.content ?? "").trim();
     const pass = /^PASS\b/i.test(verdict);
     const reason = verdict.replace(/^(PASS|FAIL)\s*/i, "").trim().slice(0, 120) || "(no reason given)";

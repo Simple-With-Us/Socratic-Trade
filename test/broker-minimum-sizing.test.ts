@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { applyDeterministicSizing } from "../src/lib/strategy";
 import type { EquityPosition, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
 // Broker minimum dollar-notional floor (Robinhood: $1). A sub-$1 advised/fallback size that rounds
 // DOWN to $0 must still be raised to the floor when capacity covers it — otherwise the $0 order

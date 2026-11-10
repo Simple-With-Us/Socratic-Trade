@@ -54,6 +54,7 @@ export interface AutoSaveController {
 export function useAutoSave(): AutoSaveController {
   const toast = useToast();
   const [status, setStatus] = useState<AutoSaveStatus>("idle");
+  const [pendingCount, setPendingCount] = useState(0);
   const inFlightRef = useRef(0);
   // True if any write in the current burst failed — keeps a later concurrent
   // success from silently overwriting a visible "Couldn't save".
@@ -75,6 +76,7 @@ export function useAutoSave(): AutoSaveController {
       // A new burst starts whenever nothing is currently in flight.
       if (inFlightRef.current === 0) burstErroredRef.current = false;
       inFlightRef.current += 1;
+      setPendingCount((count) => count + 1);
       setStatus("saving");
       if (savedTimerRef.current) {
         clearTimeout(savedTimerRef.current);
@@ -104,6 +106,7 @@ export function useAutoSave(): AutoSaveController {
             return;
           } finally {
             inFlightRef.current -= 1;
+            if (mountedRef.current) setPendingCount((count) => Math.max(0, count - 1));
           }
           // Settle only when the whole burst has drained, so a rapid multi-field
           // change shows one steady "Saving…" then a single "Saved" — and never
@@ -119,5 +122,7 @@ export function useAutoSave(): AutoSaveController {
     [toast]
   );
 
-  return { status, saving: status === "saving", save };
+  // A failed early item may set status="error" while later serialized items are still running.
+  // Keep controls disabled until the actual queue drains rather than deriving busy from the label.
+  return { status, saving: pendingCount > 0, save };
 }

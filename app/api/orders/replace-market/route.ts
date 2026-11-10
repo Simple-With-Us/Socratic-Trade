@@ -1,3 +1,5 @@
+import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
+import { LANE_WAITS, withAccountMutation } from "@/lib/account-mutation";
 import { getBrokerGateway } from "@/lib/broker";
 import { emitDashboardEvent } from "@/lib/events";
 import {
@@ -33,14 +35,38 @@ export async function POST(request: Request) {
     const orderId = String(body.orderId ?? "").trim();
     if (!orderId) return new NextResponse("orderId is required.", { status: 400 });
 
-    const result = await replaceStaleLimitOrderWithMarket({
-      userId,
-      policy: { ...policy, accountNumber: policy.accountNumber },
-      activeAccount: getActiveConnectedAccount(userId),
-      gateway: getBrokerGateway(policy, userId),
-      orderId,
-      liveConfirmation: body.liveConfirmation
-    });
+    // §7 slice 3: the cancel-then-place body runs under the account's mutation lease. A human
+    // click waits briefly (10s) for an in-flight sequence; a still-busy lease maps to the same
+    // honest 409 idiom as the replacement state machine's own concurrency guard.
+    const outcome = await withAccountMutation(
+      {
+        userId,
+        accountNumber: policy.accountNumber,
+        connectedAccountId: policy.connectedAccountId,
+        lane: "manual-replace",
+        waitMs: LANE_WAITS.manualReplace
+      },
+      (ctx) =>
+        replaceStaleLimitOrderWithMarket({
+          userId,
+          policy: { ...policy, accountNumber: policy.accountNumber as string },
+          activeAccount: getActiveConnectedAccount(userId),
+          gateway: getBrokerGateway(policy, userId),
+          orderId,
+          liveConfirmation: body.liveConfirmation,
+          fence: ctx.assertOwned
+        })
+    );
+    if (!outcome.acquired) {
+      return NextResponse.json(
+        {
+          error: "replace_precondition_failed",
+          message: `Another broker operation (${outcome.busy.activeOperation}) is in progress for this account. Retry in ~${outcome.busy.retryAfterSeconds}s.`
+        },
+        { status: 409 }
+      );
+    }
+    const result = outcome.value;
 
     emitDashboardEvent({
       type: "order",
@@ -48,6 +74,7 @@ export async function POST(request: Request) {
       at: new Date().toISOString(),
       detail: { orderId, action: "replace_market", replacementOrderId: result.replacementOrderId }
     });
+    invalidateDashboardSnapshotCache(userId, policy.accountNumber);
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof MarketReplaceConfirmationError) {

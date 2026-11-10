@@ -28,6 +28,8 @@ import {
   type TileTone
 } from "./indicators";
 import { TrendsCard } from "./trends";
+import { destinationLabel } from "../components/nav";
+import { WeeklyDigestCard } from "../components/weekly-digest-card";
 
 export default function MacroPage() {
   const { snapshot, error } = useConsoleData();
@@ -37,19 +39,19 @@ export default function MacroPage() {
   return (
     <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-[length:var(--con-fs-lg)] font-bold">Macro</h1>
+        <h1 className="text-[length:var(--con-fs-lg)] font-bold">{destinationLabel("/console/macro")}</h1>
         <span
           className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
           title="The macro and market-regime board: rates, inflation, volatility, positioning, breadth — the same inputs the strategist reads on every run."
         >
           the market backdrop the strategist trades against
         </span>
-        {board && macroSourcing(board).fred && board.macro.asOf && (
+        {board && (macroSourcing(board).fred || macroSourcing(board).treasury || macroSourcing(board).bls) && board.macro.asOf && (
           <>
             <div className="flex-1" />
             <span
               className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
-              title="Publication date of the FRED macro suite. Macro series update on different schedules (daily yields, monthly CPI), so this is the fetch date, not every series' vintage.">
+              title="Publication date of the FRED macro suite.  Macro series update on different schedules (daily yields, monthly CPI), so this is the fetch date, not every series' vintage.">
               macro as of {board.macro.asOf}
             </span>
           </>
@@ -97,7 +99,8 @@ function BoardView({
   return (
     <>
       <RegimeCard board={board} sourcing={sourcing} regimeScorecard={snapshot.regimeScorecard} />
-      {!sourcing.fred && <UnsourcedNotice vixLive={sourcing.vix} />}
+      <WeeklyDigestCard />
+      {!sourcing.fred && <UnsourcedNotice vixLive={sourcing.vix} treasuryLive={sourcing.treasury} blsLive={sourcing.bls} />}
       <TrendsCard history={board.history} />
       {sections.map((s) => (
         <Card key={s.id} title={<span title={s.desc}>{s.title}</span>}>
@@ -115,31 +118,54 @@ function BoardView({
   );
 }
 
-function UnsourcedNotice({ vixLive }: { vixLive: boolean }) {
+function UnsourcedNotice({
+  vixLive,
+  treasuryLive,
+  blsLive
+}: {
+  vixLive: boolean;
+  treasuryLive: boolean;
+  blsLive: boolean;
+}) {
+  const anyKeyless = vixLive || treasuryLive || blsLive;
+  // Build the "what's still live" clause as a list rather than enumerating every combination —
+  // scales cleanly as more key-free fallbacks (Treasury, BLS, ...) get added over time.
+  const liveClauses: string[] = [];
+  if (vixLive) liveClauses.push("the VIX (fetched key-free from Yahoo/Cboe)");
+  if (treasuryLive) liveClauses.push("the 3M/2Y/10Y Treasury yields and the two curves computed from them (fetched key-free from Treasury.gov)");
+  if (blsLive) liveClauses.push("CPI, unemployment, and nonfarm payrolls (fetched from BLS, keyless or lightly-keyed)");
+  const liveList =
+    liveClauses.length <= 1
+      ? liveClauses[0]
+      : liveClauses.length === 2
+        ? `${liveClauses[0]} and ${liveClauses[1]}`
+        : `${liveClauses.slice(0, -1).join(", ")}, and ${liveClauses[liveClauses.length - 1]}`;
+
   return (
     <div className="rounded-[var(--con-radius-sm)] border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-sm)]">
       <span className="font-semibold text-[color:var(--con-warn)]">
-        {vixLive ? "FRED macro feed unsourced — live VIX only." : "Macro feed unsourced."}
+        {anyKeyless ? "FRED macro feed unsourced — partial key-free data only." : "Macro feed unsourced."}
       </span>{" "}
       <span className="text-[color:var(--con-muted)]">
-        {vixLive ? (
+        {anyKeyless ? (
           <>
-            No FRED API key is configured. The VIX is still a live reading (fetched key-free), but every FRED-based
-            tile below shows {EM_DASH} instead of the backend&apos;s placeholder constants — this board never shows
-            fabricated numbers. The regime label is degraded too: its yield-curve input was a placeholder, so treat it
-            as VIX-informed only.{" "}
+            No FRED API key is configured. {liveList} {liveClauses.length > 1 ? "are" : "is"} still live, but every
+            other FRED-based tile below shows {EM_DASH} instead of the backend&apos;s placeholder constants — this
+            board never shows fabricated numbers. The regime label is degraded too: its yield-curve-vs-Fed-funds
+            input needs a FRED key for the Fed funds rate, so treat the label as {vixLive ? "VIX" : "partial"}-informed
+            only.{" "}
           </>
         ) : (
           <>
-            No FRED API key is configured and the key-free VIX lookup failed, so the regime reads &quot;Unknown&quot;.
-            The FRED-based tiles below show {EM_DASH} instead of the backend&apos;s placeholder constants — this board
-            never shows fabricated numbers.{" "}
+            No FRED API key is configured and every key-free fallback lookup (VIX, Treasury yield curve, BLS) failed
+            too, so the regime reads &quot;Unknown&quot;. The FRED-based tiles below show {EM_DASH} instead of the
+            backend&apos;s placeholder constants — this board never shows fabricated numbers.{" "}
           </>
         )}
         Signals from other free sources (Cboe, CFTC, factors, breadth, news) still show real readings. Add a FRED key
         under{" "}
-        <Link href="/console/settings" className="font-semibold text-[color:var(--con-accent)] hover:underline" title="Settings → API keys">
-          Settings
+        <Link href="/console/connections" className="font-semibold text-[color:var(--con-accent)] hover:underline" title="Connections → API keys">
+          Connections
         </Link>{" "}
         to light the rest up.
       </span>
@@ -185,7 +211,7 @@ function RegimeCard({
           {degraded && (
             <Chip
               tone="warn"
-              title="No FRED feed: the backend computed this label from a live VIX but a PLACEHOLDER yield curve. Curve-driven effects (Cautious / Risk-Off tilts from inversion) cannot be trusted — treat the label as VIX-informed only."
+              title="No FRED feed: the backend computed this label from a live VIX but a PLACEHOLDER yield curve.  Curve-driven effects (Cautious / Risk-Off tilts from inversion) cannot be trusted — treat the label as VIX-informed only."
             >
               degraded — curve input unsourced
             </Chip>
@@ -222,13 +248,13 @@ function RegimeCard({
         </span>
         <Chip
           tone={typeof vix === "number" ? (vix > 30 ? "neg" : vix > 20 ? "warn" : vix < 13 ? "pos" : "muted") : "muted"}
-          title="30-day expected S&P 500 volatility — the fear gauge. Bands: below 13 Risk-On, 13–20 normal, above 20 Risk-Off, above 30 Crisis."
+          title="30-day expected S&P 500 volatility — the fear gauge.  Bands: below 13 Risk-On, 13–20 normal, above 20 Risk-Off, above 30 Crisis."
         >
           VIX {typeof vix === "number" ? vix.toFixed(2) : EM_DASH}
         </Chip>
         <Chip
           tone={typeof curve === "number" ? (inverted ? "neg" : "pos") : "muted"}
-          title={`10Y Treasury yield minus the Fed's policy rate. More than 0.10 points below zero counts as inverted and nudges the regime toward Cautious / Risk-Off.${
+          title={`10Y Treasury yield minus the Fed's policy rate.  More than 0.10 points below zero counts as inverted and nudges the regime toward Cautious / Risk-Off.${
             typeof curve === "number" ? "" : " Unsourced in this snapshot — no FRED key."
           }`}
         >
@@ -239,7 +265,7 @@ function RegimeCard({
       {stat && stat.trades > 0 && (
         <p
           className="mt-3 border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]"
-          title="From your closed trades whose entry was stamped with this exact regime label. Small samples read with caution."
+          title="From your closed trades whose entry was stamped with this exact regime label.  Small samples read with caution."
         >
           Your record in this regime: <span className="con-num font-semibold">{stat.trades}</span> closed{" "}
           {stat.trades === 1 ? "trade" : "trades"} · win rate{" "}
@@ -357,7 +383,7 @@ function BreadthCard({ signals }: { signals: MarketSignals }) {
   return (
     <Card
       title={
-        <span title="True full-market breadth from Massive grouped daily bars — every listed U.S. stock, not just an index. Broad participation confirms a move; narrow breadth undermines it.">
+        <span title="True full-market breadth from Massive grouped daily bars — every listed U.S. stock, not just an index.  Broad participation confirms a move; narrow breadth undermines it.">
           Full-market breadth{asOf ? ` · ${asOf}` : ""}
         </span>
       }
@@ -385,7 +411,7 @@ function MoverList({ title, movers, asOf }: { title: string; movers: Array<{ sym
         {movers.map((m) => (
           <div
             key={m.sym}
-            className="con-row flex items-center justify-between gap-3 rounded-md px-1.5 py-1"
+            className="con-row flex items-center justify-between gap-3 rounded-control px-1.5 py-1"
             title={`${m.sym} closed ${m.pct >= 0 ? "up" : "down"} ${Math.abs(m.pct).toFixed(1)}% versus the prior close.`}
           >
             <span className="text-[length:var(--con-fs-sm)] font-semibold">{m.sym}</span>
@@ -414,7 +440,7 @@ function NewsCard({ news }: { news?: MarketNewsItem[] }) {
           <li
             key={`${n.url ?? n.title}-${i}`}
             className="con-row rounded-[var(--con-radius-sm)] px-2 py-2"
-            title={`${n.title}${n.publisher ? ` — ${n.publisher}` : ""}${n.url ? ". Opens the article in a new tab." : ""}`}
+            title={`${n.title}${n.publisher ? ` — ${n.publisher}` : ""}${n.url ? ".  Opens the article in a new tab." : ""}`}
           >
             <div className="text-[length:var(--con-fs-sm)] leading-snug">
               {n.url ? (
@@ -434,7 +460,7 @@ function NewsCard({ news }: { news?: MarketNewsItem[] }) {
                   className="con-chip"
                   title={`This story mentions ${t}.`}
                 >
-                  <SymbolButton symbol={t} showLogo={false} className="text-inherit" />
+                  <SymbolButton symbol={t} className="text-inherit" />
                 </span>
               ))}
             </div>

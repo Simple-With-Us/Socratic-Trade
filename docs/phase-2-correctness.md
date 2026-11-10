@@ -20,3 +20,11 @@
 - Fallback notional only applies to legacy rows without reviewed notional.
 - Sector composition for the LLM and policy enforcement uses position metadata first, then `MarketScan.sectorBySymbol`.
 - A held position outside `topCandidates` can still be assigned a sector.
+
+## 2026-07-21 account-drain correctness note
+
+Deleted connected accounts drain before purge so broker-side live orders can be canceled and fills
+reconciled before local account/proposal/stop state is removed. Draining cleanup must use the shared
+`isLiveOrderState` vocabulary, not only literal `open`/`partially_filled`, because brokers can
+report still-live orders as `accepted`, `pending_new`, `queued`, `confirmed`, `pending`, or
+`pending_cancel`.

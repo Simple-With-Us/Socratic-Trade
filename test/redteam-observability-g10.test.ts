@@ -33,6 +33,8 @@ vi.mock("../src/lib/observability", () => ({
 }));
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -55,7 +57,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
 });
 
 // Two near-identical proposals so the post-gate rationale-diversity check collapses. (Every
@@ -77,7 +79,7 @@ function makeFetchStub() {
   const bullProposals = [COLLAPSED_PROPOSAL("AAPL"), COLLAPSED_PROPOSAL("MSFT")];
   return async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
       const body = init?.body ? String(init.body) : "{}";
       if (body.includes("Red Team Risk Agent") || body.includes("red_team_verdict")) {
         return new Response(
@@ -106,21 +108,24 @@ function makeFetchStub() {
         { status: 200, headers: { "content-type": "application/json" } }
       );
     }
+    if (href.includes("sec.gov/files/company_tickers.json")) {
+      return new Response(JSON.stringify({ "0": { "ticker": "AAPL", "title": "Apple Inc.", "cik_str": 320193 }, "1": { "ticker": "MSFT", "title": "Microsoft Corp", "cik_str": 789019 } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     return new Response("not found", { status: 404 });
   };
 }
 
 async function seed() {
   const { upsertConnectedAccount, setActiveConnectedAccount, setPolicy, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "t");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "t");
   const id = randomUUID();
   upsertConnectedAccount({ id, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "Test", isActive: true });
   setActiveConnectedAccount(id);
   setPolicy({
     ...DEFAULT_POLICY,
     systemState: "active",
-    llmModel: "gpt-4.1-mini",
-    redTeamLlmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL", "MSFT"],
     strategyAuthority: "decide"
@@ -129,7 +134,7 @@ async function seed() {
 
 describe("observability stamping (G10)", () => {
   it("stamps promptVersion on the bull + red-team review generations, a verdict in the review output, and a diversity-collapse observation", async () => {
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", makeFetchStub());
 
     await seed();
@@ -162,5 +167,24 @@ describe("observability stamping (G10)", () => {
     expect(collapse).toBeDefined();
     expect(collapse?.metadata?.promptVersion).toBe(STRATEGY_PROMPT_VERSION);
     expect(collapse?.tags).toContain("diversity-collapse");
+
+    // (4) The completed run records its graph trajectory (run id, transitions, final state).
+    const trajectory = decisionObservations.find((o) => o.name === "trading.strategy.graph-trajectory");
+    expect(trajectory).toBeDefined();
+    expect(trajectory?.tags).toContain("graph-trajectory");
+    expect(trajectory?.metadata?.runId).toBe(result.runId);
+    expect(trajectory?.metadata?.graphFinalState).toBe("COMPLETED");
+    const recordedTransitions = trajectory?.metadata?.graphTransitions;
+    expect(Array.isArray(recordedTransitions)).toBe(true);
+    if (!Array.isArray(recordedTransitions)) {
+      throw new Error("graphTransitions has an unexpected shape");
+    }
+    expect(recordedTransitions.length).toBeGreaterThan(0);
+    expect(recordedTransitions[0]).toEqual(expect.objectContaining({
+      from: "INIT",
+      durationMs: expect.any(Number),
+      timestamp: expect.any(Number)
+    }));
+    expect(recordedTransitions.at(-1)).toEqual(expect.objectContaining({ to: "COMPLETED" }));
   }, 30_000);
 });

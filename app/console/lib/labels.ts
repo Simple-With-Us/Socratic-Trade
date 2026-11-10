@@ -59,9 +59,15 @@ export function evidenceKindLabel(kind?: string | null): string {
 const DECISION_STATUS_LABELS: Record<SocraticDecisionStatus, string> = {
   planned: "Planned",
   proposed: "Proposed",
+  placing: "Placement pending",
   placed: "Placed",
+  filled: "Filled",
   blocked: "Blocked",
   rejected: "Rejected",
+  rejected_by_broker: "Rejected by broker",
+  not_placed: "Not placed",
+  expired: "Expired",
+  withdrawn: "Withdrawn",
   error: "Failed",
   observed: "Observed (no action)"
 };
@@ -102,12 +108,62 @@ export function frameworkPriorityLabel(raw?: string | null): string {
 
 // ── Strategy authority ───────────────────────────────────────────────────────
 
+// These match the run-state vocabulary the rest of the app uses for the same two
+// authority modes ("Ask-first"/"Autopilot" — see derive.ts authorityWord). The
+// trace header renders this chip right next to the decision-STATUS chip, so the
+// old "Propose"/"Decide" labels collided with the status word "Proposed" and read
+// like a typo. "Ask-first"/"Autopilot" are different concepts, worded differently.
 const AUTHORITY_LABELS: Record<StrategyAuthority, { label: string; title: string }> = {
-  propose: { label: "Propose", title: "Proposals wait for your approval" },
-  decide: { label: "Decide", title: "The agent may act autonomously within policy" }
+  propose: { label: "Ask-first", title: "Proposals wait for your approval" },
+  decide: { label: "Autopilot", title: "The agent may act autonomously within policy" }
 };
 
 export function authorityLabel(authority?: string | null): { label: string; title: string } {
   if (authority && authority in AUTHORITY_LABELS) return AUTHORITY_LABELS[authority as StrategyAuthority];
   return { label: plainLabel(authority ?? undefined), title: "" };
+}
+
+// ── Login provider (Auth.js provider ids: "google", "github", "apple") ──────
+// plainLabel's defensive Title-Case would render "github" as "Github" — wrong,
+// GitHub's brand casing has an inner capital. Explicit map for the providers
+// this app actually wires up (src/lib/auth/auth.ts); falls back to plainLabel
+// for anything unrecognized so a raw provider id never reaches the user.
+const LOGIN_PROVIDER_LABELS: Record<string, string> = {
+  google: "Google",
+  github: "GitHub",
+  apple: "Apple"
+};
+
+export function loginProviderLabel(raw?: string | null): string {
+  if (!raw) return "";
+  return LOGIN_PROVIDER_LABELS[raw.toLowerCase()] ?? plainLabel(raw);
+}
+
+// ── Account capabilities sheet (Connected / Disabled / Whole Shares / …) ────
+// These chips sit next to Title Case row labels.  Connected / Disabled /
+// Enabled already take a capital first letter, so the rest of the values
+// follow the same Title Case (not sentence case).
+
+export function accountFractionalSharesLabel(fractional: boolean | undefined): string {
+  return fractional ? "Enabled" : "Whole Shares";
+}
+
+export function accountSessionHoursLabel(caps: {
+  overnightHours?: boolean;
+  extendedHours?: boolean;
+} | null | undefined): string {
+  if (caps?.overnightHours) return "Regular + Extended + Overnight";
+  if (caps?.extendedHours) return "Regular + Extended";
+  return "Regular Only";
+}
+
+export function accountOptionsTradingLabel(caps: {
+  optionsOrders?: boolean;
+  optionsTrading?: boolean;
+  optionsLevel?: number | string | null;
+} | null | undefined): string {
+  const level = caps?.optionsLevel ?? "?";
+  if (caps?.optionsOrders) return `Orders · Level ${level}`;
+  if (caps?.optionsTrading) return `Positions Only · Level ${level}`;
+  return "Disabled";
 }

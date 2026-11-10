@@ -35,7 +35,8 @@ export function blackRockHoldingProvider(index: BlackRockHoldingUniverse): strin
 
 export async function fetchBlackRockHoldingSymbols(
   index: BlackRockHoldingUniverse,
-  ttlMs: number
+  ttlMs: number,
+  signal?: AbortSignal
 ): Promise<{ symbols: string[]; cached: boolean; provider: string; label: string }> {
   const now = Date.now();
   const cached = holdingsCache.get(index);
@@ -49,20 +50,31 @@ export async function fetchBlackRockHoldingSymbols(
   }
 
   const fund = BLACKROCK_HOLDING_FUNDS[index];
-  const response = await fetch(blackRockFundDownloadUrl(fund.portfolioId), {
-    cache: "no-store",
-    headers: {
-      accept: "application/vnd.ms-excel,text/xml,*/*",
-      "user-agent": "Mozilla/5.0"
-    }
-  });
-  if (!response.ok) throw new Error(`${fund.label} holdings request failed with ${response.status}.`);
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(blackRockFundDownloadUrl(fund.portfolioId), {
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        accept: "application/vnd.ms-excel,text/xml,*/*",
+        "user-agent": "Mozilla/5.0"
+      }
+    });
+    if (!response.ok) throw new Error(`${fund.label} holdings request failed with ${response.status}.`);
 
-  const xml = await response.text();
-  const symbols = parseBlackRockSpreadsheetSymbols(xml);
-  if (symbols.length === 0) throw new Error(`${fund.label} holdings returned no equity symbols.`);
-  holdingsCache.set(index, { symbols, expiresAt: now + ttlMs });
-  return { symbols, cached: false, provider: fund.provider, label: fund.label };
+    const xml = await response.text();
+    const symbols = parseBlackRockSpreadsheetSymbols(xml);
+    if (symbols.length === 0) throw new Error(`${fund.label} holdings returned no equity symbols.`);
+    holdingsCache.set(index, { symbols, expiresAt: now + ttlMs });
+    return { symbols, cached: false, provider: fund.provider, label: fund.label };
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 export function clearFundHoldingsCache(): void {

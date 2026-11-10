@@ -36,7 +36,19 @@ const mocks = vi.hoisted(() => {
     withScope: vi.fn(),
     scopeSetLevel: vi.fn(),
     scopeSetTag: vi.fn(),
-    scopeSetContext: vi.fn()
+    scopeSetContext: vi.fn(),
+    scopeSetFingerprint: vi.fn(),
+    getRagUsageSummary: vi.fn(() => [] as Array<{
+      userId: string;
+      operation: string;
+      provider: string;
+      model: string | null;
+      calls: number;
+      tokensIn: number;
+      tokensOut: number;
+      batchCount: number;
+      costEstUsd: number;
+    }>)
   };
 });
 
@@ -71,17 +83,28 @@ vi.mock("@sentry/nextjs", () => ({
   withScope: mocks.withScope
 }));
 
+vi.mock("../src/lib/rag-metering", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/rag-metering")>();
+  return { ...actual, getRagUsageSummary: mocks.getRagUsageSummary };
+});
+
 function resetEnv() {
   process.env.PINECONE_API_KEY = "pinecone-test";
   process.env.VOYAGE_API_KEY = "voyage-test";
   process.env.PINECONE_INDEX_READY_WAIT_MS = "0";
   process.env.VECTOR_EMBED_BATCH_DELAY_MS = "0";
   delete process.env.RAG_QUERY_EMBED_CACHE;
-  delete process.env.RAG_RUN_BUDGET_ENABLED;
+  // Pin quality/telemetry flags OFF so each test opts in explicitly (production defaults are ON
+  // as of owner enablement 2026-07-24; tests must not depend on unset==off).
+  process.env.RAG_RUN_BUDGET_ENABLED = "off";
   delete process.env.RAG_RUN_BUDGET_CEILING;
   delete process.env.RAG_PINECONE_WRITE_BUDGET_ENABLED;
   delete process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY;
-  delete process.env.RAG_APPLY_DEFAULT_FLOORS;
+  process.env.RAG_APPLY_DEFAULT_FLOORS = "off";
+  process.env.RAG_RETRIEVAL_TELEMETRY = "off";
+  process.env.RAG_CORPUS_WIDE_LEXICAL = "off";
+  process.env.RAG_PARENT_CONTEXT_EXPANSION = "off";
+  process.env.VECTOR_ASOF_SERVER_FILTER = "off";
   delete process.env.VECTOR_MIN_SCORE;
   delete process.env.VECTOR_ENABLE_RERANK;
   delete process.env.HYBRID_RETRIEVAL;
@@ -91,6 +114,8 @@ function resetEnv() {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.getRagUsageSummary.mockReset();
+  mocks.getRagUsageSummary.mockReturnValue([]);
   resetEnv();
   mocks.resolveApiKey.mockImplementation((service: string) => {
     if (service === "pinecone") return process.env.PINECONE_API_KEY;
@@ -102,10 +127,12 @@ beforeEach(() => {
     setLevel: typeof mocks.scopeSetLevel;
     setTag: typeof mocks.scopeSetTag;
     setContext: typeof mocks.scopeSetContext;
+    setFingerprint: typeof mocks.scopeSetFingerprint;
   }) => void) => callback({
     setLevel: mocks.scopeSetLevel,
     setTag: mocks.scopeSetTag,
-    setContext: mocks.scopeSetContext
+    setContext: mocks.scopeSetContext,
+    setFingerprint: mocks.scopeSetFingerprint
   }));
   mocks.listIndexes.mockResolvedValue({ indexes: [{ name: "socratic-trade" }] });
   mocks.describeIndex.mockResolvedValue({ metric: "cosine" });
@@ -179,7 +206,7 @@ describe("R9: query-embedding LRU cache", () => {
     await retrieveContextDetailed("AAPL supply chain risk", "AAPL", 3, "local");
 
     expect(mocks.embed).toHaveBeenCalledTimes(1); // cached by default — second call is a hit
-    expect(mocks.query).toHaveBeenCalledTimes(2); // Pinecone query still runs fresh both times
+    expect(mocks.query).toHaveBeenCalledTimes(4); // private + shared pools still run fresh both times
   });
 
   it("opt-out (RAG_QUERY_EMBED_CACHE=off): embeds fresh on every call, even for the identical query", async () => {
@@ -204,7 +231,7 @@ describe("R9: query-embedding LRU cache", () => {
     await retrieveContextDetailed("AAPL supply chain risk", "AAPL", 3, "local");
 
     expect(mocks.embed).toHaveBeenCalledTimes(1); // second call is a cache hit
-    expect(mocks.query).toHaveBeenCalledTimes(2); // Pinecone query still runs fresh both times
+    expect(mocks.query).toHaveBeenCalledTimes(4); // private + shared pools still run fresh both times
   });
 
   it("when ON: per-user filters still apply after a cache hit (cache is vector-only, not results)", async () => {
@@ -386,12 +413,30 @@ describe("R16: per-run RAG budget ceiling with graceful degradation", () => {
     expect(second.length).toBeGreaterThan(0); // still returns core dense-cosine results
     expect(mocks.rerank).not.toHaveBeenCalled(); // degraded: rerank skipped
   });
+
+  it("keeps local corpus-wide lexical over-fetch enabled during budget degradation", async () => {
+    process.env.RAG_RUN_BUDGET_ENABLED = "on";
+    process.env.RAG_RUN_BUDGET_CEILING = "1";
+    process.env.RAG_CORPUS_WIDE_LEXICAL = "on";
+    process.env.VECTOR_ENABLE_RERANK = "on";
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    mocks.query.mockResolvedValue({ matches: [{ id: "c0", score: 0.9, metadata: { text: "chunk", userId: "local", scope: "shared" } }] });
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const { resetRunBudget } = await import("../src/lib/rag/run-budget");
+    resetRunBudget();
+
+    await retrieveContextDetailed("q1", "AAPL", 2, "local");
+    mocks.query.mockClear();
+    await retrieveContextDetailed("q2", "AAPL", 2, "local");
+
+    expect(mocks.query.mock.calls.some(([request]) => request.topK === 10)).toBe(true);
+  });
 });
 
 // ── R5: consolidated per-retrieval telemetry ────────────────────────────────
 
 describe("R5: consolidated per-retrieval telemetry (recordRetrievalQuality)", () => {
-  it("default OFF: never calls audit with rag_retrieval_quality", async () => {
+  it("explicitly OFF: never calls audit with rag_retrieval_quality", async () => {
     mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
     mocks.query.mockResolvedValue({
       matches: [{ id: "a", score: 0.5, metadata: { text: "chunk", userId: "local", scope: "shared" } }]
@@ -473,6 +518,18 @@ describe("Pinecone write-unit budget", () => {
   it("skips before Voyage embed when the estimated Pinecone WU budget is exhausted", async () => {
     process.env.SENTRY_DSN = "https://public@example.ingest.sentry.io/1";
     process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "1";
+    // used>0 so this is a spent window, not the zero-used remainder deadlock.
+    mocks.getRagUsageSummary.mockReturnValue([{
+      userId: "local",
+      operation: "upsert",
+      provider: "pinecone",
+      model: null,
+      calls: 1,
+      tokensIn: 10,
+      tokensOut: 1,
+      batchCount: 1,
+      costEstUsd: 0
+    }]);
     const { storeContexts } = await import("../src/lib/vector-db");
 
     const result = await storeContexts([
@@ -493,10 +550,26 @@ describe("Pinecone write-unit budget", () => {
     expect(mocks.scopeSetTag).toHaveBeenCalledWith("rag.operation", "upsert-budget");
     expect(mocks.scopeSetContext).toHaveBeenCalledWith("rag", expect.objectContaining({
       requestedEstimatedWriteUnits: expect.any(Number),
-      allowedEstimatedWriteUnits: 1,
+      allowedEstimatedWriteUnits: 0,
       skipped: 1,
       limitPer24h: 1
     }));
+  });
+
+  it("embeds the first document of a zero-used window even when the estimate exceeds a collapsed cap", async () => {
+    process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY = "15";
+    mocks.getRagUsageSummary.mockReturnValue([]);
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2] }] });
+    mocks.upsert.mockResolvedValue({});
+    const { storeContexts } = await import("../src/lib/vector-db");
+
+    const result = await storeContexts([
+      { text: "AAPL 8-K details", metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-06-18" } }
+    ]);
+
+    expect(mocks.embed).toHaveBeenCalled();
+    expect(result.writeUnitBudgetSkipped ?? 0).toBe(0);
+    expect(result.skipped).not.toBe(true);
   });
 
   it("reports provider failures to Sentry without throwing from storeContexts", async () => {
@@ -514,9 +587,33 @@ describe("Pinecone write-unit budget", () => {
     await vi.waitFor(() => expect(mocks.captureMessage).toHaveBeenCalledWith("Pinecone connection failed"));
     expect(mocks.scopeSetTag).toHaveBeenCalledWith("rag.provider", "pinecone");
     expect(mocks.scopeSetTag).toHaveBeenCalledWith("rag.operation", "upsert");
+    // Grouped by the stable lane id, not the display-name-derived title.
+    expect(mocks.scopeSetFingerprint).toHaveBeenCalledWith(["rag", "pinecone"]);
     expect(mocks.scopeSetContext).toHaveBeenCalledWith("rag", expect.objectContaining({
       reason: expect.stringContaining("Pinecone 503 unavailable")
     }));
+    consoleError.mockRestore();
+  });
+
+  it("does NOT send a provider 429 to Sentry — rate limits page through the usage-limit lane", async () => {
+    // db-health's non-RAG alerter has always suppressed 429-shaped text from Sentry (a rate limit
+    // is budget/pacing behavior, not a broken integration). This RAG path had no equivalent, so an
+    // identical failure paged here and stayed silent everywhere else. The provider_degraded
+    // notification and alertUsageLimitHit escalation are unaffected.
+    process.env.SENTRY_DSN = "https://public@example.ingest.sentry.io/1";
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2] }] });
+    mocks.upsert.mockRejectedValue(new Error("PineconeError: HTTP 429 Too Many Requests"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { storeContexts } = await import("../src/lib/vector-db");
+
+    const result = await storeContexts([
+      { text: "AAPL 8-K details", metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-06-18" } }
+    ]);
+
+    expect(result.error).toContain("429");
+    // Give the detached alert the same window the 503 case above needs before asserting absence.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mocks.captureMessage).not.toHaveBeenCalledWith("Pinecone connection failed");
     consoleError.mockRestore();
   });
 });

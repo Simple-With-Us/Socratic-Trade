@@ -1,3 +1,5 @@
+import { getDb } from "../src/lib/db";
+
 // Regression tests for the per-user Robinhood broker-token tenant-isolation fix.
 //
 // PR #42 made the Robinhood OAuth token per-user (keyed by userId), but two read-only
@@ -148,14 +150,17 @@ describe("robinhood tenant isolation — fetchDailyOHLC cascade", () => {
     const { records } = installMcpFetchMock();
     await seedUserAToken();
     const { fetchDailyOHLC, clearHistoryCache } = await import("../src/lib/history");
+    const { getDb } = await import("../src/lib/db");
 
     clearHistoryCache();
+    try { getDb().exec("DELETE FROM imported_price_eod"); } catch {}
     const barsShared = await fetchDailyOHLC("AAAA", Date.now()); // no userId → background/shared
     expect(barsShared).toBeNull(); // RH skipped; public tiers mocked to 404 → no data
     expect(records.some((r) => r.url === MCP_URL)).toBe(false); // broker never touched
 
     // Positive control: a real user in scope DOES use their OWN token for the private tier.
     clearHistoryCache();
+    try { getDb().exec("DELETE FROM imported_price_eod"); } catch {}
     const barsUserA = await fetchDailyOHLC("AAAA", Date.now(), USER_A);
     expect(barsUserA?.map((b) => b.close)).toEqual([111.11, 222.22]);
     expect(records.some((r) => r.url === MCP_URL && r.authorization === `Bearer ${TOKEN_A}`)).toBe(true);

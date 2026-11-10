@@ -18,6 +18,7 @@ import {
   factorRows,
   type QuoteView
 } from "../app/console/ui/drilldown-data";
+import { resolveDrilldownCompanyName } from "../app/console/ui/symbol-drilldown";
 import { deriveMetrics } from "../src/lib/derived-metrics";
 import type { EquityPosition, MarketQuote, MarketQuoteSummary } from "../src/lib/types";
 
@@ -313,6 +314,21 @@ describe("console drilldown: provenance + misc formatting", () => {
     expect(withProvenance("Volume.", view, "volume")).not.toContain("Source:");
   });
 
+  it("only stamps 'Received' freshness on fields a provider actually supplied", () => {
+    const view: QuoteView = {
+      symbol: "X",
+      full: false,
+      asOf: new Date().toISOString(),
+      peRatio: 12,
+      sources: { peRatio: "yahoo-finance" }
+    };
+    // Sourced field → provenance + freshness.
+    expect(withProvenance("P/E.", view, "peRatio")).toContain("Received");
+    // Unsourced field (no provider returned it this scan) → no fabricated freshness:
+    // "Received 2:00 PM" on a blank cell claimed we got data we never did.
+    expect(withProvenance("FCF yield.", view, "fcfYield")).toBe("FCF yield.");
+  });
+
   it("normalizes debt/equity like the legacy scan table (percent vs ratio, sec-xbrl exempt)", () => {
     expect(normalizedDebtToEquity({ symbol: "X", full: false, debtToEquity: 150 })).toBe(1.5);
     expect(normalizedDebtToEquity({ symbol: "X", full: false, debtToEquity: 1.5 })).toBe(1.5);
@@ -366,6 +382,14 @@ describe("console drilldown: on-demand enrichment (symbol outside the last scan)
   it("hasEnrichedData is false when every provider came back empty (sources is always a defined-but-empty object)", () => {
     expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", { sources: {} }))).toBe(false);
     expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", {}))).toBe(false);
+  });
+
+  it("fills the drawer header name from on-demand identity while keeping scan identity authoritative", () => {
+    const scan = toQuoteViewFromEnrichment("LRCX", { companyName: "Scan Name" });
+    const onDemand = toQuoteViewFromEnrichment("LRCX", { companyName: "Lam Research Corporation" });
+    expect(resolveDrilldownCompanyName(null, onDemand)).toBe("Lam Research Corporation");
+    expect(resolveDrilldownCompanyName(scan, onDemand)).toBe("Scan Name");
+    expect(resolveDrilldownCompanyName(null, toQuoteViewFromEnrichment("LRCX", { companyName: "  " }))).toBeUndefined();
   });
 });
 

@@ -11,12 +11,21 @@
 //   - Pinecone: serverless — metered by Read/Write Units; rows store units, not dollars.
 
 import crypto from "crypto";
-import { audit, getDb } from "./db";
-import { pushRagUsage } from "./usage-monitor-push";
+import { audit, getDb, getInternalSetting, setInternalSetting } from "./db";
+import { recordPineconeWriteUnits } from "./pinecone-monthly-pace";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type RagOperation = "embed" | "rerank" | "query" | "upsert";
+
+/**
+ * The embed/rerank provider dimension (PR bge-m3-metering-gate, 2026-07-18). Distinct from the
+ * broader `RagUsageEntry.provider` (which also carries "pinecone" for query/upsert rows) — this
+ * narrower union is what `activeEmbeddingProvider`/`activeRerankProvider` in vector-db.ts select
+ * between, and what `meterEmbed`/`meterRerank`/`estimateRagDispatchCost` need to price
+ * correctly. Defaults to "openrouter" everywhere it's optional.
+ */
+export type RagEmbedRerankProvider = "voyage" | "openrouter" | "siliconflow";
 
 export interface RagUsageEntry {
   userId?: string;
@@ -29,6 +38,9 @@ export interface RagUsageEntry {
   tokensOut?: number;
   /** Number of items in the batch (texts / records). */
   batchCount?: number;
+  /** OpenRouter's generation id for this call (embed/rerank via `baai/bge-m3`/`cohere/rerank-v3.5`).
+   *  Undefined for Voyage/SiliconFlow/Pinecone. */
+  providerRequestId?: string;
 }
 
 export interface RagUsageRow {
@@ -45,37 +57,93 @@ export interface RagUsageRow {
 
 // ── Cost estimation (best-effort) ────────────────────────────────────────────
 
-const VOYAGE_PRICE_PER_1K_TOKENS: Record<string, { embed: number; rerank: number }> = {
-  "voyage-finance-2": { embed: 0.00012, rerank: 0 },
-  "voyage-4": { embed: 0.00006, rerank: 0 },
-  "voyage-4-lite": { embed: 0.00002, rerank: 0 },
-  "voyage-4-large": { embed: 0.00012, rerank: 0 },
-  "rerank-2.5": { embed: 0, rerank: 0.00005 },
-  "rerank-2.5-lite": { embed: 0, rerank: 0.00002 },
-  "rerank-2": { embed: 0, rerank: 0.00005 },
+const SILICONFLOW_PRICE_PER_1K_TOKENS: Record<string, { embed: number; rerank: number }> = {
+  // $0.01 per 1M tokens = $0.00001 per 1K tokens — the SAME model + rate as the OpenRouter
+  // baai/bge-m3 table below (confirmed on openrouter.ai; SiliconFlow's published bge-m3 embed
+  // price matches). The prior literal `0.00001 / 10` was a 10x-too-small typo that undercounted
+  // SiliconFlow bge-m3 embed spend in rag_usage.cost_est_usd; pinned exactly in test/rag-metering.test.ts.
+  "BAAI/bge-m3": { embed: 0.00001, rerank: 0 },
+  "Qwen/Qwen3-Reranker-8B": { embed: 0, rerank: 0.00005 }, // nominal or matching rate
 };
+
+// OpenRouter (as of 2026-07-18; verify before relying on this for real billing reconciliation):
+//   - baai/bge-m3 embed: confirmed $0.01 per 1M input tokens on openrouter.ai/baai/bge-m3/pricing
+//     = $0.00001 per 1K tokens. Token-denominated, so it fits the existing tokensIn*rate model
+//     exactly (same shape as the Voyage/SiliconFlow tables above).
+const OPENROUTER_EMBED_PRICE_PER_1K_TOKENS: Record<string, number> = {
+  "baai/bge-m3": 0.00001
+};
+//   - cohere/rerank-v3.5 rerank: OpenRouter prices this at $0.001 PER SEARCH
+//     (openrouter.ai/cohere/rerank-v3.5), not per token — one "search" is one query plus up to 100
+//     documents, and any document over 500 tokens is auto-chunked into additional searches. Our
+//     ledger only carries an aggregate tokensIn/batchCount per call (see RagUsageEntry), not
+//     per-document token counts, so the 500-token auto-chunking is NOT modeled here — this can
+//     undercount cost for unusually long documents. What IS modeled: batchCount (document count)
+//     divided into groups of 100, each priced as one search. Good enough for the local $/day
+//     dispatch fuse (maxEstimatedCostUsdPer24h) and dashboard visibility; NOT a billing-
+//     reconciliation-grade number — reconcile against the OpenRouter dashboard periodically.
+const OPENROUTER_RERANK_PRICE_PER_SEARCH: Record<string, number> = {
+  "cohere/rerank-v3.5": 0.001
+};
+const OPENROUTER_DOCUMENTS_PER_SEARCH = 100;
 
 function estimateRagCost(
   provider: string,
   model: string | undefined,
   operation: RagOperation,
-  tokensIn: number
+  tokensIn: number,
+  batchCount?: number
 ): number | undefined {
-  if (provider !== "voyage") return undefined;
   if (operation === "query" || operation === "upsert") return undefined;
-  const modelKey = model || "voyage-finance-2";
-  const prices =
-    VOYAGE_PRICE_PER_1K_TOKENS[modelKey] ?? VOYAGE_PRICE_PER_1K_TOKENS["voyage-finance-2"];
-  if (!prices) return undefined;
-  const rate = operation === "embed" ? prices.embed : prices.rerank;
-  return (tokensIn * rate) / 1000;
+  if (provider === "openrouter") {
+    if (operation === "embed") {
+      const modelKey = (model || "baai/bge-m3").toLowerCase();
+      const rate =
+        OPENROUTER_EMBED_PRICE_PER_1K_TOKENS[modelKey] ?? OPENROUTER_EMBED_PRICE_PER_1K_TOKENS["baai/bge-m3"];
+      return (tokensIn * rate) / 1000;
+    }
+    // rerank: priced per search, not per token — see the price-table comment above.
+    const modelKey = (model || "cohere/rerank-v3.5").toLowerCase();
+    const perSearch =
+      OPENROUTER_RERANK_PRICE_PER_SEARCH[modelKey] ?? OPENROUTER_RERANK_PRICE_PER_SEARCH["cohere/rerank-v3.5"];
+    const documents = Math.max(1, batchCount ?? 1);
+    const searches = Math.max(1, Math.ceil(documents / OPENROUTER_DOCUMENTS_PER_SEARCH));
+    return searches * perSearch;
+  }
+  if (provider === "siliconflow") {
+    const modelKey = model || "BAAI/bge-m3";
+    const prices = SILICONFLOW_PRICE_PER_1K_TOKENS[modelKey] ?? SILICONFLOW_PRICE_PER_1K_TOKENS["BAAI/bge-m3"];
+    if (!prices) return undefined;
+    const rate = operation === "embed" ? prices.embed : prices.rerank;
+    return (tokensIn * rate) / 1000;
+  }
+  return undefined;
 }
 
 // ── Approximate token counting ───────────────────────────────────────────────
 
 /** Crude token estimate from UTF-8 text length (Voyage uses a tokenizer; this is still approximate). */
-function approxTokens(texts: string[]): number {
+export function approxTokens(texts: string[]): number {
   return texts.reduce((sum, t) => sum + Math.max(1, Math.ceil(Buffer.byteLength(t, "utf8") / 4)), 0);
+}
+
+/**
+ * Pre-dispatch cost reservation using the same estimator later written to `rag_usage`. Named for
+ * its original Voyage-only origin; `provider` (default "voyage", preserving prior behavior for any
+ * caller that omits it) now selects the correct price table so an OpenRouter/SiliconFlow dispatch
+ * reserves its OWN cost estimate instead of a Voyage one.
+ */
+export function estimateRagDispatchCost(
+  texts: string[],
+  operation: "embed" | "rerank",
+  model?: string,
+  provider: RagEmbedRerankProvider = "openrouter"
+): number {
+  // For rerank, `texts` is `[query, ...documents]` (see call sites in vector-db.ts) — the document
+  // count (texts.length - 1) is what OpenRouter's per-search rerank pricing needs; embed cost is
+  // purely token-based and ignores this.
+  const batchCount = operation === "rerank" ? Math.max(0, texts.length - 1) : texts.length;
+  return estimateRagCost(provider, model, operation, approxTokens(texts), batchCount) ?? 0;
 }
 
 // ── Record ───────────────────────────────────────────────────────────────────
@@ -83,12 +151,14 @@ function approxTokens(texts: string[]): number {
 /** Record a RAG operation against a user. Never throws. */
 export function recordRagUsage(entry: RagUsageEntry): void {
   try {
+    const usageId = crypto.randomUUID();
+    const occurredAt = new Date().toISOString();
     const userId = entry.userId || "local";
-    const provider = entry.provider || "voyage";
+    const provider = entry.provider || "openrouter";
     const tokensIn = entry.tokensIn ?? 0;
     const tokensOut = entry.tokensOut ?? 0;
     const batchCount = entry.batchCount ?? 1;
-    const cost = estimateRagCost(provider, entry.model, entry.operation, tokensIn);
+    const cost = estimateRagCost(provider, entry.model, entry.operation, tokensIn, batchCount);
 
     getDb()
       .prepare(
@@ -96,7 +166,7 @@ export function recordRagUsage(entry: RagUsageEntry): void {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
-        crypto.randomUUID(),
+        usageId,
         userId,
         entry.operation,
         provider,
@@ -105,54 +175,75 @@ export function recordRagUsage(entry: RagUsageEntry): void {
         tokensOut,
         batchCount,
         cost ?? null,
-        new Date().toISOString()
+        occurredAt
       );
-    // Fire-and-forget forward to the API Usage Monitor (no-op unless configured; never throws).
-    pushRagUsage({
-      provider,
-      operation: entry.operation,
-      model: entry.model,
-      userId,
-      tokensIn,
-      tokensOut,
-      batchCount,
-      costUsd: cost,
-    });
+    // No live push to the API Usage Monitor.  RAG rows reach it only through the replay lane's
+    // closed 10-minute windows (usage-monitor-replay.ts):  one summed row per provider, operation,
+    // user and model instead of one per call.  Self-hosted Qdrant is rolled up as call volume
+    // only (unit "request", requests = rows, no quantity or cost, record count in metadata),
+    // because its token columns hold a record count and it has no cost.  Live plus replay both
+    // sending per-row events was most of the ~8,000 rows a day this family produced.
   } catch {
     /* ledger is best-effort; never break the caller */
   }
 }
 
 /**
- * Convenience: record a Voyage embed call. Pass `userId` for per-user retrieval spend so the daily
+ * Convenience: record an embed call. Pass `userId` for per-user retrieval spend so the daily
  * LLM/RAG budget (`checkLlmDailyBudget`, which filters `rag_usage` by userId) actually sees it —
  * omitting it books the spend under the default "local" user and a non-local user's ceiling never trips.
+ * `provider` (default "openrouter") must match
+ * whichever provider actually served the embed call — see `activeEmbeddingProvider` in
+ * vector-db.ts — so the ledger row's price and the `rag_usage.provider` column both reflect reality.
  */
-export function meterEmbed(texts: string[], model?: string, userId?: string): void {
+export function meterEmbed(
+  texts: string[],
+  model?: string,
+  userId?: string,
+  provider: RagEmbedRerankProvider = "openrouter",
+  providerRequestId?: string,
+  batchCount?: number
+): void {
   const tokens = approxTokens(texts);
   recordRagUsage({
     userId,
     operation: "embed",
-    provider: "voyage",
-    model: model || "voyage-finance-2",
+    provider,
+    model:
+      model ||
+      (provider === "openrouter" ? "baai/bge-m3" : "BAAI/bge-m3"),
     tokensIn: tokens,
-    batchCount: texts.length
+    batchCount: batchCount ?? texts.length,
+    providerRequestId
   });
 }
 
 /**
- * Convenience: record a Voyage rerank call. Pass `userId` so retrieval rerank spend counts toward that
- * user's daily budget (see `meterEmbed`).
+ * Convenience: record a rerank call. Pass `userId` so retrieval rerank spend counts toward that
+ * user's daily budget (see `meterEmbed`). `provider` (default "openrouter") must match the active
+ * rerank provider — see `activeRerankProvider` in vector-db.ts.
  */
-export function meterRerank(query: string, documents: string[], model?: string, userId?: string): void {
+export function meterRerank(
+  query: string,
+  documents: string[],
+  model?: string,
+  userId?: string,
+  provider: RagEmbedRerankProvider = "openrouter",
+  providerRequestId?: string
+): void {
   const tokens = approxTokens([query, ...documents]);
   recordRagUsage({
     userId,
     operation: "rerank",
-    provider: "voyage",
-    model: model || "rerank-2.5",
+    provider,
+    model:
+      model ||
+      (provider === "openrouter"
+        ? "cohere/rerank-v3.5"
+        : "Qwen/Qwen3-Reranker-8B"),
     tokensIn: tokens,
-    batchCount: documents.length
+    batchCount: documents.length,
+    providerRequestId
   });
 }
 
@@ -173,6 +264,12 @@ export function meterPineconeQuery(readUnits: number, userId?: string, recordCou
 
 /**
  * Convenience: record a Pinecone upsert.
+ *
+ * Also advances the persisted CALENDAR-MONTH write-unit counter (pinecone-monthly-pace.ts). The
+ * rolling-24h fuse reads `rag_usage` directly, but the monthly pace guard needs a number that
+ * survives ledger pruning and that resets on Pinecone's own billing boundary, so it keeps its own
+ * one-row total. Both are fed from this single post-success call site so they can never disagree
+ * about what was actually delivered. Best-effort and never throws.
  */
 export function meterPineconeUpsert(recordCount: number, userId?: string, estimatedWriteUnits?: number): void {
   recordRagUsage({
@@ -183,6 +280,14 @@ export function meterPineconeUpsert(recordCount: number, userId?: string, estima
     tokensOut: recordCount,
     batchCount: recordCount
   });
+  // Legacy rows charged 5 WUs/record when no estimate was supplied (see
+  // usedPineconeWriteUnitsLast24h in vector-db.ts); keep the month counter on the same basis so a
+  // caller that omits the estimate still contributes a realistic figure instead of zero.
+  recordPineconeWriteUnits(
+    Number.isFinite(estimatedWriteUnits) && (estimatedWriteUnits ?? 0) > 0
+      ? (estimatedWriteUnits as number)
+      : recordCount * 5
+  );
 }
 
 // ── Read ─────────────────────────────────────────────────────────────────────
@@ -224,6 +329,89 @@ export function getRagUsageSummary(opts: { sinceIso?: string } = {}): RagUsageRo
   }));
 }
 
+export const DEFAULT_RAG_MAX_DAILY_INGEST_POINTS = 150_000;
+
+/** Internal watermark: audit the Qdrant daily-point gate skip at most once per UTC day. */
+export const RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY = "rag:ingestPointsGateLastAuditDay";
+
+export function ragMaxDailyIngestPoints(): number {
+  const configured = Number(process.env.RAG_MAX_DAILY_INGEST_POINTS ?? process.env.QDRANT_MAX_DAILY_INGEST_POINTS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_RAG_MAX_DAILY_INGEST_POINTS;
+}
+
+/**
+ * ISO deferral target when the rolling 24h Qdrant point fuse is spent.
+ * Mirrors the Pinecone daily-WU fuse park (1h) used by SecIngest / incremental lanes.
+ */
+export function ragIngestPointsBudgetDeferUntil(nowMs: number = Date.now()): string {
+  return new Date(nowMs + 60 * 60_000).toISOString();
+}
+
+/**
+ * ISO deferral target when the rolling 24h text embed budget (RAG_INGEST_MAX_TEXTS_PER_DAY)
+ * is spent.  Parks producers for 1h — matching the Qdrant point and Pinecone WU fuse
+ * conventions — so they retry once a slice of the 24h window has rolled.
+ */
+export function ragIngestTextBudgetDeferUntil(nowMs: number = Date.now()): string {
+  return new Date(nowMs + 60 * 60_000).toISOString();
+}
+
+/**
+ * Audit that the Qdrant daily-point gate skipped work, at most once per UTC day.
+ * Producers still park/defer on every call; this only stops audit_events / console spam
+ * (Datadog showed ~148k daily-budget skip warns when the fuse was spent).
+ */
+export function auditRagIngestPointsGateSkip(
+  payload: { operation: string; attempted: number; until: string; used?: number; limit?: number },
+  userId: string = "local"
+): void {
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    if (getInternalSetting<string>(RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY) === day) return;
+    setInternalSetting(RAG_INGEST_POINTS_GATE_AUDIT_DAY_KEY, day);
+    console.warn(
+      `[rag-metering] Qdrant daily point ingest fuse spent — parking producers until ${payload.until}` +
+        (payload.used != null && payload.limit != null ? ` (used ${payload.used}/${payload.limit})` : "") +
+        ` [${payload.operation} attempted=${payload.attempted}]`
+    );
+    audit("rag_ingest_points_gate_skip", payload, userId);
+  } catch {
+    // audit is best-effort; the gate result itself is the caller's signal
+  }
+}
+
+/**
+ * Total vector points upserted in the rolling 24-hour window, optionally scoped to a provider.
+ */
+export function usedRagUpsertPointsLast24h(userId: string = "local", provider?: string): number {
+  try {
+    const sinceIso = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const query = provider
+      ? "SELECT COALESCE(SUM(batch_count), 0) AS total FROM rag_usage WHERE user_id = ? AND operation = 'upsert' AND provider = ? AND created_at >= ?"
+      : "SELECT COALESCE(SUM(batch_count), 0) AS total FROM rag_usage WHERE user_id = ? AND operation = 'upsert' AND created_at >= ?";
+    const params = provider ? [userId, provider, sinceIso] : [userId, sinceIso];
+    const row = getDb().prepare(query).get(...params) as { total: number } | undefined;
+    return Number(row?.total ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Verifies that the rolling 24-hour vector point ingestion budget has headroom.
+ * Defaults to enabled, fail-open on DB errors.
+ */
+export function hasRagIngestPointsBudget(userId: string = "local", requested: number = 1, provider?: string): boolean {
+  if (process.env.RAG_INGEST_POINTS_BUDGET_ENABLED === "off" || process.env.RAG_INGEST_POINTS_BUDGET_ENABLED === "false") {
+    return true;
+  }
+  const used = usedRagUpsertPointsLast24h(userId, provider);
+  const limit = ragMaxDailyIngestPoints();
+  return used + requested <= limit;
+}
+
 // ── R5: consolidated per-retrieval distribution telemetry ───────────────────
 //
 // (2026-07-01 RAG backlog item R5.) Subsumes three overlapping proposals ("recall-proxy
@@ -240,9 +428,9 @@ export function getRagUsageSummary(opts: { sinceIso?: string } = {}): RagUsageRo
 
 import { envFlagOn } from "./rag/env-flag";
 
-/** Returns true when RAG_RETRIEVAL_TELEMETRY is truthy. Default OFF. */
+/** Returns true when RAG_RETRIEVAL_TELEMETRY is truthy. Default ON (owner enablement 2026-07-24). */
 export function retrievalTelemetryEnabled(): boolean {
-  return envFlagOn("RAG_RETRIEVAL_TELEMETRY", false);
+  return envFlagOn("RAG_RETRIEVAL_TELEMETRY", true);
 }
 
 /** Stable, non-reversible hash of a query string — the raw query text must NEVER be persisted

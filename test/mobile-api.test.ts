@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+
+vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
+  purgePrivateVectorRecordsForUser: vi.fn(async () => ({ ids: [], contentHashes: [], deleted: 0 }))
+}));
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-mobile-api-${randomUUID()}.db`)}`;
@@ -73,6 +79,93 @@ describe("mobile command gateway", () => {
     ).toThrow(MobileCommandValidationError);
   });
 
+  it("applies exclusive daily percent and dollar cap modes through mobile commands", async () => {
+    const { processPendingMobileCommands, queueMobileCommand } = await import("../src/lib/mobile-api");
+    const { getPolicy, setPolicy, upsertConnectedAccount } = await import("../src/lib/db");
+    const userId = `mobile-cap-${randomUUID()}`;
+    const accountId = `mobile-cap-account-${randomUUID()}`;
+    upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "live",
+      accountNumber: "MOBILE-CAP",
+      label: "Mobile Cap",
+      isActive: true
+    });
+    setPolicy(
+      { ...getPolicy(userId, accountId), maxDailyNotional: 1_000, maxDailyPctOfNav: undefined },
+      userId,
+      accountId
+    );
+
+    queueMobileCommand({
+      userId,
+      commandType: "policy.patch",
+      payload: { patch: { maxDailyPctOfNav: 20 } }
+    });
+    await processPendingMobileCommands({ limit: 10 });
+    expect(getPolicy(userId, accountId)).toMatchObject({ maxDailyPctOfNav: 20 });
+    expect(getPolicy(userId, accountId).maxDailyNotional).toBeUndefined();
+
+    queueMobileCommand({
+      userId,
+      commandType: "policy.patch",
+      payload: { patch: { maxDailyNotional: 250 } }
+    });
+    await processPendingMobileCommands({ limit: 10 });
+    expect(getPolicy(userId, accountId)).toMatchObject({ maxDailyNotional: 250 });
+    expect(getPolicy(userId, accountId).maxDailyPctOfNav).toBeUndefined();
+  });
+
+  it("builds a mobile control brief from current readiness and command state", async () => {
+    const { buildMobileBrief, mobileReadiness, queueMobileCommand } = await import("../src/lib/mobile-api");
+    const userId = `mobile-brief-${randomUUID()}`;
+
+    queueMobileCommand({
+      userId,
+      commandType: "watchlist.add",
+      payload: { symbol: "MSFT" }
+    });
+
+    const brief = buildMobileBrief({
+      readiness: mobileReadiness(userId),
+      portfolio: { totalMarketValue: 12345, buyingPower: 6789 },
+      pendingProposals: [{ executionMode: "broker/live" }],
+      positions: [{ symbol: "MSFT" }],
+      alerts: [{ status: "armed" }, { status: "triggered" }],
+      recentCommands: [{ status: "failed" }],
+      marketSession: { label: "Closed", isOpen: false },
+      generatedAt: "2026-07-22T00:00:00.000Z"
+    });
+
+    expect(brief.headline).toContain("Setup needed");
+    expect(brief.summary).toContain("Closed market");
+    expect(brief.summary).toContain("1 active alert.");
+    expect(brief.items.find((item) => item.label === "Queue")).toMatchObject({ value: "1 queued / 0 running", tone: "warn" });
+    expect(brief.items.find((item) => item.label === "Recent failures")).toMatchObject({ value: "1", tone: "danger" });
+    expect(brief.generatedAt).toBe("2026-07-22T00:00:00.000Z");
+  });
+
+  it("labels session tokens, counts unstamped live approvals and flags partial data in the brief", async () => {
+    const { buildMobileBrief, mobileReadiness } = await import("../src/lib/mobile-api");
+    const base = { readiness: mobileReadiness(`mobile-brief-${randomUUID()}`), generatedAt: "2026-07-22T00:00:00.000Z" };
+
+    expect(buildMobileBrief({ ...base, marketSession: "regular" }).summary).toContain("Open market");
+    expect(buildMobileBrief({ ...base, marketSession: "pre" }).summary).toContain("Pre-market market");
+    expect(buildMobileBrief({ ...base, marketSession: null }).summary).toContain("- market");
+
+    const unstampedLive = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/live" });
+    const unstampedPaper = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/paper" });
+    if (!unstampedLive.headline.startsWith("Setup needed")) {
+      expect(unstampedLive.headline).toContain("(1 live)");
+      expect(unstampedPaper.headline).not.toContain("live");
+    }
+
+    expect(buildMobileBrief({ ...base, partialData: true }).summary).toContain("counts may be incomplete");
+    expect(buildMobileBrief({ ...base }).summary).not.toContain("counts may be incomplete");
+  });
+
   it("keeps command reads scoped to the authenticated user", async () => {
     const { queueMobileCommand, getMobileCommand, listMobileCommands } = await import("../src/lib/mobile-api");
     const owner = `owner-${randomUUID()}`;
@@ -93,9 +186,11 @@ describe("mobile command gateway", () => {
 describe("mobile account deletion", () => {
   it("requires a current request, exact identity, and exact phrase before deleting user data", async () => {
     const { ACCOUNT_DELETE_PHRASE, confirmAndDeleteAccount, prepareAccountDeletion } = await import("../src/lib/account-deletion");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
     const { getDb, setUserSetting, upsertConnectedAccount } = await import("../src/lib/db");
     const { addToWatchlist, listWatchlist } = await import("../src/lib/watchlist");
-    const user = { userId: `delete-user-${randomUUID()}`, email: "delete@example.com" };
+    const email = "delete@example.com";
+    const user = { userId: userIdForEmail(email), email };
     const acknowledgements = {
       deleteAppData: true,
       deleteBrokerConnections: true,
@@ -116,7 +211,7 @@ describe("mobile account deletion", () => {
     });
     addToWatchlist(user.userId, "AAPL");
 
-    expect(() =>
+    await expect(
       confirmAndDeleteAccount({
         userId: user.userId,
         email: user.email,
@@ -126,10 +221,10 @@ describe("mobile account deletion", () => {
           ...acknowledgements
         }
       })
-    ).toThrow("Prepare account deletion first.");
+    ).rejects.toThrow("Prepare account deletion first.");
 
     prepareAccountDeletion(user);
-    expect(() =>
+    await expect(
       confirmAndDeleteAccount({
         userId: user.userId,
         email: user.email,
@@ -139,9 +234,9 @@ describe("mobile account deletion", () => {
           ...acknowledgements
         }
       })
-    ).toThrow("Typed email does not match the signed-in account.");
+    ).rejects.toThrow("Typed email does not match the signed-in account.");
 
-    const result = confirmAndDeleteAccount({
+    const result = await confirmAndDeleteAccount({
       userId: user.userId,
       email: user.email,
       body: {
@@ -160,5 +255,36 @@ describe("mobile account deletion", () => {
       .prepare("SELECT id FROM account_deletion_requests WHERE user_id = ?")
       .get(user.userId);
     expect(requestRow).toBeUndefined();
+  });
+});
+
+describe("serializeMobileNotifications", () => {
+  it("strips payload and webhook URL from Activity rows", async () => {
+    const { serializeMobileNotifications } = await import("../src/lib/mobile-api");
+    const rows = serializeMobileNotifications([
+      {
+        id: "n-1",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        type: "run_failed",
+        title: "Strategy run failed",
+        status: "sent",
+        webhookUrl: "https://hooks.example/secret",
+        payload: { runId: "run-1", reason: "llm" },
+        connectedAccountId: "acct-1"
+      }
+    ]);
+    expect(rows).toEqual([
+      {
+        id: "n-1",
+        type: "run_failed",
+        title: "Strategy run failed",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        status: "sent",
+        acknowledgedAt: null,
+        connectedAccountId: "acct-1"
+      }
+    ]);
+    expect(rows[0]).not.toHaveProperty("payload");
+    expect(rows[0]).not.toHaveProperty("webhookUrl");
   });
 });

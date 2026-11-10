@@ -426,3 +426,118 @@ describe("POST /api/notifications/ack — user-scoped", () => {
     expect(listNotificationEvents(userId).find((e) => e.id === runFailedY.id)?.acknowledgedAt).toBeUndefined();
   });
 });
+
+describe("broker-verification alert resolution + reconcile-marker sweepability", () => {
+  it("resolveBrokerVerificationNotifications acks an uncertain alert by proposalId — never a declined one", async () => {
+    const { insertNotificationEvent, resolveBrokerVerificationNotifications, listNotificationEvents } = await import("../src/lib/db");
+    const userId = `resolve-${randomUUID()}`;
+    const pX = randomUUID();
+
+    const uncertain = insertNotificationEvent({
+      userId, type: "run_failed", status: "sent",
+      title: "AAPL order placement uncertain — verify with broker",
+      payload: { proposalId: pX, refId: randomUUID(), reconcile: "uncertain" }
+    });
+    const pDeclined = randomUUID();
+    const declined = insertNotificationEvent({
+      userId, type: "run_failed", status: "sent",
+      title: "TSLA order declined by broker (rejected)",
+      payload: { proposalId: pDeclined, reconcile: "declined" }
+    });
+
+    const resolved = resolveBrokerVerificationNotifications(userId, { proposalId: pX, resolution: "recovered" });
+    expect(resolved).toBe(1);
+
+    const notifs = listNotificationEvents(userId);
+    expect(notifs.find((n) => n.id === uncertain.id)?.acknowledgedAt).toBeTruthy();
+    // A declined alert is a standing fact — never auto-resolved, even if we (wrongly) key it.
+    const declinedAgain = resolveBrokerVerificationNotifications(userId, { proposalId: pDeclined, resolution: "recovered" });
+    expect(declinedAgain).toBe(0);
+    expect(listNotificationEvents(userId).find((n) => n.id === declined.id)?.acknowledgedAt).toBeUndefined();
+  });
+
+  it("an unresolved uncertain alert stays perpetual — the sweep never clears it even after a later completed run", async () => {
+    const { insertNotificationEvent, insertStrategyRun, finishStrategyRun, sweepAutoAcknowledgeNotifications, listNotificationEvents } = await import("../src/lib/db");
+    const userId = `perpetual-${randomUUID()}`;
+    const acct = randomUUID();
+
+    const uncertain = insertNotificationEvent({
+      userId, connectedAccountId: acct, type: "run_failed", status: "sent",
+      title: "AAPL order placement uncertain — verify with broker",
+      payload: { proposalId: randomUUID(), refId: randomUUID(), reconcile: "uncertain" }
+    });
+    // A later completed run for the same account — which WOULD clear a plain run_failed row.
+    const runId = randomUUID();
+    insertStrategyRun(runId, userId, acct);
+    finishStrategyRun(runId, "completed", "ok", userId);
+
+    const acked = sweepAutoAcknowledgeNotifications(userId);
+    expect(acked).toBe(0);
+    expect(listNotificationEvents(userId).find((n) => n.id === uncertain.id)?.acknowledgedAt).toBeUndefined();
+  });
+
+  // Lane G3 (2026-09-25): the Robinhood account-questionnaire hold is a STANDING account-level
+  // gate (broker-account-questionnaire.ts) — a later run completing successfully (e.g. a sell)
+  // does not prove entries are unblocked, so this must stay perpetual like "uncertain"/"declined".
+  it("an account-questionnaire hold alert stays perpetual — the sweep never clears it even after a later completed run", async () => {
+    const { insertNotificationEvent, insertStrategyRun, finishStrategyRun, sweepAutoAcknowledgeNotifications, listNotificationEvents } = await import("../src/lib/db");
+    const userId = `account-action-required-${randomUUID()}`;
+    const acct = randomUUID();
+
+    const held = insertNotificationEvent({
+      userId, connectedAccountId: acct, type: "run_failed", status: "sent",
+      title: "RH-ACCOUNT needs your action on Robinhood",
+      payload: { proposalId: randomUUID(), refId: randomUUID(), reconcile: "account_action_required" }
+    });
+    const runId = randomUUID();
+    insertStrategyRun(runId, userId, acct);
+    finishStrategyRun(runId, "completed", "ok", userId);
+
+    const acked = sweepAutoAcknowledgeNotifications(userId);
+    expect(acked).toBe(0);
+    expect(listNotificationEvents(userId).find((n) => n.id === held.id)?.acknowledgedAt).toBeUndefined();
+  });
+
+  it("a not_placed alert IS sweepable — self-clears once the account's latest completed run post-dates it", async () => {
+    const { insertNotificationEvent, insertStrategyRun, finishStrategyRun, sweepAutoAcknowledgeNotifications, listNotificationEvents } = await import("../src/lib/db");
+    const userId = `notplaced-${randomUUID()}`;
+    const acct = randomUUID();
+
+    const notPlaced = insertNotificationEvent({
+      userId, connectedAccountId: acct, type: "run_failed", status: "sent",
+      title: "AAPL order was NOT placed — safe to retry",
+      payload: { proposalId: randomUUID(), refId: randomUUID(), reconcile: "not_placed" }
+    });
+    const runId = randomUUID();
+    insertStrategyRun(runId, userId, acct);
+    finishStrategyRun(runId, "completed", "ok", userId);
+
+    const acked = sweepAutoAcknowledgeNotifications(userId);
+    expect(acked).toBe(1);
+    expect(listNotificationEvents(userId).find((n) => n.id === notPlaced.id)?.acknowledgedAt).toBeTruthy();
+  });
+
+  it("legacy uncertain row (no reconcile marker) is still sweep-protected AND resolvable by proposalId", async () => {
+    const { insertNotificationEvent, insertStrategyRun, finishStrategyRun, sweepAutoAcknowledgeNotifications, resolveBrokerVerificationNotifications, listNotificationEvents } = await import("../src/lib/db");
+    const userId = `legacy-${randomUUID()}`;
+    const acct = randomUUID();
+    const pLegacy = randomUUID();
+
+    const legacy = insertNotificationEvent({
+      userId, connectedAccountId: acct, type: "run_failed", status: "sent",
+      title: "AAPL order placement uncertain — verify with broker",
+      payload: { proposalId: pLegacy } // no reconcile marker — persisted before the marker existed
+    });
+    const runId = randomUUID();
+    insertStrategyRun(runId, userId, acct);
+    finishStrategyRun(runId, "completed", "ok", userId);
+
+    // The sweep must NOT clear it (text fallback keeps it protected).
+    expect(sweepAutoAcknowledgeNotifications(userId)).toBe(0);
+    expect(listNotificationEvents(userId).find((n) => n.id === legacy.id)?.acknowledgedAt).toBeUndefined();
+
+    // But a confirmed recovery still resolves it via the legacy title fallback.
+    expect(resolveBrokerVerificationNotifications(userId, { proposalId: pLegacy, resolution: "recovered" })).toBe(1);
+    expect(listNotificationEvents(userId).find((n) => n.id === legacy.id)?.acknowledgedAt).toBeTruthy();
+  });
+});

@@ -1,0 +1,80 @@
+{
+  "runAt": "2026-07-10T08:52:37.491Z",
+  "rounds": 2,
+  "roles": [
+    "green"
+  ],
+  "models": [
+    "mistral-medium-3-5"
+  ],
+  "dryRun": false,
+  "inputPack": {
+    "candidates": "signal_snapshot @ 2026-07-07T23:18:29.379Z",
+    "macro": "settings:last_macro_sent",
+    "portfolio": "portfolio_snapshots (latest)",
+    "bearProposals": "trade_proposals (latest rows)"
+  },
+  "summaries": [
+    {
+      "model": "mistral-medium-3-5",
+      "role": "green",
+      "provider": "mistral",
+      "attempts": 2,
+      "successes": 1,
+      "timeouts": 1,
+      "httpErrors": 0,
+      "unparseable": 0,
+      "noCredential": false,
+      "p50LatencyMs": 50094,
+      "p95LatencyMs": 50094,
+      "coldP50LatencyMs": 50094,
+      "coldAvgCostUsd": 0.0743385,
+      "avgCachedPromptTokens": 0,
+      "avgCompletionTokens": 8362,
+      "avgEstCostUsd": 0.0743385,
+      "schemaValidRate": 1,
+      "avgProposalCount": 2,
+      "bracketStopLossRate": 1
+    }
+  ],
+  "records": [
+    {
+      "model": "mistral-medium-3-5",
+      "role": "green",
+      "round": 1,
+      "provider": "mistral",
+      "transport": "chat-completions",
+      "url": "https://api.mistral.ai/v1/chat/completions",
+      "keySource": "user",
+      "softTimeoutMs": 150000,
+      "status": "ok",
+      "requestBytes": 28894,
+      "latencyMs": 50094,
+      "promptTokens": 7749,
+      "completionTokens": 8362,
+      "totalTokens": 16111,
+      "cachedPromptTokens": 0,
+      "estCostUsd": 0.0743385,
+      "truncated": false,
+      "schemaValid": true,
+      "proposalCount": 2,
+      "bracketStopLossPopulated": 2
+    },
+    {
+      "model": "mistral-medium-3-5",
+      "role": "green",
+      "round": 2,
+      "provider": "mistral",
+      "transport": "chat-completions",
+      "url": "https://api.mistral.ai/v1/chat/completions",
+      "keySource": "user",
+      "softTimeoutMs": 150000,
+      "status": "timeout",
+      "requestBytes": 28894,
+      "latencyMs": 150033,
+      "error": "soft timeout after 150000ms (reply still capturing)",
+      "lateDurationMs": 164560,
+      "lateHttpStatus": 200
+    }
+  ]
+}

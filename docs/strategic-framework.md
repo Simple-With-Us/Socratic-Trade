@@ -44,25 +44,24 @@ It is built so that **doing nothing dangerous is the default.** Execution mode
 is derived purely from the `environment` of whichever broker account you've
 connected — there is no local simulator and no separate "Test mode" toggle:
 
-1. **Paper mode (default entry point):** A practice account hosted by a real
-   broker (e.g. Alpaca's "paper" sandbox). Fake money, but the order actually
-   travels to a broker's system — realistic fills, latency, and market
-   hours. If you haven't connected a broker account at all, the app simply
-   **cannot place any orders** — there is no fake local-simulation fallback.
-2. **Brokerage (live) mode:** A real account with real money. Orders here can
-   actually buy and sell, and only when *every* safety rule allows it.
-   Approving a live proposal now also requires a typed confirmation tied to
-   the proposal, account, execution mode, and estimated order size, so a
-   stale tab or script cannot approve a real-money order with an empty POST.
+1. **Paper / sandbox account:** A practice environment hosted by a real broker
+   (e.g. Alpaca Paper, Tradier Sandbox). Not production capital, but orders
+   still go to that broker's system — realistic fills, latency, and market hours.
+   With no connected account, the app **cannot place any orders** — there is no
+   fake local-simulation fallback.
+2. **Live / production brokerage:** A real account with real money (e.g. Alpaca
+   live, Tradier production, Robinhood MCP). Orders can buy and sell only when
+   every safety rule allows. Approving a production proposal may require typed
+   confirmation tied to proposal, account, mode, and size so a stale tab cannot
+   approve with an empty POST.
 
-The app records the exact execution mode (`broker/paper` or `broker/live`)
-next to proposals, fills, and portfolio snapshots, so paper and live activity
-are never mixed together in the learning and accounting layers.
+The app records execution mode (`broker/paper` or `broker/live`) on proposals,
+fills, and portfolio snapshots so paper and live activity stay separate in
+learning and accounting.
 
-> **Honesty note:** Most of the value and most of the testing happens in
-> Paper mode. Real-money mode is intentionally hard to reach and wrapped in
-> limits. Treat this whole system as **experimental**. It is not a product that
-> promises profits, and nothing here is investment advice.
+> **Honesty note:** Treat this system as **experimental**. It is not a product
+> that promises profits, and nothing here is investment advice. Guardrails are
+> owner preferences with overrides — not an immovable cage.
 
 ---
 

@@ -20,7 +20,7 @@ export interface DerivedMetrics {
   peg?: number;
   /** Earnings yield % = EPS ÷ price (the inverse of P/E). Robust when P/E is n/a (eps ≤ 0). */
   earnYld?: number;
-  /** Return on equity % = EPS ÷ book value per share, where BVPS = price ÷ P/B. Quality/efficiency. */
+  /** Return on equity %. Provider-reported (ratios-ttm) when available; else EPS ÷ BVPS, where BVPS = price ÷ P/B. Quality/efficiency. */
   roe?: number;
   /** Dividend payout ratio % = dividends per share ÷ EPS. >100 flags an unsustainable dividend. */
   payout?: number;
@@ -53,8 +53,8 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === "nu
 export function deriveMetrics(quote: Pick<
   MarketQuote | MarketQuoteSummary,
   "price" | "eps" | "peRatio" | "pbRatio" | "dividendYield" | "fiftyTwoWeekHigh" | "fiftyTwoWeekLow"
-> & { volume?: number; epsGrowth?: number; bid?: number; ask?: number }): DerivedMetrics {
-  const { price, eps, peRatio, pbRatio, dividendYield, volume, epsGrowth, bid, ask, fiftyTwoWeekHigh, fiftyTwoWeekLow } = quote;
+> & { volume?: number; epsGrowth?: number; bid?: number; ask?: number; returnOnEquity?: number }): DerivedMetrics {
+  const { price, eps, peRatio, pbRatio, dividendYield, volume, epsGrowth, bid, ask, fiftyTwoWeekHigh, fiftyTwoWeekLow, returnOnEquity } = quote;
   const metrics: DerivedMetrics = {};
 
   // PEG — only meaningful with positive earnings (P/E > 0) and real growth (≥1% YoY),
@@ -68,8 +68,12 @@ export function deriveMetrics(quote: Pick<
     metrics.earnYld = round((eps / price) * 100, 2);
   }
 
-  // ROE = EPS / BVPS, with BVPS = price / (price-to-book). Sign-preserving.
-  if (isFinitePositive(price) && isFinitePositive(pbRatio) && isFiniteNumber(eps)) {
+  // ROE — prefer the provider-reported value (FMP ratios-ttm, already a PERCENT number) over the
+  // structural EPS/BVPS approximation; the eps×pb/price identity remains the fallback when no
+  // provider reported it. Sign-preserving either way.
+  if (isFiniteNumber(returnOnEquity)) {
+    metrics.roe = round(returnOnEquity, 1);
+  } else if (isFinitePositive(price) && isFinitePositive(pbRatio) && isFiniteNumber(eps)) {
     metrics.roe = round(((eps * pbRatio) / price) * 100, 1);
   }
 

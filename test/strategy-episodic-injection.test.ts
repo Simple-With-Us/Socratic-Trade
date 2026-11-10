@@ -20,6 +20,8 @@ import { DEFAULT_POLICY } from "../src/lib/defaults";
 const mocks = vi.hoisted(() => ({ retrieveContextDetailed: vi.fn() }));
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   retrieveContext: async () => [],
   retrieveContextDetailed: mocks.retrieveContextDetailed,
   defaultMinScore: () => 0.3,
@@ -86,19 +88,19 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
             }
           ];
         }
-        // Filings pass (docType 10-k/10-q/8-k/…): nothing retrieved in this test.
+        // Filings pass (docType 10-k/10-q/8-k/fundamentals): nothing retrieved in this test.
         return [];
       }
     );
 
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     const openAiBodies: Array<{
       input?: Array<{ role: string; content: string }>;
       messages?: Array<{ role: string; content: string }>;
     }> = [];
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) {
+      if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
         const body = JSON.parse(String(init?.body ?? "{}"));
         openAiBodies.push(body);
         // The single Red Team review (chat-completions: `messages`) approves; the Bull (responses
@@ -135,15 +137,15 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
     });
 
     const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey, listAudit } = await import("../src/lib/db");
-    upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+    upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
     const accountId = randomUUID();
     upsertConnectedAccount({ id: accountId, userId: "local", broker: "test", environment: "paper", accountNumber: "TEST", label: "Episodic Injection Test", isActive: true });
     setActiveConnectedAccount(accountId);
     setPolicy({
       ...DEFAULT_POLICY,
       systemState: "active",
-      llmModel: "gpt-4.1-mini",
-      redTeamLlmModel: "gpt-4.1-mini",
+      llmModel: "openai/gpt-4.1-mini",
+      redTeamLlmModel: "openai/gpt-4.1-mini",
       includedIndices: [],
       additionalSymbols: ["AAPL"],
       strategyAuthority: "decide"
@@ -188,8 +190,10 @@ describe("strategy.ts episodic analogs + owner coaching injection", () => {
       expect(analogs, `${label} payload missing analogs block`).toContain("CLOSEST HISTORICAL ANALOGS");
       expect(analogs, `${label} payload missing top-analog similarity`).toContain("top-analog similarity 0.81");
       expect(analogs, `${label} payload missing winning analog`).toContain("Prior momentum breakout on MSFT worked");
+      expect(analogs, `${label} payload missing analog card header`).toContain("ANALOG MSFT");
       expect(analogs, `${label} payload missing counterexample label`).toContain("[COUNTEREXAMPLE — opposite realized sign]");
       expect(analogs, `${label} payload missing losing analog`).toContain("Similar setup on AMD reversed hard");
+      expect(analogs, `${label} payload dumped provenance wrapper`).not.toContain("[SOCRATIC-DECISION");
       expect(coaching, `${label} payload missing coaching block`).toContain("OWNER COACHING");
       expect(coaching, `${label} payload missing coach note`).toContain("stop chasing extended momentum after day 3");
     }

@@ -21,6 +21,13 @@
 // Honesty contract: nothing here fabricates a price. Horizons that cannot be measured become
 // terminal 'unresolvable' with a reason and stay in every denominator (coverage disclosure
 // "N/M resolved (X%)" on the job receipt). Advisory throughout — this writes memory, never gates.
+//
+// Benchmark basis (owner decision, r4): the market series behind every horizon's spyExcessPct is
+// now the S&P 500 INDEX (^GSPC), SPY the automatic ETF fallback (resolveMarketBenchmark, below).
+// Under policy.benchmarkMode === 'sector', a case grades against its own symbol's GICS sector
+// index/ETF instead (resolveGradingBenchmark) — market otherwise. Every row discloses which series
+// it actually used via `benchmarkBasis`; see outcome-horizons.ts's header for the live-verified
+// ticker table this is built on.
 import {
   audit,
   claimDueJobs,
@@ -28,9 +35,11 @@ import {
   enqueueDueJob,
   failDueJob,
   getDueJobStats,
+  getConnectedAccount,
   getPolicy,
   getSkippedCounterfactualByRunSymbol,
   getSkippedCounterfactualByRunSymbolHorizon,
+  getProposal,
   getSkippedCounterfactualCoverage,
   getSocraticDecisionCase,
   getSocraticOutcomeCoverage,
@@ -50,7 +59,7 @@ import { buildLlmRequestBody, extractLlmText, llmAuthHeaders } from "./llm-call"
 import { humanizeLlmError } from "./llm-errors";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { LLM_OUTPUT_TOKEN_CAPS, llmFetch } from "./llm-request";
-import { extractLlmUsage, recordLlmUsage } from "./llm-usage";
+import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "./llm-usage";
 import { addTradingDays } from "./market-calendar";
 import { normalizeSymbol } from "./money";
 import { withLlmGeneration } from "./observability";
@@ -60,14 +69,55 @@ import {
   computeDailyHorizonRows,
   computeIntradayHorizonRows,
   INTRADAY_HORIZONS,
+  MARKET_BENCHMARK_FALLBACK,
+  MARKET_BENCHMARK_PRIMARY,
   mergeHorizonRows,
   normalizeDailyBars,
+  pickHeadlineAlpha,
+  resolveBenchmarkSeries,
+  sectorBenchmarkEntry,
   UNRESOLVABLE_AFTER_TRADING_DAYS,
-  type NormalizedDailyBar
+  type NormalizedDailyBar,
+  type ResolvedBenchmark
 } from "./outcome-horizons";
-import { calculatePnl, type ClosedLot } from "./performance";
+import { aggregateRoundTrip, calculatePnl, type ClosedLot } from "./performance";
+import {
+  containPromptDataTree,
+  scanForInjectionAttempts,
+  type UntrustedPromptField
+} from "./prompt-safety";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText } from "./telemetry-sanitize";
-import type { FillEvent, OrderSide, SocraticDecisionCase, SocraticOutcomeHorizonRow } from "./types";
+import type {
+  BenchmarkMode,
+  FillEvent,
+  OrderSide,
+  OutcomeGradingMode,
+  SocraticDecisionCase,
+  SocraticEvidenceItem,
+  SocraticOutcomeHorizonRow
+} from "./types";
+
+/** Collect string leaves under a path for advisory injection scanning (bounded). */
+function flattenPromptScanFields(value: unknown, path: string, out: UntrustedPromptField[] = [], depth = 0): UntrustedPromptField[] {
+  if (out.length >= 24 || depth > 6) return out;
+  if (typeof value === "string") {
+    if (value.trim()) out.push({ name: path, text: value });
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length && out.length < 24; i++) {
+      flattenPromptScanFields(value[i], `${path}[${i}]`, out, depth + 1);
+    }
+    return out;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (out.length >= 24) break;
+      flattenPromptScanFields(child, path ? `${path}.${key}` : key, out, depth + 1);
+    }
+  }
+  return out;
+}
 
 const DAY_MS = 86_400_000;
 const DEFAULT_CASE_LIMIT = 25;
@@ -129,6 +179,8 @@ export async function matureSocraticDecisionOutcomes(
   const lessonBatchCap = boundedInteger(options.lessonBatchCap, 0, 20, DEFAULT_LESSON_BATCH_CAP);
   const fetchOHLC = options.fetchOHLC ?? fetchDailyOHLC;
   const fetchQuote = options.fetchQuote ?? defaultQuoteFetcher;
+  const gradingMode = resolveOutcomeGradingMode(userId, options.connectedAccountId);
+  const benchmarkMode = resolveBenchmarkMode(userId, options.connectedAccountId);
 
   const cases = listSocraticDecisionCasesNeedingOutcome(userId, {
     limit,
@@ -145,7 +197,7 @@ export async function matureSocraticDecisionOutcomes(
     barsCache.set(key, bars);
     return bars;
   };
-  const spyBars = cases.length > 0 ? (await getBars("SPY")) ?? [] : [];
+  const marketBenchmark = await resolveMarketBenchmark(cases.length > 0, getBars);
 
   let measured = 0;
   let closed = 0;
@@ -154,10 +206,38 @@ export async function matureSocraticDecisionOutcomes(
 
   for (const decisionCase of cases) {
     try {
-      const outcome = await measureCase(decisionCase, { userId, now, nowIso, nowDate, getBars, spyBars, fetchQuote });
+      const outcome = await measureCase(decisionCase, {
+        userId,
+        now,
+        nowIso,
+        nowDate,
+        getBars,
+        marketBenchmark,
+        fetchQuote,
+        gradingMode,
+        benchmarkMode
+      });
       if (!outcome) continue; // nothing decidable yet (e.g. awaiting fill reconciliation)
       const updated = await writeSocraticDecisionOutcome(decisionCase.id, outcome, userId);
       measured += 1;
+      // THE alpha-mode observability signal: the market's beta and the decision's quality disagreed
+      // (e.g. raw 'won' but SPY-excess 'lost'). Receipted once — terminal cases are never re-measured.
+      if (outcome.alphaStatus && outcome.alphaStatus !== outcome.status) {
+        audit(
+          "outcome_alpha_grading",
+          {
+            event: "divergence",
+            decisionId: decisionCase.id,
+            symbol: decisionCase.symbol,
+            rawStatus: outcome.status,
+            alphaStatus: outcome.alphaStatus,
+            alphaPct: outcome.alphaPct,
+            returnPct: outcome.returnPct
+          },
+          userId,
+          decisionCase.connectedAccountId
+        );
+      }
       if (TERMINAL_OUTCOME_STATUSES.has(outcome.status)) {
         closed += 1;
         if (outcome.status === "unresolvable") unresolvable += 1;
@@ -177,6 +257,29 @@ export async function matureSocraticDecisionOutcomes(
   const lessonCandidates = newlyClosed.filter(
     (c) => c.outcome && c.outcome.status !== "unresolvable" && c.outcome.outcomes.some((row) => row.resolution === "ok")
   );
+  // Alpha mode additionally wants alphaStatus resolved before grading a lesson — but a case whose
+  // spyExcessPct could not be measured falls back to RAW grading with a receipt (never blocks
+  // lesson generation; the candidate list is unchanged either way).
+  if (gradingMode === "alpha") {
+    for (const candidate of lessonCandidates) {
+      if (!candidate.outcome?.alphaStatus) {
+        audit(
+          "outcome_alpha_grading",
+          {
+            event: "raw_fallback",
+            reason: "no_spy_excess",
+            decisionId: candidate.id,
+            symbol: candidate.symbol,
+            rawStatus: candidate.outcome?.status
+          },
+          userId,
+          // The case's own account, not the run filter — an unfiltered maturation pass would
+          // otherwise strip per-account attribution from this receipt.
+          candidate.connectedAccountId
+        );
+      }
+    }
+  }
   if (lessonCandidates.length > 0 && isOverLlmBudget(userId, options.connectedAccountId)) {
     lessonsSkipped = lessonCandidates.length;
     audit(
@@ -189,7 +292,7 @@ export async function matureSocraticDecisionOutcomes(
     let index = 0;
     for (; index < Math.min(lessonCandidates.length, lessonBatchCap); index += 1) {
       const candidate = lessonCandidates[index];
-      const result = await generatePostMortemLessons(candidate, userId, options.llm).catch((err) => {
+      const result = await generatePostMortemLessons(candidate, userId, options.llm, gradingMode).catch((err) => {
         console.warn("[outcome-engine] post-mortem lesson pass failed:", err instanceof Error ? err.message : String(err));
         return { written: false, skippedReason: "llm_error" as string | undefined };
       });
@@ -257,8 +360,137 @@ interface MeasureContext {
   nowIso: string;
   nowDate: string;
   getBars: (symbol: string) => Promise<NormalizedDailyBar[] | null>;
-  spyBars: NormalizedDailyBar[];
+  /** The market benchmark for this run (^GSPC primary, SPY fallback) — undefined only when there
+   * were no cases to grade. */
+  marketBenchmark: ResolvedBenchmark | undefined;
   fetchQuote: OutcomeQuoteFetcher;
+  gradingMode: OutcomeGradingMode;
+  benchmarkMode: BenchmarkMode;
+}
+
+/** Read the owner's grading-mode knob, failing OPEN to "raw" — a settings-store failure must never
+ * stall outcome maturation (same contract as getUserSourceSettingsMap, source-settings.ts). */
+function resolveOutcomeGradingMode(userId: string, connectedAccountId?: string): OutcomeGradingMode {
+  try {
+    return getPolicy(userId, connectedAccountId).outcomeGradingMode ?? "raw";
+  } catch {
+    return "raw";
+  }
+}
+
+/** Read the owner's benchmark-mode knob, failing OPEN to "market" (byte-identical to before this
+ * knob existed) — same fail-open contract as resolveOutcomeGradingMode above. */
+function resolveBenchmarkMode(userId: string, connectedAccountId?: string): BenchmarkMode {
+  try {
+    return getPolicy(userId, connectedAccountId).benchmarkMode ?? "market";
+  } catch {
+    return "market";
+  }
+}
+
+/** Resolve the run's market benchmark ONCE (shared by every case this pass): ^GSPC primary, SPY
+ * the automatic ETF fallback when the index series is unavailable — the SAME fetchDailyOHLC
+ * cascade every daily-bar consumer uses (see outcome-horizons.ts's header for the live-verified
+ * bar counts). Skips the fetch entirely when there are no cases to grade. */
+async function resolveMarketBenchmark(
+  needed: boolean,
+  getBars: (symbol: string) => Promise<NormalizedDailyBar[] | null>
+): Promise<ResolvedBenchmark | undefined> {
+  if (!needed) return undefined;
+  const primaryBars = await getBars(MARKET_BENCHMARK_PRIMARY);
+  const fallbackBars = primaryBars && primaryBars.length >= 2 ? null : await getBars(MARKET_BENCHMARK_FALLBACK);
+  return resolveBenchmarkSeries(
+    { symbol: MARKET_BENCHMARK_PRIMARY, bars: primaryBars },
+    { symbol: MARKET_BENCHMARK_FALLBACK, bars: fallbackBars }
+  );
+}
+
+/** Choose the benchmark series for THIS case's daily horizons: policy.benchmarkMode === 'sector'
+ * with a known, live-mappable sector tries the sector index (falling back to the sector ETF, then
+ * the market benchmark) — 'market' mode (default) or an unmapped/unknown sector uses the market
+ * benchmark directly. Always the SAME fetchDailyOHLC cascade (ctx.getBars, memoized per run). */
+async function resolveGradingBenchmark(
+  ctx: MeasureContext,
+  sector: string | undefined
+): Promise<ResolvedBenchmark | undefined> {
+  if (ctx.benchmarkMode !== "sector") return ctx.marketBenchmark;
+  const entry = sectorBenchmarkEntry(sector);
+  if (!entry) return ctx.marketBenchmark; // unmapped/unknown sector: honest market fallback
+  const primarySymbol = entry.indexSymbol ?? entry.etfSymbol;
+  const primaryBars = await ctx.getBars(primarySymbol);
+  const fallbackBars = primaryBars && primaryBars.length >= 2 ? null : await ctx.getBars(entry.etfSymbol);
+  const resolved = resolveBenchmarkSeries(
+    { symbol: primarySymbol, bars: primaryBars },
+    { symbol: entry.etfSymbol, bars: fallbackBars }
+  );
+  return resolved ?? ctx.marketBenchmark; // sector series entirely unavailable: honest market fallback
+}
+
+/** The symbol's sector at grading time, from whatever was already stored on the decision — the
+ * candidate evidence item's quote data (placed AND blocked/rejected cases both carry it via
+ * evidenceForDecision, socratic-runtime.ts) or, as a defense-in-depth fallback for blocked/rejected
+ * cases, the skipped-candidate counterfactual row's own `sector` column. Never fetched fresh (this
+ * is a grading-time lookup, not a new enrichment call) — undefined when neither source has it. */
+function sectorForDecisionCase(evidence: SocraticEvidenceItem[], symbol: string, counterfactualSector?: string): string | undefined {
+  for (const item of evidence) {
+    if (item.kind !== "candidate") continue;
+    if (item.symbol && normalizeSymbol(item.symbol) !== symbol) continue;
+    const data = item.data;
+    if (data && typeof data === "object" && "sector" in data) {
+      const sector = (data as { sector?: unknown }).sector;
+      if (typeof sector === "string" && sector.trim()) return sector;
+    }
+  }
+  return counterfactualSector;
+}
+
+/** Input for gradeSniperAccuracy — the scorecard's stop/take levels vs the matured daily closes. */
+export interface SniperAccuracyInput {
+  side?: OrderSide;
+  stopLoss?: number;
+  takeProfit?: number;
+  /** The SAME daily series measureCase already fetched — never a new fetch pipeline. */
+  bars: NormalizedDailyBar[] | null | undefined;
+  /** YYYY-MM-DD of the entry basis; only bars strictly AFTER it participate. */
+  basisDate: string;
+}
+
+/**
+ * Pure sniper-point grading (scorecard r3): did any post-basis DAILY CLOSE breach the proposal's
+ * stop / reach its take-profit?  Close basis only — an intraday touch between closes is invisible
+ * here, which the receipt's `priceBasis` discloses.  Undefined when the proposal carried no
+ * levels or no bars cover the window (the receipt is omitted, never fabricated).
+ */
+export function gradeSniperAccuracy(
+  input: SniperAccuracyInput
+): NonNullable<SocraticDecisionCase["outcome"]>["sniperAccuracy"] | undefined {
+  const positive = (v: number | undefined): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+  const stop = positive(input.stopLoss);
+  const take = positive(input.takeProfit);
+  if (stop === undefined && take === undefined) return undefined;
+  const bars = (input.bars ?? []).filter((bar) => bar.date > input.basisDate);
+  if (bars.length === 0) return undefined;
+  // Long: stop breaches DOWN, take-profit hits UP. Short: mirrored (price up = loss).
+  const short = input.side === "short";
+  return {
+    ...(stop !== undefined ? { stopHit: bars.some((bar) => (short ? bar.close >= stop : bar.close <= stop)) } : {}),
+    ...(take !== undefined ? { takeProfitHit: bars.some((bar) => (short ? bar.close <= take : bar.close >= take)) } : {}),
+    priceBasis: "daily_close"
+  };
+}
+
+/** Companion alpha grade for a terminal case ('alpha' mode only): verdict + figure from the
+ * headline spyExcessPct row, or {} when no resolved horizon carried one (never fabricated). */
+function headlineAlphaFields(
+  outcomes: SocraticOutcomeHorizonRow[]
+): Pick<NonNullable<SocraticDecisionCase["outcome"]>, "alphaStatus" | "alphaPct"> {
+  const row = pickHeadlineAlpha(outcomes);
+  if (!row || typeof row.spyExcessPct !== "number") return {};
+  return {
+    alphaStatus: row.spyExcessPct > 0 ? "won" : row.spyExcessPct < 0 ? "lost" : "flat",
+    alphaPct: row.spyExcessPct
+  };
 }
 
 async function measureCase(
@@ -274,8 +506,11 @@ async function measureCase(
   let priceBasisPrefix = "ref_price";
   let realizedLot: ClosedLot | undefined;
   let note: string | undefined;
+  // Defense-in-depth sector source for blocked/rejected cases (sectorForDecisionCase prefers the
+  // candidate evidence item, which both branches below carry — see evidenceForDecision).
+  let counterfactualSector: string | undefined;
 
-  if (decisionCase.status === "placed") {
+  if (decisionCase.status === "placed" || decisionCase.status === "filled") {
     const fills = listFillEventsByProposalId(decisionCase.proposalId ?? decisionCase.id, ctx.userId).filter(
       (fill) => normalizeSymbol(fill.symbol) === symbol
     );
@@ -295,6 +530,7 @@ async function measureCase(
       if (ctx.nowDate > unresolvableAfter) {
         return {
           status: "unresolvable",
+          ...(decisionCase.outcome?.sniperAccuracy ? { sniperAccuracy: decisionCase.outcome.sniperAccuracy } : {}),
           note: "No fill event ever joined this placed decision (no entry basis).",
           measuredAt: ctx.nowIso,
           outcomes: mergeHorizonRows(decisionCase.outcome?.outcomes, [])
@@ -310,6 +546,7 @@ async function measureCase(
       basisPrice = counterfactual.refPrice;
       basisAtMs = Date.parse(counterfactual.snapshotAt);
       priceBasisPrefix = "ref_price";
+      counterfactualSector = counterfactual.sector;
     } else {
       // No counterfactual row (older decisions predate the veto/block insert): fall back to the
       // decision day's daily close as the basis — a real price with its provenance disclosed.
@@ -325,6 +562,7 @@ async function measureCase(
         if (ctx.nowDate > unresolvableAfter) {
           return {
             status: "unresolvable",
+            ...(decisionCase.outcome?.sniperAccuracy ? { sniperAccuracy: decisionCase.outcome.sniperAccuracy } : {}),
             note: "No counterfactual row and no price series for the decision window.",
             measuredAt: ctx.nowIso,
             outcomes: mergeHorizonRows(decisionCase.outcome?.outcomes, [])
@@ -368,14 +606,17 @@ async function measureCase(
     measuredAt: ctx.nowIso
   });
 
-  // 3) Daily horizons from the cascade's daily closes, SPY-relative.
+  // 3) Daily horizons from the cascade's daily closes, benchmark-relative (market, or the symbol's
+  // own GICS sector under policy.benchmarkMode === 'sector' — resolveGradingBenchmark).
   const bars = await ctx.getBars(symbol);
+  const sector = sectorForDecisionCase(decisionCase.evidence, symbol, counterfactualSector);
+  const benchmark = await resolveGradingBenchmark(ctx, sector);
   const dailyRows = computeDailyHorizonRows({
     basisPrice,
     basisDate: new Date(basisAt).toISOString().slice(0, 10),
     side: decisionCase.side,
     bars,
-    spyBars: ctx.spyBars,
+    benchmark,
     nowDate: ctx.nowDate,
     priceBasisPrefix,
     measuredAt: ctx.nowIso
@@ -383,12 +624,39 @@ async function measureCase(
 
   const outcomes = mergeHorizonRows(decisionCase.outcome?.outcomes, [...intradayRows, ...dailyRows]);
 
-  // 4) Case-level verdict.
+  // 3.5) Sniper-point grading (scorecard r3): compare the proposal's persisted stop/take levels
+  // against the SAME daily closes fetched above — a pure additive receipt on the outcome, never a
+  // new fetch pipeline and never a gate. Best-effort: a missing proposal row simply omits it.
+  // A pass that cannot recompute (transient bars/proposal miss, or a terminal realized-lot write
+  // that needed no bars) falls back to the receipt already persisted on the case — matching
+  // writeIntradaySampleRow's preservation — instead of silently dropping it.
+  const sniperAccuracy =
+    (() => {
+      try {
+        const proposalRow = getProposal(decisionCase.proposalId ?? decisionCase.id, ctx.userId);
+        const sniper = proposalRow?.proposal.scorecard?.sniperPoints;
+        if (!sniper) return undefined;
+        return gradeSniperAccuracy({
+          side: decisionCase.side,
+          stopLoss: sniper.stopLoss,
+          takeProfit: sniper.takeProfit,
+          bars,
+          basisDate: new Date(basisAt).toISOString().slice(0, 10)
+        });
+      } catch {
+        return undefined;
+      }
+    })() ?? decisionCase.outcome?.sniperAccuracy;
+
+  // 4) Case-level verdict. Alpha mode ADDS the companion SPY-excess grade on terminal verdicts;
+  // the raw status/returnPct are always written unchanged (raw mode is byte-identical to before).
   if (realizedLot) {
     return {
       status: realizedLot.pnl > 0 ? "won" : realizedLot.pnl < 0 ? "lost" : "flat",
       returnPct: realizedLot.returnPct,
       pnlUsd: Number(realizedLot.pnl.toFixed(2)),
+      ...(ctx.gradingMode === "alpha" ? headlineAlphaFields(outcomes) : {}),
+      ...(sniperAccuracy ? { sniperAccuracy } : {}),
       note,
       measuredAt: ctx.nowIso,
       outcomes
@@ -397,12 +665,14 @@ async function measureCase(
 
   const allHorizonsTerminal = outcomes.length === 4;
   const okRows = outcomes.filter((row) => row.resolution === "ok");
-  if (decisionCase.status !== "placed" && allHorizonsTerminal) {
+  if (decisionCase.status !== "placed" && decisionCase.status !== "filled" && allHorizonsTerminal) {
     const headline = pickHeadlineRow(okRows);
     if (headline && typeof headline.returnPct === "number") {
       return {
         status: headline.returnPct > 0 ? "won" : headline.returnPct < 0 ? "lost" : "flat",
         returnPct: headline.returnPct,
+        ...(ctx.gradingMode === "alpha" ? headlineAlphaFields(outcomes) : {}),
+        ...(sniperAccuracy ? { sniperAccuracy } : {}),
         note: `${note} Headline horizon: ${headline.horizon}.`,
         measuredAt: ctx.nowIso,
         outcomes
@@ -410,6 +680,7 @@ async function measureCase(
     }
     return {
       status: "unresolvable",
+      ...(sniperAccuracy ? { sniperAccuracy } : {}),
       note: `${note} No horizon could be measured (${outcomes.map((row) => `${row.horizon}:${row.reason ?? "?"}`).join(", ")}).`,
       measuredAt: ctx.nowIso,
       outcomes
@@ -418,7 +689,7 @@ async function measureCase(
 
   // Still maturing (placed-with-open-lot, or horizons not yet due): write the partial ledger so the
   // memory doc reflects everything measured so far; the job re-visits after recheckMs.
-  return { status: "open", note, measuredAt: ctx.nowIso, outcomes };
+  return { status: "open", note, ...(sniperAccuracy ? { sniperAccuracy } : {}), measuredAt: ctx.nowIso, outcomes };
 }
 
 /** Fire-safe enqueue of the 15m/1h 'sample_intraday_horizon' due-jobs for a decision case whose
@@ -646,7 +917,19 @@ async function writeIntradaySampleRow(
     const status = decisionCase.outcome?.status ?? "open";
     await writeSocraticDecisionOutcome(
       payload.caseId,
-      { status, returnPct: decisionCase.outcome?.returnPct, pnlUsd: decisionCase.outcome?.pnlUsd, note: decisionCase.outcome?.note, measuredAt: row.maturedAt ?? new Date().toISOString(), outcomes },
+      {
+        status,
+        returnPct: decisionCase.outcome?.returnPct,
+        pnlUsd: decisionCase.outcome?.pnlUsd,
+        // Preserve an already-written alpha companion grade — this write only adds a horizon row.
+        alphaStatus: decisionCase.outcome?.alphaStatus,
+        alphaPct: decisionCase.outcome?.alphaPct,
+        // Same for the sniper-accuracy receipt (written by the daily maturation pass).
+        sniperAccuracy: decisionCase.outcome?.sniperAccuracy,
+        note: decisionCase.outcome?.note,
+        measuredAt: row.maturedAt ?? new Date().toISOString(),
+        outcomes
+      },
       userId
     );
     return true;
@@ -675,14 +958,26 @@ function pickHeadlineRow(okRows: SocraticOutcomeHorizonRow[]): SocraticOutcomeHo
   return undefined;
 }
 
-/** FIFO closed lot opened by this exact fill (symbol + entry timestamp join), if the lot closed. */
+/**
+ * The COMPLETED round trip opened by this exact fill (symbol + entry timestamp join), if the whole
+ * entry quantity has been closed.
+ *
+ * A scaled-out position closes across several exits, producing one ClosedLot per exit against the
+ * same opening lot. Taking the first of those graded the decision on its first trim: two profitable
+ * trims followed by a stopped-out remainder read as "won" at the trim's P&L, and the case went
+ * terminal before the trade was over. So: aggregate EVERY exit against this entry, and only grade
+ * once they add up to the entry quantity. Until then the position is still open and the horizon
+ * returns (measured from the entry fill) remain the honest read.
+ */
 function findRealizedLot(entryFill: FillEvent, userId: string): ClosedLot | undefined {
   try {
-    const fills = listFillEvents(entryFill.accountNumber, entryFill.source, 500, userId);
+    // Unbounded: FIFO replay needs the COMPLETE ledger — see listFillEvents in db-fills.ts.
+    const fills = listFillEvents(entryFill.accountNumber, entryFill.source, undefined, userId);
     const { closedLots } = calculatePnl(fills);
-    return closedLots.find(
+    const exits = closedLots.filter(
       (lot) => normalizeSymbol(lot.symbol ?? "") === normalizeSymbol(entryFill.symbol) && lot.entryAt === entryFill.filledAt
     );
+    return aggregateRoundTrip(exits, entryFill.quantity);
   } catch {
     return undefined;
   }
@@ -714,12 +1009,16 @@ Respond with STRICT JSON only (no markdown, no prose outside the JSON):
 async function generatePostMortemLessons(
   decisionCase: SocraticDecisionCase,
   userId: string,
-  llmOverride?: OutcomeLessonLlm
+  llmOverride?: OutcomeLessonLlm,
+  gradingMode: OutcomeGradingMode = "raw"
 ): Promise<LessonPassResult> {
   const outcome = decisionCase.outcome;
   if (!outcome) return { written: false, skippedReason: "no_outcome" };
 
-  const userContent = JSON.stringify({
+  // #838: fence untrusted persisted model text (thesis/rationale/dissent/evidence/coach notes)
+  // the same way strategy-tuning and framework-review do — quarantine instruction-like spans
+  // and keep advisory receipts; never block generation.
+  const rawUserPayload = {
     symbol: decisionCase.symbol,
     side: decisionCase.side,
     status: decisionCase.status,
@@ -731,8 +1030,53 @@ async function generatePostMortemLessons(
     dissent: decisionCase.dissent.slice(0, 6).map((item) => ({ title: item.title, summary: truncate(item.summary, 300) })),
     evidence: decisionCase.evidence.slice(0, 6).map((item) => ({ kind: item.kind, title: item.title, summary: truncate(item.summary, 300) })),
     coachNotes: decisionCase.coachNotes.slice(-5),
-    realizedOutcome: outcome
-  });
+    realizedOutcome: outcome,
+    // Alpha mode: make the benchmark-relative grade explicit so the post-mortem judges DECISION
+    // QUALITY (SPY-excess), not market beta. The raw-fallback note is honest disclosure, not a gate.
+    ...(gradingMode === "alpha"
+      ? {
+          outcomeGrading:
+            outcome.alphaStatus !== undefined
+              ? {
+                  mode: "alpha",
+                  alphaStatus: outcome.alphaStatus,
+                  alphaPct: outcome.alphaPct,
+                  note: "Judge the belief on the SPY-excess (alpha) figures, not the raw return alone."
+                }
+              : {
+                  mode: "alpha",
+                  fallback: "raw",
+                  note: "spyExcessPct was unmeasurable for this case; graded on raw return."
+                }
+        }
+      : {})
+  };
+  const contained = containPromptDataTree(rawUserPayload, "unknown", "outcomePostMortem");
+  const injectionFindings = scanForInjectionAttempts(
+    flattenPromptScanFields(contained.value, "outcomePostMortem").slice(0, 24)
+  );
+  if (contained.receipts.length > 0 || injectionFindings.length > 0) {
+    audit(
+      "outcome_postmortem_prompt_safety",
+      {
+        decisionId: decisionCase.id,
+        symbol: decisionCase.symbol,
+        containment: contained.receipts.slice(0, 12).map(({ path, result }) => ({
+          path,
+          status: result.status,
+          patterns: result.findings.map((f) => f.pattern)
+        })),
+        injectionFindings: injectionFindings.slice(0, 12).map((f) => ({
+          name: f.name,
+          pattern: f.pattern,
+          excerpt: f.excerpt.slice(0, 240)
+        }))
+      },
+      userId,
+      decisionCase.connectedAccountId
+    );
+  }
+  const userContent = JSON.stringify(contained.value);
 
   const text = llmOverride
     ? await llmOverride({ systemPrompt: LESSON_SYSTEM_PROMPT, userContent })
@@ -764,21 +1108,61 @@ async function generatePostMortemLessons(
     decisionCase.connectedAccountId
   );
 
-  // Route each lesson through the shared learned-context ingestion (origin 'autonomous'): the
-  // fail-closed classifier decides fact-vs-risk tier; risk-tier lessons land in the approval inbox.
+  // Route each lesson as PORTFOLIO-scoped learned context so paper and live accounts both
+  // contribute to model/task comparison (owner 2026-08-04: an account is an account; paper is
+  // first-class learning evidence unless a definite paper-exclusive cause applies — that
+  // exception is enforced by the daily Learning Review, not by scoping lessons away).
+  // A historical case without a connected account may still write with unknown environment;
+  // we only refuse when we cannot identify a user at all (userId is required by ingestLearned).
+  const lessonAccount = decisionCase.connectedAccountId
+    ? getConnectedAccount(decisionCase.connectedAccountId, userId)
+    : undefined;
+  const accountEnvironment = lessonAccount?.environment ?? null;
+  if (decisionCase.connectedAccountId && !lessonAccount) {
+    // Account id was stamped but the row is gone — still write the lesson, but audit so we
+    // notice orphaned provenance. Do not drop model/task evidence for missing account metadata.
+    audit(
+      "learned_context.account_provenance_missing",
+      { userId, decisionId: decisionCase.id, connectedAccountId: decisionCase.connectedAccountId, note: "wrote portfolio lesson with null environment" },
+      userId,
+      decisionCase.connectedAccountId
+    );
+  }
+
   for (const { lesson, direction } of parsed.lessons) {
     try {
+      const envNote = accountEnvironment ? ` on a ${accountEnvironment} broker account` : "";
       await ingestLearned(
         userId,
         {
           kind: "decision",
           subject: `decision_lesson:${decisionCase.symbol ?? "portfolio"}:${decisionCase.thesisTag ?? "untagged"}`,
-          value: `${lesson} (direction: ${direction}; from the ${decisionCase.symbol ?? "portfolio"} ${decisionCase.status} decision, outcome ${outcome.status})`,
+          value: `${lesson} (direction: ${direction}; from the ${decisionCase.symbol ?? "portfolio"} ${decisionCase.status} decision${envNote}, outcome ${outcome.status})`,
           symbol: decisionCase.symbol,
-          source: "inferred",
-          confidence: 0.55
+          // Distinct from the generic "inferred" source so a lesson written HERE is identifiable in
+          // the brain's provenance line (`source=postmortem-outcome`) without a schema change.
+          source: "postmortem-outcome",
+          confidence: 0.55,
+          // PROVENANCE (2026-09-27). This text is derived by this app from its OWN closed, measured
+          // trade outcome — it is a statement about what already happened, not a claim about how to
+          // trade next. The semantic gate's LLM layer used to read it, answer "yes, this would
+          // influence trading behavior" (which is what a sizing lesson literally is), upgrade it to
+          // 'risk', and park it in learned_context_pending — a queue read only by a human click or the
+          // nightly Learning Review. That made the single highest-quality artifact the system produces
+          // effectively unreadable to the system. The marker skips the LLM layer only; the keyword
+          // layer still runs, so a lesson naming an actual risk knob is still queued for approval.
+          provenance: "system-postmortem",
+          // Conditioning keys so regime / thesis relevance scoring can rank this lesson (ST-4589 B4).
+          regime: decisionCase.regime ?? null,
+          thesisTag: decisionCase.thesisTag ?? null
         },
-        "autonomous"
+        "autonomous",
+        {
+          // No connectedAccountId → learningScope defaults to "portfolio" (cross-account).
+          // Keep paper/live on accountEnvironment for Learning Review attribution only.
+          ...(accountEnvironment ? { accountEnvironment } : {}),
+          learningScope: "portfolio"
+        }
       );
     } catch (err) {
       console.warn("[outcome-engine] ingestLearned for lesson failed:", err instanceof Error ? err.message : String(err));
@@ -817,7 +1201,11 @@ export async function callLessonLlm(userId: string, userContent: string): Promis
       systemPrompt: LESSON_SYSTEM_PROMPT,
       userContent,
       maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.postMortemReflection,
-      reasoningEffort: policy.llmReasoningEffort
+      reasoningEffort: policy.llmReasoningEffort,
+      userId,
+      keyRef,
+      service: "strategy",
+      feature: "outcome-postmortem"
     }
   );
 
@@ -845,7 +1233,7 @@ export async function callLessonLlm(userId: string, userContent: string): Promis
         return { text: undefined };
       }
       const payload = await response.json();
-      recordLlmUsage({ userId, provider, model, context: "outcome-postmortem", keySource, keyRef, connectedAccountId: policy.connectedAccountId, ...extractLlmUsage(payload) });
+      recordLlmUsage({ userId, provider, model, context: "outcome-postmortem", keySource, keyRef, connectedAccountId: policy.connectedAccountId, providerRequestId: providerRequestIdFromPayload(provider, payload), ...extractLlmUsage(payload) });
       const text = extractLlmText(payload);
       return { text: typeof text === "string" ? text : undefined };
     }

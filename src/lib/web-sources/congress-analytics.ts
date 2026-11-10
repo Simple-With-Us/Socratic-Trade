@@ -11,7 +11,11 @@ import {
   congressAnalyticsEnabled,
   getCongressTradeClient
 } from "../api-clients/congress";
-import type { ConvictionTicker, MemberLeader } from "@jaywedgeworth22/congress-trading-shared";
+import type {
+  ConvictionTicker,
+  MemberLeader,
+  MemberPerformance
+} from "@jaywedgeworth22/congress-trading-shared";
 import { normalizeSymbol } from "../money";
 import type { CongressAnalytics, WebSourceRefreshResult } from "./types";
 
@@ -23,6 +27,21 @@ const CLUSTER_LIMIT = 200;
 const MEMBER_LIMIT = 500;
 const CONFLICT_LIMIT = 1000; // fetch all conflicts in window (App A default=100; raise to catch all)
 const MAX_SKILL_LOOKUPS = 200; // cap per-member performance calls per refresh
+
+/**
+ * App A dual performance payload (filingDate vs tradeDate legs). Not yet exported from
+ * congress-trading-shared@v2.5.1 — local shape so skill ranking typechecks until the shared
+ * package publishes MemberDualPerformance.
+ */
+type MemberPerformanceLeg = MemberPerformance & {
+  avgAnnualizedExcess?: number | null;
+};
+
+type MemberDualPerformance = {
+  filingDate?: MemberPerformanceLeg | null;
+  tradeDate?: MemberPerformanceLeg | null;
+  performance?: MemberPerformanceLeg | null;
+};
 
 export { congressAnalyticsEnabled };
 
@@ -96,15 +115,67 @@ export function buildMemberScores(members: MemberLeader[]): Map<string, number> 
   return map;
 }
 
+export type MemberSkillAnchor = "filing" | "trade";
+
+/** Per-member skill detail from App A dual performance (filing preferred for trading). */
+export interface MemberSkillDetail {
+  /** 0–100 rank among the cohort on the preferred alpha metric. */
+  score: number;
+  anchor: MemberSkillAnchor;
+  source: "realized_skill_filing" | "realized_skill_trade";
+  avgExcess?: number | null;
+  medianExcess?: number | null;
+  winRate?: number | null;
+  scoredCount?: number;
+  avgAnnualizedExcess?: number | null;
+  /** Opposite-anchor context (trade when primary is filing, and vice versa). */
+  otherAnchor?: MemberSkillAnchor;
+  otherAvgExcess?: number | null;
+  otherWinRate?: number | null;
+  otherScoredCount?: number;
+}
+
+function finiteNum(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function legAlpha(leg: MemberPerformanceLeg | null | undefined): number | undefined {
+  if (!leg) return undefined;
+  if (typeof leg.scoredCount !== "number" || leg.scoredCount <= 0) return undefined;
+  // Prefer avgExcess (vs S&P); annualized is secondary ranking signal for filing leg only.
+  return [leg.avgExcess, leg.medianExcess, leg.avgAnnualizedExcess, leg.avgReturn].find(
+    (v): v is number => typeof v === "number" && Number.isFinite(v)
+  );
+}
+
 /**
- * Member SKILL scores (0–100) from App A's per-member performance endpoint, rank-normalized by realized
- * alpha vs the S&P (`avgExcess`, falling back to `medianExcess` then `avgReturn`). Only members with
- * `scoredCount > 0` are ranked — App A returns nulls until a member has scored trades (which needs prices
- * filled in). Returns a Map keyed by **filerId** (stable), distinct from the name-keyed activity proxy.
- * Empty until App A has scored performance; callers fall back to `buildMemberScores` (activity prominence).
+ * Pick the trading-relevant leg: **filingDate** (copy-trade since disclosure) first;
+ * fall back to tradeDate (politician timing) when filing is unscored.
  */
-export async function buildMemberSkillScores(filerIds: string[]): Promise<Map<string, number>> {
-  const map = new Map<string, number>();
+export function preferMemberSkillLeg(dual: MemberDualPerformance | null | undefined): {
+  leg: MemberPerformanceLeg;
+  anchor: MemberSkillAnchor;
+  other?: MemberPerformanceLeg;
+  otherAnchor?: MemberSkillAnchor;
+} | null {
+  if (!dual) return null;
+  const filing = dual.filingDate ?? undefined;
+  const trade = dual.tradeDate ?? dual.performance ?? undefined;
+  if (legAlpha(filing) !== undefined && filing) {
+    return { leg: filing, anchor: "filing", other: trade, otherAnchor: trade ? "trade" : undefined };
+  }
+  if (legAlpha(trade) !== undefined && trade) {
+    return { leg: trade, anchor: "trade", other: filing, otherAnchor: filing ? "filing" : undefined };
+  }
+  return null;
+}
+
+/**
+ * Member SKILL details from App A's dual performance endpoint.
+ * Rank-normalized 0–100 by preferred-leg alpha vs S&P (filing first). Keyed by filerId.
+ */
+export async function buildMemberSkillDetails(filerIds: string[]): Promise<Map<string, MemberSkillDetail>> {
+  const map = new Map<string, MemberSkillDetail>();
   if (!congressAnalyticsEnabled() || filerIds.length === 0) return map;
   const distinct = Array.from(new Set(filerIds.map((id) => String(id || "").trim()).filter(Boolean))).slice(
     0,
@@ -113,20 +184,72 @@ export async function buildMemberSkillScores(filerIds: string[]): Promise<Map<st
   if (distinct.length === 0) return map;
 
   const client = getCongressTradeClient();
-  const perf = await Promise.all(distinct.map((id) => client.getMemberPerformance(id).catch(() => null)));
-  const scored: Array<{ id: string; alpha: number }> = [];
+  const perf = await Promise.all(
+    distinct.map((id) =>
+      client.getMemberPerformance(id).catch(() => null) as Promise<MemberDualPerformance | MemberPerformanceLeg | null>
+    )
+  );
+  const scored: Array<{
+    id: string;
+    alpha: number;
+    anchor: MemberSkillAnchor;
+    leg: MemberPerformanceLeg;
+    other?: MemberPerformanceLeg;
+    otherAnchor?: MemberSkillAnchor;
+  }> = [];
   distinct.forEach((id, i) => {
-    const p = perf[i];
-    if (!p || typeof p.scoredCount !== "number" || p.scoredCount <= 0) return;
-    const alpha = [p.avgExcess, p.medianExcess, p.avgReturn].find(
-      (v): v is number => typeof v === "number" && Number.isFinite(v)
-    );
-    if (typeof alpha === "number") scored.push({ id, alpha });
+    const raw = perf[i];
+    // Client may return dual {filingDate,tradeDate} or a single leg — normalize.
+    const dual: MemberDualPerformance | null =
+      raw && typeof raw === "object" && ("filingDate" in raw || "tradeDate" in raw || "performance" in raw)
+        ? (raw as MemberDualPerformance)
+        : raw
+          ? { performance: raw as MemberPerformanceLeg }
+          : null;
+    const picked = preferMemberSkillLeg(dual);
+    if (!picked) return;
+    const alpha = legAlpha(picked.leg);
+    if (alpha === undefined) return;
+    scored.push({
+      id,
+      alpha,
+      anchor: picked.anchor,
+      leg: picked.leg,
+      other: picked.other,
+      otherAnchor: picked.otherAnchor
+    });
   });
   if (scored.length === 0) return map;
 
   scored.sort((a, b) => b.alpha - a.alpha);
-  scored.forEach((s, i) => map.set(s.id, Math.round(100 * (1 - i / Math.max(1, scored.length - 1)))));
+  scored.forEach((s, i) => {
+    const rank = Math.round(100 * (1 - i / Math.max(1, scored.length - 1)));
+    map.set(s.id, {
+      score: rank,
+      anchor: s.anchor,
+      source: s.anchor === "filing" ? "realized_skill_filing" : "realized_skill_trade",
+      avgExcess: s.leg.avgExcess ?? null,
+      medianExcess: s.leg.medianExcess ?? null,
+      winRate: s.leg.winRate ?? null,
+      scoredCount: finiteNum(s.leg.scoredCount),
+      avgAnnualizedExcess: s.leg.avgAnnualizedExcess ?? null,
+      otherAnchor: s.otherAnchor,
+      otherAvgExcess: s.other?.avgExcess ?? null,
+      otherWinRate: s.other?.winRate ?? null,
+      otherScoredCount: finiteNum(s.other?.scoredCount)
+    });
+  });
+  return map;
+}
+
+/**
+ * Member SKILL scores (0–100) only — thin wrapper over {@link buildMemberSkillDetails}.
+ * Prefer filing-date alpha; falls back to trade-date. Empty until App A has scored performance.
+ */
+export async function buildMemberSkillScores(filerIds: string[]): Promise<Map<string, number>> {
+  const details = await buildMemberSkillDetails(filerIds);
+  const map = new Map<string, number>();
+  for (const [id, d] of details) map.set(id, d.score);
   return map;
 }
 
@@ -169,12 +292,11 @@ export async function refreshCongressAnalytics(now: number = Date.now(), force =
   }
 
   const memberScores = buildMemberScores(members);
-  // Real skill (alpha vs S&P, keyed by filerId) for the members surfaced in clusters; the name-keyed
-  // activity proxy below is the fallback until App A has scored per-member performance.
+  // Real skill (filing-date copy-trade preferred) for cluster members; activity is fallback.
   const clusterFilerIds = clusters.flatMap((c) =>
     (Array.isArray(c.topMembers) ? c.topMembers : []).map((m) => String(m?.filerId ?? "")).filter(Boolean)
   );
-  const skillScores = await buildMemberSkillScores(clusterFilerIds);
+  const skillDetails = await buildMemberSkillDetails(clusterFilerIds);
 
   // Conviction scores keyed by normalized ticker — null-score rows excluded (thin signal,
   // not usable data; including them could pull no-signal tickers into the scan via netSentiment).
@@ -187,6 +309,7 @@ export async function refreshCongressAnalytics(now: number = Date.now(), force =
   // Conflict counts keyed by normalized ticker (one conflict trade = one flagged disclosure).
   const conflictsByTicker = new Map<string, number>();
   for (const cf of conflicts) {
+    if (!cf.ticker) continue;
     const sym = normalizeSymbol(cf.ticker);
     if (sym) conflictsByTicker.set(sym, (conflictsByTicker.get(sym) ?? 0) + 1);
   }
@@ -244,21 +367,45 @@ export async function refreshCongressAnalytics(now: number = Date.now(), force =
     const topMembers = Array.isArray(c.topMembers) ? c.topMembers : [];
     let best = 0;
     let bestSource: CongressAnalytics["topMemberScoreSource"] | undefined;
+    let bestDetail: MemberSkillDetail | undefined;
+    let bestFilerId: string | undefined;
     for (const m of topMembers) {
       const filerId = String(m?.filerId ?? "").trim();
       const name = String((m?.fullName || m?.memberName || m?.name) ?? "").trim().toLowerCase();
-      // Prefer real skill (alpha vs S&P, by filerId); fall back to activity prominence (by name).
-      const skill = filerId ? skillScores.get(filerId) : undefined;
+      // Prefer real skill (filing-date copy-trade first); fall back to activity prominence.
+      const detail = filerId ? skillDetails.get(filerId) : undefined;
+      const skill = detail?.score;
       const activity = name ? memberScores.get(name) : undefined;
       const s = skill ?? activity;
       if (typeof s === "number" && s > best) {
         best = s;
-        bestSource = skill !== undefined ? "realized_skill" : "activity_prominence";
+        bestSource = detail ? detail.source : "activity_prominence";
+        bestDetail = detail;
+        bestFilerId = filerId || undefined;
       }
     }
     if (best > 0) {
       entry.topMemberScore = best;
       entry.topMemberScoreSource = bestSource;
+      if (bestFilerId) entry.topMemberFilerId = bestFilerId;
+      if (bestDetail) {
+        if (bestDetail.anchor === "filing") {
+          entry.topMemberFilingAvgExcess = bestDetail.avgExcess ?? null;
+          entry.topMemberFilingWinRate = bestDetail.winRate ?? null;
+          entry.topMemberFilingScoredCount = bestDetail.scoredCount;
+          entry.topMemberFilingAvgAnnualizedExcess = bestDetail.avgAnnualizedExcess ?? null;
+          entry.topMemberTradeAvgExcess = bestDetail.otherAvgExcess ?? null;
+          entry.topMemberTradeWinRate = bestDetail.otherWinRate ?? null;
+          entry.topMemberTradeScoredCount = bestDetail.otherScoredCount;
+        } else {
+          entry.topMemberTradeAvgExcess = bestDetail.avgExcess ?? null;
+          entry.topMemberTradeWinRate = bestDetail.winRate ?? null;
+          entry.topMemberTradeScoredCount = bestDetail.scoredCount;
+          entry.topMemberFilingAvgExcess = bestDetail.otherAvgExcess ?? null;
+          entry.topMemberFilingWinRate = bestDetail.otherWinRate ?? null;
+          entry.topMemberFilingScoredCount = bestDetail.otherScoredCount;
+        }
+      }
     }
   }
 

@@ -119,6 +119,98 @@ describe("robinhood mcp transport", () => {
     expect(firstCall.params.arguments).not.toHaveProperty("account_number");
   });
 
+  it("chunks a 250-name universe so Robinhood never sees more than 10 symbols", async () => {
+    vi.stubEnv("ROBINHOOD_MCP_URL", "https://mcp.example.test/trading");
+    const { chunkRobinhoodSymbols, ROBINHOOD_EQUITY_SYMBOL_CHUNK } = await import("../src/lib/robinhood");
+    const universe = Array.from({ length: 250 }, (_, i) => `SYM${String(i + 1).padStart(3, "0")}`);
+    const chunks = chunkRobinhoodSymbols(universe);
+    expect(chunks).toHaveLength(25);
+    expect(chunks.every((chunk) => chunk.length <= ROBINHOOD_EQUITY_SYMBOL_CHUNK)).toBe(true);
+    expect(chunks.flat()).toHaveLength(250);
+    expect(new Set(chunks.flat()).size).toBe(250);
+
+    const calls: string[][] = [];
+    vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}"));
+      const symbols = request.params.arguments.symbols as string[];
+      if (symbols.length > 10) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { message: `too many symbols (max 10, got ${symbols.length})` }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      calls.push(symbols);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            structuredContent: {
+              data: {
+                quotes: symbols.map((symbol, idx) => ({ symbol, price: String(10 + idx) }))
+              }
+            }
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const { getRobinhoodGateway } = await import("../src/lib/robinhood");
+    const { setMcpOAuthTokens } = await import("../src/lib/mcp-oauth");
+    setMcpOAuthTokens("user-a", { accessToken: "test-token", tokenType: "Bearer" });
+
+    const quotes = await getRobinhoodGateway("user-a").getEquityQuotes("RH-ACCOUNT", universe);
+    expect(calls.length).toBe(25);
+    expect(calls.every((chunk) => chunk.length <= 10)).toBe(true);
+    expect(Object.keys(quotes)).toHaveLength(250);
+    expect(quotes.SYM001?.price).toBe(10);
+    expect(quotes.SYM250?.price).toBeGreaterThan(0);
+  });
+
+  it("keeps quotes from other chunks when one Robinhood chunk hits max-10", async () => {
+    vi.stubEnv("ROBINHOOD_MCP_URL", "https://mcp.example.test/trading");
+    vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}"));
+      const symbols = request.params.arguments.symbols as string[];
+      if (symbols.includes("BAD1")) {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { message: "too many symbols (max 10, got 10)" }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            structuredContent: {
+              data: { quotes: symbols.map((symbol) => ({ symbol, price: "12" })) }
+            }
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const { getRobinhoodGateway } = await import("../src/lib/robinhood");
+    const { setMcpOAuthTokens } = await import("../src/lib/mcp-oauth");
+    setMcpOAuthTokens("user-a", { accessToken: "test-token", tokenType: "Bearer" });
+    const first = Array.from({ length: 10 }, (_, i) => `OK${i}`);
+    const second = Array.from({ length: 10 }, (_, i) => `BAD${i}`);
+    const quotes = await getRobinhoodGateway("user-a").getEquityQuotes("RH-ACCOUNT", [...first, ...second]);
+    expect(quotes.OK0?.price).toBe(12);
+    expect(quotes.BAD0).toBeUndefined();
+  });
+
   it("maps equity orders including limit/stop price (Robinhood `price` = limit) and time-in-force", async () => {
     vi.stubEnv("ROBINHOOD_MCP_URL", "https://mcp.example.test/trading");
     vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
@@ -344,6 +436,90 @@ describe("robinhood mcp transport", () => {
 
     expect(portfolio.totalMarketValue).toBe(100);
     expect(portfolio.cash).toBe(100);
+  });
+
+  it("maps a legacy historicals span onto start_time without sending symbol/span", async () => {
+    const { robinhoodHistoricalsStartTime } = await import("../src/lib/robinhood");
+    const now = Date.parse("2026-08-13T16:00:00.000Z");
+    expect(robinhoodHistoricalsStartTime("5year", now)).toBe(new Date(now - 5 * 365.25 * 24 * 60 * 60 * 1000).toISOString());
+  });
+
+  it("calls option-chain tools with only schema-legal arguments (no symbol/symbols extras)", async () => {
+    vi.stubEnv("ROBINHOOD_ADAPTER", "mcp");
+    vi.stubEnv("ROBINHOOD_MCP_URL", "https://mcp.example.test/trading");
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}"));
+      if (request.method === "tools/call") {
+        calls.push({ name: request.params.name, args: request.params.arguments });
+      }
+      const payload =
+        request.params?.name === "get_equity_quotes"
+          ? { quotes: [{ symbol: "AAPL", last_trade_price: "200" }] }
+          : { results: [] };
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { structuredContent: { data: payload, guide: "ok" } }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const { fetchRobinhoodOptionChain } = await import("../src/lib/robinhood");
+    const { setMcpOAuthTokens } = await import("../src/lib/mcp-oauth");
+    setMcpOAuthTokens("user-a", { accessToken: "test-token", tokenType: "Bearer" });
+
+    await fetchRobinhoodOptionChain("aapl", "user-a", { expiration: "2026-09-18", type: "call" });
+
+    const chain = calls.find((c) => c.name === "get_option_chains");
+    const instruments = calls.find((c) => c.name === "get_option_instruments");
+    expect(chain?.args).toEqual({ underlying_symbol: "AAPL" });
+    expect(chain?.args).not.toHaveProperty("symbol");
+    expect(chain?.args).not.toHaveProperty("symbols");
+    expect(instruments?.args).toEqual({
+      chain_symbol: "AAPL",
+      expiration_dates: "2026-09-18",
+      type: "call"
+    });
+    expect(instruments?.args).not.toHaveProperty("symbol");
+    expect(instruments?.args).not.toHaveProperty("symbols");
+    expect(instruments?.args).not.toHaveProperty("underlying_symbol");
+  });
+
+  it("calls get_equity_historicals with symbols+start_time, not symbol or span", async () => {
+    vi.stubEnv("ROBINHOOD_ADAPTER", "mcp");
+    vi.stubEnv("ROBINHOOD_MCP_URL", "https://mcp.example.test/trading");
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body ?? "{}"));
+      if (request.method === "tools/call") calls.push(request.params.arguments);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { structuredContent: { data: { historicals: [] }, guide: "ok" } }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const { fetchRobinhoodHistoricals } = await import("../src/lib/robinhood");
+    const { setMcpOAuthTokens } = await import("../src/lib/mcp-oauth");
+    setMcpOAuthTokens("user-a", { accessToken: "test-token", tokenType: "Bearer" });
+
+    await fetchRobinhoodHistoricals("aapl", { interval: "day", span: "5year", userId: "user-a" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      symbols: ["AAPL"],
+      interval: "day",
+      bounds: "regular"
+    });
+    expect(calls[0]).toHaveProperty("start_time");
+    expect(calls[0]).not.toHaveProperty("symbol");
+    expect(calls[0]).not.toHaveProperty("span");
   });
 });
 

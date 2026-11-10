@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { deterministicBearFilter } from "../src/lib/strategy";
 import { isEscalationRegime } from "../src/lib/regime-watch";
 import { MARKET_REGIME_LABELS } from "../src/lib/market-regime";
 import type { MarketFactorBreakdown, MarketQuote, TradeProposal } from "../src/lib/types";
+import { deterministicBearFilter } from "../src/lib/strategy-risk";
 
 /**
  * Gate-level regression for the risk lane's typed-`MarketRegime` adoption: the crisis cap

@@ -18,12 +18,22 @@ const budget = await import("../src/lib/usage-budget");
 const { DEFAULT_POLICY } = await import("../src/lib/defaults");
 const { listNotificationEvents } = await import("../src/lib/db-notifications");
 
+const { upsertUserApiKey, deleteUserApiKey } = await import("../src/lib/db-api-keys");
+
 const BASE = "https://usage.example.test";
 const TOKEN = "test-token";
 
 type BudgetStatus = Awaited<ReturnType<typeof budget.getBudgetStatusCached>>;
 
-function status(providers: Array<{ name: string; status: "ok" | "warning" | "exceeded" | "unconfigured"; spentUsd?: number; monthlyBudgetUsd?: number }>): NonNullable<BudgetStatus> {
+function status(providers: Array<{
+  name: string;
+  status: "ok" | "warning" | "exceeded" | "unconfigured";
+  spentUsd?: number;
+  monthlyBudgetUsd?: number;
+  projectedEomUsd?: number | null;
+  projectedRunoutDate?: string | null;
+  spendCoverage?: string | null;
+}>): NonNullable<BudgetStatus> {
   return {
     generatedAt: new Date().toISOString(),
     month: "2026-07",
@@ -34,6 +44,9 @@ function status(providers: Array<{ name: string; status: "ok" | "warning" | "exc
       spentUsd: p.spentUsd ?? 0,
       remainingUsd: null,
       percentUsed: null,
+      projectedEomUsd: p.projectedEomUsd ?? null,
+      projectedRunoutDate: p.projectedRunoutDate ?? null,
+      spendCoverage: p.spendCoverage ?? null,
     })),
     summary: {
       totalBudgetUsd: 100,
@@ -47,43 +60,117 @@ function status(providers: Array<{ name: string; status: "ok" | "warning" | "exc
 }
 
 describe("usage-budget: cheaperModel", () => {
+  // 2026-09-18 catalog cleanup: gpt-4o / gpt-mini-latest / gpt-5.4-nano were removed. The OpenAI
+  // downgrade chain now ends at gpt-6-luna (the cheapest remaining OpenAI row), so any
+  // premium OpenAI slug — including historical/persisted ones that no longer match the catalog —
+  // downgrades to gpt-6-luna instead of falling off into "no cheaper model".
   it("maps known models down a tier and returns undefined when none", () => {
-    expect(budget.cheaperModel("gpt-4o")).toBe("gpt-4o-mini");
-    expect(budget.cheaperModel("claude-opus-4-8")).toBe("claude-sonnet-4-6");
+    expect(budget.cheaperModel("openai/gpt-4o")).toBe("openai/gpt-6-luna");
+    expect(budget.cheaperModel("anthropic/claude-opus-4-8")).toBe("anthropic/claude-sonnet-latest");
+    expect(budget.cheaperModel("anthropic/claude-opus-5-5")).toBeUndefined(); // owner rule (#3705): Opus 5.5 never downgrades on budget exhaustion
+    expect(budget.cheaperModel("claude-opus-5.5")).toBeUndefined(); // owner rule (#3705): Opus 5.5 never downgrades on budget exhaustion
     expect(budget.cheaperModel("claude-haiku-4-5-20251001")).toBeUndefined(); // already cheapest (prefix)
-    expect(budget.cheaperModel("gpt-4o-mini")).toBeUndefined();
+    expect(budget.cheaperModel("openai/gpt-5.4-nano")).toBe("openai/gpt-6-luna"); // historical; lands on luna
+    expect(budget.cheaperModel("gpt-5.5")).toBe("gpt-6-luna");
+    // grok-build-0.1 left the catalog: Grok has no cheaper row, so over budget means skip.
+    expect(budget.cheaperModel("grok-4.6")).toBeUndefined();
+    expect(budget.cheaperModel("x-ai/grok-latest")).toBeUndefined();
+    // Large 4 is cheaper than Medium 3.5, so Large downgrades to Small.
+    expect(budget.cheaperModel("mistral-large-latest")).toBe("mistral-small-latest");
+    // The Spark contributor tier is already cheaper than Glimmer.
+    expect(budget.cheaperModel("muse-spark-1.3-contributor")).toBeUndefined();
+    // Retired NON-contributor Muse rows never downgrade onto the train-on-your-prompts contributor
+    // tier without consent; no non-contributor Muse row is offered, so over budget means skip.
+    expect(budget.cheaperModel("muse-spark-1.3")).toBeUndefined();
+    expect(budget.cheaperModel("meta/muse-spark-1.3")).toBeUndefined();
+    expect(budget.cheaperModel("muse-glimmer-30b")).toBeUndefined();
+    expect(budget.cheaperModel("minimax-m3")).toBe("minimax-m3.1-flash");
+    expect(budget.cheaperModel("minimax-m3.1-flash")).toBeUndefined(); // no cheaper MiniMax row
+    // ST-4589 (2026-11-04): four OpenAI classes, astra -> sol -> terra -> luna.
+    expect(budget.cheaperModel("gpt-6-astra")).toBe("gpt-6.1-sol");
+    expect(budget.cheaperModel("openai/gpt-6.1-sol")).toBe("openai/gpt-6.1-terra");
+    expect(budget.cheaperModel("gpt-6.1-terra")).toBe("gpt-6-luna");
+    expect(budget.cheaperModel("gpt-6-luna")).toBe("gpt-6-luna");
+    expect(budget.cheaperModel("gpt-6-astra-pro")).toBe("gpt-6.1-sol"); // retired, still downgrades
+    expect(budget.cheaperModel("gpt-5.6-sol")).toBe("gpt-6.1-terra");
+    expect(budget.cheaperModel("muse-wonder-1.0")).toBeUndefined();
+    expect(budget.cheaperModel("muse-wonder-1.0-contributor")).toBeUndefined(); // Code CLI only, cost unknown
     expect(budget.cheaperModel(undefined)).toBeUndefined();
   });
 });
 
+describe("usage-budget: no automatic downgrade onto a contributor (train-on-prompts) tier (ST-4589 review)", () => {
+  it("only a contributor row may downgrade onto a contributor row, across the whole map", async () => {
+    const { displaySlugFor } = await import("../src/lib/llm-model-catalog");
+    const contributor = (id: string) => /-contributor$/i.test(displaySlugFor(id) || id);
+    for (const [from, to] of Object.entries(budget.CHEAPER_MODEL)) {
+      if (contributor(to)) expect(contributor(from), `${from} -> ${to} would move a run onto a contributor tier`).toBe(true);
+    }
+    // Including through cheaperModel's alias/prefix resolution for every spelling of the retired rows.
+    for (const id of ["muse-spark-1.3", "meta/muse-spark-1.3", "muse-glimmer-30b", "meta/muse-glimmer-30b", "muse-wonder-1.0", "meta/muse-wonder"]) {
+      const target = budget.cheaperModel(id);
+      expect(target === undefined || !contributor(target), `${id} -> ${target}`).toBe(true);
+    }
+    // MiniMax is unaffected.
+    expect(budget.cheaperModel("minimax-m3")).toBe("minimax-m3.1-flash");
+  });
+});
+
+describe("usage-budget: every downgrade arrow is strictly cheaper (ST-4589 review)", () => {
+  it("lands each CHEAPER_MODEL key on a lower blended list price than the row it is served as", async () => {
+    const { estimateLlmCostUsd } = await import("../src/lib/llm-usage");
+    const { displaySlugFor, CATALOG_DISPLAY_SLUGS } = await import("../src/lib/llm-model-catalog");
+    // Blended 3:1 input:output, priced as the row the id actually resolves to.
+    const blended = (id: string) => estimateLlmCostUsd(displaySlugFor(id) || id, 3_000_000, 1_000_000)!;
+    for (const [from, to] of Object.entries(budget.CHEAPER_MODEL)) {
+      if (from === to) continue; // the terminal row maps to itself (= no cheaper tier; skip)
+      expect(displaySlugFor(to), `${from} -> ${to} must be a catalog row`).toBeTruthy();
+      // Every target is an OFFERED row, never a retired one (owner 2026-11-05).
+      expect(CATALOG_DISPLAY_SLUGS, `${from} -> ${to} must be offered`).toContain(to);
+      expect(blended(to), `${from} (${blended(from)}) -> ${to} (${blended(to)})`).toBeLessThan(blended(from));
+    }
+  });
+});
+
 describe("usage-budget: evaluateBudgetForRun", () => {
+  const savedFallback = process.env.LLM_OPERATOR_FALLBACK;
   beforeEach(() => {
+    process.env.LLM_OPERATOR_FALLBACK = "off";
+    upsertUserApiKey("local", "openai", "native-openai-placeholder");
     process.env.USAGE_MONITOR_BASE_URL = BASE;
     process.env.USAGE_INGEST_TOKEN = TOKEN;
     process.env.USAGE_BUDGET_ENFORCE = "on";
   });
   afterEach(() => {
+    deleteUserApiKey("local", "openai");
+    deleteUserApiKey("local", "openrouter");
+    if (savedFallback === undefined) delete process.env.LLM_OPERATOR_FALLBACK;
+    else process.env.LLM_OPERATOR_FALLBACK = savedFallback;
     delete process.env.USAGE_MONITOR_BASE_URL;
     delete process.env.USAGE_INGEST_TOKEN;
     delete process.env.USAGE_BUDGET_ENFORCE;
   });
 
   it("downgrades the model when the LLM provider is over budget", async () => {
+    // 2026-09-18: premium OpenAI rows now downgrade all the way to gpt-6-luna (the cheapest
+    // remaining OpenAI row in the curated catalog); the chain stops there, so a higher-tier slug
+    // can't be downgraded further and a luna policy itself yields skip=true (see next test).
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o", redTeamLlmModel: "gpt-4o" },
+      { llmModel: "openai/gpt-4o", redTeamLlmModel: "openai/gpt-4o" },
       { status: status([{ name: "openai", status: "exceeded" }]) }
     );
     expect(decision.skip).toBe(false);
     expect(decision.downgraded).toBe(true);
-    expect(decision.llmModel).toBe("gpt-4o-mini");
-    expect(decision.redTeamLlmModel).toBe("gpt-4o-mini");
+    expect(decision.llmModel).toBe("openai/gpt-6-luna");
+    expect(decision.redTeamLlmModel).toBe("openai/gpt-6-luna");
   });
 
   it("skips the cycle when over budget and already on the cheapest tier", async () => {
+    // gpt-6-luna is the curated bottom of the OpenAI chain now (gpt-5.4-nano was removed).
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o-mini" },
+      { llmModel: "openai/gpt-6-luna" },
       { status: status([{ name: "openai", status: "exceeded" }]) }
     );
     expect(decision.skip).toBe(true);
@@ -91,9 +178,11 @@ describe("usage-budget: evaluateBudgetForRun", () => {
   });
 
   it("still skips when green is cheapest even if the red model could be downgraded (F6)", async () => {
+    // The red seat would downgrade (claude-opus-4-8 -> claude-sonnet-latest), but the green seat
+    // is already at luna so the cycle is skipped per the F6 invariant.
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o-mini", redTeamLlmModel: "claude-opus-4-8" },
+      { llmModel: "openai/gpt-6-luna", redTeamLlmModel: "anthropic/claude-opus-4-8" },
       { status: status([{ name: "openai", status: "exceeded" }]) }
     );
     expect(decision.skip).toBe(true);
@@ -116,7 +205,7 @@ describe("usage-budget: evaluateBudgetForRun", () => {
   it("does nothing when the LLM provider is under budget", async () => {
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o" },
+      { llmModel: "openai/gpt-4o" },
       { status: status([{ name: "openai", status: "ok" }, { name: "alpaca", status: "exceeded" }]) }
     );
     expect(decision.skip).toBe(false);
@@ -127,7 +216,7 @@ describe("usage-budget: evaluateBudgetForRun", () => {
     process.env.USAGE_BUDGET_ENFORCE = "off";
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o" },
+      { llmModel: "openai/gpt-4o" },
       { status: status([{ name: "openai", status: "exceeded" }]) }
     );
     expect(decision.skip).toBe(false);
@@ -137,18 +226,87 @@ describe("usage-budget: evaluateBudgetForRun", () => {
   it("is a no-op when budget status is unavailable (monitor down)", async () => {
     const decision = await budget.evaluateBudgetForRun(
       "local",
-      { llmModel: "gpt-4o" },
+      { llmModel: "openai/gpt-4o" },
       { status: null }
     );
     expect(decision.skip).toBe(false);
     expect(decision.downgraded).toBe(false);
   });
+
+  it("budgets native MiniMax independently from unrelated OpenRouter spend", async () => {
+    const userId = "minimax-budget-user";
+    upsertUserApiKey(userId, "minimax", "minimax-placeholder");
+    const policy = { llmModel: "minimax-m3.1-flash" }; // cheapest MiniMax row: over budget means skip
+    const overRouter = status([{ name: "openrouter", status: "exceeded" }, { name: "minimax", status: "ok" }]);
+    try {
+      expect(await budget.evaluateBudgetForRun(userId, policy, { status: overRouter })).toEqual({ skip: false, downgraded: false });
+      expect(await budget.previewBudgetDecision(userId, policy, { status: overRouter })).toEqual({ skip: false, downgraded: false });
+      const nativeExceeded = await budget.evaluateBudgetForRun(userId, policy, { status: status([{ name: "openrouter", status: "ok" }, { name: "minimax", status: "exceeded" }]) });
+      expect(nativeExceeded.skip).toBe(true);
+      expect(nativeExceeded.reason).toMatch(/minimax/);
+      upsertUserApiKey(userId, "openrouter", "openrouter-placeholder");
+      const routed = await budget.evaluateBudgetForRun(userId, policy, { status: overRouter });
+      expect(routed.skip).toBe(true);
+      expect(routed.reason).toMatch(/openrouter/);
+    } finally {
+      deleteUserApiKey(userId, "minimax");
+      deleteUserApiKey(userId, "openrouter");
+    }
+  });
+
+  it("enforces on openrouter when spend is booked there (universal routing)", async () => {
+    upsertUserApiKey("local", "openrouter", "openrouter-placeholder");
+    // gpt-6-luna is the new cheapest OpenAI row — already at the bottom, so over-OpenRouter
+    // spend correctly skips rather than downgrade to a no-longer-existent cheaper tier.
+    const decision = await budget.evaluateBudgetForRun(
+      "local",
+      { llmModel: "openai/gpt-6-luna" },
+      { status: status([{ name: "openrouter", status: "exceeded" }, { name: "openai", status: "ok" }]) }
+    );
+    expect(decision.skip).toBe(true);
+    expect(decision.downgraded).toBe(false);
+    expect(decision.reason).toMatch(/openrouter/i);
+  });
+
+  it("downgrades using OpenRouter status when its credential serves the run", async () => {
+    upsertUserApiKey("local", "openrouter", "openrouter-placeholder");
+    const decision = await budget.evaluateBudgetForRun(
+      "local",
+      { llmModel: "openai/gpt-4o", redTeamLlmModel: "openai/gpt-4o" },
+      { status: status([{ name: "openrouter", status: "exceeded" }, { name: "openai", status: "ok" }]) }
+    );
+    expect(decision.skip).toBe(false);
+    expect(decision.downgraded).toBe(true);
+    // 2026-09-18: OpenAI downgrade chain ends at gpt-6-luna.
+    expect(decision.llmModel).toBe("openai/gpt-6-luna");
+  });
+
+  it("skips (never silently moves onto the contributor tier) a stored retired Muse Spark when over budget", async () => {
+    upsertUserApiKey("local", "openrouter", "openrouter-placeholder");
+    const decision = await budget.evaluateBudgetForRun(
+      "local",
+      { llmModel: "muse-spark-1.3" },
+      { status: status([{ name: "openrouter", status: "exceeded" }]) }
+    );
+    expect(decision.skip).toBe(true);
+    expect(decision.downgraded).toBe(false);
+    expect(decision.llmModel).toBeUndefined();
+  });
 });
 
 describe("usage-budget: getBudgetStatusCached", () => {
-  afterEach(() => {
+  const priorReadToken = process.env.USAGE_READ_TOKEN;
+  beforeEach(() => {
+    delete process.env.USAGE_READ_TOKEN;
+  });
+  afterEach(async () => {
     delete process.env.USAGE_MONITOR_BASE_URL;
     delete process.env.USAGE_INGEST_TOKEN;
+    if (priorReadToken === undefined) delete process.env.USAGE_READ_TOKEN;
+    else process.env.USAGE_READ_TOKEN = priorReadToken;
+    budget.resetUsageBudgetCacheForTests();
+    const { resetPeerLaneBackoffForTests } = await import("../src/lib/peer-lane-backoff");
+    resetPeerLaneBackoffForTests();
   });
 
   it("fetches + parses the monitor response with bearer auth", async () => {
@@ -170,6 +328,62 @@ describe("usage-budget: getBudgetStatusCached", () => {
   it("returns null when unconfigured", async () => {
     const s = await budget.getBudgetStatusCached({ force: true });
     expect(s).toBeNull();
+  });
+
+  it("parses projectedEomUsd/projectedRunoutDate/spendCoverage forecast fields when present", async () => {
+    process.env.USAGE_MONITOR_BASE_URL = BASE;
+    process.env.USAGE_INGEST_TOKEN = TOKEN;
+    const raw = {
+      generatedAt: new Date().toISOString(),
+      month: "2026-07",
+      providers: [
+        {
+          name: "openai",
+          status: "ok",
+          monthlyBudgetUsd: 100,
+          spentUsd: 20,
+          remainingUsd: 80,
+          percentUsed: 20,
+          projectedEomUsd: 145.5,
+          projectedRunoutDate: "2026-07-22",
+          spendCoverage: "complete",
+        },
+      ],
+      summary: { totalBudgetUsd: 100, totalSpentUsd: 20, remainingUsd: 80, percentUsed: 20, overBudget: false, warning: false },
+    };
+    const fetchImpl = (async () => new Response(JSON.stringify(raw), { status: 200 })) as unknown as typeof fetch;
+
+    const s = await budget.getBudgetStatusCached({ force: true, fetchImpl });
+    expect(s?.providers[0]?.projectedEomUsd).toBe(145.5);
+    expect(s?.providers[0]?.projectedRunoutDate).toBe("2026-07-22");
+    expect(s?.providers[0]?.spendCoverage).toBe("complete");
+  });
+
+  it("defaults forecast fields to null when the monitor response omits them (older monitor)", async () => {
+    process.env.USAGE_MONITOR_BASE_URL = BASE;
+    process.env.USAGE_INGEST_TOKEN = TOKEN;
+    const fetchImpl = (async () => new Response(JSON.stringify(status([{ name: "openai", status: "ok" }])), { status: 200 })) as unknown as typeof fetch;
+
+    const s = await budget.getBudgetStatusCached({ force: true, fetchImpl });
+    expect(s?.providers[0]?.projectedEomUsd).toBeNull();
+    expect(s?.providers[0]?.projectedRunoutDate).toBeNull();
+    expect(s?.providers[0]?.spendCoverage).toBeNull();
+  });
+
+  it("does not stall a run on a slow UM — serves stale cache / fail-open (#2550)", async () => {
+    process.env.USAGE_MONITOR_BASE_URL = BASE;
+    process.env.USAGE_INGEST_TOKEN = TOKEN;
+    const { recordPeerLaneSample, PEER_LANE_USAGE_MONITOR } = await import("../src/lib/peer-lane-backoff");
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, 6900);
+    recordPeerLaneSample(PEER_LANE_USAGE_MONITOR, 7100);
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return new Response(JSON.stringify(status([{ name: "openai", status: "ok" }])), { status: 200 });
+    }) as unknown as typeof fetch;
+    const s = await budget.getBudgetStatusCached({ fetchImpl });
+    expect(s).toBeNull();
+    expect(calls).toBe(0);
   });
 });
 
@@ -193,6 +407,63 @@ describe("usage-budget: checkBudgetAndAlert", () => {
     const after = listNotificationEvents("local", 100);
     expect(after.length).toBeGreaterThan(before);
     expect(after.some((n) => n.type === "budget_alert")).toBe(true);
+  });
+
+  it("suppresses a second alert for the same (user, provider, level) within the cooldown", async () => {
+    const provider = `cooldown-provider-${Date.now()}`;
+    const st = status([{ name: provider, status: "exceeded", spentUsd: 120, monthlyBudgetUsd: 100 }]);
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const afterFirst = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const afterSecond = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+
+    expect(afterSecond).toBe(afterFirst); // the second call was suppressed by the cooldown, no new alert
+  });
+
+  it("the alert cooldown survives a simulated process restart", async () => {
+    const { flushDurableStateNow, resetDurableStateCacheForTests } = await import("../src/lib/durable-state");
+    const provider = `restart-provider-${Date.now()}`;
+    const st = status([{ name: provider, status: "exceeded", spentUsd: 120, monthlyBudgetUsd: 100 }]);
+
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const afterFirst = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    flushDurableStateNow(); // the cooldown's debounced write lands in SQLite
+
+    // Simulate a restart: forget the in-memory durable-state cache (SQLite rows are untouched).
+    resetDurableStateCacheForTests();
+
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const afterSecond = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    // A fresh process must still honor the cooldown recorded before the "restart" — no duplicate alert.
+    expect(afterSecond).toBe(afterFirst);
+  });
+
+  it("alerts on a forecasted breach even when lagging MTD status is still ok", async () => {
+    const provider = `forecast-provider-${Date.now()}`;
+    // MTD spend is comfortably ok (20/100 = 20%), but the projected EOM spend (145) is well past
+    // the 100 budget — the forecast-aware alert must still fire.
+    const st = status([{
+      name: provider,
+      status: "ok",
+      spentUsd: 20,
+      monthlyBudgetUsd: 100,
+      projectedEomUsd: 145,
+      projectedRunoutDate: "2026-07-22",
+    }]);
+    const before = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const after = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("does not alert when MTD is ok and there is no forecasted breach", async () => {
+    const provider = `no-breach-provider-${Date.now()}`;
+    const st = status([{ name: provider, status: "ok", spentUsd: 10, monthlyBudgetUsd: 100, projectedEomUsd: 30 }]);
+    const before = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    await budget.checkBudgetAndAlert("local", DEFAULT_POLICY, { status: st });
+    const after = listNotificationEvents("local", 200).filter((n) => n.type === "budget_alert").length;
+    expect(after).toBe(before);
   });
 });
 
@@ -236,5 +507,23 @@ describe("usage-budget: formatBudgetAdvisory", () => {
     const line = budget.formatBudgetAdvisory(s);
     expect(line).toContain("anthropic");
     expect(line).not.toContain("openai");
+  });
+
+  it("surfaces a provider that's ok on lagging spend but forecasted to breach, with forecast fields", () => {
+    const s = status([{
+      name: "openai",
+      status: "ok",
+      spentUsd: 20,
+      monthlyBudgetUsd: 100,
+      projectedEomUsd: 145,
+      projectedRunoutDate: "2026-07-22",
+    }]);
+    const line = budget.formatBudgetAdvisory(s);
+    expect(line).toBeTruthy();
+    expect(line).toContain("openai");
+    expect(line).toContain("projected EOM $145.00");
+    expect(line).toContain("projected runout 2026-07-22");
+    expect(line).toContain("status=ok");
+    expect(line).toContain("forecast=exceeded");
   });
 });

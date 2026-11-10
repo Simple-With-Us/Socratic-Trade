@@ -6,6 +6,8 @@ import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS } from "../src/lib/llm-request";
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => ["SEC 8-K filing for AAPL.\nReported item(s): Item 2.02 Results of Operations and Financial Condition."],
@@ -28,8 +30,8 @@ afterEach(() => {
 
 async function seedLocalOpenAiKey(): Promise<() => void> {
   const { deleteUserApiKey, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
-  return () => deleteUserApiKey("local", "openai");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
+  return () => deleteUserApiKey("local", "openrouter");
 }
 
 describe("persistence and notifications", () => {
@@ -59,11 +61,11 @@ describe("persistence and notifications", () => {
 
   it("rejects overlapping strategy run locks", async () => {
     const { acquireStrategyLock, releaseStrategyLock } = await import("../src/lib/db");
-    expect(acquireStrategyLock()).toBe(true);
-    expect(acquireStrategyLock()).toBe(false);
-    releaseStrategyLock();
-    expect(acquireStrategyLock()).toBe(true);
-    releaseStrategyLock();
+    expect(acquireStrategyLock("owner1")).toBe(true);
+    expect(acquireStrategyLock("owner2")).toBe(false);
+    releaseStrategyLock("owner1");
+    expect(acquireStrategyLock("owner3")).toBe(true);
+    releaseStrategyLock("owner3");
   });
 
   it("keeps strategy run locks isolated per user", async () => {
@@ -71,12 +73,12 @@ describe("persistence and notifications", () => {
     const userA = `lock-a-${randomUUID()}`;
     const userB = `lock-b-${randomUUID()}`;
 
-    expect(acquireStrategyLock(userA)).toBe(true);
-    expect(acquireStrategyLock(userB)).toBe(true);
-    expect(acquireStrategyLock(userA)).toBe(false);
+    expect(acquireStrategyLock("owner-a", userA)).toBe(true);
+    expect(acquireStrategyLock("owner-b", userB)).toBe(true);
+    expect(acquireStrategyLock("owner-a2", userA)).toBe(false);
 
-    releaseStrategyLock(userA);
-    releaseStrategyLock(userB);
+    releaseStrategyLock("owner-a", userA);
+    releaseStrategyLock("owner-b", userB);
   });
 
   it("strips legacy dryRun/paperMode keys from old stored policy JSON instead of leaking them", async () => {
@@ -195,15 +197,15 @@ describe("persistence and notifications", () => {
   });
 
   it("writes one strategy_run audit event from runStrategyOnce", async () => {
-    const originalOpenAiKey = process.env.OPENAI_API_KEY;
+    const originalOpenAiKey = process.env.OPENROUTER_API_KEY;
     let cleanupOpenAiKey: (() => void) | undefined;
     // Seed a key + stub the LLM so the run completes (0 proposals). The strategy session now
     // requires a resolvable LLM credential — without one runStrategyOnce returns "failed" — and
     // this test only needs the run to complete to assert the audit event was written.
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
-      if (String(url).includes("api.openai.com")) {
-        return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [] }) }), {
+      if (String(url).includes("openrouter.ai") || String(url).includes("api.openai.com")) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals: [] }) } }] }), {
           status: 200,
           headers: { "content-type": "application/json" }
         });
@@ -256,7 +258,7 @@ describe("persistence and notifications", () => {
         systemState: "active",
         // Classic model so request-body assertions check temperature + exact caps
         // (reasoning-model bounds are covered by test/llm-request.test.ts).
-        llmModel: "gpt-4.1-mini",
+        llmModel: "openai/gpt-4o-mini",
         includedIndices: [],
         additionalSymbols: ["AAPL"],
         strategyAuthority: "decide"
@@ -268,18 +270,18 @@ describe("persistence and notifications", () => {
       expect(after).toBe(before + 1);
     } finally {
       cleanupOpenAiKey?.();
-      if (originalOpenAiKey) process.env.OPENAI_API_KEY = originalOpenAiKey;
-      else delete process.env.OPENAI_API_KEY;
+      if (originalOpenAiKey) process.env.OPENROUTER_API_KEY = originalOpenAiKey;
+      else delete process.env.OPENROUTER_API_KEY;
     }
   }, 30_000);
 
   it("records a failed Green Team LLM step when the proposal request times out", async () => {
-    const originalOpenAiKey = process.env.OPENAI_API_KEY;
+    const originalOpenAiKey = process.env.OPENROUTER_API_KEY;
     let cleanupOpenAiKey: (() => void) | undefined;
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) {
+      if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
         throw new Error("The operation was aborted due to timeout");
       }
       if (href.includes("nasdaq.com")) {
@@ -327,7 +329,7 @@ describe("persistence and notifications", () => {
       setPolicy({
         ...DEFAULT_POLICY,
         systemState: "active",
-        llmModel: "gpt-5.5",
+        llmModel: "openai/gpt-5.5",
         llmReasoningEffort: "high",
         includedIndices: [],
         additionalSymbols: ["AAPL"],
@@ -337,8 +339,8 @@ describe("persistence and notifications", () => {
       const result = await runStrategyOnce();
       expect(result.status).toBe("failed");
       // gpt-5.5 is a reasoning model, so the strategy call gets the reasoning-class-aware timeout
-      // (150s) rather than the base 60s — the message reports the actual bound that elapsed.
-      expect(result.summary).toContain("Green Team proposal timed out after 150s using OpenAI gpt-5.5");
+      // (360s) rather than the base 60s — the message reports the actual bound that elapsed.
+      expect(result.summary).toContain("Green Team proposal timed out after 360s using OpenRouter gpt-5.5");
       expect(result.llmSteps).toMatchObject([
         {
           step: "bull",
@@ -364,22 +366,22 @@ describe("persistence and notifications", () => {
       expect(runAudit?.llmSteps).toMatchObject([{ step: "bull", status: "failed" }]);
     } finally {
       cleanupOpenAiKey?.();
-      if (originalOpenAiKey) process.env.OPENAI_API_KEY = originalOpenAiKey;
-      else delete process.env.OPENAI_API_KEY;
+      if (originalOpenAiKey) process.env.OPENROUTER_API_KEY = originalOpenAiKey;
+      else delete process.env.OPENROUTER_API_KEY;
     }
   }, 30_000);
 
   it("records a pre-run portfolio snapshot before any proposals execute", async () => {
-    const originalOpenAiKey = process.env.OPENAI_API_KEY;
+    const originalOpenAiKey = process.env.OPENROUTER_API_KEY;
     let cleanupOpenAiKey: (() => void) | undefined;
     // Seed a key + stub the LLM to return 0 proposals → the run completes as a no-op. (The strategy
     // session now requires a resolvable LLM credential; without one runStrategyOnce returns "failed".)
     // We just need to verify a pre-run snapshot was written with the run's runId.
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) {
-        return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [] }) }), {
+      if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals: [] }) } }] }), {
           status: 200,
           headers: { "content-type": "application/json" }
         });
@@ -433,7 +435,7 @@ describe("persistence and notifications", () => {
         systemState: "active",
         // Classic model so request-body assertions check temperature + exact caps
         // (reasoning-model bounds are covered by test/llm-request.test.ts).
-        llmModel: "gpt-4.1-mini",
+        llmModel: "openai/gpt-4o-mini",
         includedIndices: [],
         additionalSymbols: ["AAPL"],
         strategyAuthority: "decide"
@@ -450,21 +452,21 @@ describe("persistence and notifications", () => {
       expect(runSnapshots.length).toBeGreaterThanOrEqual(2);
     } finally {
       cleanupOpenAiKey?.();
-      if (originalOpenAiKey) process.env.OPENAI_API_KEY = originalOpenAiKey;
-      else delete process.env.OPENAI_API_KEY;
+      if (originalOpenAiKey) process.env.OPENROUTER_API_KEY = originalOpenAiKey;
+      else delete process.env.OPENROUTER_API_KEY;
     }
   }, 20_000);
 
   it("sends retrieved context in user content instead of the stable system prompt", async () => {
-    const originalOpenAiKey = process.env.OPENAI_API_KEY;
+    const originalOpenAiKey = process.env.OPENROUTER_API_KEY;
     let cleanupOpenAiKey: (() => void) | undefined;
-    process.env.OPENAI_API_KEY = "test-openai-key";
+    process.env.OPENROUTER_API_KEY = "test-openai-key";
     const openAiBodies: any[] = [];
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) {
+      if ((href.includes("openrouter.ai") || href.includes("api.openai.com"))) {
         openAiBodies.push(JSON.parse(String(init?.body ?? "{}")));
-        return new Response(JSON.stringify({ output_text: JSON.stringify({ proposals: [] }) }), {
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ proposals: [] }) } }] }), {
           status: 200,
           headers: { "content-type": "application/json" }
         });
@@ -516,7 +518,7 @@ describe("persistence and notifications", () => {
         systemState: "active",
         // Classic model so request-body assertions check temperature + exact caps
         // (reasoning-model bounds are covered by test/llm-request.test.ts).
-        llmModel: "gpt-4.1-mini",
+        llmModel: "openai/gpt-4o-mini",
         includedIndices: [],
         additionalSymbols: ["AAPL"],
         strategyAuthority: "decide"
@@ -528,17 +530,17 @@ describe("persistence and notifications", () => {
       // exactly ONE LLM call (the Bull). The Red Team review only runs per risk-adding opening —
       // its request bounds are covered by test/red-team.test.ts.
       expect(openAiBodies).toHaveLength(1);
-      expect(openAiBodies[0].max_output_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal);
+      expect(openAiBodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.strategyProposal);
       // The Bull (proposer) stays deterministic, greedy temp-0.
       expect(openAiBodies[0].temperature).toBe(LLM_REQUEST_DEFAULTS.deterministicTemperature);
-      expect(openAiBodies.every((body) => body.max_completion_tokens === undefined)).toBe(true);
 
       const bullBody = openAiBodies[0];
       const systemContent = bullBody.input.find((item: any) => item.role === "system")?.content ?? "";
       const userContent = JSON.parse(bullBody.input.find((item: any) => item.role === "user")?.content ?? "{}");
       expect(systemContent).toContain('Current executionMode is "broker/paper"');
       expect(userContent.executionMode).toBe("broker/paper");
-      expect(userContent.executionModeClarification).toContain("simulated fills");
+      expect(userContent.executionModeClarification).toContain("deterministic fills");
+      expect(userContent.executionModeClarification).toContain("not a product account");
       expect(systemContent).toContain("`retrievedFinancialContext`");
       expect(systemContent).not.toContain("Item 2.02 Results of Operations");
       expect(userContent.retrievedFinancialContext).toContain("Item 2.02 Results of Operations");
@@ -546,15 +548,17 @@ describe("persistence and notifications", () => {
       // header (via formatChunkWithProvenance, stubbed above to prepend "[SYMBOL]") before joining
       // into ragContext, so the model sees which symbol each chunk came from and can cite it — the
       // original chunk text still survives verbatim as a substring (asserted above).
-      expect(userContent.retrievedFinancialContext).toMatch(/^\[AAPL\]/);
+      // 2026-07-17 RAG-B10/B13: strategy.ts now wraps each symbol's chunks in a dossier header
+      // ("### RAG Dossier for SYMBOL") before the provenance-prefixed chunks.
+      expect(userContent.retrievedFinancialContext).toMatch(/^### RAG Dossier for AAPL/);
       for (const body of openAiBodies) {
         const content = body.input.find((item: any) => item.role === "user")?.content ?? "{}";
         expect(JSON.parse(content).executionMode).toBe("broker/paper");
       }
     } finally {
       cleanupOpenAiKey?.();
-      if (originalOpenAiKey) process.env.OPENAI_API_KEY = originalOpenAiKey;
-      else delete process.env.OPENAI_API_KEY;
+      if (originalOpenAiKey) process.env.OPENROUTER_API_KEY = originalOpenAiKey;
+      else delete process.env.OPENROUTER_API_KEY;
     }
   });
 
@@ -562,7 +566,7 @@ describe("persistence and notifications", () => {
     const { sendNotification } = await import("../src/lib/notifications");
     const event = await sendNotification({ type: "fill", title: "Fill", payload: { id: "1" } }, { policy: DEFAULT_POLICY });
     expect(event.status).toBe("skipped");
-    expect(event.error).toContain("Notifications Webhook");
+    expect(event.error).toBe("No notification channels enabled.");
   });
 
   it("bridges legacy notification events to direct email delivery", async () => {
@@ -591,17 +595,18 @@ describe("persistence and notifications", () => {
       { policy: DEFAULT_POLICY, userId }
     );
 
-    expect(event.status).toBe("skipped");
-    expect(event.error).toContain("Notifications Webhook");
+    expect(event.status).toBe("sent");
+    expect(event.error).toBeUndefined();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://api.resend.com/emails");
     const emailBody = calls[0]?.body as { text?: string };
     expect(emailBody).toMatchObject({
       from: "alerts@example.test",
       to: ["ops@example.test"],
-      subject: "AAPL fill"
+      subject: "[Socratic-Trade] AAPL fill"
     });
     expect(String(emailBody.text)).toContain("AAPL");
+    expect(String(emailBody.text)).toMatch(/\n\(sent by Socratic-Trade\)$/);
     const audit = getDb()
       .prepare("SELECT payload FROM audit_events WHERE user_id = ? AND kind = 'notify.sent' ORDER BY created_at DESC LIMIT 1")
       .get(userId) as { payload: string } | undefined;
@@ -632,7 +637,12 @@ describe("persistence and notifications", () => {
           ...DEFAULT_POLICY,
           notificationSettings: { webhookUrl: "https://example.test/webhook?token=secret", enabledEvents: ["fill"] }
         },
-        fetcher: async () => new Response(null, { status: 204 })
+        fetcher: async () => new Response(null, { status: 204 }),
+        // Legacy webhook path re-validates its target with a real DNS lookup on every send
+        // (SSRF/rebinding hardening — src/lib/egress-guard.ts). "example.test" is an
+        // IANA-reserved, never-resolving host used deliberately; stub the resolver so this
+        // test stays hermetic.
+        resolveWebhookHost: async () => ["8.8.8.8"]
       }
     );
 
@@ -654,12 +664,13 @@ describe("persistence and notifications", () => {
       accountNumber: "PA-URL-TEST",
       label: "Custom Alpaca",
       apiKey: "PK-KEY",
-      baseUrl: "https://custom-alpaca-endpoint.com/v2/",
+      apiSecret: "SK-SECRET",
+      baseUrl: "https://paper-api.alpaca.markets/v2/",
       isActive: true
     });
 
     const gateway1 = getAlpacaGateway(userId);
-    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://custom-alpaca-endpoint.com");
+    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://paper-api.alpaca.markets");
   });
 
   it("does not fall back to generic Alpaca keys for a selected connected account with missing credentials", async () => {

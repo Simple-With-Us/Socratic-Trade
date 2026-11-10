@@ -12,17 +12,22 @@
 // captures the latest filings and merges them into a rolling window, so over time
 // the dataset covers whichever symbols insiders actually traded — never fabricated.
 
-import { audit, getInternalSetting, setInternalSetting } from "../db";
+import { audit, getInternalSetting, listUsers, listWatchlistSymbols, setInternalSetting } from "../db";
 import { normalizeSymbol } from "../money";
+import { resolveSourceBool, resolveSourceNumber } from "../source-settings";
 import type { WebSourceRefreshResult } from "./types";
 import { retryBackoffMs } from "./congress";
+import { fetchInsiderBulkFilings, type BulkInsiderFiling } from "./insider-bulk";
 import { politeFetchText, runRateLimited, secUserAgent } from "./http";
+import { parseAndSaveForm4 } from "./sec-facts";
+import { loadTickerCikMap } from "./sec8k";
+import { padCik } from "./sec-filings";
+import { form4WritePath, persistCorpusSnapshot } from "../rag/corpus-layout";
 
 const DATASET_KEY = "webSource:insider:dataset";
 const ATTEMPT_KEY = "webSource:insider:lastAttempt";
 const DEFAULT_TTL_MS = 24 * 60 * 60_000; // daily
-const DEFAULT_WINDOW_DAYS = 30; // how long an insider filing stays in the rolling window
-const DEFAULT_MAX_FILINGS = 30; // ownership XMLs parsed per refresh (politeness: ~2 reqs each)
+const DEFAULT_WINDOW_DAYS = 90; // dollar score window: net purchases / value traded
 const SEC_BASE = "https://www.sec.gov";
 
 export interface InsiderFiling {
@@ -32,6 +37,10 @@ export interface InsiderFiling {
   sellTx: number; // count of open-market sale transactions
   buyShares: number;
   sellShares: number;
+  /** Open-market purchase dollars (shares * price). Absent on older rows. */
+  buyValue?: number;
+  /** Open-market sale dollars (shares * price). Absent on older rows. */
+  sellValue?: number;
   filedAt: string; // ISO date
   accession: string;
 }
@@ -40,6 +49,10 @@ export interface InsiderDataset {
   filings: InsiderFiling[];
   fetchedAt: string;
   recordCount: number;
+  /** Window used when `signals` was built. Mismatch falls back to aggregating filings. */
+  windowDays?: number;
+  /** Precomputed per-symbol scores so a scan does not re-walk the dataset. */
+  signals?: Record<string, InsiderSignal>;
 }
 
 export interface InsiderSignal {
@@ -52,13 +65,27 @@ export interface InsiderSignal {
 }
 
 export function insiderTtlMs(): number {
-  const v = Number(process.env.WEB_SOURCE_INSIDER_TTL_MS ?? DEFAULT_TTL_MS);
+  const fromSettings = resolveSourceNumber("WEB_SOURCE_INSIDER_TTL_MS");
+  const v = fromSettings > 0 ? fromSettings : Number(process.env.WEB_SOURCE_INSIDER_TTL_MS ?? DEFAULT_TTL_MS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_TTL_MS;
 }
 
 function windowDays(): number {
-  const v = Number(process.env.WEB_SOURCE_INSIDER_WINDOW_DAYS ?? DEFAULT_WINDOW_DAYS);
+  const fromSettings = resolveSourceNumber("WEB_SOURCE_INSIDER_WINDOW_DAYS");
+  const v = fromSettings > 0 ? fromSettings : Number(process.env.WEB_SOURCE_INSIDER_WINDOW_DAYS ?? DEFAULT_WINDOW_DAYS);
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_WINDOW_DAYS;
+}
+
+/**
+ * Cap on ownership XMLs parsed from the atom feed. Null means uncapped.
+ * The catalog default is 0 (no cap). A positive user, server, or env override
+ * is honored. Quarterly bulk rows never use this cap — the old default of 60
+ * plus a 20-symbol watchlist slice is what left ~150 symbols partial.
+ */
+export function insiderXmlFilingCap(): number | null {
+  const fromSettings = resolveSourceNumber("WEB_SOURCE_INSIDER_MAX_FILINGS");
+  if (Number.isFinite(fromSettings) && fromSettings > 0) return Math.floor(fromSettings);
+  return null;
 }
 
 export function getInsiderDataset(): InsiderDataset | undefined {
@@ -144,21 +171,67 @@ export function parseForm4Xml(xml: string, ctx: { accession: string }): InsiderF
   let sellTx = 0;
   let buyShares = 0;
   let sellShares = 0;
+  let buyValue = 0;
+  let sellValue = 0;
   // Only non-derivative open-market transactions carry directional sentiment.
   for (const block of xml.split(/<nonDerivativeTransaction>/).slice(1)) {
     const code = block.match(/<transactionCode>([A-Z])<\/transactionCode>/)?.[1];
     if (code !== "P" && code !== "S") continue;
     const shares = Number(block.match(/<transactionShares>[\s\S]*?<value>([\d.]+)<\/value>/)?.[1] ?? 0);
+    const price = Number(block.match(/<transactionPricePerShare>[\s\S]*?<value>([\d.]+)<\/value>/)?.[1] ?? "");
+    const safeShares = Number.isFinite(shares) ? shares : 0;
+    const value = safeShares > 0 && Number.isFinite(price) && price > 0 ? safeShares * price : 0;
     if (code === "P") {
       buyTx++;
-      buyShares += Number.isFinite(shares) ? shares : 0;
+      buyShares += safeShares;
+      buyValue += value;
     } else {
       sellTx++;
-      sellShares += Number.isFinite(shares) ? shares : 0;
+      sellShares += safeShares;
+      sellValue += value;
     }
   }
   if (buyTx === 0 && sellTx === 0) return null; // no discretionary open-market activity
-  return { symbol, owner, buyTx, sellTx, buyShares, sellShares, filedAt: filedAt.slice(0, 10), accession: ctx.accession };
+  return {
+    symbol,
+    owner,
+    buyTx,
+    sellTx,
+    buyShares,
+    sellShares,
+    buyValue,
+    sellValue,
+    filedAt: filedAt.slice(0, 10),
+    accession: ctx.accession
+  };
+}
+
+/**
+ * 0–100 score. Dollar value wins when any priced transaction exists:
+ * 100 * buyValue / (buyValue + sellValue), which is 50 + 50 * (net / total)
+ * for net = buyValue - sellValue and total = buyValue + sellValue.
+ * Unpriced filings fall back to shares, then to transaction counts, so a
+ * pushed 0–100 marker (counts only) still round-trips.
+ */
+function sentimentRatio(buy: number, sell: number): number | null {
+  if (!(buy > 0 || sell > 0)) return null;
+  const total = buy + sell;
+  if (!(total > 0)) return null;
+  return Math.round((buy / total) * 100);
+}
+
+export function insiderSentimentScore(list: InsiderFiling[]): number | null {
+  const buyValue = list.reduce((sum, filing) => sum + (filing.buyValue ?? 0), 0);
+  const sellValue = list.reduce((sum, filing) => sum + (filing.sellValue ?? 0), 0);
+  const byValue = sentimentRatio(buyValue, sellValue);
+  if (byValue != null) return byValue;
+  const buyShares = list.reduce((sum, filing) => sum + filing.buyShares, 0);
+  const sellShares = list.reduce((sum, filing) => sum + filing.sellShares, 0);
+  const byShares = sentimentRatio(buyShares, sellShares);
+  if (byShares != null) return byShares;
+  const buyTx = list.reduce((sum, filing) => sum + filing.buyTx, 0);
+  const sellTx = list.reduce((sum, filing) => sum + filing.sellTx, 0);
+  return sentimentRatio(buyTx, sellTx);
 }
 
 // ── Aggregation (pure) ───────────────────────────────────────────────────────
@@ -183,14 +256,13 @@ export function aggregateInsiderSignals(
 
   const out: Record<string, InsiderSignal> = {};
   for (const [symbol, list] of bySymbol) {
-    const buyTx = list.reduce((s, f) => s + f.buyTx, 0);
-    const sellTx = list.reduce((s, f) => s + f.sellTx, 0);
-    if (buyTx + sellTx === 0) continue;
+    const score = insiderSentimentScore(list);
+    if (score == null) continue;
     const buyFilings = list.filter((f) => f.buyTx > f.sellTx).length;
     const sellFilings = list.filter((f) => f.sellTx > f.buyTx).length;
     const owners = distinct(list.map((f) => f.owner));
     out[symbol] = {
-      insiderSentiment: Math.round((buyTx / (buyTx + sellTx)) * 100),
+      insiderSentiment: score,
       buyFilings,
       sellFilings,
       owners,
@@ -218,8 +290,31 @@ function buildInsiderBulletin(symbol: string, buyFilings: number, sellFilings: n
 
 export function getInsiderSignals(symbols: string[], now: number = Date.now()): Record<string, InsiderSignal> {
   const dataset = getInsiderDataset();
-  if (!dataset?.filings?.length) return {};
+  if (!dataset) return {};
+  const window = windowDays();
+  if (dataset.signals && dataset.windowDays === window) {
+    const out: Record<string, InsiderSignal> = {};
+    for (const raw of symbols) {
+      const symbol = normalizeSymbol(raw);
+      const signal = symbol ? dataset.signals[symbol] : undefined;
+      if (signal) out[symbol] = signal;
+    }
+    return out;
+  }
+  if (!dataset.filings?.length) return {};
   return aggregateInsiderSignals(dataset.filings, symbols, now);
+}
+
+function filingsToDataset(filings: InsiderFiling[], fetchedAt: string, now: number): InsiderDataset {
+  const window = windowDays();
+  const symbols = [...new Set(filings.map((filing) => filing.symbol))];
+  return {
+    filings,
+    fetchedAt,
+    recordCount: filings.length,
+    windowDays: window,
+    signals: aggregateInsiderSignals(filings, symbols, now, window)
+  };
 }
 
 // ── Live refresh ─────────────────────────────────────────────────────────────
@@ -233,25 +328,175 @@ export function isInsiderRefreshDue(now: number = Date.now()): boolean {
   return now - Date.parse(dataset.fetchedAt) >= insiderTtlMs();
 }
 
-async function scrapeRecentForm4s(now: number): Promise<InsiderFiling[]> {
-  const ua = secUserAgent();
-  const feed = await politeFetchText(
-    `${SEC_BASE}/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom`,
-    { headers: { "user-agent": ua, accept: "application/atom+xml" } }
+function cikFromEdgarDir(dir: string): string {
+  const raw = dir.match(/\/data\/(\d+)\//)?.[1] ?? "";
+  return raw ? padCik(raw) : "";
+}
+
+function persistForm4Xml(xml: string, dir: string, accession: string, parsed: InsiderFiling | null): void {
+  const cik =
+    xml.match(/<issuerCik>([^<]+)<\/issuerCik>/)?.[1]?.trim() ||
+    cikFromEdgarDir(dir);
+  if (!cik) return;
+  try {
+    parseAndSaveForm4(xml, cik, accession, parsed?.symbol ?? "");
+  } catch {
+    // Structured persist is additive; sentiment dataset still stores the filing.
+  }
+  persistCorpusSnapshot(form4WritePath(accession, "ownership.xml"), xml);
+  persistCorpusSnapshot(
+    form4WritePath(accession, "summary.json"),
+    JSON.stringify({
+      cik,
+      accession,
+      symbol: parsed?.symbol ?? "",
+      owner: parsed?.owner ?? "",
+      filedAt: parsed?.filedAt ?? "",
+      buyTx: parsed?.buyTx ?? 0,
+      sellTx: parsed?.sellTx ?? 0
+    })
   );
-  const filings = parseCurrentForm4Feed(feed).slice(0, Number(process.env.WEB_SOURCE_INSIDER_MAX_FILINGS ?? DEFAULT_MAX_FILINGS));
+}
+
+async function fetchForm4FromDirs(
+  filings: Array<{ dir: string; accession: string }>,
+  ua: string
+): Promise<InsiderFiling[]> {
   const parsed = await runRateLimited(filings, 250, async ({ dir, accession }) => {
     try {
       const indexJson = JSON.parse(await politeFetchText(`${dir}index.json`, { headers: { "user-agent": ua } }));
       const xmlName = pickOwnershipXml(indexJson);
       if (!xmlName) return null;
       const xml = await politeFetchText(`${dir}${xmlName}`, { headers: { "user-agent": ua } });
-      return parseForm4Xml(xml, { accession });
+      const filing = parseForm4Xml(xml, { accession });
+      persistForm4Xml(xml, dir, accession, filing);
+      return filing;
     } catch {
       return null;
     }
   });
   return parsed.filter((f): f is InsiderFiling => f !== null);
+}
+
+function allWatchlistSymbols(): string[] {
+  const out = new Set<string>();
+  for (const userId of listUsers()) {
+    for (const item of listWatchlistSymbols(userId)) {
+      if (item.symbol) out.add(normalizeSymbol(item.symbol));
+    }
+  }
+  return [...out];
+}
+
+function bulkToFiling(row: BulkInsiderFiling): InsiderFiling {
+  return {
+    symbol: row.symbol,
+    owner: row.owner,
+    buyTx: row.buyTx,
+    sellTx: row.sellTx,
+    buyShares: row.buyShares,
+    sellShares: row.sellShares,
+    buyValue: row.buyValue,
+    sellValue: row.sellValue,
+    filedAt: row.filedAt,
+    accession: row.accession
+  };
+}
+
+async function scrapeForm4XmlDelta(now: number, bulkCovered: boolean): Promise<InsiderFiling[]> {
+  const ua = secUserAgent();
+  const cap = insiderXmlFilingCap();
+  const feed = await politeFetchText(
+    `${SEC_BASE}/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom`,
+    { headers: { "user-agent": ua, accept: "application/atom+xml" } }
+  );
+  let current = parseCurrentForm4Feed(feed);
+  if (cap != null) current = current.slice(0, cap);
+  const out = await fetchForm4FromDirs(current, ua);
+
+  // The watchlist pass fills the active quarter when that quarter's ZIP did
+  // not download.  A previous-quarter ZIP is not coverage.  The pass is not
+  // sliced to 20 symbols.
+  if (bulkCovered || !resolveSourceBool("WEB_SOURCE_INSIDER_WATCHLIST")) return out;
+
+  let tickerCik: Record<string, string> = {};
+  try {
+    tickerCik = await loadTickerCikMap(now);
+  } catch {
+    return out;
+  }
+  const watch = allWatchlistSymbols().filter((symbol) => tickerCik[symbol]);
+  const seen = new Set(current.map((filing) => filing.accession));
+  const extra: Array<{ dir: string; accession: string }> = [];
+  for (const symbol of watch) {
+    if (cap != null && current.length + extra.length >= cap) break;
+    try {
+      const cik = tickerCik[symbol];
+      const atom = await politeFetchText(
+        `${SEC_BASE}/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=4&owner=include&count=8&output=atom`,
+        { headers: { "user-agent": ua, accept: "application/atom+xml" } }
+      );
+      for (const hit of parseCurrentForm4Feed(atom)) {
+        if (seen.has(hit.accession)) continue;
+        seen.add(hit.accession);
+        extra.push(hit);
+        if (cap != null && current.length + extra.length >= cap) break;
+      }
+    } catch {
+      // Skip one symbol; keep the rest of the watchlist pass.
+    }
+  }
+  if (extra.length === 0) return out;
+  const room = cap == null ? extra : extra.slice(0, Math.max(0, cap - current.length));
+  const more = await fetchForm4FromDirs(room, ua);
+  return [...out, ...more];
+}
+
+/**
+ * One row per accession.  XML wins identity fields.  Dollar, share, and
+ * transaction totals keep the larger side so an unpriced Form 4 XML body
+ * cannot erase `TRANS_PRICEPERSHARE * TRANS_SHARES` from the quarterly ZIP.
+ */
+export function mergeInsiderByAccession(bulk: InsiderFiling[], xml: InsiderFiling[]): InsiderFiling[] {
+  const byAccession = new Map<string, InsiderFiling>();
+  for (const filing of bulk) byAccession.set(filing.accession, filing);
+  for (const filing of xml) {
+    const prior = byAccession.get(filing.accession);
+    if (!prior) {
+      byAccession.set(filing.accession, filing);
+      continue;
+    }
+    byAccession.set(filing.accession, {
+      ...filing,
+      buyValue: Math.max(prior.buyValue ?? 0, filing.buyValue ?? 0),
+      sellValue: Math.max(prior.sellValue ?? 0, filing.sellValue ?? 0),
+      buyShares: Math.max(prior.buyShares, filing.buyShares),
+      sellShares: Math.max(prior.sellShares, filing.sellShares),
+      buyTx: Math.max(prior.buyTx, filing.buyTx),
+      sellTx: Math.max(prior.sellTx, filing.sellTx)
+    });
+  }
+  return [...byAccession.values()];
+}
+
+async function scrapeRecentForm4s(now: number): Promise<InsiderFiling[]> {
+  const window = windowDays();
+  let bulk: InsiderFiling[] = [];
+  let currentQuarterLoaded = false;
+  try {
+    const loaded = await fetchInsiderBulkFilings(now, window);
+    bulk = loaded.filings.map(bulkToFiling);
+    currentQuarterLoaded = loaded.currentQuarterLoaded;
+  } catch {
+    bulk = [];
+  }
+  let xml: InsiderFiling[] = [];
+  try {
+    xml = await scrapeForm4XmlDelta(now, currentQuarterLoaded);
+  } catch (error) {
+    if (bulk.length === 0) throw error;
+  }
+  return mergeInsiderByAccession(bulk, xml);
 }
 
 /** Merge fresh filings into the rolling window, deduped by accession, pruned to window. */
@@ -314,6 +559,8 @@ export function coerceInsiderFiling(raw: unknown): InsiderFiling | null {
     sellTx: num(o.sellTx),
     buyShares: num(o.buyShares),
     sellShares: num(o.sellShares),
+    buyValue: num(o.buyValue),
+    sellValue: num(o.sellValue),
     filedAt,
     accession
   };
@@ -325,7 +572,7 @@ export function upsertInsiderFilings(incoming: InsiderFiling[], now: number = Da
   const prior = getInsiderDataset();
   if (clean.length === 0) return { total: prior?.recordCount ?? 0 };
   const merged = mergeInsiderFilings(prior?.filings ?? [], clean, now);
-  const dataset: InsiderDataset = { filings: merged, fetchedAt: new Date(now).toISOString(), recordCount: merged.length };
+  const dataset = filingsToDataset(merged, new Date(now).toISOString(), now);
   setInternalSetting(DATASET_KEY, dataset);
   return { total: merged.length };
 }
@@ -361,7 +608,7 @@ export async function refreshInsider(now: number = Date.now(), force = false): P
     return { id: "insider", ok: false, recordCount: 0, sources: [], fetchedAt: prior?.fetchedAt ?? "", warning: warning ?? "no records" };
   }
 
-  const dataset: InsiderDataset = { filings: merged, fetchedAt, recordCount: merged.length };
+  const dataset = filingsToDataset(merged, fetchedAt, now);
   setInternalSetting(DATASET_KEY, dataset);
   const ok = fresh.length > 0;
   audit("web_source_refresh", { id: "insider", ok, recordCount: merged.length, fresh: fresh.length, warning });

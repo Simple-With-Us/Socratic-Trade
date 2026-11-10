@@ -3,20 +3,88 @@
 // runStrategyOnce gate WITHOUT a strategy↔triggers import cycle. triggers.ts re-exports these for
 // callers that already import from it (tests).
 //
-// CONFIG (who sets it / how to modify): the limit is a per-user POLICY setting
-// (`policy.tuning.llmDailyTokenBudget` / `llmDailyCostBudgetUsd`), editable in the dashboard
-// Settings → Tuning UI and via `PATCH /api/policy`. When a policy value is unset, it falls back to
-// the operator env default (`TRIGGER_LLM_DAILY_TOKEN_BUDGET` / `TRIGGER_LLM_DAILY_COST_BUDGET_USD`).
-// 0 / negative / unset on both = no ceiling (default OFF — behavior byte-identical).
+// CONFIG (who sets it / how to modify): the live cap is a per-user setting
+// (`user_settings.llm_daily_budget`), editable in Settings → Daily LLM Budget and iOS
+// Account & Settings, and via `GET/PATCH /api/settings/llm-budget`. That is NOT an Infisical
+// secret. Legacy `policy.tuning.llmDailyTokenBudget` / `llmDailyCostBudgetUsd` still bind when
+// the user setting is unset. Env `TRIGGER_LLM_DAILY_*` is a retired operator default only —
+// do not put a per-user cap back in Infisical. 0 / unset on every tier = no ceiling (default OFF).
 //
 // ENFORCEMENT: `checkLlmDailyBudget` is the ledger read; `isOverLlmBudget` / `assertWithinLlmBudget`
 // are the guards the spend primitives call, so EVERY current and future LLM/RAG spend site is covered
-// by one check rather than per-call-site gates.
+// by one check rather than per-call-site gates. When a cap is SET and today's ledger cannot be
+// read, the check fail-closes to skip (never overrun).
 import { randomUUID } from "crypto";
-import { DAILY_RESET_TIME_ZONE, getDb, getPolicy, startOfDayInTimeZone } from "./db";
+import {
+  DAILY_RESET_TIME_ZONE,
+  deleteUserSetting,
+  getDb,
+  getPolicy,
+  getUserSetting,
+  setUserSetting,
+  startOfDayInTimeZone
+} from "./db";
 import { getLlmUsageSummary } from "./llm-usage";
 import { getRagUsageSummary } from "./rag-metering";
 import type { TradingPolicy } from "./types";
+
+export const LLM_DAILY_BUDGET_SETTING_KEY = "llm_daily_budget";
+
+export interface UserLlmDailyBudget {
+  tokenBudget?: number;
+  costBudgetUsd?: number;
+}
+
+export type LlmBudgetLimitSource = "user" | "policy" | "env" | "none";
+
+export interface LlmBudgetResolvedLimits {
+  tokenLimit: number;
+  costLimit: number;
+  tokenSource: LlmBudgetLimitSource;
+  costSource: LlmBudgetLimitSource;
+}
+
+function asOptionalFiniteNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+/** Stored per-user overrides only (what the Settings UI edits). Missing key = inherit next tier. */
+export function getUserLlmDailyBudget(userId: string): UserLlmDailyBudget {
+  try {
+    const stored = getUserSetting<UserLlmDailyBudget | null>(userId, LLM_DAILY_BUDGET_SETTING_KEY, null);
+    if (!stored || typeof stored !== "object") return {};
+    return {
+      tokenBudget: asOptionalFiniteNumber(stored.tokenBudget),
+      costBudgetUsd: asOptionalFiniteNumber(stored.costBudgetUsd)
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** Merge a user-settings patch. `null` clears that field; omit a field to leave it. */
+export function setUserLlmDailyBudget(
+  userId: string,
+  patch: { tokenBudget?: number | null; costBudgetUsd?: number | null }
+): UserLlmDailyBudget {
+  const next: UserLlmDailyBudget = { ...getUserLlmDailyBudget(userId) };
+  if (patch.tokenBudget === null) {
+    delete next.tokenBudget;
+  } else if (asOptionalFiniteNumber(patch.tokenBudget) !== undefined) {
+    next.tokenBudget = patch.tokenBudget as number;
+  }
+  if (patch.costBudgetUsd === null) {
+    delete next.costBudgetUsd;
+  } else if (asOptionalFiniteNumber(patch.costBudgetUsd) !== undefined) {
+    next.costBudgetUsd = patch.costBudgetUsd as number;
+  }
+  if (next.tokenBudget === undefined && next.costBudgetUsd === undefined) {
+    deleteUserSetting(userId, LLM_DAILY_BUDGET_SETTING_KEY);
+    return {};
+  }
+  setUserSetting(userId, LLM_DAILY_BUDGET_SETTING_KEY, next);
+  return next;
+}
 
 function envNum(name: string, dflt: number): number {
   const raw = process.env[name];
@@ -25,20 +93,28 @@ function envNum(name: string, dflt: number): number {
   return Number.isFinite(n) && n >= 0 ? n : dflt;
 }
 
-/** Resolve a limit for one dimension. An EXPLICIT per-user policy value always wins over the env
- *  default — including `0`, which means "no limit" (an account opting OUT of an operator-set default).
- *  Only `undefined` (blank in the UI) inherits the env default. Positive = that limit; ≤0 = no ceiling. */
-function resolveLimit(policyValue: number | undefined, envName: string): number {
-  if (typeof policyValue === "number" && Number.isFinite(policyValue)) {
-    return policyValue > 0 ? policyValue : Number.POSITIVE_INFINITY;
+/** Resolve one dimension. User setting wins, then legacy policy.tuning, then retired env default.
+ *  An EXPLICIT finite value always wins over a lower tier — including `0`, which means "no limit"
+ *  (opting OUT of an operator-set default). Only `undefined` inherits the next tier. */
+function resolveLimitFromTiers(
+  userValue: number | undefined,
+  policyValue: number | undefined,
+  envName: string
+): { limit: number; source: LlmBudgetLimitSource } {
+  if (asOptionalFiniteNumber(userValue) !== undefined) {
+    return { limit: userValue! > 0 ? userValue! : Number.POSITIVE_INFINITY, source: "user" };
+  }
+  if (asOptionalFiniteNumber(policyValue) !== undefined) {
+    return { limit: policyValue! > 0 ? policyValue! : Number.POSITIVE_INFINITY, source: "policy" };
   }
   const env = envNum(envName, 0);
-  return env > 0 ? env : Number.POSITIVE_INFINITY;
+  if (env > 0) return { limit: env, source: "env" };
+  return { limit: Number.POSITIVE_INFINITY, source: "none" };
 }
 
 export interface LlmBudgetDecision {
   ok: boolean;
-  reason?: "token_budget" | "cost_budget";
+  reason?: "token_budget" | "cost_budget" | "ledger_unavailable";
   tokensToday?: number;
   costUsdToday?: number;
   tokenLimit?: number;
@@ -46,39 +122,25 @@ export interface LlmBudgetDecision {
 }
 
 /**
- * Hard per-user/day LLM usage ceiling. Reads the per-user policy limit (env fallback), then sums
- * TODAY's usage (America/New_York day boundary) for `userId` from the ledger in llm-usage.ts across
- * every provider/context/key. Default OFF: with no policy value AND no env limit, the limits are
- * +Infinity and this always returns ok. Pure + DB-read-only so it can be unit-tested directly.
+ * Hard per-user/day LLM usage ceiling. Reads user_settings (then legacy policy.tuning, then
+ * retired env), then sums TODAY's usage (America/New_York day) for `userId`. Default OFF.
+ * When a cap is set and the ledger cannot be read, returns ok:false (fail-closed skip).
  */
 export function checkLlmDailyBudget(userId: string, now: Date = new Date(), connectedAccountId?: string): LlmBudgetDecision {
-  // Resilient policy read: the budget check is called from spend primitives (withLlmGeneration,
-  // retrieveContextDetailed) in many contexts. If the per-user policy can't be read, degrade to the
-  // env-only limit rather than throwing — never let budget bookkeeping break an LLM/RAG call.
-  // Resolve the policy for the TARGETED account (a multi-account scheduler run passes its
-  // connectedAccountId) so the ceiling reflects that account's tuning, not the active account's; the
-  // usage ledger is still summed per-user below. Omitting it resolves the active account (unchanged).
-  let tuning: TradingPolicy["tuning"];
-  try {
-    tuning = getPolicy(userId, connectedAccountId).tuning;
-  } catch {
-    tuning = undefined;
-  }
-  const tokenLimit = resolveLimit(tuning?.llmDailyTokenBudget, "TRIGGER_LLM_DAILY_TOKEN_BUDGET");
-  const costLimit = resolveLimit(tuning?.llmDailyCostBudgetUsd, "TRIGGER_LLM_DAILY_COST_BUDGET_USD");
+  const { tokenLimit, costLimit } = resolveLlmLimits(userId, connectedAccountId);
   if (!Number.isFinite(tokenLimit) && !Number.isFinite(costLimit)) return { ok: true };
 
   const sinceIso = startOfDayInTimeZone(now, DAILY_RESET_TIME_ZONE).toISOString();
-  // LLM (model) spend from the llm_usage ledger…
-  const llmRows = getLlmUsageSummary({ sinceIso }).filter((r) => r.userId === userId);
-  let tokensToday = llmRows.reduce((sum, r) => sum + (r.totalTokens ?? 0), 0);
-  let costUsdToday = llmRows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
-  // …PLUS RAG (Voyage/Pinecone) spend from the rag_usage ledger — the ceiling gates RAG retrieval
-  // (retrieveContextDetailed), so RAG usage must count toward it too, else RAG spend never trips the
-  // limit. Tokens = embed/rerank input+output; cost = estimated Voyage/Pinecone USD.
-  const ragRows = getRagUsageSummary({ sinceIso }).filter((r) => r.userId === userId);
-  tokensToday += ragRows.reduce((sum, r) => sum + (r.tokensIn ?? 0) + (r.tokensOut ?? 0), 0);
-  costUsdToday += ragRows.reduce((sum, r) => sum + (r.costEstUsd ?? 0), 0);
+  let tokensToday: number;
+  let costUsdToday: number;
+  try {
+    const usage = sumLedgerUsage(userId, sinceIso);
+    tokensToday = usage.tokens;
+    costUsdToday = usage.costUsd;
+  } catch {
+    // Cap is set: never let a ledger fault overrun the day. Callers skip LLM/RAG.
+    return { ok: false, reason: "ledger_unavailable", tokenLimit, costLimitUsd: costLimit };
+  }
 
   if (Number.isFinite(tokenLimit) && tokensToday >= tokenLimit) {
     return { ok: false, reason: "token_budget", tokensToday, costUsdToday, tokenLimit, costLimitUsd: costLimit };
@@ -113,17 +175,22 @@ function reservationTtlMs(): number {
 
 const reservationKey = (userId: string): string => `llm_budget_reservation:${userId}`;
 
-/** Resolve the per-user daily token/cost limits (env fallback) for the targeted account. */
-function resolveLlmLimits(userId: string, connectedAccountId?: string): { tokenLimit: number; costLimit: number } {
+/** Resolve the per-user daily token/cost limits (user settings → legacy policy → retired env). */
+export function resolveLlmLimits(userId: string, connectedAccountId?: string): LlmBudgetResolvedLimits {
+  const user = getUserLlmDailyBudget(userId);
   let tuning: TradingPolicy["tuning"];
   try {
     tuning = getPolicy(userId, connectedAccountId).tuning;
   } catch {
     tuning = undefined;
   }
+  const token = resolveLimitFromTiers(user.tokenBudget, tuning?.llmDailyTokenBudget, "TRIGGER_LLM_DAILY_TOKEN_BUDGET");
+  const cost = resolveLimitFromTiers(user.costBudgetUsd, tuning?.llmDailyCostBudgetUsd, "TRIGGER_LLM_DAILY_COST_BUDGET_USD");
   return {
-    tokenLimit: resolveLimit(tuning?.llmDailyTokenBudget, "TRIGGER_LLM_DAILY_TOKEN_BUDGET"),
-    costLimit: resolveLimit(tuning?.llmDailyCostBudgetUsd, "TRIGGER_LLM_DAILY_COST_BUDGET_USD"),
+    tokenLimit: token.limit,
+    costLimit: cost.limit,
+    tokenSource: token.source,
+    costSource: cost.source
   };
 }
 
@@ -158,7 +225,7 @@ export function reserveLlmBudget(
   estCostUsd: number,
   now: Date = new Date(),
   connectedAccountId?: string
-): { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" } {
+): { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" | "ledger_unavailable" } {
   const { tokenLimit, costLimit } = resolveLlmLimits(userId, connectedAccountId);
   if (!Number.isFinite(tokenLimit) && !Number.isFinite(costLimit)) return { ok: true }; // no ceiling → no reservation
   try {
@@ -204,9 +271,9 @@ export function reserveLlmBudget(
       ).run(key, JSON.stringify({ reservations }), now.toISOString());
       return { ok: true as const, reservationId: id };
     });
-    return tx.immediate() as { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" };
+    return tx.immediate() as { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" | "ledger_unavailable" };
   } catch {
-    return { ok: false }; // fail-closed for the reservation; caller degrades to "skip LLM", never a failed run
+    return { ok: false, reason: "ledger_unavailable" }; // fail-closed; caller degrades to "skip LLM"
   }
 }
 
@@ -215,7 +282,7 @@ export function reserveLlmRunBudget(
   userId: string,
   connectedAccountId?: string,
   now: Date = new Date()
-): { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" } {
+): { ok: boolean; reservationId?: string; reason?: "token_budget" | "cost_budget" | "ledger_unavailable" } {
   const est = runReservationEstimate();
   return reserveLlmBudget(userId, est.tokens, est.costUsd, now, connectedAccountId);
 }
@@ -280,13 +347,15 @@ export function isOverLlmBudget(userId: string, connectedAccountId?: string): bo
 /** Thrown by `assertWithinLlmBudget` — a distinct type so callers can recognize a budget stop vs. a
  *  provider/network error. */
 export class LlmBudgetExceededError extends Error {
-  readonly reason?: "token_budget" | "cost_budget";
+  readonly reason?: "token_budget" | "cost_budget" | "ledger_unavailable";
   constructor(decision: LlmBudgetDecision) {
     super(
-      `Daily LLM budget ceiling reached (${decision.reason ?? "budget"}): ` +
-      `tokensToday=${decision.tokensToday ?? "?"} (limit ${decision.tokenLimit ?? "∞"}), ` +
-      `costUsdToday=${decision.costUsdToday ?? "?"} (limit ${decision.costLimitUsd ?? "∞"}). ` +
-      `Skipping LLM/RAG spend for the rest of the day.`
+      decision.reason === "ledger_unavailable"
+        ? "Daily LLM budget is set but today's usage ledger could not be read — skipping LLM/RAG spend (fail-closed)."
+        : `Daily LLM budget ceiling reached (${decision.reason ?? "budget"}): ` +
+          `tokensToday=${decision.tokensToday ?? "?"} (limit ${decision.tokenLimit ?? "∞"}), ` +
+          `costUsdToday=${decision.costUsdToday ?? "?"} (limit ${decision.costLimitUsd ?? "∞"}). ` +
+          `Skipping LLM/RAG spend for the rest of the day.`
     );
     this.name = "LlmBudgetExceededError";
     this.reason = decision.reason;

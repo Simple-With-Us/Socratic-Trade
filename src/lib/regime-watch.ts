@@ -8,7 +8,7 @@
 import { audit, getInternalSetting, setInternalSetting } from "./db";
 import { getPolicy } from "./db-profiles";
 import { determineMarketRegime, fetchMacroDataWithLiveVix, type MacroData } from "./macro";
-import { classifyMarketRegime, isEscalationMarketRegime, regimeFromLabel } from "./market-regime";
+import { classifyMarketRegime, isEscalationMarketRegime, MARKET_REGIME_LABELS, regimeFromLabel } from "./market-regime";
 import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMultiSignalSeverity } from "./regime-severity";
 import { emitDashboardEvent } from "./events";
@@ -48,6 +48,45 @@ function regimeKey(userId: string): string {
 // finds the new key empty; without this fallback it would silently seed and SWALLOW a real flip.
 const LEGACY_REGIME_KEY = "regime:current";
 
+// ── Unknown-side suppression ──────────────────────────────────────────────────
+// "Unknown (no macro feed)" is a DATA OUTAGE state (classifyMarketRegime's asOf === "unavailable"
+// branch, severity 0 by design), not a market regime. Before this gate, every tick recomputed the
+// label and announced ANY change, so a flaky feed flapped the stored label Neutral <-> Unknown,
+// wrote a regime_flip audit row per transition (6 on 2026-07-28 alone, some ~1 minute apart), and
+// on recovery into an escalation regime could fire LLM trigger runs off an outage artifact.
+const UNKNOWN_REGIME_LABEL: string = MARKET_REGIME_LABELS.unknown; // "Unknown (no macro feed)"
+
+// Throttle for the outage diagnostic: at most one macro_feed_unavailable audit per user per hour.
+// The outage must stay OBSERVABLE (one row with evidence) without recreating the flap spam.
+const MACRO_UNAVAILABLE_THROTTLE_MS = 60 * 60_000;
+
+function macroUnavailableNotifiedKey(userId: string): string {
+  return `regime:macro-unavailable-notified:${userId}`;
+}
+
+/**
+ * Audit the outage once per throttle window. Marker is the last-emitted ISO timestamp in the
+ * no-audit internal KV (same store as the regime label), so the throttle survives restarts.
+ * Payload carries the sourcing evidence (asOf/vixAsOf) plus the held last-known regime.
+ */
+function auditMacroFeedUnavailable(userId: string, macro: MacroData & { vixAsOf?: string }, heldRegime: string | null, now: number): void {
+  const markerKey = macroUnavailableNotifiedKey(userId);
+  const last = getInternalSetting<string>(markerKey);
+  const lastAt = last ? Date.parse(last) : NaN;
+  if (Number.isFinite(lastAt) && now - lastAt < MACRO_UNAVAILABLE_THROTTLE_MS) return;
+  setInternalSetting(markerKey, new Date(now).toISOString());
+  audit(
+    "macro_feed_unavailable",
+    {
+      asOf: macro.asOf,
+      vixAsOf: macro.vixAsOf ?? null,
+      heldRegime,
+      throttleMinutes: MACRO_UNAVAILABLE_THROTTLE_MS / 60_000
+    },
+    userId
+  );
+}
+
 /**
  * Regimes the expert panel flagged for escalation. Delegates to the shared typed source of truth
  * (`isEscalationMarketRegime` ∘ `regimeFromLabel`) so this consumer, the crisis cap (policy.ts),
@@ -72,6 +111,13 @@ export function isEscalationRegime(label: string): boolean {
  * tick. Seeds silently on first run. Uses the LIVE VIX overlay (fetchMacroDataWithLiveVix), not
  * the bare 24h-cached fetchMacroData snapshot — flip detection off a day-old VIX could miss an
  * intraday regime change (and the panic brake above it) for up to a day.
+ *
+ * OUTAGE HANDLING: when the feed is down the classifier returns "Unknown (no macro feed)" — that is
+ * held OFF the stored label (see UNKNOWN_REGIME_LABEL gate below): no flip audit, no dirty event,
+ * no material event, just a throttled macro_feed_unavailable diagnostic. The stored last-known
+ * label survives the outage untouched, so when the feed recovers the normal comparison below
+ * catches any REAL regime change that happened during the outage and announces it with the usual
+ * semantics (escalations submit a material event, de-escalations don't).
  */
 export async function checkRegimeFlip(userId: string): Promise<void> {
   const macro = await fetchMacroDataWithLiveVix(userId);
@@ -92,7 +138,20 @@ export async function checkRegimeFlip(userId: string): Promise<void> {
     }
   }
 
-  if (!prev) {
+  // OUTAGE GATE: a missing feed is not a regime change. When the computed label is Unknown, hold
+  // the stored last-known label — no overwrite, no regime_flip audit, no dashboard dirty event, no
+  // material event. Emit only the throttled macro_feed_unavailable diagnostic so the outage stays
+  // observable. This also covers first-ever ticks: the key is never SEEDED with the Unknown label;
+  // we wait for a real reading.
+  if (next === UNKNOWN_REGIME_LABEL) {
+    auditMacroFeedUnavailable(userId, macro, prev ?? null, Date.now());
+    return;
+  }
+
+  // Repair path for deploys where the pre-gate code already persisted an Unknown label: treat it
+  // as unseeded and silently adopt the recovered real label rather than announcing a fake
+  // "Unknown -> X" flip (Unknown was never a real regime to flip FROM).
+  if (!prev || prev === UNKNOWN_REGIME_LABEL) {
     setInternalSetting(key, next); // seed; don't announce a "flip" from nothing
     return;
   }

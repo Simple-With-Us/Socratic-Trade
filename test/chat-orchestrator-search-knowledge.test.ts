@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({ retrieveContextDetailed: vi.fn() }));
 
 vi.mock("../src/lib/vector-db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/vector-db")>();
-  return { ...actual, retrieveContextDetailed: mocks.retrieveContextDetailed };
+  return { ...actual, managedVectorLedgerAuthority: vi.fn(), retrieveContextDetailed: mocks.retrieveContextDetailed };
 });
 
 let orchestrator: typeof import("../src/lib/chat/orchestrator");
@@ -36,6 +36,7 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
   });
 
   it("returns doc_type/section as additive keys, and NO isStale key when the flag is off", async () => {
+    process.env.RAG_CITATION_STALENESS = "off";
     mocks.retrieveContextDetailed.mockResolvedValue([
       {
         id: "AAPL-10K#c001",
@@ -61,6 +62,41 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
     expect("isStale" in chunk).toBe(false); // never present when the flag is off — not even as undefined-valued key noise
   });
 
+  it("uses immutable occurrence coordinates for id-less citation refs", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([
+      {
+        id: "",
+        text: "Repeated boilerplate",
+        score: 0.8,
+        source: "sec-edgar",
+        doc_type: "10-k",
+        section: "MD&A",
+        metadata: {
+          accession: "0001",
+          chunk_ordinal: 3,
+          content_hash: "same-text"
+        }
+      },
+      {
+        id: "",
+        text: "Repeated boilerplate",
+        score: 0.7,
+        source: "sec-edgar",
+        doc_type: "10-k",
+        section: "Risk Factors",
+        metadata: {
+          accession: "0001",
+          chunk_ordinal: 4,
+          content_hash: "same-text"
+        }
+      }
+    ]);
+    const deps = orchestrator.buildProductionDeps();
+    const results = await deps.searchKnowledge({ query: "boilerplate", ticker: "AAPL", k: 2 }, "local");
+
+    expect(results[0]!.evidence_ref).not.toBe(results[1]!.evidence_ref);
+  });
+
   // 2026-07-04 RAG quick-wins: wire the previously-dormant post-rerank relevance floor + near-dup
   // suppression into this call site — both existed since 2026-07-01 but no caller ever passed them.
   it("passes minRelevanceScore and dedupeSimilarity through to retrieveContextDetailed", async () => {
@@ -75,6 +111,7 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
       5,
       "local",
       expect.objectContaining({
+        asOf: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
         minRelevanceScore: expect.any(Number),
         dedupeSimilarity: expect.any(Number)
       })
@@ -119,5 +156,20 @@ describe("buildProductionDeps().searchKnowledge — R13 provenance payload", () 
     const results = await deps.searchKnowledge({ query: "q" }, "local");
     expect(results).toEqual([]);
     expect(mocks.retrieveContextDetailed).not.toHaveBeenCalled();
+  });
+
+  it("forwards a parseable as_of and defaults asOf to now when omitted", async () => {
+    mocks.retrieveContextDetailed.mockResolvedValue([]);
+    const deps = orchestrator.buildProductionDeps();
+
+    await deps.searchKnowledge({ query: "q", ticker: "AAPL", as_of: "2026-05-01T12:00:00.000Z" }, "local");
+    expect(mocks.retrieveContextDetailed.mock.calls[0]![4]).toEqual(
+      expect.objectContaining({ asOf: "2026-05-01T12:00:00.000Z" })
+    );
+
+    mocks.retrieveContextDetailed.mockClear();
+    await deps.searchKnowledge({ query: "q", ticker: "AAPL" }, "local");
+    const asOf = mocks.retrieveContextDetailed.mock.calls[0]![4].asOf as string;
+    expect(Date.parse(asOf)).toBeGreaterThan(Date.parse("2026-01-01T00:00:00.000Z"));
   });
 });

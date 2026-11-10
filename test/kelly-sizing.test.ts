@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { applyDeterministicSizing } from "../src/lib/strategy";
 import type { EquityPosition, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
 // Fractional-Kelly sizing integration (policy.tuning.fractionalKellySizing, default OFF). Runs
 // BESIDE the existing Kelly-lite edgeFactor multiplier in applyDeterministicSizing — never

@@ -8,10 +8,14 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-per-user-isolation-${randomUUID()}.db`)}`;
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("per-user policy isolation (M3)", () => {
@@ -88,6 +92,40 @@ describe("per-user policy isolation (M3)", () => {
 
     // userE should not be able to delete userD's profile.
     expect(() => deleteStrategyProfile(profile.id, userE)).toThrow("Strategy profile not found.");
+  });
+
+  it("a second allowed email maps to an isolated userId and isolated consent", async () => {
+    const { userIdForEmail, isEmailAllowed } = await import("../src/lib/auth/identity");
+    const {
+      setPolicy,
+      getPolicy,
+      setDataPoolConsent,
+      hasDataPoolConsent,
+      setLegalNoticeConsent,
+      hasLegalNoticeConsent
+    } = await import("../src/lib/db");
+
+    vi.stubEnv("ALLOWED_EMAILS", "friend@example.com,family@example.com");
+    expect(isEmailAllowed("friend@example.com")).toBe(true);
+    expect(isEmailAllowed("family@example.com")).toBe(true);
+
+    const friend = userIdForEmail("friend@example.com");
+    const family = userIdForEmail("family@example.com");
+    expect(friend).not.toBe("local");
+    expect(family).not.toBe("local");
+    expect(friend).not.toBe(family);
+
+    setPolicy({ ...getPolicy(friend), maxOrderNotional: 3333 }, friend);
+    setPolicy({ ...getPolicy(family), maxOrderNotional: 4444 }, family);
+    setDataPoolConsent(friend, true);
+    setLegalNoticeConsent(friend, true);
+
+    expect(getPolicy(friend).maxOrderNotional).toBe(3333);
+    expect(getPolicy(family).maxOrderNotional).toBe(4444);
+    expect(hasDataPoolConsent(friend)).toBe(true);
+    expect(hasDataPoolConsent(family)).toBe(false);
+    expect(hasLegalNoticeConsent(friend)).toBe(true);
+    expect(hasLegalNoticeConsent(family)).toBe(false);
   });
 
   it("deleteStrategyProfile with no remaining profiles leaves no active profile", async () => {

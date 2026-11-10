@@ -21,14 +21,30 @@ import type { TechnicalDirection } from "../types";
 export interface CongressTrade {
   symbol: string; // normalized ticker (uppercase, no class suffix)
   member: string; // e.g. "John Boozman"
-  chamber: "senate" | "house";
-  side: "buy" | "sell";
+  chamber: "senate" | "house" | "executive";
+  side: "buy" | "sell" | "exchange";
   amountLow?: number; // lower bound of the disclosed dollar range
   amountHigh?: number; // upper bound of the disclosed dollar range
   owner?: string; // Self / Joint / Spouse / Child
   tradedAt: string; // ISO date the trade occurred (txDate)
-  disclosedAt?: string; // ISO date the report was filed
+  disclosedAt?: string; // ISO date the report was filed.  Absent when the filing date was not disclosed.
   source: string; // adapter id that produced this record
+  /** App A transaction id.  Present rows dedupe on this instead of the lossy summary key. */
+  id?: string;
+  docId?: string;
+  rowKey?: string;
+  party?: string;
+  bioguideId?: string;
+  pdfUrl?: string;
+  disclosureLagDays?: number;
+  stockActStatus?: string;
+  priceAtTrade?: number;
+  spxAtTrade?: number;
+  priceAtFiling?: number;
+  spxAtFiling?: number;
+  latencyProbeHealth?: string;
+  latencyProbeDelayMs?: number;
+  providerPublishedAt?: string;
 }
 
 /** Per-symbol aggregate of recent congressional trading (the overlay the scan reads).
@@ -66,7 +82,17 @@ export interface CongressAnalytics {
   cluster?: boolean; // appears in App A's cluster-buys (many members → same ticker)
   clusterMemberCount?: number;
   topMemberScore?: number; // 0–100 best member-quality among the ticker's cluster members
-  topMemberScoreSource?: "realized_skill" | "activity_prominence";
+  /** Prefer realized_skill_filing (copy-trade since disclosure); trade = politician timing; activity = volume proxy. */
+  topMemberScoreSource?: "realized_skill_filing" | "realized_skill_trade" | "realized_skill" | "activity_prominence";
+  /** Raw skill stats for the winning cluster member (from App A dual performance). */
+  topMemberFilerId?: string;
+  topMemberFilingAvgExcess?: number | null;
+  topMemberFilingWinRate?: number | null;
+  topMemberFilingScoredCount?: number;
+  topMemberFilingAvgAnnualizedExcess?: number | null;
+  topMemberTradeAvgExcess?: number | null;
+  topMemberTradeWinRate?: number | null;
+  topMemberTradeScoredCount?: number;
   /** App A composite conviction score 0–100; null = too thin (< 3 resolved-side trades). */
   convictionScore?: number | null;
   /** Direction the conviction score points: "BUY" or "SELL". null = no directional signal. */

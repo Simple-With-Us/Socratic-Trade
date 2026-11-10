@@ -31,7 +31,6 @@ const MARKET_SERVICES: Array<[string, string]> = [
   ["fmp", "FMP_API_KEY"],
   ["alphavantage", "ALPHAVANTAGE_API_KEY"],
   ["marketstack", "MARKETSTACK_API_KEY"],
-  ["tradier", "TRADIER_API_KEY"],
   ["fred", "FRED_API_KEY"],
   ["massive", "MASSIVE_API_KEY"],
   ["apify", "APIFY_API_TOKEN"],

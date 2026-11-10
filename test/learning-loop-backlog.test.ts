@@ -25,7 +25,7 @@ beforeAll(() => {
 afterEach(() => {
   mockRunWalkForwardOOS.mockReset();
   mockRunWalkForwardOOS.mockResolvedValue(null);
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
 });
 
 function policyFor(account: string, tuning?: TradingPolicy["tuning"]): TradingPolicy {
@@ -62,6 +62,11 @@ function oosResult(overrides: Partial<OOSResult> = {}): OOSResult {
   const icDelta = overrides.oosICCandidate != null ? overrides.oosICCandidate - baselineIC : 0.03;
   return {
     trainObservations: 40, testObservations: 30, trainDates: 7, testDates: 5,
+    window: {
+      trainStartDate: "2026-05-01", trainEndDate: "2026-06-01",
+      embargoDates: 2, purgedTrainDates: 0,
+      testStartDate: "2026-06-05", testEndDate: "2026-06-15"
+    },
     trainICs: [], icWeights: { ...DEFAULT_POLICY.scoringWeights },
     oosIC: 0.03, oosICIR: 0.9, oosICDefault: 0.01,
     oosICCandidate: baselineIC + icDelta, oosICBaseline: baselineIC,
