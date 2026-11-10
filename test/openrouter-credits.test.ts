@@ -176,6 +176,34 @@ describe("openrouter credit status", () => {
     expect(second.keysLimitReached).toBe(1);
     expect(second.problemKeyLabels).toContain("st-prod");
     expect(second.remainingUsd).toBe(90);
+
+    // The carryover is bounded: 31 minutes after the verdict was confirmed, with /keys still
+    // down, it expires and the check reports the healthy balance it can actually read.
+    const third = (await getOpenRouterCreditStatus(1000 + 31 * 60_000, keysDown.fetcher))!;
+    expect(third.ok).toBe(true);
+    expect(third.reasons).not.toContain("key_limit_reached");
+  });
+
+  it("does not render a key-limit failure as an exhausted-balance hint", async () => {
+    const { formatOpenRouterCreditsExhaustedHint } = await import("../src/lib/openrouter-credits");
+    expect(
+      formatOpenRouterCreditsExhaustedHint({
+        ok: false,
+        remainingUsd: 90,
+        totalUsd: 100,
+        usedUsd: 10,
+        thresholdUsd: 3,
+        keyLimitThresholdUsd: 3,
+        source: "management",
+        keysChecked: true,
+        keysWithLimit: 2,
+        keysLimitReached: 1,
+        keysLimitLow: 0,
+        reasons: ["key_limit_reached"],
+        problemKeyLabels: ["st-prod"],
+        checkedAt: "2026-08-17T00:00:00.000Z"
+      })
+    ).toBeUndefined();
   });
 
   it("with a management key, ok=false when any enabled key is low on its limit", async () => {

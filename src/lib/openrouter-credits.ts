@@ -18,7 +18,33 @@
 // ok=false — we fail open (and keep serving the last good value) so a monitor doesn't page on
 // our own inability to read the balance. Cached so a frequent health poll never hammers OR.
 
+import { z } from "zod";
 import { resolveLlmCredential } from "./db";
+
+// Vendor payload envelopes, parsed at the trust boundary (Kody rule: validate every untrusted
+// input with zod). Fields stay z.unknown() and are coerced by the field-level guards below
+// (parseNumber, typeof checks) — the schemas pin the envelope shape so a vendor restructure
+// fails closed (malformed) instead of drifting silently into the balance/limit logic.
+const CreditsPayloadSchema = z
+  .object({
+    data: z
+      .object({ total_credits: z.unknown().optional(), total_usage: z.unknown().optional() })
+      .passthrough()
+  })
+  .passthrough();
+
+const KeyPayloadSchema = z
+  .object({
+    data: z
+      .object({
+        is_management_key: z.unknown().optional(),
+        is_provisioning_key: z.unknown().optional()
+      })
+      .passthrough()
+  })
+  .passthrough();
+
+const KeysPayloadSchema = z.object({ data: z.array(z.unknown()) }).passthrough();
 
 const CREDITS_URL = "https://openrouter.ai/api/v1/credits";
 const KEY_URL = "https://openrouter.ai/api/v1/key";
@@ -67,6 +93,24 @@ export interface OpenRouterCreditStatus {
 
 let cache: { status: OpenRouterCreditStatus; atMs: number } | null = null;
 
+/**
+ * The last key-limit verdict CONFIRMED by a successful /keys read. While /keys is unreachable,
+ * a confirmed verdict is carried over so a transient read failure cannot flap a real key
+ * exhaustion to ok:true (Sentry, PR #5097) — but only for a bounded window from confirmation
+ * (Kody, PR #5097): past KEY_LIMIT_CARRYOVER_MS the verdict expires and the check reports what
+ * it can actually read, so a fixed limit stops paging instead of being held forever.
+ */
+let lastKeyLimitFailure: {
+  reasons: OpenRouterCreditReason[];
+  keysWithLimit: number;
+  keysLimitReached: number;
+  keysLimitLow: number;
+  problemKeyLabels: string[];
+  confirmedAtMs: number;
+} | null = null;
+
+const KEY_LIMIT_CARRYOVER_MS = 30 * 60_000;
+
 function numEnv(name: string, fallback: number, min: number): number {
   const v = Number(process.env[name]);
   return Number.isFinite(v) && v >= min ? v : fallback;
@@ -84,6 +128,7 @@ function cacheMs(): number {
 /** Test seam: drop the cached balance so a test controls each fetch. */
 export function __resetOpenRouterCreditCache(): void {
   cache = null;
+  lastKeyLimitFailure = null;
 }
 
 function resolveCheckKey(): string | undefined {
@@ -142,10 +187,10 @@ async function detectManagementKey(
 ): Promise<boolean> {
   try {
     const res = await fetchJson(KEY_URL, key, fetcher, timeoutMs);
-    if (!res.ok || !res.data || typeof res.data !== "object") return false;
-    const data = (res.data as { data?: Record<string, unknown> }).data;
-    if (!data || typeof data !== "object") return false;
-    return data.is_management_key === true || data.is_provisioning_key === true;
+    if (!res.ok) return false;
+    const parsed = KeyPayloadSchema.safeParse(res.data);
+    if (!parsed.success) return false;
+    return parsed.data.data.is_management_key === true || parsed.data.data.is_provisioning_key === true;
   } catch {
     return false;
   }
@@ -154,26 +199,33 @@ async function detectManagementKey(
 async function fetchAllKeys(
   key: string,
   fetcher: typeof fetch,
-  timeoutMs: number = FETCH_TIMEOUT_MS
+  deadlineAtMs: number = Date.now() + FETCH_TIMEOUT_MS
 ): Promise<{ ok: boolean; status: number; keys: KeyLimitRow[] }> {
   const keys: KeyLimitRow[] = [];
   let offset = 0;
 
   for (let page = 0; page < MAX_KEYS_PAGES; page += 1) {
+    // One shared deadline across all pages (Kody, PR #5097): a per-page full timeout would let
+    // pagination multiply the caller's budget — the health probe's maxWaitMs most of all.
+    const remainingMs = deadlineAtMs - Date.now();
+    if (remainingMs <= 0) {
+      return { ok: false, status: 502, keys: [] };
+    }
     const url = new URL(KEYS_URL);
     url.searchParams.set("include_disabled", "true");
     url.searchParams.set("offset", String(offset));
-    const res = await fetchJson(url.toString(), key, fetcher, timeoutMs);
+    // Send limit explicitly: the stop condition compares against KEYS_PAGE_SIZE, so the page
+    // size must be the one requested, not the vendor default (Kody, PR #5097).
+    url.searchParams.set("limit", String(KEYS_PAGE_SIZE));
+    const res = await fetchJson(url.toString(), key, fetcher, remainingMs);
     if (!res.ok) {
       return { ok: false, status: res.status, keys: [] };
     }
-    const rows =
-      res.data && typeof res.data === "object" && !Array.isArray(res.data)
-        ? (res.data as { data?: unknown }).data
-        : null;
-    if (!Array.isArray(rows)) {
+    const parsedKeys = KeysPayloadSchema.safeParse(res.data);
+    if (!parsedKeys.success) {
       return { ok: false, status: 502, keys: [] };
     }
+    const rows = parsedKeys.data.data;
     for (const raw of rows) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const row = raw as Record<string, unknown>;
@@ -258,8 +310,22 @@ export async function getOpenRouterCreditStatus(
   const keyFloor = keyLimitThresholdUsd();
   const checkedAt = new Date(nowMs).toISOString();
   const waitMs = Math.max(200, Math.min(options?.maxWaitMs ?? FETCH_TIMEOUT_MS, FETCH_TIMEOUT_MS));
+  // One shared deadline for the whole check — detection, credits, and every /keys page draw
+  // from the same budget (Kody, PR #5097), so a cache miss cannot multiply the caller's
+  // maxWaitMs (the health probe's 1.5s most of all) by the number of fetches.
+  const deadlineAtMs = Date.now() + waitMs;
+  const budgetMs = () => Math.max(1, deadlineAtMs - Date.now());
+  // The tier the configured key is presumed to be, before detection runs: resolveCheckKey
+  // prefers the management env keys, so their presence means a management-tier check.
+  const presumedSource: "management" | "inference" =
+    process.env.OPENROUTER_MANAGEMENT_KEY?.trim() || process.env.OPENROUTER_ADMIN_KEY?.trim()
+      ? "management"
+      : "inference";
 
-  const failOpen = (error: string): OpenRouterCreditStatus => {
+  const failOpen = (
+    error: string,
+    source: "management" | "inference" = presumedSource
+  ): OpenRouterCreditStatus => {
     if (cache) return cache.status;
     return {
       ok: true,
@@ -269,7 +335,7 @@ export async function getOpenRouterCreditStatus(
       thresholdUsd: accountThreshold,
       keyLimitThresholdUsd: keyFloor,
       checkedAt,
-      source: "inference",
+      source,
       keysChecked: false,
       keysWithLimit: 0,
       keysLimitReached: 0,
@@ -280,23 +346,21 @@ export async function getOpenRouterCreditStatus(
   };
 
   try {
-    const isManagement = await detectManagementKey(key, fetcher, waitMs);
+    const isManagement = await detectManagementKey(key, fetcher, budgetMs());
     const source: "management" | "inference" = isManagement ? "management" : "inference";
 
     // Account prepaid balance (free). Works with management keys; many inference keys also
     // answer /credits — if it fails we fail-open rather than page.
-    const creditsRes = await fetchJson(CREDITS_URL, key, fetcher, waitMs);
+    const creditsRes = await fetchJson(CREDITS_URL, key, fetcher, budgetMs());
     if (!creditsRes.ok) {
-      return failOpen(`credits check HTTP ${creditsRes.status}`);
+      return failOpen(`credits check HTTP ${creditsRes.status}`, source);
     }
-    const creditsPayload =
-      creditsRes.data && typeof creditsRes.data === "object" && !Array.isArray(creditsRes.data)
-        ? (creditsRes.data as { data?: { total_credits?: unknown; total_usage?: unknown } }).data
-        : undefined;
+    const parsedCredits = CreditsPayloadSchema.safeParse(creditsRes.data);
+    const creditsPayload = parsedCredits.success ? parsedCredits.data.data : undefined;
     const total = parseNumber(creditsPayload?.total_credits);
     const used = parseNumber(creditsPayload?.total_usage);
     if (total == null || used == null) {
-      return failOpen("credits response malformed");
+      return failOpen("credits response malformed", source);
     }
     const remaining = Math.round((total - used) * 1e6) / 1e6;
 
@@ -309,7 +373,7 @@ export async function getOpenRouterCreditStatus(
     let keysError: string | undefined;
 
     if (isManagement) {
-      const keysResult = await fetchAllKeys(key, fetcher, waitMs);
+      const keysResult = await fetchAllKeys(key, fetcher, deadlineAtMs);
       if (keysResult.ok) {
         keysChecked = true;
         const evald = evaluateKeyLimits(keysResult.keys, keyFloor);
@@ -324,31 +388,44 @@ export async function getOpenRouterCreditStatus(
       }
     }
 
+    if (keysChecked) {
+      // Record (or clear) the confirmed key-limit verdict for the bounded carryover below.
+      lastKeyLimitFailure = keyReasons.length
+        ? {
+            reasons: [...keyReasons],
+            keysWithLimit,
+            keysLimitReached,
+            keysLimitLow,
+            problemKeyLabels: [...problemKeyLabels],
+            confirmedAtMs: nowMs
+          }
+        : null;
+    }
+
     const reasons: OpenRouterCreditReason[] = [...keyReasons];
     if (remaining < accountThreshold) {
       reasons.push("account_low");
     }
 
     // A transient keys-read failure must not erase a known key-limit failure (Sentry, PR #5097):
-    // when this run could not check keys at all — management detection failed or the /keys read
-    // errored — and the previous cached status was failing on key limits, retain the cached key
-    // reasons, counts and labels instead of caching a fresh ok:true that flaps the alert off.
-    // The account-balance fields above still refresh; only the key-limit verdict is carried over,
-    // and the next successful /keys read replaces it.
-    if (!keysChecked && cache) {
-      const cachedKeyReasons = cache.status.reasons.filter(
-        (reason) => reason === "key_limit_reached" || reason === "key_limit_low"
-      );
-      if (cachedKeyReasons.length) {
-        for (const reason of cachedKeyReasons) {
+    // when this run could not check keys — management detection failed or the /keys read errored
+    // — carry over the last CONFIRMED key-limit verdict instead of caching a fresh ok:true that
+    // flaps the alert off. The carryover is bounded (Kody, PR #5097): it expires
+    // KEY_LIMIT_CARRYOVER_MS after the verdict was confirmed by a real /keys read, and the
+    // account-balance fields above still refresh every cycle.
+    if (!keysChecked && lastKeyLimitFailure) {
+      if (nowMs - lastKeyLimitFailure.confirmedAtMs <= KEY_LIMIT_CARRYOVER_MS) {
+        for (const reason of lastKeyLimitFailure.reasons) {
           if (!reasons.includes(reason)) reasons.push(reason);
         }
-        keysWithLimit = cache.status.keysWithLimit;
-        keysLimitReached = cache.status.keysLimitReached;
-        keysLimitLow = cache.status.keysLimitLow;
-        if (cache.status.problemKeyLabels?.length) {
-          problemKeyLabels = cache.status.problemKeyLabels;
+        keysWithLimit = lastKeyLimitFailure.keysWithLimit;
+        keysLimitReached = lastKeyLimitFailure.keysLimitReached;
+        keysLimitLow = lastKeyLimitFailure.keysLimitLow;
+        if (lastKeyLimitFailure.problemKeyLabels.length) {
+          problemKeyLabels = [...lastKeyLimitFailure.problemKeyLabels];
         }
+      } else {
+        lastKeyLimitFailure = null;
       }
     }
 
@@ -388,6 +465,13 @@ export function formatOpenRouterCreditsExhaustedHint(
 ): string | undefined {
   if (!status || status.ok) return undefined;
   if (status.remainingUsd == null || !Number.isFinite(status.remainingUsd)) return undefined;
+  // Only an ACCOUNT-low failure is an exhausted-balance story (Kody, PR #5097): a per-key limit
+  // failure with a healthy balance must not render as "credits exhausted — top up", which sends
+  // the operator to refill the account instead of raising the key's cap. Key-limit state is
+  // surfaced separately via reasons/problemKeyLabels on the health payload.
+  const accountLow =
+    status.reasons?.includes("account_low") ?? status.remainingUsd < status.thresholdUsd;
+  if (!accountLow) return undefined;
   const remaining = status.remainingUsd.toFixed(2);
   const floor = status.thresholdUsd.toFixed(2);
   return `OpenRouter credits look exhausted ($${remaining} remaining; alert floor $${floor}).  Empty LLM responses are the usual symptom.  Top up OpenRouter.`;
