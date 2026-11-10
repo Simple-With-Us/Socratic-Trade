@@ -24,13 +24,14 @@ export async function POST(request: Request) {
     if (typeof body.code !== "string" || typeof body.codeVerifier !== "string") {
       return NextResponse.json({ error: "Missing mobile authentication code." }, { status: 400 });
     }
-    const handoff = consumeMobileAuthHandoff({ code: body.code, codeVerifier: body.codeVerifier });
-    if (!handoff) {
-      return NextResponse.json({ error: "Mobile authentication code is invalid or expired." }, { status: 401 });
-    }
 
     const authSecret = process.env.AUTH_SECRET;
     if (!authSecret) {
+      return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    }
+
+    const handoff = consumeMobileAuthHandoff({ code: body.code, codeVerifier: body.codeVerifier });
+    if (!handoff) {
       return NextResponse.json({ error: "Mobile authentication code is invalid or expired." }, { status: 401 });
     }
     const payload = await decodeSessionToken({

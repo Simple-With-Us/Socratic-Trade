@@ -124,6 +124,35 @@ describe("mobile OAuth exchange route", () => {
     }
   });
 
+  it("returns 500 without burning the handoff code when AUTH_SECRET is unset", async () => {
+    const secret = "test-secret-at-least-32-bytes-long!!";
+    const verifier = "v".repeat(43);
+    const sessionToken = await encodeSessionToken({
+      token: { email: "handoff@example.com" },
+      secret,
+      salt: "authjs.session-token",
+    });
+    const code = createMobileAuthHandoff({
+      sessionToken,
+      codeChallenge: challenge(verifier),
+      handoffNonce: LEGACY_MOBILE_HANDOFF_NONCE,
+      sessionId: LEGACY_MOBILE_SESSION_ID,
+    });
+    vi.stubEnv("AUTH_SECRET", "");
+    const misconfig = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
+      method: "POST",
+      body: JSON.stringify({ code, codeVerifier: verifier }),
+    }));
+    expect(misconfig.status).toBe(500);
+
+    vi.stubEnv("AUTH_SECRET", secret);
+    const retry = await POST(new Request("https://socratictrade.com/api/mobile/auth/exchange", {
+      method: "POST",
+      body: JSON.stringify({ code, codeVerifier: verifier }),
+    }));
+    expect(retry.status).toBe(200);
+  });
+
   it("rejects a legacy session whose JWT cannot be verified under the source salt", async () => {
     vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
     const verifier = "v".repeat(43);
