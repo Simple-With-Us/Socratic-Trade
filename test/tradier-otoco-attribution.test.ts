@@ -147,16 +147,21 @@ describe("Tradier OTOCO attribution", () => {
       ]
     };
     const legs = container.leg as Record<string, unknown>[];
+    const containerRow = mapTradierBracketContainerRow(container);
+    expect(containerRow.id).toBe("88100");
+    expect(containerRow.side).toBe("buy");
     const working = [
-      mapTradierBracketContainerRow(container),
-      mapTradierBracketLegRow(container, legs[0]),
+      containerRow,
       mapTradierBracketLegRow(container, legs[1]),
       mapTradierBracketLegRow(container, legs[2])
     ];
+    expect(working.map((o) => o.id).sort()).toEqual(["88100", "88102", "88103"]);
     const contexts = loadOrderRoleContexts(working, lookup);
-    const entryRole = classifyOrderRole(working[1], contexts.get("88101")!);
+    const entryRole = classifyOrderRole(containerRow, contexts.get("88100")!);
     expect(entryRole.role).toBe("entry");
-    expect(entryRole.role).not.toBe("bracket_stop_loss");
+    expect(contexts.get("88102")?.bracketSiblingWorkingCount).toBe(1);
+    const exitRole = classifyOrderRole(working[1], contexts.get("88102")!);
+    expect(exitRole.role).toBe("bracket_take_profit");
   });
 
   it("carries parent attribution on leg-entry executions", () => {

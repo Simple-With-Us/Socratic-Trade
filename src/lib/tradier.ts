@@ -718,6 +718,8 @@ class TradierBrokerGateway implements BrokerGateway {
           if (legField) {
             for (const leg of arr<Record<string, unknown>>(legField)) {
               if (String(leg.class ?? "").toLowerCase() !== "equity") continue;
+              // Leg-entry shape: container row already carries the entry (id + tag for reconciliation).
+              if (tradierBracketLegIsEntry(o, leg)) continue;
               all.push(mapTradierBracketLegRow(o, leg));
             }
           }
@@ -1583,19 +1585,27 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
   if (!parts || !["oto", "otoco", "oco"].includes(cls)) return order;
   const resolvedState = resolveTradierBracketContainerState(container, parts);
   const entry = parts.entry;
-  return {
+  const base: EquityOrder = {
     ...order,
     /* Leg-entry shape surfaces the real entry as its own row; bracket class on the container
        would pair it with exit siblings and misclassify the entry as an exit leg. */
     ...(parts.entryIsLeg ? {} : { orderClass: tradierOrderClassFromContainerClass(cls) }),
-    state: resolvedState,
-    ...(parts.entryIsLeg && entry
-      ? {
-          filledQuantity: optionalNumber(entry.exec_quantity) ?? order.filledQuantity,
-          averagePrice: optionalNumber(entry.avg_fill_price) ?? order.averagePrice
-        }
-      : {})
+    state: resolvedState
   };
+  if (parts.entryIsLeg && entry) {
+    const entryView = withContainerFallback(container, entry);
+    return {
+      ...base,
+      side: mapTradierSideRead(entryView.side),
+      type: mapTradierTypeRead(entryView.type),
+      quantity: optionalNumber(entryView.quantity) ?? base.quantity,
+      limitPrice: optionalNumber(entryView.price) ?? base.limitPrice,
+      stopPrice: optionalNumber(entryView.stop_price) ?? base.stopPrice,
+      filledQuantity: optionalNumber(entry.exec_quantity) ?? base.filledQuantity,
+      averagePrice: optionalNumber(entry.avg_fill_price) ?? base.averagePrice
+    };
+  }
+  return base;
 }
 
 /** Map one equity leg nested under an OTO/OTOCO/OCO container. Exit legs omit `tag` but inherit attribution. */
