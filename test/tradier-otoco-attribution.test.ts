@@ -164,6 +164,61 @@ describe("Tradier OTOCO attribution", () => {
     expect(marketEntry).toMatchObject({ type: "market", limitPrice: undefined, stopPrice: undefined });
   });
 
+  it("falls back to container limit/stop prices when container type casing differs but entry matches family", () => {
+    const limitFallback = mapTradierBracketContainerRow({
+      id: 88600,
+      class: "otoco",
+      tag: "st-ref-upper-limit",
+      status: "open",
+      symbol: "MPC",
+      type: "LIMIT",
+      price: 103,
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88601, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88602, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88603, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    });
+    expect(limitFallback).toMatchObject({ type: "limit", limitPrice: 103, stopPrice: undefined });
+
+    const stopFallback = mapTradierBracketContainerRow({
+      id: 88700,
+      class: "otoco",
+      tag: "st-ref-upper-stop",
+      status: "open",
+      symbol: "MPC",
+      type: "STOP",
+      stop_price: 88,
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88701, class: "equity", side: "buy", type: "stop", status: "open", quantity: 5, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88702, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88703, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    });
+    expect(stopFallback).toMatchObject({ type: "stop_market", stopPrice: 88, limitPrice: undefined });
+  });
+
+  it("does not cross-family fallback when container type is uppercase but entry changes family", () => {
+    const row = mapTradierBracketContainerRow({
+      id: 88800,
+      class: "otoco",
+      tag: "st-ref-upper-cross",
+      status: "open",
+      symbol: "MPC",
+      type: "LIMIT",
+      price: 118,
+      create_date: "2026-11-07T14:00:00.000Z",
+      leg: [
+        { id: 88801, class: "equity", side: "buy", type: "stop", status: "open", quantity: 5, stop_price: 95, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88802, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 150, create_date: "2026-11-07T14:00:00.000Z" },
+        { id: 88803, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 140, create_date: "2026-11-07T14:00:00.000Z" }
+      ]
+    });
+    expect(row).toMatchObject({ type: "stop_market", stopPrice: 95, limitPrice: undefined });
+  });
+
   it("falls back to container limit price when entry type stays limit-family and entry omits price", () => {
     const container: Record<string, unknown> = {
       id: 88500,

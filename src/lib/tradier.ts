@@ -225,7 +225,7 @@ function mapTradierSideWrite(side: OrderSide): string {
 
 // Tradier `o.side` -> OrderSide (READ-BACK).
 function mapTradierSideRead(raw: unknown): OrderSide {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "buy":
       return "buy";
     case "sell":
@@ -262,7 +262,7 @@ function exitSideForEntry(entrySide: OrderSide): OrderSide {
 
 // Tradier `o.type` -> OrderType (READ-BACK).
 function mapTradierTypeRead(raw: unknown): OrderType {
-  switch (String(raw)) {
+  switch (String(raw ?? "").trim().toLowerCase()) {
     case "market":
       return "market";
     case "limit":
@@ -1609,14 +1609,15 @@ export function mapTradierBracketContainerRow(container: Record<string, unknown>
     const entryView = withContainerFallback(container, entry);
     const entrySide = recognizedTradierSide(entryView.side);
     const entryType = recognizedTradierType(entryView.type);
-    const mergedType = entryType ?? base.type;
+    const baseType = recognizedTradierType(container.type) ?? recognizedTradierType(base.type) ?? base.type;
+    const mergedType = entryType ?? baseType;
     const entryLimit = optionalNumber(entryView.price);
     const entryStop = optionalNumber(entryView.stop_price);
     const limitPrice = carriesLimitPrice(mergedType)
-      ? entryLimit ?? (carriesLimitPrice(base.type) ? base.limitPrice : undefined)
+      ? entryLimit ?? (carriesLimitPrice(baseType) ? base.limitPrice : undefined)
       : undefined;
     const stopPrice = carriesStopPrice(mergedType)
-      ? entryStop ?? (carriesStopPrice(base.type) ? base.stopPrice : undefined)
+      ? entryStop ?? (carriesStopPrice(baseType) ? base.stopPrice : undefined)
       : undefined;
     return {
       ...base,
