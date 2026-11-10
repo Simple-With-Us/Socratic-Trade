@@ -60,6 +60,25 @@ describe("empty screener + expired seed", () => {
     await expect(scanMarket(["AAPL"], [])).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 
+  it("forwards userId into Yahoo chart fallback when v7 misses on empty screener", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "miss" });
+    const yahoo = await import("../src/lib/yahoo-finance");
+    const chartSpy = vi.spyOn(yahoo, "fetchYahooFinanceChartQuotes");
+    const userId = "empty-screener-chart-user";
+
+    try {
+      await expect(
+        scanMarket(["AAPL"], [], undefined, userId, [], { enrichmentMode: "skip" })
+      ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+
+      expect(chartSpy).toHaveBeenCalled();
+      const chartOptions = chartSpy.mock.calls[0]?.[1];
+      expect(chartOptions?.userId).toBe(userId);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
   it("Yahoo-fallbacks the whole allowed set, including index members, when the screener is empty", async () => {
     stubFetches({ nasdaqRows: [], yahoo: "aapl" });
 
@@ -84,7 +103,7 @@ describe("empty screener + expired seed", () => {
     });
   });
 
-  it("uses a last-good seed before Yahoo-pricing the whole allowed set", async () => {
+  it("uses a last-good seed after Yahoo and broker recovery both miss", async () => {
     let yahooCalls = 0;
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);
@@ -122,7 +141,7 @@ describe("empty screener + expired seed", () => {
       }
     });
 
-    expect(yahooCalls).toBe(0);
+    expect(yahooCalls).toBeGreaterThan(0);
     expect(scan.topCandidates.map((quote) => quote.symbol).sort()).toEqual(["AAPL", "MSFT"]);
     expect(scan.warnings.join(" ")).toContain("stale fallback");
   });
