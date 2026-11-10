@@ -3590,6 +3590,24 @@ const MIGRATIONS: Migration[] = [
         "CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON audit_events (user_id, connected_account_id, created_at DESC)"
       );
     }
+  },
+  {
+    version: 102,
+    name: "st2599_auth_sessions",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          absolute_expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          last_seen_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active
+          ON auth_sessions (user_id, revoked_at);
+      `);
+    }
   }
 ];
 
@@ -5372,6 +5390,7 @@ export * from "./db-signal-health";
 export * from "./db-lookahead-audit";
 export * from "./db-enrichment-coverage";
 export * from "./db-device-tokens";
+export * from "./db-auth-sessions";
 export * from "./db-trade-locks";
 export * from "./db-memory-lifecycle";
 export * from "./db-overlays";

@@ -208,7 +208,7 @@ export async function fetchYahooFinanceChartQuotes(
 
 export async function fetchYahooFinanceQuotesBatch(
   symbols: string[],
-  options?: { concurrency?: number; userId?: string }
+  options?: { concurrency?: number; userId?: string; signal?: AbortSignal }
 ): Promise<Map<string, YahooFinanceQuote>> {
   const result = new Map<string, YahooFinanceQuote>();
   if (symbols.length === 0) return result;
@@ -226,6 +226,7 @@ export async function fetchYahooFinanceQuotesBatch(
   // still finish inside the interactive scan budget.
   const concurrency = Math.max(1, Math.min(options?.concurrency ?? 1, 4));
   for (let i = 0; i < chunks.length; i += concurrency) {
+    if (options?.signal?.aborted) break;
     const wave = chunks.slice(i, i + concurrency);
     const maps = await Promise.all(wave.map((chunk) => fetchYahooQuoteChunk(chunk, options?.userId)));
     for (const map of maps) {

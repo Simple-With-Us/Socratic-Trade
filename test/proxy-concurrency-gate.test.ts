@@ -88,7 +88,8 @@ describe("ProxyConcurrencyGate", () => {
   it("reports the queue wait on the granted slot", async () => {
     const gate = new ProxyConcurrencyGate(() => 1);
     const held = await gate.acquire();
-    expect(held.waitMs).toBe(0);
+    // Immediate grant still crosses a Date.now() boundary on loaded CI hosts (1ms is normal).
+    expect(held.waitMs).toBeLessThan(5);
     const waiting = gate.acquire();
     await sleep(70);
     held.release();
