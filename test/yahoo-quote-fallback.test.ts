@@ -207,6 +207,7 @@ describe("yahoo v7 partial results under abort pressure", () => {
     });
 
     const batch = await fetchYahooFinanceQuotesBatch(symbols(55), { concurrency: 2 });
+    expect(abortOnce.size).toBe(0);
     expect(batch.size).toBeGreaterThan(40);
     const telemetry = peekLastYahooQuoteTelemetry();
     expect(telemetry?.kind).toBe("v7_batch_complete");
@@ -216,11 +217,13 @@ describe("yahoo v7 partial results under abort pressure", () => {
 
   it("does not break remaining v7 waves when a chunk aborts once then succeeds", async () => {
     const abortOncePerChunk = new Map<string, boolean>();
+    let abortThrows = 0;
     yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
         const chunkKey = url.match(/symbols=([^&]+)/)?.[1] ?? "";
         if (!abortOncePerChunk.has(chunkKey)) {
           abortOncePerChunk.set(chunkKey, true);
+          abortThrows += 1;
           throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
         }
         const symbols = chunkKey.split(",").map((s) => decodeURIComponent(s));
@@ -243,14 +246,100 @@ describe("yahoo v7 partial results under abort pressure", () => {
     });
 
     const batch = await fetchYahooFinanceQuotesBatch(symbols(100), { concurrency: 2 });
+    expect(abortThrows).toBeGreaterThanOrEqual(2);
     expect(batch.size).toBe(100);
     const telemetry = peekLastYahooQuoteTelemetry();
     expect(telemetry?.v7ChunksAbort ?? 0).toBe(0);
     expect((telemetry?.v7Chunks ?? 0)).toBeGreaterThanOrEqual(2);
   });
+
+  it("prices v7 chunks when numeric fields arrive as strings", async () => {
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        const symbols = (url.match(/symbols=([^&]+)/)?.[1] ?? "")
+          .split(",")
+          .map((s) => decodeURIComponent(s));
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: symbols.map((symbol) => ({
+                symbol,
+                regularMarketPrice: "42.5",
+                bid: "42.4",
+                ask: "42.6",
+                regularMarketVolume: "1000"
+              }))
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batch = await fetchYahooFinanceQuotesBatch(["ZZZ1", "ZZZ2"]);
+    expect(batch.size).toBe(2);
+    expect(batch.get("ZZZ1")?.price).toBe(42.5);
+  });
+
+  it("emits v7_chunk_empty telemetry when a chunk fails with a non-abort error", async () => {
+    const telemetryKinds: string[] = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      const line = args.map(String).join(" ");
+      const json = line.match(/\{.*\}$/)?.[0];
+      if (json) {
+        try {
+          const payload = JSON.parse(json) as { kind?: string };
+          if (payload.kind) telemetryKinds.push(payload.kind);
+        } catch {
+          // ignore non-json warn lines
+        }
+      }
+    });
+    try {
+      yahooSessionStubs((url) => {
+        if (url.includes("/v7/finance/quote")) {
+          throw new TypeError("Unexpected v7 parse failure");
+        }
+        return new Response("not found", { status: 404 });
+      });
+      const batch = await fetchYahooFinanceQuotesBatch(["FAIL1"]);
+      expect(batch.size).toBe(0);
+      expect(telemetryKinds).toContain("v7_chunk_empty");
+      expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe("yahoo chart zod boundary", () => {
+  it("accepts chart meta with null optional fields and still prices", async () => {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("/v8/finance/chart/")) {
+        return new Response(
+          JSON.stringify({
+            chart: {
+              result: [{
+                meta: {
+                  regularMarketPrice: 88,
+                  chartPreviousClose: null,
+                  trailingPE: null,
+                  longName: null
+                },
+                indicators: { quote: [{ volume: [1] }] }
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const quote = await fetchYahooFinanceQuote("NULLY");
+    expect(quote?.price).toBe(88);
+  });
+
   it("rejects malformed chart payloads before reading meta", async () => {
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);

@@ -502,11 +502,13 @@ async function fetchYahooQuoteChunk(
         const fiftyTwoWeekHigh = optionalPositive(item.fiftyTwoWeekHigh);
         const fiftyTwoWeekLow = optionalPositive(item.fiftyTwoWeekLow);
 
-        const syntheticBid = !(item.bid && item.bid > 0);
-        const syntheticAsk = !(item.ask && item.ask > 0);
+        const bidRaw = optionalPositive(item.bid);
+        const askRaw = optionalPositive(item.ask);
+        const syntheticBid = bidRaw === undefined;
+        const syntheticAsk = askRaw === undefined;
         const hasRealSpread = !syntheticBid && !syntheticAsk;
-        const bid = syntheticBid ? price * 0.999 : Number(item.bid);
-        const ask = syntheticAsk ? price * 1.001 : Number(item.ask);
+        const bid = syntheticBid ? price * 0.999 : bidRaw;
+        const ask = syntheticAsk ? price * 1.001 : askRaw;
         const volume = Number(item.regularMarketVolume ?? 0);
         const t = Number(item.regularMarketTime);
         const asOf = Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : undefined;
@@ -550,6 +552,8 @@ async function fetchYahooQuoteChunk(
           v7ChunksAbort: stats.v7ChunksAbort,
           v7Chunks: stats.v7Chunks
         });
+      } else {
+        emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
       }
       return result;
     }

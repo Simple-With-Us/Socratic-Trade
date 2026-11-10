@@ -2,19 +2,23 @@ import { z } from "zod";
 
 const looseNumber = z.union([z.number(), z.string()]);
 
+/** Yahoo often sends null or string-numeric optional fields — keep parse tolerant, validate in mappers. */
+const looseOptionalNumber = z.union([looseNumber, z.null()]).optional();
+const looseOptionalString = z.union([z.string(), z.null()]).optional();
+
 export const YahooChartMetaSchema = z
   .object({
-    regularMarketPrice: looseNumber.optional(),
-    longName: z.string().optional(),
-    shortName: z.string().optional(),
-    chartPreviousClose: looseNumber.optional(),
-    regularMarketVolume: looseNumber.optional(),
-    regularMarketTime: looseNumber.optional(),
-    trailingPE: looseNumber.optional(),
-    epsTrailingTwelveMonths: looseNumber.optional(),
-    beta: looseNumber.optional(),
-    fiftyTwoWeekHigh: looseNumber.optional(),
-    fiftyTwoWeekLow: looseNumber.optional()
+    regularMarketPrice: looseOptionalNumber,
+    longName: looseOptionalString,
+    shortName: looseOptionalString,
+    chartPreviousClose: looseOptionalNumber,
+    regularMarketVolume: looseOptionalNumber,
+    regularMarketTime: looseOptionalNumber,
+    trailingPE: looseOptionalNumber,
+    epsTrailingTwelveMonths: looseOptionalNumber,
+    beta: looseOptionalNumber,
+    fiftyTwoWeekHigh: looseOptionalNumber,
+    fiftyTwoWeekLow: looseOptionalNumber
   })
   .passthrough();
 
@@ -52,22 +56,22 @@ export const YahooChartResponseSchema = z
 export const YahooV7QuoteItemSchema = z
   .object({
     symbol: z.string().optional(),
-    regularMarketPrice: z.number().optional(),
-    bid: z.number().optional(),
-    ask: z.number().optional(),
-    regularMarketPreviousClose: z.number().optional(),
-    regularMarketOpen: z.number().optional(),
-    regularMarketDayHigh: z.number().optional(),
-    regularMarketDayLow: z.number().optional(),
-    regularMarketVolume: z.number().optional(),
-    regularMarketTime: z.number().optional(),
-    regularMarketChange: z.number().optional(),
-    regularMarketChangePercent: z.number().optional(),
-    shortName: z.string().optional(),
-    longName: z.string().optional(),
-    trailingPE: z.number().optional(),
-    fiftyTwoWeekHigh: z.number().optional(),
-    fiftyTwoWeekLow: z.number().optional()
+    regularMarketPrice: looseOptionalNumber,
+    bid: looseOptionalNumber,
+    ask: looseOptionalNumber,
+    regularMarketPreviousClose: looseOptionalNumber,
+    regularMarketOpen: looseOptionalNumber,
+    regularMarketDayHigh: looseOptionalNumber,
+    regularMarketDayLow: looseOptionalNumber,
+    regularMarketVolume: looseOptionalNumber,
+    regularMarketTime: looseOptionalNumber,
+    regularMarketChange: looseOptionalNumber,
+    regularMarketChangePercent: looseOptionalNumber,
+    shortName: looseOptionalString,
+    longName: looseOptionalString,
+    trailingPE: looseOptionalNumber,
+    fiftyTwoWeekHigh: looseOptionalNumber,
+    fiftyTwoWeekLow: looseOptionalNumber
   })
   .passthrough();
 
