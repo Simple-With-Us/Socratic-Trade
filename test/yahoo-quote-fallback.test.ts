@@ -401,10 +401,30 @@ describe("yahoo session handshake timeout", () => {
   });
 });
 
+function v7QuoteStubForSymbols(symbolList: string[]): (url: string) => Response | Promise<Response> {
+  return (url: string) => {
+    if (url.includes("/v7/finance/quote")) {
+      const result = symbolList.map((symbol) => ({
+        symbol,
+        regularMarketPrice: 1,
+        bid: 1,
+        ask: 1
+      }));
+      return new Response(
+        JSON.stringify({ quoteResponse: { result } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
 describe("yahoo v7 batch telemetry", () => {
   it("emits v7_batch_complete when the batch signal is already aborted", async () => {
+    let v7Calls = 0;
     yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
+        v7Calls += 1;
         return new Response(
           JSON.stringify({
             quoteResponse: { result: [{ symbol: "PRIME", regularMarketPrice: 9, bid: 9, ask: 9 }] }
@@ -414,13 +434,18 @@ describe("yahoo v7 batch telemetry", () => {
       }
       return new Response("not found", { status: 404 });
     });
-    await fetchYahooFinanceQuotesBatch(["PRIME"]);
+    const primed = await fetchYahooFinanceQuotesBatch(["PRIME"]);
+    expect(v7Calls).toBe(1);
+    expect(primed.get("PRIME")?.price).toBe(9);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
     expect(peekLastYahooQuoteTelemetry()?.v7Chunks).toBe(1);
     expect(peekLastYahooQuoteTelemetry()?.symbolsPriced).toBe(1);
 
     const controller = new AbortController();
     controller.abort();
-    await fetchYahooFinanceQuotesBatch(["CANCEL"], { signal: controller.signal });
+    const aborted = await fetchYahooFinanceQuotesBatch(["CANCEL"], { signal: controller.signal });
+    expect(aborted.size).toBe(0);
+    expect(v7Calls).toBe(1);
     const telemetry = peekLastYahooQuoteTelemetry();
     expect(telemetry?.kind).toBe("v7_batch_complete");
     expect(telemetry?.symbolsRequested).toBe(1);
@@ -429,21 +454,16 @@ describe("yahoo v7 batch telemetry", () => {
   });
 
   it("does not count v7Chunks for parallel chunks that never start an attempt", async () => {
+    const controlUniverse = symbols(10);
+    yahooSessionStubs(v7QuoteStubForSymbols(controlUniverse));
+    const controlBatch = await fetchYahooFinanceQuotesBatch(controlUniverse, { concurrency: 2 });
+    expect(controlBatch.size).toBe(controlUniverse.length);
+    const controlTelemetry = peekLastYahooQuoteTelemetry();
+    expect(controlTelemetry?.kind).toBe("v7_batch_complete");
+    expect(controlTelemetry?.v7Chunks).toBeGreaterThan(0);
+
     const controller = new AbortController();
     controller.abort();
-    yahooSessionStubs((url) => {
-      if (url.includes("/v7/finance/quote")) {
-        return new Response(
-          JSON.stringify({
-            quoteResponse: {
-              result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }]
-            }
-          }),
-          { status: 200, headers: { "content-type": "application/json" } }
-        );
-      }
-      return new Response("not found", { status: 404 });
-    });
     await fetchYahooFinanceQuotesBatch(symbols(100), { concurrency: 2, signal: controller.signal });
     const telemetry = peekLastYahooQuoteTelemetry();
     expect(telemetry?.kind).toBe("v7_batch_complete");
