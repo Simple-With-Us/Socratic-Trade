@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
-import { audit } from "@/lib/db";
 import { fetchPriceSeries, parseMarketRange } from "@/lib/market-read";
 import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import {
+  bestEffortAudit,
+  isSqliteBusy,
+  peerReadRouteSqliteRetry,
+  peerReadSqliteContentionResponse
+} from "@/lib/sqlite-peer-read";
 
 export const dynamic = "force-dynamic";
 
@@ -20,13 +25,19 @@ export const dynamic = "force-dynamic";
 // (closes[0] = latest close). See src/lib/market-read.ts.
 export async function GET(req: Request, { params }: { params: Promise<{ symbol: string }> }) {
   if (!verifySecuritiesImportToken(req)) {
-    audit("market_read_rejected", { reason: "token", route: "prices" });
+    bestEffortAudit("market_read_rejected", { reason: "token", route: "prices" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const rateLimitResp = enforceRateLimit("peer-app", "peer-read", RATE_LIMITS.peerRead);
   if (rateLimitResp) return rateLimitResp;
   const { symbol } = await params;
-  const read = await fetchPriceSeries(symbol, parseMarketRange(req.url));
+  let read;
+  try {
+    read = await peerReadRouteSqliteRetry(() => fetchPriceSeries(symbol, parseMarketRange(req.url)));
+  } catch (err) {
+    if (isSqliteBusy(err)) return peerReadSqliteContentionResponse();
+    throw err;
+  }
   switch (read.kind) {
     case "ok":
       return NextResponse.json(read.series);

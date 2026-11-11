@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
-import { audit } from "@/lib/db";
 import { fetchCompanyProfile } from "@/lib/market-read";
 import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import {
+  bestEffortAudit,
+  isSqliteBusy,
+  peerReadRouteSqliteRetry,
+  peerReadSqliteContentionResponse
+} from "@/lib/sqlite-peer-read";
 
 export const dynamic = "force-dynamic";
 
@@ -15,13 +20,19 @@ export const dynamic = "force-dynamic";
 // keyless Nasdaq delayed screener. FMP is never used here.
 export async function GET(req: Request, { params }: { params: Promise<{ symbol: string }> }) {
   if (!verifySecuritiesImportToken(req)) {
-    audit("market_read_rejected", { reason: "token", route: "profile" });
+    bestEffortAudit("market_read_rejected", { reason: "token", route: "profile" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const rateLimitResp = enforceRateLimit("peer-app", "peer-read", RATE_LIMITS.peerRead);
   if (rateLimitResp) return rateLimitResp;
   const { symbol } = await params;
-  const ref = await fetchCompanyProfile(symbol);
+  let ref;
+  try {
+    ref = await peerReadRouteSqliteRetry(() => fetchCompanyProfile(symbol));
+  } catch (err) {
+    if (isSqliteBusy(err)) return peerReadSqliteContentionResponse();
+    throw err;
+  }
   if (!ref) {
     return NextResponse.json({ ref: null }, { status: 404 });
   }

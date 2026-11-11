@@ -338,6 +338,16 @@ describe("GET /api/market/prices/[symbol]", () => {
     });
   });
 
+  it("503 with Retry-After when sqlite contention escapes fetchDailyOHLC", async () => {
+    mockFetchDailyOHLC.mockRejectedValue(
+      Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" })
+    );
+    const res = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("2");
+    expect(await res.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
+  });
+
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
     mockFetchDailyOHLC.mockResolvedValue(null);
     const res = await pricesRoute(authedRequest("http://localhost/api/market/prices/NOTREAL", TEST_TOKEN), {
