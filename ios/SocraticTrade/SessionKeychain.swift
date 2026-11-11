@@ -398,39 +398,31 @@ enum SessionCookiePersistence {
         guard let host, !host.isEmpty else { return [] }
         ensureAlwaysAcceptsCookies(in: storage)
 
-        let originScoped = URL(string: "https://\(host)/")
-            .map { storage.cookies(for: $0) ?? [] } ?? []
-        let originTrusted = Set(originScoped.map(ObjectIdentifier.init))
-
-        func normalizedDomainForKey(_ cookie: HTTPCookie) -> String {
-            CookieDomain.effective(cookie, owningHost: host)
-        }
+        let origin = URL(string: "https://\(host)/")
+        let originScoped = origin.map { storage.cookies(for: $0) ?? [] } ?? []
+        var seenKeys = Set<String>()
+        var matched: [HTTPCookie] = []
 
         func cookieKey(_ cookie: HTTPCookie) -> String {
-            "\(cookie.name)|\(normalizedDomainForKey(cookie))|\(cookie.path)"
+            let domainKey = CookieDomain.effective(cookie, owningHost: host)
+            return "\(cookie.name)|\(domainKey)|\(cookie.path)"
         }
 
-        var merged: [String: HTTPCookie] = [:]
+        func consider(_ cookie: HTTPCookie) {
+            guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return }
+            guard ownsDomain(cookie, host: host) else { return }
+            let key = cookieKey(cookie)
+            guard seenKeys.insert(key).inserted else { return }
+            matched.append(cookie)
+        }
+
         for cookie in originScoped {
-            merged[cookieKey(cookie)] = cookie
+            consider(cookie)
         }
         for cookie in storage.cookies ?? [] {
-            let key = cookieKey(cookie)
-            if merged[key] == nil {
-                merged[key] = cookie
-            }
+            consider(cookie)
         }
-
-        return merged.values.filter { cookie in
-            guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return false }
-            if originTrusted.contains(ObjectIdentifier(cookie)) {
-                return true
-            }
-            if isCookieBoundToHTTPSOrigin(cookie, host: host), ownsDomain(cookie, host: host) {
-                return true
-            }
-            return ownsDomain(cookie, host: host)
-        }
+        return matched
     }
 
     static func ownsDomain(_ cookie: HTTPCookie, host: String) -> Bool {
