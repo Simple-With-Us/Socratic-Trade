@@ -369,23 +369,35 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
             state = .failed(PushRegistrationPolicy.conflictMessage)
             return
         }
-        do {
-            try await client.registerPushToken(registration)
-            registrationGate.observeSuccess()
-            registeredToken = registration.token
-            state = .registered(environment: registration.environment)
-        } catch let error as MobileAPIError {
-            registrationGate.observe(token: registration.token, error: error)
-            registeredToken = nil
-            if case .deviceTokenConflict = error {
-                log.error("Push register returned 409. Not retrying in this session.")
-                state = .failed(PushRegistrationPolicy.conflictMessage)
+        var attempt = 0
+        while true {
+            do {
+                try await client.registerPushToken(registration)
+                registrationGate.observeSuccess()
+                registeredToken = registration.token
+                state = .registered(environment: registration.environment)
+                return
+            } catch let error as MobileAPIError {
+                registrationGate.observe(token: registration.token, error: error)
+                if case .deviceTokenConflict = error {
+                    log.error("Push register returned 409. Not retrying in this session.")
+                    state = .failed(PushRegistrationPolicy.conflictMessage)
+                    return
+                }
+                if error.isTransientPushRegistrationFailure, attempt == 0 {
+                    attempt += 1
+                    continue
+                }
+                state = .failed(error.localizedDescription)
+                return
+            } catch {
+                if attempt == 0 {
+                    attempt += 1
+                    continue
+                }
+                state = .failed(error.localizedDescription)
                 return
             }
-            state = .failed(error.localizedDescription)
-        } catch {
-            registeredToken = nil
-            state = .failed(error.localizedDescription)
         }
     }
 
@@ -408,23 +420,33 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     }
 
     /// Deletes this device's row for the signed-in account without ending the system
-    /// registration. Used before a different account's session replaces the cookies.
+    /// registration. Called after a new sign-in has succeeded, with the previous
+    /// account's cookies put back for this call only.
     ///
-    /// The incoming session always gets one register attempt. A 409 clears the local
-    /// token, and a later session expiry cannot DELETE, so the hold has to drop here
-    /// or the account that already owns the token stays blocked until the process
-    /// restarts. A fresh 409 arms the hold again, so repeated APNs callbacks in that
-    /// session do not loop.
+    /// A transient DELETE is retried once. The token stays until the DELETE succeeds,
+    /// so a later sign-out can still unbind it. The incoming session gets one register
+    /// attempt after this returns. A fresh 409 arms the hold again.
     func relinquishTokenForAccountChange() async {
-        if let token = registeredToken {
+        guard let token = registeredToken else {
+            registrationGate.observeSuccess()
+            return
+        }
+        var attempt = 0
+        while true {
             do {
                 try await client.unregisterPushToken(token)
                 registeredToken = nil
                 if state.isWorking {
                     state = .awaitingToken
                 }
+                break
             } catch {
-                log.error("Push unregister before account change failed. The next register may be refused.")
+                if attempt == 0 {
+                    attempt += 1
+                    continue
+                }
+                log.error("Push unregister before account change failed. The token stays until a later sign-out.")
+                break
             }
         }
         registrationGate.observeSuccess()

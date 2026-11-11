@@ -1097,14 +1097,14 @@ final class MobileStore: ObservableObject {
     /// Re-register this device's APNs token under the session that just began.
     ///
     /// The server returns 409 when the token still belongs to another account. That refusal
-    /// is surfaced once. Sign-in already cleared the hold, so this call is the one attempt.
-    /// A fresh 409 stops later callbacks until the next sign-in.
+    /// is surfaced once. This call is the one attempt for the new session. A fresh 409
+    /// stops later callbacks until the next sign-in.
     private func claimPushTokenForCurrentSession() async {
         await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
     }
 
-    /// Drops the current account's push row while its session cookies are still valid.
-    /// A broker-account switch does not call this: that switch keeps the same signed-in user.
+    /// Drops the current account's push row while that account's cookies are restored.
+    /// A broker-account switch does not call this on its own: that switch keeps the same user.
     func releasePushForAccountChange() async {
         await pushTokenRelease.relinquishTokenForAccountChange()
     }
@@ -1117,18 +1117,18 @@ final class MobileStore: ObservableObject {
         }
         isSigningIn = true
         defer { isSigningIn = false }
-        await releasePushForAccountChange()
+        let priorCookies = ownedSessionCookies()
         do {
             _ = try await client.loginWithApple(identityToken: identityToken, name: name, nonce: nonce)
             isAuthenticated = true
             error = nil
+            await rebindPushAfterSuccessfulLogin(priorCookies: priorCookies)
             await load()
             if isAuthenticated {
                 if opensEventStreamOnSignIn { startEvents() }
                 if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             }
         } catch {
-            applyAuthAwareError(error)
             self.error = "Apple Sign-In failed: \(error.localizedDescription)"
         }
     }
@@ -1137,9 +1137,10 @@ final class MobileStore: ObservableObject {
         guard !isSigningIn else { return }
         isSigningIn = true
         defer { isSigningIn = false }
-        await releasePushForAccountChange()
+        let priorCookies = ownedSessionCookies()
         do {
             try await client.exchangeWebAuthCode(code, verifier: verifier)
+            await rebindPushAfterSuccessfulLogin(priorCookies: priorCookies)
             await load()
             if isAuthenticated {
                 if opensEventStreamOnSignIn { startEvents() }
@@ -1148,9 +1149,41 @@ final class MobileStore: ObservableObject {
                 error = "Authentication failed after web sign-in.  Try again."
             }
         } catch {
-            applyAuthAwareError(error)
             self.error = "Web sign-in could not be completed.  Try again."
         }
+    }
+
+    /// The login response has already replaced the session cookies. Put the previous
+    /// account's cookies back only for the DELETE, then restore the signed-in session.
+    /// Registration waits until load confirms that session. A failed login never reaches
+    /// this method, so the old session keeps its push row.
+    private func rebindPushAfterSuccessfulLogin(priorCookies: [HTTPCookie]) async {
+        let signedInCookies = ownedSessionCookies()
+        if !priorCookies.isEmpty {
+            replaceOwnedSessionCookies(with: priorCookies)
+            await releasePushForAccountChange()
+            replaceOwnedSessionCookies(with: signedInCookies)
+        } else {
+            await releasePushForAccountChange()
+        }
+    }
+
+    private func ownedSessionCookies() -> [HTTPCookie] {
+        (sessionCookieStorage.cookies ?? []).filter { client.ownsCookie($0) }
+    }
+
+    private func replaceOwnedSessionCookies(with cookies: [HTTPCookie]) {
+        let storage = sessionCookieStorage
+        for cookie in storage.cookies ?? [] where client.ownsCookie(cookie) {
+            storage.deleteCookie(cookie)
+        }
+        for cookie in cookies {
+            storage.setCookie(cookie)
+        }
+    }
+
+    private var sessionCookieStorage: HTTPCookieStorage {
+        client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
     }
 
     /// Explicit sign-out. Session cookies stay until the authenticated push delete finishes.

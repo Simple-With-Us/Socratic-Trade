@@ -1,6 +1,6 @@
 ## 2026-11-11 CURSOR — ST-4594 iOS session hardening
 
-**What.**  The iOS app now prepares a PKCE handoff nonce before Google/GitHub sign-in, fetches the server Apple nonce before native Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out unregisters the push token before clearing cookies.  A push-register 409 is surfaced once.  The next sign-in gets one attempt, and a fresh 409 holds the token again so callbacks do not loop.  Server `__legacy_compat__` paths stay for older builds.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+**What.**  The iOS app now prepares a PKCE handoff nonce before Google/GitHub sign-in, fetches the server Apple nonce before native Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out unregisters the push token before clearing cookies.  A replacement sign-in unregisters the previous account only after login succeeds.  A push-register 409 is surfaced once.  The next sign-in gets one attempt, and a fresh 409 holds the token again so callbacks do not loop.  Server `__legacy_compat__` paths stay for older builds.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
 
 **Next.**  PR #5132 is open and one Kody review is already requested.  Squash auto-merge waits on `verify` and `verify-ios`.  Do not drop the server legacy paths until this build is on TestFlight and the App Store.
 

@@ -42,6 +42,18 @@ enum MobileAPIError: Error, LocalizedError {
         }
     }
 
+    /// A push upload can be sent again. A 409 is not transient: another account owns the token.
+    var isTransientPushRegistrationFailure: Bool {
+        switch self {
+        case .network, .decoding:
+            return true
+        case .serverError(let statusCode, _) where statusCode >= 500:
+            return true
+        case .serverError, .unauthorized, .deviceTokenConflict, .scanQuotesUnavailable:
+            return false
+        }
+    }
+
     /// True when the failure is user- or task-initiated cancellation (no alert copy).
     static func isUserCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }

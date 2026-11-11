@@ -360,18 +360,17 @@ struct LoginView: View {
         )
     }
 
-    private func complete(_ result: Result<ASAuthorization, Error>) {
+    private func complete(_ result: Result<ASAuthorization, Error>, nonce: String?) {
         switch result {
         case .success(let authorization):
-            handleAuthorization(authorization)
+            handleAuthorization(authorization, serverNonce: nonce)
         case .failure(let error):
-            AppleSignInCoordinator.shared.serverNonce = nil
             guard let message = AppleSignInFailure.message(for: error) else { return }
             store.error = message
         }
     }
 
-    private func handleAuthorization(_ authorization: ASAuthorization) {
+    private func handleAuthorization(_ authorization: ASAuthorization, serverNonce: String?) {
         guard
             let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
             let tokenData = credential.identityToken,
@@ -387,8 +386,6 @@ struct LoginView: View {
             return components.isEmpty ? nil : components.joined(separator: " ")
         }()
 
-        let serverNonce = AppleSignInCoordinator.shared.serverNonce
-        AppleSignInCoordinator.shared.serverNonce = nil
         guard let serverNonce, MobileAuthNonce.isServerIssued(serverNonce) else {
             store.error = MobileAuthStartFailure.appleNonceUnavailable
             return
@@ -610,42 +607,48 @@ enum AppleSignInFailure {
 private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     static let shared = AppleSignInCoordinator()
 
-    fileprivate var serverNonce: String?
-    private var completion: ((Result<ASAuthorization, Error>) -> Void)?
-    private var controller: ASAuthorizationController?
+    private var attempts = AppleSignInAttempts<ObjectIdentifier>()
+    private var retained: [ObjectIdentifier: (
+        controller: ASAuthorizationController,
+        completion: (Result<ASAuthorization, Error>, String?) -> Void
+    )] = [:]
 
     func start(
         controller: ASAuthorizationController,
         serverNonce: String,
-        completion: @escaping (Result<ASAuthorization, Error>) -> Void
+        completion: @escaping (Result<ASAuthorization, Error>, String?) -> Void
     ) {
-        self.serverNonce = serverNonce
-        self.completion = completion
-        self.controller = controller
+        let key = ObjectIdentifier(controller)
+        attempts.begin(key, nonce: serverNonce)
+        retained[key] = (controller, completion)
         controller.delegate = self
         controller.presentationContextProvider = self
         controller.performRequests()
     }
 
-    private func finish(_ result: Result<ASAuthorization, Error>) {
-        let completion = self.completion
-        self.completion = nil
-        self.controller = nil
-        completion?(result)
+    private func finish(controller: ASAuthorizationController, result: Result<ASAuthorization, Error>) {
+        let key = ObjectIdentifier(controller)
+        let nonce = attempts.take(key)
+        let completion = retained.removeValue(forKey: key)?.completion
+        completion?(result, nonce)
     }
 
     nonisolated func authorizationController(
         controller: ASAuthorizationController,
         didCompleteWithAuthorization authorization: ASAuthorization
     ) {
-        Task { @MainActor in finish(.success(authorization)) }
+        Task { @MainActor in
+            finish(controller: controller, result: .success(authorization))
+        }
     }
 
     nonisolated func authorizationController(
         controller: ASAuthorizationController,
         didCompleteWithError error: Error
     ) {
-        Task { @MainActor in finish(.failure(error)) }
+        Task { @MainActor in
+            finish(controller: controller, result: .failure(error))
+        }
     }
 
     nonisolated func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {

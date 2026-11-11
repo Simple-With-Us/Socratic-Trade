@@ -199,6 +199,18 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 2)
     }
 
+    func testOverlappingAppleAttemptsKeepDistinctNonces() {
+        var attempts = AppleSignInAttempts<String>()
+        attempts.begin("first", nonce: "nonce-a")
+        attempts.begin("second", nonce: "nonce-b")
+        XCTAssertEqual(attempts.nonce(for: "first"), "nonce-a")
+        XCTAssertEqual(attempts.nonce(for: "second"), "nonce-b")
+        XCTAssertEqual(attempts.take("first"), "nonce-a")
+        XCTAssertNil(attempts.nonce(for: "first"))
+        XCTAssertEqual(attempts.take("second"), "nonce-b")
+        XCTAssertNil(attempts.take("second"))
+    }
+
     func testConflictGateDoesNotSendTheSameTokenAgainUntilTheHoldClears() {
         var gate = PushRegistrationGate()
         let token = "device-token"
@@ -215,6 +227,66 @@ final class MobileSessionHardeningTests: XCTestCase {
         )
         XCTAssertFalse(PushRegistrationPolicy.conflictMessage.contains("apns"))
         XCTAssertFalse(PushRegistrationPolicy.conflictMessage.lowercased().contains("device token"))
+    }
+
+    @MainActor
+    func testTransientUploadKeepsTheTokenSoAccountChangeCanUnbind() async throws {
+        let log = AuthRequestLog()
+        let posts = RequestCounter()
+        let session = stubbedSession(log: log) { request in
+            if request.httpMethod == "DELETE" {
+                return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
+            }
+            posts.value += 1
+            if posts.value == 1 {
+                return (200, Data(#"{"ok":true}"#.utf8))
+            }
+            return (503, Data(#"{"ok":false}"#.utf8))
+        }
+        let client = MobileAPIClient(baseURL: base, session: session)
+        let coordinator = PushNotificationCoordinator(client: client)
+        let registration = try XCTUnwrap(PushRegistrationRequest(
+            token: "abc123",
+            environment: .production,
+            bundleId: "com.socratictrade.ios"
+        ))
+
+        await coordinator.upload(registration)
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 3)
+
+        await coordinator.relinquishTokenForAccountChange()
+        XCTAssertEqual(log.snapshot().filter { $0.method == "DELETE" }.count, 1)
+    }
+
+    @MainActor
+    func testConflictAfterASuccessfulRegisterDoesNotDropTheToken() async throws {
+        let log = AuthRequestLog()
+        let posts = RequestCounter()
+        let session = stubbedSession(log: log) { request in
+            if request.httpMethod == "DELETE" {
+                return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
+            }
+            posts.value += 1
+            if posts.value == 1 {
+                return (200, Data(#"{"ok":true}"#.utf8))
+            }
+            return (409, Data(#"{"error":"token belongs to another account"}"#.utf8))
+        }
+        let client = MobileAPIClient(baseURL: base, session: session)
+        let coordinator = PushNotificationCoordinator(client: client)
+        let registration = try XCTUnwrap(PushRegistrationRequest(
+            token: "abc123",
+            environment: .production,
+            bundleId: "com.socratictrade.ios"
+        ))
+
+        await coordinator.upload(registration)
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 2)
+
+        await coordinator.relinquishTokenForAccountChange()
+        XCTAssertEqual(log.snapshot().filter { $0.method == "DELETE" }.count, 1)
     }
 
     @MainActor
@@ -242,10 +314,12 @@ final class MobileSessionHardeningTests: XCTestCase {
     }
 
     @MainActor
-    func testAccountChangeUnregistersBeforeTheNewAppleSignIn() async throws {
+    func testAccountChangeUnregistersAfterAppleSignInSucceeds() async throws {
         let log = AuthRequestLog()
+        let swap = CookieSwap()
         let session = stubbedSession(log: log) { request in
             if request.url?.path == "/api/mobile/auth/apple" {
+                swap.apply()
                 return (200, Data(#"{"success":true,"email":"owner@example.com"}"#.utf8))
             }
             if request.url?.path == "/api/mobile/snapshot" {
@@ -254,7 +328,9 @@ final class MobileSessionHardeningTests: XCTestCase {
             return (200, Data(#"{"ok":true}"#.utf8))
         }
         let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
-        storage.setCookie(try sessionCookie())
+        swap.storage = storage
+        swap.next = try sessionCookie(value: "next-session")
+        storage.setCookie(try sessionCookie(value: "prior-session"))
         clearSnapshotCache()
         defer { clearSnapshotCache() }
         let client = MobileAPIClient(baseURL: base, session: session)
@@ -268,13 +344,46 @@ final class MobileSessionHardeningTests: XCTestCase {
 
         let events = log.snapshot()
         XCTAssertGreaterThanOrEqual(events.count, 2)
-        XCTAssertEqual(events[0].method, "DELETE")
-        XCTAssertEqual(events[0].path, "/api/mobile/push/register")
-        XCTAssertTrue(release.cookiePresentAtUnregister)
-        XCTAssertEqual(events[1].method, "POST")
-        XCTAssertEqual(events[1].path, "/api/mobile/auth/apple")
-        XCTAssertEqual(events[1].header, MobileAPIClient.sessionHardeningHeaderValue)
-        XCTAssertTrue(storage.cookies?.contains { $0.name == "st-session-hardening" } ?? false)
+        XCTAssertEqual(events[0].method, "POST")
+        XCTAssertEqual(events[0].path, "/api/mobile/auth/apple")
+        XCTAssertEqual(events[0].header, MobileAPIClient.sessionHardeningHeaderValue)
+        XCTAssertEqual(events[1].method, "DELETE")
+        XCTAssertEqual(events[1].path, "/api/mobile/push/register")
+        XCTAssertEqual(release.cookieValueAtUnregister, "prior-session")
+        XCTAssertEqual(
+            storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
+            "next-session"
+        )
+    }
+
+    @MainActor
+    func testFailedAppleSignInLeavesThePushRowInPlace() async throws {
+        let log = AuthRequestLog()
+        let session = stubbedSession(log: log) { request in
+            if request.url?.path == "/api/mobile/auth/apple" {
+                return (401, Data(#"{"error":"invalid nonce"}"#.utf8))
+            }
+            return (200, Data(#"{"ok":true}"#.utf8))
+        }
+        let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
+        storage.setCookie(try sessionCookie(value: "prior-session"))
+        let client = MobileAPIClient(baseURL: base, session: session)
+        let release = ScriptedPushRelease(client: client, token: "abc123")
+        let store = MobileStore(client: client)
+        store.opensEventStreamOnSignIn = false
+        store.claimsPushOnSignIn = false
+        store.pushTokenRelease = release
+
+        await store.loginWithApple(identityToken: "identity-token", name: "Owner", nonce: issuedNonce)
+
+        XCTAssertFalse(log.snapshot().contains { $0.method == "DELETE" })
+        XCTAssertEqual(log.snapshot().first?.method, "POST")
+        XCTAssertEqual(log.snapshot().first?.path, "/api/mobile/auth/apple")
+        XCTAssertEqual(
+            storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
+            "prior-session"
+        )
+        XCTAssertNotNil(store.error)
     }
 
     private func jsonObject(_ request: URLRequest) throws -> [String: Any] {
@@ -282,12 +391,12 @@ final class MobileSessionHardeningTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
-    private func sessionCookie() throws -> HTTPCookie {
+    private func sessionCookie(value: String = "still-signed-in") throws -> HTTPCookie {
         try XCTUnwrap(HTTPCookie(properties: [
             .domain: "socratictrade.com",
             .path: "/",
             .name: "st-session-hardening",
-            .value: "still-signed-in",
+            .value: value,
             .secure: "TRUE"
         ]))
     }
@@ -332,6 +441,7 @@ private final class ScriptedPushRelease: PushTokenReleasing {
     let client: MobileAPIClient
     var token: String?
     private(set) var cookiePresentAtUnregister = false
+    private(set) var cookieValueAtUnregister: String?
 
     init(client: MobileAPIClient, token: String?) {
         self.client = client
@@ -348,10 +458,28 @@ private final class ScriptedPushRelease: PushTokenReleasing {
 
     private func delete() async {
         let storage = client.session.configuration.httpCookieStorage
-        cookiePresentAtUnregister = storage?.cookies?.contains { $0.name == "st-session-hardening" } ?? false
+        cookieValueAtUnregister = storage?.cookies?.first { $0.name == "st-session-hardening" }?.value
+        cookiePresentAtUnregister = cookieValueAtUnregister != nil
         guard let token else { return }
         try? await client.unregisterPushToken(token)
         self.token = nil
+    }
+}
+
+private final class RequestCounter: @unchecked Sendable {
+    var value = 0
+}
+
+private final class CookieSwap: @unchecked Sendable {
+    var storage: HTTPCookieStorage?
+    var next: HTTPCookie?
+
+    func apply() {
+        guard let storage, let next else { return }
+        for cookie in storage.cookies ?? [] where cookie.name == next.name {
+            storage.deleteCookie(cookie)
+        }
+        storage.setCookie(next)
     }
 }
 

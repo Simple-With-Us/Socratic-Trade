@@ -71,6 +71,26 @@ enum MobileWebAuthStart {
     }
 }
 
+/// One server nonce per Apple sign-in attempt.
+///
+/// Overlapping sheets must not share a single nonce slot. The key is the attempt
+/// (the authorization controller's identity). Taking one attempt leaves the others.
+struct AppleSignInAttempts<Key: Hashable> {
+    private var nonces: [Key: String] = [:]
+
+    mutating func begin(_ key: Key, nonce: String) {
+        nonces[key] = nonce
+    }
+
+    func nonce(for key: Key) -> String? {
+        nonces[key]
+    }
+
+    mutating func take(_ key: Key) -> String? {
+        nonces.removeValue(forKey: key)
+    }
+}
+
 /// What the owner sees when push registration is refused because another account still
 /// owns this device. Further uploads of that token stop for the rest of the session.
 /// The next sign-in allows one attempt, and a fresh 409 arms the hold again.
