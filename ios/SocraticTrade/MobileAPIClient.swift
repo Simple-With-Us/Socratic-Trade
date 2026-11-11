@@ -113,6 +113,10 @@ struct MobileAPIClient {
 
     let baseURL: URL
     var session: URLSession = .shared
+    /// Custom URL protocols for the account-change DELETE session. A live
+    /// URLSession does not return `configuration.protocolClasses`, so a stub
+    /// installed on `session` has to be repeated here.
+    var isolatedProtocolClasses: [AnyClass]? = nil
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
@@ -302,7 +306,8 @@ struct MobileAPIClient {
     /// The shared cookie jar is not read or written, so other in-flight calls keep
     /// the signed-in session.
     func unregisterPushToken(_ token: String, isolatedCookies: [HTTPCookie]) async throws {
-        var request = unregisterPushRequest(token)
+        var request = try unregisterPushRequest(token)
+        request.httpShouldHandleCookies = false
         let cookie = HTTPCookie.requestHeaderFields(with: isolatedCookies)["Cookie"]
         if let cookie {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
@@ -311,7 +316,7 @@ struct MobileAPIClient {
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpCookieStorage = nil
-        configuration.protocolClasses = session.configuration.protocolClasses
+        configuration.protocolClasses = isolatedProtocolClasses ?? session.configuration.protocolClasses
         let isolated = URLSession(configuration: configuration)
         defer { isolated.finishTasksAndInvalidate() }
         _ = try await successfulResponseData(for: request, transport: isolated)

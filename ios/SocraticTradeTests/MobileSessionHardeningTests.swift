@@ -102,7 +102,11 @@ final class MobileSessionHardeningTests: XCTestCase {
             XCTAssertEqual(request.httpMethod, "POST")
             return (200, Data(#"{"nonce":"issued-handoff"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let nonce = try await client.prepareHandoff(codeChallenge: String(repeating: "c", count: 43))
         XCTAssertEqual(nonce, "issued-handoff")
         XCTAssertEqual(log.snapshot().count, 1)
@@ -116,7 +120,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let session = stubbedSession(log: AuthRequestLog()) { _ in
             (503, Data(#"{"error":"unavailable"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         do {
             _ = try await client.fetchAppleSignInNonce()
             XCTFail("a failed nonce fetch must throw")
@@ -136,7 +144,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let session = stubbedSession(log: AuthRequestLog()) { _ in
             (200, Data(#"{"nonce":"__legacy_compat__"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         do {
             _ = try await client.prepareHandoff(codeChallenge: String(repeating: "d", count: 43))
             XCTFail("legacy nonce must not be accepted")
@@ -150,7 +162,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let session = stubbedSession(log: log) { _ in
             (409, Data(#"{"ok":false,"error":"other account"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let registration = PushRegistrationRequest(
             token: "abc123",
             environment: .production,
@@ -178,7 +194,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let session = stubbedSession(log: log) { _ in
             (409, Data(#"{"ok":false,"error":"other account"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let coordinator = PushNotificationCoordinator(client: client)
         let registration = try XCTUnwrap(PushRegistrationRequest(
             token: "abc123",
@@ -243,7 +263,11 @@ final class MobileSessionHardeningTests: XCTestCase {
             }
             return (503, Data(#"{"ok":false}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let coordinator = PushNotificationCoordinator(client: client)
         let registration = try XCTUnwrap(PushRegistrationRequest(
             token: "abc123",
@@ -273,7 +297,11 @@ final class MobileSessionHardeningTests: XCTestCase {
             }
             return (409, Data(#"{"error":"token belongs to another account"}"#.utf8))
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let coordinator = PushNotificationCoordinator(client: client)
         let registration = try XCTUnwrap(PushRegistrationRequest(
             token: "abc123",
@@ -295,7 +323,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let session = stubbedSession(log: log) { _ in
             throw URLError(.cancelled)
         }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let coordinator = PushNotificationCoordinator(client: client)
         let registration = try XCTUnwrap(PushRegistrationRequest(
             token: "abc123",
@@ -327,7 +359,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
         let cookie = try sessionCookie()
         storage.setCookie(cookie)
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let release = ScriptedPushRelease(client: client, token: "abc123")
         let store = MobileStore(client: client)
         store.pushTokenRelease = release
@@ -370,7 +406,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         storage.setCookie(try sessionCookie(value: "prior-session"))
         clearSnapshotCache()
         defer { clearSnapshotCache() }
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let release = ScriptedPushRelease(client: client, token: "abc123")
         let store = MobileStore(client: client)
         store.opensEventStreamOnSignIn = false
@@ -405,7 +445,11 @@ final class MobileSessionHardeningTests: XCTestCase {
         }
         let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
         storage.setCookie(try sessionCookie(value: "prior-session"))
-        let client = MobileAPIClient(baseURL: base, session: session)
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
         let release = ScriptedPushRelease(client: client, token: "abc123")
         let store = MobileStore(client: client)
         store.opensEventStreamOnSignIn = false
