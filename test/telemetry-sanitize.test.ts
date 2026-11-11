@@ -31,6 +31,28 @@ describe("sanitizeTelemetryUrl", () => {
     expect(sanitizeTelemetryUrl("/console/orders")).toBe("/console/orders");
   });
 
+
+  it("redacts secrets nested inside a non-sensitive param's URL value", () => {
+    const url = "/redirect?next=https://provider/q?apikey=SECRET123&app=1";
+    const result = sanitizeTelemetryUrl(url);
+    expect(result).not.toContain("SECRET123");
+    // the nested value is replaced with its redacted decoded form (Sentry-readable)
+    expect(result).toContain("apikey=[REDACTED]");
+    expect(result).toContain("app=1");
+  });
+
+  it("redacts nested token params and leaves plain values untouched", () => {
+    const url = "/jump?target=https%3A%2F%2Fa.example%2Fp%3Ftoken%3Dtkn99%26x%3D1&page=2";
+    const result = sanitizeTelemetryUrl(url);
+    expect(result).not.toContain("tkn99");
+    expect(result).toContain("page=2");
+    expect(result).toContain("x=1");
+  });
+
+  it("leaves plain non-sensitive values verbatim (no URL, no params)", () => {
+    expect(sanitizeTelemetryUrl("/q?name=Slug%20Value&id=42")).toBe("/q?name=Slug%20Value&id=42");
+  });
+
   it("handles non-string/empty input safely", () => {
     expect(sanitizeTelemetryUrl("")).toBe("");
     expect(sanitizeTelemetryUrl(undefined as unknown as string)).toBeUndefined();
