@@ -299,18 +299,29 @@ enum SessionCookiePersistence {
     ) -> [HTTPCookie] {
         guard let host, !host.isEmpty else { return [] }
         var merged: [String: HTTPCookie] = [:]
-        func ingest(_ cookies: [HTTPCookie]) {
+        var associatedWithOrigin = Set<String>()
+        func cookieKey(_ cookie: HTTPCookie) -> String {
+            "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
+        }
+        func ingest(_ cookies: [HTTPCookie], originScoped: Bool) {
             for cookie in cookies {
-                let key = "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
+                let key = cookieKey(cookie)
+                if originScoped {
+                    associatedWithOrigin.insert(key)
+                }
                 merged[key] = cookie
             }
         }
         if let origin = URL(string: "https://\(host)/") {
-            ingest(storage.cookies(for: origin) ?? [])
+            ingest(storage.cookies(for: origin) ?? [], originScoped: true)
         }
-        ingest(storage.cookies ?? [])
+        ingest(storage.cookies ?? [], originScoped: false)
         return merged.values.filter { cookie in
-            ownsDomain(cookie, host: host) && AuthSessionCookie.isSessionCookieName(cookie.name)
+            guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return false }
+            if associatedWithOrigin.contains(cookieKey(cookie)) {
+                return true
+            }
+            return ownsDomain(cookie, host: host)
         }
     }
 
