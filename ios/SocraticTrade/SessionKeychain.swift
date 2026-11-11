@@ -315,7 +315,17 @@ enum SessionCookiePersistence {
     }
 
     static func ownsDomain(_ cookie: HTTPCookie, host: String) -> Bool {
-        ownsDomain(cookie.domain, host: host, originURL: cookie.properties?[.originURL] as? URL)
+        ownsDomain(cookie.domain, host: host, originURL: originURL(from: cookie.properties?[.originURL]))
+    }
+
+    private static func originURL(from property: Any?) -> URL? {
+        if let url = property as? URL {
+            return url
+        }
+        if let raw = property as? String {
+            return URL(string: raw)
+        }
+        return nil
     }
 
     static func ownsDomain(_ cookieDomain: String, host: String, originURL: URL? = nil) -> Bool {

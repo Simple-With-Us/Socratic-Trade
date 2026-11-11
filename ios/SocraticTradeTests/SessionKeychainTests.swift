@@ -121,6 +121,27 @@ final class SessionKeychainTests: XCTestCase {
         )
     }
 
+    func testAuthSessionCookiesTreatsStringOriginURLAsOwned() throws {
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: "__Secure-authjs.session-token",
+            .value: "tok",
+            .path: "/",
+            .version: "0",
+            .secure: "TRUE",
+        ]
+        properties[.originURL] = "https://socratictrade.com/"
+        let cookie = try XCTUnwrap(HTTPCookie(properties: properties))
+        XCTAssertTrue(SessionCookiePersistence.ownsDomain(cookie, host: "socratictrade.com"))
+
+        let storage = HTTPCookieStorage()
+        let origin = URL(string: "https://socratictrade.com/")!
+        storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
+        XCTAssertEqual(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
+            1
+        )
+    }
+
     func testMakeHTTPCookieOmitsInvalidSameSiteValue() throws {
         let origin = URL(string: "https://socratictrade.com/")!
         let archive = SessionCookieArchive(
