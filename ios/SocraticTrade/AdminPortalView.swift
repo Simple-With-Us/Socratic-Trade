@@ -279,23 +279,11 @@ struct AdminPortalWebView: UIViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         context.coordinator.webView = webView
         context.coordinator.requestedURL = pageURL
+        context.coordinator.appliedSessionCookieFingerprint = Self.sessionCookieFingerprint(sessionCookies)
 
-        // Copy the native Auth.js session cookies into the web view before first load.
-        // Never wait forever on setCookie — a hung callback left the sheet blank.
-        let cookieStore = configuration.websiteDataStore.httpCookieStore
-        let group = DispatchGroup()
-        for cookie in sessionCookies {
-            group.enter()
-            cookieStore.setCookie(cookie) { group.leave() }
-        }
-        var didStartLoad = false
-        let startLoad = {
-            guard !didStartLoad else { return }
-            didStartLoad = true
+        Self.installSessionCookies(sessionCookies, in: webView) {
             webView.load(URLRequest(url: pageURL))
         }
-        group.notify(queue: .main, execute: startLoad)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: startLoad)
         return webView
     }
 
@@ -305,10 +293,52 @@ struct AdminPortalWebView: UIViewRepresentable {
         context.coordinator.onFailed = onFailed
         context.coordinator.onBackToConsole = onBackToConsole
         context.coordinator.webView = webView
+
+        let fingerprint = Self.sessionCookieFingerprint(sessionCookies)
+        if context.coordinator.appliedSessionCookieFingerprint != fingerprint {
+            context.coordinator.appliedSessionCookieFingerprint = fingerprint
+            Self.installSessionCookies(sessionCookies, in: webView) {
+                if webView.url != nil {
+                    webView.reload()
+                }
+            }
+        }
+
         if context.coordinator.requestedURL?.path != pageURL.path {
             context.coordinator.requestedURL = pageURL
             webView.load(URLRequest(url: pageURL))
         }
+    }
+
+    private static func sessionCookieFingerprint(_ cookies: [HTTPCookie]) -> String {
+        cookies
+            .map { cookie in
+                let domain = cookie.domain
+                return "\(cookie.name)|\(domain)|\(cookie.path)|\(cookie.value)"
+            }
+            .sorted()
+            .joined(separator: "\u{1f}")
+    }
+
+    private static func installSessionCookies(
+        _ cookies: [HTTPCookie],
+        in webView: WKWebView,
+        onInstalled: @escaping () -> Void
+    ) {
+        let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
+        let group = DispatchGroup()
+        for cookie in cookies {
+            group.enter()
+            cookieStore.setCookie(cookie) { group.leave() }
+        }
+        var didFinish = false
+        let finish = {
+            guard !didFinish else { return }
+            didFinish = true
+            onInstalled()
+        }
+        group.notify(queue: .main, execute: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: finish)
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
@@ -370,6 +400,7 @@ struct AdminPortalWebView: UIViewRepresentable {
         var onFailed: (String) -> Void
         var onBackToConsole: () -> Void
         var requestedURL: URL?
+        var appliedSessionCookieFingerprint: String?
         weak var webView: WKWebView?
 
         init(

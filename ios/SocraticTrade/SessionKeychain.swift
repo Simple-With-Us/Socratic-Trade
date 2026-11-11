@@ -3,6 +3,68 @@ import Security
 
 // MARK: - Session cookie naming (mirrors src/lib/auth/session-cookie-names.ts)
 
+private enum CookieDomain {
+    /// Resolves the registrable host for a cookie (Foundation sometimes exposes only the public suffix in `cookie.domain`).
+    static func effective(_ cookie: HTTPCookie, owningHost: String? = nil) -> String {
+        let domainAttribute = cookie.properties?[.domain] as? String
+        let originHost = originHost(from: cookie)
+        let normalizedHost = normalizedLabel(owningHost)
+
+        func push(_ raw: String?, into candidates: inout [String]) {
+            guard let raw, let label = normalizedLabel(raw), !label.isEmpty else { return }
+            if !candidates.contains(label) {
+                candidates.append(label)
+            }
+        }
+
+        var candidates: [String] = []
+        push(domainAttribute, into: &candidates)
+        push(originHost, into: &candidates)
+        push(owningHost, into: &candidates)
+
+        let cookieDomain = normalizedLabel(cookie.domain)
+        if let cookieDomain, !cookieDomain.isEmpty {
+            if cookieDomain.contains(".") {
+                push(cookie.domain, into: &candidates)
+            } else if cookieDomain == normalizedHost {
+                push(cookie.domain, into: &candidates)
+            }
+        }
+
+        if let registrable = candidates.first(where: { $0.contains(".") }) {
+            return registrable
+        }
+        if let normalizedHost, candidates.contains(normalizedHost) {
+            return normalizedHost
+        }
+        if let originHost, originHost.contains("."), let normalizedHost, originHost == normalizedHost {
+            return originHost
+        }
+        let fallback = candidates.first ?? cookieDomain ?? ""
+        if fallback.contains(".") { return fallback }
+        if let normalizedHost, fallback == normalizedHost { return fallback }
+        return ""
+    }
+
+    private static func normalizedLabel(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func originHost(from cookie: HTTPCookie) -> String? {
+        if let url = cookie.properties?[.originURL] as? URL {
+            return url.host
+        }
+        if let raw = cookie.properties?[.originURL] as? String {
+            return URL(string: raw)?.host
+        }
+        return nil
+    }
+}
+
 enum AuthSessionCookie {
     static let knownBaseNames: [String] = [
         "__Secure-authjs.session-token",
@@ -37,13 +99,16 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     let sameSite: String?
     /// When true, the cookie had no `Domain` attribute (host-only); restore via `.originURL`, not `.domain`.
     let hostOnly: Bool
+    /// HTTPS origin host recorded at archive time; used when `domain` is empty so restore never widens across hosts.
+    let recordedOriginHost: String?
     let expiresAt: Date?
 
     init(cookie: HTTPCookie, owningHost: String? = nil) {
         name = cookie.name
         value = cookie.value
         hostOnly = Self.inferHostOnly(cookie: cookie, owningHost: owningHost)
-        domain = Self.normalizedDomain(cookie.domain, owningHost: owningHost)
+        domain = CookieDomain.effective(cookie, owningHost: owningHost)
+        recordedOriginHost = Self.recordedOriginHost(from: cookie, owningHost: owningHost, hostOnly: hostOnly)
         path = cookie.path.isEmpty ? "/" : cookie.path
         secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
         httpOnly = cookie.isHTTPOnly
@@ -64,6 +129,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         httpOnly: Bool = false,
         sameSite: String? = nil,
         hostOnly: Bool = false,
+        recordedOriginHost: String? = nil,
         expiresAt: Date?
     ) {
         self.name = name
@@ -74,11 +140,12 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         self.httpOnly = httpOnly
         self.sameSite = sameSite
         self.hostOnly = hostOnly
+        self.recordedOriginHost = recordedOriginHost
         self.expiresAt = expiresAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case name, value, domain, path, secure, httpOnly, sameSite, hostOnly, expiresAt
+        case name, value, domain, path, secure, httpOnly, sameSite, hostOnly, recordedOriginHost, expiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -91,6 +158,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         httpOnly = try container.decodeIfPresent(Bool.self, forKey: .httpOnly) ?? false
         sameSite = try container.decodeIfPresent(String.self, forKey: .sameSite)
         hostOnly = try container.decodeIfPresent(Bool.self, forKey: .hostOnly) ?? false
+        recordedOriginHost = try container.decodeIfPresent(String.self, forKey: .recordedOriginHost)
         expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
     }
 
@@ -109,8 +177,11 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
             .version: "0",
         ]
         if hostOnly {
-            guard let origin else { return nil }
+            guard let origin, let originHost = origin.host?.lowercased(), !originHost.isEmpty else {
+                return nil
+            }
             properties[.originURL] = origin
+            properties[.domain] = originHost
         } else {
             guard !domain.isEmpty else { return nil }
             let cookieDomain = domain.hasPrefix(".") ? domain : ".\(domain)"
@@ -150,12 +221,19 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         }
     }
 
-    private static func normalizedDomain(_ cookieDomain: String, owningHost: String?) -> String {
-        let trimmed = cookieDomain
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        if !trimmed.isEmpty { return trimmed }
-        return owningHost?.lowercased() ?? cookieDomain
+    private static func recordedOriginHost(
+        from cookie: HTTPCookie,
+        owningHost: String?,
+        hostOnly: Bool
+    ) -> String? {
+        guard hostOnly else { return nil }
+        if let url = cookie.properties?[.originURL] as? URL {
+            return url.host?.lowercased()
+        }
+        if let raw = cookie.properties?[.originURL] as? String {
+            return URL(string: raw)?.host?.lowercased()
+        }
+        return owningHost?.lowercased()
     }
 
     /// Host-only when the cookie's domain exactly matches `owningHost` (no leading-dot `Domain` attribute).
@@ -164,12 +242,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         if let domainAttribute = cookie.properties?[.domain] as? String, domainAttribute.hasPrefix(".") {
             return false
         }
-        if cookie.domain.hasPrefix(".") {
-            return false
-        }
-        let normalized = cookie.domain
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
+        let normalized = CookieDomain.effective(cookie, owningHost: owningHost)
         guard !normalized.isEmpty else { return false }
         return normalized == host
     }
@@ -185,7 +258,22 @@ protocol SessionCredentialStoring: Sendable {
 
 enum SessionCredentialStoreError: Error, Equatable {
     case encodingFailed
+    case decodingFailed
     case keychainUnexpectedStatus(OSStatus)
+
+    var isTransientKeychainFailure: Bool {
+        guard case .keychainUnexpectedStatus(let status) = self else { return false }
+        return status == errSecInteractionNotAllowed || status == errSecUserCanceled
+    }
+
+    var shouldDeletePersistedCredentialsOnRestoreFailure: Bool {
+        switch self {
+        case .encodingFailed, .decodingFailed:
+            return true
+        case .keychainUnexpectedStatus:
+            return false
+        }
+    }
 }
 
 // MARK: - Keychain
@@ -269,7 +357,11 @@ struct KeychainSessionStore: SessionCredentialStoring {
     private func decode(_ data: Data) throws -> [SessionCookieArchive] {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode([SessionCookieArchive].self, from: data)
+        do {
+            return try decoder.decode([SessionCookieArchive].self, from: data)
+        } catch {
+            throw SessionCredentialStoreError.decodingFailed
+        }
     }
 }
 
@@ -293,35 +385,48 @@ final class InMemorySessionCredentialStore: SessionCredentialStoring, @unchecked
 // MARK: - URLSession cookie helpers
 
 enum SessionCookiePersistence {
+    private static func ensureAlwaysAcceptsCookies(in storage: HTTPCookieStorage) {
+        guard storage !== HTTPCookieStorage.shared else { return }
+        guard storage.cookieAcceptPolicy != .always else { return }
+        storage.cookieAcceptPolicy = .always
+    }
+
     static func authSessionCookies(
         in storage: HTTPCookieStorage,
         owningHost host: String?
     ) -> [HTTPCookie] {
         guard let host, !host.isEmpty else { return [] }
-        var merged: [String: HTTPCookie] = [:]
-        var associatedWithOrigin = Set<String>()
+        ensureAlwaysAcceptsCookies(in: storage)
+
+        let originScoped = URL(string: "https://\(host)/")
+            .map { storage.cookies(for: $0) ?? [] } ?? []
+        let originTrusted = Set(originScoped.map(ObjectIdentifier.init))
+
+        func normalizedDomainForKey(_ cookie: HTTPCookie) -> String {
+            CookieDomain.effective(cookie, owningHost: host)
+        }
+
         func cookieKey(_ cookie: HTTPCookie) -> String {
-            "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
+            "\(cookie.name)|\(normalizedDomainForKey(cookie))|\(cookie.path)"
         }
-        func sessionSlotKey(_ cookie: HTTPCookie) -> String {
-            "\(cookie.name)|\(cookie.path)"
+
+        var merged: [String: HTTPCookie] = [:]
+        for cookie in originScoped {
+            merged[cookieKey(cookie)] = cookie
         }
-        func ingest(_ cookies: [HTTPCookie], originScoped: Bool) {
-            for cookie in cookies {
-                let key = cookieKey(cookie)
-                if originScoped {
-                    associatedWithOrigin.insert(sessionSlotKey(cookie))
-                }
+        for cookie in storage.cookies ?? [] {
+            let key = cookieKey(cookie)
+            if merged[key] == nil {
                 merged[key] = cookie
             }
         }
-        if let origin = URL(string: "https://\(host)/") {
-            ingest(storage.cookies(for: origin) ?? [], originScoped: true)
-        }
-        ingest(storage.cookies ?? [], originScoped: false)
+
         return merged.values.filter { cookie in
             guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return false }
-            if associatedWithOrigin.contains(sessionSlotKey(cookie)) {
+            if originTrusted.contains(ObjectIdentifier(cookie)) {
+                return true
+            }
+            if isCookieBoundToHTTPSOrigin(cookie, host: host), ownsDomain(cookie, host: host) {
                 return true
             }
             return ownsDomain(cookie, host: host)
@@ -329,9 +434,29 @@ enum SessionCookiePersistence {
     }
 
     static func ownsDomain(_ cookie: HTTPCookie, host: String) -> Bool {
-        let domainAttribute = cookie.properties?[.domain] as? String
-        let domain = !cookie.domain.isEmpty ? cookie.domain : (domainAttribute ?? "")
+        let domain = CookieDomain.effective(cookie, owningHost: host)
         return ownsDomain(domain, host: host, originURL: originURL(from: cookie.properties?[.originURL]))
+    }
+
+    private static func archiveBelongsToHost(_ archive: SessionCookieArchive, host: String) -> Bool {
+        let normalizedHost = host
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        if archive.hostOnly {
+            let archivedDomain = archive.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            if archivedDomain.isEmpty {
+                guard let recorded = archive.recordedOriginHost?
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                    .lowercased(),
+                    !recorded.isEmpty
+                else { return false }
+                return recorded == normalizedHost
+            }
+            return archivedDomain == normalizedHost
+        }
+        return ownsDomain(archive.domain, host: host)
     }
 
     private static func originURL(from property: Any?) -> URL? {
@@ -344,43 +469,77 @@ enum SessionCookiePersistence {
         return nil
     }
 
+    private static func isCookieBoundToHTTPSOrigin(_ cookie: HTTPCookie, host: String) -> Bool {
+        let normalizedHost = host
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard !normalizedHost.isEmpty else { return false }
+        guard let origin = originURL(from: cookie.properties?[.originURL]) else { return false }
+        guard origin.scheme?.lowercased() == "https" else { return false }
+        let originHost = origin.host?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        return originHost == normalizedHost
+    }
+
     static func ownsDomain(_ cookieDomain: String, host: String, originURL: URL? = nil) -> Bool {
-        let normalizedHost = host.lowercased()
+        let normalizedHost = host
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard !normalizedHost.isEmpty else { return false }
+
         let domain = cookieDomain
             .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             .lowercased()
         if domain.isEmpty {
-            if let originURL, originURL.host?.lowercased() == normalizedHost {
-                return true
+            if let originURL {
+                let originHost = originURL.host?
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                    .lowercased()
+                if originHost == normalizedHost { return true }
             }
             return false
         }
-        return normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
+
+        // Reject bare public-suffix / TLD labels (e.g. Domain=com must not match *socratictrade.com).
+        if !domain.contains(".") {
+            return false
+        }
+
+        if normalizedHost == domain { return true }
+        return normalizedHost.hasSuffix(".\(domain)")
     }
 
-  static func apply(
+    static func apply(
         _ archives: [SessionCookieArchive],
         to storage: HTTPCookieStorage,
         owningHost host: String?,
         now: Date = Date()
     ) -> Int {
+        guard let host, !host.isEmpty else { return 0 }
+        ensureAlwaysAcceptsCookies(in: storage)
         clearAuthSessionCookies(in: storage, owningHost: host)
-        let origin = host.flatMap { URL(string: "https://\($0)/") }
+        let origin = URL(string: "https://\(host)/")
         var applied = 0
         for archive in archives {
             if archive.isExpired(at: now) { continue }
             let cookieOrigin = origin ?? URL(string: "https://\(archive.domain)/")
+            guard archiveBelongsToHost(archive, host: host) else { continue }
             guard let cookie = archive.makeHTTPCookie(origin: cookieOrigin) else { continue }
-            if let cookieOrigin {
-                storage.setCookies([cookie], for: cookieOrigin, mainDocumentURL: nil)
+            if archive.hostOnly {
+                if let cookieOrigin {
+                    storage.setCookies([cookie], for: cookieOrigin, mainDocumentURL: nil)
+                }
+            } else {
+                storage.setCookie(cookie)
             }
-            storage.setCookie(cookie)
             applied += 1
         }
         return applied
     }
 
     static func clearAuthSessionCookies(in storage: HTTPCookieStorage, owningHost host: String?) {
+        ensureAlwaysAcceptsCookies(in: storage)
         for cookie in authSessionCookies(in: storage, owningHost: host) {
             storage.deleteCookie(cookie)
         }
@@ -402,7 +561,7 @@ enum SessionCookiePersistence {
     }
 }
 
-struct SessionCookieCoordinator {
+struct SessionCookieCoordinator: Sendable {
     let credentialStore: SessionCredentialStoring
 
     init(credentialStore: SessionCredentialStoring = KeychainSessionStore()) {
@@ -445,7 +604,7 @@ struct SessionCookieCoordinator {
         try credentialStore.save(cookies: cookies.map { SessionCookieArchive(cookie: $0, owningHost: host) })
     }
 
-    func clearSession(from client: MobileAPIClient) throws {
+    func clearInMemorySession(from client: MobileAPIClient) {
         let storage = cookieStorage(for: client)
         SessionCookiePersistence.clearAuthSessionCookies(
             in: storage,
@@ -455,6 +614,10 @@ struct SessionCookieCoordinator {
             in: HTTPCookieStorage.shared,
             owningHost: client.baseURL.host
         )
+    }
+
+    func clearSession(from client: MobileAPIClient) throws {
+        clearInMemorySession(from: client)
         try credentialStore.delete()
     }
 

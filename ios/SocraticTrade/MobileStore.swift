@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 import Sentry
 
 // MARK: - Duplicate command folding
@@ -436,6 +437,9 @@ final class MobileStore: ObservableObject {
     @Published private(set) var sessionEpoch = 0
     @Published private(set) var isAuthenticated = false
     @Published private(set) var hasInitialized = false
+    @Published private(set) var isRestoringPersistedSession = false
+    private var didAttemptPersistedSessionRestore = false
+    private var persistedSessionRestoreAwaitingRetry = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var isStreamConnected = false
@@ -495,6 +499,8 @@ final class MobileStore: ObservableObject {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
+    private static let sessionLog = Logger(subsystem: "com.socratictrade.ios", category: "session")
+
     init(
         client: MobileAPIClient,
         previewSnapshot: MobileSnapshot? = nil,
@@ -502,16 +508,16 @@ final class MobileStore: ObservableObject {
     ) {
         self.client = client
         self.sessionCookieCoordinator = sessionCookieCoordinator
-        if previewSnapshot == nil {
-            try? sessionCookieCoordinator.prepareClientSession(client)
-        }
         let cached = previewSnapshot ?? Self.loadCachedSnapshot()
         snapshot = cached
         // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
         // assert the gating path without going through a real load().
         partialData = cached?.partialData ?? false
-        isAuthenticated = cached != nil
+        isAuthenticated = false
         hasInitialized = previewSnapshot != nil
+        if previewSnapshot != nil, cached != nil {
+            isAuthenticated = true
+        }
         if cached == nil {
             lastUpdatedAt = nil
         } else if previewSnapshot != nil {
@@ -523,6 +529,76 @@ final class MobileStore: ObservableObject {
 
     var isInitialLoading: Bool {
         !hasInitialized && snapshot == nil
+    }
+
+    /// Blocks authenticated network work until the in-flight Keychain restore finishes, or runs restore once if needed.
+    func ensurePersistedSessionRestoredBeforeAuthenticatedRequests() async {
+        while isRestoringPersistedSession {
+            await Task.yield()
+        }
+        if !didAttemptPersistedSessionRestore {
+            await restorePersistedSessionFromKeychainIfNeeded()
+        }
+    }
+
+    /// Restores Keychain session archives into the client's cookie jar without blocking launch.
+    func restorePersistedSessionFromKeychainIfNeeded() async {
+        guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else { return }
+        didAttemptPersistedSessionRestore = true
+        persistedSessionRestoreAwaitingRetry = false
+        isRestoringPersistedSession = true
+        defer { isRestoringPersistedSession = false }
+
+        let coordinator = sessionCookieCoordinator
+        let client = client
+        let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+            Result {
+                try coordinator.prepareClientSession(client)
+            }
+        }.value
+
+        switch result {
+        case .success:
+            applySuccessfulPersistedSessionRestore()
+        case .failure(let failure):
+            handlePersistedSessionRestoreFailure(failure)
+        }
+    }
+
+    private func applySuccessfulPersistedSessionRestore() {
+        let hasLiveCookies = !sessionCookieCoordinator.sessionCookies(for: client).isEmpty
+        let hasCachedSnapshot = snapshot != nil || Self.loadCachedSnapshot() != nil
+        isAuthenticated = hasLiveCookies && hasCachedSnapshot
+    }
+
+    private func handlePersistedSessionRestoreFailure(_ failure: Error) {
+        Self.sessionLog.error(
+            "Session restore failed: \(failure.localizedDescription, privacy: .public)"
+        )
+        if let credentialError = failure as? SessionCredentialStoreError {
+            if credentialError.isTransientKeychainFailure {
+                sessionCookieCoordinator.clearInMemorySession(from: client)
+                error =
+                    "Could not restore your saved session while the device is locked.\u{00A0} Unlock the device and try again."
+                isAuthenticated = false
+                didAttemptPersistedSessionRestore = false
+                persistedSessionRestoreAwaitingRetry = true
+                return
+            }
+            if credentialError.shouldDeletePersistedCredentialsOnRestoreFailure {
+                do {
+                    try sessionCookieCoordinator.clearSession(from: client)
+                } catch {
+                    sessionCookieCoordinator.clearInMemorySession(from: client)
+                }
+            } else {
+                sessionCookieCoordinator.clearInMemorySession(from: client)
+            }
+        } else {
+            sessionCookieCoordinator.clearInMemorySession(from: client)
+        }
+        error = "Could not restore your saved session.\u{00A0} Sign in again."
+        isAuthenticated = false
     }
 
     var hasActiveCommandWork: Bool {
@@ -759,6 +835,7 @@ final class MobileStore: ObservableObject {
     }
 
     func load() async {
+        await ensurePersistedSessionRestoredBeforeAuthenticatedRequests()
         loadGeneration &+= 1
         let generation = loadGeneration
         let shouldReportSessionExpiry = hasInitialized || isAuthenticated
@@ -1257,18 +1334,17 @@ final class MobileStore: ObservableObject {
         _ = clearSessionCookiesReportingFailure()
     }
 
-  @discardableResult
+    @discardableResult
     private func clearSessionCookiesReportingFailure() -> String? {
         do {
             try sessionCookieCoordinator.clearSession(from: client)
             return nil
         } catch {
-            do {
-                try sessionCookieCoordinator.clearSession(from: client)
-                return nil
-            } catch {
-                return "Sign-out could not clear the saved session.\u{00A0} Try again."
-            }
+            Self.sessionLog.error(
+                "Sign-out session clear failed: \(error.localizedDescription, privacy: .public)"
+            )
+            sessionCookieCoordinator.clearInMemorySession(from: client)
+            return "Sign-out could not clear the saved session.\u{00A0} Try again."
         }
     }
 
