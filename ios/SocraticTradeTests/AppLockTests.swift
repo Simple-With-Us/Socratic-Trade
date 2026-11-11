@@ -39,6 +39,24 @@ final class AppLockPolicyTests: XCTestCase {
         )
     }
 
+    func testReturningWithinGraceClearsBackgroundTimestamp() {
+        AppLockPreferences.isEnabled = true
+        let controller = AppLockController()
+        controller.unlockSucceeded()
+        let backgrounded = Date(timeIntervalSince1970: 1_700_000_000)
+        controller.recordDidEnterBackground(at: backgrounded)
+        controller.evaluateForegroundEntry(at: backgrounded.addingTimeInterval(30))
+        XCTAssertNil(controller.lastBackgroundedAt)
+        XCTAssertFalse(
+            AppLockPolicy.shouldRequireLock(
+                isEnabled: true,
+                isUnlocked: true,
+                lastBackgroundedAt: controller.lastBackgroundedAt,
+                now: backgrounded.addingTimeInterval(120)
+            )
+        )
+    }
+
     func testEnabledPastGraceRequiresUnlock() {
         let backgrounded = Date(timeIntervalSince1970: 1_700_000_000)
         let now = backgrounded.addingTimeInterval(AppLockPolicy.defaultGracePeriod + 1)

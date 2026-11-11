@@ -32,13 +32,13 @@ struct SocraticTradeApp: App {
         AppAppearance.applyFonts()
     }
 
-    @StateObject private var appLock = AppLockController()
+    @State private var appLock = AppLockController()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
-                .environmentObject(appLock)
+                .environment(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
                 // picker on this app yet — do not follow OS dark by default).
@@ -54,7 +54,7 @@ struct SocraticTradeApp: App {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: MobileStore
-    @EnvironmentObject private var appLock: AppLockController
+    @Environment(AppLockController.self) private var appLock
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var didRunBootstrap = false
@@ -158,23 +158,34 @@ struct ContentView: View {
     }
 
     private func bootstrapIfNeeded() async {
-        guard !didRunBootstrap else { return }
-        didRunBootstrap = true
-        PushNotificationCoordinator.shared.rebindAPIClient(store.client)
-        PushNotificationCoordinator.shared.configure(
-            route: { destination in pendingDeepLink = destination },
-            isLiveStreamConnected: { store.isStreamConnected }
-        )
-        if SocraticTradeApp.isScreenshotMode { return }
-        guard !store.hasInitialized else { return }
-        await store.load()
-        if store.isAuthenticated {
-            store.startEvents()
-            // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
-            // new device token after a restore or reinstall, and asking each launch is the
-            // only way to notice.
-            await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+        if !didRunBootstrap {
+            didRunBootstrap = true
+            PushNotificationCoordinator.shared.rebindAPIClient(store.client)
+            PushNotificationCoordinator.shared.configure(
+                route: { destination in pendingDeepLink = destination },
+                isLiveStreamConnected: { store.isStreamConnected }
+            )
+            if SocraticTradeApp.isScreenshotMode { return }
+            if !store.hasInitialized {
+                await store.load()
+                if store.isAuthenticated {
+                    store.startEvents()
+                    // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
+                    // new device token after a restore or reinstall, and asking each launch is the
+                    // only way to notice.
+                    await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+                }
+            }
+            return
         }
+        await resumeLiveSessionIfNeeded()
+    }
+
+    private func resumeLiveSessionIfNeeded() async {
+        if SocraticTradeApp.isScreenshotMode { return }
+        guard store.isAuthenticated else { return }
+        store.startEvents()
+        await store.load()
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {

@@ -881,7 +881,7 @@ struct AccountSettingsView: View {
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var store: MobileStore
     @EnvironmentObject private var push: PushNotificationCoordinator
-    @EnvironmentObject private var appLock: AppLockController
+    @Environment(AppLockController.self) private var appLock
 
     @State private var deleteIdentity = ""
     @State private var deletePhrase = ""

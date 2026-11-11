@@ -1166,7 +1166,9 @@ final class MobileStore: ObservableObject {
         removeAccountScopedPersistence()
         sessionEpoch &+= 1
         await PushNotificationCoordinator.shared.signOutAndForgetToken()
-        clearSessionCookies()
+        if let message = clearSessionCookiesReportingFailure() {
+            error = message
+        }
     }
 
     func clearLocalSession() {
@@ -1224,7 +1226,22 @@ final class MobileStore: ObservableObject {
     }
 
     private func clearSessionCookies() {
-        try? sessionCookieCoordinator.clearSession(from: client)
+        _ = clearSessionCookiesReportingFailure()
+    }
+
+  @discardableResult
+    private func clearSessionCookiesReportingFailure() -> String? {
+        do {
+            try sessionCookieCoordinator.clearSession(from: client)
+            return nil
+        } catch {
+            do {
+                try sessionCookieCoordinator.clearSession(from: client)
+                return nil
+            } catch {
+                return "Sign-out could not clear the saved session.  Try again."
+            }
+        }
     }
 
     private func persistAuthSessionCookies() {

@@ -32,6 +32,11 @@ Auth.js session cookies previously lived only in the default `URLSession` persis
 - **LoginView untouched** — hooks are only `MobileStore` sign-in / sign-out / `load()` and `MobileAPIClient` session construction.
 - **Push coordinator** rebinds to `MobileStore.client` at bootstrap so push register/delete share the same cookie jar.
 
+## Review follow-up (PR #5131)
+
+- App lock: `@Observable` controller, grace-period timestamp cleared on foreground return, device-auth guard + escape hatch, resume `startEvents()`/`load()` after unlock.
+- Session: Keychain `SecItemUpdate` save path, `httpOnly` preserved in archives, expired archives skipped (Keychain cleared when all stale), sign-out retries Keychain delete and surfaces failure.
+
 ## Verification State
 
 Linux cloud seat — Swift compile not run locally.

@@ -32,6 +32,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     let domain: String
     let path: String
     let secure: Bool
+    let httpOnly: Bool
     let expiresAt: Date?
 
     init(cookie: HTTPCookie) {
@@ -40,11 +41,50 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         domain = cookie.domain
         path = cookie.path
         secure = cookie.isSecure
+        httpOnly = cookie.isHTTPOnly
         if let date = cookie.expiresDate, date.timeIntervalSince1970 > 0 {
             expiresAt = date
         } else {
             expiresAt = nil
         }
+    }
+
+    init(
+        name: String,
+        value: String,
+        domain: String,
+        path: String,
+        secure: Bool,
+        httpOnly: Bool = false,
+        expiresAt: Date?
+    ) {
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+        self.secure = secure
+        self.httpOnly = httpOnly
+        self.expiresAt = expiresAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, value, domain, path, secure, httpOnly, expiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        value = try container.decode(String.self, forKey: .value)
+        domain = try container.decode(String.self, forKey: .domain)
+        path = try container.decode(String.self, forKey: .path)
+        secure = try container.decode(Bool.self, forKey: .secure)
+        httpOnly = try container.decodeIfPresent(Bool.self, forKey: .httpOnly) ?? false
+        expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
+    }
+
+    func isExpired(at date: Date) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt <= date
     }
 
     func makeHTTPCookie() -> HTTPCookie? {
@@ -56,6 +96,9 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         ]
         if secure {
             properties[.secure] = "TRUE"
+        }
+        if httpOnly {
+            properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE"
         }
         if let expiresAt {
             properties[.expires] = expiresAt
@@ -93,17 +136,27 @@ struct KeychainSessionStore: SessionCredentialStoring {
 
     func save(cookies: [SessionCookieArchive]) throws {
         let data = try encode(cookies)
-        try delete()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let updateAttributes: [String: Any] = [
             kSecValueData as String: data,
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw SessionCredentialStoreError.keychainUnexpectedStatus(status)
+        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw SessionCredentialStoreError.keychainUnexpectedStatus(updateStatus)
+        }
+        var addQuery = query
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        addQuery[kSecValueData as String] = data
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw SessionCredentialStoreError.keychainUnexpectedStatus(addStatus)
         }
     }
 
@@ -190,16 +243,21 @@ enum SessionCookiePersistence {
         return normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
     }
 
-    static func apply(
+  static func apply(
         _ archives: [SessionCookieArchive],
         to storage: HTTPCookieStorage,
-        owningHost host: String?
-    ) {
+        owningHost host: String?,
+        now: Date = Date()
+    ) -> Int {
         clearAuthSessionCookies(in: storage, owningHost: host)
+        var applied = 0
         for archive in archives {
+            if archive.isExpired(at: now) { continue }
             guard let cookie = archive.makeHTTPCookie() else { continue }
             storage.setCookie(cookie)
+            applied += 1
         }
+        return applied
     }
 
     static func clearAuthSessionCookies(in storage: HTTPCookieStorage, owningHost host: String?) {
@@ -234,11 +292,14 @@ struct SessionCookieCoordinator {
     func prepareClientSession(_ client: MobileAPIClient) throws {
         let storage = cookieStorage(for: client)
         if let archives = try credentialStore.load(), !archives.isEmpty {
-            SessionCookiePersistence.apply(
+            let applied = SessionCookiePersistence.apply(
                 archives,
                 to: storage,
                 owningHost: client.baseURL.host
             )
+            if applied == 0 {
+                try credentialStore.delete()
+            }
         }
         try SessionCookiePersistence.migrateFromLegacySharedStorageIfNeeded(
             into: storage,

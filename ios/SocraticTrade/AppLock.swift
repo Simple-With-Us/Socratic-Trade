@@ -1,5 +1,6 @@
 import Foundation
 import LocalAuthentication
+import Observation
 import SwiftUI
 
 enum AppLockPolicy {
@@ -31,23 +32,38 @@ enum AppLockPreferences {
 }
 
 @MainActor
-final class AppLockController: ObservableObject {
-    @Published private(set) var isUnlocked: Bool
-    @Published var lastErrorMessage: String?
+@Observable
+final class AppLockController {
+    private(set) var isUnlocked: Bool
+    var lastErrorMessage: String?
 
     private(set) var lastBackgroundedAt: Date?
+
+    static func deviceAuthenticationAvailable() -> Bool {
+        let context = LAContext()
+        var policyError: NSError?
+        return context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError)
+    }
 
     var isEnabled: Bool {
         get { AppLockPreferences.isEnabled }
         set {
-            AppLockPreferences.isEnabled = newValue
             if newValue {
+                guard Self.deviceAuthenticationAvailable() else {
+                    lastErrorMessage =
+                        "Set a device passcode or enroll biometrics before turning on app lock."
+                    AppLockPreferences.isEnabled = false
+                    isUnlocked = true
+                    return
+                }
+                AppLockPreferences.isEnabled = true
                 isUnlocked = false
             } else {
+                AppLockPreferences.isEnabled = false
                 isUnlocked = true
                 lastBackgroundedAt = nil
+                lastErrorMessage = nil
             }
-            objectWillChange.send()
         }
     }
 
@@ -62,7 +78,12 @@ final class AppLockController: ObservableObject {
 
     init() {
         if AppLockPreferences.isEnabled {
-            isUnlocked = false
+            if Self.deviceAuthenticationAvailable() {
+                isUnlocked = false
+            } else {
+                AppLockPreferences.isEnabled = false
+                isUnlocked = true
+            }
         } else {
             isUnlocked = true
         }
@@ -75,16 +96,16 @@ final class AppLockController: ObservableObject {
     func evaluateForegroundEntry(at date: Date = Date()) {
         guard isEnabled else {
             isUnlocked = true
+            lastBackgroundedAt = nil
             return
         }
-        if AppLockPolicy.shouldRequireLock(
-            isEnabled: true,
-            isUnlocked: isUnlocked,
-            lastBackgroundedAt: lastBackgroundedAt,
-            now: date
-        ) {
-            isUnlocked = false
+        guard let lastBackgroundedAt else { return }
+        let elapsed = date.timeIntervalSince(lastBackgroundedAt)
+        if elapsed <= AppLockPolicy.defaultGracePeriod {
+            self.lastBackgroundedAt = nil
+            return
         }
+        isUnlocked = false
     }
 
     func unlockSucceeded() {
@@ -96,10 +117,16 @@ final class AppLockController: ObservableObject {
     func reportUnlockFailure(_ message: String) {
         lastErrorMessage = message
     }
+
+    func disableBecauseAuthenticationUnavailable() {
+        AppLockPreferences.isEnabled = false
+        isUnlocked = true
+        lastBackgroundedAt = nil
+    }
 }
 
 struct AppLockView: View {
-    @ObservedObject var controller: AppLockController
+    @Bindable var controller: AppLockController
 
     var body: some View {
         ZStack {
@@ -126,7 +153,12 @@ struct AppLockView: View {
                     authenticate()
                 }
                 .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
+                if !AppLockController.deviceAuthenticationAvailable() {
+                    Button("Turn Off App Lock") {
+                        controller.disableBecauseAuthenticationUnavailable()
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
             .padding(32)
         }
@@ -141,7 +173,9 @@ struct AppLockView: View {
         context.localizedCancelTitle = "Cancel"
         var policyError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
-            controller.reportUnlockFailure("Biometrics or a device passcode is required to use app lock.")
+            controller.reportUnlockFailure(
+                "Biometrics or a device passcode is required to use app lock.  Turn off app lock to continue."
+            )
             return
         }
         let reason = "Unlock your Socratic Trade session."

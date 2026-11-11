@@ -11,6 +11,45 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertFalse(AuthSessionCookie.isSessionCookieName("__Secure-authjs.session-token.chunk"))
     }
 
+    func testHttpOnlyRoundTripsThroughArchive() throws {
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "socratictrade.com",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "secret",
+            .secure: "TRUE",
+            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+        ]))
+        let archive = SessionCookieArchive(cookie: cookie)
+        XCTAssertTrue(archive.httpOnly)
+        let restored = try XCTUnwrap(archive.makeHTTPCookie())
+        XCTAssertTrue(restored.isHTTPOnly)
+    }
+
+    func testApplySkipsExpiredArchives() throws {
+        let storage = HTTPCookieStorage()
+        let past = Date(timeIntervalSince1970: 1_600_000_000)
+        let archive = SessionCookieArchive(
+            name: "__Secure-authjs.session-token",
+            value: "stale",
+            domain: "socratictrade.com",
+            path: "/",
+            secure: true,
+            httpOnly: true,
+            expiresAt: past
+        )
+        let applied = SessionCookiePersistence.apply(
+            [archive],
+            to: storage,
+            owningHost: "socratictrade.com",
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        XCTAssertEqual(applied, 0)
+        XCTAssertTrue(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").isEmpty
+        )
+    }
+
     func testInMemoryStoreSaveLoadDeleteRoundTrip() throws {
         let store = InMemorySessionCredentialStore()
         let archives = [
