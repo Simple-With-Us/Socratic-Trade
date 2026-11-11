@@ -34,6 +34,19 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertEqual(applied, 0)
     }
 
+    func testApplyRestoresSecureAuthArchiveInJar() throws {
+        let storage = HTTPCookieStorage()
+        let archive = SessionCookieArchive(cookie: try makeCookie(name: "__Secure-authjs.session-token", value: "tok"))
+        XCTAssertEqual(
+            SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
+            1
+        )
+        XCTAssertEqual(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
+            1
+        )
+    }
+
     func testMakeHTTPCookieOmitsInvalidSameSiteValue() throws {
         let origin = URL(string: "https://socratictrade.com/")!
         let archive = SessionCookieArchive(
@@ -183,7 +196,7 @@ final class SessionKeychainTests: XCTestCase {
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
         return try XCTUnwrap(HTTPCookie(properties: [
-            .domain: "socratictrade.com",
+            .domain: ".socratictrade.com",
             .path: "/",
             .name: name,
             .value: value,

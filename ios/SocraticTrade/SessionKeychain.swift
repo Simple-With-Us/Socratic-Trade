@@ -96,11 +96,13 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     func makeHTTPCookie(origin: URL? = nil) -> HTTPCookie? {
         guard !domain.isEmpty, !name.isEmpty, !value.isEmpty else { return nil }
         let pathValue = path.isEmpty ? "/" : path
+        let cookieDomain = domain.hasPrefix(".") ? domain : ".\(domain)"
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: name,
             .value: value,
-            .domain: domain,
+            .domain: cookieDomain,
             .path: pathValue,
+            .version: "0",
         ]
         if let origin, domain.isEmpty {
             properties[.originURL] = origin
