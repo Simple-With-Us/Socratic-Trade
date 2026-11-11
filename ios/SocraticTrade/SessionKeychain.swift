@@ -493,12 +493,13 @@ enum SessionCookiePersistence {
             return false
         }
 
-        // Reject bare public-suffix / TLD labels (e.g. Domain=com must not match *socratictrade.com).
+        if normalizedHost == domain { return true }
+
+        // Reject bare public-suffix / TLD labels for broader domain-scoped matches only (e.g. Domain=com vs *socratictrade.com).
         if !domain.contains(".") {
             return false
         }
 
-        if normalizedHost == domain { return true }
         return normalizedHost.hasSuffix(".\(domain)")
     }
 

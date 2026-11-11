@@ -91,6 +91,34 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertTrue(SessionCookiePersistence.ownsDomain("socratictrade.com", host: "socratictrade.com"))
         XCTAssertTrue(SessionCookiePersistence.ownsDomain(".socratictrade.com", host: "api.socratictrade.com"))
         XCTAssertFalse(SessionCookiePersistence.ownsDomain("trade.com", host: "socratictrade.com"))
+        XCTAssertTrue(SessionCookiePersistence.ownsDomain("localhost", host: "localhost"))
+        XCTAssertTrue(SessionCookiePersistence.ownsDomain(".localhost", host: "localhost"))
+    }
+
+    func testLocalhostSessionPersistSessionCookiesAndClear() throws {
+        let credentialStore = InMemorySessionCredentialStore()
+        let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
+        let client = MobileAPIClient(baseURL: URL(string: "https://localhost:3000")!)
+        let storage = client.sessionCookieJar
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .originURL: URL(string: "https://localhost:3000/")!,
+            .domain: "localhost",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "dev-session",
+            .secure: "TRUE",
+            .version: "0",
+        ]))
+        installInJar(cookie, storage: storage, host: "localhost")
+
+        try coordinator.persistSession(from: client)
+        XCTAssertEqual(try XCTUnwrap(try credentialStore.load()).count, 1)
+        XCTAssertEqual(coordinator.sessionCookies(for: client).count, 1)
+        XCTAssertEqual(coordinator.sessionCookies(for: client)[0].value, "dev-session")
+
+        try coordinator.clearSession(from: client)
+        XCTAssertNil(try credentialStore.load())
+        XCTAssertTrue(coordinator.sessionCookies(for: client).isEmpty)
     }
 
     func testAuthSessionCookiesGuardReturnsEmptyWithoutOwningHost_positiveControlFindsOwnedCookie() throws {
