@@ -1,3 +1,9 @@
+## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
+
+**What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
+
+**Next.**  PR open; wait for Playwright Smoke + `verify` green; do not merge from agent.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.
