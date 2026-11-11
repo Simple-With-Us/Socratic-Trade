@@ -149,7 +149,6 @@ describe("openrouter credit status", () => {
     process.env.OPENROUTER_ADMIN_KEY = "sk-or-mgmt-test";
     process.env.OPENROUTER_LOW_CREDIT_USD = "3";
     process.env.OPENROUTER_KEY_LIMIT_LOW_USD = "3";
-    process.env.OPENROUTER_CREDIT_CHECK_INTERVAL_MS = "1000";
     const { getOpenRouterCreditStatus } = await import("../src/lib/openrouter-credits");
     const exhausted = makeFetcher({
       credits: { data: { total_credits: 100, total_usage: 10 } },
@@ -170,7 +169,8 @@ describe("openrouter credit status", () => {
       keysOk: false,
       keysStatus: 500
     });
-    const second = (await getOpenRouterCreditStatus(1000 + 60_000, keysDown.fetcher))!;
+    // +11 min: past the (10-minute, clamped) cache interval, inside the 30-minute carryover.
+    const second = (await getOpenRouterCreditStatus(1000 + 660_000, keysDown.fetcher))!;
     expect(second.ok).toBe(false);
     expect(second.reasons).toContain("key_limit_reached");
     expect(second.keysLimitReached).toBe(1);
@@ -179,9 +179,56 @@ describe("openrouter credit status", () => {
 
     // The carryover is bounded: 31 minutes after the verdict was confirmed, with /keys still
     // down, it expires and the check reports the healthy balance it can actually read.
-    const third = (await getOpenRouterCreditStatus(1000 + 31 * 60_000, keysDown.fetcher))!;
+    const third = (await getOpenRouterCreditStatus(1000 + 660_000 + 31 * 60_000, keysDown.fetcher))!;
     expect(third.ok).toBe(true);
     expect(third.reasons).not.toContain("key_limit_reached");
+  });
+
+  it("a truncated /keys read neither clears nor records the confirmed key-limit verdict", async () => {
+    process.env.OPENROUTER_ADMIN_KEY = "sk-or-mgmt-test";
+    process.env.OPENROUTER_LOW_CREDIT_USD = "3";
+    process.env.OPENROUTER_KEY_LIMIT_LOW_USD = "3";
+    const { getOpenRouterCreditStatus } = await import("../src/lib/openrouter-credits");
+    const exhausted = makeFetcher({
+      credits: { data: { total_credits: 100, total_usage: 10 } },
+      key: { data: { is_management_key: true } },
+      keys: {
+        data: [{ label: "st-prod", disabled: false, limit: 50, limit_remaining: 0 }]
+      }
+    });
+    const first = (await getOpenRouterCreditStatus(1000, exhausted.fetcher))!;
+    expect(first.ok).toBe(false);
+    expect(first.reasons).toContain("key_limit_reached");
+
+    // Next cycle: /keys page 1 returns a full page of clean keys, page 2 stalls past the
+    // shared deadline, so the read truncates with a clean partial set. The truncated read
+    // must not clear the confirmed verdict — the bounded carryover keeps ok=false.
+    const cleanRow = (i: number) => ({ label: `k${i}`, disabled: false, limit: 50, limit_remaining: 40 });
+    const slowPager = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/key") && !url.includes("/keys")) {
+        return new Response(JSON.stringify({ data: { is_management_key: true } }), { status: 200 });
+      }
+      if (url.includes("/api/v1/keys")) {
+        const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
+        if (offset > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          return new Response(
+            JSON.stringify({ data: Array.from({ length: 100 }, (_, i) => cleanRow(100 + i)) }),
+            { status: 200 }
+          );
+        }
+        return new Response(
+          JSON.stringify({ data: Array.from({ length: 100 }, (_, i) => cleanRow(i)) }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ data: { total_credits: 100, total_usage: 10 } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const second = (await getOpenRouterCreditStatus(1000 + 660_000, slowPager, { maxWaitMs: 200 }))!;
+    expect(second.keysChecked).toBe(false);
+    expect(second.ok).toBe(false);
+    expect(second.reasons).toContain("key_limit_reached");
   });
 
   it("does not render a key-limit failure as an exhausted-balance hint", async () => {

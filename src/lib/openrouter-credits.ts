@@ -200,7 +200,7 @@ async function fetchAllKeys(
   key: string,
   fetcher: typeof fetch,
   deadlineAtMs: number = Date.now() + FETCH_TIMEOUT_MS
-): Promise<{ ok: boolean; status: number; keys: KeyLimitRow[] }> {
+): Promise<{ ok: boolean; status: number; keys: KeyLimitRow[]; truncated: boolean }> {
   const keys: KeyLimitRow[] = [];
   let offset = 0;
 
@@ -212,9 +212,9 @@ async function fetchAllKeys(
       // Deadline hit mid-pagination: pages already collected are real observations — return
       // them for evaluation instead of discarding an exhaustion already seen (Kody, PR #5097).
       if (keys.length > 0) {
-        return { ok: true, status: 200, keys };
+        return { ok: true, status: 200, keys, truncated: true };
       }
-      return { ok: false, status: 502, keys: [] };
+      return { ok: false, status: 502, keys: [], truncated: false };
     }
     const url = new URL(KEYS_URL);
     url.searchParams.set("include_disabled", "true");
@@ -226,16 +226,16 @@ async function fetchAllKeys(
     if (!res.ok) {
       // Same partial-data rule as the deadline path: keep pages already collected.
       if (keys.length > 0) {
-        return { ok: true, status: res.status, keys };
+        return { ok: true, status: res.status, keys, truncated: true };
       }
-      return { ok: false, status: res.status, keys: [] };
+      return { ok: false, status: res.status, keys: [], truncated: false };
     }
     const parsedKeys = KeysPayloadSchema.safeParse(res.data);
     if (!parsedKeys.success) {
       if (keys.length > 0) {
-        return { ok: true, status: 200, keys };
+        return { ok: true, status: 200, keys, truncated: true };
       }
-      return { ok: false, status: 502, keys: [] };
+      return { ok: false, status: 502, keys: [], truncated: false };
     }
     const rows = parsedKeys.data.data;
     for (const raw of rows) {
@@ -254,11 +254,13 @@ async function fetchAllKeys(
       });
     }
     if (rows.length < KEYS_PAGE_SIZE) {
-      return { ok: true, status: res.status, keys };
+      return { ok: true, status: res.status, keys, truncated: false };
     }
     offset += rows.length;
   }
-  return { ok: false, status: 502, keys: [] };
+  // Page cap reached with a full last page: more keys may exist — the collected set is a
+  // truncated read, not a complete one.
+  return { ok: keys.length > 0, status: 502, keys, truncated: true };
 }
 
 function evaluateKeyLimits(
@@ -387,7 +389,9 @@ export async function getOpenRouterCreditStatus(
     if (isManagement) {
       const keysResult = await fetchAllKeys(key, fetcher, deadlineAtMs);
       if (keysResult.ok) {
-        keysChecked = true;
+        // A truncated read still evaluates what it collected, but it is not a complete check:
+        // it neither records nor clears the confirmed verdict below (Kody, PR #5097).
+        keysChecked = !keysResult.truncated;
         const evald = evaluateKeyLimits(keysResult.keys, keyFloor);
         keysWithLimit = evald.keysWithLimit;
         keysLimitReached = evald.keysLimitReached;
@@ -427,14 +431,18 @@ export async function getOpenRouterCreditStatus(
     // account-balance fields above still refresh every cycle.
     if (!keysChecked && lastKeyLimitFailure) {
       if (nowMs - lastKeyLimitFailure.confirmedAtMs <= KEY_LIMIT_CARRYOVER_MS) {
-        for (const reason of lastKeyLimitFailure.reasons) {
-          if (!reasons.includes(reason)) reasons.push(reason);
-        }
-        keysWithLimit = lastKeyLimitFailure.keysWithLimit;
-        keysLimitReached = lastKeyLimitFailure.keysLimitReached;
-        keysLimitLow = lastKeyLimitFailure.keysLimitLow;
-        if (lastKeyLimitFailure.problemKeyLabels.length) {
-          problemKeyLabels = [...lastKeyLimitFailure.problemKeyLabels];
+        // A truncated read that found its own key problems keeps its fresher evaluation; the
+        // snapshot only fills in when this run saw no key problem at all.
+        if (!keyReasons.length) {
+          for (const reason of lastKeyLimitFailure.reasons) {
+            if (!reasons.includes(reason)) reasons.push(reason);
+          }
+          keysWithLimit = lastKeyLimitFailure.keysWithLimit;
+          keysLimitReached = lastKeyLimitFailure.keysLimitReached;
+          keysLimitLow = lastKeyLimitFailure.keysLimitLow;
+          if (lastKeyLimitFailure.problemKeyLabels.length) {
+            problemKeyLabels = [...lastKeyLimitFailure.problemKeyLabels];
+          }
         }
       } else {
         lastKeyLimitFailure = null;
