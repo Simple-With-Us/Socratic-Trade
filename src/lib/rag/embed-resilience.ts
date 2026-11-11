@@ -8,6 +8,7 @@
 // The cache stores only the vector.  Pinecone/Qdrant filters still run on every retrieval.
 
 import { isTransientNetworkError } from "../network-errors";
+import { isStrategyRagRetrievalTimeout } from "../rag-retrieval-deadline";
 import { hashContent } from "./chunk";
 
 export const DEFAULT_EMBED_CALL_TIMEOUT_MS = 8_000;
@@ -40,6 +41,7 @@ function isValidEmbedding(embedding: unknown): embedding is number[] {
 
 /** True when a failed embed attempt should advance the shared provider circuit breaker. */
 export function countsTowardEmbedProviderFailure(error: unknown): boolean {
+  if (isStrategyRagRetrievalTimeout(error)) return false;
   if (isEmbedCircuitOpenError(error)) return false;
   if (error instanceof Error) {
     if (error.name === "AbortError") return false;

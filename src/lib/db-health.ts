@@ -11,6 +11,7 @@ import {
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
+import { isStrategyRagRetrievalTimeoutText } from "./rag-retrieval-deadline";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
 // "5 consecutive failures" condition — the only one strong enough to act on automatically (e.g. the
@@ -28,12 +29,20 @@ export const HEALTH_REASON_CONSECUTIVE_FAILURES = "Last 5 consecutive calls all 
 export const HEALTH_SOFT_FAILURE_PREFIX = "[expected-limit] ";
 
 /**
+ * Prefix for a caller-side strategy RAG deadline. It is not an expected quota and not a
+ * provider outage, and it must not paint the lane STOPPED.
+ */
+export const HEALTH_CALLER_TIMEOUT_PREFIX = "[caller-timeout] ";
+
+/**
  * True when an api_health_log failure row is a soft/expected limit (rate limit, daily cap, …).
  * Matches both the explicit prefix logApiHealth stamps for `soft: true`, and common free-text
  * shapes from older rows / call sites that forget the flag but still say "HTTP 429".
  */
 export function isSoftHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
+  if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return true;
+  if (isStrategyRagRetrievalTimeoutText(errorText)) return true;
   if (errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) return true;
   // Legacy / free-text shapes that should never hard-STOP a lane on their own.
   return (
@@ -92,6 +101,7 @@ export function isTransientHealthFailure(errorText: string | null | undefined): 
  */
 export function connectionHealthFailureClass(errorText: string | null | undefined): string | null {
   if (!errorText) return null;
+  if (isStrategyRagRetrievalTimeoutText(errorText) || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return "timeout";
   if (isDependencyDbContentionMessage(errorText)) return HEALTH_FAILURE_CLASS_DEPENDENCY_DB;
   if (isLocalDbFaultMessage(errorText)) return "local-db-contention";
   if (isTransientHealthFailure(errorText)) return "transient-network";
@@ -473,6 +483,12 @@ let apiHealthFlushTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
   let errorText = opts.errorText ?? null;
+  if (!opts.ok && errorText && isStrategyRagRetrievalTimeoutText(errorText)) {
+    if (!errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) {
+      errorText = `${HEALTH_CALLER_TIMEOUT_PREFIX}${errorText}`;
+    }
+    return errorText;
+  }
   const filingApiAuthSoft =
     opts.service === "filingapi" && !opts.ok && isFilingApiAuthErrorText(errorText);
   if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {

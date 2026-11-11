@@ -1,5 +1,5 @@
 import type { BrowserContext } from "@playwright/test";
-import { encodeSessionToken } from "../../src/lib/auth/session-token";
+import { encodeSessionJwtCrypto } from "../../src/lib/auth/session-jwt-crypto";
 import { playwrightAdminAuthSecret } from "./playwright-admin-auth";
 
 export const PLAYWRIGHT_AUTH_EMAIL =
@@ -8,7 +8,8 @@ export const PLAYWRIGHT_AUTH_EMAIL =
 /** Auth.js session for admin UI specs (`playwright.admin.config.ts` webServer only). */
 export async function installPlaywrightAdminSession(context: BrowserContext): Promise<void> {
   const secret = playwrightAdminAuthSecret();
-  const jwt = await encodeSessionToken({
+  // Use session-jwt-crypto directly — session-token.ts is server-only (ST-2599) and must not load in Playwright's runner graph.
+  const jwt = await encodeSessionJwtCrypto({
     token: { email: PLAYWRIGHT_AUTH_EMAIL, loginAt: Date.now() },
     secret,
     salt: "authjs.session-token",

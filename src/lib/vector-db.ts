@@ -1,7 +1,7 @@
 import { Pinecone, type PineconeRecord, type RecordMetadata } from "@pinecone-database/pinecone";
 import crypto from "crypto";
 import { siliconflowBaseUrl } from "./siliconflow-base";
-import { combineAbortSignals, createRagQueryAbort, raceWithAbort, RAG_QUERY_IO_DEADLINE_MS } from "./rag-retrieval-deadline";
+import { combineAbortSignals, createRagQueryAbort, isStrategyRagRetrievalTimeout, raceWithAbort, RAG_QUERY_IO_DEADLINE_MS } from "./rag-retrieval-deadline";
 import * as dbModule from "./db";
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting, type ApiKeySource } from "./db";
 import { filterNewDocumentChunks, insertDocumentChunks } from "./db";
@@ -1722,6 +1722,24 @@ const RAG_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   siliconflow: "SiliconFlow"
 };
 
+const RAG_RETRIEVAL_TIMEOUT_FINGERPRINT = ["rag", "retrieval-timeout"];
+
+/** Caller-side 15s deadline. Warning only, and not the provider-outage fingerprint. */
+async function reportStrategyRagRetrievalTimeout(
+  error: unknown,
+  context: Record<string, string | number | boolean | null | undefined>,
+  leaseGuard?: VectorStoreLeaseGuard
+): Promise<void> {
+  markRagSentryCaptured(error);
+  await captureRagSentryMessage(
+    "warning",
+    "RAG retrieval timed out",
+    { ...context, failureClass: "timeout" },
+    leaseGuard,
+    { fingerprint: RAG_RETRIEVAL_TIMEOUT_FINGERPRINT }
+  );
+}
+
 async function alertRagConnectionFailure(
   // "voyage"/"voyage-rerank" remain valid inputs for back-compat (recordMissingRagKey's
   // missing-API-key path still reports under the literal "voyage" service, unrelated to this rename
@@ -1741,6 +1759,19 @@ async function alertRagConnectionFailure(
   try {
     const assertActive = leaseGuard ? () => assertVectorStoreLease(leaseGuard) : undefined;
     assertVectorStoreLease(leaseGuard);
+    // A strategy-run deadline is the caller giving up. It is not an OpenRouter or Qdrant outage,
+    // so it must not page "connection failed" or stamp failureClass hard.
+    if (isStrategyRagRetrievalTimeout(rawError) || isStrategyRagRetrievalTimeout(message)) {
+      await reportStrategyRagRetrievalTimeout(rawError ?? message, {
+        provider: activeProvider ?? service,
+        lane: service,
+        source,
+        operation,
+        userSpecific: source === "user",
+        reason: message
+      }, leaseGuard);
+      return;
+    }
     // Transport-blip warnings arm a short cooldown on a `:transient` key so they cannot suppress a
     // later error-level / hard capture on the same lane (parity with alertConnectionFailure).
     const transportBlipForCooldown =
@@ -1916,15 +1947,23 @@ export const __ragSentryCooldownTestHandle__ = ragSentryLastSentAt;
 /** Cooldown key = the Sentry issue the event lands in. Events are fingerprinted by the stable
  *  lane (or provider) below, never by the drifting display title, so keying on the title would
  *  let one lane re-page under each title variant. Without a lane/provider, Sentry groups by
- *  message text, so the message is the key. */
+ *  message text, so the message is the key. A caller fingerprint that leaves that lane issue
+ *  (the strategy-run deadline) gets its own key so it cannot suppress the lane's other warnings. */
 /** @internal exported for test/rag-sentry-cooldown-key.test.ts */
 export function ragSentryCooldownKey(
   level: "warning" | "error",
   message: string,
-  context: Record<string, string | number | boolean | null | undefined>
+  context: Record<string, string | number | boolean | null | undefined>,
+  fingerprint?: string[]
 ): string {
   const groupKey = context.lane ?? context.provider;
-  return groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+  const base = groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+  if (!fingerprint || fingerprint.length === 0) return base;
+  const laneFingerprint = groupKey != null && groupKey !== "" ? ["rag", String(groupKey)] : undefined;
+  const leavesLaneIssue = !laneFingerprint
+    || fingerprint.length !== laneFingerprint.length
+    || fingerprint.some((part, index) => part !== laneFingerprint[index]);
+  return leavesLaneIssue ? `${base}:fp:${fingerprint.join("/")}` : base;
 }
 
 async function captureRagSentryMessage(
@@ -1937,6 +1976,8 @@ async function captureRagSentryMessage(
      *  persisted ingest-budget / Pinecone WU markers); skip the in-process 15-minute one so
      *  the two windows never stack and the caller's window stays authoritative. */
     callerThrottled?: boolean;
+    /** Overrides the lane fingerprint so a caller-side deadline does not join a provider outage issue. */
+    fingerprint?: string[];
   }
 ): Promise<void> {
   assertVectorStoreLease(leaseGuard);
@@ -1957,7 +1998,7 @@ async function captureRagSentryMessage(
     });
   }
   if (!process.env.SENTRY_DSN) return;
-  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context);
+  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context, options?.fingerprint);
   // Claim the window synchronously (before the awaited SDK import) so concurrent failures in
   // the same tick can't all slip through, then release the claim if nothing was actually sent
   // so a transient SDK load/capture failure never suppresses the next real report.
@@ -1990,7 +2031,8 @@ async function captureRagSentryMessage(
       // service id ("rag-embed"/"rag-rerank"/"pinecone"); fall back to `provider` for the few
       // contexts that carry no lane (e.g. the storeContexts ledger path).
       const groupKey = context.lane ?? context.provider;
-      if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
+      if (options?.fingerprint && options.fingerprint.length > 0) scope.setFingerprint(options.fingerprint);
+      else if (groupKey) scope.setFingerprint(["rag", String(groupKey)]);
       scope.setContext("rag", context);
       captureMessage(message);
       sent = true;
@@ -2204,6 +2246,7 @@ async function withRagApiHealth<T>(
     const wuExhausted = service === "pinecone" && isPineconeWuExhaustedError(rawMessage);
     const limitStatus = ragLimitStatus(rawMessage);
     const isTransient = limitStatus === "transient";
+    const retrievalTimeout = isStrategyRagRetrievalTimeout(error);
     assertVectorStoreLease(leaseGuard);
     logApiHealth({
       service: loggedService,
@@ -2212,7 +2255,7 @@ async function withRagApiHealth<T>(
       errorText: message,
       keySource: source,
       userId: targetUserId,
-      ...(wuExhausted || isTransient ? { soft: true } : {})
+      ...(wuExhausted || isTransient || retrievalTimeout ? { soft: true } : {})
     });
     markRagSentryCaptured(error);
     const alert = wuExhausted
@@ -2987,11 +3030,11 @@ async function embedWithRetry(
             );
           }
         }
-        // Never retry on abort or timeout.  The caller's signal fired or the per-attempt
-        // embed abort expired.  Retrying would only queue more requests against a slow
-        // provider and stall the scheduler for a multiple of the deadline.
-        if (boundSignal?.aborted || isAbortOrTimeoutError(error)) {
-          throw boundSignal?.reason instanceof Error ? boundSignal.reason : error;
+        // Never retry on abort, the strategy retrieval deadline, or a per-attempt timeout.
+        // A deadline must not start another backoff after the caller has already moved on.
+        if (boundSignal?.aborted || isStrategyRagRetrievalTimeout(error) || isAbortOrTimeoutError(error)) {
+          const abortedReason = boundSignal?.aborted && boundSignal.reason instanceof Error ? boundSignal.reason : error;
+          throw abortedReason;
         }
         const isRate = isRateLimitError(error);
         const isTransient = isTransientNetworkError(error);
@@ -9212,19 +9255,33 @@ export async function retrieveContextDetailed(
       reportRetrievalStatus(options, "degraded");
       return finish([]);
     }
-    console.error("[vector-db] Error retrieving context:", err);
-    if (!wasRagSentryCaptured(err)) {
-      // Same leftover as the storeContexts catch (fixed 2026-09-07): a hardcoded
-      // `provider: "pinecone"` folded post-cutover Qdrant retrieve failures into
-      // SOCRATIC-TRADE-1T / PD #116 even when denseTierQuery never touched Pinecone.
-      await captureRagSentryMessage("error", "RAG retrieval failed", {
-        provider: readBackend,
-        operation: "retrieveContext",
-        source: userId === "local" ? "operator" : "user",
-        symbol,
-        reason: err instanceof Error ? err.message : String(err),
-        ...(isTransientNetworkError(err) ? { isTransient: true } : {})
-      });
+    if (isStrategyRagRetrievalTimeout(err)) {
+      console.warn("[vector-db] RAG retrieval timed out:", err instanceof Error ? err.message : String(err));
+      if (!wasRagSentryCaptured(err)) {
+        // Same caller-side deadline the embed lane used to file as a hard connection failure.
+        await reportStrategyRagRetrievalTimeout(err, {
+          provider: readBackend,
+          operation: "retrieveContext",
+          source: userId === "local" ? "operator" : "user",
+          symbol,
+          reason: err instanceof Error ? err.message : String(err)
+        });
+      }
+    } else {
+      console.error("[vector-db] Error retrieving context:", err);
+      if (!wasRagSentryCaptured(err)) {
+        // Same leftover as the storeContexts catch (fixed 2026-09-07): a hardcoded
+        // `provider: "pinecone"` folded post-cutover Qdrant retrieve failures into
+        // SOCRATIC-TRADE-1T / PD #116 even when denseTierQuery never touched Pinecone.
+        await captureRagSentryMessage("error", "RAG retrieval failed", {
+          provider: readBackend,
+          operation: "retrieveContext",
+          source: userId === "local" ? "operator" : "user",
+          symbol,
+          reason: err instanceof Error ? err.message : String(err),
+          ...(isTransientNetworkError(err) ? { isTransient: true } : {})
+        });
+      }
     }
     reportRetrievalStatus(options, "lookup_failed", { userId, symbol });
     return finish([]);

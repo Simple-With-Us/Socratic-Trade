@@ -1,3 +1,18 @@
+## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
+
+**What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
+
+**Next.**  PR open; wait for Playwright Smoke + `verify` green; do not merge from agent.
+## 2026-11-11 [gb-trader] ST-4601 — deadline Sentry cooldown is its own key
+
+**What.**  A retrieval-timeout warning used the same 15-minute cooldown key as other rag-embed warnings, so it could suppress a later transient-network warning.  A fingerprint that leaves the lane issue now has its own key.{nb} Skipping episodic retrieval after a filings timeout stays intentional: that pass is another RAG wait.
+
+## 2026-11-11 [gb-trader] ST-4601 — RAG deadline is a timeout, not a provider outage
+
+**What.** A strategy-run retrieval deadline (`RAG_QUERY_IO_DEADLINE_MS`, 15s) was filed twice at error level: "RAG retrieval failed" (SOCRATIC-TRADE-2G) and "OpenRouter embed connection failed" with `failureClass` hard (SOCRATIC-TRADE-1X).  The same abort is now a warning timeout.  It does not count as a hard provider outage in api-health or RAG health, and the embed retry loop does not start another backoff after the caller aborts.  After the first deadline in a run, later symbols skip RAG and the run logs the skipped count once.  Empty-chunk continuation is unchanged.  The 15s budget is unchanged.  Order placement, sizing, prompts, and strategy settings are untouched.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+**Next.** PR is open against `main` and is not merged.  `verify` CI is the gate.  Jay merges.  Do not enable auto-merge.
+
 ## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
 
 **What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout stays cacheable.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` keep hourly ISR under a hash CSP stamped from that build's HTML.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
@@ -13,6 +28,9 @@
 ## 2026-11-07 CURSOR — PR #4998 Kody follow-ups (ST-4574 / MiniMax M3.1 Flash)
 
 **What.**  Stacked branch `cursor/pr-4998-review-fixes-21a3` merges `main` into PR #4998 and closes valid Kody threads: retired-catalog reconciliation (no `minimax/minimax-m3` alias on the M3.1 row), alias-aware rotation-pin validation, OpenRouter availability regression test, rollout doc hygiene (no account ids; predecessor attribution fixed).  Rollouts: `docs/rollouts/2026-11-07-pr-4998-kody-followups.md`, updated `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.## 2026-11-09 draft-PR sweep (ST-4597)  
+44 restore-event drafts triaged: 39 closed with evidence, #5062 merged (autofix token grants), telemetry URL redaction ported from #5046 (this PR), #5098 FilingAPI retirement and #5093 pinecone residual removal queued as fresh branches.  See docs/rollouts/2026-11-09-draft-pr-sweep.md.
 
 **Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.
 
