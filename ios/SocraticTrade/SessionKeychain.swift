@@ -42,7 +42,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     init(cookie: HTTPCookie, owningHost: String? = nil) {
         name = cookie.name
         value = cookie.value
-        hostOnly = Self.inferHostOnly(cookie: cookie)
+        hostOnly = Self.inferHostOnly(cookie: cookie, owningHost: owningHost)
         domain = Self.normalizedDomain(cookie.domain, owningHost: owningHost)
         path = cookie.path.isEmpty ? "/" : cookie.path
         secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
@@ -159,12 +159,23 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     }
 
     /// Host-only cookies omit a leading-dot `Domain` attribute; domain cookies include it in stored properties.
-    private static func inferHostOnly(cookie: HTTPCookie) -> Bool {
+    private static func inferHostOnly(cookie: HTTPCookie, owningHost: String?) -> Bool {
         if cookie.properties?[.originURL] != nil {
             return true
         }
         if let domainAttribute = cookie.properties?[.domain] as? String {
             return !domainAttribute.hasPrefix(".")
+        }
+        if cookie.domain.hasPrefix(".") {
+            return false
+        }
+        if let host = owningHost?.lowercased() {
+            let normalized = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            if normalized == host {
+                return true
+            }
         }
         return !cookie.domain.hasPrefix(".")
     }
@@ -293,16 +304,29 @@ enum SessionCookiePersistence {
         owningHost host: String?
     ) -> [HTTPCookie] {
         guard let host else { return [] }
-        return (storage.cookies ?? []).filter { cookie in
+        let origin = URL(string: "https://\(host)/")!
+        var merged: [String: HTTPCookie] = [:]
+        func ingest(_ cookies: [HTTPCookie]) {
+            for cookie in cookies {
+                let key = "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
+                merged[key] = cookie
+            }
+        }
+        ingest(storage.cookies(for: origin) ?? [])
+        ingest(storage.cookies ?? [])
+        return merged.values.filter { cookie in
             ownsDomain(cookie.domain, host: host) && AuthSessionCookie.isSessionCookieName(cookie.name)
         }
     }
 
     static func ownsDomain(_ cookieDomain: String, host: String) -> Bool {
+        let normalizedHost = host.lowercased()
         let domain = cookieDomain
             .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             .lowercased()
-        let normalizedHost = host.lowercased()
+        if domain.isEmpty {
+            return true
+        }
         return normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
     }
 

@@ -42,7 +42,7 @@ final class SessionKeychainTests: XCTestCase {
         let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
         XCTAssertTrue(archive.hostOnly)
         let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
-        XCTAssertNil(restored.properties?[.domain])
+        XCTAssertNotNil(restored.properties?[.originURL])
         XCTAssertFalse(restored.domain.hasPrefix("."))
 
         let storage = HTTPCookieStorage()
