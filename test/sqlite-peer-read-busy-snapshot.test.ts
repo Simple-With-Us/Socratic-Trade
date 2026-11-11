@@ -131,6 +131,19 @@ describe("peer read sqlite helpers", () => {
     expect(isSqliteBusyErrorCode(Object.assign(new Error("x"), { code: "SQLITE_BUSY_SNAPSHOT" }))).toBe(true);
   });
 
+  it("peerReadRouteSqliteRetry yields and retries coded SQLITE_BUSY within the shared deadline", async () => {
+    const busy = Object.assign(new Error("busy"), { code: "SQLITE_BUSY" });
+    const { peerReadRouteSqliteRetry } = await import("../src/lib/sqlite-peer-read");
+    let calls = 0;
+    const result = await peerReadRouteSqliteRetry(async () => {
+      calls += 1;
+      if (calls < 2) throw busy;
+      return "ok";
+    });
+    expect(result).toBe("ok");
+    expect(calls).toBe(2);
+  });
+
   it("nested peerReadSqliteRetry shares one route deadline (no second 4s budget)", async () => {
     const busy = Object.assign(new Error("busy"), { code: "SQLITE_BUSY" });
     const { peerReadRouteSqliteRetry, peerReadSqliteRetry, PEER_READ_SQLITE_RETRY_BUDGET_MS } = await import(

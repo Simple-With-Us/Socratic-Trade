@@ -338,17 +338,14 @@ describe("GET /api/market/prices/[symbol]", () => {
     });
   });
 
-  it("503 with Retry-After when sqlite contention escapes fetchDailyOHLC", async () => {
-    mockFetchDailyOHLC.mockRejectedValue(
-      Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" })
-    );
-    const res = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("2");
-    expect(await res.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
-  });
+  it("503 only for coded sqlite busy, not message-only provider lock text", async () => {
+    const codedBusy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" });
+    mockFetchDailyOHLC.mockRejectedValue(codedBusy);
+    const busyRes = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    expect(busyRes.status).toBe(503);
+    expect(busyRes.headers.get("retry-after")).toBe("2");
+    expect(await busyRes.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
 
-  it("does not map message-only lock text to 503 without a sqlite code", async () => {
     mockFetchDailyOHLC.mockRejectedValue(new Error("provider said database is locked"));
     await expect(pricesRoute(authedRequest(url, TEST_TOKEN), ctx)).rejects.toThrow(
       "provider said database is locked"

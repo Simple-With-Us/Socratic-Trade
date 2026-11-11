@@ -17,6 +17,7 @@ import {
   isSqliteBusy,
   sqliteYieldRetry
 } from "./sqlite-event-loop";
+import { yieldEventLoop } from "./slow-sync-guard";
 
 /** Lock-wait budget for congress.trade peer pulls (fail fast → 503 + Retry-After). */
 export const PEER_READ_SQLITE_RETRY_BUDGET_MS = 4_000;
@@ -53,12 +54,19 @@ export async function peerReadSqliteRetry<T>(fn: () => T): Promise<T> {
 }
 
 /**
- * Establish a single 4s sqlite retry deadline for the whole peer route handler (including
- * nested peerReadSqliteRetry slices inside fetchDailyOHLC).  Does not re-run the fetch on busy.
+ * Single 4s deadline shared with nested peerReadSqliteRetry slices.  On coded SQLITE_BUSY/LOCKED
+ * that escapes an inner slice, yield and retry the handler until the deadline (transient lock).
  */
 export async function peerReadRouteSqliteRetry<T>(fn: () => Promise<T>): Promise<T> {
   const deadline = Date.now() + PEER_READ_SQLITE_RETRY_BUDGET_MS;
-  return peerReadSqliteDeadlineStore.run(deadline, fn);
+  for (;;) {
+    try {
+      return await peerReadSqliteDeadlineStore.run(deadline, fn);
+    } catch (err) {
+      if (!isSqliteBusyErrorCode(err) || Date.now() >= deadline) throw err;
+      await yieldEventLoop();
+    }
+  }
 }
 
 /** Swallow SQLITE_BUSY on optional persistence during a read path; rethrow everything else. */
