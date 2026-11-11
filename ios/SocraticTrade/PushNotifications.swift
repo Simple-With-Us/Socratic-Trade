@@ -441,12 +441,17 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
 
     /// Deletes this device's row for the previous account without ending the system
     /// registration. The DELETE carries `priorCookies` on its own session. The shared
-    /// cookie jar stays on the account that just signed in.
+    /// cookie jar stays on the account that just signed in. Empty `priorCookies`
+    /// resets the gate and does not send the request.
     ///
     /// A transient DELETE is retried once. The token stays until the DELETE succeeds,
     /// so a later sign-out can still unbind it. The incoming session gets one register
     /// attempt after this returns. A fresh 409 arms the hold again.
     func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async {
+        guard !priorCookies.isEmpty else {
+            registrationGate.observeSuccess()
+            return
+        }
         guard let token = registeredToken else {
             registrationGate.observeSuccess()
             return

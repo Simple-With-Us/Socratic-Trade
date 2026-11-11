@@ -1154,28 +1154,16 @@ final class MobileStore: ObservableObject {
     }
 
     /// The login response has already replaced the session cookies. The previous
-    /// account's cookies ride on an isolated DELETE and never enter the shared jar.
-    /// `defer` puts the signed-in cookies back if that jar changes while the DELETE
-    /// is in flight. Registration waits until load confirms that session. A failed
-    /// login never reaches this method, so the old session keeps its push row.
+    /// account's cookies ride on an isolated DELETE and this method does not read
+    /// or write the shared jar. A cookie rotation that lands during the DELETE stays.
+    /// Registration waits until load confirms that session. A failed login never
+    /// reaches this method, so the old session keeps its push row.
     private func rebindPushAfterSuccessfulLogin(priorCookies: [HTTPCookie]) async {
-        let signedInCookies = ownedSessionCookies()
-        defer { replaceOwnedSessionCookies(with: signedInCookies) }
         await releasePushForAccountChange(priorCookies: priorCookies)
     }
 
     private func ownedSessionCookies() -> [HTTPCookie] {
         (sessionCookieStorage.cookies ?? []).filter { client.ownsCookie($0) }
-    }
-
-    private func replaceOwnedSessionCookies(with cookies: [HTTPCookie]) {
-        let storage = sessionCookieStorage
-        for cookie in storage.cookies ?? [] where client.ownsCookie(cookie) {
-            storage.deleteCookie(cookie)
-        }
-        for cookie in cookies {
-            storage.setCookie(cookie)
-        }
     }
 
     private var sessionCookieStorage: HTTPCookieStorage {

@@ -279,7 +279,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         await coordinator.upload(registration)
         XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 3)
 
-        await coordinator.relinquishTokenForAccountChange()
+        await coordinator.relinquishTokenForAccountChange(priorCookies: [try sessionCookie(value: "prior-session")])
         XCTAssertEqual(log.snapshot().filter { $0.method == "DELETE" }.count, 1)
     }
 
@@ -313,8 +313,39 @@ final class MobileSessionHardeningTests: XCTestCase {
         await coordinator.upload(registration)
         XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 2)
 
-        await coordinator.relinquishTokenForAccountChange()
+        await coordinator.relinquishTokenForAccountChange(priorCookies: [try sessionCookie(value: "prior-session")])
         XCTAssertEqual(log.snapshot().filter { $0.method == "DELETE" }.count, 1)
+    }
+
+    @MainActor
+    func testEmptyPriorCookiesSkipsTheAccountChangeDelete() async throws {
+        let log = AuthRequestLog()
+        let session = stubbedSession(log: log) { request in
+            if request.httpMethod == "DELETE" {
+                return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
+            }
+            return (200, Data(#"{"ok":true}"#.utf8))
+        }
+        let client = MobileAPIClient(
+            baseURL: base,
+            session: session,
+            isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
+        )
+        let coordinator = PushNotificationCoordinator(client: client)
+        let registration = try XCTUnwrap(PushRegistrationRequest(
+            token: "abc123",
+            environment: .production,
+            bundleId: "com.socratictrade.ios"
+        ))
+
+        await coordinator.upload(registration)
+        await coordinator.relinquishTokenForAccountChange(priorCookies: [])
+        XCTAssertEqual(log.snapshot().filter { $0.method == "DELETE" }.count, 0)
+
+        await coordinator.relinquishTokenForAccountChange(priorCookies: [try sessionCookie(value: "prior-session")])
+        let deletes = log.snapshot().filter { $0.method == "DELETE" }
+        XCTAssertEqual(deletes.count, 1)
+        XCTAssertEqual(deletes[0].cookie, "st-session-hardening=prior-session")
     }
 
     @MainActor
@@ -390,9 +421,11 @@ final class MobileSessionHardeningTests: XCTestCase {
             if request.httpMethod == "DELETE" {
                 let jar = swap.storage
                 swap.storageValueAtDelete = jar?.cookies?.first { $0.name == "st-session-hardening" }?.value
-                for cookie in jar?.cookies ?? [] where cookie.name == "st-session-hardening" {
+                let rotated = try self.sessionCookie(value: "rotated-during-delete")
+                for cookie in jar?.cookies ?? [] where cookie.name == rotated.name {
                     jar?.deleteCookie(cookie)
                 }
+                jar?.setCookie(rotated)
                 return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
             }
             if request.url?.path == "/api/mobile/snapshot" {
@@ -430,7 +463,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(swap.storageValueAtDelete, "next-session")
         XCTAssertEqual(
             storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
-            "next-session"
+            "rotated-during-delete"
         )
     }
 
