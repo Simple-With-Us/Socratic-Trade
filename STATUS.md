@@ -1,3 +1,13 @@
+## 2026-11-11 [gb-trader] ST-4601 — deadline Sentry cooldown is its own key
+
+**What.**  A retrieval-timeout warning used the same 15-minute cooldown key as other rag-embed warnings, so it could suppress a later transient-network warning.  A fingerprint that leaves the lane issue now has its own key.{nb} Skipping episodic retrieval after a filings timeout stays intentional: that pass is another RAG wait.
+
+## 2026-11-11 [gb-trader] ST-4601 — RAG deadline is a timeout, not a provider outage
+
+**What.** A strategy-run retrieval deadline (`RAG_QUERY_IO_DEADLINE_MS`, 15s) was filed twice at error level: "RAG retrieval failed" (SOCRATIC-TRADE-2G) and "OpenRouter embed connection failed" with `failureClass` hard (SOCRATIC-TRADE-1X).  The same abort is now a warning timeout.  It does not count as a hard provider outage in api-health or RAG health, and the embed retry loop does not start another backoff after the caller aborts.  After the first deadline in a run, later symbols skip RAG and the run logs the skipped count once.  Empty-chunk continuation is unchanged.  The 15s budget is unchanged.  Order placement, sizing, prompts, and strategy settings are untouched.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+**Next.** PR is open against `main` and is not merged.  `verify` CI is the gate.  Jay merges.  Do not enable auto-merge.
+
 ## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
 
 **What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout stays cacheable.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` keep hourly ISR under a hash CSP stamped from that build's HTML.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
