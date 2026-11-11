@@ -29,6 +29,9 @@
 
 **What.**  Stacked branch `cursor/pr-4998-review-fixes-21a3` merges `main` into PR #4998 and closes valid Kody threads: retired-catalog reconciliation (no `minimax/minimax-m3` alias on the M3.1 row), alias-aware rotation-pin validation, OpenRouter availability regression test, rollout doc hygiene (no account ids; predecessor attribution fixed).  Rollouts: `docs/rollouts/2026-11-07-pr-4998-kody-followups.md`, updated `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
 
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.## 2026-11-09 draft-PR sweep (ST-4597)  
+44 restore-event drafts triaged: 39 closed with evidence, #5062 merged (autofix token grants), telemetry URL redaction ported from #5046 (this PR), #5098 FilingAPI retirement and #5093 pinecone residual removal queued as fresh branches.  See docs/rollouts/2026-11-09-draft-pr-sweep.md.
+
 **Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.
 
 ## 2026-11-11 CURSOR — ST-4594 iOS session hardening
