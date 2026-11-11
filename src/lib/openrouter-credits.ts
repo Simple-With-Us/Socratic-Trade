@@ -433,13 +433,16 @@ export async function getOpenRouterCreditStatus(
       if (nowMs - lastKeyLimitFailure.confirmedAtMs <= KEY_LIMIT_CARRYOVER_MS) {
         // Union with this run's own evaluation (Kody, PR #5097): a truncated read that finds
         // a lesser problem must not downgrade the confirmed verdict — reasons and labels
-        // union, counts take the max (each side is a lower bound on a different key set).
+        // union. The counters, though, are taken from the confirmed snapshot as a set:
+        // maxing each counter independently can report an impossible inventory
+        // (reached + low > withLimit) when the two reads cover disjoint keys, so the counts
+        // describe the last complete read while the reasons describe everything known.
         for (const reason of lastKeyLimitFailure.reasons) {
           if (!reasons.includes(reason)) reasons.push(reason);
         }
-        keysWithLimit = Math.max(keysWithLimit, lastKeyLimitFailure.keysWithLimit);
-        keysLimitReached = Math.max(keysLimitReached, lastKeyLimitFailure.keysLimitReached);
-        keysLimitLow = Math.max(keysLimitLow, lastKeyLimitFailure.keysLimitLow);
+        keysWithLimit = lastKeyLimitFailure.keysWithLimit;
+        keysLimitReached = lastKeyLimitFailure.keysLimitReached;
+        keysLimitLow = lastKeyLimitFailure.keysLimitLow;
         for (const label of lastKeyLimitFailure.problemKeyLabels) {
           if (!problemKeyLabels.includes(label)) problemKeyLabels.push(label);
         }
