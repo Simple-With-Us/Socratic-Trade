@@ -336,7 +336,7 @@ struct MoneyActionResult: Equatable, Identifiable {
             return true
         case .serverError(let statusCode, _):
             return statusCode == 408 || statusCode == 429 || statusCode >= 500
-        case .scanQuotesUnavailable, .unauthorized:
+        case .scanQuotesUnavailable, .unauthorized, .deviceTokenConflict:
             return false
         }
     }
@@ -463,6 +463,12 @@ final class MobileStore: ObservableObject {
     @Published private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
 
     let client: MobileAPIClient
+    /// Push unregister for sign-out and for a change of signed-in account. Tests replace it.
+    var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
+    /// Sign-in tests turn this off so the SSE reconnect loop does not outlive the test.
+    var opensEventStreamOnSignIn = true
+    /// XCTest sets this false so a sign-in test does not touch the notification center.
+    var claimsPushOnSignIn = true
     private var eventTask: Task<Void, Never>?
     private var reloadInFlight = false
     private var reloadPending = false
@@ -1080,18 +1086,45 @@ final class MobileStore: ObservableObject {
         }
     }
 
-    func loginWithApple(identityToken: String, name: String?) async {
+    func dismissError() {
+        error = nil
+    }
+
+    func dismissSuccess() {
+        successMessage = nil
+    }
+
+    /// Re-register this device's APNs token under the session that just began.
+    ///
+    /// The server returns 409 when the token still belongs to another account. That refusal
+    /// is surfaced once and is not retried until the prior account unregisters.
+    private func claimPushTokenForCurrentSession() async {
+        await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+    }
+
+    /// Drops the current account's push row while its session cookies are still valid.
+    /// A broker-account switch does not call this: that switch keeps the same signed-in user.
+    func releasePushForAccountChange() async {
+        await pushTokenRelease.relinquishTokenForAccountChange()
+    }
+
+    func loginWithApple(identityToken: String, name: String?, nonce: String) async {
         guard !isSigningIn else { return }
+        guard MobileAuthNonce.isServerIssued(nonce) else {
+            error = MobileAuthStartFailure.appleNonceUnavailable
+            return
+        }
         isSigningIn = true
         defer { isSigningIn = false }
+        await releasePushForAccountChange()
         do {
-            _ = try await client.loginWithApple(identityToken: identityToken, name: name)
+            _ = try await client.loginWithApple(identityToken: identityToken, name: name, nonce: nonce)
             isAuthenticated = true
             error = nil
             await load()
             if isAuthenticated {
-                startEvents()
-                await claimPushTokenForCurrentSession()
+                if opensEventStreamOnSignIn { startEvents() }
+                if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             }
         } catch {
             applyAuthAwareError(error)
@@ -1103,12 +1136,13 @@ final class MobileStore: ObservableObject {
         guard !isSigningIn else { return }
         isSigningIn = true
         defer { isSigningIn = false }
+        await releasePushForAccountChange()
         do {
             try await client.exchangeWebAuthCode(code, verifier: verifier)
             await load()
             if isAuthenticated {
-                startEvents()
-                await claimPushTokenForCurrentSession()
+                if opensEventStreamOnSignIn { startEvents() }
+                if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             } else if error == nil {
                 error = "Authentication failed after web sign-in.  Try again."
             }
@@ -1118,31 +1152,7 @@ final class MobileStore: ObservableObject {
         }
     }
 
-    func dismissError() {
-        error = nil
-    }
-
-    func dismissSuccess() {
-        successMessage = nil
-    }
-
-    /// Re-register this device's APNs token under the session that just began.
-    ///
-    /// Registration is otherwise only attempted at cold start, for a session that was ALREADY
-    /// restored — which leaves a real window on a shared device: when one owner's session expires
-    /// (`clearLocalSession` drops only the local belief; it cannot send an authenticated delete,
-    /// and the system token stays valid) and a DIFFERENT account signs in, the server row still
-    /// belongs to the previous owner and still delivers their alerts to this phone until the next
-    /// cold launch.  Registering here hands the token to the new session immediately — the server
-    /// reassigns the row on conflict — and it is also what gets push working on a first sign-in
-    /// without making the owner relaunch the app.  Never prompts: it re-asserts an existing grant
-    /// only, and does nothing when notifications were never authorized.
-    private func claimPushTokenForCurrentSession() async {
-        await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
-    }
-
-    /// Explicit sign-out.  The portfolio, snapshot cache, and URL cache drop immediately.
-    /// Session cookies stay until the authenticated push delete finishes.
+    /// Explicit sign-out. Session cookies stay until the authenticated push delete finishes.
     func signOut() async {
         stopEvents()
         clearPresentedAccountState()
@@ -1153,7 +1163,7 @@ final class MobileStore: ObservableObject {
         hasInitialized = true
         removeAccountScopedPersistence()
         sessionEpoch &+= 1
-        await PushNotificationCoordinator.shared.signOutAndForgetToken()
+        await pushTokenRelease.signOutAndForgetToken()
         clearSessionCookies()
     }
 
@@ -1335,7 +1345,7 @@ final class MobileStore: ObservableObject {
     private func shouldReleaseCommandAttempt(after error: Error) -> Bool {
         guard let apiError = error as? MobileAPIError else { return false }
         switch apiError {
-        case .serverError, .unauthorized, .scanQuotesUnavailable:
+        case .serverError, .unauthorized, .scanQuotesUnavailable, .deviceTokenConflict:
             return true
         case .network, .decoding:
             return false

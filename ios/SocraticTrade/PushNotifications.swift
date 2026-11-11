@@ -1,4 +1,5 @@
 import Foundation
+import os
 import UIKit
 import UserNotifications
 
@@ -205,6 +206,9 @@ enum PushAlertState: Equatable {
 
     /// Settings copy stays ordinary app language.  Apple / token errors stay out of the footer.
     static func failureSummary(_ message: String) -> String {
+        if message == PushRegistrationPolicy.conflictMessage {
+            return message
+        }
         let lower = message.lowercased()
         let looksLikeAppleJargon =
             lower.contains("apns")
@@ -228,13 +232,19 @@ enum PushAlertState: Equatable {
     }
 }
 
+@MainActor
+protocol PushTokenReleasing: AnyObject {
+    func signOutAndForgetToken() async
+    func relinquishTokenForAccountChange() async
+}
+
 /// Owns everything push: authorization, APNs registration, server registration, foreground
 /// presentation, and tap routing.
 ///
 /// A singleton because `UIApplicationDelegate` — the only place APNs hands back a device
 /// token — is created by UIKit and cannot be handed a SwiftUI-owned object.
 @MainActor
-final class PushNotificationCoordinator: NSObject, ObservableObject {
+final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenReleasing {
     static let shared = PushNotificationCoordinator()
 
     @Published private(set) var state: PushAlertState = .unknown
@@ -248,8 +258,10 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
 
     private let client: MobileAPIClient
     private var registeredToken: String?
+    private var registrationGate = PushRegistrationGate()
     /// Guards the one-time prompt so re-entering Proposals does not re-ask.
     private var hasRequestedAuthorizationThisLaunch = false
+    private let log = Logger(subsystem: "com.socratictrade.ios", category: "push")
 
     init(client: MobileAPIClient = MobileAPIClient(baseURL: MobileAPIClient.productionBaseURL)) {
         self.client = client
@@ -353,10 +365,24 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
     }
 
     private func upload(_ registration: PushRegistrationRequest) async {
+        guard registrationGate.shouldSend(token: registration.token) else {
+            state = .failed(PushRegistrationPolicy.conflictMessage)
+            return
+        }
         do {
             try await client.registerPushToken(registration)
+            registrationGate.observeSuccess()
             registeredToken = registration.token
             state = .registered(environment: registration.environment)
+        } catch let error as MobileAPIError {
+            registrationGate.observe(token: registration.token, error: error)
+            registeredToken = nil
+            if case .deviceTokenConflict = error {
+                log.error("Push register returned 409. Not retrying until the prior account unregisters.")
+                state = .failed(PushRegistrationPolicy.conflictMessage)
+                return
+            }
+            state = .failed(error.localizedDescription)
         } catch {
             registeredToken = nil
             state = .failed(error.localizedDescription)
@@ -372,13 +398,29 @@ final class PushNotificationCoordinator: NSObject, ObservableObject {
     /// system token is invalidated so any push the server still attempts comes back
     /// `410 Unregistered` and is cleaned up on that side.
     func signOutAndForgetToken() async {
-        let token = registeredToken
-        registeredToken = nil
-        state = .notRequested
-        if let token {
+        if let token = registeredToken {
             try? await client.unregisterPushToken(token)
         }
+        registeredToken = nil
+        registrationGate.observeSuccess()
+        state = .notRequested
         UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
+    /// Deletes this device's row for the signed-in account without ending the system
+    /// registration. Used before a different account's session replaces the cookies.
+    func relinquishTokenForAccountChange() async {
+        guard let token = registeredToken else { return }
+        do {
+            try await client.unregisterPushToken(token)
+            registeredToken = nil
+            registrationGate.observeSuccess()
+            if state.isWorking {
+                state = .awaitingToken
+            }
+        } catch {
+            log.error("Push unregister before account change failed. The next register may be refused.")
+        }
     }
 
     /// Session lost without an explicit sign-out (expired cookie).  No network call is

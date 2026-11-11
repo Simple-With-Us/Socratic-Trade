@@ -5,6 +5,8 @@ import Security
 enum MobileAPIError: Error, LocalizedError {
     case unauthorized(statusCode: Int)
     case serverError(statusCode: Int, message: String?)
+    /// POST /api/mobile/push/register returned 409. The token still belongs to another account.
+    case deviceTokenConflict(message: String?)
     case scanQuotesUnavailable(MarketScanResponse)
     case network(Error)
     case decoding(Error)
@@ -13,6 +15,8 @@ enum MobileAPIError: Error, LocalizedError {
         switch self {
         case .unauthorized:
             return "Your session expired.  Sign in again."
+        case .deviceTokenConflict:
+            return PushRegistrationPolicy.conflictMessage
         case .serverError(let statusCode, let message):
             // Cloudflare 521-523: origin unreachable.  Keep the reason, drop the vendor and code.
             if (521...523).contains(statusCode) {
@@ -91,6 +95,9 @@ struct MobileAPIClient {
     /// handed the store's client) targets the same host — and therefore the same
     /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
     static let productionBaseURL = URL(string: "https://socratictrade.com")!
+    /// Sent on mobile auth requests so the server applies ST-2599 strict checks.
+    static let sessionHardeningHeaderField = "x-socratic-mobile-session-hardening"
+    static let sessionHardeningHeaderValue = "1"
 
     let baseURL: URL
     var session: URLSession = .shared
@@ -269,7 +276,7 @@ struct MobileAPIClient {
         var request = request(path: "/api/mobile/push/register", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: registration.jsonBody)
-        _ = try await successfulResponseData(for: request)
+        _ = try await successfulResponseData(for: request, deviceTokenConflictPath: true)
     }
 
     /// Sign-out counterpart.  Sends the token so the server drops the exact row rather than
@@ -322,25 +329,66 @@ struct MobileAPIClient {
         return (try? JSONDecoder().decode(AccountDeletionResult.self, from: data)) ?? .successfulHTTP
     }
 
-    func loginWithApple(identityToken: String, name: String?) async throws -> AppleLoginResponse {
-        var request = request(path: "/api/mobile/auth/apple", method: "POST")
+    func prepareHandoff(codeChallenge: String) async throws -> String {
+        let response: HandoffNonceResponse = try await send(try handoffPrepareRequest(codeChallenge: codeChallenge))
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.handoffUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func fetchAppleSignInNonce() async throws -> String {
+        let response: AppleServerNonceResponse = try await send(appleNonceRequest())
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.appleNonceUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func handoffPrepareRequest(codeChallenge: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/handoff-prepare", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        var body: [String: Any] = ["identityToken": identityToken]
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["codeChallenge": codeChallenge])
+        return request
+    }
+
+    func appleNonceRequest() -> URLRequest {
+        authRequest(path: "/api/mobile/auth/apple/nonce", method: "GET")
+    }
+
+    func appleLoginRequest(identityToken: String, name: String?, nonce: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/apple", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        var body: [String: Any] = ["identityToken": identityToken, "nonce": nonce]
         if let name, !name.isEmpty {
             body["name"] = name
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
+        return request
     }
 
-    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
-        var request = request(path: "/api/mobile/auth/exchange", method: "POST")
+    func webAuthExchangeRequest(code: String, verifier: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/exchange", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "code": code,
             "codeVerifier": verifier
         ])
-        let _: WebAuthExchangeResponse = try await send(request)
+        return request
+    }
+
+    func loginWithApple(identityToken: String, name: String?, nonce: String) async throws -> AppleLoginResponse {
+        try await send(try appleLoginRequest(identityToken: identityToken, name: name, nonce: nonce))
+    }
+
+    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
+        let _: WebAuthExchangeResponse = try await send(try webAuthExchangeRequest(code: code, verifier: verifier))
     }
 
     /// `onConnect` fires when the stream response is established and again on every received
@@ -422,6 +470,12 @@ struct MobileAPIClient {
         return request
     }
 
+    private func authRequest(path: String, method: String) -> URLRequest {
+        var request = request(path: path, method: method)
+        request.setValue(Self.sessionHardeningHeaderValue, forHTTPHeaderField: Self.sessionHardeningHeaderField)
+        return request
+    }
+
     private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
         var attempt = 0
         while true {
@@ -473,7 +527,11 @@ struct MobileAPIClient {
         }
     }
 
-    private func successfulResponseData(for request: URLRequest, captureFailures: Bool = true) async throws -> Data {
+    private func successfulResponseData(
+        for request: URLRequest,
+        captureFailures: Bool = true,
+        deviceTokenConflictPath: Bool = false
+    ) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -485,6 +543,11 @@ struct MobileAPIClient {
                 SentryTelemetry.captureAPIFailure(error: error, endpoint: request.url?.absoluteString ?? "")
             }
             throw MobileAPIError.network(error)
+        }
+        if deviceTokenConflictPath,
+           let http = response as? HTTPURLResponse,
+           http.statusCode == 409 {
+            throw MobileAPIError.deviceTokenConflict(message: Self.serverMessage(from: data))
         }
         try Self.requireSuccess(response, body: data)
         return data
@@ -533,6 +596,14 @@ private struct AcknowledgeNotificationsResponse: Decodable {
 
 private struct WebAuthExchangeResponse: Decodable {
     let success: Bool
+}
+
+private struct HandoffNonceResponse: Decodable {
+    let nonce: String
+}
+
+private struct AppleServerNonceResponse: Decodable {
+    let nonce: String
 }
 
 struct WebAuthCodeVerifier {

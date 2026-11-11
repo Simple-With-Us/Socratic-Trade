@@ -1,3 +1,9 @@
+## 2026-11-11 CURSOR — ST-4594 iOS session hardening
+
+**What.**  The iOS app now prepares a PKCE handoff nonce before Google/GitHub sign-in, fetches the server Apple nonce before native Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out unregisters the push token before clearing cookies.  A push-register 409 is surfaced once and is not retried until the prior account unregisters.  Server `__legacy_compat__` paths stay for older builds.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+
+**Next.**  Open the ready PR, request one Kody review, and let `verify` plus `ios-build` gate the squash merge.  Do not drop the server legacy paths until this build is on TestFlight and the App Store.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.

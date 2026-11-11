@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const NONCE_TTL_MS = 5 * 60_000;
 const MAX_NONCES = 512;
@@ -37,4 +37,16 @@ export function consumeAppleSignInNonce(nonce: string, now: number = Date.now())
   const row = store().get(nonce);
   store().delete(nonce);
   return !!row && row.expiresAt > now;
+}
+
+/** Lowercase hex SHA-256. Apple copies `request.nonce` into the identity token, and the
+ * native client sets that property to this digest of the issued nonce. */
+export function appleSignInNonceDigest(nonce: string): string {
+  return createHash("sha256").update(nonce, "utf8").digest("hex");
+}
+
+/** The identity-token `nonce` claim is either the issued nonce or its SHA-256 hex. */
+export function applePresentedNonceMatches(issuedNonce: string, tokenNonce: string | undefined): boolean {
+  if (!issuedNonce || !tokenNonce) return false;
+  return tokenNonce === issuedNonce || tokenNonce === appleSignInNonceDigest(issuedNonce);
 }
