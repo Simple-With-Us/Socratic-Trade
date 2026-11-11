@@ -290,6 +290,35 @@ final class MobileSessionHardeningTests: XCTestCase {
     }
 
     @MainActor
+    func testCancelledUploadDoesNotRetry() async throws {
+        let log = AuthRequestLog()
+        let session = stubbedSession(log: log) { _ in
+            throw URLError(.cancelled)
+        }
+        let client = MobileAPIClient(baseURL: base, session: session)
+        let coordinator = PushNotificationCoordinator(client: client)
+        let registration = try XCTUnwrap(PushRegistrationRequest(
+            token: "abc123",
+            environment: .production,
+            bundleId: "com.socratictrade.ios"
+        ))
+
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 1)
+        XCTAssertFalse(PushUploadRetry.shouldRetry(CancellationError(), attempt: 0, isCancelled: false))
+        XCTAssertFalse(PushUploadRetry.shouldRetry(
+            MobileAPIError.network(URLError(.cancelled)),
+            attempt: 0,
+            isCancelled: true
+        ))
+        XCTAssertTrue(PushUploadRetry.shouldRetry(
+            MobileAPIError.serverError(statusCode: 503, message: nil),
+            attempt: 0,
+            isCancelled: false
+        ))
+    }
+
+    @MainActor
     func testSignOutUnregistersPushBeforeClearingCookies() async throws {
         let log = AuthRequestLog()
         let session = stubbedSession(log: log) { request in
@@ -322,6 +351,14 @@ final class MobileSessionHardeningTests: XCTestCase {
                 swap.apply()
                 return (200, Data(#"{"success":true,"email":"owner@example.com"}"#.utf8))
             }
+            if request.httpMethod == "DELETE" {
+                let jar = swap.storage
+                swap.storageValueAtDelete = jar?.cookies?.first { $0.name == "st-session-hardening" }?.value
+                for cookie in jar?.cookies ?? [] where cookie.name == "st-session-hardening" {
+                    jar?.deleteCookie(cookie)
+                }
+                return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
+            }
             if request.url?.path == "/api/mobile/snapshot" {
                 return (200, Data(self.minimalSnapshotJSON.utf8))
             }
@@ -349,7 +386,8 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(events[0].header, MobileAPIClient.sessionHardeningHeaderValue)
         XCTAssertEqual(events[1].method, "DELETE")
         XCTAssertEqual(events[1].path, "/api/mobile/push/register")
-        XCTAssertEqual(release.cookieValueAtUnregister, "prior-session")
+        XCTAssertEqual(events[1].cookie, "st-session-hardening=prior-session")
+        XCTAssertEqual(swap.storageValueAtDelete, "next-session")
         XCTAssertEqual(
             storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
             "next-session"
@@ -452,16 +490,20 @@ private final class ScriptedPushRelease: PushTokenReleasing {
         await delete()
     }
 
-    func relinquishTokenForAccountChange() async {
-        await delete()
+    func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async {
+        await delete(isolatedCookies: priorCookies)
     }
 
-    private func delete() async {
+    private func delete(isolatedCookies: [HTTPCookie]? = nil) async {
         let storage = client.session.configuration.httpCookieStorage
         cookieValueAtUnregister = storage?.cookies?.first { $0.name == "st-session-hardening" }?.value
         cookiePresentAtUnregister = cookieValueAtUnregister != nil
         guard let token else { return }
-        try? await client.unregisterPushToken(token)
+        if let isolatedCookies {
+            try? await client.unregisterPushToken(token, isolatedCookies: isolatedCookies)
+        } else {
+            try? await client.unregisterPushToken(token)
+        }
         self.token = nil
     }
 }
@@ -473,6 +515,7 @@ private final class RequestCounter: @unchecked Sendable {
 private final class CookieSwap: @unchecked Sendable {
     var storage: HTTPCookieStorage?
     var next: HTTPCookie?
+    var storageValueAtDelete: String?
 
     func apply() {
         guard let storage, let next else { return }
@@ -488,6 +531,7 @@ private final class AuthRequestLog: @unchecked Sendable {
         let method: String
         let path: String
         let header: String?
+        let cookie: String?
     }
 
     private let lock = NSLock()
@@ -517,7 +561,8 @@ private final class SessionHardeningURLProtocol: URLProtocol {
         Self.log.append(AuthRequestLog.Event(
             method: request.httpMethod ?? "",
             path: request.url?.path ?? "",
-            header: request.value(forHTTPHeaderField: MobileAPIClient.sessionHardeningHeaderField)
+            header: request.value(forHTTPHeaderField: MobileAPIClient.sessionHardeningHeaderField),
+            cookie: request.value(forHTTPHeaderField: "Cookie")
         ))
         guard let handler = Self.handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))

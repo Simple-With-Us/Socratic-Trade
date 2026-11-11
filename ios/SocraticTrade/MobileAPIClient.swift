@@ -295,10 +295,33 @@ struct MobileAPIClient {
     /// every token the session's user owns — signing out of one device must not silence
     /// another one the same owner is still signed in on.
     func unregisterPushToken(_ token: String) async throws {
+        _ = try await successfulResponseData(for: unregisterPushRequest(token))
+    }
+
+    /// Account-change DELETE. The prior account's cookies go on this request only.
+    /// The shared cookie jar is not read or written, so other in-flight calls keep
+    /// the signed-in session.
+    func unregisterPushToken(_ token: String, isolatedCookies: [HTTPCookie]) async throws {
+        var request = unregisterPushRequest(token)
+        let cookie = HTTPCookie.requestHeaderFields(with: isolatedCookies)["Cookie"]
+        if let cookie {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        configuration.protocolClasses = session.configuration.protocolClasses
+        let isolated = URLSession(configuration: configuration)
+        defer { isolated.finishTasksAndInvalidate() }
+        _ = try await successfulResponseData(for: request, transport: isolated)
+    }
+
+    private func unregisterPushRequest(_ token: String) throws -> URLRequest {
         var request = request(path: "/api/mobile/push/register", method: "DELETE")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
-        _ = try await successfulResponseData(for: request)
+        return request
     }
 
     func acknowledgeNotifications(ids: [String]) async throws -> Int {
@@ -542,12 +565,13 @@ struct MobileAPIClient {
     private func successfulResponseData(
         for request: URLRequest,
         captureFailures: Bool = true,
-        deviceTokenConflictPath: Bool = false
+        deviceTokenConflictPath: Bool = false,
+        transport: URLSession? = nil
     ) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await (transport ?? session).data(for: request)
         } catch is CancellationError {
             throw CancellationError()
         } catch {

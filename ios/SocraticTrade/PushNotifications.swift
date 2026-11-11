@@ -235,7 +235,24 @@ enum PushAlertState: Equatable {
 @MainActor
 protocol PushTokenReleasing: AnyObject {
     func signOutAndForgetToken() async
-    func relinquishTokenForAccountChange() async
+    func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async
+}
+
+extension PushTokenReleasing {
+    func relinquishTokenForAccountChange() async {
+        await relinquishTokenForAccountChange(priorCookies: [])
+    }
+}
+
+/// Whether one failed push upload should be sent again.
+enum PushUploadRetry {
+    static func shouldRetry(_ error: Error, attempt: Int, isCancelled: Bool) -> Bool {
+        if isCancelled || error is CancellationError { return false }
+        if MobileAPIError.isUserCancellation(error) { return false }
+        guard let error = error as? MobileAPIError else { return attempt == 0 }
+        if case .deviceTokenConflict = error { return false }
+        return error.isTransientPushRegistrationFailure && attempt == 0
+    }
 }
 
 /// Owns everything push: authorization, APNs registration, server registration, foreground
@@ -371,32 +388,35 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
         }
         var attempt = 0
         while true {
+            if Task.isCancelled { return }
             do {
                 try await client.registerPushToken(registration)
                 registrationGate.observeSuccess()
                 registeredToken = registration.token
                 state = .registered(environment: registration.environment)
                 return
-            } catch let error as MobileAPIError {
-                registrationGate.observe(token: registration.token, error: error)
-                if case .deviceTokenConflict = error {
-                    log.error("Push register returned 409. Not retrying in this session.")
-                    state = .failed(PushRegistrationPolicy.conflictMessage)
+            } catch {
+                if !PushUploadRetry.shouldRetry(error, attempt: attempt, isCancelled: Task.isCancelled) {
+                    if error is CancellationError || Task.isCancelled || MobileAPIError.isUserCancellation(error) {
+                        return
+                    }
+                    if let error = error as? MobileAPIError {
+                        registrationGate.observe(token: registration.token, error: error)
+                        if case .deviceTokenConflict = error {
+                            log.error("Push register returned 409. Not retrying in this session.")
+                            state = .failed(PushRegistrationPolicy.conflictMessage)
+                            return
+                        }
+                        state = .failed(error.localizedDescription)
+                        return
+                    }
+                    state = .failed(error.localizedDescription)
                     return
                 }
-                if error.isTransientPushRegistrationFailure, attempt == 0 {
-                    attempt += 1
-                    continue
+                if let error = error as? MobileAPIError {
+                    registrationGate.observe(token: registration.token, error: error)
                 }
-                state = .failed(error.localizedDescription)
-                return
-            } catch {
-                if attempt == 0 {
-                    attempt += 1
-                    continue
-                }
-                state = .failed(error.localizedDescription)
-                return
+                attempt += 1
             }
         }
     }
@@ -419,28 +439,32 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
         UIApplication.shared.unregisterForRemoteNotifications()
     }
 
-    /// Deletes this device's row for the signed-in account without ending the system
-    /// registration. Called after a new sign-in has succeeded, with the previous
-    /// account's cookies put back for this call only.
+    /// Deletes this device's row for the previous account without ending the system
+    /// registration. The DELETE carries `priorCookies` on its own session. The shared
+    /// cookie jar stays on the account that just signed in.
     ///
     /// A transient DELETE is retried once. The token stays until the DELETE succeeds,
     /// so a later sign-out can still unbind it. The incoming session gets one register
     /// attempt after this returns. A fresh 409 arms the hold again.
-    func relinquishTokenForAccountChange() async {
+    func relinquishTokenForAccountChange(priorCookies: [HTTPCookie]) async {
         guard let token = registeredToken else {
             registrationGate.observeSuccess()
             return
         }
         var attempt = 0
         while true {
+            if Task.isCancelled { return }
             do {
-                try await client.unregisterPushToken(token)
+                try await client.unregisterPushToken(token, isolatedCookies: priorCookies)
                 registeredToken = nil
                 if state.isWorking {
                     state = .awaitingToken
                 }
                 break
+            } catch is CancellationError {
+                return
             } catch {
+                if Task.isCancelled || MobileAPIError.isUserCancellation(error) { return }
                 if attempt == 0 {
                     attempt += 1
                     continue

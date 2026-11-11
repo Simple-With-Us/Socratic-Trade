@@ -1103,10 +1103,10 @@ final class MobileStore: ObservableObject {
         await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
     }
 
-    /// Drops the current account's push row while that account's cookies are restored.
+    /// Drops the previous account's push row. The shared cookie jar is left alone.
     /// A broker-account switch does not call this on its own: that switch keeps the same user.
-    func releasePushForAccountChange() async {
-        await pushTokenRelease.relinquishTokenForAccountChange()
+    func releasePushForAccountChange(priorCookies: [HTTPCookie]) async {
+        await pushTokenRelease.relinquishTokenForAccountChange(priorCookies: priorCookies)
     }
 
     func loginWithApple(identityToken: String, name: String?, nonce: String) async {
@@ -1153,19 +1153,15 @@ final class MobileStore: ObservableObject {
         }
     }
 
-    /// The login response has already replaced the session cookies. Put the previous
-    /// account's cookies back only for the DELETE, then restore the signed-in session.
-    /// Registration waits until load confirms that session. A failed login never reaches
-    /// this method, so the old session keeps its push row.
+    /// The login response has already replaced the session cookies. The previous
+    /// account's cookies ride on an isolated DELETE and never enter the shared jar.
+    /// `defer` puts the signed-in cookies back if that jar changes while the DELETE
+    /// is in flight. Registration waits until load confirms that session. A failed
+    /// login never reaches this method, so the old session keeps its push row.
     private func rebindPushAfterSuccessfulLogin(priorCookies: [HTTPCookie]) async {
         let signedInCookies = ownedSessionCookies()
-        if !priorCookies.isEmpty {
-            replaceOwnedSessionCookies(with: priorCookies)
-            await releasePushForAccountChange()
-            replaceOwnedSessionCookies(with: signedInCookies)
-        } else {
-            await releasePushForAccountChange()
-        }
+        defer { replaceOwnedSessionCookies(with: signedInCookies) }
+        await releasePushForAccountChange(priorCookies: priorCookies)
     }
 
     private func ownedSessionCookies() -> [HTTPCookie] {
