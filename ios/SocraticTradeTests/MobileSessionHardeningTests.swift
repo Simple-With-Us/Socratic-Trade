@@ -172,6 +172,33 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(log.snapshot()[0].path, "/api/mobile/push/register")
     }
 
+    @MainActor
+    func testNewSignInAllowsOneRegisterAfterAConflictHold() async throws {
+        let log = AuthRequestLog()
+        let session = stubbedSession(log: log) { _ in
+            (409, Data(#"{"ok":false,"error":"other account"}"#.utf8))
+        }
+        let client = MobileAPIClient(baseURL: base, session: session)
+        let coordinator = PushNotificationCoordinator(client: client)
+        let registration = try XCTUnwrap(PushRegistrationRequest(
+            token: "abc123",
+            environment: .production,
+            bundleId: "com.socratictrade.ios"
+        ))
+
+        await coordinator.upload(registration)
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().count, 1)
+
+        await coordinator.relinquishTokenForAccountChange()
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().count, 2)
+
+        await coordinator.upload(registration)
+        XCTAssertEqual(log.snapshot().count, 2)
+        XCTAssertEqual(log.snapshot().filter { $0.method == "POST" }.count, 2)
+    }
+
     func testConflictGateDoesNotSendTheSameTokenAgainUntilTheHoldClears() {
         var gate = PushRegistrationGate()
         let token = "device-token"

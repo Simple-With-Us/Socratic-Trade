@@ -1097,7 +1097,8 @@ final class MobileStore: ObservableObject {
     /// Re-register this device's APNs token under the session that just began.
     ///
     /// The server returns 409 when the token still belongs to another account. That refusal
-    /// is surfaced once and is not retried until the prior account unregisters.
+    /// is surfaced once. Sign-in already cleared the hold, so this call is the one attempt.
+    /// A fresh 409 stops later callbacks until the next sign-in.
     private func claimPushTokenForCurrentSession() async {
         await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
     }

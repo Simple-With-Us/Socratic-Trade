@@ -364,7 +364,7 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
         state = .failed(error.localizedDescription)
     }
 
-    private func upload(_ registration: PushRegistrationRequest) async {
+    func upload(_ registration: PushRegistrationRequest) async {
         guard registrationGate.shouldSend(token: registration.token) else {
             state = .failed(PushRegistrationPolicy.conflictMessage)
             return
@@ -378,7 +378,7 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
             registrationGate.observe(token: registration.token, error: error)
             registeredToken = nil
             if case .deviceTokenConflict = error {
-                log.error("Push register returned 409. Not retrying until the prior account unregisters.")
+                log.error("Push register returned 409. Not retrying in this session.")
                 state = .failed(PushRegistrationPolicy.conflictMessage)
                 return
             }
@@ -409,18 +409,25 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
 
     /// Deletes this device's row for the signed-in account without ending the system
     /// registration. Used before a different account's session replaces the cookies.
+    ///
+    /// The incoming session always gets one register attempt. A 409 clears the local
+    /// token, and a later session expiry cannot DELETE, so the hold has to drop here
+    /// or the account that already owns the token stays blocked until the process
+    /// restarts. A fresh 409 arms the hold again, so repeated APNs callbacks in that
+    /// session do not loop.
     func relinquishTokenForAccountChange() async {
-        guard let token = registeredToken else { return }
-        do {
-            try await client.unregisterPushToken(token)
-            registeredToken = nil
-            registrationGate.observeSuccess()
-            if state.isWorking {
-                state = .awaitingToken
+        if let token = registeredToken {
+            do {
+                try await client.unregisterPushToken(token)
+                registeredToken = nil
+                if state.isWorking {
+                    state = .awaitingToken
+                }
+            } catch {
+                log.error("Push unregister before account change failed. The next register may be refused.")
             }
-        } catch {
-            log.error("Push unregister before account change failed. The next register may be refused.")
         }
+        registrationGate.observeSuccess()
     }
 
     /// Session lost without an explicit sign-out (expired cookie).  No network call is

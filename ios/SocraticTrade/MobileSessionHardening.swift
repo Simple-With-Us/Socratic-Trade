@@ -72,8 +72,8 @@ enum MobileWebAuthStart {
 }
 
 /// What the owner sees when push registration is refused because another account still
-/// owns this device. Registration of that same token stops until a successful unregister
-/// or a later successful register clears the hold.
+/// owns this device. Further uploads of that token stop for the rest of the session.
+/// The next sign-in allows one attempt, and a fresh 409 arms the hold again.
 enum PushRegistrationPolicy {
     static let conflictMessage =
         "This phone is still registered to another account.\u{00A0} Sign out of that account, then try alerts again."
