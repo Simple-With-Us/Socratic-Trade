@@ -1,3 +1,9 @@
+## 2026-11-11 CURSOR — ST-4599 snapshot first, then live quotes (PR #5125)
+
+**What.**  When the Nasdaq screener is down and a saved snapshot is available, the interactive scan shows that snapshot immediately, labeled with its age in Central time (for example `Prices as of 2:14 PM, 23 min old`), and then replaces those prices when Yahoo or broker recovery returns.  If recovery fails, the snapshot stays on screen with its age.  The blocking recovery order is unchanged: Yahoo, then broker, then seed.  Freshness still passes `allowWholeSetYahooFallback: false`, and the priority proxy lane and quote-outage backoff stay as they are.  Rollout: `docs/rollouts/2026-11-11-st-4599-snapshot-first-scan.md`.
+
+**Next.**  PR #5125 stays open on `fix/st-3999-screener-gate-priority`.  ST-4599 stays In Progress until that PR merges.  iOS compile is the hosted `ios-build` job.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.

@@ -2364,6 +2364,15 @@ export interface MarketScan {
    * and provider failures obvious on Scan/admin instead of silent dashes.
    */
   dataCoverage?: MarketScanDataCoverage;
+  /**
+   * When this scan is a saved snapshot shown while live recovery is still
+   * running (or after it failed). Central-time age copy is derived from this.
+   */
+  pricesAsOf?: string;
+  /** True on the first interactive response: a follow-up `?recovery=` is in flight. */
+  refreshPending?: boolean;
+  /** Opaque id for `GET /api/scan?recovery=`. Present only with `refreshPending`. */
+  recoveryId?: string;
 }
 
 /** Per-scan coverage shortfall report (user-visible + ops). */
@@ -2633,6 +2642,20 @@ export interface MarketDataProviderOptions {
    * fallback still applies when a seed is present.
    */
   allowWholeSetYahooFallback?: boolean;
+  /**
+   * Interactive scan only. When the Nasdaq screener is down and `seedEnrichment`
+   * can price the universe, return that snapshot immediately (with `pricesAsOf`)
+   * and keep Yahoo-then-broker recovery running for a follow-up. The freshness
+   * lane does not set this.
+   */
+  previewSeedBeforeLiveRecovery?: boolean;
+  /** Audit time of the saved snapshot, used when seed rows have no `asOf`. */
+  seedAsOf?: string;
+  /**
+   * Internal: the live-recovery follow-up already knows the screener is down,
+   * so it prices the allowed set without another screener fetch.
+   */
+  skipNasdaqScreener?: boolean;
 }
 
 export interface MarketDataProvider {

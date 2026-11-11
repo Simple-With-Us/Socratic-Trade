@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MarketScan } from "../src/lib/types";
+import { registerScanRecovery, resetScanRecoveriesForTests } from "../src/lib/scan-seed-preview";
 
 const scanMarketMock = vi.fn();
 vi.mock("../src/lib/market", async (importOriginal) => {
@@ -97,7 +98,83 @@ describe("GET /api/scan — connected account scope", () => {
 
     expect(getPolicy(userId).connectedAccountId).toBe(accountId);
     expect(scanMarketMock).toHaveBeenCalledTimes(1);
-    const options = scanMarketMock.mock.calls[0][5] as { connectedAccountId?: string };
+    const options = scanMarketMock.mock.calls[0][5] as {
+      connectedAccountId?: string;
+      previewSeedBeforeLiveRecovery?: boolean;
+      allowWholeSetYahooFallback?: boolean;
+    };
     expect(options.connectedAccountId).toBe(accountId);
+    expect(options.previewSeedBeforeLiveRecovery).toBe(true);
+    expect(options.allowWholeSetYahooFallback).toBeUndefined();
+  });
+
+  it("returns a pending seed preview as-is, then the live recovery for the same user", async () => {
+    const email = `scan-route-preview-${randomUUID()}@example.com`;
+    const { userId } = resolveRequestUserFromEmail(email);
+    const otherEmail = `other-${email}`;
+    resolveRequestUserFromEmail(otherEmail);
+    const pricesAsOf = "2026-11-11T20:14:00.000Z";
+    const recoveryId = "22222222-2222-4222-8222-222222222222";
+    scanMarketMock.mockResolvedValueOnce({
+      ...emptyScan(),
+      generatedAt: pricesAsOf,
+      cached: true,
+      returnedQuotes: 1,
+      pricesAsOf,
+      refreshPending: true,
+      recoveryId
+    });
+
+    const preview = await scanGet(
+      new Request("https://trading.example.com/api/scan", {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: email }
+      })
+    );
+    expect(preview.status).toBe(200);
+    const previewBody = await preview.json();
+    expect(previewBody.pricesAsOf).toBe(pricesAsOf);
+    expect(previewBody.refreshPending).toBe(true);
+    expect(previewBody.recoveryId).toBe(recoveryId);
+
+    const live = {
+      ...emptyScan(),
+      source: "yahoo-finance",
+      generatedAt: "2026-11-11T20:40:00.000Z",
+      returnedQuotes: 1
+    };
+    registerScanRecovery(recoveryId, userId, Promise.resolve(live));
+    const replaced = await scanGet(
+      new Request(`https://trading.example.com/api/scan?recovery=${recoveryId}`, {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: email }
+      })
+    );
+    expect(replaced.status).toBe(200);
+    const replacedBody = await replaced.json();
+    expect(replacedBody.source).toBe("yahoo-finance");
+    expect(replacedBody.refreshPending).toBeUndefined();
+
+    const keptId = "33333333-3333-4333-8333-333333333333";
+    registerScanRecovery(keptId, userId, Promise.resolve({
+      keptSnapshot: true,
+      pricesAsOf,
+      refreshPending: false
+    }));
+    const kept = await scanGet(
+      new Request(`https://trading.example.com/api/scan?recovery=${keptId}`, {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: email }
+      })
+    );
+    expect(kept.status).toBe(200);
+    const keptBody = await kept.json();
+    expect(keptBody.keptSnapshot).toBe(true);
+    expect(keptBody.pricesAsOf).toBe(pricesAsOf);
+
+    const other = await scanGet(
+      new Request(`https://trading.example.com/api/scan?recovery=${keptId}`, {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: otherEmail }
+      })
+    );
+    expect(other.status).toBe(404);
+    resetScanRecoveriesForTests();
   });
 });

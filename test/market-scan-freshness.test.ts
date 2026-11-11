@@ -555,8 +555,12 @@ describe("quote-outage backoff + whole-set fallback opt-out (ST-3999)", () => {
   it("passes allowWholeSetYahooFallback:false into scanMarket", async () => {
     await runMarketScanFreshnessIfDue(MONDAY);
     expect(scanMarketMock).toHaveBeenCalledTimes(1);
-    const options = scanMarketMock.mock.calls[0][5] as { allowWholeSetYahooFallback?: boolean };
+    const options = scanMarketMock.mock.calls[0][5] as {
+      allowWholeSetYahooFallback?: boolean;
+      previewSeedBeforeLiveRecovery?: boolean;
+    };
     expect(options.allowWholeSetYahooFallback).toBe(false);
+    expect(options.previewSeedBeforeLiveRecovery).not.toBe(true);
   });
 
   it("backs off 1m after a quotes-unavailable failure and logs one line", async () => {

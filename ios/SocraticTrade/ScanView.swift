@@ -8,6 +8,7 @@ struct ScanView: View {
     @State private var isLoading = true
     @State private var loadError: String?
     @State private var staleScanNote: String?
+    @State private var priceAgeNote: String?
     @State private var didAttemptLiveRefresh = false
     @State private var query = ""
     @State private var presentedSymbol: PresentedSymbol?
@@ -65,7 +66,9 @@ struct ScanView: View {
             VStack(alignment: .leading, spacing: 8) {
                 SectionHeading(
                     "Market Scan",
-                    subtitle: scan?.asOf.map { "as of \(AppFormat.dateTime($0))" } ?? "ranked names for this universe"
+                    subtitle: priceAgeNote
+                        ?? scan?.asOf.map { "as of \(AppFormat.dateTime($0))" }
+                        ?? "ranked names for this universe"
                 )
                 Text(DeskCopy.scanUniverseNote)
                     .font(.appSubheadline)
@@ -223,18 +226,40 @@ struct ScanView: View {
         do {
             let response = try await store.fetchMarketScan()
             scan = response
-            if response.stale == true {
+            if response.refreshPending == true, let recoveryId = response.recoveryId, !recoveryId.isEmpty {
+                priceAgeNote = DeskCopy.scanPriceAgeNote(pricesAsOf: response.pricesAsOf, refreshPending: true)
+                staleScanNote = nil
+                loadError = nil
+                do {
+                    let live = try await store.fetchMarketScan(recoveryId: recoveryId)
+                    if live.keptSnapshot == true {
+                        priceAgeNote = DeskCopy.scanPriceAgeNote(
+                            pricesAsOf: response.pricesAsOf ?? live.pricesAsOf,
+                            refreshPending: false
+                        )
+                    } else {
+                        scan = live.keepingLastGood(from: response)
+                        priceAgeNote = nil
+                    }
+                } catch {
+                    priceAgeNote = DeskCopy.scanPriceAgeNote(pricesAsOf: response.pricesAsOf, refreshPending: false)
+                }
+                didAttemptLiveRefresh = true
+            } else if response.stale == true {
+                priceAgeNote = nil
                 loadError = nil
                 staleScanNote = DeskCopy.scanShowingStaleNote(
                     generatedAt: response.generatedAt ?? response.asOf,
                     staleReason: response.staleReason
                 )
             } else {
+                priceAgeNote = nil
                 staleScanNote = nil
                 loadError = nil
             }
             didAttemptLiveRefresh = true
         } catch let error as MobileAPIError {
+            priceAgeNote = nil
             staleScanNote = nil
             if case .scanQuotesUnavailable(let failed) = error {
                 scan = failed.keepingLastGood(from: scan)
@@ -245,6 +270,7 @@ struct ScanView: View {
             )
             didAttemptLiveRefresh = true
         } catch {
+            priceAgeNote = nil
             staleScanNote = nil
             loadError = DeskCopy.scanRefreshFailedBanner(
                 reason: error.localizedDescription,

@@ -992,8 +992,8 @@ final class MobileStore: ObservableObject {
         try await client.chatProviders()
     }
 
-    func fetchMarketScan() async throws -> MarketScanResponse {
-        try await client.marketScan()
+    func fetchMarketScan(recoveryId: String? = nil) async throws -> MarketScanResponse {
+        try await client.marketScan(recoveryId: recoveryId)
     }
 
     func fetchFullPolicy() async throws -> FullPolicy {
