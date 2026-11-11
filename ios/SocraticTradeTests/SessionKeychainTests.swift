@@ -98,10 +98,11 @@ final class SessionKeychainTests: XCTestCase {
     func testLocalhostSessionPersistSessionCookiesAndClear() throws {
         let credentialStore = InMemorySessionCredentialStore()
         let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
-        let client = MobileAPIClient(baseURL: URL(string: "https://localhost:3000")!)
+        let client = MobileAPIClient(baseURL: URL(string: "https://localhost")!)
         let storage = client.sessionCookieJar
+        let origin = URL(string: "https://localhost/")!
         let cookie = try XCTUnwrap(HTTPCookie(properties: [
-            .originURL: URL(string: "https://localhost:3000/")!,
+            .originURL: origin,
             .domain: "localhost",
             .path: "/",
             .name: "__Secure-authjs.session-token",
@@ -109,7 +110,8 @@ final class SessionKeychainTests: XCTestCase {
             .secure: "TRUE",
             .version: "0",
         ]))
-        installInJar(cookie, storage: storage, host: "localhost")
+        storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
+        storage.setCookie(cookie)
 
         try coordinator.persistSession(from: client)
         XCTAssertEqual(try XCTUnwrap(try credentialStore.load()).count, 1)
