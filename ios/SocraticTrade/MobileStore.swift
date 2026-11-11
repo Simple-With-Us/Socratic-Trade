@@ -394,11 +394,11 @@ struct MoneyActionResult: Equatable, Identifiable {
     private static func successCopy(_ action: MoneyAction) -> String {
         switch action {
         case .approve:
-            return "Approved.  Waiting for the desk to refresh."
+            return "Approved.\u{00A0} Waiting for the desk to refresh."
         case .reject:
-            return "Rejected.  Waiting for the desk to refresh."
+            return "Rejected.\u{00A0} Waiting for the desk to refresh."
         case .cancel:
-            return "Order cancelled.  Waiting for the desk to refresh."
+            return "Order cancelled.\u{00A0} Waiting for the desk to refresh."
         }
     }
 
@@ -416,11 +416,11 @@ struct MoneyActionResult: Equatable, Identifiable {
     private static func retryableCopy(_ action: MoneyAction) -> String {
         switch action {
         case .approve:
-            return "Approve did not finish.  Try again."
+            return "Approve did not finish.\u{00A0} Try again."
         case .reject:
-            return "Reject did not finish.  Try again."
+            return "Reject did not finish.\u{00A0} Try again."
         case .cancel:
-            return "Cancel did not finish.  Try again."
+            return "Cancel did not finish.\u{00A0} Try again."
         }
     }
 }
@@ -922,7 +922,7 @@ final class MobileStore: ObservableObject {
                     if let pending = pendingAccountId,
                        snapshot?.readiness.activeConnectedAccount?.id != pending,
                        snapshot?.connectedAccounts.first(where: { $0.id == pending })?.isActive != true {
-                        error = "Switched accounts.  Waiting for the new portfolio to load."
+                        error = "Switched accounts.\u{00A0} Waiting for the new portfolio to load."
                     }
                     finishAccountSwitch(command, operationID: operationID, payload: payload)
                 }
@@ -1158,10 +1158,10 @@ final class MobileStore: ObservableObject {
                 if opensEventStreamOnSignIn { startEvents() }
                 if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             } else if error == nil {
-                error = "Authentication failed after web sign-in.  Try again."
+                error = "Authentication failed after web sign-in.\u{00A0} Try again."
             }
         } catch {
-            self.error = "Web sign-in could not be completed.  Try again."
+            self.error = "Web sign-in could not be completed.\u{00A0} Try again."
         }
     }
 
@@ -1267,7 +1267,7 @@ final class MobileStore: ObservableObject {
                 try sessionCookieCoordinator.clearSession(from: client)
                 return nil
             } catch {
-                return "Sign-out could not clear the saved session.  Try again."
+                return "Sign-out could not clear the saved session.\u{00A0} Try again."
             }
         }
     }
@@ -1277,7 +1277,7 @@ final class MobileStore: ObservableObject {
             try sessionCookieCoordinator.persistSession(from: client)
         } catch {
             if self.error == nil {
-                self.error = "Could not save your session for the next launch.  Sign in again if needed after closing the app."
+                self.error = "Could not save your session for the next launch.\u{00A0} Sign in again if needed after closing the app."
             }
         }
     }
@@ -1419,7 +1419,7 @@ final class MobileStore: ObservableObject {
            !snapshot.readiness.hasAccount || !snapshot.readiness.hasUniverse {
             return "Connect an account and configure a symbol universe before running the agent."
         }
-        return "Pull to refresh, then try again.  Stop remains available."
+        return "Pull to refresh, then try again.\u{00A0} Stop remains available."
     }
 
     private static let protectiveCommands: Set<String> = [

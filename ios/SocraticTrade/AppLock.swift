@@ -178,7 +178,7 @@ struct AppLockView: View {
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
             refreshDeviceAuthenticationAvailability()
             controller.reportUnlockFailure(
-                "Biometrics or a device passcode is required to use app lock.  Turn off app lock to continue."
+                "Biometrics or a device passcode is required to use app lock.\u{00A0} Turn off app lock to continue."
             )
             return
         }
@@ -195,7 +195,7 @@ struct AppLockView: View {
                         return
                     }
                     refreshDeviceAuthenticationAvailability()
-                    controller.reportUnlockFailure("Could not unlock.  Try again.")
+                    controller.reportUnlockFailure("Could not unlock.\u{00A0} Try again.")
                 }
             }
         }

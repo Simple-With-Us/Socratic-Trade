@@ -13,13 +13,15 @@ final class SessionKeychainTests: XCTestCase {
 
     func testArchivePreservesPastExpiryAndSkipsOnApply() throws {
         let past = Date(timeIntervalSince1970: 1_600_000_000)
+        let origin = URL(string: "https://socratictrade.com/")!
         let cookie = try XCTUnwrap(HTTPCookie(properties: [
-            .domain: "socratictrade.com",
+            .originURL: origin,
             .path: "/",
             .name: "__Secure-authjs.session-token",
             .value: "stale",
             .secure: "TRUE",
             .expires: past,
+            .version: "0",
         ]))
         let archive = SessionCookieArchive(cookie: cookie)
         XCTAssertEqual(archive.expiresAt, past)
@@ -32,6 +34,46 @@ final class SessionKeychainTests: XCTestCase {
             now: now
         )
         XCTAssertEqual(applied, 0)
+    }
+
+    func testHostOnlyCookieStaysHostOnlyAfterArchiveRoundTrip() throws {
+        let origin = URL(string: "https://socratictrade.com/")!
+        let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "tok")
+        let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
+        XCTAssertTrue(archive.hostOnly)
+        let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
+        XCTAssertNil(restored.properties?[.domain])
+        XCTAssertFalse(restored.domain.hasPrefix("."))
+
+        let storage = HTTPCookieStorage()
+        XCTAssertEqual(
+            SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
+            1
+        )
+        XCTAssertEqual(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
+            1
+        )
+    }
+
+    func testDomainScopedCookieStaysDomainScopedAfterArchiveRoundTrip() throws {
+        let origin = URL(string: "https://socratictrade.com/")!
+        let cookie = try makeDomainScopedCookie(name: "__Secure-authjs.session-token.0", value: "chunk")
+        let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
+        XCTAssertFalse(archive.hostOnly)
+        let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
+        let domainAttribute = restored.properties?[.domain] as? String
+        XCTAssertEqual(domainAttribute, ".socratictrade.com")
+
+        let storage = HTTPCookieStorage()
+        XCTAssertEqual(
+            SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
+            1
+        )
+        XCTAssertEqual(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
+            1
+        )
     }
 
     func testApplyRestoresSecureAuthArchiveInJar() throws {
@@ -85,17 +127,11 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testHttpOnlyRoundTripsThroughArchive() throws {
-        let cookie = try XCTUnwrap(HTTPCookie(properties: [
-            .domain: "socratictrade.com",
-            .path: "/",
-            .name: "__Secure-authjs.session-token",
-            .value: "secret",
-            .secure: "TRUE",
-            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
-        ]))
+        let origin = URL(string: "https://socratictrade.com/")!
+        let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "secret")
         let archive = SessionCookieArchive(cookie: cookie)
         XCTAssertTrue(archive.httpOnly)
-        let restored = try XCTUnwrap(archive.makeHTTPCookie())
+        let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
         XCTAssertTrue(restored.isHTTPOnly)
     }
 
@@ -195,12 +231,29 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
-        return try XCTUnwrap(HTTPCookie(properties: [
+        try makeHostOnlyCookie(name: name, value: value)
+    }
+
+    private func makeHostOnlyCookie(name: String, value: String) throws -> HTTPCookie {
+        try XCTUnwrap(HTTPCookie(properties: [
+            .originURL: URL(string: "https://socratictrade.com/")!,
+            .path: "/",
+            .name: name,
+            .value: value,
+            .secure: "TRUE",
+            .version: "0",
+            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+        ]))
+    }
+
+    private func makeDomainScopedCookie(name: String, value: String) throws -> HTTPCookie {
+        try XCTUnwrap(HTTPCookie(properties: [
             .domain: ".socratictrade.com",
             .path: "/",
             .name: name,
             .value: value,
             .secure: "TRUE",
+            .version: "0",
         ]))
     }
 }

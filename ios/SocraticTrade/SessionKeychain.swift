@@ -35,11 +35,14 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     let httpOnly: Bool
     /// SameSite policy string for `HTTPCookiePropertyKey.sameSitePolicy` (`Lax`, `Strict`, `None`).
     let sameSite: String?
+    /// When true, the cookie had no `Domain` attribute (host-only); restore via `.originURL`, not `.domain`.
+    let hostOnly: Bool
     let expiresAt: Date?
 
     init(cookie: HTTPCookie, owningHost: String? = nil) {
         name = cookie.name
         value = cookie.value
+        hostOnly = Self.inferHostOnly(cookie: cookie)
         domain = Self.normalizedDomain(cookie.domain, owningHost: owningHost)
         path = cookie.path.isEmpty ? "/" : cookie.path
         secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
@@ -60,6 +63,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         secure: Bool,
         httpOnly: Bool = false,
         sameSite: String? = nil,
+        hostOnly: Bool = false,
         expiresAt: Date?
     ) {
         self.name = name
@@ -69,11 +73,12 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         self.secure = secure
         self.httpOnly = httpOnly
         self.sameSite = sameSite
+        self.hostOnly = hostOnly
         self.expiresAt = expiresAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case name, value, domain, path, secure, httpOnly, sameSite, expiresAt
+        case name, value, domain, path, secure, httpOnly, sameSite, hostOnly, expiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -85,6 +90,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         secure = try container.decode(Bool.self, forKey: .secure)
         httpOnly = try container.decodeIfPresent(Bool.self, forKey: .httpOnly) ?? false
         sameSite = try container.decodeIfPresent(String.self, forKey: .sameSite)
+        hostOnly = try container.decodeIfPresent(Bool.self, forKey: .hostOnly) ?? false
         expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
     }
 
@@ -94,18 +100,21 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     }
 
     func makeHTTPCookie(origin: URL? = nil) -> HTTPCookie? {
-        guard !domain.isEmpty, !name.isEmpty, !value.isEmpty else { return nil }
+        guard !name.isEmpty, !value.isEmpty else { return nil }
         let pathValue = path.isEmpty ? "/" : path
-        let cookieDomain = domain.hasPrefix(".") ? domain : ".\(domain)"
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: name,
             .value: value,
-            .domain: cookieDomain,
             .path: pathValue,
             .version: "0",
         ]
-        if let origin, domain.isEmpty {
+        if hostOnly {
+            guard let origin else { return nil }
             properties[.originURL] = origin
+        } else {
+            guard !domain.isEmpty else { return nil }
+            let cookieDomain = domain.hasPrefix(".") ? domain : ".\(domain)"
+            properties[.domain] = cookieDomain
         }
         if secure {
             properties[.secure] = "TRUE"
@@ -147,6 +156,17 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
             .lowercased()
         if !trimmed.isEmpty { return trimmed }
         return owningHost?.lowercased() ?? cookieDomain
+    }
+
+    /// Host-only cookies omit a leading-dot `Domain` attribute; domain cookies include it in stored properties.
+    private static func inferHostOnly(cookie: HTTPCookie) -> Bool {
+        if cookie.properties?[.originURL] != nil {
+            return true
+        }
+        if let domainAttribute = cookie.properties?[.domain] as? String {
+            return !domainAttribute.hasPrefix(".")
+        }
+        return !cookie.domain.hasPrefix(".")
     }
 }
 
