@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { Card } from "../ui/primitives";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
-// The CDN-cached prerender (`s-maxage=31536000`) was leaving a deployed docs edit stale
-// for up to a year. A docs-only deploy can change the terms the consent gate links to
-// without invalidating the CDN copy. Background-revalidate hourly.
+// Background-revalidate hourly so a year-long CDN copy cannot freeze a docs edit.
+// This page has no per-request nonce.  Its CSP is the hash list stamped from the
+// prerendered HTML.  See docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
 export const revalidate = 3600;
 
 export const metadata: Metadata = {

@@ -58,6 +58,13 @@ import { getSessionIdentity } from "./src/lib/auth/session-edge";
 import { isLiveBootstrap } from "./src/lib/auth-secret-guard";
 import { landingPageEnabled } from "./src/lib/landing-page";
 import { CANONICAL_HOST, isAltDomainHost, isMarketingHost } from "./src/lib/marketing-hosts";
+import {
+  cspEnabled,
+  generateCspNonce,
+  reportingEndpointsHeader,
+  resolveCspDecision,
+  stampCspRequestHeaders
+} from "./src/lib/csp-policy";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -173,44 +180,28 @@ function isAdminPagePath(pathname: string): boolean {
 // Applied to EVERY response the middleware returns (allowed, 401, 403, redirects). X-Frame-Options
 // and Referrer-Policy are unconditional and safe. CSP is DEFAULT-OFF: it only emits when CSP_ENABLED
 // is truthy, and defaults to report-only (Content-Security-Policy-Report-Only) unless CSP_REPORT_ONLY
-// is explicitly falsy — so it can never block the dashboard's inline/eval/Next resources by default.
-// A conservative starter policy is used; tighten it once report-only telemetry confirms no breakage.
+// is explicitly falsy.  Dynamic routes get a per-request nonce plus strict-dynamic.
+// /welcome, /privacy-policy, and /terms-and-conditions stay on hourly ISR and get a
+// hash policy stamped from that build's HTML (see src/lib/csp-policy.ts).  Until the
+// stamp runs, those three routes stay report-only.  CSP_POLICY still replaces the
+// directive string.  Flipping CSP_REPORT_ONLY to a falsy value enforces the nonce
+// policy, and the hash policy when the stamp is present, with no further code change.
 function isFlagOn(value: string | undefined): boolean {
   if (value === undefined) return false;
   const v = value.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
-function isFlagExplicitlyOff(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  const v = value.trim().toLowerCase();
-  return v === "0" || v === "false" || v === "no" || v === "off";
-}
-
-/** The CSP directive string. Kept intentionally permissive (unsafe-inline/eval, https:) because Next.js
- *  ships inline bootstrap scripts and styled-jsx; this is a starting point for report-only telemetry,
- *  NOT a hardened enforcing policy. Override via CSP_POLICY when you have a tightened one.
- *  Default policy always includes report-uri /api/csp-report so CSP_ENABLED=on starts collecting. */
-function cspPolicy(): string {
-  const custom = process.env.CSP_POLICY?.trim();
-  if (custom) return custom;
-  return [
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
-    "connect-src 'self' https:",
-    "frame-ancestors 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "report-uri /api/csp-report"
-  ].join("; ");
-}
-
 /** Set the standard security headers on `res` and return it. Mutates in place for convenience.
- *  Exported so tests can assert the header set without driving the full edge middleware. */
-export function withSecurityHeaders(res: NextResponse): NextResponse {
+ *  Exported so tests can assert the header set without driving the full edge middleware.
+ *  Pass the request nonce so a dynamic response matches the x-nonce forwarded to the app.
+ *  `pathname` selects the hash policy for prerendered routes.  Omitted, it stays on the
+ *  nonce policy (redirects and other responses that do not render that HTML). */
+export function withSecurityHeaders(
+  res: NextResponse,
+  nonce: string = generateCspNonce(),
+  pathname = ""
+): NextResponse {
   res.headers.set("X-Frame-Options", "DENY");
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -225,10 +216,11 @@ export function withSecurityHeaders(res: NextResponse): NextResponse {
   if (process.env.NODE_ENV === "production") {
     res.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   }
-  if (isFlagOn(process.env.CSP_ENABLED)) {
-    const reportOnly = !isFlagExplicitlyOff(process.env.CSP_REPORT_ONLY);
-    const header = reportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy";
-    res.headers.set(header, cspPolicy());
+  if (cspEnabled()) {
+    const decision = resolveCspDecision(pathname, nonce);
+    res.headers.set(decision.headerName, decision.policy);
+    const reporting = reportingEndpointsHeader();
+    if (reporting) res.headers.set("Reporting-Endpoints", reporting);
   }
   return res;
 }
@@ -340,6 +332,9 @@ function isEmailAllowed(email: string, fromCf: boolean): boolean {
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
   const host = (req.headers.get("host") || "").toLowerCase().split(":")[0];
+  // One nonce for this request.  Response CSP and the forwarded x-nonce share it.
+  const cspNonce = generateCspNonce();
+  const secure = (res: NextResponse): NextResponse => withSecurityHeaders(res, cspNonce, pathname);
 
   // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
   // https://socratictrade.com/welcome in a single hop instead of bouncing off
@@ -390,7 +385,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       // Every other redirect in this middleware goes out through
       // withSecurityHeaders, so the G4 contract (docs/rollouts/2026-07-01-security-hardening.md)
       // holds for this one too — a redirect is still a response a browser renders.
-      return withSecurityHeaders(NextResponse.redirect(target, 308));
+      return secure(NextResponse.redirect(target, 308));
     }
   }
 
@@ -425,11 +420,11 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // Apex (and every other host): leftover PWA paths go to the website console.
   // Do not match /api/mobile/* — that is the native iOS command gateway.
   if (pathname === "/mobile" || pathname.startsWith("/mobile/")) {
-    return withSecurityHeaders(NextResponse.redirect(new URL("/console", req.url)));
+    return secure(NextResponse.redirect(new URL("/console", req.url)));
   }
 
   if (pathname === "/manifest.webmanifest") {
-    return withSecurityHeaders(
+    return secure(
       new NextResponse(null, {
         status: 410,
         headers: { "cache-control": "no-store" }
@@ -464,7 +459,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       target.searchParams.set("provider", provider);
       const callbackUrl = new URL(req.url).searchParams.get("callbackUrl");
       if (callbackUrl) target.searchParams.set("callbackUrl", callbackUrl);
-      return withSecurityHeaders(NextResponse.redirect(target));
+      return secure(NextResponse.redirect(target));
     }
   }
 
@@ -475,7 +470,8 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     // Public (no auth) — but still strip client-supplied identity headers so a forged
     // identity can never reach a handler that reads it.
     const headers = stripClientIdentityHeaders(new Headers(req.headers));
-    return withSecurityHeaders(NextResponse.next({ request: { headers } }));
+    stampCspRequestHeaders(headers, cspNonce, pathname);
+    return secure(NextResponse.next({ request: { headers } }));
   }
 
   // CSRF: reject cross-site state-changing requests to /api/*
@@ -491,7 +487,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
       host: req.headers.get("host")
     });
     if (!csrf.ok) {
-      return withSecurityHeaders(
+      return secure(
         new NextResponse(JSON.stringify({ ok: false, error: "Cross-site request blocked (CSRF)." }), {
           status: 403,
           headers: { "content-type": "application/json" }
@@ -505,7 +501,8 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // session handoff; the browser-origin check prevents login CSRF/session fixation.
   if (isMobileAuthExchangePath) {
     const headers = stripClientIdentityHeaders(new Headers(req.headers));
-    return withSecurityHeaders(NextResponse.next({ request: { headers } }));
+    stampCspRequestHeaders(headers, cspNonce, pathname);
+    return secure(NextResponse.next({ request: { headers } }));
   }
 
   // --- Identity resolution ---
@@ -571,7 +568,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // must fall through to the fail-closed /login redirect below rather than be
   // sent to a page that does not exist.
   if (isMarketingHost(host) && pathname === "/" && (trustedEmail || landingPageEnabled())) {
-    return withSecurityHeaders(
+    return secure(
       NextResponse.redirect(new URL(trustedEmail ? "/console" : "/welcome", req.url))
     );
   }
@@ -579,7 +576,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (trustedEmail) {
     if (!isEmailAllowed(trustedEmail, fromCf)) {
       // Authenticated upstream, but not permitted in this app.
-      return withSecurityHeaders(
+      return secure(
         pathname.startsWith("/api/")
           ? new NextResponse("Forbidden", { status: 403 })
           : NextResponse.redirect(new URL("/access-denied", req.url))
@@ -599,7 +596,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   } else {
     // No verified identity and auth is configured (or armed) → FAIL CLOSED.
     if (pathname.startsWith("/api/")) {
-      return withSecurityHeaders(
+      return secure(
         new NextResponse(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: { "Content-Type": "application/json" }
@@ -608,7 +605,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     }
     const loginUrl = new URL("/login", req.url);
     loginUrl.searchParams.set("callbackUrl", req.nextUrl.pathname + req.nextUrl.search);
-    return withSecurityHeaders(NextResponse.redirect(loginUrl));
+    return secure(NextResponse.redirect(loginUrl));
   }
 
   // --- Admin role gate for the operator page tree ---
@@ -623,7 +620,7 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // start without a real identity source, and the Source 3 branch above is additionally guarded by
   // `!isLiveBootstrap()`. It only preserves local development, where auth is unconfigured by design.
   if (isAdminPagePath(pathname) && !isAdminEmail(trustedEmail)) {
-    return withSecurityHeaders(NextResponse.redirect(new URL("/access-denied", req.url)));
+    return secure(NextResponse.redirect(new URL("/access-denied", req.url)));
   }
 
   // Strip spoofable client-supplied identity hints, then forward the resolved identity + provenance.
@@ -638,7 +635,8 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (authSessionId) {
     headers.set(AUTHENTICATED_SESSION_SID_HEADER, authSessionId);
   }
-  return withSecurityHeaders(NextResponse.next({ request: { headers } }));
+  stampCspRequestHeaders(headers, cspNonce, pathname);
+  return secure(NextResponse.next({ request: { headers } }));
 }
 
 export const config = {
