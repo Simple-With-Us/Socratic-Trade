@@ -15,7 +15,7 @@ enum AppLiveSessionResume {
     static func resumeLiveSession(
         store: some LiveSessionResuming,
         isScreenshotMode: Bool,
-        shouldStartEvents: (@escaping () -> Bool)? = nil
+        shouldStartEvents: (() -> Bool)? = nil
     ) async {
         if isScreenshotMode { return }
         guard store.isAuthenticated else { return }
