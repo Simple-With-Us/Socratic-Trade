@@ -431,18 +431,17 @@ export async function getOpenRouterCreditStatus(
     // account-balance fields above still refresh every cycle.
     if (!keysChecked && lastKeyLimitFailure) {
       if (nowMs - lastKeyLimitFailure.confirmedAtMs <= KEY_LIMIT_CARRYOVER_MS) {
-        // A truncated read that found its own key problems keeps its fresher evaluation; the
-        // snapshot only fills in when this run saw no key problem at all.
-        if (!keyReasons.length) {
-          for (const reason of lastKeyLimitFailure.reasons) {
-            if (!reasons.includes(reason)) reasons.push(reason);
-          }
-          keysWithLimit = lastKeyLimitFailure.keysWithLimit;
-          keysLimitReached = lastKeyLimitFailure.keysLimitReached;
-          keysLimitLow = lastKeyLimitFailure.keysLimitLow;
-          if (lastKeyLimitFailure.problemKeyLabels.length) {
-            problemKeyLabels = [...lastKeyLimitFailure.problemKeyLabels];
-          }
+        // Union with this run's own evaluation (Kody, PR #5097): a truncated read that finds
+        // a lesser problem must not downgrade the confirmed verdict — reasons and labels
+        // union, counts take the max (each side is a lower bound on a different key set).
+        for (const reason of lastKeyLimitFailure.reasons) {
+          if (!reasons.includes(reason)) reasons.push(reason);
+        }
+        keysWithLimit = Math.max(keysWithLimit, lastKeyLimitFailure.keysWithLimit);
+        keysLimitReached = Math.max(keysLimitReached, lastKeyLimitFailure.keysLimitReached);
+        keysLimitLow = Math.max(keysLimitLow, lastKeyLimitFailure.keysLimitLow);
+        for (const label of lastKeyLimitFailure.problemKeyLabels) {
+          if (!problemKeyLabels.includes(label)) problemKeyLabels.push(label);
         }
       } else {
         lastKeyLimitFailure = null;
