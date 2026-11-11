@@ -12,6 +12,7 @@ Production strategy runs were spending another 15s per symbol after the retrieva
 - `src/lib/rag/embed-resilience.ts` — a deadline does not advance the embed circuit breaker.
 - `src/lib/rag/retrieval-pressure.ts` — a deadline still counts toward retrieval backoff.
 - `src/lib/strategy.ts` — after the first deadline in a run, later symbols skip RAG.  One warning includes the skipped count.  The episodic pass is skipped for that run too.  Facts cards still build.  Empty chunks stay the continue path.
+- `ragSentryCooldownKey` includes a caller fingerprint when it leaves the lane issue, so a deadline warning cannot suppress a transient-network warning on the same lane.  Covered in `test/rag-sentry-cooldown-key.test.ts`.
 - Tests: `test/rag-deadline-timeout-classification.test.ts`, `test/strategy-rag-timeout-skip.test.ts`, and a deadline case in `test/embed-resilience.test.ts`.
 
 ## Decisions & Trade-offs

@@ -1947,15 +1947,23 @@ export const __ragSentryCooldownTestHandle__ = ragSentryLastSentAt;
 /** Cooldown key = the Sentry issue the event lands in. Events are fingerprinted by the stable
  *  lane (or provider) below, never by the drifting display title, so keying on the title would
  *  let one lane re-page under each title variant. Without a lane/provider, Sentry groups by
- *  message text, so the message is the key. */
+ *  message text, so the message is the key. A caller fingerprint that leaves that lane issue
+ *  (the strategy-run deadline) gets its own key so it cannot suppress the lane's other warnings. */
 /** @internal exported for test/rag-sentry-cooldown-key.test.ts */
 export function ragSentryCooldownKey(
   level: "warning" | "error",
   message: string,
-  context: Record<string, string | number | boolean | null | undefined>
+  context: Record<string, string | number | boolean | null | undefined>,
+  fingerprint?: string[]
 ): string {
   const groupKey = context.lane ?? context.provider;
-  return groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+  const base = groupKey != null && groupKey !== "" ? `${level}:group:${String(groupKey)}` : `${level}:message:${message}`;
+  if (!fingerprint || fingerprint.length === 0) return base;
+  const laneFingerprint = groupKey != null && groupKey !== "" ? ["rag", String(groupKey)] : undefined;
+  const leavesLaneIssue = !laneFingerprint
+    || fingerprint.length !== laneFingerprint.length
+    || fingerprint.some((part, index) => part !== laneFingerprint[index]);
+  return leavesLaneIssue ? `${base}:fp:${fingerprint.join("/")}` : base;
 }
 
 async function captureRagSentryMessage(
@@ -1990,7 +1998,7 @@ async function captureRagSentryMessage(
     });
   }
   if (!process.env.SENTRY_DSN) return;
-  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context);
+  const cooldownKey = options?.callerThrottled ? undefined : ragSentryCooldownKey(level, message, context, options?.fingerprint);
   // Claim the window synchronously (before the awaited SDK import) so concurrent failures in
   // the same tick can't all slip through, then release the claim if nothing was actually sent
   // so a transient SDK load/capture failure never suppresses the next real report.
