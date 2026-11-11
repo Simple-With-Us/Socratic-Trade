@@ -343,7 +343,11 @@ enum SessionCookiePersistence {
             if archive.isExpired(at: now) { continue }
             let cookieOrigin = origin ?? URL(string: "https://\(archive.domain)/")
             guard let cookie = archive.makeHTTPCookie(origin: cookieOrigin) else { continue }
-            storage.setCookie(cookie)
+            if let cookieOrigin {
+                storage.setCookie(cookie, for: cookieOrigin)
+            } else {
+                storage.setCookie(cookie)
+            }
             applied += 1
         }
         return applied

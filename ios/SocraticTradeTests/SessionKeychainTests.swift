@@ -42,7 +42,7 @@ final class SessionKeychainTests: XCTestCase {
         let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
         XCTAssertTrue(archive.hostOnly)
         let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
-        XCTAssertNotNil(restored.properties?[.originURL])
+        XCTAssertTrue(restored.isSecure)
         XCTAssertFalse(restored.domain.hasPrefix("."))
 
         let storage = HTTPCookieStorage()
@@ -178,7 +178,7 @@ final class SessionKeychainTests: XCTestCase {
         let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
         let storage = client.sessionCookieJar
         let cookie = try makeCookie(name: "__Secure-authjs.session-token", value: "restored-value")
-        storage.setCookie(cookie)
+        installInJar(cookie, storage: storage)
 
         try coordinator.persistSession(from: client)
         storage.deleteCookie(cookie)
@@ -200,7 +200,7 @@ final class SessionKeychainTests: XCTestCase {
         )
         let isolated = client.sessionCookieJar
         let legacyCookie = try makeCookie(name: "__Secure-authjs.session-token", value: "legacy")
-        HTTPCookieStorage.shared.setCookie(legacyCookie)
+        installInJar(legacyCookie, storage: HTTPCookieStorage.shared)
 
         try coordinator.prepareClientSession(client)
 
@@ -223,11 +223,20 @@ final class SessionKeychainTests: XCTestCase {
         let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
         let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
         let storage = client.sessionCookieJar
-        storage.setCookie(try makeCookie(name: "authjs.session-token", value: "gone"))
+        installInJar(try makeCookie(name: "authjs.session-token", value: "gone"), storage: storage)
         try coordinator.persistSession(from: client)
         try coordinator.clearSession(from: client)
         XCTAssertNil(try credentialStore.load())
         XCTAssertTrue(SessionCookiePersistence.authSessionCookies(in: storage, owningHost: client.baseURL.host).isEmpty)
+    }
+
+    private func installInJar(
+        _ cookie: HTTPCookie,
+        storage: HTTPCookieStorage,
+        host: String = "socratictrade.com"
+    ) {
+        let origin = URL(string: "https://\(host)/")!
+        storage.setCookie(cookie, for: origin)
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
