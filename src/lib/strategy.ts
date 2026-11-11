@@ -864,6 +864,21 @@ export async function runStrategyOnce(
         connectedAccountId
       );
     }
+    const brokerRecoverySource = gathered.baseMarketScan.universeQuoteRecoverySource;
+    if (brokerRecoverySource && !gathered.usedLastGood) {
+      audit(
+        "strategy_gather_broker_universe_recovery",
+        {
+          runId,
+          userId,
+          recoverySource: brokerRecoverySource,
+          returnedQuotes: gathered.baseMarketScan.returnedQuotes,
+          scannedSymbols: gathered.baseMarketScan.scannedSymbols
+        },
+        userId,
+        connectedAccountId
+      );
+    }
     const { baseMarketScan, marketScan } = gathered;
     const daily = dailyExecutionStats(policy.accountNumber, new Date(), userId);
     // Full lock PROVENANCE (binding account, clear date, summed disallowed lossUsd), not just the

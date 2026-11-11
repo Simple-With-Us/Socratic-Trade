@@ -1,3 +1,9 @@
+## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
+
+**What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.
+
+**Next.**  PR #5121 Kody/Sentry review fixes landed on branch; green `verify`, then merge (weekday RTH latch applies).
+
 ## 2026-11-07 CURSOR — PR #4998 Kody follow-ups (ST-4574 / MiniMax M3.1 Flash)
 
 **What.**  Stacked branch `cursor/pr-4998-review-fixes-21a3` merges `main` into PR #4998 and closes valid Kody threads: retired-catalog reconciliation (no `minimax/minimax-m3` alias on the M3.1 row), alias-aware rotation-pin validation, OpenRouter availability regression test, rollout doc hygiene (no account ids; predecessor attribution fixed).  Rollouts: `docs/rollouts/2026-11-07-pr-4998-kody-followups.md`, updated `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.

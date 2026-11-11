@@ -1007,6 +1007,16 @@ export interface EquityOrder {
    */
   clientOrderId?: string;
   /**
+   * When Tradier (or another gateway) flattens a bracket/OTOCO container into per-leg rows, the
+   * container's broker order id — the id stored on the opening proposal at placement.
+   */
+  parentOrderId?: string;
+  /**
+   * Container idempotency tag when the leg row omits its own `clientOrderId` (Tradier exit legs).
+   * Used for attribution and contingent-leg detection without copying the tag onto every leg.
+   */
+  parentClientOrderId?: string;
+  /**
    * Broker-reported order-class family (Alpaca `order_class`: "simple" | "bracket" | "oco" | "oto"),
    * carried through unchanged on both the parent AND the split child legs once a bracket's entry
    * fills. The ONLY authoritative signal that two resting exit orders are true bracket/OCO siblings
@@ -2344,6 +2354,11 @@ export interface MarketScan {
   cacheTtlMs?: number;
   cached?: boolean;
   warnings: string[];
+  /**
+   * When the Nasdaq/Yahoo chain was empty, the broker tape that filled the universe
+   * (e.g. `alpaca-delayed_sip`, `tradier`).  Set only for that recovery path.
+   */
+  universeQuoteRecoverySource?: string;
   /**
    * Honest fill/shortfall report for the candidate set — makes missing PE/EPS/news
    * and provider failures obvious on Scan/admin instead of silent dashes.

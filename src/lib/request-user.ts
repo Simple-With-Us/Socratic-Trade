@@ -7,11 +7,13 @@
 // checks must additionally inspect middleware's identity-source provenance; see `auth/admin.ts`.
 
 import { DEV_USER_ID, userIdForEmail } from "./auth/identity";
+import { isAuthServerSessionActive } from "./db-auth-sessions";
 import { isLiveBootstrap } from "./auth-secret-guard";
 import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES,
-  AUTHENTICATED_SESSION_ISSUED_AT_HEADER
+  AUTHENTICATED_SESSION_ISSUED_AT_HEADER,
+  AUTHENTICATED_SESSION_SID_HEADER,
 } from "./auth/strip-identity";
 import { resolveAuthenticatedAccountGeneration } from "./user-write-fence";
 
@@ -59,6 +61,14 @@ export function resolveRequestUser(request: Request): ResolvedRequestUser {
   }
   const resolved = resolveRequestUserFromEmail(email);
   const issuedAt = request.headers.get(AUTHENTICATED_SESSION_ISSUED_AT_HEADER);
+  const sessionSid = request.headers.get(AUTHENTICATED_SESSION_SID_HEADER)?.trim();
+  if (
+    identitySource === AUTHENTICATED_IDENTITY_SOURCES.authJsSession &&
+    sessionSid &&
+    !isAuthServerSessionActive(sessionSid)
+  ) {
+    throw new Error("Session revoked or expired.");
+  }
   if (
     identitySource === AUTHENTICATED_IDENTITY_SOURCES.authJsSession ||
     identitySource === AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess
