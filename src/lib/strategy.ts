@@ -1500,6 +1500,10 @@ export async function runStrategyOnce(
     // only checks the committed ledger, NOT live reservations, so retrieving here would still spend
     // Voyage/Pinecone budget the other run has claimed (the RAG half of the TOCTOU). It's advisory context
     // for the (now-skipped) proposal step anyway, so there is nothing to retrieve for.
+    // One retrieval deadline in this run skips RAG for every later symbol. The timed-out symbol
+    // already continues with no chunks; the rest must not each wait another 15s.
+    let ragTimedOutThisRun = false;
+    let ragSkippedAfterTimeout = 0;
     if (!skipLlmDueToBudget) {
       try {
         const { retrieveContextDetailed, defaultMinScore, defaultRelevanceFloor, defaultDedupeSimilarity, formatChunkWithProvenance } =
@@ -1602,8 +1606,20 @@ export async function runStrategyOnce(
               const { proposerDossierEnabled, assembleProposerDossier } = await import("./rag/proposer-dossier");
               // Issue #2961: a hung embed or vector query must not stall the trading loop.
               // Deadline aborts the signal and this symbol contributes no chunks. The run
-              // continues; the account is not halted.
-              let chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
+              // continues; the account is not halted. After the first deadline, later symbols
+              // in this run skip retrieval entirely.
+              let chunks: Awaited<ReturnType<typeof retrieveContextDetailed>> = [];
+              if (ragTimedOutThisRun) {
+                ragSkippedAfterTimeout += 1;
+                if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                  ragRetrievalStatusRows.push({
+                    symbol: normalizeSymbol(sym),
+                    status: "lookup_failed",
+                    reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+                  });
+                }
+              } else {
+              chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
                 const optionsWithSignal = { ...retrieveOptions, signal };
                 if (proposerDossierEnabled()) {
                   const dossier = await assembleProposerDossier({
@@ -1638,7 +1654,7 @@ export async function runStrategyOnce(
                 }
                 return retrieveContextDetailed(query, sym, limit, userId, optionsWithSignal);
               }, () => {
-                console.warn(`[Strategy] ${STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE} for ${sym}; continuing without those chunks.`);
+                ragTimedOutThisRun = true;
                 if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
                   ragRetrievalStatusRows.push({
                     symbol: normalizeSymbol(sym),
@@ -1648,6 +1664,7 @@ export async function runStrategyOnce(
                 }
                 return [];
               });
+              }
 
               // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
               // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
@@ -1707,6 +1724,12 @@ export async function runStrategyOnce(
             })
           );
           contexts.push(...chunkResults);
+        }
+
+        if (ragTimedOutThisRun) {
+          console.warn(
+            `[Strategy] ${STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE}; skipped RAG retrieval for ${ragSkippedAfterTimeout} later symbol(s) in this run.`
+          );
         }
 
         const validContexts = contexts.flatMap((context) => context.chunks).filter(Boolean);
@@ -1959,7 +1982,15 @@ export async function runStrategyOnce(
     // spends Voyage/Pinecone budget).
     let experienceAnalogs = "";
     let ownerCoaching = "";
-    if (!skipLlmDueToBudget) {
+    if (!skipLlmDueToBudget && ragTimedOutThisRun) {
+      if (!ragRetrievalStatusRows.some((row) => row.symbol === "PORTFOLIO")) {
+        ragRetrievalStatusRows.push({
+          symbol: "PORTFOLIO",
+          status: "lookup_failed",
+          reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+        });
+      }
+    } else if (!skipLlmDueToBudget) {
       try {
         const { retrieveDecisionExperiences } = await import("./experience-memory");
         // Regime for the sketch: fetchMacroData is cached (6h TTL), so this is effectively free —

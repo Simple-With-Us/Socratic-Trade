@@ -5,8 +5,9 @@ import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-she
 import { DecisionTraceIllustration } from "./decision-trace-illustration";
 import { landingPageEnabled } from "@/lib/landing-page";
 
-// Background-revalidate hourly: same fix as the legal pages — the CDN-cached prerender
-// was leaving a deployed docs edit stale for up to a year.
+// Hourly ISR.  This page does not read a per-request nonce.  Middleware serves a
+// hash CSP stamped from the prerendered HTML, which can be cached with the body.
+// See docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
 export const revalidate = 3600;
 
 export const metadata: Metadata = {
@@ -100,7 +101,8 @@ export default function WelcomePage() {
   if (!landingPageEnabled()) notFound();
   return (
     <>
-      {/* JSON-LD structured data */}
+      {/* JSON-LD structured data.  type=ld+json is still a script element for CSP.
+          The static-page hash list covers this body.  A nonce here would opt the page into dynamic rendering. */}
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
