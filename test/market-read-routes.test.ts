@@ -338,6 +338,20 @@ describe("GET /api/market/prices/[symbol]", () => {
     });
   });
 
+  it("503 only for coded sqlite busy, not message-only provider lock text", async () => {
+    const codedBusy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" });
+    mockFetchDailyOHLC.mockRejectedValue(codedBusy);
+    const busyRes = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    expect(busyRes.status).toBe(503);
+    expect(busyRes.headers.get("retry-after")).toBe("2");
+    expect(await busyRes.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
+
+    mockFetchDailyOHLC.mockRejectedValue(new Error("provider said database is locked"));
+    await expect(pricesRoute(authedRequest(url, TEST_TOKEN), ctx)).rejects.toThrow(
+      "provider said database is locked"
+    );
+  });
+
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
     mockFetchDailyOHLC.mockResolvedValue(null);
     const res = await pricesRoute(authedRequest("http://localhost/api/market/prices/NOTREAL", TEST_TOKEN), {
