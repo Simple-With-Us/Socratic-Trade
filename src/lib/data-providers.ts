@@ -80,6 +80,8 @@ import { readCompanyFactsCache } from "./web-sources/sec-facts";
 import { padCik } from "./web-sources/sec-filings";
 import { readProviderFieldCacheForSymbol, writeProviderFieldCache } from "./provider-field-cache";
 import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
+import type { YahooSessionCreds } from "./yahoo-session";
+import { clearYahooSessionCredsCache, getYahooSessionCreds, YAHOO_SESSION_UA } from "./yahoo-session";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
 import { tryReserveRapidApiCalls, refundRapidApiCalls, type RapidApiProviderKey } from "./rapidapi-quota";
 import {
@@ -3114,15 +3116,7 @@ export class NasdaqQuoteEnrichmentProvider implements MarketEnrichmentProvider {
 // Uses Yahoo Finance session-crumb auth to call v10/finance/quoteSummary.
 // Provides: sector, industry, P/E, EPS, dividend yield, and analyst rating.
 
-interface YfCreds { cookie: string; crumb: string; expiresAt: number; }
-// Keyed by effective proxy URL: cookie+crumb are issued to the egress IP, so creds
-// fetched through a user's proxy must not be reused for a different egress path.
-const yfCredsByProxy = new Map<string, YfCreds>();
-const YF_CRUMB_TTL_MS = 55 * 60_000; // 55 min (crumbs expire ~1 hr)
-const YF_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
-// A single failed cookie/crumb handshake otherwise blanks the ENTIRE Yahoo enrichment batch
-// for every symbol this run — retry once after this short backoff before giving up.
-const YF_CREDS_RETRY_BACKOFF_MS = 500;
+type YfCreds = YahooSessionCreds;
 
 class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
   constructor(private readonly userId?: string) {}
@@ -3147,7 +3141,14 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     let creds: YfCreds;
-    try { creds = await this.getCreds(); } catch (err) {
+    try {
+      const resolved = await getYahooSessionCreds(this.userId);
+      if (!resolved) {
+        logApiHealth({ service: this.name, ok: false, errorText: "Yahoo session cancelled" });
+        return result;
+      }
+      creds = resolved;
+    } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
       logApiHealth({ service: this.name, ok: false, errorText: scrubProviderErrorText(appendErrorCause(rawMessage, err)) });
       return result;
@@ -3170,51 +3171,6 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     return result;
   }
 
-  private proxyCacheKey(): string {
-    return resolveDataSourceProxy(this.userId).proxyUrl ?? "direct";
-  }
-
-  private async getCreds(): Promise<YfCreds> {
-    const now = Date.now();
-    const cacheKey = this.proxyCacheKey();
-    const cached = yfCredsByProxy.get(cacheKey);
-    if (cached && cached.expiresAt > now) return cached;
-
-    try {
-      return await this.fetchCreds(now);
-    } catch {
-      // One retry with a short backoff — a transient network blip or momentary 429 on the
-      // handshake shouldn't blank Yahoo enrichment for every symbol this run.
-      await new Promise((resolve) => setTimeout(resolve, YF_CREDS_RETRY_BACKOFF_MS));
-      return await this.fetchCreds(Date.now());
-    }
-  }
-
-  private async fetchCreds(now: number): Promise<YfCreds> {
-    // Both legs of the handshake go through the same egress path (dataSourceFetch
-    // with this provider's userId) so the cookie and crumb are issued to one IP.
-    const cookieRes = await dataSourceFetch("https://fc.yahoo.com", {
-      headers: { "user-agent": YF_UA },
-      redirect: "follow"
-    }, { userId: this.userId });
-    const rawCookies: string[] =
-      typeof (cookieRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === "function"
-        ? (cookieRes.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
-        : [cookieRes.headers.get("set-cookie") ?? ""].filter(Boolean);
-    const cookie = rawCookies.map((c) => c.split(";")[0]).filter(Boolean).join("; ");
-
-    const crumbRes = await dataSourceFetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
-      headers: { "user-agent": YF_UA, "Cookie": cookie, "accept": "text/plain" }
-    }, { userId: this.userId });
-    if (!crumbRes.ok) throw new Error(`Yahoo Finance crumb failed: ${crumbRes.status}`);
-    const crumb = (await crumbRes.text()).trim();
-    if (!crumb || crumb.startsWith("{")) throw new Error("Invalid Yahoo Finance crumb");
-
-    const creds = { cookie, crumb, expiresAt: now + YF_CRUMB_TTL_MS };
-    yfCredsByProxy.set(this.proxyCacheKey(), creds);
-    return creds;
-  }
-
   private async fetchSymbol(symbol: string, creds: YfCreds): Promise<SymbolEnrichment> {
     // calendarEvents → next earnings date (daysToEarnings); institutionOwnership +
     // majorHoldersBreakdown → institutional ownership %. Both ride the SAME authenticated
@@ -3232,7 +3188,7 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
       const timeout = setTimeout(() => controller.abort(), 8000);
       try {
         return await fetchWithRetry(url, {
-          headers: { "user-agent": YF_UA, "Cookie": creds.cookie, "accept": "application/json" },
+          headers: { "user-agent": YAHOO_SESSION_UA, Cookie: creds.cookie, accept: "application/json" },
           cache: "no-store",
           signal: controller.signal
         }, { service: this.name });
@@ -5510,7 +5466,7 @@ export function scoreHeadlines(headlines: string[]): number {
 
 export function clearEnrichmentCache(): void {
   cache.clear();
-  yfCredsByProxy.clear();
+  clearYahooSessionCredsCache();
   avEarningsCalendarCache = null;
   finnhubEarningsCalendarCache = null;
 }

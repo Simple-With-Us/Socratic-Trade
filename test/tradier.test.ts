@@ -849,10 +849,51 @@ describe("Tradier adapter — OTOCO/OCO equity legs surface for coverage (codex-
     expect(orders.find((o) => o.id === "500")?.clientOrderId).toBe("bracket");
     expect(orders.find((o) => o.id === "501")?.clientOrderId).toBeUndefined();
     expect(orders.find((o) => o.id === "502")?.clientOrderId).toBeUndefined();
+    expect(orders.find((o) => o.id === "501")?.parentClientOrderId).toBe("bracket");
+    expect(orders.find((o) => o.id === "501")?.orderClass).toBe("otoco");
     const stopLeg = orders.find((o) => o.type === "stop_market")!;
     expect(stopLeg).toMatchObject({ id: "502", symbol: "AAPL", side: "sell", type: "stop_market", state: "open", stopPrice: 180 });
     const { isLiveOrderState } = await import("../src/lib/broker-side");
     expect(isLiveOrderState(stopLeg.state)).toBe(true); // a long-side coverage check sees the resting exit
+  });
+
+  it("leg-entry OTOCO lists the container as the lone entry row plus exit legs only (no duplicate entry leg)", async () => {
+    await seedTradier();
+    installFetchMock([
+      {
+        match: (u, m) => m === "GET" && u.includes(`/accounts/${ACCT}/orders`),
+        body: {
+          orders: {
+            order: {
+              id: 880,
+              symbol: "MPC",
+              type: "otoco",
+              class: "otoco",
+              status: "open",
+              create_date: "2026-07-10",
+              tag: "st-ref-three-leg",
+              leg: [
+                { id: 881, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, price: 100 },
+                { id: 882, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 110 },
+                { id: 883, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 90 }
+              ]
+            }
+          }
+        }
+      }
+    ]);
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const orders = await getTradierGateway("local").getEquityOrders(ACCT);
+    expect(orders.map((o) => o.id).sort()).toEqual(["880", "882", "883"]);
+    const entry = orders.find((o) => o.id === "880")!;
+    expect(entry).toMatchObject({
+      clientOrderId: "st-ref-three-leg",
+      side: "buy",
+      type: "limit",
+      limitPrice: 100
+    });
+    expect(entry.orderClass).toBeUndefined();
+    expect(orders.find((o) => o.id === "882")?.orderClass).toBe("otoco");
   });
 
   it("a lone option order (container class not equity, no equity legs) is still dropped", async () => {
