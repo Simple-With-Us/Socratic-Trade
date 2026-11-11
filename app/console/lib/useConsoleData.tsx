@@ -133,6 +133,15 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // consumed for the no-snapshot case, where it separates "still fetching" from "stopped trying".
   const [fetching, setFetching] = useState(false);
   const [stream, setStream] = useState<ConsoleStreamHealth>(UNSUPPORTED_STREAM);
+  const [isVisible, setIsVisible] = useState(
+    typeof document !== "undefined" ? document.visibilityState === "visible" : true
+  );
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handleVis = () => setIsVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", handleVis);
+    return () => document.removeEventListener("visibilitychange", handleVis);
+  }, []);
   const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const inFlight = useRef<AbortController | null>(null);
   const mounted = useRef(true);
@@ -324,6 +333,13 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       setStream(UNSUPPORTED_STREAM);
       return;
     }
+    if (!isVisible) {
+      // Prevent background tabs from exhausting the HTTP connection pool. The cleanup of the
+      // previous run already closed the EventSource; reflect that in the stream health instead
+      // of leaving it stuck at "live" while disconnected.
+      setStream((prev) => (prev.status === "unsupported" ? prev : { ...prev, status: "reconnecting" }));
+      return;
+    }
     setStream((prev) => ({ ...prev, status: "connecting" }));
     const events = new EventSource("/api/events/stream");
 
@@ -373,7 +389,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       for (const { type, handler } of handlers) events.removeEventListener(type, handler);
       events.close();
     };
-  }, [queueRefresh]);
+  }, [queueRefresh, isVisible]);
 
   const value = useMemo<ConsoleData>(() => {
     // The loading/slow/failed decision lives in a pure module so it is actually covered by tests

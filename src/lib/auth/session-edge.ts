@@ -1,11 +1,15 @@
 // Edge-safe Auth.js session verifier for middleware.ts.
 //
 // This app configures Auth.js to write a compact HS256 JWT through
-// `encodeSessionToken`, so middleware can verify the same cookie with narrow,
+// `encodeSessionJwtCrypto`, so middleware can verify the same cookie with narrow,
 // edge-safe jose subpath imports and avoid pulling the full next-auth/jose barrel
 // into the edge bundle.
 
-import { decodeSessionToken } from "./session-token";
+import { decodeSessionJwtCrypto } from "./session-jwt-crypto";
+import {
+  SESSION_JWT_ABS_EXP_CLAIM,
+  SESSION_JWT_SID_CLAIM,
+} from "./session-policy";
 
 /** Auth.js v5 session cookie names, in preference order. */
 const SESSION_COOKIE_NAMES = ["__Secure-authjs.session-token", "authjs.session-token"] as const;
@@ -14,6 +18,25 @@ export interface VerifiedSessionIdentity {
   email: string;
   /** Explicit login callback time in milliseconds; unlike JWT iat, this is not rolled on refresh. */
   loginAt?: number;
+  sessionId?: string;
+}
+
+/** Edge-safe session freshness without SQLite. Server-backed JWTs honor absExp; legacy JWTs honor exp. */
+export function edgeSessionTrustValid(payload: import("jose").JWTPayload, nowSeconds?: number): boolean {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1000);
+  const sid = payload[SESSION_JWT_SID_CLAIM];
+  if (typeof sid === "string" && sid) {
+    const absExp = payload[SESSION_JWT_ABS_EXP_CLAIM];
+    if (typeof absExp !== "number" || !Number.isFinite(absExp) || absExp <= now) return false;
+    return true;
+  }
+  const exp = payload.exp;
+  if (typeof exp !== "number" || !Number.isFinite(exp) || exp <= now) return false;
+  return true;
+}
+
+function edgeBackedSessionValid(payload: import("jose").JWTPayload): boolean {
+  return edgeSessionTrustValid(payload);
 }
 
 /**
@@ -61,13 +84,16 @@ export async function getSessionIdentity(
   if (!token || !salt) return null;
 
   try {
-    const payload = await decodeSessionToken({ token, secret: authSecret, salt });
+    const payload = await decodeSessionJwtCrypto({ token, secret: authSecret, salt });
+    if (!payload || !edgeBackedSessionValid(payload)) return null;
     const email = payload?.email;
     const loginAt = payload?.loginAt;
     if (typeof email === "string" && email.includes("@")) {
+      const sessionId = payload[SESSION_JWT_SID_CLAIM];
       return {
         email: email.trim().toLowerCase(),
-        ...(typeof loginAt === "number" && Number.isFinite(loginAt) ? { loginAt } : {})
+        ...(typeof loginAt === "number" && Number.isFinite(loginAt) ? { loginAt } : {}),
+        ...(typeof sessionId === "string" && sessionId ? { sessionId } : {}),
       };
     }
     return null;

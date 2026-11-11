@@ -77,6 +77,7 @@ function withLastGoodWarning(
   const existingWarnings = Array.isArray(scan.warnings) ? scan.warnings : [];
   return {
     ...scan,
+    universeQuoteRecoverySource: undefined,
     warnings: [...existingWarnings, warning]
   };
 }
@@ -111,8 +112,9 @@ async function refreshTopCandidateQuotes(
  * When the live scan still cannot finish — deadline abort OR
  * `ScanQuotesUnavailableError` from an empty Nasdaq/Yahoo recovery — reuse the
  * newest persisted MarketScan (real last tape, not a fabricated book) plus a
- * short quote refresh so Green can start.  No last-good row still fails the run —
- * there is nothing honest to decide on.
+ * short quote refresh so Green can start.  Broker universe recovery (ST-4590)
+ * runs inside `scanMarket` before that throw.  No last-good row still fails the
+ * run — there is nothing honest to decide on.
  */
 export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<StrategyGatherResult> {
   const deadlineMs = input.deadlineMs ?? STRATEGY_GATHER_DEADLINE_MS;

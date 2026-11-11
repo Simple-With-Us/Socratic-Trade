@@ -10,13 +10,23 @@
  *
  * `jose` is mocked so no real network call ever reaches https://appleid.apple.com.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { issueAppleSignInNonce } from "../src/lib/auth/apple-signin-nonce";
 
 const mocks = vi.hoisted(() => ({
   createRemoteJWKSet: vi.fn(() => "JWKS_SENTINEL" as unknown as ReturnType<typeof import("jose").createRemoteJWKSet>),
+  appleNonce: "",
   // Declared with explicit (token, jwks) params so mock.calls is typed as a 2-tuple — the
   // JWKS-reuse test below reads call[1] to assert reference equality across requests.
-  jwtVerify: vi.fn(async (_token: unknown, _jwks: unknown) => ({ payload: { email: "owner@example.com" } }) as unknown as Awaited<ReturnType<typeof import("jose").jwtVerify>>)
+  jwtVerify: vi.fn(
+    async (_token: unknown, _jwks: unknown) =>
+      ({
+        payload: { email: "owner@example.com", nonce: mocks.appleNonce },
+      }) as unknown as Awaited<ReturnType<typeof import("jose").jwtVerify>>,
+  ),
 }));
 
 vi.mock("jose", () => ({
@@ -25,14 +35,25 @@ vi.mock("jose", () => ({
 }));
 
 vi.mock("../src/lib/auth/identity", () => ({
-  isEmailAllowed: () => true
+  isEmailAllowed: () => true,
+  userIdForEmail: (email: string) => `uid-${email}`,
 }));
 
 const APPLE_AUTH_URL = "http://localhost/api/mobile/auth/apple";
 
+beforeAll(() => {
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-apple-auth-${randomUUID()}.db`)}`;
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  process.env.AUTH_SECRET = "test-auth-secret";
+  mocks.jwtVerify.mockImplementation(
+    async (_token: unknown, _jwks: unknown) =>
+      ({
+        payload: { email: "owner@example.com", nonce: mocks.appleNonce },
+      }) as unknown as Awaited<ReturnType<typeof import("jose").jwtVerify>>,
+  );
+  process.env.AUTH_SECRET = "test-auth-secret-at-least-32-chars";
 });
 
 describe("POST /api/mobile/auth/apple", () => {
@@ -41,11 +62,12 @@ describe("POST /api/mobile/auth/apple", () => {
     expect(mocks.createRemoteJWKSet).toHaveBeenCalledTimes(1); // module-load side effect, before any request
 
     for (let i = 0; i < 3; i++) {
+      mocks.appleNonce = issueAppleSignInNonce();
       const res = await POST(
         new Request(APPLE_AUTH_URL, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ identityToken: "token", name: "Owner" })
+          body: JSON.stringify({ identityToken: "token", name: "Owner", nonce: mocks.appleNonce })
         })
       );
       expect(res.status).toBe(200);
@@ -58,6 +80,35 @@ describe("POST /api/mobile/auth/apple", () => {
     // Every call must have received the exact same resolver instance (reference equality).
     const resolverArgs = mocks.jwtVerify.mock.calls.map((call) => call[1]);
     expect(new Set(resolverArgs).size).toBe(1);
+  });
+
+  it("allows legacy iOS builds without a server nonce", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identityToken: "token", name: "Owner" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(mocks.jwtVerify).toHaveBeenCalled();
+  });
+
+  it("rejects hardened clients that omit the server nonce (400)", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-socratic-mobile-session-hardening": "1",
+        },
+        body: JSON.stringify({ identityToken: "token" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(mocks.jwtVerify).not.toHaveBeenCalled();
   });
 
   it("rejects a missing identityToken (400)", async () => {
@@ -87,7 +138,12 @@ describe("POST /api/mobile/auth/apple", () => {
 
   it("rejects a request body over the byte cap (413) without ever calling jwtVerify", async () => {
     const { POST } = await import("../app/api/mobile/auth/apple/route");
-    const oversized = JSON.stringify({ identityToken: "x".repeat(64 * 1024), name: "Owner" });
+    mocks.appleNonce = issueAppleSignInNonce();
+    const oversized = JSON.stringify({
+      identityToken: "x".repeat(64 * 1024),
+      name: "Owner",
+      nonce: mocks.appleNonce,
+    });
     const res = await POST(
       new Request(APPLE_AUTH_URL, {
         method: "POST",
@@ -103,11 +159,12 @@ describe("POST /api/mobile/auth/apple", () => {
     const { POST } = await import("../app/api/mobile/auth/apple/route");
     // A real Apple identityToken JWT is typically 1-2 KB; use a generously large but realistic 4 KB.
     const realisticToken = "x".repeat(4 * 1024);
+    mocks.appleNonce = issueAppleSignInNonce();
     const res = await POST(
       new Request(APPLE_AUTH_URL, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ identityToken: realisticToken, name: "Owner" })
+        body: JSON.stringify({ identityToken: realisticToken, name: "Owner", nonce: mocks.appleNonce })
       })
     );
     expect(res.status).toBe(200);

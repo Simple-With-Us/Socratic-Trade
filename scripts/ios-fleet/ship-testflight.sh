@@ -1660,6 +1660,26 @@ ensure_tf_ready() {
     log "TestFlight internal testers can install this build"
     return 0
   fi
+  if [[ $rc -eq 5 ]]; then
+    # asc-api.mjs: the build reached IN_BETA_TESTING / READY_FOR_BETA_TESTING and
+    # countInternalTesters read zero testers in internal all-builds groups.
+    # Not a failed upload; warn instead of the rc=0 success line (GH #1018).
+    log "warning: build ${BUILD_NUM} is processed but ${BUNDLE_ID} has no internal TestFlight testers with access to all builds; nobody can install it yet"
+    log "warning: the Sync standing TestFlight testers step creates or refills the internal all-builds group; otherwise add internal testers in App Store Connect"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning title=TestFlight has no reachable internal tester::${BUNDLE_ID} build ${BUILD_NUM} is processed but no internal tester with access to all builds can install it.  Check the Sync standing TestFlight testers step."
+    fi
+    return 0
+  fi
+  if [[ $rc -eq 6 ]]; then
+    # asc-api.mjs: processed, but countInternalTesters returned ok:false, so we
+    # cannot say anyone can install it.  Say so instead of the success line.
+    log "warning: build ${BUILD_NUM} is processed but the internal TestFlight tester count could not be read for ${BUNDLE_ID}; installability is unverified"
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+      echo "::warning title=TestFlight internal installability unverified::${BUNDLE_ID} build ${BUILD_NUM} is processed but the internal tester count could not be read.  Check TestFlight."
+    fi
+    return 0
+  fi
   if [[ $rc -eq 3 ]]; then
     log "warning: upload succeeded but ASC has not reached IN_BETA_TESTING yet; watch TestFlight"
     return 0
