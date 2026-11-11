@@ -42,9 +42,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         path = cookie.path.isEmpty ? "/" : cookie.path
         secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
         httpOnly = cookie.isHTTPOnly
-        if let date = cookie.expiresDate,
-           date.timeIntervalSince1970 > 0,
-           date > Date() {
+        if let date = cookie.expiresDate, date.timeIntervalSince1970 > 0 {
             expiresAt = date
         } else {
             expiresAt = nil

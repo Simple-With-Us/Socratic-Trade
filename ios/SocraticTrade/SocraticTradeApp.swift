@@ -182,10 +182,10 @@ struct ContentView: View {
     }
 
     private func resumeLiveSessionIfNeeded() async {
-        if SocraticTradeApp.isScreenshotMode { return }
-        guard store.isAuthenticated else { return }
-        store.startEvents()
-        await store.load()
+        await AppLiveSessionResume.resumeLiveSession(
+            store: store,
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode
+        )
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {

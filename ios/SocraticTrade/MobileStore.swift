@@ -1244,8 +1244,14 @@ final class MobileStore: ObservableObject {
         }
     }
 
-    private func persistAuthSessionCookies() {
-        try? sessionCookieCoordinator.persistSession(from: client)
+    func persistAuthSessionCookies() {
+        do {
+            try sessionCookieCoordinator.persistSession(from: client)
+        } catch {
+            if self.error == nil {
+                self.error = "Could not save your session for the next launch.  Sign in again if needed after closing the app."
+            }
+        }
     }
 
     func authSessionCookiesForWebView() -> [HTTPCookie] {

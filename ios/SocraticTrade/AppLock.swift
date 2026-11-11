@@ -122,11 +122,13 @@ final class AppLockController {
         AppLockPreferences.isEnabled = false
         isUnlocked = true
         lastBackgroundedAt = nil
+        lastErrorMessage = nil
     }
 }
 
 struct AppLockView: View {
     @Bindable var controller: AppLockController
+    @State private var deviceAuthenticationAvailable = AppLockController.deviceAuthenticationAvailable()
 
     var body: some View {
         ZStack {
@@ -153,7 +155,7 @@ struct AppLockView: View {
                     authenticate()
                 }
                 .buttonStyle(.borderedProminent)
-                if !AppLockController.deviceAuthenticationAvailable() {
+                if !deviceAuthenticationAvailable {
                     Button("Turn Off App Lock") {
                         controller.disableBecauseAuthenticationUnavailable()
                     }
@@ -163,6 +165,7 @@ struct AppLockView: View {
             .padding(32)
         }
         .onAppear {
+            refreshDeviceAuthenticationAvailability()
             authenticate()
         }
         .accessibilityAddTraits(.isModal)
@@ -173,6 +176,7 @@ struct AppLockView: View {
         context.localizedCancelTitle = "Cancel"
         var policyError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            refreshDeviceAuthenticationAvailability()
             controller.reportUnlockFailure(
                 "Biometrics or a device passcode is required to use app lock.  Turn off app lock to continue."
             )
@@ -190,9 +194,14 @@ struct AppLockView: View {
                         || nsError.code == LAError.systemCancel.rawValue {
                         return
                     }
+                    refreshDeviceAuthenticationAvailability()
                     controller.reportUnlockFailure("Could not unlock.  Try again.")
                 }
             }
         }
+    }
+
+    private func refreshDeviceAuthenticationAvailability() {
+        deviceAuthenticationAvailable = AppLockController.deviceAuthenticationAvailable()
     }
 }
