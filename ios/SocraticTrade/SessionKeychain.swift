@@ -310,16 +310,23 @@ enum SessionCookiePersistence {
         }
         ingest(storage.cookies ?? [])
         return merged.values.filter { cookie in
-            ownsDomain(cookie.domain, host: host) && AuthSessionCookie.isSessionCookieName(cookie.name)
+            ownsDomain(cookie, host: host) && AuthSessionCookie.isSessionCookieName(cookie.name)
         }
     }
 
-    static func ownsDomain(_ cookieDomain: String, host: String) -> Bool {
+    static func ownsDomain(_ cookie: HTTPCookie, host: String) -> Bool {
+        ownsDomain(cookie.domain, host: host, originURL: cookie.properties?[.originURL] as? URL)
+    }
+
+    static func ownsDomain(_ cookieDomain: String, host: String, originURL: URL? = nil) -> Bool {
         let normalizedHost = host.lowercased()
         let domain = cookieDomain
             .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             .lowercased()
         if domain.isEmpty {
+            if let originURL, originURL.host?.lowercased() == normalizedHost {
+                return true
+            }
             return false
         }
         return normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
