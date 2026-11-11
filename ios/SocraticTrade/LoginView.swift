@@ -332,28 +332,45 @@ struct LoginView: View {
     /// called by an ASAuthorizationController this view owns instead of by the system
     /// button.
     private func beginAppleSignIn() {
-        let request = ASAuthorizationAppleIDProvider().createRequest()
-        configure(request)
-        let controller = ASAuthorizationController(authorizationRequests: [request])
-        AppleSignInCoordinator.shared.start(controller: controller, completion: complete)
-    }
-
-    private func configure(_ request: ASAuthorizationAppleIDRequest) {
+        guard !store.isSigningIn else { return }
         store.dismissError()
-        request.requestedScopes = [.fullName, .email]
+        Task { await beginAppleSignInPrepared() }
     }
 
-    private func complete(_ result: Result<ASAuthorization, Error>) {
+    private func beginAppleSignInPrepared() async {
+        let serverNonce: String
+        do {
+            serverNonce = try await store.client.fetchAppleSignInNonce()
+        } catch {
+            store.error = MobileAuthStartFailure.appleNonceUnavailable
+            return
+        }
+        guard MobileAuthNonce.isServerIssued(serverNonce) else {
+            store.error = MobileAuthStartFailure.appleNonceUnavailable
+            return
+        }
+        let request = ASAuthorizationAppleIDProvider().createRequest()
+        request.requestedScopes = [.fullName, .email]
+        request.nonce = AppleSignInNonce.authorizationRequestNonce(serverNonce: serverNonce)
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        AppleSignInCoordinator.shared.start(
+            controller: controller,
+            serverNonce: serverNonce,
+            completion: complete
+        )
+    }
+
+    private func complete(_ result: Result<ASAuthorization, Error>, nonce: String?) {
         switch result {
         case .success(let authorization):
-            handleAuthorization(authorization)
+            handleAuthorization(authorization, serverNonce: nonce)
         case .failure(let error):
             guard let message = AppleSignInFailure.message(for: error) else { return }
             store.error = message
         }
     }
 
-    private func handleAuthorization(_ authorization: ASAuthorization) {
+    private func handleAuthorization(_ authorization: ASAuthorization, serverNonce: String?) {
         guard
             let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
             let tokenData = credential.identityToken,
@@ -369,62 +386,65 @@ struct LoginView: View {
             return components.isEmpty ? nil : components.joined(separator: " ")
         }()
 
+        guard let serverNonce, MobileAuthNonce.isServerIssued(serverNonce) else {
+            store.error = MobileAuthStartFailure.appleNonceUnavailable
+            return
+        }
+
         Task {
-            await store.loginWithApple(identityToken: identityToken, name: name)
+            await store.loginWithApple(identityToken: identityToken, name: name, nonce: serverNonce)
         }
     }
 
     private func beginWebAuth(provider: String) {
+        guard !store.isSigningIn else { return }
         store.dismissError()
+        Task { await beginWebAuthPrepared(provider: provider) }
+    }
+
+    private func beginWebAuthPrepared(provider: String) async {
         guard let verifier = WebAuthCodeVerifier.make() else {
-            store.error = "Could not securely start web sign-in.  Try again."
+            store.error = MobileAuthStartFailure.handoffUnavailable
             return
         }
-        guard var callbackComponents = URLComponents(url: store.client.baseURL.appending(path: "/api/mobile/auth-redirect"), resolvingAgainstBaseURL: false) else {
-            store.error = "Could not prepare web sign-in."
+        let handoffNonce: String
+        do {
+            handoffNonce = try await store.client.prepareHandoff(codeChallenge: verifier.challenge)
+        } catch {
+            store.error = MobileAuthStartFailure.handoffUnavailable
             return
         }
-        callbackComponents.queryItems = [
-            URLQueryItem(name: "code_challenge", value: verifier.challenge)
-        ]
-        // /api/mobile/auth-start initiates OAuth on a plain GET.  Auth.js v5 only
-        // initiates on POST, so the old /api/auth/signin/<provider> entry dead-ended
-        // on /access-denied?error=Configuration (middleware translates it for older
-        // builds; new builds go straight to the initiator).
-        guard let callbackURL = callbackComponents.url,
-              var components = URLComponents(url: store.client.baseURL.appending(path: "/api/mobile/auth-start"), resolvingAgainstBaseURL: false) else {
-            store.error = "Could not prepare web sign-in."
-            return
-        }
-        components.queryItems = [
-            URLQueryItem(name: "provider", value: provider),
-            URLQueryItem(name: "callbackUrl", value: callbackURL.absoluteString)
-        ]
-        guard let url = components.url else {
-            store.error = "Could not start web sign-in."
+        guard
+            let callbackURL = MobileWebAuthStart.callbackURL(
+                baseURL: store.client.baseURL,
+                codeChallenge: verifier.challenge,
+                handoffNonce: handoffNonce
+            ),
+            let url = MobileWebAuthStart.startURL(
+                baseURL: store.client.baseURL,
+                provider: provider,
+                callbackURL: callbackURL
+            )
+        else {
+            store.error = MobileAuthStartFailure.handoffUnavailable
             return
         }
 
         let contextProvider = WebAuthContextProvider()
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "socratictrade") { callbackURL, error in
-            if let error {
-                if let authError = error as? ASWebAuthenticationSessionError, authError.code == .canceledLogin {
+            Task { @MainActor in
+                if let error {
+                    if let authError = error as? ASWebAuthenticationSessionError, authError.code == .canceledLogin {
+                        return
+                    }
+                    store.error = error.localizedDescription
                     return
                 }
-                Task { @MainActor in store.error = error.localizedDescription }
-                return
-            }
-            guard
-                let callbackURL,
-                let code = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "code" })?.value,
-                !code.isEmpty
-            else {
-                // 2026-09-20 MM (#3226 #3): the OAuth provider (Google / GitHub / Apple) can
-                // return a redirect without `code` and with `error` + `error_description` when
-                // the user denied consent, the account is blocked, or the IdP itself failed.
-                // The original "Invalid callback URL from web sign-in." hid every one of those
-                // behind a single opaque message — surface the provider's explanation instead.
-                Task { @MainActor in
+                guard
+                    let callbackURL,
+                    let code = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "code" })?.value,
+                    !code.isEmpty
+                else {
                     let queryItems = URLComponents(url: callbackURL ?? URL(string: "about:blank")!,
                                                    resolvingAgainstBaseURL: false)?.queryItems ?? []
                     let providerError = queryItems.first(where: { $0.name == "error" })?.value
@@ -436,16 +456,17 @@ struct LoginView: View {
                     } else {
                         store.error = "Invalid callback URL from web sign-in."
                     }
+                    return
                 }
-                return
-            }
-            Task { @MainActor in
                 await store.loginWithWebAuthCode(code, verifier: verifier.value)
             }
         }
         session.presentationContextProvider = contextProvider
         session.prefersEphemeralWebBrowserSession = false
-        WebAuthSessionManager.shared.start(session: session, provider: contextProvider)
+        let started = WebAuthSessionManager.shared.start(session: session, provider: contextProvider)
+        if !started {
+            store.error = MobileAuthStartFailure.handoffUnavailable
+        }
     }
 }
 
@@ -586,39 +607,48 @@ enum AppleSignInFailure {
 private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
     static let shared = AppleSignInCoordinator()
 
-    private var completion: ((Result<ASAuthorization, Error>) -> Void)?
-    private var controller: ASAuthorizationController?
+    private var attempts = AppleSignInAttempts<ObjectIdentifier>()
+    private var retained: [ObjectIdentifier: (
+        controller: ASAuthorizationController,
+        completion: (Result<ASAuthorization, Error>, String?) -> Void
+    )] = [:]
 
     func start(
         controller: ASAuthorizationController,
-        completion: @escaping (Result<ASAuthorization, Error>) -> Void
+        serverNonce: String,
+        completion: @escaping (Result<ASAuthorization, Error>, String?) -> Void
     ) {
-        self.completion = completion
-        self.controller = controller
+        let key = ObjectIdentifier(controller)
+        attempts.begin(key, nonce: serverNonce)
+        retained[key] = (controller, completion)
         controller.delegate = self
         controller.presentationContextProvider = self
         controller.performRequests()
     }
 
-    private func finish(_ result: Result<ASAuthorization, Error>) {
-        let completion = self.completion
-        self.completion = nil
-        self.controller = nil
-        completion?(result)
+    private func finish(controller: ASAuthorizationController, result: Result<ASAuthorization, Error>) {
+        let key = ObjectIdentifier(controller)
+        let nonce = attempts.take(key)
+        let completion = retained.removeValue(forKey: key)?.completion
+        completion?(result, nonce)
     }
 
     nonisolated func authorizationController(
         controller: ASAuthorizationController,
         didCompleteWithAuthorization authorization: ASAuthorization
     ) {
-        Task { @MainActor in finish(.success(authorization)) }
+        Task { @MainActor in
+            finish(controller: controller, result: .success(authorization))
+        }
     }
 
     nonisolated func authorizationController(
         controller: ASAuthorizationController,
         didCompleteWithError error: Error
     ) {
-        Task { @MainActor in finish(.failure(error)) }
+        Task { @MainActor in
+            finish(controller: controller, result: .failure(error))
+        }
     }
 
     nonisolated func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
@@ -632,10 +662,11 @@ private final class WebAuthSessionManager {
     private var session: ASWebAuthenticationSession?
     private var contextProvider: WebAuthContextProvider?
 
-    func start(session: ASWebAuthenticationSession, provider: WebAuthContextProvider) {
+    @discardableResult
+    func start(session: ASWebAuthenticationSession, provider: WebAuthContextProvider) -> Bool {
         self.session = session
         self.contextProvider = provider
-        session.start()
+        return session.start()
     }
 }
 

@@ -272,7 +272,7 @@ describe("ops diagnostic snapshot", () => {
     expect(rejection!.detail).toContain("symbol=AAPL");
   });
 
-  it("treats FilingAPI 401s as ok (soft skip) and expected-limit lanes as ok", async () => {
+  it("excludes retired FilingAPI from deps (leftover 401s are muted OFF) and treats expected-limit lanes as ok", async () => {
     const { logApiHealth } = await import("../src/lib/db-health");
     for (let i = 0; i < 5; i++) {
       logApiHealth({ service: "filingapi", ok: false, errorText: "HTTP 401 Unauthorized", keySource: "env" });
@@ -285,7 +285,7 @@ describe("ops diagnostic snapshot", () => {
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
     const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     const deps = snapshot.dependencies ?? {};
-    expect(deps.filingapi?.ok).toBe(true);
+    expect(deps.filingapi).toBeUndefined();
     expect(deps["vix-yahoo"]?.ok).toBe(true);
     expect(deps.roic?.ok).toBe(true);
   });
