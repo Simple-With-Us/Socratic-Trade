@@ -154,5 +154,8 @@ describe("/api/health awaits the trading-liveness summary", () => {
         `livenessDegradedSince:trading_liveness_degraded:${TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY}`
       )
     ).toBeTruthy();
+    expect(
+      getInternalSetting<string>("livenessAlertSent:trading_liveness_degraded")
+    ).toBeTruthy();
   });
 });

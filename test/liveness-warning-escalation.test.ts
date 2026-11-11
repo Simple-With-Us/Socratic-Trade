@@ -215,6 +215,22 @@ describe("alertLivenessWarning escalation", () => {
     expect(getInternalSetting<string>(`livenessDegradedSince:${TYPE}`)).toBeUndefined();
     expect(readSince(getInternalSetting(accountSinceKey(ACCT_B)))).toBeTruthy();
   });
+
+  it("pages when the fleet is fully dark via the synthetic episode account", async () => {
+    const { TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY } = await import("../src/lib/trading-liveness");
+    const { alertLivenessWarning } = await lib();
+    const fleetKey = `livenessDegradedSince:${TYPE}:${TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY}`;
+    await alertLivenessWarning(TYPE, "fleet is fully dark", {
+      accounts: [
+        { accountKey: TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY, accountLabel: "Fleet fully dark" }
+      ]
+    });
+    expect(notifyMock.sendNotification).toHaveBeenCalledTimes(1);
+    const { title } = lastNotification();
+    expect(title).toMatch(/^Liveness Warning:/);
+    const { getInternalSetting } = await db();
+    expect(getInternalSetting<string>(fleetKey)).toBeTruthy();
+  });
 });
 
 function readSince(stored: unknown): string | undefined {
