@@ -46,7 +46,10 @@ describe("sanitizeTelemetryUrl", () => {
     const result = sanitizeTelemetryUrl(url);
     expect(result).not.toContain("tkn99");
     expect(result).toContain("page=2");
-    expect(result).toContain("x=1");
+    // the encoded nested value comes back re-encoded, so the outer & and the
+    // sibling param survive intact
+    expect(result).toContain("%26x%3D1");
+    expect(result).toContain("token%3D%5BREDACTED%5D");
   });
 
   it("leaves plain non-sensitive values verbatim (no URL, no params)", () => {

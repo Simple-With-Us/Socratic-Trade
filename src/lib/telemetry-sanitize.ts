@@ -258,15 +258,22 @@ function redactParams(query: string, depth: number): string {
 function redactNestedUrlValue(rawValue: string, depth: number): string {
   if (depth > 3) return rawValue;
   let candidate = rawValue;
+  let decoded = false;
   try {
-    candidate = decodeURIComponent(rawValue.replace(/\+/g, " "));
+    const dec = decodeURIComponent(rawValue.replace(/\+/g, " "));
+    decoded = dec !== rawValue;
+    candidate = dec;
   } catch {
     // not percent-encoded (or malformed): sanitize the raw text itself when it
     // still looks like a URL
   }
   if (!/^https?:\/\//i.test(candidate)) return rawValue;
   if (!/[?#]/.test(candidate)) return rawValue;
-  return sanitizeTelemetryUrlAtDepth(candidate, depth + 1);
+  const redacted = sanitizeTelemetryUrlAtDepth(candidate, depth + 1);
+  // Preserve the outer delimiters: when the value was percent-encoded, return
+  // the redacted form re-encoded, or a literal & in the nested URL would split
+  // into fake top-level params.
+  return decoded ? encodeURIComponent(redacted) : redacted;
 }
 
 const URL_IN_TEXT = /(?:https?:\/\/|\/)[^\s"'<>]*\?[^\s"'<>]*/g;
