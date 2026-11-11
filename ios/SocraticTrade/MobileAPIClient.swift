@@ -129,8 +129,26 @@ struct MobileAPIClient {
         self.baseURL = baseURL
         self.isolatedProtocolClasses = isolatedProtocolClasses
         if let session {
-            self.session = session
-            self.sessionCookieJar = cookieJar ?? session.configuration.httpCookieStorage ?? HTTPCookieStorage()
+            if let cookieJar {
+                self.sessionCookieJar = cookieJar
+                self.session = session
+            } else if let existingJar = session.configuration.httpCookieStorage {
+                self.sessionCookieJar = existingJar
+                self.session = session
+            } else {
+                let jar = HTTPCookieStorage()
+                let configuration = session.configuration.copy() as? URLSessionConfiguration
+                    ?? session.configuration
+                configuration.httpShouldSetCookies = true
+                configuration.httpCookieAcceptPolicy = .always
+                configuration.httpCookieStorage = jar
+                self.sessionCookieJar = jar
+                self.session = URLSession(
+                    configuration: configuration,
+                    delegate: session.delegate,
+                    delegateQueue: session.delegateQueue
+                )
+            }
         } else {
             let jar = HTTPCookieStorage()
             self.sessionCookieJar = jar
@@ -525,7 +543,7 @@ struct MobileAPIClient {
 
     func ownsCookie(_ cookie: HTTPCookie) -> Bool {
         guard let host = baseURL.host else { return false }
-        return SessionCookiePersistence.ownsDomain(cookie.domain, host: host)
+        return SessionCookiePersistence.ownsDomain(cookie, host: host)
     }
 
     func authSessionCookies() -> [HTTPCookie] {

@@ -75,6 +75,31 @@ final class AppLockControllerTests: XCTestCase {
         XCTAssertFalse(controller.requiresLockScreen)
     }
 
+    func testColdStartKeepsAppLockPreferenceWhenEnabled() {
+        AppLockPreferences.isEnabled = true
+        let controller = AppLockController()
+        XCTAssertTrue(AppLockPreferences.isEnabled)
+        XCTAssertTrue(controller.requiresLockScreen)
+    }
+
+    func testEnablingClearsLastUnlockErrorMessage() {
+        guard AppLockController.deviceAuthenticationAvailable() else { return }
+        AppLockPreferences.isEnabled = false
+        let controller = AppLockController()
+        controller.reportUnlockFailure("Could not unlock.\u{00A0} Try again.")
+        controller.isEnabled = true
+        XCTAssertNil(controller.lastErrorMessage)
+        XCTAssertTrue(controller.requiresLockScreen)
+    }
+
+    func testDismissUnlockErrorClearsLastErrorMessage() {
+        let controller = AppLockController()
+        controller.reportUnlockFailure("Could not unlock.\u{00A0} Try again.")
+        XCTAssertNotNil(controller.lastErrorMessage)
+        controller.dismissUnlockError()
+        XCTAssertNil(controller.lastErrorMessage)
+    }
+
     func testDisableBecauseAuthenticationUnavailableClearsLastErrorMessage() {
         AppLockPreferences.isEnabled = true
         let controller = AppLockController()

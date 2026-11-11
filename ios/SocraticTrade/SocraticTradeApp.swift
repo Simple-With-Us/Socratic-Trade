@@ -135,7 +135,13 @@ struct ContentView: View {
                     .zIndex(2)
             }
         }
+        .task {
+            await store.restorePersistedSessionFromKeychainIfNeeded()
+        }
         .task(id: appLock.isUnlocked) {
+            if appLock.isUnlocked {
+                await store.restorePersistedSessionFromKeychainIfNeeded()
+            }
             guard appLock.isUnlocked else { return }
             await bootstrapIfNeeded()
         }

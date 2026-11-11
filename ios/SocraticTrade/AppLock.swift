@@ -58,6 +58,7 @@ final class AppLockController {
                 }
                 AppLockPreferences.isEnabled = true
                 isUnlocked = false
+                lastErrorMessage = nil
             } else {
                 AppLockPreferences.isEnabled = false
                 isUnlocked = true
@@ -78,11 +79,10 @@ final class AppLockController {
 
     init() {
         if AppLockPreferences.isEnabled {
-            if Self.deviceAuthenticationAvailable() {
-                isUnlocked = false
-            } else {
-                AppLockPreferences.isEnabled = false
-                isUnlocked = true
+            isUnlocked = false
+            if !Self.deviceAuthenticationAvailable() {
+                lastErrorMessage =
+                    "A device passcode or biometrics is required to use app lock.\u{00A0} Add one in Settings, then unlock."
             }
         } else {
             isUnlocked = true
@@ -116,6 +116,10 @@ final class AppLockController {
 
     func reportUnlockFailure(_ message: String) {
         lastErrorMessage = message
+    }
+
+    func dismissUnlockError() {
+        lastErrorMessage = nil
     }
 
     func disableBecauseAuthenticationUnavailable() {
@@ -192,6 +196,7 @@ struct AppLockView: View {
                     if nsError.code == LAError.userCancel.rawValue
                         || nsError.code == LAError.appCancel.rawValue
                         || nsError.code == LAError.systemCancel.rawValue {
+                        controller.dismissUnlockError()
                         return
                     }
                     refreshDeviceAuthenticationAvailability()

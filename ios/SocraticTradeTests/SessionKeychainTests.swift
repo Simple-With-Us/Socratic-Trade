@@ -78,11 +78,19 @@ final class SessionKeychainTests: XCTestCase {
         let storage = HTTPCookieStorage()
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
-            1
+            0
         )
         XCTAssertTrue(
             SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").isEmpty
         )
+    }
+
+    func testOwnsDomainRejectsBarePublicSuffixLabels() {
+        XCTAssertFalse(SessionCookiePersistence.ownsDomain("com", host: "socratictrade.com"))
+        XCTAssertFalse(SessionCookiePersistence.ownsDomain(".com", host: "api.socratictrade.com"))
+        XCTAssertTrue(SessionCookiePersistence.ownsDomain("socratictrade.com", host: "socratictrade.com"))
+        XCTAssertTrue(SessionCookiePersistence.ownsDomain(".socratictrade.com", host: "api.socratictrade.com"))
+        XCTAssertFalse(SessionCookiePersistence.ownsDomain("trade.com", host: "socratictrade.com"))
     }
 
     func testDomainScopedCookieStaysDomainScopedAfterArchiveRoundTrip() throws {
@@ -119,6 +127,93 @@ final class SessionKeychainTests: XCTestCase {
             SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
             1
         )
+    }
+
+    func testAuthSessionCookiesDoesNotTrustGlobalNamePathCollision() throws {
+        let storage = HTTPCookieStorage()
+        let origin = URL(string: "https://socratictrade.com/")!
+        let owned = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "owned-value")
+        storage.setCookies([owned], for: origin, mainDocumentURL: nil)
+
+        let collidingForeign = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "evil.example",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "foreign-value",
+            .secure: "TRUE",
+            .version: "0",
+        ]))
+        storage.setCookie(collidingForeign)
+
+        let matched = SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com")
+        XCTAssertEqual(matched.count, 1)
+        XCTAssertEqual(matched[0].value, "owned-value")
+        XCTAssertFalse(SessionCookiePersistence.ownsDomain(collidingForeign, host: "socratictrade.com"))
+    }
+
+    func testAuthSessionCookiesMergesLeadingDotDomainWithBareDomain() throws {
+        let storage = HTTPCookieStorage()
+        let dotted = try makeDomainScopedCookie(name: "__Secure-authjs.session-token", value: "dotted")
+        storage.setCookie(dotted)
+
+        let bareDomainCookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "socratictrade.com",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "bare",
+            .secure: "TRUE",
+            .version: "0",
+        ]))
+        storage.setCookie(bareDomainCookie)
+
+        let matched = SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com")
+        XCTAssertEqual(matched.count, 1)
+    }
+
+    func testOwnsCookieUsesSharedOriginURLHelper() throws {
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: "__Secure-authjs.session-token",
+            .value: "tok",
+            .path: "/",
+            .version: "0",
+            .secure: "TRUE",
+        ]
+        properties[.originURL] = "https://socratictrade.com/"
+        let cookie = try XCTUnwrap(HTTPCookie(properties: properties))
+        let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
+        XCTAssertTrue(client.ownsCookie(cookie))
+    }
+
+    func testInjectedSessionWithoutCookieStorageUsesOwnedJar() throws {
+        final class TrackingDelegate: NSObject, URLSessionDelegate {}
+        let delegate = TrackingDelegate()
+        var configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.timeoutIntervalForRequest = 77
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        let client = MobileAPIClient(
+            baseURL: URL(string: "https://socratictrade.com")!,
+            session: session
+        )
+        XCTAssert(client.sessionCookieJar === client.session.configuration.httpCookieStorage)
+        XCTAssertTrue(client.session.delegate === delegate)
+        XCTAssertEqual(client.session.configuration.timeoutIntervalForRequest, 77)
+        let origin = URL(string: "https://socratictrade.com/")!
+        let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "jar-test")
+        client.sessionCookieJar.setCookies([cookie], for: origin, mainDocumentURL: nil)
+        XCTAssertEqual(client.authSessionCookies().count, 1)
+    }
+
+    func testClearInMemorySessionLeavesCredentialStoreIntact() throws {
+        let credentialStore = InMemorySessionCredentialStore()
+        let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
+        let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
+        let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "keep")
+        try credentialStore.save(cookies: [SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")])
+        installInJar(cookie, storage: client.sessionCookieJar)
+        coordinator.clearInMemorySession(from: client)
+        XCTAssertEqual(try credentialStore.load()?.count, 1)
+        XCTAssertTrue(coordinator.sessionCookies(for: client).isEmpty)
     }
 
     func testAuthSessionCookiesTreatsStringOriginURLAsOwned() throws {
