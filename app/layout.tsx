@@ -7,6 +7,16 @@ import { GlobalErrorToasts } from "./ui/global-error-toasts";
 import { pwaUnregisterScript } from "@/lib/pwa-unregister";
 import { resolvePublicRumConfig } from "@/lib/datadog-env";
 import { DatadogRumBoot } from "./ui/datadog-rum-boot";
+import { readRequestCspNonce } from "@/lib/csp-nonce";
+
+// Nonce CSP is per request.  headers() inside readRequestCspNonce, plus this
+// export, opts every page under this layout into dynamic rendering.  A static
+// or ISR HTML body would freeze a nonce that the next request's CSP does not
+// match.  /welcome, /privacy-policy, and /terms-and-conditions used to
+// revalidate hourly (they had been stuck behind a year-long CDN cache).  They
+// now render per request so the nonce in the HTML matches the header.  See
+// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://socratictrade.com"),
@@ -65,14 +75,19 @@ export const viewport: Viewport = {
   themeColor: "#ffffff"
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
   // lato.variable puts --font-lato on <html>, so both globals.css (--font-sans) and console.css
   // (--con-font-lato) can resolve it — the console mounts deep inside <body>, not here.
+  // Theme bootstrap and the PWA kill-switch are the only inline scripts in this layout.
+  // Sentry and Datadog ship inside the Next bundle (nonced by the framework from the
+  // request CSP), not as extra <script> tags.  Cloudflare Web Analytics is not in
+  // this repo; an edge-injected beacon cannot receive this nonce.
+  const nonce = await readRequestCspNonce();
   return (
     <html lang="en" className={lato.variable} suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-        <script dangerouslySetInnerHTML={{ __html: pwaUnregisterScript }} />
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: pwaUnregisterScript }} />
       </head>
       <body>
         <ThemeProvider>

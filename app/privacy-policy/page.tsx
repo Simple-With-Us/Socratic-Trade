@@ -3,11 +3,11 @@ import { Card } from "../ui/primitives";
 import { BACKUP_RETENTION_SENTENCE } from "@/lib/legal-notice";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
-// The CDN-cached prerender (`s-maxage=31536000`) was leaving a deployed docs edit stale
-// for up to a year. A docs-only deploy can change the policy the consent gate links to
-// without invalidating the CDN copy. Background-revalidate hourly: the SSR-generated
-// HTML/CDN stamp refreshes; stale-while-revalidate keeps page-loads fast in between.
-export const revalidate = 3600;
+// Hourly ISR (revalidate = 3600) was removed for the nonce CSP.  This page used
+// to revalidate in the background so a year-long CDN copy could not freeze a
+// docs edit.  The root layout is force-dynamic, so the HTML is rendered per
+// request and the nonce matches the CSP header.  See
+// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
 
 export const metadata: Metadata = {
   title: "Privacy Policy",

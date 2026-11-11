@@ -1,3 +1,9 @@
+## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
+
+**What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout is dynamic so the nonce in the HTML matches the header.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` no longer use hourly ISR.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
+
+**Next.**  Watch `[csp-report]` after deploy.  Enforce only with `CSP_REPORT_ONLY=0` once those reports are clean.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.

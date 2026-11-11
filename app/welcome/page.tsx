@@ -4,10 +4,12 @@ import { Card } from "../ui/primitives";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 import { DecisionTraceIllustration } from "./decision-trace-illustration";
 import { landingPageEnabled } from "@/lib/landing-page";
+import { readRequestCspNonce } from "@/lib/csp-nonce";
 
-// Background-revalidate hourly: same fix as the legal pages — the CDN-cached prerender
-// was leaving a deployed docs edit stale for up to a year.
-export const revalidate = 3600;
+// Hourly ISR (revalidate = 3600) was removed for the nonce CSP.  A cached HTML
+// body cannot carry the nonce middleware mints on the next request.  The root
+// layout is force-dynamic for the same reason.  See
+// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
 
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
@@ -96,13 +98,15 @@ const STEPS: Array<{ n: number; title: string; detail: string }> = [
   }
 ];
 
-export default function WelcomePage() {
+export default async function WelcomePage() {
   if (!landingPageEnabled()) notFound();
+  const nonce = await readRequestCspNonce();
   return (
     <>
-      {/* JSON-LD structured data */}
+      {/* JSON-LD structured data.  type=ld+json is still a script element for CSP. */}
       <script
         type="application/ld+json"
+        nonce={nonce}
         dangerouslySetInnerHTML={{
           __html: JSON.stringify({
             "@context": "https://schema.org",
