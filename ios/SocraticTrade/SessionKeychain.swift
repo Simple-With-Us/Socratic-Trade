@@ -89,14 +89,37 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         return expiresAt <= date
     }
 
-    func makeHTTPCookie() -> HTTPCookie? {
+    func makeHTTPCookie(origin: URL? = nil) -> HTTPCookie? {
         guard !domain.isEmpty, !name.isEmpty, !value.isEmpty else { return nil }
+        let pathValue = path.isEmpty ? "/" : path
+        if let origin {
+            var setCookie = "\(name)=\(value); Domain=\(domain); Path=\(pathValue)"
+            if secure {
+                setCookie += "; Secure"
+            }
+            if httpOnly {
+                setCookie += "; HttpOnly"
+            }
+            if let expiresAt {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.timeZone = TimeZone(abbreviation: "GMT")
+                formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+                setCookie += "; Expires=\(formatter.string(from: expiresAt))"
+            }
+            if let parsed = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": setCookie], for: origin).first {
+                return parsed
+            }
+        }
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: name,
             .value: value,
             .domain: domain,
-            .path: path.isEmpty ? "/" : path,
+            .path: pathValue,
         ]
+        if let origin {
+            properties[.originURL] = origin
+        }
         if secure {
             properties[.secure] = "TRUE"
         }
@@ -261,10 +284,12 @@ enum SessionCookiePersistence {
         now: Date = Date()
     ) -> Int {
         clearAuthSessionCookies(in: storage, owningHost: host)
+        let origin = host.flatMap { URL(string: "https://\($0)/") }
         var applied = 0
         for archive in archives {
             if archive.isExpired(at: now) { continue }
-            guard let cookie = archive.makeHTTPCookie() else { continue }
+            let cookieOrigin = origin ?? URL(string: "https://\(archive.domain)/")
+            guard let cookie = archive.makeHTTPCookie(origin: cookieOrigin) else { continue }
             storage.setCookie(cookie)
             applied += 1
         }
@@ -357,6 +382,6 @@ struct SessionCookieCoordinator {
     }
 
     private func cookieStorage(for client: MobileAPIClient) -> HTTPCookieStorage {
-        client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        client.sessionCookieJar
     }
 }

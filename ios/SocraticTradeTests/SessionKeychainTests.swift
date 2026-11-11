@@ -87,11 +87,8 @@ final class SessionKeychainTests: XCTestCase {
     func testCoordinatorPersistAndRestore() throws {
         let credentialStore = InMemorySessionCredentialStore()
         let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
-        let client = MobileAPIClient(
-            baseURL: URL(string: "https://socratictrade.com")!,
-            session: MobileAPIClient.makeURLSession()
-        )
-        let storage = try XCTUnwrap(client.session.configuration.httpCookieStorage)
+        let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
+        let storage = client.sessionCookieJar
         let cookie = try makeCookie(name: "__Secure-authjs.session-token", value: "restored-value")
         storage.setCookie(cookie)
 
@@ -113,7 +110,7 @@ final class SessionKeychainTests: XCTestCase {
             baseURL: URL(string: "https://socratictrade.com")!,
             session: MobileAPIClient.makeURLSession()
         )
-        let isolated = try XCTUnwrap(client.session.configuration.httpCookieStorage)
+        let isolated = client.sessionCookieJar
         let legacyCookie = try makeCookie(name: "__Secure-authjs.session-token", value: "legacy")
         HTTPCookieStorage.shared.setCookie(legacyCookie)
 
@@ -136,11 +133,8 @@ final class SessionKeychainTests: XCTestCase {
     func testClearSessionRemovesKeychainAndJar() throws {
         let credentialStore = InMemorySessionCredentialStore()
         let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
-        let client = MobileAPIClient(
-            baseURL: URL(string: "https://socratictrade.com")!,
-            session: MobileAPIClient.makeURLSession()
-        )
-        let storage = try XCTUnwrap(client.session.configuration.httpCookieStorage)
+        let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
+        let storage = client.sessionCookieJar
         storage.setCookie(try makeCookie(name: "authjs.session-token", value: "gone"))
         try coordinator.persistSession(from: client)
         try coordinator.clearSession(from: client)
@@ -149,12 +143,14 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
-        try XCTUnwrap(HTTPCookie(properties: [
-            .domain: "socratictrade.com",
-            .path: "/",
-            .name: name,
-            .value: value,
-            .secure: "TRUE",
-        ]))
+        let origin = URL(string: "https://socratictrade.com/")!
+        try XCTUnwrap(
+            HTTPCookie.cookies(
+                withResponseHeaderFields: [
+                    "Set-Cookie": "\(name)=\(value); Domain=socratictrade.com; Path=/; Secure",
+                ],
+                for: origin
+            ).first
+        )
     }
 }

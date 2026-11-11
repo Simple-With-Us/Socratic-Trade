@@ -94,18 +94,31 @@ struct MobileAPIClient {
 
     let baseURL: URL
     var session: URLSession
+    /// Stable in-memory jar — do not read `session.configuration.httpCookieStorage` (configuration is a copy).
+    let sessionCookieJar: HTTPCookieStorage
 
-    init(baseURL: URL, session: URLSession = MobileAPIClient.makeURLSession()) {
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        cookieJar: HTTPCookieStorage? = nil
+    ) {
         self.baseURL = baseURL
-        self.session = session
+        if let session {
+            self.session = session
+            self.sessionCookieJar = cookieJar ?? session.configuration.httpCookieStorage ?? HTTPCookieStorage()
+        } else {
+            let jar = HTTPCookieStorage()
+            self.sessionCookieJar = jar
+            self.session = Self.makeURLSession(cookieJar: jar)
+        }
     }
 
     /// In-memory cookie storage only — the durable session lives in the Keychain via `SessionCookieCoordinator`.
-    static func makeURLSession() -> URLSession {
+    static func makeURLSession(cookieJar: HTTPCookieStorage = HTTPCookieStorage()) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = true
         configuration.httpCookieAcceptPolicy = .always
-        configuration.httpCookieStorage = HTTPCookieStorage()
+        configuration.httpCookieStorage = cookieJar
         return URLSession(configuration: configuration)
     }
 
@@ -426,8 +439,7 @@ struct MobileAPIClient {
     }
 
     func authSessionCookies() -> [HTTPCookie] {
-        let storage = session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
-        return SessionCookiePersistence.authSessionCookies(in: storage, owningHost: baseURL.host)
+        SessionCookiePersistence.authSessionCookies(in: sessionCookieJar, owningHost: baseURL.host)
     }
 
     private func request(path: String, method: String = "GET") -> URLRequest {
