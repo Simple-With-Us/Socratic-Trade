@@ -348,6 +348,13 @@ describe("GET /api/market/prices/[symbol]", () => {
     expect(await res.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
   });
 
+  it("does not map message-only lock text to 503 without a sqlite code", async () => {
+    mockFetchDailyOHLC.mockRejectedValue(new Error("provider said database is locked"));
+    await expect(pricesRoute(authedRequest(url, TEST_TOKEN), ctx)).rejects.toThrow(
+      "provider said database is locked"
+    );
+  });
+
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
     mockFetchDailyOHLC.mockResolvedValue(null);
     const res = await pricesRoute(authedRequest("http://localhost/api/market/prices/NOTREAL", TEST_TOKEN), {

@@ -4,7 +4,7 @@ import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import {
   bestEffortAudit,
-  isSqliteBusy,
+  isSqliteBusyErrorCode,
   peerReadRouteSqliteRetry,
   peerReadSqliteContentionResponse
 } from "@/lib/sqlite-peer-read";
@@ -29,7 +29,7 @@ export async function GET(req: Request) {
   try {
     read = await peerReadRouteSqliteRetry(() => fetchSpxCloses(parseMarketRange(req.url)));
   } catch (err) {
-    if (isSqliteBusy(err)) return peerReadSqliteContentionResponse();
+    if (isSqliteBusyErrorCode(err)) return peerReadSqliteContentionResponse();
     throw err;
   }
   switch (read.kind) {

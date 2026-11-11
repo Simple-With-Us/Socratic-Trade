@@ -75,13 +75,16 @@ describe("history-cache upsert transaction mode", () => {
       return wrapped;
     }) as never);
 
-    const { upsertHistoryCacheEod } = await import("../src/lib/history-cache");
-    upsertHistoryCacheEod("TESTSYM", [
-      { time: "2026-01-02", close: 10, open: 9, high: 11, low: 8, volume: 1000, source: "test" },
-      { time: "2026-01-03", close: 11, open: 10, high: 12, low: 9, volume: 1100, source: "test" }
-    ]);
-    expect(modes).toEqual(["immediate"]);
-    spy.mockRestore();
+    try {
+      const { upsertHistoryCacheEod } = await import("../src/lib/history-cache");
+      upsertHistoryCacheEod("TESTSYM", [
+        { time: "2026-01-02", close: 10, open: 9, high: 11, low: 8, volume: 1000, source: "test" },
+        { time: "2026-01-03", close: 11, open: 10, high: 12, low: 9, volume: 1100, source: "test" }
+      ]);
+      expect(modes).toEqual(["immediate"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -100,19 +103,50 @@ describe("fetchDailyOHLC congress-read best-effort writes", () => {
     ]);
 
     const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
-    const fulfillSpy = vi
-      .spyOn(await import("../src/lib/db-settings"), "fulfillMarketDataDemand")
-      .mockImplementation(() => {
+    const fulfillSpy = vi.spyOn(await import("../src/lib/db-settings"), "fulfillMarketDataDemand");
+
+    try {
+      fulfillSpy.mockImplementation(() => {
         throw busy;
       });
 
-    const { fetchDailyOHLC } = await import("../src/lib/history");
-    const bars = await fetchDailyOHLC("PEERBUSY", Date.now(), undefined, {
-      skipAppATier: true,
-      usageLabel: "congress-read"
-    });
-    expect(bars?.length).toBeGreaterThanOrEqual(2);
-    expect(bars?.at(-1)?.close).toBe(51);
-    fulfillSpy.mockRestore();
+      const { fetchDailyOHLC } = await import("../src/lib/history");
+      const bars = await fetchDailyOHLC("PEERBUSY", Date.now(), undefined, {
+        skipAppATier: true,
+        usageLabel: "congress-read"
+      });
+      expect(bars?.length).toBeGreaterThanOrEqual(2);
+      expect(bars?.at(-1)?.close).toBe(51);
+    } finally {
+      fulfillSpy.mockRestore();
+    }
+  });
+});
+
+describe("peer read sqlite helpers", () => {
+  it("isSqliteBusyErrorCode requires a sqlite busy/locked code", async () => {
+    const { isSqliteBusyErrorCode } = await import("../src/lib/sqlite-peer-read");
+    expect(isSqliteBusyErrorCode(new Error("database is locked"))).toBe(false);
+    expect(isSqliteBusyErrorCode(Object.assign(new Error("x"), { code: "SQLITE_BUSY" }))).toBe(true);
+    expect(isSqliteBusyErrorCode(Object.assign(new Error("x"), { code: "SQLITE_BUSY_SNAPSHOT" }))).toBe(true);
+  });
+
+  it("nested peerReadSqliteRetry shares one route deadline (no second 4s budget)", async () => {
+    const busy = Object.assign(new Error("busy"), { code: "SQLITE_BUSY" });
+    const { peerReadRouteSqliteRetry, peerReadSqliteRetry, PEER_READ_SQLITE_RETRY_BUDGET_MS } = await import(
+      "../src/lib/sqlite-peer-read"
+    );
+    const started = Date.now();
+    await expect(
+      peerReadRouteSqliteRetry(async () => {
+        await peerReadSqliteRetry(() => {
+          throw busy;
+        });
+        await peerReadSqliteRetry(() => {
+          throw busy;
+        });
+      })
+    ).rejects.toMatchObject({ code: "SQLITE_BUSY" });
+    expect(Date.now() - started).toBeLessThan(PEER_READ_SQLITE_RETRY_BUDGET_MS + 1500);
   });
 });

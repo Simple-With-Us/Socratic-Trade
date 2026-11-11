@@ -4,9 +4,9 @@ import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import {
   bestEffortAudit,
-  isSqliteBusy,
   peerReadRouteSqliteRetry,
-  peerReadSqliteContentionResponse
+  peerReadSqliteContentionResponse,
+  isSqliteBusyErrorCode
 } from "@/lib/sqlite-peer-read";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +35,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ symbol: 
   try {
     read = await peerReadRouteSqliteRetry(() => fetchPriceSeries(symbol, parseMarketRange(req.url)));
   } catch (err) {
-    if (isSqliteBusy(err)) return peerReadSqliteContentionResponse();
+    if (isSqliteBusyErrorCode(err)) return peerReadSqliteContentionResponse();
     throw err;
   }
   switch (read.kind) {

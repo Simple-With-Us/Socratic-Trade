@@ -206,13 +206,19 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     if (isSqliteBusy(error)) {
-      return NextResponse.json(
-        { ok: false, error: "database temporarily unavailable" },
-        {
-          status: 503,
-          headers: { "retry-after": String(PEER_READ_SQLITE_RETRY_AFTER_SECONDS) }
-        }
-      );
+      audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown", pushId });
+      const busyResponse = await finishPeerPush({
+        pushId,
+        at,
+        payloadHash,
+        delivered: null,
+        consumed: null,
+        status: 503,
+        store: true,
+        body: { ok: false, error: "database temporarily unavailable" }
+      });
+      busyResponse.headers.set("retry-after", String(PEER_READ_SQLITE_RETRY_AFTER_SECONDS));
+      return busyResponse;
     }
     audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown", pushId });
     return finishPeerPush({

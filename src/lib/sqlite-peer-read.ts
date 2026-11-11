@@ -9,6 +9,7 @@
 //   - Required reads: short yield-retry budget, then propagate SQLITE_BUSY to the route → 503 + Retry-After.
 //   - Best-effort writes on read paths: swallow SQLITE_BUSY; never fail the price envelope.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { NextResponse } from "next/server";
 import { audit } from "./db";
 import {
@@ -16,7 +17,6 @@ import {
   isSqliteBusy,
   sqliteYieldRetry
 } from "./sqlite-event-loop";
-import { yieldEventLoop } from "./slow-sync-guard";
 
 /** Lock-wait budget for congress.trade peer pulls (fail fast → 503 + Retry-After). */
 export const PEER_READ_SQLITE_RETRY_BUDGET_MS = 4_000;
@@ -25,6 +25,16 @@ export const PEER_READ_SQLITE_RETRY_BUDGET_MS = 4_000;
 export const PEER_READ_SQLITE_RETRY_AFTER_SECONDS = 2;
 
 export { isSqliteBusy };
+
+/** True only when better-sqlite3 (or our wrappers) stamped a SQLITE_BUSY / SQLITE_LOCKED code. */
+export function isSqliteBusyErrorCode(err: unknown): boolean {
+  if (err == null || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code !== "string" || code.length === 0) return false;
+  return code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED");
+}
+
+const peerReadSqliteDeadlineStore = new AsyncLocalStorage<number>();
 
 export function isPeerReadUsageLabel(usageLabel: string | undefined): boolean {
   return usageLabel === "congress-read";
@@ -35,20 +45,20 @@ export function isPeerReadUsageLabel(usageLabel: string | undefined): boolean {
  * Only use from async call sites (e.g. fetchDailyOHLC on the congress-read label).
  */
 export async function peerReadSqliteRetry<T>(fn: () => T): Promise<T> {
-  return sqliteYieldRetry(fn, PEER_READ_SQLITE_RETRY_BUDGET_MS);
+  const deadline =
+    peerReadSqliteDeadlineStore.getStore() ?? Date.now() + PEER_READ_SQLITE_RETRY_BUDGET_MS;
+  const budget = deadline - Date.now();
+  if (budget <= 0) return fn();
+  return sqliteYieldRetry(fn, budget);
 }
 
-/** For route handlers whose work includes awaited sqlite retries inside fetchDailyOHLC. */
+/**
+ * Establish a single 4s sqlite retry deadline for the whole peer route handler (including
+ * nested peerReadSqliteRetry slices inside fetchDailyOHLC).  Does not re-run the fetch on busy.
+ */
 export async function peerReadRouteSqliteRetry<T>(fn: () => Promise<T>): Promise<T> {
   const deadline = Date.now() + PEER_READ_SQLITE_RETRY_BUDGET_MS;
-  for (;;) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (!isSqliteBusy(err) || Date.now() >= deadline) throw err;
-      await yieldEventLoop();
-    }
-  }
+  return peerReadSqliteDeadlineStore.run(deadline, fn);
 }
 
 /** Swallow SQLITE_BUSY on optional persistence during a read path; rethrow everything else. */
