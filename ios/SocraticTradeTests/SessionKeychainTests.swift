@@ -56,6 +56,34 @@ final class SessionKeychainTests: XCTestCase {
         )
     }
 
+    func testForeignDomainCookieStaysForeignAfterArchiveRoundTrip() throws {
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "evil.example",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "foreign",
+            .secure: "TRUE",
+            .version: "0",
+        ]))
+        let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
+        XCTAssertFalse(archive.hostOnly)
+        XCTAssertEqual(archive.domain, "evil.example")
+
+        let appOrigin = URL(string: "https://socratictrade.com/")!
+        let restored = try XCTUnwrap(archive.makeHTTPCookie(origin: appOrigin))
+        XCTAssertEqual(restored.properties?[.domain] as? String, ".evil.example")
+        XCTAssertNil(restored.properties?[.originURL])
+
+        let storage = HTTPCookieStorage()
+        XCTAssertEqual(
+            SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
+            1
+        )
+        XCTAssertTrue(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").isEmpty
+        )
+    }
+
     func testDomainScopedCookieStaysDomainScopedAfterArchiveRoundTrip() throws {
         let origin = URL(string: "https://socratictrade.com/")!
         let cookie = try makeDomainScopedCookie(name: "__Secure-authjs.session-token.0", value: "chunk")
@@ -78,7 +106,10 @@ final class SessionKeychainTests: XCTestCase {
 
     func testApplyRestoresSecureAuthArchiveInJar() throws {
         let storage = HTTPCookieStorage()
-        let archive = SessionCookieArchive(cookie: try makeCookie(name: "__Secure-authjs.session-token", value: "tok"))
+        let archive = SessionCookieArchive(
+            cookie: try makeCookie(name: "__Secure-authjs.session-token", value: "tok"),
+            owningHost: "socratictrade.com"
+        )
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
             1
@@ -236,7 +267,7 @@ final class SessionKeychainTests: XCTestCase {
         host: String = "socratictrade.com"
     ) {
         let origin = URL(string: "https://\(host)/")!
-        storage.setCookie(cookie, for: origin)
+        storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {

@@ -158,26 +158,20 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         return owningHost?.lowercased() ?? cookieDomain
     }
 
-    /// Host-only cookies omit a leading-dot `Domain` attribute; domain cookies include it in stored properties.
+    /// Host-only when the cookie's domain exactly matches `owningHost` (no leading-dot `Domain` attribute).
     private static func inferHostOnly(cookie: HTTPCookie, owningHost: String?) -> Bool {
-        if cookie.properties?[.originURL] != nil {
-            return true
-        }
-        if let domainAttribute = cookie.properties?[.domain] as? String {
-            return !domainAttribute.hasPrefix(".")
+        guard let host = owningHost?.lowercased() else { return false }
+        if let domainAttribute = cookie.properties?[.domain] as? String, domainAttribute.hasPrefix(".") {
+            return false
         }
         if cookie.domain.hasPrefix(".") {
             return false
         }
-        if let host = owningHost?.lowercased() {
-            let normalized = cookie.domain
-                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-                .lowercased()
-            if normalized == host {
-                return true
-            }
-        }
-        return !cookie.domain.hasPrefix(".")
+        let normalized = cookie.domain
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return normalized == host
     }
 }
 
@@ -345,7 +339,7 @@ enum SessionCookiePersistence {
             let cookieOrigin = origin ?? URL(string: "https://\(archive.domain)/")
             guard let cookie = archive.makeHTTPCookie(origin: cookieOrigin) else { continue }
             if let cookieOrigin {
-                storage.setCookie(cookie, for: cookieOrigin)
+                storage.setCookies([cookie], for: cookieOrigin, mainDocumentURL: nil)
             } else {
                 storage.setCookie(cookie)
             }
