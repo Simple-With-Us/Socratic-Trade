@@ -35,6 +35,7 @@ npx vitest run test/rag-deadline-timeout-classification.test.ts test/strategy-ra
 ## Next Steps & Blockers
 
 - Open the PR against `main`.  Do not merge and do not enable auto-merge.  Jay merges after `verify` is green.
+- 2026-11-11: merged `origin/main` (`e4f7dcbf`, ST-2789 nonce CSP) into this branch.  Git auto-merged `PLAN.md` and `STATUS.md`.  No source file conflicted.  Both the RAG deadline notes and the CSP notes stay.  Blank lines were added so the CSP heading and the CSP plan note are not glued to the ST-4601 text.
 - GB-Trader already holds the Linear claim.  This seat did not take it.
 
 ## Zero-Code Findings
