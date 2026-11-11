@@ -121,19 +121,9 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     }
 
     private static func sameSitePolicyString(from cookie: HTTPCookie) -> String? {
-        if #available(iOS 13.0, *) {
-            switch cookie.sameSitePolicy {
-            case .lax:
-                return "Lax"
-            case .strict:
-                return "Strict"
-            case .none:
-                return "None"
-            @unknown default:
-                return nil
-            }
-        }
-        return nil
+        guard let policy = cookie.properties[.sameSitePolicy] as? String else { return nil }
+        let trimmed = policy.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func normalizedDomain(_ cookieDomain: String, owningHost: String?) -> String {
