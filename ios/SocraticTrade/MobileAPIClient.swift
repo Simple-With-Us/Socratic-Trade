@@ -89,11 +89,25 @@ struct SSEFrameAccumulator {
 struct MobileAPIClient {
     /// The one origin this app talks to.  Shared so the push coordinator (which cannot be
     /// handed the store's client) targets the same host — and therefore the same
-    /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
+    /// in-memory cookie jar — instead of a second hardcoded string that can drift.
     static let productionBaseURL = URL(string: "https://socratictrade.com")!
 
     let baseURL: URL
-    var session: URLSession = .shared
+    var session: URLSession
+
+    init(baseURL: URL, session: URLSession = MobileAPIClient.makeURLSession()) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    /// In-memory cookie storage only — the durable session lives in the Keychain via `SessionCookieCoordinator`.
+    static func makeURLSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpCookieStorage = HTTPCookieStorage()
+        return URLSession(configuration: configuration)
+    }
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
@@ -407,11 +421,13 @@ struct MobileAPIClient {
     }
 
     func ownsCookie(_ cookie: HTTPCookie) -> Bool {
-        guard let host = baseURL.host?.lowercased() else { return false }
-        let domain = cookie.domain
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        return host == domain || host.hasSuffix(".\(domain)")
+        guard let host = baseURL.host else { return false }
+        return SessionCookiePersistence.ownsDomain(cookie.domain, host: host)
+    }
+
+    func authSessionCookies() -> [HTTPCookie] {
+        let storage = session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        return SessionCookiePersistence.authSessionCookies(in: storage, owningHost: baseURL.host)
     }
 
     private func request(path: String, method: String = "GET") -> URLRequest {

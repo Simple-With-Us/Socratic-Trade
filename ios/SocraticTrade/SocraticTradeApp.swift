@@ -32,10 +32,13 @@ struct SocraticTradeApp: App {
         AppAppearance.applyFonts()
     }
 
+    @StateObject private var appLock = AppLockController()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environmentObject(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
                 // picker on this app yet — do not follow OS dark by default).
@@ -51,7 +54,10 @@ struct SocraticTradeApp: App {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: MobileStore
+    @EnvironmentObject private var appLock: AppLockController
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @State private var didRunBootstrap = false
 
     /// The splash's own floor, independent of the network. Without it a warm launch (cached
     /// session, snapshot back in ~200ms) shows the wordmark for a single frame, which reads as
@@ -122,8 +128,16 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
-        .task {
-            await bootstrap()
+        .overlay {
+            if appLock.requiresLockScreen {
+                AppLockView(controller: appLock)
+                    .transition(.opacity)
+                    .zIndex(2)
+            }
+        }
+        .task(id: appLock.isUnlocked) {
+            guard appLock.isUnlocked else { return }
+            await bootstrapIfNeeded()
         }
         .task {
             try? await Task.sleep(for: .seconds(1.2))
@@ -143,7 +157,10 @@ struct ContentView: View {
         }
     }
 
-    private func bootstrap() async {
+    private func bootstrapIfNeeded() async {
+        guard !didRunBootstrap else { return }
+        didRunBootstrap = true
+        PushNotificationCoordinator.shared.rebindAPIClient(store.client)
         PushNotificationCoordinator.shared.configure(
             route: { destination in pendingDeepLink = destination },
             isLiveStreamConnected: { store.isStreamConnected }
@@ -163,11 +180,18 @@ struct ContentView: View {
     private func handleScenePhase(_ phase: ScenePhase) {
         if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
-        case .active where store.isAuthenticated:
-            store.startEvents()
-            Task { await store.load() }
         case .background:
             store.stopEvents()
+            if appLock.isEnabled {
+                appLock.recordDidEnterBackground()
+            }
+        case .active:
+            appLock.evaluateForegroundEntry()
+            guard appLock.isUnlocked else { return }
+            if store.isAuthenticated {
+                store.startEvents()
+                Task { await store.load() }
+            }
         default:
             break
         }

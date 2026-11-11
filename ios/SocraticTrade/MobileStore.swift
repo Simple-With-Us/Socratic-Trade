@@ -463,6 +463,7 @@ final class MobileStore: ObservableObject {
     @Published private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
 
     let client: MobileAPIClient
+    private let sessionCookieCoordinator: SessionCookieCoordinator
     private var eventTask: Task<Void, Never>?
     private var reloadInFlight = false
     private var reloadPending = false
@@ -488,8 +489,16 @@ final class MobileStore: ObservableObject {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
-    init(client: MobileAPIClient, previewSnapshot: MobileSnapshot? = nil) {
+    init(
+        client: MobileAPIClient,
+        previewSnapshot: MobileSnapshot? = nil,
+        sessionCookieCoordinator: SessionCookieCoordinator = SessionCookieCoordinator()
+    ) {
         self.client = client
+        self.sessionCookieCoordinator = sessionCookieCoordinator
+        if previewSnapshot == nil {
+            try? sessionCookieCoordinator.prepareClientSession(client)
+        }
         let cached = previewSnapshot ?? Self.loadCachedSnapshot()
         snapshot = cached
         // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
@@ -767,6 +776,7 @@ final class MobileStore: ObservableObject {
             partialData = loadedSnapshot.partialData
             isAuthenticated = true
             error = nil
+            persistAuthSessionCookies()
             if let pendingAccountId,
                loadedSnapshot.connectedAccounts.contains(where: { $0.id == pendingAccountId && $0.isActive == true })
                 || loadedSnapshot.readiness.activeConnectedAccount?.id == pendingAccountId {
@@ -1090,6 +1100,7 @@ final class MobileStore: ObservableObject {
             error = nil
             await load()
             if isAuthenticated {
+                persistAuthSessionCookies()
                 startEvents()
                 await claimPushTokenForCurrentSession()
             }
@@ -1107,6 +1118,7 @@ final class MobileStore: ObservableObject {
             try await client.exchangeWebAuthCode(code, verifier: verifier)
             await load()
             if isAuthenticated {
+                persistAuthSessionCookies()
                 startEvents()
                 await claimPushTokenForCurrentSession()
             } else if error == nil {
@@ -1212,10 +1224,15 @@ final class MobileStore: ObservableObject {
     }
 
     private func clearSessionCookies() {
-        let cookieStorage = client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
-        for cookie in cookieStorage.cookies ?? [] where client.ownsCookie(cookie) {
-            cookieStorage.deleteCookie(cookie)
-        }
+        try? sessionCookieCoordinator.clearSession(from: client)
+    }
+
+    private func persistAuthSessionCookies() {
+        try? sessionCookieCoordinator.persistSession(from: client)
+    }
+
+    func authSessionCookiesForWebView() -> [HTTPCookie] {
+        sessionCookieCoordinator.sessionCookies(for: client)
     }
 
     /// UserDefaults snapshot plus every URL cache this client can read back.

@@ -109,6 +109,7 @@ struct AdminPortalView: View {
             } else {
                 AdminPortalWebView(
                     pageURL: page.pageURL,
+                    sessionCookies: store.authSessionCookiesForWebView(),
                     onSessionExpired: {
                         sessionExpired = true
                         isLoading = false
@@ -241,6 +242,7 @@ struct AdminPortalWebView: UIViewRepresentable {
     static let nativeMessageName = "socraticNative"
 
     var pageURL: URL
+    var sessionCookies: [HTTPCookie] = []
     let onSessionExpired: () -> Void
     var onFinished: () -> Void = {}
     var onFailed: (String) -> Void = { _ in }
@@ -278,13 +280,9 @@ struct AdminPortalWebView: UIViewRepresentable {
         context.coordinator.webView = webView
         context.coordinator.requestedURL = pageURL
 
-        // Copy the native session cookies (the app talks to the API over URLSession.shared,
-        // which persists into HTTPCookieStorage.shared) into the web view before first load.
+        // Copy the native Auth.js session cookies into the web view before first load.
         // Never wait forever on setCookie — a hung callback left the sheet blank.
         let cookieStore = configuration.websiteDataStore.httpCookieStore
-        let sessionCookies = (HTTPCookieStorage.shared.cookies ?? []).filter { cookie in
-            cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).hasSuffix(Self.allowedHost)
-        }
         let group = DispatchGroup()
         for cookie in sessionCookies {
             group.enter()
