@@ -1,3 +1,9 @@
+## 2026-11-11 [gb-trader] ST-4601 — RAG deadline is a timeout, not a provider outage
+
+**What.** A strategy-run retrieval deadline (`RAG_QUERY_IO_DEADLINE_MS`, 15s) was filed twice at error level: "RAG retrieval failed" (SOCRATIC-TRADE-2G) and "OpenRouter embed connection failed" with `failureClass` hard (SOCRATIC-TRADE-1X).  The same abort is now a warning timeout.  It does not count as a hard provider outage in api-health or RAG health, and the embed retry loop does not start another backoff after the caller aborts.  After the first deadline in a run, later symbols skip RAG and the run logs the skipped count once.  Empty-chunk continuation is unchanged.  The 15s budget is unchanged.  Order placement, sizing, prompts, and strategy settings are untouched.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+**Next.** PR is open against `main` and is not merged.  `verify` CI is the gate.  Jay merges.  Do not enable auto-merge.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.

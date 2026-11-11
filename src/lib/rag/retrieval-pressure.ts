@@ -8,6 +8,7 @@
 // during backoff get a null slot and degrade without another Sentry error.
 
 import { isAbortOrTimeoutError } from "../network-errors";
+import { isStrategyRagRetrievalTimeout } from "../rag-retrieval-deadline";
 
 export const DEFAULT_RAG_RETRIEVAL_CONCURRENCY = 4;
 export const DEFAULT_RAG_RETRIEVAL_BACKOFF_BASE_MS = 2_000;
@@ -66,6 +67,7 @@ export function retrievalBackoffEnabled(): boolean {
 }
 
 export function countsTowardRetrievalBackoff(error: unknown): boolean {
+  if (isStrategyRagRetrievalTimeout(error)) return true;
   if (isAbortOrTimeoutError(error)) return true;
   if (error instanceof Error && /timed out|timeout|deadline/i.test(error.message)) return true;
   return false;
