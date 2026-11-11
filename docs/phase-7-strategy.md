@@ -2,6 +2,11 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-11-11 Strategy RAG deadline is a timeout (ST-4601)
+
+The 15s strategy retrieval deadline stays.  A deadline abort is a caller timeout, not an OpenRouter or Qdrant connection failure.  Health rows use a caller-timeout mark and stay out of the hard STOPPED streak.  Sentry for that abort is a warning with its own fingerprint, so it does not join SOCRATIC-TRADE-1X or SOCRATIC-TRADE-2G.  The embed retry loop stops when the caller signal is already aborted.  After one deadline in a strategy run, later symbols skip retrieval and the run logs how many were skipped.  The timed-out symbol still continues with no chunks.  Do not raise `RAG_QUERY_IO_DEADLINE_MS`.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+
 ## 2026-10-15 Restart sweep stays off other instances' live runs (ST-8)
 
 PR #3138 closed every `strategy_runs` row that started before this process booted, on the first tick, on every process.  That marked a run another node had just adopted as `failed` and freed its request for a duplicate.  The restart arm now stays quiet for two minutes after boot (`RESTART_SWEEP_BOOT_GRACE_MS`).  A sweep with `reapUnowned` false only updates rows whose `owner_instance` is this process, so a follower cannot close the leader's runs.  The leader reaps other instances only after it holds the scheduler lease.  A pre-boot row whose `strategy_run_requests` row is still `running` and is not a restart retry is left for the drain to adopt.  A time-stale run this process owns is still swept at 30 minutes, including while its lock guard keeps renewing.  Rollout: `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.

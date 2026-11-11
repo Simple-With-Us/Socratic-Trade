@@ -70,12 +70,25 @@ function dependenciesWithoutOpsDetail(dependencies: HealthDependencies | undefin
 function stubCredits(totalCredits: number, totalUsage: number) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () =>
-      new Response(JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }), {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      })
-    )
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/key") && !url.includes("/keys")) {
+        return new Response(JSON.stringify({ data: { is_management_key: false } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.includes("/api/v1/keys")) {
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(
+        JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    })
   );
 }
 
@@ -94,6 +107,10 @@ describe("/api/health exposure", () => {
   beforeEach(async () => {
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    // Host shells may export OPENROUTER_ADMIN_KEY; force the inference path so these
+    // exposure tests stay hermetic and do not hit real OpenRouter or /keys pagination.
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     stubCredits(100, 40); // remaining $60, comfortably above the default $3 threshold
     await seed();
   });
@@ -102,6 +119,8 @@ describe("/api/health exposure", () => {
     vi.unstubAllGlobals();
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     const { db, credits } = await load();
     credits.__resetOpenRouterCreditCache();
     try {

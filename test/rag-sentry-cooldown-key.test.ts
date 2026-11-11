@@ -16,6 +16,22 @@ describe("ragSentryCooldownKey", () => {
     expect(ragSentryCooldownKey("error", "x", { lane: "rag-embed" })).not.toBe(embed);
   });
 
+  it("does not let a deadline fingerprint share the lane warning cooldown", () => {
+    const laneWarning = ragSentryCooldownKey("warning", "OpenRouter embed connection failed", {
+      lane: "rag-embed",
+      provider: "openrouter",
+      failureClass: "transient-network"
+    });
+    const deadline = ragSentryCooldownKey(
+      "warning",
+      "RAG retrieval timed out",
+      { lane: "rag-embed", provider: "openrouter", failureClass: "timeout" },
+      ["rag", "retrieval-timeout"]
+    );
+    expect(deadline).not.toBe(laneWarning);
+    expect(ragSentryCooldownKey("warning", "RAG retrieval timed out", { lane: "rag-embed" }, ["rag", "rag-embed"])).toBe(laneWarning);
+  });
+
   it("falls back to provider, then to the message (Sentry's own grouping) when no lane", () => {
     expect(ragSentryCooldownKey("warning", "a", { provider: "pinecone" })).toBe(ragSentryCooldownKey("warning", "b", { provider: "pinecone" }));
     expect(ragSentryCooldownKey("warning", "a", { operation: "query" })).not.toBe(ragSentryCooldownKey("warning", "b", { operation: "query" }));
