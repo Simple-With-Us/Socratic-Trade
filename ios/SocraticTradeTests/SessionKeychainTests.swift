@@ -34,6 +34,23 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertEqual(applied, 0)
     }
 
+    func testMakeHTTPCookieOmitsInvalidSameSiteValue() throws {
+        let origin = URL(string: "https://socratictrade.com/")!
+        let archive = SessionCookieArchive(
+            name: "__Secure-authjs.session-token",
+            value: "token",
+            domain: "socratictrade.com",
+            path: "/",
+            secure: true,
+            httpOnly: false,
+            sameSite: "TotallyInvalid",
+            expiresAt: nil
+        )
+        let cookie = try XCTUnwrap(archive.makeHTTPCookie(origin: origin))
+        XCTAssertEqual(cookie.value, "token")
+        XCTAssertNil(cookie.properties?[.sameSitePolicy])
+    }
+
     func testMakeHTTPCookiePreservesDelimiterCharactersInValue() throws {
         let trickyValue = "a;b,c=d;e=f"
         let origin = URL(string: "https://socratictrade.com/")!

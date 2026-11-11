@@ -114,16 +114,29 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         if let expiresAt {
             properties[.expires] = expiresAt
         }
-        if let sameSite {
-            properties[.sameSitePolicy] = sameSite
+        if let normalizedSameSite = Self.normalizedSameSitePolicy(sameSite) {
+            properties[.sameSitePolicy] = normalizedSameSite
         }
         return HTTPCookie(properties: properties)
     }
 
     private static func sameSitePolicyString(from cookie: HTTPCookie) -> String? {
-        guard let policy = cookie.properties?[.sameSitePolicy] as? String else { return nil }
-        let trimmed = policy.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        normalizedSameSitePolicy(cookie.properties?[.sameSitePolicy] as? String)
+    }
+
+    /// Foundation accepts only `Lax`, `Strict`, or `None` for `.sameSitePolicy`; omit on mismatch.
+    private static func normalizedSameSitePolicy(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        switch raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased() {
+        case "lax":
+            return "Lax"
+        case "strict":
+            return "Strict"
+        case "none":
+            return "None"
+        default:
+            return nil
+        }
     }
 
     private static func normalizedDomain(_ cookieDomain: String, owningHost: String?) -> String {
