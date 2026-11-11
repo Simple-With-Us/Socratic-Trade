@@ -37,7 +37,7 @@ The preview is a ranked copy of the seed, not a second full finalize, so stale p
 
 ## Verification State
 
-`npx tsc --noEmit` exited 0.
+`NODE_OPTIONS=--max-old-space-size=4096 npm run build` exited 0.  The first `npm run build` aborted at the default heap limit (exit 134) before typecheck of the pages.  `npx tsc --noEmit` exited 0.
 
 `npm run lint` exited 0 (0 errors, 867 grandfathered warnings).
 
