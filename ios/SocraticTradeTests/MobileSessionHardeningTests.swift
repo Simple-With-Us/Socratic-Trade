@@ -19,7 +19,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertFalse(issuedDigest.contains(MobileAuthNonce.legacyCompat))
     }
 
-    func testWebAuthStartCarriesThePreparedNonceAndRefusesLegacyCompat() {
+    func testWebAuthStartCarriesThePreparedNonceAndRefusesLegacyCompat() throws {
         let challenge = String(repeating: "a", count: 43)
         XCTAssertNil(
             MobileWebAuthStart.callbackURL(
