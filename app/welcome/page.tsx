@@ -4,12 +4,11 @@ import { Card } from "../ui/primitives";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 import { DecisionTraceIllustration } from "./decision-trace-illustration";
 import { landingPageEnabled } from "@/lib/landing-page";
-import { readRequestCspNonce } from "@/lib/csp-nonce";
 
-// Hourly ISR (revalidate = 3600) was removed for the nonce CSP.  A cached HTML
-// body cannot carry the nonce middleware mints on the next request.  The root
-// layout is force-dynamic for the same reason.  See
-// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
+// Hourly ISR.  This page does not read a per-request nonce.  Middleware serves a
+// hash CSP stamped from the prerendered HTML, which can be cached with the body.
+// See docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
+export const revalidate = 3600;
 
 export const metadata: Metadata = {
   title: { absolute: "Socratic Trade" },
@@ -98,15 +97,14 @@ const STEPS: Array<{ n: number; title: string; detail: string }> = [
   }
 ];
 
-export default async function WelcomePage() {
+export default function WelcomePage() {
   if (!landingPageEnabled()) notFound();
-  const nonce = await readRequestCspNonce();
   return (
     <>
-      {/* JSON-LD structured data.  type=ld+json is still a script element for CSP. */}
+      {/* JSON-LD structured data.  type=ld+json is still a script element for CSP.
+          The static-page hash list covers this body.  A nonce here would opt the page into dynamic rendering. */}
       <script
         type="application/ld+json"
-        nonce={nonce}
         dangerouslySetInnerHTML={{
           __html: JSON.stringify({
             "@context": "https://schema.org",

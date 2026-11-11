@@ -3,11 +3,10 @@ import { Card } from "../ui/primitives";
 import { BACKUP_RETENTION_SENTENCE } from "@/lib/legal-notice";
 import { PublicShell, PUBLIC_HEADER_ACTION_CLASS } from "../ui/public/public-shell";
 
-// Hourly ISR (revalidate = 3600) was removed for the nonce CSP.  This page used
-// to revalidate in the background so a year-long CDN copy could not freeze a
-// docs edit.  The root layout is force-dynamic, so the HTML is rendered per
-// request and the nonce matches the CSP header.  See
-// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
+// Background-revalidate hourly so a year-long CDN copy cannot freeze a docs edit.
+// This page has no per-request nonce.  Its CSP is the hash list stamped from the
+// prerendered HTML.  See docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
+export const revalidate = 3600;
 
 export const metadata: Metadata = {
   title: "Privacy Policy",

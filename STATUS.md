@@ -1,6 +1,6 @@
 ## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
 
-**What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout is dynamic so the nonce in the HTML matches the header.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` no longer use hourly ISR.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
+**What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout stays cacheable.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` keep hourly ISR under a hash CSP stamped from that build's HTML.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
 
 **Next.**  Watch `[csp-report]` after deploy.  Enforce only with `CSP_REPORT_ONLY=0` once those reports are clean.
 

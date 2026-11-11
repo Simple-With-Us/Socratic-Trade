@@ -7,16 +7,13 @@ import { GlobalErrorToasts } from "./ui/global-error-toasts";
 import { pwaUnregisterScript } from "@/lib/pwa-unregister";
 import { resolvePublicRumConfig } from "@/lib/datadog-env";
 import { DatadogRumBoot } from "./ui/datadog-rum-boot";
-import { readRequestCspNonce } from "@/lib/csp-nonce";
 
-// Nonce CSP is per request.  headers() inside readRequestCspNonce, plus this
-// export, opts every page under this layout into dynamic rendering.  A static
-// or ISR HTML body would freeze a nonce that the next request's CSP does not
-// match.  /welcome, /privacy-policy, and /terms-and-conditions used to
-// revalidate hourly (they had been stuck behind a year-long CDN cache).  They
-// now render per request so the nonce in the HTML matches the header.  See
+// This layout does not read headers() and does not force dynamic rendering.
+// The theme and PWA scripts below are constant, so the nonce policy allows them
+// by sha256 (LAYOUT_SCRIPT_HASHES).  /welcome, /privacy-policy, and
+// /terms-and-conditions keep hourly ISR.  Their full inline-script hashes are
+// stamped into the middleware bundle from that build's HTML.  See
 // docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
-export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://socratictrade.com"),
@@ -75,19 +72,19 @@ export const viewport: Viewport = {
   themeColor: "#ffffff"
 };
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   // lato.variable puts --font-lato on <html>, so both globals.css (--font-sans) and console.css
   // (--con-font-lato) can resolve it — the console mounts deep inside <body>, not here.
   // Theme bootstrap and the PWA kill-switch are the only inline scripts in this layout.
-  // Sentry and Datadog ship inside the Next bundle (nonced by the framework from the
-  // request CSP), not as extra <script> tags.  Cloudflare Web Analytics is not in
-  // this repo; an edge-injected beacon cannot receive this nonce.
-  const nonce = await readRequestCspNonce();
+  // They are allowed by sha256, not by a per-request nonce, so this shell can stay static.
+  // Sentry and Datadog ship inside the Next bundle.  On dynamic routes Next nonces those
+  // scripts from the request CSP.  Cloudflare Web Analytics is not in this repo; an
+  // edge-injected beacon cannot receive a nonce or one of these hashes.
   return (
     <html lang="en" className={lato.variable} suppressHydrationWarning>
       <head>
-        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: pwaUnregisterScript }} />
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        <script dangerouslySetInnerHTML={{ __html: pwaUnregisterScript }} />
       </head>
       <body>
         <ThemeProvider>

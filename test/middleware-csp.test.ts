@@ -3,12 +3,17 @@
 // CSP stays off unless CSP_ENABLED is truthy, and report-only unless CSP_REPORT_ONLY
 // is explicitly falsy.  The default script-src is nonce + strict-dynamic.  CSP_POLICY
 // still replaces that string entirely.
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NextRequest, NextResponse } from "next/server";
 import { middleware, withSecurityHeaders } from "../middleware";
+import { themeInitScript } from "../app/ui/theme";
+import { pwaUnregisterScript } from "../src/lib/pwa-unregister";
+import { LAYOUT_SCRIPT_HASHES, resolveCspDecision } from "../src/lib/csp-policy";
+import { inlineScriptHashes } from "../scripts/csp-html-hashes.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -79,7 +84,10 @@ describe("ST-2789 nonce CSP", () => {
     const nonce = nonceOf(policy);
     expect(again.headers.get("x-middleware-request-x-nonce")).toBe(nonce);
     expect(again.headers.get("x-middleware-request-content-security-policy")).toContain(`'nonce-${nonce}'`);
-    expect(directive(policy, "script-src")).toBe(`script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`);
+    const layoutHashes = LAYOUT_SCRIPT_HASHES.map((hash) => `'${hash}'`).join(" ");
+    expect(directive(policy, "script-src")).toBe(
+      `script-src 'self' 'nonce-${nonce}' ${layoutHashes} 'strict-dynamic'`
+    );
     expect(directive(policy, "script-src")).not.toContain("unsafe-eval");
     expect(directive(policy, "script-src")).not.toContain("unsafe-inline");
     expect(directive(policy, "style-src")).toBe("style-src 'self' 'unsafe-inline'");
@@ -142,6 +150,43 @@ describe("ST-2789 nonce CSP", () => {
     expect(directive(first.headers.get("Content-Security-Policy-Report-Only") ?? "", "script-src")).not.toContain("unsafe-eval");
   });
 
+  it("keeps welcome, privacy, and terms report-only until the build stamps hashes", async () => {
+    vi.stubEnv("CSP_ENABLED", "1");
+    vi.stubEnv("CSP_REPORT_ONLY", "0");
+    vi.stubEnv("NODE_ENV", "production");
+    for (const path of ["/welcome", "/privacy-policy", "/terms-and-conditions"]) {
+      const res = await middleware(new NextRequest(`https://socratictrade.com${path}`));
+      const got = browserCsp(res);
+      expect(got.name, path).toBe("Content-Security-Policy-Report-Only");
+      expect(res.headers.get("Content-Security-Policy"), path).toBeNull();
+      expect(directive(got.policy, "script-src"), path).toBe("script-src 'self' 'unsafe-inline'");
+      expect(got.policy, path).not.toContain("strict-dynamic");
+      expect(res.headers.get("x-middleware-request-x-nonce"), path).toBeNull();
+    }
+  });
+
+  it("enforces a hash policy for a stamped static route and does not forward a nonce", () => {
+    const decision = resolveCspDecision(
+      "/privacy-policy",
+      "unusednonceunusednonce00==",
+      { NODE_ENV: "production", CSP_REPORT_ONLY: "0" },
+      JSON.stringify({ "/privacy-policy": ["sha256-abc"] })
+    );
+    expect(decision.forwardNonce).toBe(false);
+    expect(decision.headerName).toBe("Content-Security-Policy");
+    expect(directive(decision.policy, "script-src")).toBe("script-src 'self' 'sha256-abc'");
+    expect(directive(decision.policy, "script-src")).not.toContain("strict-dynamic");
+    expect(directive(decision.policy, "script-src")).not.toContain("unsafe-inline");
+    expect(directive(decision.policy, "style-src")).toBe("style-src 'self' 'unsafe-inline'");
+  });
+
+  it("hashes the layout scripts and decodes inline HTML before hashing", () => {
+    const sha = (text: string) => `sha256-${createHash("sha256").update(text).digest("base64")}`;
+    expect(LAYOUT_SCRIPT_HASHES).toEqual([sha(themeInitScript), sha(pwaUnregisterScript)]);
+    const html = '<script src="/app.js"></script><script>hello&amp;world</script><script>hello&amp;world</script>';
+    expect(inlineScriptHashes(html)).toEqual([sha("hello&world")]);
+  });
+
   it("covers every inline script and next/script under app/", () => {
     const files = walk(join(ROOT, "app"));
     const inline = files.filter((file) => /<script[\s>]/.test(readFileSync(file, "utf8")));
@@ -149,16 +194,17 @@ describe("ST-2789 nonce CSP", () => {
       "app/layout.tsx",
       "app/welcome/page.tsx"
     ]);
-    for (const file of inline) {
-      const text = readFileSync(file, "utf8");
-      expect(text, file).toContain("readRequestCspNonce");
-      expect(text, file).toContain("nonce={nonce}");
-    }
     const scriptImports = files.filter((file) => /from ["']next\/script["']/.test(readFileSync(file, "utf8")));
     expect(scriptImports).toEqual([]);
+    const layout = readFileSync(join(ROOT, "app/layout.tsx"), "utf8");
+    expect(layout).not.toContain("readRequestCspNonce");
+    expect(layout).not.toContain('export const dynamic = "force-dynamic"');
+    expect(layout).toContain("themeInitScript");
+    expect(layout).toContain("pwaUnregisterScript");
     for (const page of ["app/welcome/page.tsx", "app/privacy-policy/page.tsx", "app/terms-and-conditions/page.tsx"]) {
-      expect(readFileSync(join(ROOT, page), "utf8")).not.toContain("export const revalidate");
+      const text = readFileSync(join(ROOT, page), "utf8");
+      expect(text, page).toContain("export const revalidate = 3600");
+      expect(text, page).not.toContain("readRequestCspNonce");
     }
-    expect(readFileSync(join(ROOT, "app/layout.tsx"), "utf8")).toContain('export const dynamic = "force-dynamic"');
   });
 });

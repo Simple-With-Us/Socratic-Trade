@@ -40,7 +40,7 @@ export function listDormantFeatureStatus(env: EnvSource = process.env): DormantF
       enabled: flagOn("CSP_ENABLED", false, env),
       readyToEnable: true,
       defaultWhenUnset: "off",
-      note: "Safe as report-only (CSP_REPORT_ONLY unset/on).  The default policy is a per-request nonce plus strict-dynamic (no script unsafe-inline or unsafe-eval).  Reports POST to /api/csp-report.  Do not set CSP_REPORT_ONLY=off until telemetry is clean."
+      note: "Safe as report-only (CSP_REPORT_ONLY unset/on).  Dynamic routes use a per-request nonce plus strict-dynamic.  Welcome and the legal pages keep hourly ISR under a build-stamped hash policy.  Reports POST to /api/csp-report.  Do not set CSP_REPORT_ONLY=off until telemetry is clean."
     },
     {
       id: "usage-budget-enforce",
