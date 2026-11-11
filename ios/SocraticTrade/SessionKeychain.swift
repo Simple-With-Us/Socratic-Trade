@@ -102,7 +102,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
             .domain: domain,
             .path: pathValue,
         ]
-        if let origin {
+        if let origin, domain.isEmpty {
             properties[.originURL] = origin
         }
         if secure {

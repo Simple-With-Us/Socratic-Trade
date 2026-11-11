@@ -182,15 +182,12 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
-        let origin = URL(string: "https://socratictrade.com/")!
-        let properties: [HTTPCookiePropertyKey: Any] = [
+        return try XCTUnwrap(HTTPCookie(properties: [
             .domain: "socratictrade.com",
             .path: "/",
             .name: name,
             .value: value,
             .secure: "TRUE",
-            .originURL: origin,
-        ]
-        return try XCTUnwrap(HTTPCookie(properties: properties))
+        ]))
     }
 }
