@@ -16,6 +16,7 @@ final class SessionKeychainTests: XCTestCase {
         let origin = URL(string: "https://socratictrade.com/")!
         let cookie = try XCTUnwrap(HTTPCookie(properties: [
             .originURL: origin,
+            .domain: "socratictrade.com",
             .path: "/",
             .name: "__Secure-authjs.session-token",
             .value: "stale",
@@ -23,7 +24,7 @@ final class SessionKeychainTests: XCTestCase {
             .expires: past,
             .version: "0",
         ]))
-        let archive = SessionCookieArchive(cookie: cookie)
+        let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
         XCTAssertEqual(archive.expiresAt, past)
         let storage = HTTPCookieStorage()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -277,6 +278,7 @@ final class SessionKeychainTests: XCTestCase {
     private func makeHostOnlyCookie(name: String, value: String) throws -> HTTPCookie {
         try XCTUnwrap(HTTPCookie(properties: [
             .originURL: URL(string: "https://socratictrade.com/")!,
+            .domain: "socratictrade.com",
             .path: "/",
             .name: name,
             .value: value,
