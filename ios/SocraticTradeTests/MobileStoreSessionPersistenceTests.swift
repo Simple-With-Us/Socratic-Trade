@@ -57,6 +57,35 @@ final class MobileStoreSessionPersistenceTests: XCTestCase {
         func delete() throws {}
     }
 
+    private final class CountingDelayedLoadCredentialStore: SessionCredentialStoring, @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var prepareClientSessionLoadCount = 0
+
+        func save(cookies: [SessionCookieArchive]) throws {}
+
+        func load() throws -> [SessionCookieArchive]? {
+            lock.lock()
+            prepareClientSessionLoadCount += 1
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.08)
+            return nil
+        }
+
+        func delete() throws {}
+    }
+
+    @MainActor
+    func testConcurrentRestoreCallersShareOneRestoreTask() async {
+        let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)
+        let credentialStore = CountingDelayedLoadCredentialStore()
+        let coordinator = SessionCookieCoordinator(credentialStore: credentialStore)
+        let store = MobileStore(client: client, sessionCookieCoordinator: coordinator)
+        async let ensure = store.ensurePersistedSessionRestoredBeforeAuthenticatedRequests()
+        async let restore = store.restorePersistedSessionFromKeychainIfNeeded()
+        await (ensure, restore)
+        XCTAssertEqual(credentialStore.prepareClientSessionLoadCount, 1)
+    }
+
     @MainActor
     func testLoadAwaitKeychainRestoreBeforeAuthenticatedRequests() async {
         let client = MobileAPIClient(baseURL: URL(string: "https://socratictrade.com")!)

@@ -9,7 +9,21 @@ final class AppLiveSessionResumeTests: XCTestCase {
 
         await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
 
-        XCTAssertEqual(store.callOrder, ["load"])
+        XCTAssertEqual(store.callOrder, ["stopEvents", "load"])
+    }
+
+    func testResumeSkipsStartEventsWhenGateClosesAfterLoad() async {
+        let store = LiveSessionResumeTestDouble()
+        store.isAuthenticated = true
+        store.remainAuthenticatedAfterLoad = true
+
+        await AppLiveSessionResume.resumeLiveSession(
+            store: store,
+            isScreenshotMode: false,
+            shouldStartEvents: { false }
+        )
+
+        XCTAssertEqual(store.callOrder, ["stopEvents", "load"])
     }
 
     func testResumeStartsEventsOnlyAfterSuccessfulLoad() async {
@@ -19,7 +33,7 @@ final class AppLiveSessionResumeTests: XCTestCase {
 
         await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
 
-        XCTAssertEqual(store.callOrder, ["load", "startEvents"])
+        XCTAssertEqual(store.callOrder, ["stopEvents", "load", "startEvents"])
     }
 }
 
@@ -36,5 +50,9 @@ private final class LiveSessionResumeTestDouble: LiveSessionResuming {
 
     func startEvents() {
         callOrder.append("startEvents")
+    }
+
+    func stopEvents() {
+        callOrder.append("stopEvents")
     }
 }

@@ -69,6 +69,8 @@ struct ContentView: View {
     /// destination as soon as it is set, so the right screen is already showing when
     /// authentication completes.
     @State private var pendingDeepLink: DeepLinkDestination?
+    @State private var foregroundResumeTask: Task<Void, Never>?
+    @State private var scenePhaseResumeGate = ScenePhaseResumeGate()
 
     var body: some View {
         ZStack {
@@ -103,6 +105,11 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
+        .onChange(of: store.isAuthenticated) { _, authenticated in
+            if !authenticated {
+                store.stopEvents()
+            }
+        }
         .task {
             await store.restorePersistedSessionFromKeychainIfNeeded()
             await bootstrapIfNeeded()
@@ -112,6 +119,7 @@ struct ContentView: View {
             minimumSplashElapsed = true
         }
         .onChange(of: scenePhase) { _, phase in
+            scenePhaseResumeGate.phase = phase
             handleScenePhase(phase)
         }
         .onOpenURL { url in
@@ -152,11 +160,22 @@ struct ContentView: View {
         if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
         case .background:
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = nil
             store.stopEvents()
-        case .active where store.isAuthenticated:
-            store.startEvents()
-            Task { await store.load() }
-        default:
+        case .inactive:
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = nil
+        case .active:
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = Task { @MainActor in
+                await AppForegroundResume.resumeAfterBecomingActive(
+                    store: store,
+                    isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+                    shouldContinue: { scenePhaseResumeGate.shouldContinueResume() }
+                )
+            }
+        @unknown default:
             break
         }
     }

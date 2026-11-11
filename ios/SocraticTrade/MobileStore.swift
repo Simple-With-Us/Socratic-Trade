@@ -440,6 +440,7 @@ final class MobileStore: ObservableObject {
     @Published private(set) var isRestoringPersistedSession = false
     private var didAttemptPersistedSessionRestore = false
     private var persistedSessionRestoreAwaitingRetry = false
+    private var persistedSessionRestoreTask: Task<Void, Never>?
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var isStreamConnected = false
@@ -533,16 +534,30 @@ final class MobileStore: ObservableObject {
 
     /// Blocks authenticated network work until the in-flight Keychain restore finishes, or runs restore once if needed.
     func ensurePersistedSessionRestoredBeforeAuthenticatedRequests() async {
-        while isRestoringPersistedSession {
-            await Task.yield()
-        }
-        if !didAttemptPersistedSessionRestore {
-            await restorePersistedSessionFromKeychainIfNeeded()
-        }
+        await persistedSessionRestoreTaskEnsured().value
     }
 
     /// Restores Keychain session archives into the client's cookie jar without blocking launch.
     func restorePersistedSessionFromKeychainIfNeeded() async {
+        await persistedSessionRestoreTaskEnsured().value
+    }
+
+    private func persistedSessionRestoreTaskEnsured() -> Task<Void, Never> {
+        if let task = persistedSessionRestoreTask {
+            return task
+        }
+        guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else {
+            return Task {}
+        }
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runPersistedSessionRestoreIfNeeded()
+        }
+        persistedSessionRestoreTask = task
+        return task
+    }
+
+    private func runPersistedSessionRestoreIfNeeded() async {
         guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else { return }
         didAttemptPersistedSessionRestore = true
         persistedSessionRestoreAwaitingRetry = false
@@ -583,6 +598,7 @@ final class MobileStore: ObservableObject {
                 isAuthenticated = false
                 didAttemptPersistedSessionRestore = false
                 persistedSessionRestoreAwaitingRetry = true
+                persistedSessionRestoreTask = nil
                 return
             }
             if credentialError.shouldDeletePersistedCredentialsOnRestoreFailure {
