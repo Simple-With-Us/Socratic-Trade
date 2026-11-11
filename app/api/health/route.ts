@@ -1,4 +1,11 @@
-import { databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning, clearLivenessWarning } from "@/lib/db";
+import {
+  databasePath,
+  resolveApiKeyWithSource,
+  alertStorageWarning,
+  alertLivenessWarning,
+  clearLivenessWarning
+} from "@/lib/db";
+import { reconcileLivenessAccountEpisodes } from "@/lib/db-health";
 import { connectionHealthFailureClass, isHardStoppedHealthSummary } from "@/lib/db-health";
 import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
@@ -231,6 +238,13 @@ async function assembleHealth(): Promise<HealthPayload> {
     checks.tradingLiveness = publicLiveness;
     checks.tradingLivenessDegraded = publicLiveness.degraded > 0;
     
+    const degradedAccounts = (liveness?.accounts ?? []).filter((a) => a.degraded);
+    const degradedAccountKeys = degradedAccounts.map(
+      (a) => `${a.userId}:${a.connectedAccountId}`
+    );
+    if (liveness) {
+      void reconcileLivenessAccountEpisodes("trading_liveness_degraded", degradedAccountKeys);
+    }
     if (checks.tradingLivenessDegraded) {
       // A fully-dark fleet has no active accounts to count, so the generic message would page
       // "1 active account(s)" while zero are active — say what is actually wrong instead.
@@ -241,8 +255,7 @@ async function assembleHealth(): Promise<HealthPayload> {
       // The alert/Sentry message carries the WHY (label, reasons, newest failed
       // run summary) from the full summary. This never enters the public payload
       // above, which stays identity-free.
-      const degradedDetail = (liveness?.accounts ?? [])
-        .filter((a) => a.degraded)
+      const degradedDetail = degradedAccounts
         .slice(0, 3)
         .map((a) => {
           const reasons = a.degradedReasons.join(", ") || "degraded";
@@ -255,7 +268,12 @@ async function assembleHealth(): Promise<HealthPayload> {
       const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
         : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
-      void alertLivenessWarning("trading_liveness_degraded", livenessMessage);
+      void alertLivenessWarning("trading_liveness_degraded", livenessMessage, {
+        accounts: degradedAccounts.map((a) => ({
+          accountKey: `${a.userId}:${a.connectedAccountId}`,
+          accountLabel: a.label
+        }))
+      });
     } else if (liveness) {
       // Recovery: reset the escalation episode clock.  Only a real healthy
       // result counts: null means no active accounts or an unreadable
