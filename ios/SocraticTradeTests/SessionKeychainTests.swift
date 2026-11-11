@@ -183,7 +183,7 @@ final class SessionKeychainTests: XCTestCase {
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
         let origin = URL(string: "https://socratictrade.com/")!
-        try XCTUnwrap(
+        return try XCTUnwrap(
             HTTPCookie.cookies(
                 withResponseHeaderFields: [
                     "Set-Cookie": "\(name)=\(value); Domain=socratictrade.com; Path=/; Secure",
