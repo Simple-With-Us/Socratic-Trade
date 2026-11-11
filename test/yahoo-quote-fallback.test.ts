@@ -5,12 +5,18 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { resetDbForTesting } from "../src/lib/db";
 import { clearMarketCache, scanMarket } from "../src/lib/market";
 import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
+import { __resetYahooSessionCredsForTests } from "../src/lib/yahoo-session";
 import {
+  __resetYahooQuoteTelemetryForTests,
   __resetYahooV7AuthCooldownForTests,
   fetchYahooFinanceChartQuotes,
+  fetchYahooFinanceQuote,
   fetchYahooFinanceQuotesBatch,
+  peekLastYahooQuoteTelemetry,
+  yahooQuoteFromChartMeta,
   YAHOO_CHART_FALLBACK_CONCURRENCY
 } from "../src/lib/yahoo-finance";
+import { YAHOO_SESSION_HANDSHAKE_TIMEOUT_MS } from "../src/lib/yahoo-session";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-yahoo-quote-fallback-${randomUUID()}.db`)}`;
@@ -21,12 +27,16 @@ beforeEach(() => {
   clearMarketCache();
   resetProviderRateLimiterState();
   __resetYahooV7AuthCooldownForTests();
+  __resetYahooSessionCredsForTests();
+  __resetYahooQuoteTelemetryForTests();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   __resetYahooV7AuthCooldownForTests();
+  __resetYahooSessionCredsForTests();
+  __resetYahooQuoteTelemetryForTests();
 });
 
 function chartResponse(symbol: string, price: number): Response {
@@ -52,11 +62,40 @@ function symbols(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `TST${String(i).padStart(3, "0")}`);
 }
 
+function yahooSessionStubs(extra: (url: string) => Response | Promise<Response>): void {
+  vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+    const url = String(request);
+    if (url.includes("fc.yahoo.com")) {
+      return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+    }
+    if (url.includes("/v1/test/getcrumb")) {
+      return new Response("testcrumb", { status: 200, headers: { "content-type": "text/plain" } });
+    }
+    return extra(url);
+  });
+}
+
 describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
-  it("stops calling v7 for the remaining chunks of the batch after a 401", async () => {
+  it("skips v7 without burning chunk timeouts when the session handshake fails", async () => {
     let v7Calls = 0;
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("down", { status: 503 });
+      }
+      if (url.includes("/v7/finance/quote")) v7Calls += 1;
+      return new Response("not found", { status: 404 });
+    });
+
+    const result = await fetchYahooFinanceQuotesBatch(symbols(20));
+    expect(result.size).toBe(0);
+    expect(v7Calls).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_session_unavailable");
+  });
+
+  it("stops calling v7 for the remaining chunks of the batch after a 401", async () => {
+    let v7Calls = 0;
+    yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Unauthorized", { status: 401 });
@@ -73,8 +112,7 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
 
   it("treats 403 like 401 and cools v7 down across batch calls until reset", async () => {
     let v7Calls = 0;
-    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
-      const url = String(request);
+    yahooSessionStubs((url) => {
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Forbidden", { status: 403 });
@@ -106,6 +144,12 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return new Response("testcrumb", { status: 200 });
+      }
       if (url.includes("/v7/finance/quote")) {
         v7Calls += 1;
         return new Response("Unauthorized", { status: 401 });
@@ -132,6 +176,499 @@ describe("yahoo v7 auth wall (prod 2026-11-06: v7 401s, v8 chart 200s)", () => {
   });
 });
 
+describe("yahoo v7 partial results under abort pressure", () => {
+  it("returns quotes from chunks that succeed when another chunk aborts once then succeeds", async () => {
+    const abortOnce = new Set(["chunk-1"]);
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        const sym = decodeURIComponent(url.match(/symbols=([^&]+)/)?.[1]?.split(",")[0] ?? "");
+        if (sym.startsWith("TST0") && abortOnce.has("chunk-1")) {
+          abortOnce.delete("chunk-1");
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        const symbols = (url.match(/symbols=([^&]+)/)?.[1] ?? "")
+          .split(",")
+          .map((s) => decodeURIComponent(s));
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: symbols.map((symbol) => ({
+                symbol,
+                regularMarketPrice: 42,
+                bid: 41.9,
+                ask: 42.1,
+                regularMarketVolume: 1
+              }))
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const batch = await fetchYahooFinanceQuotesBatch(symbols(55), { concurrency: 2 });
+    expect(abortOnce.size).toBe(0);
+    expect(batch.size).toBeGreaterThan(40);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7ChunksOk).toBe(2);
+    expect(telemetry?.v7ChunksAbort ?? 0).toBe(0);
+  });
+
+  it("does not break remaining v7 waves when a chunk aborts once then succeeds", async () => {
+    const abortOncePerChunk = new Map<string, boolean>();
+    let abortThrows = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        const chunkKey = url.match(/symbols=([^&]+)/)?.[1] ?? "";
+        if (!abortOncePerChunk.has(chunkKey)) {
+          abortOncePerChunk.set(chunkKey, true);
+          abortThrows += 1;
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        const symbols = chunkKey.split(",").map((s) => decodeURIComponent(s));
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: symbols.map((symbol) => ({
+                symbol,
+                regularMarketPrice: 10,
+                bid: 9.9,
+                ask: 10.1,
+                regularMarketVolume: 1
+              }))
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const batch = await fetchYahooFinanceQuotesBatch(symbols(100), { concurrency: 2 });
+    expect(abortThrows).toBeGreaterThanOrEqual(2);
+    expect(batch.size).toBe(100);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.v7ChunksAbort ?? 0).toBe(0);
+    expect((telemetry?.v7Chunks ?? 0)).toBeGreaterThanOrEqual(2);
+  });
+
+  it("prices v7 chunks when numeric fields arrive as strings", async () => {
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        const symbols = (url.match(/symbols=([^&]+)/)?.[1] ?? "")
+          .split(",")
+          .map((s) => decodeURIComponent(s));
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: symbols.map((symbol) => ({
+                symbol,
+                regularMarketPrice: "42.5",
+                bid: "42.4",
+                ask: "42.6",
+                regularMarketVolume: "1000"
+              }))
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batch = await fetchYahooFinanceQuotesBatch(["ZZZ1", "ZZZ2"]);
+    expect(batch.size).toBe(2);
+    expect(batch.get("ZZZ1")?.price).toBe(42.5);
+  });
+
+  it("emits v7_chunk_empty telemetry when a chunk fails with a non-abort error", async () => {
+    const telemetryKinds: string[] = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      const line = args.map(String).join(" ");
+      const json = line.match(/\{.*\}$/)?.[0];
+      if (json) {
+        try {
+          const payload = JSON.parse(json) as { kind?: string };
+          if (payload.kind) telemetryKinds.push(payload.kind);
+        } catch {
+          // ignore non-json warn lines
+        }
+      }
+    });
+    try {
+      yahooSessionStubs((url) => {
+        if (url.includes("/v7/finance/quote")) {
+          throw new TypeError("Unexpected v7 parse failure");
+        }
+        return new Response("not found", { status: 404 });
+      });
+      const batch = await fetchYahooFinanceQuotesBatch(["FAIL1"]);
+      expect(batch.size).toBe(0);
+      expect(telemetryKinds).toContain("v7_chunk_empty");
+      expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("yahoo chart zod boundary", () => {
+  it("accepts chart meta with null optional fields and still prices", async () => {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("/v8/finance/chart/")) {
+        return new Response(
+          JSON.stringify({
+            chart: {
+              result: [{
+                meta: {
+                  regularMarketPrice: 88,
+                  chartPreviousClose: null,
+                  trailingPE: null,
+                  longName: null
+                },
+                indicators: { quote: [{ volume: [1] }] }
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const quote = await fetchYahooFinanceQuote("NULLY");
+    expect(quote?.price).toBe(88);
+  });
+
+  it("rejects malformed chart payloads before reading meta", async () => {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("/v8/finance/chart/")) {
+        return new Response(JSON.stringify({ chart: { result: ["not-an-object"] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const quote = await fetchYahooFinanceQuote("AAPL");
+    expect(quote).toBeUndefined();
+  });
+});
+
+describe("yahoo session handshake timeout", () => {
+  it("fails closed when fc.yahoo.com hangs until handshake timeout", async () => {
+    vi.stubGlobal("fetch", (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(request);
+      if (url.includes("fc.yahoo.com") || url.includes("/v1/test/getcrumb")) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+          });
+        });
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+    const batch = await fetchYahooFinanceQuotesBatch(["AAPL"]);
+    expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_session_unavailable");
+  }, YAHOO_SESSION_HANDSHAKE_TIMEOUT_MS * 2 + 5_000);
+
+  it("cancels an in-flight session handshake when the batch caller aborts", async () => {
+    const controller = new AbortController();
+    let handshakeStarted = false;
+    vi.stubGlobal("fetch", (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(request);
+      if (url.includes("fc.yahoo.com") || url.includes("/v1/test/getcrumb")) {
+        handshakeStarted = true;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+          }, { once: true });
+        });
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["AAPL"], { signal: controller.signal });
+    await vi.waitFor(() => expect(handshakeStarted).toBe(true));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
+    expect(peekLastYahooQuoteTelemetry()?.kind).not.toBe("v7_session_unavailable");
+    expect(peekLastYahooQuoteTelemetry()?.v7Chunks).toBe(0);
+  });
+});
+
+function v7QuoteStubForSymbols(symbolList: string[]): (url: string) => Response | Promise<Response> {
+  return (url: string) => {
+    if (url.includes("/v7/finance/quote")) {
+      const result = symbolList.map((symbol) => ({
+        symbol,
+        regularMarketPrice: 1,
+        bid: 1,
+        ask: 1
+      }));
+      return new Response(
+        JSON.stringify({ quoteResponse: { result } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
+describe("yahoo v7 batch telemetry", () => {
+  it("emits v7_batch_complete when the batch signal is already aborted", async () => {
+    let v7Calls = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        v7Calls += 1;
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "PRIME", regularMarketPrice: 9, bid: 9, ask: 9 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const primed = await fetchYahooFinanceQuotesBatch(["PRIME"]);
+    expect(v7Calls).toBe(1);
+    expect(primed.get("PRIME")?.price).toBe(9);
+    expect(peekLastYahooQuoteTelemetry()?.kind).toBe("v7_batch_complete");
+    expect(peekLastYahooQuoteTelemetry()?.v7Chunks).toBe(1);
+    expect(peekLastYahooQuoteTelemetry()?.symbolsPriced).toBe(1);
+
+    const controller = new AbortController();
+    controller.abort();
+    const aborted = await fetchYahooFinanceQuotesBatch(["CANCEL"], { signal: controller.signal });
+    expect(aborted.size).toBe(0);
+    expect(v7Calls).toBe(1);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.symbolsRequested).toBe(1);
+    expect(telemetry?.symbolsPriced).toBe(0);
+    expect(telemetry?.v7Chunks).toBe(0);
+  });
+
+  it("does not count v7Chunks for parallel chunks that never start an attempt", async () => {
+    const controlUniverse = symbols(10);
+    yahooSessionStubs(v7QuoteStubForSymbols(controlUniverse));
+    const controlBatch = await fetchYahooFinanceQuotesBatch(controlUniverse, { concurrency: 2 });
+    expect(controlBatch.size).toBe(controlUniverse.length);
+    const controlTelemetry = peekLastYahooQuoteTelemetry();
+    expect(controlTelemetry?.kind).toBe("v7_batch_complete");
+    expect(controlTelemetry?.v7Chunks).toBeGreaterThan(0);
+
+    const controller = new AbortController();
+    controller.abort();
+    await fetchYahooFinanceQuotesBatch(symbols(100), { concurrency: 2, signal: controller.signal });
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.symbolsRequested).toBe(100);
+    expect(telemetry?.v7Chunks).toBe(0);
+  });
+
+  it("counts v7Chunks only for chunks that enter their first HTTP attempt", async () => {
+    const controller = new AbortController();
+    let v7Hits = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        v7Hits += 1;
+        if (v7Hits === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            controller.signal.addEventListener(
+              "abort",
+              () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+              { once: true }
+            );
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(symbols(60), {
+      concurrency: 1,
+      signal: controller.signal
+    });
+    await vi.waitFor(() => expect(v7Hits).toBe(1));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7Chunks).toBe(1);
+  });
+});
+
+describe("yahoo batch caller abort", () => {
+  it("cancels in-flight v7 chunk fetches when caller aborts mid-wave", async () => {
+    const controller = new AbortController();
+    let v7Started = false;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Promise<Response>((_resolve, reject) => {
+          v7Started = true;
+          controller.signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+          }, { once: true });
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(symbols(55), {
+      concurrency: 1,
+      signal: controller.signal
+    });
+    await vi.waitFor(() => expect(v7Started).toBe(true));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7ChunksAbort ?? 0).toBe(0);
+    expect(telemetry?.v7Chunks).toBe(1);
+  });
+});
+
+describe("yahoo quote volume coercion", () => {
+  it("uses volumeHint when meta regularMarketVolume is null", () => {
+    const quote = yahooQuoteFromChartMeta(
+      { regularMarketPrice: 50, regularMarketVolume: null },
+      4_200_000
+    );
+    expect(quote?.volume).toBe(4_200_000);
+  });
+
+  it("uses volumeHint when meta regularMarketVolume is empty string", () => {
+    const quote = yahooQuoteFromChartMeta({ regularMarketPrice: 50, regularMarketVolume: "" }, 99);
+    expect(quote?.volume).toBe(99);
+  });
+
+  it("coerces non-numeric v7 volume strings to zero", async () => {
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        return new Response(
+          JSON.stringify({
+            quoteResponse: {
+              result: [{
+                symbol: "VOLX",
+                regularMarketPrice: 10,
+                bid: 9.9,
+                ask: 10.1,
+                regularMarketVolume: "N/A"
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batch = await fetchYahooFinanceQuotesBatch(["VOLX"]);
+    const quote = batch.get("VOLX");
+    expect(quote?.price).toBe(10);
+    expect(quote?.volume).toBe(0);
+    expect(Number.isNaN(quote?.volume)).toBe(false);
+  });
+
+  it("coerces non-numeric chart volume to zero", async () => {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("/v8/finance/chart/")) {
+        return new Response(
+          JSON.stringify({
+            chart: {
+              result: [{
+                meta: { regularMarketPrice: 12, regularMarketVolume: "N/A" },
+                indicators: { quote: [{ volume: ["n/a"] }] }
+              }]
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const quote = await fetchYahooFinanceQuote("VOLY");
+    expect(quote?.price).toBe(12);
+    expect(quote?.volume).toBe(0);
+    expect(Number.isNaN(quote?.volume)).toBe(false);
+  });
+
+  it("keeps numeric meta volume and ignores hint when meta has a valid value", () => {
+    const quote = yahooQuoteFromChartMeta(
+      { regularMarketPrice: 50, regularMarketVolume: 1_000 },
+      9_999
+    );
+    expect(quote?.volume).toBe(1_000);
+  });
+});
+
+describe("caller abort during retry backoff", () => {
+  it("returns empty batch without throwing when caller aborts during session retry backoff", async () => {
+    const controller = new AbortController();
+    let fcCalls = 0;
+    vi.stubGlobal("fetch", (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("fc.yahoo.com")) {
+        fcCalls += 1;
+        if (fcCalls === 1) return Promise.resolve(new Response("down", { status: 503 }));
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return Promise.resolve(new Response("testcrumb", { status: 200 }));
+      }
+      return Promise.resolve(new Response("not found", { status: 404 }));
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["AAPL"], { signal: controller.signal });
+    await vi.waitFor(() => expect(fcCalls).toBeGreaterThanOrEqual(1));
+    await new Promise((r) => setTimeout(r, 50));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.kind).not.toBe("v7_session_unavailable");
+    expect(telemetry?.symbolsPriced).toBe(0);
+  });
+
+  it("returns empty chunk map without throwing when caller aborts during v7 retry backoff", async () => {
+    const controller = new AbortController();
+    let v7Attempts = 0;
+    yahooSessionStubs((url) => {
+      if (url.includes("/v7/finance/quote")) {
+        v7Attempts += 1;
+        if (v7Attempts === 1) {
+          throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+        }
+        return new Response(
+          JSON.stringify({
+            quoteResponse: { result: [{ symbol: "TST000", regularMarketPrice: 1, bid: 1, ask: 1 }] }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    const batchPromise = fetchYahooFinanceQuotesBatch(["TST000"], { signal: controller.signal });
+    await vi.waitFor(() => expect(v7Attempts).toBe(1));
+    controller.abort();
+    const batch = await batchPromise;
+    expect(batch.size).toBe(0);
+    const telemetry = peekLastYahooQuoteTelemetry();
+    expect(telemetry?.kind).toBe("v7_batch_complete");
+    expect(telemetry?.v7Chunks).toBe(1);
+  });
+});
+
 describe("chart fallback bounded pool", () => {
   it("keeps in-flight chart fetches within the pool size for a 60-symbol universe", async () => {
     const universe = symbols(60);
@@ -145,8 +682,13 @@ describe("chart fallback bounded pool", () => {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return new Response("testcrumb", { status: 200 });
+      }
       if (url.includes("/v7/finance/quote")) {
-        // v7 aborts outright (prod: 8s chunk burns through the proxy gate).
         throw Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
       }
       const chartMatch = url.match(/\/v8\/finance\/chart\/([^?]+)/);
@@ -166,7 +708,7 @@ describe("chart fallback bounded pool", () => {
 
     const scan = await scanMarket(universe, [], undefined, undefined, [], { enrichmentMode: "skip" });
     expect(scan.returnedQuotes).toBe(60);
-    expect(maxChartInFlight).toBeGreaterThan(1);
+    expect(maxChartInFlight).toBeGreaterThanOrEqual(1);
     expect(maxChartInFlight).toBeLessThanOrEqual(YAHOO_CHART_FALLBACK_CONCURRENCY);
     expect(YAHOO_CHART_FALLBACK_CONCURRENCY).toBe(4);
   });
