@@ -1,3 +1,9 @@
+## 2026-11-11 CURSOR — ST-4596 Keychain session cookies (#5131)
+
+**What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
+
+**Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.

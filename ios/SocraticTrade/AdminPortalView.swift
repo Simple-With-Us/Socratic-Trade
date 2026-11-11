@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import WebKit
 
@@ -310,11 +311,13 @@ struct AdminPortalWebView: UIViewRepresentable {
         }
     }
 
-    private static func sessionCookieFingerprint(_ cookies: [HTTPCookie]) -> String {
+    static func sessionCookieFingerprint(_ cookies: [HTTPCookie]) -> String {
         cookies
             .map { cookie in
+                let digest = SHA256.hash(data: Data(cookie.value.utf8))
+                let valueHash = digest.map { String(format: "%02x", $0) }.joined()
                 let domain = cookie.domain
-                return "\(cookie.name)|\(domain)|\(cookie.path)|\(cookie.value)"
+                return "\(cookie.name)|\(domain)|\(cookie.path)|\(valueHash)"
             }
             .sorted()
             .joined(separator: "\u{1f}")

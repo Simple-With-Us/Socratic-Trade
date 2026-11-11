@@ -12,7 +12,7 @@ enum AppForegroundResume {
     static func resumeAfterBecomingActive(
         store: some LiveSessionResuming & SessionRestoreAwaiting,
         isScreenshotMode: Bool,
-        shouldContinue: () -> Bool
+        shouldContinue: @escaping () -> Bool
     ) async {
         guard !isScreenshotMode else { return }
         await store.ensurePersistedSessionRestoredBeforeAuthenticatedRequests()
