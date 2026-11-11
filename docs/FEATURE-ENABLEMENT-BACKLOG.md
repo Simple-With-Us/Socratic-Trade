@@ -14,7 +14,7 @@ dormant items can be enabled safely — not a blind flip of rights/cost gates:
 - `src/lib/dormant-features.ts` + `GET /api/admin/rag-coverage` → `dormantFeatures` checklist
   (`readyToEnable` vs blocked).
 - Marketing pages: `LANDING_PAGE_ENABLED` unset = **ON**; explicit off → 404.
-- CSP: `CSP_ENABLED=on` is report-only by default; reports → `POST /api/csp-report`.
+- CSP: `CSP_ENABLED=on` is report-only by default.  Dynamic routes use a per-request nonce plus `strict-dynamic`.  Welcome and the legal pages use a hash policy stamped at build time and keep hourly ISR.  Reports → `POST /api/csp-report`.
 - `VECTOR_EMBED_CLEAN_TEXT=on` stamps `embed_rev=2` (vs 1) so mixed populations stay detectable.
 
 Update this file when you add a new default-off switch. Pair enablement with a rollout note +
@@ -32,7 +32,7 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 | Flag / gate | Default | Ready? | How to enable safely |
 |-------------|---------|--------|----------------------|
 | `LANDING_PAGE_ENABLED` | **ON** (unset) | Live | Set `off` only for private deploys.  Pages: `/welcome`, `/framework`, `/how-it-works`, `/strategy`. |
-| `CSP_ENABLED` | off (prod Infisical **on** 2026-08-13, report-only) | **Live** (report-only) | `CSP_REPORT_ONLY=on`. Watch `[csp-report]` logs. **Do not** set `CSP_REPORT_ONLY=off` until clean. |
+| `CSP_ENABLED` | off (prod Infisical **on** 2026-08-13, report-only) | **Live** (report-only) | Nonce + `strict-dynamic` on dynamic routes.  Welcome and legal pages keep hourly ISR under a build-stamped hash policy (ST-2789).  Leave `CSP_REPORT_ONLY` unset.  Watch `[csp-report]` logs.  Set `CSP_REPORT_ONLY=0` only after reports are clean. |
 | `USAGE_BUDGET_ENFORCE` | off | **Yes** | Set `on` when usage-monitor budget-status is trusted. Fail-open on monitor outage. |
 | `CONGRESS_SHARE_ENABLED` | off (prod Infisical **on** 2026-08-13) | **Live** | Requires `CONGRESS_TRADE_TOKEN` (CT INGEST_TOKEN). Nightly batch + after-scan refs. Keep `CONGRESS_SHARE_FUNDAMENTALS_ENABLED` off unless App A #46 is confirmed. |
 | `WEB_SOURCE_SEC8K_FULL_BODY` | off (prod Infisical **on** 2026-08-13) | **Live** (bounded) | Limit 5/cycle + `WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS=12000` (cap 60s). Adaptive FTS-mirror batching. Watch `[slow-sync]` / backlog. |
@@ -96,7 +96,7 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 |------------|------|--------|
 | Usage-budget hard enforce | `USAGE_BUDGET_ENFORCE=off` | Ready — see table above |
 | Landing / welcome / strategy | `LANDING_PAGE_ENABLED` unset → **ON** | Explicit off → 404 |
-| CSP headers | `CSP_ENABLED=on` + `CSP_REPORT_ONLY=on` (2026-08-13) | Live report-only; `/api/csp-report`. Do not enforce-block. |
+| CSP headers | `CSP_ENABLED=on`, `CSP_REPORT_ONLY` unset (2026-08-13, nonce policy ST-2789) | Live report-only; `/api/csp-report`.  ISR pages use stamped script hashes.  Do not set `CSP_REPORT_ONLY=0` until reports are clean. |
 | Sentry session replay | `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=false` | Privacy/cost |
 | Dev background workers | `DEV_BACKGROUND_WORKERS=off` | **Keep off** in local UI QA |
 | Robinhood broker-held stops | `policy.robinhoodBrokerStops` default off | Per-account policy |
