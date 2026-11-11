@@ -111,6 +111,46 @@ describe("POST /api/mobile/auth/apple", () => {
     expect(mocks.jwtVerify).not.toHaveBeenCalled();
   });
 
+  it("accepts an identity token whose nonce is the SHA-256 hex of the issued nonce", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const { appleSignInNonceDigest } = await import("../src/lib/auth/apple-signin-nonce");
+    const issued = issueAppleSignInNonce();
+    mocks.appleNonce = appleSignInNonceDigest(issued);
+    expect(appleSignInNonceDigest("server-nonce")).toBe(
+      "0891992dd7ec661dc2bf5be407acf21fd557daf14f762be012caaa04c9373eb1",
+    );
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-socratic-mobile-session-hardening": "1",
+          "cf-connecting-ip": "203.0.113.45",
+        },
+        body: JSON.stringify({ identityToken: "token", nonce: issued }),
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects a token nonce that is neither the issued nonce nor its digest", async () => {
+    const { POST } = await import("../app/api/mobile/auth/apple/route");
+    const issued = issueAppleSignInNonce();
+    mocks.appleNonce = "not-the-issued-nonce";
+    const res = await POST(
+      new Request(APPLE_AUTH_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-socratic-mobile-session-hardening": "1",
+          "cf-connecting-ip": "203.0.113.46",
+        },
+        body: JSON.stringify({ identityToken: "token", nonce: issued }),
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+
   it("rejects a missing identityToken (400)", async () => {
     const { POST } = await import("../app/api/mobile/auth/apple/route");
     const res = await POST(

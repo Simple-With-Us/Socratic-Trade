@@ -6,7 +6,7 @@ import { encodeSessionToken } from "../../../../../src/lib/auth/session-token";
 import { resolveAppleClientIds } from "../../../../../src/lib/auth/apple-client-id";
 import { APPLE_AUTH_MAX_BYTES, PayloadTooLargeError, readJsonWithLimit } from "../../../../../src/lib/bounded-body";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import { consumeAppleSignInNonce } from "@/lib/auth/apple-signin-nonce";
+import { applePresentedNonceMatches, consumeAppleSignInNonce } from "@/lib/auth/apple-signin-nonce";
 import {
   absoluteExpUnixSeconds,
   createAuthServerSession,
@@ -67,7 +67,7 @@ export async function POST(request: Request) {
     if (!claimsParsed.success) {
       return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
     }
-    if (strictApple && claimsParsed.data.nonce !== nonceValue) {
+    if (strictApple && !applePresentedNonceMatches(nonceValue, claimsParsed.data.nonce)) {
       return NextResponse.json({ error: "Invalid identity token" }, { status: 401 });
     }
 
