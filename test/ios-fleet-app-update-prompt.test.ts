@@ -1,16 +1,37 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 const repo = process.cwd();
 const fleetPrompt = readFileSync(resolve(repo, "scripts/ios-fleet/AppUpdatePrompt.swift"), "utf8");
 const appPrompt = readFileSync(resolve(repo, "ios/SocraticTrade/AppUpdatePrompt.swift"), "utf8");
-const apps = JSON.parse(readFileSync(resolve(repo, "scripts/ios-fleet/apps.json"), "utf8")) as {
-  apps: Record<string, { bundleId?: string; appleId?: number; notes?: string }>;
-};
-const versions = JSON.parse(
-  readFileSync(resolve(repo, "scripts/ios-fleet/ios-app-versions.json"), "utf8")
-) as { apps: Record<string, { appleId?: number; marketingVersion?: string }> };
+
+// Validate the JSON configs instead of casting: a wrong-typed appleId or a
+// malformed row must fail this suite loudly, not flow through JSON.parse
+// into silently-degraded assertions.
+const AppEntrySchema = z.looseObject({
+  bundleId: z.string().optional(),
+  appleId: z.number().int().optional(),
+  notes: z.string().optional(),
+});
+const AppsSchema = z.looseObject({
+  apps: z.record(z.string(), AppEntrySchema),
+});
+const VersionEntrySchema = z.looseObject({
+  appleId: z.number().int().optional(),
+  marketingVersion: z.string().optional(),
+});
+const VersionsSchema = z.looseObject({
+  apps: z.record(z.string(), VersionEntrySchema),
+});
+
+const apps = AppsSchema.parse(
+  JSON.parse(readFileSync(resolve(repo, "scripts/ios-fleet/apps.json"), "utf8"))
+);
+const versions = VersionsSchema.parse(
+  JSON.parse(readFileSync(resolve(repo, "scripts/ios-fleet/ios-app-versions.json"), "utf8"))
+);
 const ship = readFileSync(resolve(repo, "scripts/ios-fleet/ship-testflight.sh"), "utf8");
 const pin = readFileSync(resolve(repo, "scripts/ios-fleet.sha256"), "utf8");
 const pinScript = readFileSync(resolve(repo, "scripts/ios-fleet-pin.sh"), "utf8");
