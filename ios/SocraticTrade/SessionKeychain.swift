@@ -121,8 +121,8 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     }
 
     private static func sameSitePolicyString(from cookie: HTTPCookie) -> String? {
-        guard let policy = cookie.properties[.sameSitePolicy] as? String else { return nil }
-        let trimmed = policy.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let policy = cookie.properties?[.sameSitePolicy] as? String else { return nil }
+        let trimmed = policy.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
