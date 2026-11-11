@@ -431,21 +431,21 @@ export async function getOpenRouterCreditStatus(
     // account-balance fields above still refresh every cycle.
     if (!keysChecked && lastKeyLimitFailure) {
       if (nowMs - lastKeyLimitFailure.confirmedAtMs <= KEY_LIMIT_CARRYOVER_MS) {
-        // Union with this run's own evaluation (Kody, PR #5097): a truncated read that finds
-        // a lesser problem must not downgrade the confirmed verdict — reasons and labels
-        // union. The counters, though, are taken from the confirmed snapshot as a set:
-        // maxing each counter independently can report an impossible inventory
-        // (reached + low > withLimit) when the two reads cover disjoint keys, so the counts
-        // describe the last complete read while the reasons describe everything known.
-        for (const reason of lastKeyLimitFailure.reasons) {
-          if (!reasons.includes(reason)) reasons.push(reason);
-        }
+        // Keep the confirmed snapshot AS A SET (Kody, PR #5097): this run's partial key
+        // evaluation is discarded, so reasons, counters and labels always describe one
+        // consistent complete read — a unioned reason can never cite a zero counter, and a
+        // lesser partial problem can never downgrade the confirmed verdict. Only this run's
+        // account_low (a fresh, complete balance read) is preserved alongside it. A problem
+        // only the partial read saw surfaces authoritatively on the next complete read.
+        const hasAccountLow = reasons.includes("account_low");
+        reasons.length = 0;
+        for (const reason of lastKeyLimitFailure.reasons) reasons.push(reason);
+        if (hasAccountLow && !reasons.includes("account_low")) reasons.push("account_low");
         keysWithLimit = lastKeyLimitFailure.keysWithLimit;
         keysLimitReached = lastKeyLimitFailure.keysLimitReached;
         keysLimitLow = lastKeyLimitFailure.keysLimitLow;
-        for (const label of lastKeyLimitFailure.problemKeyLabels) {
-          if (!problemKeyLabels.includes(label)) problemKeyLabels.push(label);
-        }
+        problemKeyLabels.length = 0;
+        for (const label of lastKeyLimitFailure.problemKeyLabels) problemKeyLabels.push(label);
       } else {
         lastKeyLimitFailure = null;
       }

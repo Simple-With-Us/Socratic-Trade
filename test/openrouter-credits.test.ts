@@ -203,8 +203,8 @@ describe("openrouter credit status", () => {
     // Next cycle: /keys page 1 returns a full page of clean keys, page 2 stalls past the
     // shared deadline, so the read truncates with a clean partial set. The truncated read
     // must not clear the confirmed verdict — the bounded carryover keeps ok=false.
-    // Page 1 carries one LOW key of its own: the union with the confirmed snapshot must keep
-    // BOTH verdicts (low from this truncated read, reached from the snapshot).
+    // Page 1 carries one LOW key of its own: under snapshot-as-set semantics the partial
+    // observation is discarded and the confirmed verdict is reported verbatim.
     const cleanRow = (i: number) => ({ label: `k${i}`, disabled: false, limit: 50, limit_remaining: i === 0 ? 1 : 40 });
     const slowPager = (async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -231,8 +231,8 @@ describe("openrouter credit status", () => {
     expect(second.keysChecked).toBe(false);
     expect(second.ok).toBe(false);
     expect(second.reasons).toContain("key_limit_reached");
-    expect(second.reasons).toContain("key_limit_low");
-    expect(second.keysLimitReached).toBeGreaterThanOrEqual(1);
+    expect(second.reasons).not.toContain("key_limit_low");
+    expect(second.keysLimitReached).toBe(1);
     expect(second.problemKeyLabels).toContain("st-prod");
   });
 
