@@ -35,12 +35,12 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     let httpOnly: Bool
     let expiresAt: Date?
 
-    init(cookie: HTTPCookie) {
+    init(cookie: HTTPCookie, owningHost: String? = nil) {
         name = cookie.name
         value = cookie.value
-        domain = cookie.domain
-        path = cookie.path
-        secure = cookie.isSecure
+        domain = Self.normalizedDomain(cookie.domain, owningHost: owningHost)
+        path = cookie.path.isEmpty ? "/" : cookie.path
+        secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
         httpOnly = cookie.isHTTPOnly
         if let date = cookie.expiresDate,
            date.timeIntervalSince1970 > 0,
@@ -90,11 +90,12 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     }
 
     func makeHTTPCookie() -> HTTPCookie? {
+        guard !domain.isEmpty, !name.isEmpty, !value.isEmpty else { return nil }
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: name,
             .value: value,
             .domain: domain,
-            .path: path,
+            .path: path.isEmpty ? "/" : path,
         ]
         if secure {
             properties[.secure] = "TRUE"
@@ -106,6 +107,14 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
             properties[.expires] = expiresAt
         }
         return HTTPCookie(properties: properties)
+    }
+
+    private static func normalizedDomain(_ cookieDomain: String, owningHost: String?) -> String {
+        let trimmed = cookieDomain
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
+        if !trimmed.isEmpty { return trimmed }
+        return owningHost?.lowercased() ?? cookieDomain
     }
 }
 
@@ -277,7 +286,7 @@ enum SessionCookiePersistence {
         guard (try credentialStore.load()) == nil else { return }
         let legacy = authSessionCookies(in: HTTPCookieStorage.shared, owningHost: host)
         guard !legacy.isEmpty else { return }
-        let archives = legacy.map(SessionCookieArchive.init(cookie:))
+        let archives = legacy.map { SessionCookieArchive(cookie: $0, owningHost: host) }
         try credentialStore.save(cookies: archives)
         apply(archives, to: storage, owningHost: host)
         clearAuthSessionCookies(in: HTTPCookieStorage.shared, owningHost: host)
@@ -323,7 +332,8 @@ struct SessionCookieCoordinator {
             try credentialStore.delete()
             return
         }
-        try credentialStore.save(cookies: cookies.map(SessionCookieArchive.init(cookie:)))
+        let host = client.baseURL.host
+        try credentialStore.save(cookies: cookies.map { SessionCookieArchive(cookie: $0, owningHost: host) })
     }
 
     func clearSession(from client: MobileAPIClient) throws {
