@@ -46,6 +46,7 @@ export interface QuoteView {
   factorBreakdown?: MarketFactorBreakdown;
   provider?: string;
   asOf?: string;
+  priceDelayLabel?: "15-min delayed";
   sentiment?: number;
   peRatio?: number;
   headlines?: string[];
@@ -99,6 +100,8 @@ export function preferFreshQuote(
 ): MarketQuote | undefined {
   if (!override) return runQuote;
   if (!runQuote) return override;
+  if (override.priceDelayLabel && !runQuote.priceDelayLabel) return override;
+  if (runQuote.priceDelayLabel && !override.priceDelayLabel) return runQuote;
   const overrideAt = override.asOf ? Date.parse(override.asOf) : NaN;
   const runAt = runQuote.asOf ? Date.parse(runQuote.asOf) : NaN;
   if (Number.isFinite(overrideAt) && Number.isFinite(runAt) && runAt > overrideAt) return runQuote;
@@ -124,6 +127,7 @@ export function toQuoteView(full: MarketQuote | undefined, summary: MarketQuoteS
     score: num(q.score),
     provider: q.provider,
     asOf: q.asOf,
+    priceDelayLabel: q.priceDelayLabel,
     sentiment: num(q.sentiment),
     peRatio: num(q.peRatio),
     analystRating: q.analystRating,
@@ -171,7 +175,10 @@ export function toQuoteView(full: MarketQuote | undefined, summary: MarketQuoteS
  *  used when the last market scan didn't know the symbol at all. Deliberately omits
  *  `score`, `factorBreakdown`, `marketCap`, and `sectorRelStrength` — those rank the
  *  symbol against the scan's candidate universe and are never approximated here. */
-export function toQuoteViewFromEnrichment(symbol: string, enrichment: Partial<SymbolEnrichment>): QuoteView {
+export function toQuoteViewFromEnrichment(
+  symbol: string,
+  enrichment: Partial<SymbolEnrichment> & { priceDelayLabel?: string }
+): QuoteView {
   return {
     symbol,
     full: false,
@@ -183,6 +190,7 @@ export function toQuoteViewFromEnrichment(symbol: string, enrichment: Partial<Sy
     sector: enrichment.sector,
     industry: enrichment.industry,
     asOf: enrichment.asOf,
+    priceDelayLabel: enrichment.priceDelayLabel === "15-min delayed" ? "15-min delayed" : undefined,
     sentiment: num(enrichment.sentiment),
     peRatio: num(enrichment.peRatio),
     analystRating: enrichment.analystRating,

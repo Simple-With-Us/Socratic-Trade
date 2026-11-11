@@ -48,6 +48,13 @@ struct ScanView: View {
         }
     }
 
+    private var scanSubtitle: String {
+        if let delay = scan?.priceDelay, delay.label == "15-min delayed" {
+            return "15-min delayed · as of \(AppFormat.dateTime(delay.asOf))"
+        }
+        return scan?.asOf.map { "as of \(AppFormat.dateTime($0))" } ?? "ranked names for this universe"
+    }
+
     private var filtered: [ScanCandidate] {
         let rows = scan?.topCandidates ?? []
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -65,7 +72,7 @@ struct ScanView: View {
             VStack(alignment: .leading, spacing: 8) {
                 SectionHeading(
                     "Market Scan",
-                    subtitle: scan?.asOf.map { "as of \(AppFormat.dateTime($0))" } ?? "ranked names for this universe"
+                    subtitle: scanSubtitle
                 )
                 Text(DeskCopy.scanUniverseNote)
                     .font(.appSubheadline)

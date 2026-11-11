@@ -118,6 +118,11 @@ export interface DashboardSnapshot {
   unifiedFeed: UnifiedActivityGroup[];
   latestStrategyRun?: StrategyDecision;
   latestScan?: MarketScan;
+  /**
+   * Set when the operating account is Alpaca PAPER.  Prices in this snapshot
+   * (scan, positions, order-ticket fallbacks) share this as-of.
+   */
+  priceDelay?: { label: "15-min delayed"; asOf: string };
   /** Native weekly value + momentum screens from this account's scan tape. */
   weeklyMarketDigest?: WeeklyMarketDigest;
   dailyStats: { orderCount: number; openingOrderCount: number; notional: number };

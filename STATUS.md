@@ -1,3 +1,9 @@
+## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
+
+**What.**  An Alpaca PAPER account now reads every displayed and decision price through one delayed-price policy (`src/lib/paper-delayed-price-policy.ts`).  The canonical as-of is now minus 15 minutes.  A `delayed_sip` print inside that window wins.  Another source is kept only when its print is already in the window, or when it is the Nasdaq delayed screener without a precise print time, and those prices are relabeled to the same as-of.  A fresher print is withheld.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS label the tape `15-min delayed` with the as-of.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
+
+**Next.**  PR is open for review.  This lane does not merge.  CI runs the full gate.
+
 ## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
 
 **What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.

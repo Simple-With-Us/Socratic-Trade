@@ -128,6 +128,9 @@ struct SymbolInfoSheet: View {
 
     private var asOfLine: String? {
         guard case .loaded(let info) = loadState, info.asOf != nil else { return nil }
+        if info.priceDelayLabel == "15-min delayed" {
+            return "15-min delayed · as of \(AppFormat.dateTimeCentral(info.asOf))"
+        }
         return "Quote data from a live fetch (\(AppFormat.dateTimeCentral(info.asOf)))."
     }
 

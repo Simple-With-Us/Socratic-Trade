@@ -19,6 +19,8 @@ import {
 } from "@/lib/quote-cascade-budget";
 import { fetchYahooFinanceQuote } from "@/lib/yahoo-finance";
 import { fetchFreshQuotesCascade, isQuoteFresh } from "@/lib/quotes-cascade";
+import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
+import { choosePaperPrice, type PaperDelayedPricePolicy } from "@/lib/paper-delayed-price-policy";
 import type { BrokerQuote } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -137,6 +139,8 @@ export async function GET(request: Request) {
             ...(liveQuote.volume && liveQuote.volume > 0 ? { volume: liveQuote.volume } : {}),
             ...(intradayChangePct !== undefined ? { intradayChangePct } : {}),
             asOf: liveQuote.asOf ?? liveQuote.fetchedAt ?? base.asOf,
+            ...(typeof liveQuote.expectedDelaySec === "number" ? { expectedDelaySec: liveQuote.expectedDelaySec } : {}),
+            ...(liveQuote.venuePriceAuthoritative ? { venuePriceAuthoritative: true } : {}),
             sources: {
               ...base.sources,
               price: liveQuote.provider ?? "quotes-cascade",
@@ -187,7 +191,11 @@ export async function GET(request: Request) {
       rich = await withinBudget(richPromise, CASCADE_BUDGET_MS, budget.signal);
     }
     const richData = rich.status === "ready" ? rich.data : {};
-    const enrichment = composeOnDemandQuote([durable, fastData, yahooData, richData]);
+    const composed = composeOnDemandQuote([durable, fastData, yahooData, richData]);
+    const paperPolicy = paperPricePolicyForUser(userId);
+    const enrichment = paperPolicy.active
+      ? alignOnDemandPaperQuote([durable, fastData, yahooData, richData], composed, paperPolicy)
+      : composed;
 
     const hasLiveQuote =
       fast.status === "ready"
@@ -198,7 +206,11 @@ export async function GET(request: Request) {
     if (hasLiveQuote || enrichmentHasValues(durable)) {
       budget.abort(new Error("yahoo floor ready"));
       persistOnDemandQuote(symbol, enrichment);
-      return NextResponse.json({ symbol, ...enrichment });
+      return NextResponse.json({
+        symbol,
+        ...enrichment,
+        ...(paperPolicy.active ? { priceDelayLabel: paperPolicy.label } : {})
+      });
     }
 
     const error = rich.status === "failed" ? rich.error : fast.error;
@@ -211,4 +223,37 @@ export async function GET(request: Request) {
   } finally {
     budget.clear();
   }
+}
+
+function alignOnDemandPaperQuote(
+  layers: SymbolEnrichment[],
+  enrichment: SymbolEnrichment,
+  policy: PaperDelayedPricePolicy
+): SymbolEnrichment {
+  const chosen = choosePaperPrice(
+    layers.map((layer) => ({
+      price: layer.price,
+      asOf: layer.asOf,
+      provider: layer.sources?.price,
+      expectedDelaySec: layer.expectedDelaySec,
+      venuePriceAuthoritative: layer.venuePriceAuthoritative,
+      bid: layer.bid,
+      ask: layer.ask
+    })),
+    policy
+  );
+  if (chosen.withheld || chosen.price === undefined) {
+    const next: SymbolEnrichment = { ...enrichment, asOf: policy.asOf };
+    delete next.price;
+    delete next.bid;
+    delete next.ask;
+    return next;
+  }
+  return {
+    ...enrichment,
+    price: chosen.price,
+    asOf: chosen.asOf,
+    bid: chosen.bid ?? enrichment.bid,
+    ask: chosen.ask ?? enrichment.ask
+  };
 }

@@ -206,6 +206,11 @@ enum CoachModelCatalog {
 
 // MARK: - Scan
 
+struct PaperPriceDelay: Decodable {
+    let label: String
+    let asOf: String
+}
+
 struct MarketScanResponse: Decodable {
     let topCandidates: [ScanCandidate]
     let asOf: String?
@@ -215,6 +220,7 @@ struct MarketScanResponse: Decodable {
     let warnings: [String]
     let stale: Bool?
     let staleReason: String?
+    let priceDelay: PaperPriceDelay?
 
     var hasUsableUniverse: Bool { !topCandidates.isEmpty }
 
@@ -231,6 +237,7 @@ struct MarketScanResponse: Decodable {
         case warnings
         case stale
         case staleReason
+        case priceDelay
     }
 
     init(
@@ -241,7 +248,8 @@ struct MarketScanResponse: Decodable {
         returnedQuotes: Int? = nil,
         warnings: [String] = [],
         stale: Bool? = nil,
-        staleReason: String? = nil
+        staleReason: String? = nil,
+        priceDelay: PaperPriceDelay? = nil
     ) {
         self.topCandidates = topCandidates
         self.asOf = asOf ?? generatedAt
@@ -251,6 +259,7 @@ struct MarketScanResponse: Decodable {
         self.warnings = warnings
         self.stale = stale
         self.staleReason = staleReason
+        self.priceDelay = priceDelay
     }
 
     init(from decoder: Decoder) throws {
@@ -266,6 +275,7 @@ struct MarketScanResponse: Decodable {
         warnings = try values.decodeIfPresent([String].self, forKey: .warnings) ?? []
         stale = try values.decodeIfPresent(Bool.self, forKey: .stale)
         staleReason = try values.decodeIfPresent(String.self, forKey: .staleReason)
+        priceDelay = try values.decodeIfPresent(PaperPriceDelay.self, forKey: .priceDelay)
     }
 
     /// Same rule as `/console/scan`: a failed refresh never blanks a last-good table.

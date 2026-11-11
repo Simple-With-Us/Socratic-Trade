@@ -120,7 +120,9 @@ export async function checkPriceAlerts(userId: string): Promise<PriceAlert[]> {
         {
           policy,
           userId,
-          directBody: `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`
+          directBody: quote?.priceDelayLabel
+            ? `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.\u00A0 15-min delayed, as of ${quote.asOf ?? "the paper tape"}.`
+            : `${alert.symbol} ${alert.op} $${alert.price} — now $${currentPrice}.`
         }
       );
       if (event.status === "failed") {

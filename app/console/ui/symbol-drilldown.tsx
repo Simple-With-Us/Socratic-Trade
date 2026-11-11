@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { MarketQuote, MarketQuoteSummary } from "@/lib/types";
 import { useConsoleDataOptional } from "../lib/useConsoleData";
-import { cx, fmtMoney, fmtPct, EM_DASH } from "../lib/format";
+import { cx, fmtMoney, fmtPct, paperDelayCaption, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { Chip } from "./primitives";
 import { useSymbolDrawer } from "./symbol-drawer";
 import { TickerLogo } from "./ticker-logo";
@@ -55,7 +55,7 @@ type HistoryState =
   | { status: "loading" }
   | { status: "empty" }
   | { status: "error" }
-  | { status: "ready"; bars: HistoryBar[] };
+  | { status: "ready"; bars: HistoryBar[]; priceDelayAsOf?: string };
 
 function useHistory(symbol: string, enabled: boolean): HistoryState {
   const [state, setState] = useState<HistoryState>({ status: "loading" });
@@ -72,10 +72,10 @@ function useHistory(symbol: string, enabled: boolean): HistoryState {
           return;
         }
         if (!res.ok) throw new Error(`history ${res.status}`);
-        const json: { bars?: HistoryBar[] } = await res.json();
+        const json: { bars?: HistoryBar[]; priceDelay?: { asOf?: string } } = await res.json();
         const bars = (json.bars ?? []).filter((b) => typeof b.close === "number" && Number.isFinite(b.close));
         if (controller.signal.aborted) return;
-        setState(bars.length >= 2 ? { status: "ready", bars } : { status: "empty" });
+        setState(bars.length >= 2 ? { status: "ready", bars, priceDelayAsOf: json.priceDelay?.asOf } : { status: "empty" });
       } catch (err) {
         if (!controller.signal.aborted) setState({ status: "error" });
       }
@@ -170,7 +170,7 @@ const PAD = 6;
 
 /** Self-contained SVG close-price line (same honest style as EquityChart):
  *  no interpolation, fewer than two visible points renders a sentence. */
-function PriceHistoryChart({ bars }: { bars: HistoryBar[] }) {
+function PriceHistoryChart({ bars, priceDelayAsOf }: { bars: HistoryBar[]; priceDelayAsOf?: string }) {
   const [tf, setTf] = useState<Timeframe>("1Y");
 
   const visible = useMemo(() => {
@@ -236,6 +236,11 @@ function PriceHistoryChart({ bars }: { bars: HistoryBar[] }) {
           {visible[visible.length - 1].time} · {fmtMoney(last)}
         </span>
       </figcaption>
+      {paperDelayCaption(priceDelayAsOf) && (
+        <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+          {paperDelayCaption(priceDelayAsOf)}.{SENTENCE_GAP}The latest session close uses that print while the market is open.
+        </p>
+      )}
     </figure>
   );
 }
@@ -383,6 +388,11 @@ export function SymbolDrilldownSheet({
           >
             {fmtMoney(price)}
           </span>
+          {view?.priceDelayLabel && (
+            <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {paperDelayCaption(view.asOf) ?? view.priceDelayLabel}
+            </span>
+          )}
           {typeof dayChangePct === "number" && (
             <span
               className="con-num cursor-default text-[length:var(--con-fs-sm)] font-semibold"
@@ -440,7 +450,7 @@ export function SymbolDrilldownSheet({
             Couldn&apos;t load price history for {normalized}.
           </p>
         )}
-        {history.status === "ready" && <PriceHistoryChart bars={history.bars} />}
+        {history.status === "ready" && <PriceHistoryChart bars={history.bars} priceDelayAsOf={history.priceDelayAsOf} />}
 
         {/* Your exposure — account truth, available even when the scan didn't know the symbol.
             Outside the console (no ConsoleDataProvider) there is no account snapshot to read at

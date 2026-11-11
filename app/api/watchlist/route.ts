@@ -4,6 +4,8 @@ import { normalizeSymbol } from "@/lib/money";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/watchlist";
 import { cascadeFreshMaxAgeMs, fetchFreshQuotesCascade, isQuoteFresh } from "@/lib/quotes-cascade";
+import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
+import { alignBrokerQuoteRecord } from "@/lib/paper-delayed-price-policy";
 import type { BrokerQuote } from "@/lib/types";
 import { NextResponse } from "next/server";
 
@@ -57,7 +59,15 @@ export async function GET(request: Request) {
     }
   }
 
-  return NextResponse.json({ items, quotes });
+  const paperPolicy = paperPricePolicyForUser(userId);
+  const aligned = alignBrokerQuoteRecord(quotes, paperPolicy);
+  return NextResponse.json({
+    items,
+    quotes: aligned,
+    ...(paperPolicy.active && paperPolicy.asOf
+      ? { priceDelay: { label: paperPolicy.label, asOf: paperPolicy.asOf } }
+      : {})
+  });
 }
 
 export async function POST(request: Request) {

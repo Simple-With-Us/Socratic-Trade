@@ -1046,6 +1046,8 @@ export interface BrokerQuote {
   volume?: number;
   asOf?: string;
   provider?: string;
+  /** Set when this price was aligned to the Alpaca PAPER 15-minute clock. */
+  priceDelayLabel?: "15-min delayed";
   /**
    * When true, this quote's price is the execution-venue tape (e.g. Tradier sandbox paper, which
    * only trades against its ~15-minute delayed feed). Do NOT replace with a fresher external
@@ -2230,6 +2232,8 @@ export interface MarketQuote {
   provider?: string;
   cached?: boolean;
   asOf?: string;
+  /** Set when this price was aligned to the Alpaca PAPER 15-minute clock. */
+  priceDelayLabel?: "15-min delayed";
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
   /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */
@@ -2364,6 +2368,11 @@ export interface MarketScan {
    * and provider failures obvious on Scan/admin instead of silent dashes.
    */
   dataCoverage?: MarketScanDataCoverage;
+  /**
+   * Present when this scan was built for an Alpaca PAPER account.  Every price
+   * the scan kept shares this as-of (the paper market's 15-minute clock).
+   */
+  priceDelay?: { label: "15-min delayed"; asOf: string };
 }
 
 /** Per-scan coverage shortfall report (user-visible + ops). */
@@ -2524,6 +2533,8 @@ export interface MarketQuoteSummary {
   score: number;
   provider?: string;
   asOf?: string;
+  /** Set when this price was aligned to the Alpaca PAPER 15-minute clock. */
+  priceDelayLabel?: "15-min delayed";
   /** See BrokerQuote.venuePriceAuthoritative — carried through mergeQuoteData for policy gates. */
   venuePriceAuthoritative?: boolean;
   /** See BrokerQuote.expectedDelaySec — documented delay of this quote's tape (Alpaca PAPER ~900s). */

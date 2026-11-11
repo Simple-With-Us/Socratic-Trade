@@ -596,10 +596,12 @@ describe("fetchFreshQuotesCascade", () => {
     expect(result.AAPL).toBeUndefined();
   });
 
-  it("venue_delayed WITH skipActiveBroker: later levels may still fill (L1a never ran — Sentry pendingSymbols thread)", async () => {
-    // The caller already hit the broker itself, so L1a is skipped.  Blanking
-    // the pending list here would drop every fallback and leave the caller
-    // with an empty result.
+  it("venue_delayed WITH skipActiveBroker: later levels still run, but a fresher-than-15-min print is withheld", async () => {
+    // The caller already hit the broker itself, so L1a is skipped and the
+    // pending list is NOT blanked (Sentry pendingSymbols thread).  For an
+    // Alpaca PAPER account the delayed-price policy then drops a print that
+    // is newer than the paper clock, so the caller keeps its own delayed
+    // gateway quote instead of overlaying a live one.
     const now = Date.now();
     const freshIso = new Date(now - 20_000).toISOString();
 
@@ -636,7 +638,49 @@ describe("fetchFreshQuotesCascade", () => {
 
     expect(mockGetEquityQuotes).not.toHaveBeenCalled();
     expect(mockEnrich).toHaveBeenCalled();
+    expect(result.AAPL).toBeUndefined();
+  });
+
+  it("venue_delayed WITH skipActiveBroker: a delayed_sip print is kept and shares the paper as-of", async () => {
+    const now = Date.now();
+    const delayedIso = new Date(now - 900_000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      accountNumber: "PA33IDTHMFK9",
+      connectedAccountId: "ap-paper",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-paper",
+      broker: "alpaca",
+      environment: "paper"
+    });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 210,
+        asOf: delayedIso,
+        expectedDelaySec: 900,
+        bid: 209.9,
+        ask: 210.1,
+        prevClose: 205,
+        open: 206,
+        high: 211,
+        low: 204,
+        volume: 1000
+      }
+    });
+
+    const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper", {
+      skipActiveBroker: true
+    });
+
     expect(result.AAPL?.price).toBe(210);
+    expect(result.AAPL?.priceDelayLabel).toBe("15-min delayed");
+    const asOfMs = Date.parse(result.AAPL?.asOf ?? "");
+    expect(Math.abs(asOfMs - (Date.now() - 900_000))).toBeLessThan(5_000);
   });
 
   it("on Tradier live, KEEPS the Tradier quote and does not overlay Alpaca or Yahoo", async () => {

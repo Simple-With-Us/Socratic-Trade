@@ -33,6 +33,8 @@ import {
   isAlpacaPaperAccount,
   isFutureProviderStamp
 } from "./alpaca-paper-quotes";
+import { paperPricePolicyForUser } from "./paper-delayed-price-account";
+import { alignBrokerQuoteRecord, paperDelayedPricePolicy } from "./paper-delayed-price-policy";
 import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
 /**
@@ -1272,7 +1274,13 @@ export async function fetchFreshQuotesCascade(
   // Persist only accepted (fresh/venue-authoritative) quotes as latest
   // (Cluster B Q3): stale fallback quotes below are returned to the caller
   // but must not be written to symbol_field_latest as if they were latest.
-  syncQuotesToFieldStore(result);
+  // An Alpaca PAPER account drops a fresher overlay before that write so the
+  // shared store does not keep a live print as "latest".
+  const paperPolicy = activeAccount
+    ? paperDelayedPricePolicy(activeAccount)
+    : paperPricePolicyForUser(userId, connectedAccountId);
+  const accepted = alignBrokerQuoteRecord(result, paperPolicy);
+  syncQuotesToFieldStore(paperPolicy.active ? accepted : result);
 
   // --- FALLBACK ---
   // For any symbols that could not be resolved to a fresh quote (e.g. during market close / weekend),
@@ -1295,5 +1303,5 @@ export async function fetchFreshQuotesCascade(
     }
   }
 
-  return result;
+  return alignBrokerQuoteRecord(result, paperPolicy);
 }

@@ -1,6 +1,8 @@
 /** Formatting helpers for the console. One rule everywhere: missing data
  *  renders as "—" (em dash) — never a fabricated number. */
 
+import { PAPER_DELAYED_PRICE_LABEL } from "@/lib/paper-delayed-price-policy";
+
 export const EM_DASH = "—";
 
 /** Owner ruling (2026-08-11): every timestamp shown to the user displays in
@@ -52,6 +54,22 @@ export function startOfCentralDay(now: Date): Date {
  *  spaces to one, so the gap is rendered as NBSP + space — interpose
  *  {SENTENCE_GAP} between sentences in JSX copy instead of a literal "  ". */
 export const SENTENCE_GAP = "\u00A0 ";
+
+/** Caption for an Alpaca PAPER account's shared 15-minute as-of. */
+export function paperDelayCaption(asOf: string | undefined): string | undefined {
+  if (!asOf) return undefined;
+  const ms = Date.parse(asOf);
+  if (!Number.isFinite(ms)) return `${PAPER_DELAYED_PRICE_LABEL} · as of ${asOf}`;
+  const when = new Date(ms).toLocaleString("en-US", {
+    timeZone: CENTRAL_TIME_ZONE,
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short"
+  });
+  return `${PAPER_DELAYED_PRICE_LABEL} · as of ${when}`;
+}
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
