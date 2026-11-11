@@ -11,6 +11,27 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertFalse(AuthSessionCookie.isSessionCookieName("__Secure-authjs.session-token.chunk"))
     }
 
+    func testArchiveTreatsPastJarExpiryAsSessionCookie() throws {
+        let past = Date(timeIntervalSince1970: 1_600_000_000)
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "socratictrade.com",
+            .path: "/",
+            .name: "__Secure-authjs.session-token",
+            .value: "live",
+            .secure: "TRUE",
+            .expires: past,
+        ]))
+        let archive = SessionCookieArchive(cookie: cookie)
+        XCTAssertNil(archive.expiresAt)
+        let storage = HTTPCookieStorage()
+        let applied = SessionCookiePersistence.apply(
+            [archive],
+            to: storage,
+            owningHost: "socratictrade.com"
+        )
+        XCTAssertEqual(applied, 1)
+    }
+
     func testHttpOnlyRoundTripsThroughArchive() throws {
         let cookie = try XCTUnwrap(HTTPCookie(properties: [
             .domain: "socratictrade.com",

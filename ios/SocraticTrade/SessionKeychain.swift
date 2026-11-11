@@ -42,7 +42,9 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         path = cookie.path
         secure = cookie.isSecure
         httpOnly = cookie.isHTTPOnly
-        if let date = cookie.expiresDate, date.timeIntervalSince1970 > 0 {
+        if let date = cookie.expiresDate,
+           date.timeIntervalSince1970 > 0,
+           date > Date() {
             expiresAt = date
         } else {
             expiresAt = nil
@@ -292,13 +294,16 @@ struct SessionCookieCoordinator {
     func prepareClientSession(_ client: MobileAPIClient) throws {
         let storage = cookieStorage(for: client)
         if let archives = try credentialStore.load(), !archives.isEmpty {
-            let applied = SessionCookiePersistence.apply(
-                archives,
-                to: storage,
-                owningHost: client.baseURL.host
-            )
-            if applied == 0 {
+            let now = Date()
+            if archives.allSatisfy({ $0.isExpired(at: now) }) {
                 try credentialStore.delete()
+            } else {
+                _ = SessionCookiePersistence.apply(
+                    archives,
+                    to: storage,
+                    owningHost: client.baseURL.host,
+                    now: now
+                )
             }
         }
         try SessionCookiePersistence.migrateFromLegacySharedStorageIfNeeded(
