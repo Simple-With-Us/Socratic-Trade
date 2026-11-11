@@ -257,15 +257,20 @@ function redactParams(query: string, depth: number): string {
 // query or a key=value fragment, in which case the redacted form replaces it.
 function redactNestedUrlValue(rawValue: string, depth: number): string {
   if (depth > 3) return rawValue;
-  let candidate = rawValue;
-  let decoded = false;
+  let percentEncoded = false;
   try {
-    const dec = decodeURIComponent(rawValue.replace(/\+/g, " "));
-    decoded = dec !== rawValue;
-    candidate = dec;
+    percentEncoded = decodeURIComponent(rawValue) !== rawValue;
   } catch {
-    // not percent-encoded (or malformed): sanitize the raw text itself when it
-    // still looks like a URL
+    // malformed percent-encoding: treat the value as plain
+  }
+  let candidate = rawValue;
+  try {
+    // + means space only for the URL-detection/sanitizing pass; the encoding
+    // decision above deliberately ignores it so plain a+b values are not
+    // mistaken for encoded ones.
+    candidate = decodeURIComponent(rawValue.replace(/\+/g, " "));
+  } catch {
+    // keep the raw text when it cannot be decoded at all
   }
   if (!/^https?:\/\//i.test(candidate)) return rawValue;
   if (!/[?#]/.test(candidate)) return rawValue;
@@ -273,7 +278,7 @@ function redactNestedUrlValue(rawValue: string, depth: number): string {
   // Preserve the outer delimiters: when the value was percent-encoded, return
   // the redacted form re-encoded, or a literal & in the nested URL would split
   // into fake top-level params.
-  return decoded ? encodeURIComponent(redacted) : redacted;
+  return percentEncoded ? encodeURIComponent(redacted) : redacted;
 }
 
 const URL_IN_TEXT = /(?:https?:\/\/|\/)[^\s"'<>]*\?[^\s"'<>]*/g;
