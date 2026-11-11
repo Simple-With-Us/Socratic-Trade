@@ -303,11 +303,14 @@ enum SessionCookiePersistence {
         func cookieKey(_ cookie: HTTPCookie) -> String {
             "\(cookie.name)|\(cookie.domain)|\(cookie.path)"
         }
+        func sessionSlotKey(_ cookie: HTTPCookie) -> String {
+            "\(cookie.name)|\(cookie.path)"
+        }
         func ingest(_ cookies: [HTTPCookie], originScoped: Bool) {
             for cookie in cookies {
                 let key = cookieKey(cookie)
                 if originScoped {
-                    associatedWithOrigin.insert(key)
+                    associatedWithOrigin.insert(sessionSlotKey(cookie))
                 }
                 merged[key] = cookie
             }
@@ -318,7 +321,7 @@ enum SessionCookiePersistence {
         ingest(storage.cookies ?? [], originScoped: false)
         return merged.values.filter { cookie in
             guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return false }
-            if associatedWithOrigin.contains(cookieKey(cookie)) {
+            if associatedWithOrigin.contains(sessionSlotKey(cookie)) {
                 return true
             }
             return ownsDomain(cookie, host: host)
@@ -326,7 +329,9 @@ enum SessionCookiePersistence {
     }
 
     static func ownsDomain(_ cookie: HTTPCookie, host: String) -> Bool {
-        ownsDomain(cookie.domain, host: host, originURL: originURL(from: cookie.properties?[.originURL]))
+        let domainAttribute = cookie.properties?[.domain] as? String
+        let domain = !cookie.domain.isEmpty ? cookie.domain : (domainAttribute ?? "")
+        return ownsDomain(domain, host: host, originURL: originURL(from: cookie.properties?[.originURL]))
     }
 
     private static func originURL(from property: Any?) -> URL? {
@@ -368,9 +373,8 @@ enum SessionCookiePersistence {
             guard let cookie = archive.makeHTTPCookie(origin: cookieOrigin) else { continue }
             if let cookieOrigin {
                 storage.setCookies([cookie], for: cookieOrigin, mainDocumentURL: nil)
-            } else {
-                storage.setCookie(cookie)
             }
+            storage.setCookie(cookie)
             applied += 1
         }
         return applied

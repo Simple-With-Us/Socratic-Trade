@@ -136,6 +136,7 @@ final class SessionKeychainTests: XCTestCase {
         let storage = HTTPCookieStorage()
         let origin = URL(string: "https://socratictrade.com/")!
         storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
+        storage.setCookie(cookie)
         XCTAssertEqual(
             SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
             1
@@ -290,6 +291,7 @@ final class SessionKeychainTests: XCTestCase {
     ) {
         let origin = URL(string: "https://\(host)/")!
         storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
+        storage.setCookie(cookie)
     }
 
     private func makeCookie(name: String, value: String) throws -> HTTPCookie {
