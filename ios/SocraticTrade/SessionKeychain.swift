@@ -303,8 +303,7 @@ enum SessionCookiePersistence {
         in storage: HTTPCookieStorage,
         owningHost host: String?
     ) -> [HTTPCookie] {
-        guard let host else { return [] }
-        let origin = URL(string: "https://\(host)/")!
+        guard let host, !host.isEmpty else { return [] }
         var merged: [String: HTTPCookie] = [:]
         func ingest(_ cookies: [HTTPCookie]) {
             for cookie in cookies {
@@ -312,7 +311,9 @@ enum SessionCookiePersistence {
                 merged[key] = cookie
             }
         }
-        ingest(storage.cookies(for: origin) ?? [])
+        if let origin = URL(string: "https://\(host)/") {
+            ingest(storage.cookies(for: origin) ?? [])
+        }
         ingest(storage.cookies ?? [])
         return merged.values.filter { cookie in
             ownsDomain(cookie.domain, host: host) && AuthSessionCookie.isSessionCookieName(cookie.name)
@@ -325,7 +326,7 @@ enum SessionCookiePersistence {
             .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             .lowercased()
         if domain.isEmpty {
-            return true
+            return false
         }
         return normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)")
     }
