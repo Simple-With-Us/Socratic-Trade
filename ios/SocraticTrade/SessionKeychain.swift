@@ -33,6 +33,8 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     let path: String
     let secure: Bool
     let httpOnly: Bool
+    /// SameSite policy string for `HTTPCookiePropertyKey.sameSitePolicy` (`Lax`, `Strict`, `None`).
+    let sameSite: String?
     let expiresAt: Date?
 
     init(cookie: HTTPCookie, owningHost: String? = nil) {
@@ -42,6 +44,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         path = cookie.path.isEmpty ? "/" : cookie.path
         secure = cookie.isSecure || name.hasPrefix("__Secure-") || name.hasPrefix("__Host-")
         httpOnly = cookie.isHTTPOnly
+        sameSite = Self.sameSitePolicyString(from: cookie)
         if let date = cookie.expiresDate, date.timeIntervalSince1970 > 0 {
             expiresAt = date
         } else {
@@ -56,6 +59,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         path: String,
         secure: Bool,
         httpOnly: Bool = false,
+        sameSite: String? = nil,
         expiresAt: Date?
     ) {
         self.name = name
@@ -64,11 +68,12 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         self.path = path
         self.secure = secure
         self.httpOnly = httpOnly
+        self.sameSite = sameSite
         self.expiresAt = expiresAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case name, value, domain, path, secure, httpOnly, expiresAt
+        case name, value, domain, path, secure, httpOnly, sameSite, expiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +84,7 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         path = try container.decode(String.self, forKey: .path)
         secure = try container.decode(Bool.self, forKey: .secure)
         httpOnly = try container.decodeIfPresent(Bool.self, forKey: .httpOnly) ?? false
+        sameSite = try container.decodeIfPresent(String.self, forKey: .sameSite)
         expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
     }
 
@@ -90,25 +96,6 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
     func makeHTTPCookie(origin: URL? = nil) -> HTTPCookie? {
         guard !domain.isEmpty, !name.isEmpty, !value.isEmpty else { return nil }
         let pathValue = path.isEmpty ? "/" : path
-        if let origin {
-            var setCookie = "\(name)=\(value); Domain=\(domain); Path=\(pathValue)"
-            if secure {
-                setCookie += "; Secure"
-            }
-            if httpOnly {
-                setCookie += "; HttpOnly"
-            }
-            if let expiresAt {
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.timeZone = TimeZone(abbreviation: "GMT")
-                formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-                setCookie += "; Expires=\(formatter.string(from: expiresAt))"
-            }
-            if let parsed = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": setCookie], for: origin).first {
-                return parsed
-            }
-        }
         var properties: [HTTPCookiePropertyKey: Any] = [
             .name: name,
             .value: value,
@@ -127,7 +114,26 @@ struct SessionCookieArchive: Codable, Equatable, Sendable {
         if let expiresAt {
             properties[.expires] = expiresAt
         }
+        if let sameSite {
+            properties[.sameSitePolicy] = sameSite
+        }
         return HTTPCookie(properties: properties)
+    }
+
+    private static func sameSitePolicyString(from cookie: HTTPCookie) -> String? {
+        if #available(iOS 13.0, *) {
+            switch cookie.sameSitePolicy {
+            case .lax:
+                return "Lax"
+            case .strict:
+                return "Strict"
+            case .none:
+                return "None"
+            @unknown default:
+                return nil
+            }
+        }
+        return nil
     }
 
     private static func normalizedDomain(_ cookieDomain: String, owningHost: String?) -> String {
