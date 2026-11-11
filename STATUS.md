@@ -1,6 +1,6 @@
 ## 2026-11-11 CURSOR — ST-4600 Alpaca paper prices share one 15-minute clock
 
-**What.**  An Alpaca PAPER account now reads every displayed and decision price through one delayed-price policy (`src/lib/paper-delayed-price-policy.ts`).  The canonical as-of is now minus 15 minutes.  A `delayed_sip` print inside that window wins.  Another source is kept only when its print is already in the window, or when it is the Nasdaq delayed screener without a precise print time, and those prices are relabeled to the same as-of.  A fresher print is withheld.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS label the tape `15-min delayed` with the as-of.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
+**What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
 
 **Next.**  PR is open for review.  This lane does not merge.  CI runs the full gate.
 

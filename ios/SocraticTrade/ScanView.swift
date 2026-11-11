@@ -50,7 +50,7 @@ struct ScanView: View {
 
     private var scanSubtitle: String {
         if let delay = scan?.priceDelay, delay.label == "15-min delayed" {
-            return "15-min delayed · as of \(AppFormat.dateTime(delay.asOf))"
+            return "Prices are generally 15-min delayed."
         }
         return scan?.asOf.map { "as of \(AppFormat.dateTime($0))" } ?? "ranked names for this universe"
     }

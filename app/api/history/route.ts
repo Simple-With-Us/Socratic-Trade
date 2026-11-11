@@ -60,11 +60,9 @@ export async function GET(req: Request) {
           const chosen = choosePaperPrice([quotes[symbol]], paperPolicy);
           if (!chosen.withheld && chosen.price !== undefined) {
             chartBars[chartBars.length - 1] = { ...last, close: chosen.price };
-          } else {
-            chartBars.pop();
           }
         } catch {
-          chartBars.pop();
+          // Keep the history bar.  A missing Alpaca quote may use another source.
         }
       }
     }

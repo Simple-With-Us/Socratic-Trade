@@ -208,8 +208,7 @@ export async function GET(request: Request) {
       persistOnDemandQuote(symbol, enrichment);
       return NextResponse.json({
         symbol,
-        ...enrichment,
-        ...(paperPolicy.active ? { priceDelayLabel: paperPolicy.label } : {})
+        ...enrichment
       });
     }
 
@@ -243,7 +242,7 @@ function alignOnDemandPaperQuote(
     policy
   );
   if (chosen.withheld || chosen.price === undefined) {
-    const next: SymbolEnrichment = { ...enrichment, asOf: policy.asOf };
+    const next: SymbolEnrichment = { ...enrichment };
     delete next.price;
     delete next.bid;
     delete next.ask;
@@ -254,6 +253,7 @@ function alignOnDemandPaperQuote(
     price: chosen.price,
     asOf: chosen.asOf,
     bid: chosen.bid ?? enrichment.bid,
-    ask: chosen.ask ?? enrichment.ask
+    ask: chosen.ask ?? enrichment.ask,
+    ...(chosen.priceDelayLabel ? { priceDelayLabel: chosen.priceDelayLabel } : {})
   };
 }

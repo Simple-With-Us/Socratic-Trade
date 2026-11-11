@@ -197,6 +197,12 @@ export interface SymbolEnrichment {
   vwap?: number;        // session volume-weighted average price (Alpaca dailyBar.vw)
   asOf?: string;
   /**
+   * Set only when this price came from Alpaca's delayed paper tape.
+   * A fallback price leaves it unset so the UI does not claim that print
+   * is the 15-minute tape.
+   */
+  priceDelayLabel?: "15-min delayed";
+  /**
    * Documented publication delay of the tape this enrichment came from, in
    * seconds (Alpaca PAPER `delayed_sip` ≈ 900s).
    *

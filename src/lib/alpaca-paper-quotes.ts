@@ -20,9 +20,10 @@
  *    b. NO EXCESS DELAY — the `asOf` age must stay within
  *       `expectedDelaySec + tolerance`.  A feed that is lagging far beyond
  *       the documented 900s is broken and is flagged, not silently accepted.
- * 4. NO REALTIME OVERLAY.  A delayed tape priced by the venue is never
- *    replaced by Yahoo / IEX / any fresher secondary, and missing broker data
- *    fails closed rather than silently substituting another tape.
+ * 4. NO REALTIME OVERLAY OF A RETURNED PRINT.  A delayed tape priced by the
+ *    venue is never replaced by Yahoo / IEX / any fresher secondary.  A symbol
+ *    the delayed feed did not price may use another source.  That fallback is
+ *    not labeled as the paper tape.
  * 5. FUTURE STAMPS ARE BAD DATA, NOT FRESH DATA.  A provider stamp AHEAD of
  *    the wall clock (beyond a tiny clock-skew slack) never proves freshness:
  *    the observation is treated as missing and the retrieval as stale, so a

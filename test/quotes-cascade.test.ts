@@ -555,10 +555,10 @@ describe("fetchFreshQuotesCascade", () => {
     expect(age.ageSec!).toBeLessThan(5);
   });
 
-  it("venue_delayed WITHOUT skipActiveBroker: later levels do NOT fill (the venue tape is authoritative)", async () => {
-    // L1a ran and the Alpaca paper venue priced nothing — the pending list is
-    // cleared so Alpaca/Yahoo can never overlay the paper venue tape (Q5's
-    // unpriced-symbol cascade is Tradier-only; see the Tradier case below).
+  it("venue_delayed WITHOUT skipActiveBroker: a symbol Alpaca did not price keeps the later-level fallback", async () => {
+    // L1a ran and the Alpaca paper venue priced nothing.  The symbol stays
+    // pending so the existing later levels can fill it.  A quote Alpaca did
+    // return is still not replaced.
     const now = Date.now();
     const freshIso = new Date(now - 20_000).toISOString();
 
@@ -592,16 +592,17 @@ describe("fetchFreshQuotesCascade", () => {
     const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper");
 
     expect(mockGetEquityQuotes).toHaveBeenCalled();
-    expect(mockEnrich).not.toHaveBeenCalled();
-    expect(result.AAPL).toBeUndefined();
+    expect(mockEnrich).toHaveBeenCalled();
+    expect(result.AAPL?.price).toBe(210);
+    expect(result.AAPL?.asOf).toBe(freshIso);
+    expect(result.AAPL?.priceDelayLabel).toBeUndefined();
   });
 
-  it("venue_delayed WITH skipActiveBroker: later levels still run, but a fresher-than-15-min print is withheld", async () => {
+  it("venue_delayed WITH skipActiveBroker: a fresher print is kept when Alpaca did not price the symbol", async () => {
     // The caller already hit the broker itself, so L1a is skipped and the
-    // pending list is NOT blanked (Sentry pendingSymbols thread).  For an
-    // Alpaca PAPER account the delayed-price policy then drops a print that
-    // is newer than the paper clock, so the caller keeps its own delayed
-    // gateway quote instead of overlaying a live one.
+    // pending list is NOT blanked (Sentry pendingSymbols thread).  When Alpaca
+    // priced nothing, the other source is kept and is not labeled as the
+    // paper tape.
     const now = Date.now();
     const freshIso = new Date(now - 20_000).toISOString();
 
@@ -638,10 +639,12 @@ describe("fetchFreshQuotesCascade", () => {
 
     expect(mockGetEquityQuotes).not.toHaveBeenCalled();
     expect(mockEnrich).toHaveBeenCalled();
-    expect(result.AAPL).toBeUndefined();
+    expect(result.AAPL?.price).toBe(210);
+    expect(result.AAPL?.asOf).toBe(freshIso);
+    expect(result.AAPL?.priceDelayLabel).toBeUndefined();
   });
 
-  it("venue_delayed WITH skipActiveBroker: a delayed_sip print is kept and shares the paper as-of", async () => {
+  it("venue_delayed WITH skipActiveBroker: a delayed_sip print keeps Alpaca's timestamp", async () => {
     const now = Date.now();
     const delayedIso = new Date(now - 900_000).toISOString();
 
@@ -679,8 +682,7 @@ describe("fetchFreshQuotesCascade", () => {
 
     expect(result.AAPL?.price).toBe(210);
     expect(result.AAPL?.priceDelayLabel).toBe("15-min delayed");
-    const asOfMs = Date.parse(result.AAPL?.asOf ?? "");
-    expect(Math.abs(asOfMs - (Date.now() - 900_000))).toBeLessThan(5_000);
+    expect(result.AAPL?.asOf).toBe(delayedIso);
   });
 
   it("on Tradier live, KEEPS the Tradier quote and does not overlay Alpaca or Yahoo", async () => {

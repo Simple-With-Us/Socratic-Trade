@@ -1,5 +1,11 @@
 # 2026-11-11 — ST-4600 Alpaca paper prices share one 15-minute clock
 
+## 2026-11-11 correction (Jay, 11:47pm CT)
+
+Alpaca's market-data API, not the paper trading host, serves quotes.  `paper-api.alpaca.markets` is orders, positions, and account.  Quotes and bars are `https://data.alpaca.markets`.  `feed=delayed_sip` is the 15-minute delayed SIP tape (stream path `v2/delayed_sip`).  A latest quote already carries its print time in `t`.  A free key's default latest trade is IEX, and `feed=sip` without a subscription returns "subscription does not permit querying recent SIP data", so the paper path keeps requesting `delayed_sip`.
+
+Jay's correction: prefer that Alpaca quote, and when Alpaca returns nothing a later source is allowed.  Do not stamp the fallback with wall clock minus 15 minutes.  The UI says "Prices are generally 15-min delayed." and does not claim a per-price as-of.  Live accounts and Tradier paper are unchanged.  Portfolio equity totals stay the broker figure.
+
 ## Context & Objective
 
 Alpaca's paper market fills on `delayed_sip`.  The execution cascade already asked that feed for quotes, but scan enrichment, Yahoo, charts, position marks, and on-demand quotes could still show a different print.  This change makes the prices an Alpaca PAPER account shows and decides on share one ~15-minute as-of.

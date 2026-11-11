@@ -1886,7 +1886,7 @@ function alignQuoteToPaperPolicy<T extends {
     policy
   );
   if (chosen.withheld || chosen.price === undefined) {
-    return { ...merged, price: 0, bid: undefined, ask: undefined, asOf: policy.asOf, priceDelayLabel: policy.label };
+    return { ...merged, price: 0, bid: undefined, ask: undefined, priceDelayLabel: undefined };
   }
   return {
     ...merged,
@@ -1894,7 +1894,7 @@ function alignQuoteToPaperPolicy<T extends {
     asOf: chosen.asOf,
     bid: chosen.bid,
     ask: chosen.ask,
-    priceDelayLabel: policy.label
+    priceDelayLabel: chosen.priceDelayLabel
   };
 }
 
@@ -1984,8 +1984,8 @@ export function applyEnrichment(
       : quote.price;
   const bid = paperChoice ? (paperWithheld ? undefined : paperChoice.bid) : enrichmentBid ? extra.bid : quote.bid;
   const ask = paperChoice ? (paperWithheld ? undefined : paperChoice.ask) : enrichmentAsk ? extra.ask : quote.ask;
-  const asOf = paperChoice ? paperChoice.asOf ?? policy?.asOf : extra.asOf ?? quote.asOf;
-  const priceDelayLabel = paperChoice ? policy?.label : quote.priceDelayLabel;
+  const asOf = paperChoice ? paperChoice.asOf : extra.asOf ?? quote.asOf;
+  const priceDelayLabel = paperChoice ? paperChoice.priceDelayLabel : quote.priceDelayLabel;
   const syntheticBidResolved = paperChoice
     ? paperWithheld
       ? false

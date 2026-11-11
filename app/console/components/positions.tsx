@@ -9,7 +9,7 @@ import Link from "next/link";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import type { OptionPosition } from "@/lib/types";
 import { deriveProtection, deriveUnmanagedShorts, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
-import { fmtMoney, fmtPct, fmtQty, paperDelayCaption, EM_DASH, SENTENCE_GAP } from "../lib/format";
+import { fmtMoney, fmtPct, fmtQty, paperDelayNote, EM_DASH } from "../lib/format";
 import { Card, Dash, Empty, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -70,9 +70,9 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
   return (
     <>
       <Card title={`Positions (${positions.length})`} padded={false}>
-        {paperDelayCaption(snapshot.priceDelay?.asOf) && (
+        {paperDelayNote(snapshot.priceDelay) && (
           <p className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {paperDelayCaption(snapshot.priceDelay?.asOf)}.{SENTENCE_GAP}Position values use that print, not a live mark.
+            {paperDelayNote(snapshot.priceDelay)}
           </p>
         )}
         {unmanagedShorts && (

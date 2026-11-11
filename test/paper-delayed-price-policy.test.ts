@@ -1,20 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { preferFreshQuote } from "../app/console/ui/drilldown-data";
 import {
-  ALPACA_PAPER_EXPECTED_DELAY_SEC
-} from "../src/lib/alpaca-paper-quotes";
-import {
   alignBrokerQuoteRecord,
   choosePaperPrice,
   paperDelayedPricePolicy,
   PAPER_DELAYED_PRICE_LABEL,
-  type DelayablePrice,
-  type PaperDelayedPricePolicy
+  PAPER_DELAYED_PRICE_NOTE,
+  type DelayablePrice
 } from "../src/lib/paper-delayed-price-policy";
 import type { MarketQuote } from "../src/lib/types";
 
 const NOW = Date.parse("2026-11-11T15:30:00.000Z");
-const CANONICAL = new Date(NOW - ALPACA_PAPER_EXPECTED_DELAY_SEC * 1000).toISOString();
+const ALPACA_AS_OF = "2026-11-11T15:14:40.000Z";
 
 const paper = paperDelayedPricePolicy({ broker: "alpaca", environment: "paper" }, NOW);
 const live = paperDelayedPricePolicy({ broker: "alpaca", environment: "live" }, NOW);
@@ -33,46 +30,47 @@ function quote(partial: Partial<MarketQuote>): MarketQuote {
 }
 
 describe("paperDelayedPricePolicy", () => {
-  it("is active only for an Alpaca paper account and stamps one 15-minute as-of", () => {
+  it("is active only for an Alpaca paper account", () => {
     expect(paper.active).toBe(true);
-    expect(paper.asOf).toBe(CANONICAL);
     expect(paper.label).toBe(PAPER_DELAYED_PRICE_LABEL);
-    expect(paper.label).toBe("15-min delayed");
+    expect(PAPER_DELAYED_PRICE_NOTE).toBe("Prices are generally 15-min delayed.");
     expect(live.active).toBe(false);
     expect(live.asOf).toBeUndefined();
     expect(tradier.active).toBe(false);
     expect(paperDelayedPricePolicy({ broker: "alpaca-mcp", environment: "paper" }, NOW).active).toBe(false);
   });
 
-  it("gives a paper batch one shared as-of and leaves a live batch on its own clocks", () => {
-    const sipAsOf = new Date(NOW - 900_000 + 30_000).toISOString();
+  it("keeps Alpaca's timestamp and keeps a fallback when Alpaca has no price", () => {
     const yahooAsOf = new Date(NOW - 20_000).toISOString();
     const screenerAsOf = "2026-11-11";
     const rows: Record<string, DelayablePrice & { symbol: string }> = {
-      SIP: { symbol: "SIP", price: 10, asOf: sipAsOf, provider: "alpaca", expectedDelaySec: 900 },
+      SIP: { symbol: "SIP", price: 10, asOf: ALPACA_AS_OF, provider: "alpaca", expectedDelaySec: 900 },
       YAHOO: { symbol: "YAHOO", price: 11, asOf: yahooAsOf, provider: "yahoo-finance" },
       SCREEN: { symbol: "SCREEN", price: 12, asOf: screenerAsOf, provider: "nasdaq-delayed-screener" }
     };
 
     const delayed = alignBrokerQuoteRecord(rows, paper);
     expect(delayed.SIP?.price).toBe(10);
-    expect(delayed.SIP?.asOf).toBe(paper.asOf);
+    expect(delayed.SIP?.asOf).toBe(ALPACA_AS_OF);
     expect(delayed.SIP?.priceDelayLabel).toBe("15-min delayed");
+    expect(delayed.YAHOO?.price).toBe(11);
+    expect(delayed.YAHOO?.asOf).toBe(yahooAsOf);
+    expect(delayed.YAHOO?.priceDelayLabel).toBeUndefined();
     expect(delayed.SCREEN?.price).toBe(12);
-    expect(delayed.SCREEN?.asOf).toBe(paper.asOf);
-    expect(delayed.YAHOO).toBeUndefined();
+    expect(delayed.SCREEN?.asOf).toBe(screenerAsOf);
+    expect(delayed.SCREEN?.priceDelayLabel).toBeUndefined();
 
     const untouched = alignBrokerQuoteRecord(rows, live);
-    expect(untouched.SIP?.asOf).toBe(sipAsOf);
+    expect(untouched.SIP?.asOf).toBe(ALPACA_AS_OF);
     expect(untouched.YAHOO?.asOf).toBe(yahooAsOf);
     expect(untouched.YAHOO?.priceDelayLabel).toBeUndefined();
     expect(untouched.SCREEN?.asOf).toBe(screenerAsOf);
   });
 
-  it("prefers delayed_sip over a fresher print and withholds a fresher-only symbol", () => {
+  it("prefers the Alpaca delayed quote and keeps a fresher fallback when Alpaca is missing", () => {
     const sip = {
       price: 180,
-      asOf: new Date(NOW - 890_000).toISOString(),
+      asOf: ALPACA_AS_OF,
       provider: "alpaca",
       expectedDelaySec: 900
     };
@@ -80,13 +78,16 @@ describe("paperDelayedPricePolicy", () => {
     const chosen = choosePaperPrice([yahoo, sip], paper);
     expect(chosen.source).toBe("delayed_sip");
     expect(chosen.price).toBe(180);
-    expect(chosen.asOf).toBe(paper.asOf);
+    expect(chosen.asOf).toBe(ALPACA_AS_OF);
+    expect(chosen.priceDelayLabel).toBe("15-min delayed");
     expect(chosen.withheld).toBe(false);
 
     const freshOnly = choosePaperPrice([yahoo], paper);
-    expect(freshOnly.source).toBe("withheld");
-    expect(freshOnly.price).toBeUndefined();
-    expect(freshOnly.asOf).toBe(paper.asOf);
+    expect(freshOnly.source).toBe("fallback");
+    expect(freshOnly.price).toBe(181.5);
+    expect(freshOnly.asOf).toBe(yahoo.asOf);
+    expect(freshOnly.priceDelayLabel).toBeUndefined();
+    expect(freshOnly.withheld).toBe(false);
 
     const passthrough = choosePaperPrice([yahoo, sip], live);
     expect(passthrough.source).toBe("passthrough");
@@ -95,47 +96,28 @@ describe("paperDelayedPricePolicy", () => {
     expect(passthrough.priceDelayLabel).toBeUndefined();
   });
 
-  it("rewinds to the bar inside the window and keeps an older print's real as-of", () => {
+  it("does not stamp a fallback with Alpaca's clock", () => {
     const olderAsOf = new Date(NOW - 3 * 60 * 60 * 1000).toISOString();
     const older = choosePaperPrice(
       [{ price: 50, asOf: olderAsOf, provider: "yahoo-finance" }],
       paper
     );
-    expect(older.source).toBe("older");
+    expect(older.source).toBe("fallback");
     expect(older.price).toBe(50);
     expect(older.asOf).toBe(olderAsOf);
-    expect(older.priceDelayLabel).toBe("15-min delayed");
+    expect(older.priceDelayLabel).toBeUndefined();
 
-    const rewound = choosePaperPrice(
-      [{ price: 99, asOf: new Date(NOW - 5_000).toISOString(), provider: "yahoo-finance" }],
-      paper,
-      [
-        { timeMs: NOW - 20 * 60 * 1000, price: 40 },
-        { timeMs: NOW - ALPACA_PAPER_EXPECTED_DELAY_SEC * 1000, price: 42 },
-        { timeMs: NOW - 60_000, price: 44 }
-      ]
+    const screener = choosePaperPrice(
+      [{ price: 12, asOf: "2026-11-11", provider: "nasdaq-delayed-screener" }],
+      paper
     );
-    expect(rewound.source).toBe("rewound");
-    expect(rewound.price).toBe(42);
-    expect(rewound.asOf).toBe(paper.asOf);
-  });
-
-  it("shares one as-of across two symbols that both land in the window", () => {
-    const policy: PaperDelayedPricePolicy = paper;
-    const a = choosePaperPrice(
-      [{ price: 1, asOf: new Date(NOW - 900_000 + 10_000).toISOString(), expectedDelaySec: 900 }],
-      policy
-    );
-    const b = choosePaperPrice(
-      [{ price: 2, asOf: new Date(NOW - 900_000 - 20_000).toISOString(), provider: "nasdaq-delayed-screener" }],
-      policy
-    );
-    expect(a.asOf).toBe(b.asOf);
-    expect(a.asOf).toBe(policy.asOf);
+    expect(screener.source).toBe("fallback");
+    expect(screener.asOf).toBe("2026-11-11");
+    expect(screener.priceDelayLabel).toBeUndefined();
   });
 
   it("keeps a delayed quote when a newer unlabelled quote is also available", () => {
-    const delayed = quote({ price: 10, asOf: CANONICAL, priceDelayLabel: "15-min delayed" });
+    const delayed = quote({ price: 10, asOf: ALPACA_AS_OF, priceDelayLabel: "15-min delayed" });
     const fresh = quote({ price: 11, asOf: new Date(NOW).toISOString() });
     expect(preferFreshQuote(fresh, delayed)?.price).toBe(10);
     expect(preferFreshQuote(delayed, fresh)?.price).toBe(10);

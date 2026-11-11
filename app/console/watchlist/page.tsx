@@ -13,7 +13,7 @@ import { useSearchParams } from "next/navigation";
 import { BellPlus, Plus, Trash2 } from "lucide-react";
 import type { PriceAlert, WatchlistItem } from "@/lib/types";
 import { DEEP_LINK_FOCUS_CLASS, readSymbolQuery, scrollDeepLinkTarget, symbolElementId } from "../lib/deep-link-focus";
-import { cx, fmtMoney, paperDelayCaption, EM_DASH, SENTENCE_GAP } from "../lib/format";
+import { cx, fmtMoney, paperDelayNote, EM_DASH, SENTENCE_GAP } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Dash, Empty, Field, NumInput, Select, TextInput } from "../ui/primitives";
@@ -243,7 +243,7 @@ function WatchlistPageInner() {
       >
         {data?.priceDelay && (
           <p className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {paperDelayCaption(data.priceDelay.asOf)}
+            {paperDelayNote(data.priceDelay)}
           </p>
         )}
         {data === null ? (
@@ -283,7 +283,7 @@ function WatchlistPageInner() {
                           className="num con-num"
                           title={
                             typeof quote?.price === "number"
-                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}${data.priceDelay ? `.${SENTENCE_GAP}${paperDelayCaption(data.priceDelay.asOf)}` : `.${SENTENCE_GAP}Quotes may be delayed.`}`
+                              ? `${item.symbol}: ${fmtMoney(quote.price)}${quote.provider ? ` via ${quote.provider}` : ""}${data.priceDelay ? `.${SENTENCE_GAP}${paperDelayNote(data.priceDelay)}` : `.${SENTENCE_GAP}Quotes may be delayed.`}`
                               : "No quote available — quotes come from the active account's data source and may be delayed."
                           }
                         >
