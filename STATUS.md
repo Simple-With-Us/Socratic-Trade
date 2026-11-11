@@ -1,3 +1,8 @@
+## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
+
+**What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
+
+**Next.**  PR open; wait for Playwright Smoke + `verify` green; do not merge from agent.
 ## 2026-11-11 [gb-trader] ST-4601 — deadline Sentry cooldown is its own key
 
 **What.**  A retrieval-timeout warning used the same 15-minute cooldown key as other rag-embed warnings, so it could suppress a later transient-network warning.  A fingerprint that leaves the lane issue now has its own key.{nb} Skipping episodic retrieval after a filings timeout stays intentional: that pass is another RAG wait.
