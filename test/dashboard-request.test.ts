@@ -105,6 +105,29 @@ describe("shared dashboard request", () => {
     expect(shouldSkipDashboardPoll(now + 8_999)).toBe(true);
     expect(shouldSkipDashboardPoll(now + 9_000)).toBe(false);
   });
+
+  it("starts a fresh fetch when the shared request was already aborted", async () => {
+    const { loadSharedDashboard } = await import("../app/console/lib/dashboard-request");
+    const controller = new AbortController();
+    let fetches = 0;
+    const first = loadSharedDashboard((signal) => {
+      fetches += 1;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+        setTimeout(() => resolve({ ok: false }), 1_000);
+      });
+    }, controller.signal);
+    controller.abort();
+    const second = loadSharedDashboard(() => {
+      fetches += 1;
+      return Promise.resolve({ ok: true });
+    });
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(second).resolves.toEqual({ ok: true });
+    expect(fetches).toBe(2);
+  });
 });
 
 describe("fetchDashboard", () => {

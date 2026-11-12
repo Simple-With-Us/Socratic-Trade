@@ -105,6 +105,8 @@ export function loadSharedDashboard<T>(
   signal?: AbortSignal
 ): Promise<T> {
   if (signal?.aborted) return Promise.reject(abortError());
+  // An aborted entry stays until its promise settles. Joining it fails the new caller.
+  if (shared?.controller.signal.aborted) shared = null;
   if (shared) return bindSubscriber(shared as SharedRequest<T>, signal);
 
   const controller = new AbortController();
