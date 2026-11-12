@@ -5,8 +5,9 @@ import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
-// Unknown keys (e.g. a client-sent accountNumber) are stripped, never forwarded: only `label` is renameable.
-const RenameConnectedAccountBodySchema = z.object({ label: z.string() });
+// This route owns the PATCH envelope, so it is strict: unknown keys (e.g. a client-sent accountNumber)
+// fail validation with HTTP 400 instead of being silently dropped. Only `label` is renameable.
+const RenameConnectedAccountBodySchema = z.object({ label: z.string() }).strict();
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -28,7 +29,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     const { id } = await params;
     const parsedBody = RenameConnectedAccountBodySchema.safeParse(await req.json().catch(() => ({})));
     if (!parsedBody.success) {
-      return new NextResponse("A `label` string is required.", { status: 400 });
+      return new NextResponse("Only a `label` string is accepted.", { status: 400 });
     }
     const userId = resolveRequestUserIdOrResponse(req);
     if (userId instanceof Response) return userId;

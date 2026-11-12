@@ -1,0 +1,91 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// ST-4610 Kody follow-ups: POST /api/profiles validates a strict envelope before it reaches the
+// database, and POST /api/profiles/[id]/activate keeps user-resolution server faults out of its 400 catch.
+
+beforeEach(() => {
+  vi.resetModules();
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-profile-routes-${randomUUID()}.db`)}`;
+});
+
+afterEach(() => {
+  vi.doUnmock("@/lib/request-user");
+  vi.unstubAllEnvs();
+});
+
+function postProfiles(body: unknown): Request {
+  return new Request("http://localhost/api/profiles", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+}
+
+describe("POST /api/profiles strict payload", () => {
+  it("rejects unknown keys with HTTP 400 and persists nothing", async () => {
+    const { POST } = await import("../app/api/profiles/route");
+    const response = await POST(postProfiles({ name: "Momentum", userId: "someone-else" }));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "Invalid profile payload" });
+    const { listStrategyProfiles } = await import("../src/lib/db");
+    expect(listStrategyProfiles("local").some((p) => p.name === "Momentum")).toBe(false);
+  });
+
+  it.each([
+    ["non-string name", { name: 42 }],
+    ["non-string prompt", { prompt: ["x"] }],
+    ["non-object policy", { policy: "aggressive" }],
+    ["non-boolean active", { active: "yes" }],
+    ["array body", ["Momentum"]]
+  ])("rejects a %s with HTTP 400", async (_label, body) => {
+    const { POST } = await import("../app/api/profiles/route");
+    const response = await POST(postProfiles(body));
+    expect(response.status).toBe(400);
+  });
+
+  it("creates a profile from the parsed fields only", async () => {
+    const { POST } = await import("../app/api/profiles/route");
+    const response = await POST(postProfiles({ name: "  Swing  ", prompt: "Be patient.", active: true }));
+    expect(response.status).toBe(200);
+    const profile = (await response.json()) as { name: string; prompt: string; active: boolean };
+    expect(profile).toMatchObject({ name: "Swing", prompt: "Be patient.", active: true });
+
+    const blank = await POST(postProfiles({ name: "   " }));
+    expect(blank.status).toBe(200);
+    await expect(blank.json()).resolves.toMatchObject({ name: "New Strategy", active: false });
+  });
+});
+
+describe("POST /api/profiles/[id]/activate error mapping", () => {
+  function activate(id: string): Request {
+    return new Request(`http://localhost/api/profiles/${id}/activate`, { method: "POST" });
+  }
+
+  it("lets a user-resolution server fault escape as a 500 instead of a 400 with internal text", async () => {
+    vi.doMock("@/lib/request-user", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/lib/request-user")>()),
+      resolveRequestUserIdOrResponse: () => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+    }));
+    const { POST } = await import("../app/api/profiles/[id]/activate/route");
+    await expect(POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) })).rejects.toThrow(/SQLITE_BUSY/);
+  });
+
+  it("returns the 401 identity denial unchanged", async () => {
+    vi.stubEnv("CODE_CLI_ENABLED", "true");
+    const { POST } = await import("../app/api/profiles/[id]/activate/route");
+    const response = await POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) });
+    expect(response.status).toBe(401);
+  });
+
+  it("still maps an activation failure to HTTP 400", async () => {
+    const { POST } = await import("../app/api/profiles/[id]/activate/route");
+    const response = await POST(activate("missing"), { params: Promise.resolve({ id: "missing" }) });
+    expect(response.status).toBe(400);
+    await expect(response.text()).resolves.toMatch(/not found/i);
+  });
+});
