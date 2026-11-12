@@ -95,6 +95,7 @@ export type PositionInvariantRefusalCode =
 export type PositionInvariantReceiptKind =
   | "quantity_clamped_to_position"
   | "dollar_exit_resolved_to_quantity"
+  | "dollar_amount_dropped_qty_wins"
   | "buy_against_short_is_cover"
   | "closing_bracket_legs_stripped"
   | "closing_market_price_fields_stripped";
@@ -179,6 +180,28 @@ function isDollarSized<T extends Pick<EquityOrderInput, "quantity" | "dollarAmou
 }
 
 /**
+ * When an explicit positive quantity is authoritative, drop a leftover dollarAmount so review
+ * and broker adapters size from the same field. The held-position clamp still bounds the shares.
+ */
+function dropDollarAmountWhenQuantityWins(
+  input: EquityOrderInput,
+  receipts: PositionInvariantReceipt[]
+): EquityOrderInput {
+  const dollars = input.dollarAmount;
+  if (!(input.quantity != null && input.quantity > 0) || dollars == null) return input;
+  const { dollarAmount: _droppedDollars, ...withoutDollars } = input;
+  const next: EquityOrderInput = withoutDollars;
+  receipts.push({
+    kind: "dollar_amount_dropped_qty_wins",
+    detail:
+      `The order carried both ${formatQty(input.quantity)} shares and $${dollars.toFixed(2)}; ` +
+      "the share count is authoritative, so the dollar amount was dropped.",
+    changedFields: ["dollarAmount"]
+  });
+  return next;
+}
+
+/**
  * True for a fail-closed refusal caused by a failed position read (`position_unverified`): nothing
  * reached the broker and the cause is transient, so the lanes book it retryable "not_placed", not
  * terminal "blocked".
@@ -252,11 +275,15 @@ export function applyPositionInvariant(
   const receipts: PositionInvariantReceipt[] = [];
   const symbol = normalizeSymbol(order.symbol);
   const side = order.side;
+  const finish = (): { input: EquityOrderInput; receipts: PositionInvariantReceipt[] } => ({
+    input: dropDollarAmountWhenQuantityWins(input, receipts),
+    receipts
+  });
 
-  if (side === "short") return { input, receipts };
+  if (side === "short") return finish();
 
   if (!position) {
-    if (side === "buy") return { input, receipts };
+    if (side === "buy") return finish();
     throw new OrderPositionInvariantError(
       `${symbol} ${side.toUpperCase()} not placed: could not verify the broker's ${symbol} position just before placement, ` +
         `and a ${side} of an unverified position can open an unintended ${side === "sell" ? "SHORT" : "LONG"}.  ` +
@@ -274,42 +301,45 @@ export function applyPositionInvariant(
   let closable: number;
   if (side === "buy") {
     // A buy only changes shape when it provably closes (part of) a held short.
-    if (!(heldShort > 0)) return { input, receipts };
+    if (!(heldShort > 0)) return finish();
     let quantity = input.quantity;
-    if (isDollarSized(input) && position.marketValuePriced === false) {
+    // Read dollars without isDollarSized() so input stays EquityOrderInput (optional dollarAmount).
+    const buyDollars = input.dollarAmount;
+    const dollarSizedBuy = buyDollars != null && buyDollars > 0 && !(input.quantity != null && input.quantity > 0);
+    if (dollarSizedBuy && position.marketValuePriced === false) {
       // The short's value is a cost-basis fallback (quote failure), not a market price. Sizing a
       // cover from it can buy several times the intended dollars, and whether the buy exceeds
       // the short cannot be told either, so it is refused as retryable (ST-4616). A zero or
       // negative quantity alongside the dollars does not make it a share order.
       throw new OrderPositionInvariantError(
         `${symbol} BUY not placed: the account is short ${formatQty(heldShort)} ${symbol} and no live quote priced it ` +
-          `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} buy cannot be sized against the short safely.  ` +
+          `(the position value is cost basis), so a $${buyDollars.toFixed(2)} buy cannot be sized against the short safely.  ` +
           "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
         "position_unverified"
       );
     }
-    if (isDollarSized(input)) {
+    if (dollarSizedBuy) {
       // Dollar-sized buy (the autopilot's default sizing): resolve it against the short's own
       // per-share value before deciding.  Unpriceable, sub-share, or larger than the short ->
       // unchanged, exactly like a quantity buy above the short.  A stale zero/negative quantity
       // is replaced by the resolved share count.
-      const resolved = resolveDollarsAgainstHeld(input.dollarAmount, heldShort, heldMarketValue);
-      if (!resolved || resolved.kind === "exceeds") return { input, receipts };
-      const dollars = input.dollarAmount;
+      const resolved = resolveDollarsAgainstHeld(buyDollars, heldShort, heldMarketValue);
+      if (!resolved || resolved.kind === "exceeds") return finish();
       const { dollarAmount: _resolvedDollars, ...withoutDollars } = input;
-      input = { ...withoutDollars, quantity: resolved.quantity };
+      const next: EquityOrderInput = { ...withoutDollars, quantity: resolved.quantity };
+      input = next;
       quantity = resolved.quantity;
       receipts.push({
         kind: "dollar_exit_resolved_to_quantity",
         detail:
-          `$${dollars.toFixed(2)} buy against a $${heldMarketValue.toFixed(2)} ${symbol} short ` +
+          `$${buyDollars.toFixed(2)} buy against a $${heldMarketValue.toFixed(2)} ${symbol} short ` +
           (resolved.kind === "full" ? "is a full cover" : "is a partial cover") +
           `; placed as ${formatQty(resolved.quantity)} shares.`,
         changedFields: ["dollarAmount", "quantity"]
       });
     }
     if (quantity == null || !(quantity > 0) || quantity > heldShort + QTY_EPSILON) {
-      return { input, receipts };
+      return finish();
     }
     input = { ...input, side: "cover" };
     receipts.push({
@@ -361,7 +391,8 @@ export function applyPositionInvariant(
   // exit on an unpriced position is refused as retryable before either branch below. This does
   // not depend on `resolvePartialDollarExits`: the full-exit check also reads the value. A zero
   // or negative quantity alongside the dollars is still a dollar order here. An explicit positive
-  // quantity is left alone so the existing clamp (not dollar resolution) bounds it.
+  // quantity is left alone so the existing clamp (not dollar resolution) bounds it; leftover
+  // dollarAmount is dropped on the way out so review and the broker both size by shares.
   // Read dollars without isDollarSized() so input.dollarAmount stays optional (TS2790).
   const dollars = input.dollarAmount;
   if (dollars != null && dollars > 0 && !(input.quantity != null && input.quantity > 0)) {
@@ -451,7 +482,7 @@ export function applyPositionInvariant(
     });
   }
 
-  return { input, receipts };
+  return finish();
 }
 
 function brokerInScope(activeBroker: string | undefined): boolean {
@@ -475,6 +506,33 @@ export function withPositionInvariant(gateway: BrokerGateway, policy: TradingPol
             rawInput.side === "short" ||
             (rawInput.side === "buy" && NO_SHORT_BROKERS.has(policy.activeBroker ?? ""))
           ) {
+            // Shorts and no-short-broker buys skip the position read, but a leftover
+            // dollarAmount next to a positive quantity must still be dropped so the
+            // adapter and review agree on share sizing (Alpaca TIF also keys off the field).
+            if (brokerInScope(policy.activeBroker)) {
+              const receipts: PositionInvariantReceipt[] = [];
+              const input = dropDollarAmountWhenQuantityWins(withoutHint, receipts);
+              for (const receipt of receipts) {
+                audit(
+                  "order_position_invariant_reshaped",
+                  {
+                    symbol: normalizeSymbol(rawInput.symbol),
+                    side: rawInput.side,
+                    placedSide: input.side,
+                    type: rawInput.type,
+                    refId: rawInput.refId,
+                    receipt: receipt.kind,
+                    changedFields: receipt.changedFields,
+                    detail: receipt.detail,
+                    positionQuantity: null,
+                    positionSource: null
+                  },
+                  userId,
+                  policy.connectedAccountId
+                );
+              }
+              return target.placeEquityOrder({ ...input, refId: rawInput.refId });
+            }
             return target.placeEquityOrder(withoutHint as EquityOrderInput & { refId: string });
           }
           const symbol = normalizeSymbol(rawInput.symbol);

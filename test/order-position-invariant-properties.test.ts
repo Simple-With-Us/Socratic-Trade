@@ -182,6 +182,8 @@ interface HitCounts {
   extendedLimit: number;
   /** Alpaca quantity exits whose size was checked against the held position. */
   exitBound: number;
+  /** Exits that carried both a positive quantity and a dollarAmount; quantity won. */
+  mixedQtyWins: number;
 }
 
 function mulberry32(seed: number): () => number {
@@ -257,6 +259,11 @@ function generateCase(rng: () => number, i: number): GenCase {
     if (bias === 0 && mv > 0) dollarAmount = mv;
     else if (bias === 1 && mv > 0) dollarAmount = mv * 0.5;
     else dollarAmount = pick(rng, [1.34, 10, 50, 500]);
+    // Kody PRRT_kwDOS7mOVM62r3PH: ~1/5 of dollar cases also carry an explicit positive quantity.
+    if (int(rng, 5) === 0) {
+      if (int(rng, 5) < 2 && Math.abs(staleQty) > EPS) quantity = Math.abs(staleQty);
+      else quantity = pick(rng, [1, 2, 4, 12, 50, 0.5, 1.5, 0.02778376]);
+    }
   } else if (int(rng, 5) < 2 && Math.abs(staleQty) > EPS) {
     quantity = Math.abs(staleQty);
   } else {
@@ -475,7 +482,8 @@ function emptyHits(): HitCounts {
     readFailed: 0,
     dirtyTag: 0,
     extendedLimit: 0,
-    exitBound: 0
+    exitBound: 0,
+    mixedQtyWins: 0
   };
 }
 
@@ -498,8 +506,8 @@ function orderFrom(c: GenCase, accountNumber: string): EquityOrderInput & { refI
     referencePrice: c.price,
     refId: c.refId
   };
+  if (c.quantity != null) order.quantity = c.quantity;
   if (c.dollarAmount != null) order.dollarAmount = c.dollarAmount;
-  else order.quantity = c.quantity;
   if (c.limitPrice != null) order.limitPrice = c.limitPrice;
   if (c.stopPrice != null) order.stopPrice = c.stopPrice;
   if (c.bracketTakeProfit != null) order.bracketTakeProfit = c.bracketTakeProfit;
@@ -703,6 +711,15 @@ function increasesShort(broker: BrokerName, held: number, wireSide: string, qty:
   return false;
 }
 
+/** Requested positive quantity for a mixed dollar exit, clamped to the held position. */
+function mixedExitClampedQty(c: GenCase, heldLong: number, heldShort: number): number | undefined {
+  if (c.dollarAmount == null || !(c.dollarAmount > 0) || c.quantity == null || !(c.quantity > 0)) return undefined;
+  if (c.side === "sell" && heldLong > 0) return Math.min(c.quantity, heldLong);
+  if (c.side === "cover" && heldShort > 0) return Math.min(c.quantity, heldShort);
+  if (c.side === "buy" && heldShort > 0 && c.quantity <= heldShort + 1e-6) return Math.min(c.quantity, heldShort);
+  return undefined;
+}
+
 function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, unknown>, hits: HitCounts): void {
   const book = seenBook(c);
   const hadBrackets = c.bracketTakeProfit != null || c.bracketStopLoss != null || c.bracketStopLimit != null;
@@ -800,7 +817,9 @@ function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, u
     if (book.verified && c.side === "sell" && heldLong <= 0) {
       throw new Error(`Verified sell of a flat or short book was sent. ${detail(c, payload)}`);
     }
+    const qtyWins = c.quantity != null && c.quantity > 0;
     const fullDollar =
+      !qtyWins &&
       c.dollarAmount != null &&
       book.mv > 0 &&
       c.dollarAmount >= book.mv * 0.98 &&
@@ -817,6 +836,14 @@ function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, u
       hits.freshClamp += 1;
       if (Math.abs(qty! - heldLong) > 1e-8) {
         throw new Error(`Fresh clamp should be the held long, got ${qty}. ${detail(c, payload)}`);
+      }
+    }
+    const mixedExitQty = mixedExitClampedQty(c, heldLong, heldShort);
+    if (mixedExitQty != null) {
+      hits.mixedQtyWins += 1;
+      if (notional != null) throw new Error(`Mixed qty-wins exit still carried a notional. ${detail(c, payload)}`);
+      if (qty == null || Math.abs(qty - mixedExitQty) > 1e-8) {
+        throw new Error(`Mixed qty-wins exit qty ${qty} !== clamped ${mixedExitQty}. ${detail(c, payload)}`);
       }
     }
     return;
@@ -899,7 +926,9 @@ function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, u
     if (book.verified && c.side === "cover" && heldShort <= 0) {
       throw new Error(`Verified cover without a short was sent. ${detail(c, form)}`);
     }
-    const fullDollar = c.dollarAmount != null && book.mv > 0 && c.dollarAmount >= book.mv * 0.98 && (closingLong || closingShort);
+    const qtyWins = c.quantity != null && c.quantity > 0;
+    const fullDollar =
+      !qtyWins && c.dollarAmount != null && book.mv > 0 && c.dollarAmount >= book.mv * 0.98 && (closingLong || closingShort);
     if (fullDollar && Number.isInteger(closingLong ? heldLong : heldShort)) {
       hits.fullDollar += 1;
       const target = closingShort ? heldShort : heldLong;
@@ -907,6 +936,18 @@ function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, u
     }
     if (c.read === "fresh" && c.quantity != null && heldLong > 0 && c.quantity > heldLong + 1e-6 && closingLong) {
       hits.freshClamp += 1;
+    }
+    const mixedExitQty = mixedExitClampedQty(c, heldLong, heldShort);
+    if (mixedExitQty != null) {
+      hits.mixedQtyWins += 1;
+      if (form.notional != null || form.dollarAmount != null || form.amount != null) {
+        throw new Error(`Mixed qty-wins exit still carried a dollar size. ${detail(c, form)}`);
+      }
+      // Tradier only accepts whole shares and floors a fractional clamped qty.
+      const expected = Number.isInteger(mixedExitQty) ? mixedExitQty : Math.floor(mixedExitQty);
+      if (Math.abs(qty - expected) > 1e-8) {
+        throw new Error(`Mixed qty-wins exit qty ${qty} !== clamped ${expected}. ${detail(c, form)}`);
+      }
     }
     return;
   }
@@ -1048,6 +1089,7 @@ describe("money-path order invariant properties", () => {
     expect(hits.shareClass).toBeGreaterThan(0);
     expect(hits.shortEntry + hits.policyBlockedShort).toBeGreaterThan(0);
     expect(hits.exitBound).toBeGreaterThan(0);
+    expect(hits.mixedQtyWins).toBeGreaterThan(0);
   }, 180_000);
 
   it("Tradier payloads hold the money-path invariants (seed 0x4616)", async () => {
@@ -1060,6 +1102,7 @@ describe("money-path order invariant properties", () => {
     expect(hits.extendedLimit).toBeGreaterThan(0);
     expect(hits.shareClass).toBeGreaterThan(0);
     expect(hits.freshClamp).toBeGreaterThan(0);
+    expect(hits.mixedQtyWins).toBeGreaterThan(0);
   }, 180_000);
 
   it("BRK.B and BRK-B are the same long", () => {
@@ -1384,27 +1427,33 @@ describe("money-path order invariant properties", () => {
     const short = heldPositionFor(pricedShort, "MSFT");
     const base = { accountNumber: TRADIER_ACCOUNT, symbol: "MSFT", type: "market", timeInForce: "gfd", marketHours: "regular_hours" } as const;
     const tradier = { resolvePartialDollarExits: true };
-    // $500 of a $1000 / 10-share long would resolve to 5 shares. A requested 3 is kept, not resized.
-    const partial = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 3 }, long, tradier).input;
-    expect(partial).toMatchObject({ side: "sell", quantity: 3, dollarAmount: 500 });
-    // Requested 8 is also kept (not resized down to 5).
-    expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 8 }, long, tradier).input).toMatchObject({
-      quantity: 8,
-      dollarAmount: 500
-    });
-    // Requested 15 exceeds the held 10 and is clamped; dollars are not used to resize.
+    // $500 of a $1000 / 10-share long would resolve to 5 shares. A requested 3 is kept, not resized,
+    // and the leftover dollarAmount is dropped so review and the broker both size by shares.
+    const partial = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 3 }, long, tradier);
+    expect(partial.input).toMatchObject({ side: "sell", quantity: 3 });
+    expect(partial.input.dollarAmount).toBeUndefined();
+    expect(partial.receipts.some((receipt) => receipt.kind === "dollar_amount_dropped_qty_wins")).toBe(true);
+    // Requested 8 is also kept (not resized down to 5); dollars are dropped.
+    const eight = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 8 }, long, tradier);
+    expect(eight.input).toMatchObject({ quantity: 8 });
+    expect(eight.input.dollarAmount).toBeUndefined();
+    expect(eight.receipts.some((receipt) => receipt.kind === "dollar_amount_dropped_qty_wins")).toBe(true);
+    // Requested 15 exceeds the held 10 and is clamped; dollars are not used to resize, and are dropped.
     const clamped = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 15 }, long, tradier);
-    expect(clamped.input).toMatchObject({ quantity: 10, dollarAmount: 500 });
+    expect(clamped.input).toMatchObject({ quantity: 10 });
+    expect(clamped.input.dollarAmount).toBeUndefined();
     expect(clamped.receipts.some((receipt) => receipt.kind === "quantity_clamped_to_position")).toBe(true);
-    // Cover: requested 4 of a 10-share short; $500 would also be 5 shares, but 4 is kept.
-    expect(applyPositionInvariant({ ...base, side: "cover", dollarAmount: 500, quantity: 4 }, short, tradier).input).toMatchObject({
-      side: "cover",
-      quantity: 4,
-      dollarAmount: 500
-    });
-    // Alpaca: a positive quantity is kept, not stripped so the order goes out as dollars only.
-    const alpaca = applyPositionInvariant({ ...base, accountNumber: ALPACA_ACCOUNT, side: "sell", dollarAmount: 500, quantity: 3 }, long).input;
-    expect(alpaca).toMatchObject({ quantity: 3, dollarAmount: 500 });
+    expect(clamped.receipts.some((receipt) => receipt.kind === "dollar_amount_dropped_qty_wins")).toBe(true);
+    // Cover: requested 4 of a 10-share short; $500 would also be 5 shares, but 4 is kept and dollars drop.
+    const cover = applyPositionInvariant({ ...base, side: "cover", dollarAmount: 500, quantity: 4 }, short, tradier);
+    expect(cover.input).toMatchObject({ side: "cover", quantity: 4 });
+    expect(cover.input.dollarAmount).toBeUndefined();
+    expect(cover.receipts.some((receipt) => receipt.kind === "dollar_amount_dropped_qty_wins")).toBe(true);
+    // Alpaca: a positive quantity is kept and dollarAmount is dropped (not sent as notional).
+    const alpaca = applyPositionInvariant({ ...base, accountNumber: ALPACA_ACCOUNT, side: "sell", dollarAmount: 500, quantity: 3 }, long);
+    expect(alpaca.input).toMatchObject({ quantity: 3 });
+    expect(alpaca.input.dollarAmount).toBeUndefined();
+    expect(alpaca.receipts.some((receipt) => receipt.kind === "dollar_amount_dropped_qty_wins")).toBe(true);
     // Stale qty<=0 is still dropped: Tradier resolves $500 to 5 shares; Alpaca keeps the $500 notional.
     for (const quantity of [0, -3]) {
       const label = `quantity ${quantity}`;
