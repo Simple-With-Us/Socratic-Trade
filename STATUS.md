@@ -3,6 +3,11 @@
 **What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` classifies a thrown provider/gateway failure as 504 `broker_timeout`, 502 `broker_auth_failed`, or 502 `broker_unavailable` (matching other broker-backed GETs).  `fetchDailyOHLC` catches provider failures and resolves `null`, which the route answers as 502 `broker_unavailable`; a genuine empty series stays 200 with `bars: []`.  Identity denials stay 401, and local faults (SQLite, adapter defects) stay 500 `internal_error`.  PUT `/api/policy` and POST `/api/keys` reject unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
 
 **Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
+## 2026-11-12 CURSOR — ST-3999 proxy gate slot leak
+
+**What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, and `fetchWithRetry` cancels before a 429 retry.  `fetchCancelingErrorBody` is opt-in and is not on the `dataSourceFetch` path, so an unread 5xx there is bounded by the gate.  A max hold that has already delivered a chunk releases the slot without aborting the stream.  The idle timer and the proxy-leg timer stay armed until that stream closes.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
+
+**Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
 ## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
 
 **What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
@@ -52,6 +57,7 @@
 **What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
 
 **Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
+
 ## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
 
 **What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
