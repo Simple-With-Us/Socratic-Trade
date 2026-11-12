@@ -95,7 +95,8 @@ NOOP_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", 
 FRESH_DATE="2026-06-10T15:00:00Z"
 N1="$(mkcommit n1 "$NOOP_DATE" ".github/workflows/ci.yml")"
 C4="$(mkcommit c4 "$FRESH_DATE")"
-RTH_LAT="$(mkcommit rthlat "2026-06-10T14:00:00Z")"
+# An in-session watched commit inside the RTH gap; only its place in history matters.
+mkcommit rthlat "2026-06-10T14:00:00Z" >/dev/null
 RTH_AFTER="$(mkcommit rthat "2026-06-10T15:30:00Z")"
 # Pre-market (09:00 ET) watched commit: off-hours, so it ages from its own
 # timestamp (14h at PINNED_LATCH_NOW), not from the close or the drain.
