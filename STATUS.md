@@ -3,6 +3,11 @@
 **What.**  The expensive admin ingest and backfill routes now call `enforceRateLimit` after the existing admin check.  A caller who already passed that check is still allowed the same way.  Starting a job is capped at 6 calls per 10 minutes per admin per route, and the next call returns 429 without starting OpenRouter, Qdrant, or SEC work.  Status reads on those routes, including the chat transcript, are capped at 30 per minute.  Hourly operation budgets that already covered some of these posts stay in place.  Empty 10-K lists and unknown web-source ids still return 400 and do not spend the new budget.  Rollout: `docs/rollouts/2026-11-12-st-4632-admin-ingest-rate-limits.md`.
 
 **Next.**  The PR is the delivery.  Do not merge, do not enable auto-merge, and do not deploy from this lane.
+## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
+
+**What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  SOCRATIC-TRADE-2E on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  Do not raise the cap.
 ## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
 
 **What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
