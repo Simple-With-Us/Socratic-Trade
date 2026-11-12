@@ -784,12 +784,16 @@ final class MobileStore: ObservableObject {
             }
             reconcileTrackedCommands(loadedSnapshot.recentCommands)
         } catch is CancellationError {
-            if generation == loadGeneration, !isAuthenticated {
-                initializationCancelled = true
-            }
+            noteCancelledInitialization(generation: generation)
             return
         } catch let caught {
             guard generation == loadGeneration else { return }
+            // URLSession wraps task cancellation as URLError.cancelled inside
+            // MobileAPIError.network. That is not a failed load.
+            if MobileAPIError.isUserCancellation(caught) {
+                noteCancelledInitialization(generation: generation)
+                return
+            }
             snapshotLoadFailed = true
             if snapshot == nil {
                 applyAuthAwareError(caught, showUnauthorizedMessage: shouldReportSessionExpiry)
@@ -799,6 +803,12 @@ final class MobileStore: ObservableObject {
                 // Cached snapshot stays on screen; do not keep a prior transient error banner.
                 error = nil
             }
+        }
+    }
+
+    private func noteCancelledInitialization(generation: Int) {
+        if generation == loadGeneration, !isAuthenticated {
+            initializationCancelled = true
         }
     }
 

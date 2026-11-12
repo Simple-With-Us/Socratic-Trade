@@ -121,6 +121,28 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertTrue(secondOutcome.startedEvents)
     }
 
+    func testFinishedResumeIsNotRejoined() async {
+        let gate = LiveResumeGate()
+        let store = LiveSessionResumeTestDouble()
+        store.isAuthenticated = true
+
+        let failed = await gate.run {
+            await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
+        }
+        XCTAssertFalse(failed.joinedInFlight)
+        XCTAssertFalse(failed.startedEvents)
+        XCTAssertEqual(store.loadCount, 1)
+
+        store.isAuthenticated = true
+        store.remainAuthenticatedAfterLoad = true
+        let retried = await gate.run {
+            await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
+        }
+        XCTAssertFalse(retried.joinedInFlight)
+        XCTAssertTrue(retried.startedEvents)
+        XCTAssertEqual(store.loadCount, 2)
+    }
+
     func testCancellingTheRunnerDoesNotAbortTheSharedLoad() async {
         let gate = LiveResumeGate()
         let store = LiveSessionResumeTestDouble()

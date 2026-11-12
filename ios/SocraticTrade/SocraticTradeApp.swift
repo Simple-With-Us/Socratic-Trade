@@ -197,7 +197,8 @@ struct ContentView: View {
             isScreenshotMode: SocraticTradeApp.isScreenshotMode,
             hasInitialized: store.hasInitialized,
             isAuthenticated: store.isAuthenticated,
-            initializationCancelled: store.initializationCancelled
+            initializationCancelled: store.initializationCancelled,
+            snapshotLoadFailed: store.snapshotLoadFailed
         )
         switch action {
         case .skip:
@@ -220,12 +221,14 @@ struct ContentView: View {
         let outcome = await liveResumeGate.run { [appLock, store] in
             await Self.performForegroundResume(appLock: appLock, store: store)
         }
-        // One fresh resume, not another trip through the gate. A waiter can
-        // wake before the runner clears a finished handle, and rejoining that
-        // handle would see the same failure and spin.
+        // One more resume, still inside the gate. A direct call would let every
+        // waiter of the failed handle start its own resume and stop the stream
+        // the newest one just opened. A finished handle is not rejoined.
         guard outcome.joinedInFlight, !outcome.startedEvents else { return }
         guard appLock.sceneIsActive, appLock.isUnlocked, store.isAuthenticated else { return }
-        _ = await Self.performForegroundResume(appLock: appLock, store: store)
+        _ = await liveResumeGate.run { [appLock, store] in
+            await Self.performForegroundResume(appLock: appLock, store: store)
+        }
     }
 
     @MainActor

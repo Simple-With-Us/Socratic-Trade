@@ -47,17 +47,19 @@ enum AppLockSessionBootstrap {
         case resumeLiveSession
     }
 
-    /// A canceled first load sets `hasInitialized` and leaves `isAuthenticated`
-    /// false, and `initializationCancelled` marks that case. An initialized
-    /// signed-out session is not that case, so unlocking it does not fetch.
+    /// A canceled first load and a failed first load both leave `hasInitialized`
+    /// set and `isAuthenticated` false. Those reload. A finished sign-out clears
+    /// `snapshotLoadFailed`, so unlocking it does not fetch.
     static func action(
         isScreenshotMode: Bool,
         hasInitialized: Bool,
         isAuthenticated: Bool,
-        initializationCancelled: Bool
+        initializationCancelled: Bool,
+        snapshotLoadFailed: Bool
     ) -> Action {
         if isScreenshotMode { return .skip }
-        if !hasInitialized || (initializationCancelled && !isAuthenticated) {
+        let sessionNeverSignedIn = !isAuthenticated && (initializationCancelled || snapshotLoadFailed)
+        if !hasInitialized || sessionNeverSignedIn {
             return .loadSession
         }
         if !isAuthenticated { return .skip }

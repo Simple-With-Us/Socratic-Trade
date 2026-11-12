@@ -108,7 +108,21 @@ final class AppLockPolicyTests: XCTestCase {
                 isScreenshotMode: false,
                 hasInitialized: true,
                 isAuthenticated: false,
-                initializationCancelled: true
+                initializationCancelled: true,
+                snapshotLoadFailed: false
+            ),
+            .loadSession
+        )
+    }
+
+    func testFailedInitialLoadReloads() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: false,
+                hasInitialized: true,
+                isAuthenticated: false,
+                initializationCancelled: false,
+                snapshotLoadFailed: true
             ),
             .loadSession
         )
@@ -120,9 +134,23 @@ final class AppLockPolicyTests: XCTestCase {
                 isScreenshotMode: false,
                 hasInitialized: true,
                 isAuthenticated: false,
-                initializationCancelled: false
+                initializationCancelled: false,
+                snapshotLoadFailed: false
             ),
             .skip
+        )
+    }
+
+    func testSignedInSessionResumesAfterAFailedRefresh() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: false,
+                hasInitialized: true,
+                isAuthenticated: true,
+                initializationCancelled: false,
+                snapshotLoadFailed: true
+            ),
+            .resumeLiveSession
         )
     }
 
@@ -132,7 +160,8 @@ final class AppLockPolicyTests: XCTestCase {
                 isScreenshotMode: false,
                 hasInitialized: true,
                 isAuthenticated: true,
-                initializationCancelled: false
+                initializationCancelled: false,
+                snapshotLoadFailed: false
             ),
             .resumeLiveSession
         )
@@ -144,7 +173,8 @@ final class AppLockPolicyTests: XCTestCase {
                 isScreenshotMode: true,
                 hasInitialized: false,
                 isAuthenticated: false,
-                initializationCancelled: false
+                initializationCancelled: false,
+                snapshotLoadFailed: true
             ),
             .skip
         )
