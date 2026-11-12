@@ -7,7 +7,7 @@ import {
   PROXY_SLOT_IDLE_MS,
   PROXY_SLOT_MAX_HOLD_MS,
   ProxyConcurrencyGate,
-  proxiedFetch,
+  fetchCancelingErrorBody,
   sharedProxyConcurrencyGate
 } from "../src/lib/proxy-fetch";
 import { __resetYahooSessionCredsForTests } from "../src/lib/yahoo-session";
@@ -115,6 +115,55 @@ describe("proxy gate slot leak", () => {
     expect(sharedProxyConcurrencyGate.queued).toBe(0);
   });
 
+  it("releases the slot at max hold without aborting a body that already delivered a chunk", async () => {
+    process.env.PROXY_MAX_CONCURRENCY = "1";
+    let pulls = 0;
+    let releaseSecond: (() => void) | undefined;
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      (async () => new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new Uint8Array([1]));
+              return;
+            }
+            return new Promise<void>((resolve) => {
+              releaseSecond = resolve;
+            });
+          },
+          cancel() {
+            releaseSecond?.();
+          }
+        }),
+        { status: 200 }
+      )) as typeof fetch,
+      { slotIdleMs: 30_000, slotMaxHoldMs: 80 }
+    );
+    const res = await proxied("https://example.test/slow");
+    const reader = res.body!.getReader();
+    try {
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      expect(first.value?.[0]).toBe(1);
+      await sleep(150);
+      expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+      let second = "aborted";
+      try {
+        second = await Promise.race([
+          reader.read().then(() => "chunk"),
+          sleep(40).then(() => "pending")
+        ]);
+      } catch {
+        second = "aborted";
+      }
+      expect(second).toBe("pending");
+    } finally {
+      await reader.cancel();
+    }
+  });
+
   it("cancels a status >= 400 body unless the caller opts in", async () => {
     const calls: string[] = [];
     const fetchImpl = (async () => {
@@ -123,7 +172,7 @@ describe("proxy gate slot leak", () => {
         calls.push("cancel");
       });
     }) as typeof fetch;
-    const res = await proxiedFetch("https://example.test/err", undefined, { fetchImpl });
+    const res = await fetchCancelingErrorBody("https://example.test/err", undefined, { fetchImpl });
     expect(res.status).toBe(503);
     expect(calls).toEqual(["fetch", "cancel"]);
 
@@ -131,7 +180,7 @@ describe("proxy gate slot leak", () => {
     const keepImpl = (async () => hangingBody(503, () => {
       kept.push("cancel");
     })) as typeof fetch;
-    const keptRes = await proxiedFetch("https://example.test/keep", undefined, {
+    const keptRes = await fetchCancelingErrorBody("https://example.test/keep", undefined, {
       fetchImpl: keepImpl,
       readErrorBody: true
     });
@@ -143,7 +192,7 @@ describe("proxy gate slot leak", () => {
     const okImpl = (async () => hangingBody(200, () => {
       okCalls.push("cancel");
     })) as typeof fetch;
-    const ok = await proxiedFetch("https://example.test/ok", undefined, { fetchImpl: okImpl });
+    const ok = await fetchCancelingErrorBody("https://example.test/ok", undefined, { fetchImpl: okImpl });
     expect(ok.status).toBe(200);
     expect(okCalls).toEqual([]);
     await ok.body?.cancel();

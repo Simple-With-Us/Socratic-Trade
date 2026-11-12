@@ -200,8 +200,7 @@ export const PROXY_SLOT_MAX_HOLD_MS = 20_000;
  */
 export const PROXY_SLOT_IDLE_MS = 20_000;
 
-/** `/api/proxy-use` asks Sentry to alert when the oldest hold exceeds this. */
-export const PROXY_GATE_HOLD_ALERT_MS = 60_000;
+export { PROXY_GATE_HOLD_ALERT_MS } from "./proxy-gate-alert";
 
 export interface ProxyGateSnapshot {
   inFlight: number;
@@ -419,7 +418,12 @@ const bodyReleaseRegistry = new FinalizationRegistry<() => void>((release) => {
  * Idle and max-hold do not depend on the caller reading or cancelling.
  * An unread non-ok body used to pin its slot until process restart.
  * FinalizationRegistry releases the slot if the response is collected
- * first.
+ * first. It does not error a stream that still has a reader.
+ *
+ * A max hold that has already delivered a chunk releases the slot and
+ * leaves the stream up, so a slow download is not aborted at 20s. A max
+ * hold that has delivered nothing, and an idle body, cancel the upstream
+ * and error the stream. That is the unread or stalled leak.
  */
 function wrapBodyUntilSettle(
   res: Response,
@@ -431,11 +435,13 @@ function wrapBodyUntilSettle(
     onSettle();
     return res;
   }
-  let settled = false;
+  let slotReleased = false;
+  let streamClosed = false;
   let onBodyAbort: (() => void) | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let maxTimer: ReturnType<typeof setTimeout> | undefined;
   let pullActive = false;
+  let bytesSeen = false;
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
   const unregisterToken = {};
   const clearHoldTimers = () => {
@@ -444,14 +450,21 @@ function wrapBodyUntilSettle(
     idleTimer = undefined;
     maxTimer = undefined;
   };
-  const finish = () => {
-    if (settled) return;
-    settled = true;
-    clearHoldTimers();
-    bodyReleaseRegistry.unregister(unregisterToken);
+  const detachAbort = () => {
     if (onBodyAbort && settleSignal) settleSignal.removeEventListener("abort", onBodyAbort);
     onBodyAbort = undefined;
+  };
+  const releaseSlot = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    clearHoldTimers();
+    bodyReleaseRegistry.unregister(unregisterToken);
     onSettle();
+  };
+  const endStream = () => {
+    streamClosed = true;
+    detachAbort();
+    releaseSlot();
   };
   const upstream = res.body.getReader();
   // Cancelling an already-errored upstream rejects with the stored error
@@ -461,14 +474,17 @@ function wrapBodyUntilSettle(
   // it can never surface as an unhandled rejection.
   const cancelUpstream = (reason?: unknown): Promise<void> =>
     upstream.cancel(reason).catch(() => undefined);
-  const forceRelease = () => {
-    if (settled) return;
-    finish();
+  const errorStream = (err: unknown) => {
     try {
-      streamController?.error(new DOMException("aborted", "AbortError"));
+      streamController?.error(err);
     } catch {
       // already errored or cancelled
     }
+  };
+  const abandon = () => {
+    if (streamClosed) return;
+    endStream();
+    errorStream(new DOMException("aborted", "AbortError"));
     void cancelUpstream(new DOMException("aborted", "AbortError"));
   };
   const armTimer = (ms: number, fn: () => void): ReturnType<typeof setTimeout> => {
@@ -479,31 +495,28 @@ function wrapBodyUntilSettle(
     return timer;
   };
   const armIdle = () => {
-    if (settled) return;
+    if (slotReleased || streamClosed) return;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = armTimer(limits.idleMs, () => {
       idleTimer = undefined;
-      if (settled || pullActive) return;
-      forceRelease();
+      if (slotReleased || streamClosed || pullActive) return;
+      abandon();
     });
   };
   const wrappedBody = new ReadableStream<Uint8Array>({
     start(controller) {
       streamController = controller;
       if (settleSignal?.aborted) {
-        finish();
+        endStream();
         controller.error(new DOMException("aborted", "AbortError"));
         void cancelUpstream();
         return;
       }
       if (settleSignal) {
         onBodyAbort = () => {
-          try {
-            controller.error(new DOMException("aborted", "AbortError"));
-          } catch {
-            // already errored
-          }
-          finish();
+          if (streamClosed) return;
+          endStream();
+          errorStream(new DOMException("aborted", "AbortError"));
           void cancelUpstream();
         };
         settleSignal.addEventListener("abort", onBodyAbort, { once: true });
@@ -515,14 +528,10 @@ function wrapBodyUntilSettle(
         clearTimeout(idleTimer);
         idleTimer = undefined;
       }
-      if (settleSignal?.aborted || settled) {
+      if (settleSignal?.aborted || streamClosed) {
         pullActive = false;
-        finish();
-        try {
-          controller.error(new DOMException("aborted", "AbortError"));
-        } catch {
-          // already errored or cancelled
-        }
+        endStream();
+        errorStream(new DOMException("aborted", "AbortError"));
         await cancelUpstream();
         return;
       }
@@ -532,31 +541,28 @@ function wrapBodyUntilSettle(
       } catch (err) {
         // A rejected read (mid-body socket reset, the leg timer disturbing
         // the body) errors the wrapped stream for the consumer, but nothing
-        // else settles the body: without finish() here, onSettle never fires
-        // and whatever the body holds — the gate slot, the leg timer —
+        // else settles the body: without releaseSlot() here, onSettle never
+        // fires and whatever the body holds — the gate slot, the leg timer —
         // leaks for the life of the process.
         pullActive = false;
-        finish();
-        try {
-          controller.error(err);
-        } catch {
-          // already errored or cancelled
-        }
+        endStream();
+        errorStream(err);
         return;
       }
       if (chunk.done) {
         pullActive = false;
-        finish();
+        endStream();
         controller.close();
         return;
       }
       pullActive = false;
-      if (!settled) armIdle();
+      bytesSeen = true;
+      if (!slotReleased && !streamClosed) armIdle();
       controller.enqueue(chunk.value);
     },
     async cancel(reason) {
       pullActive = false;
-      finish();
+      endStream();
       await cancelUpstream(reason);
     }
   }, { highWaterMark: 0 });
@@ -565,13 +571,22 @@ function wrapBodyUntilSettle(
     statusText: res.statusText,
     headers: res.headers
   });
-  if (!settled) {
+  if (!streamClosed) {
     maxTimer = armTimer(limits.maxHoldMs, () => {
       maxTimer = undefined;
-      forceRelease();
+      if (slotReleased || streamClosed) return;
+      if (bytesSeen) {
+        releaseSlot();
+        return;
+      }
+      abandon();
     });
     armIdle();
-    bodyReleaseRegistry.register(wrapped, forceRelease, unregisterToken);
+    bodyReleaseRegistry.register(wrapped, () => {
+      const reading = pullActive;
+      releaseSlot();
+      if (!reading && !streamClosed) void cancelUpstream(new DOMException("aborted", "AbortError"));
+    }, unregisterToken);
   }
   return wrapped;
 }
@@ -681,10 +696,12 @@ export function createProxiedFetch(
   }) as typeof fetch;
 }
 
-export interface ProxiedFetchOptions {
+export interface FetchCancelingErrorBodyOptions {
   /**
-   * Keep a status >= 400 body for the caller to read.  The default cancels
-   * that body so an unread proxied error cannot hold a gate slot.
+   * Keep a status >= 400 body for the caller to read. The default cancels
+   * that body. This helper uses `fetchImpl` as given. It does not open the
+   * residential proxy or take a gate slot by itself. `dataSourceFetch` does
+   * not call it. An unread 5xx on that path is bounded by the gate.
    */
   readErrorBody?: boolean;
   fetchImpl?: typeof fetch;
@@ -692,13 +709,13 @@ export interface ProxiedFetchOptions {
 
 /**
  * Fetch through `fetchImpl` (default global fetch) and cancel an unread
- * error body.  Pass `readErrorBody` when the caller will consume a
- * status >= 400 payload.  A 2xx/3xx body is left untouched.
+ * error body. Pass `readErrorBody` when the caller will consume a
+ * status >= 400 payload. A 2xx/3xx body is left untouched.
  */
-export async function proxiedFetch(
+export async function fetchCancelingErrorBody(
   input: RequestInfo | URL,
   init?: RequestInit,
-  options?: ProxiedFetchOptions
+  options?: FetchCancelingErrorBodyOptions
 ): Promise<Response> {
   const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
   const response = await fetchImpl(input, init);

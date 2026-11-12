@@ -11,6 +11,7 @@
  */
 
 import type * as SentryNs from "@sentry/nextjs";
+import { PROXY_GATE_HOLD_ALERT_MS } from "./proxy-gate-alert";
 
 type SentryMod = typeof SentryNs;
 type LogAttrs = Record<string, string | number | boolean | null | undefined>;
@@ -141,13 +142,20 @@ export function logWarn(message: string, attributes?: LogAttrs): void {
 }
 
 const PROXY_GATE_ALERT_INTERVAL_MS = 10 * 60 * 1000;
-let lastProxyGateAlertAt = 0;
+
+type ProxyGateAlertState = { lastAlertAt: number };
+type ProxyGateAlertHost = typeof globalThis & {
+  __socraticProxyGateAlertState?: ProxyGateAlertState;
+};
+const proxyGateAlertHost = globalThis as ProxyGateAlertHost;
+const proxyGateAlertState = (proxyGateAlertHost.__socraticProxyGateAlertState ??= { lastAlertAt: 0 });
 
 type SentryGauge = (name: string, value: number, options?: { unit?: string }) => void;
 
 /**
- * Publish proxy-gate counters.  A hold older than 60s files one warning per
- * ten minutes so a leaked slot is visible without a new issue on every poll.
+ * Publish proxy-gate counters.  A hold older than PROXY_GATE_HOLD_ALERT_MS
+ * files one warning per ten minutes.  The timestamp is on globalThis so
+ * separate Next.js bundles share one throttle.
  * Fail-soft: metrics must not break `/api/proxy-use`.
  */
 export function recordProxyGateSnapshot(stats: {
@@ -162,9 +170,12 @@ export function recordProxyGateSnapshot(stats: {
       gauge?.("proxy.gate.queued", stats.queued);
       gauge?.("proxy.gate.oldest_hold_ms", stats.oldestHoldMs, { unit: "millisecond" });
       const now = Date.now();
-      if (stats.oldestHoldMs > 60_000 && now - lastProxyGateAlertAt >= PROXY_GATE_ALERT_INTERVAL_MS) {
-        lastProxyGateAlertAt = now;
-        Sentry?.captureMessage("proxy concurrency gate oldest hold exceeds 60s", {
+      if (
+        stats.oldestHoldMs > PROXY_GATE_HOLD_ALERT_MS &&
+        now - proxyGateAlertState.lastAlertAt >= PROXY_GATE_ALERT_INTERVAL_MS
+      ) {
+        proxyGateAlertState.lastAlertAt = now;
+        Sentry?.captureMessage(`proxy concurrency gate oldest hold exceeds ${PROXY_GATE_HOLD_ALERT_MS / 1000}s`, {
           level: "warning",
           tags: { area: "proxy-gate" },
           extra: {
