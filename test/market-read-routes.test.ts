@@ -692,6 +692,65 @@ describe("GET /api/market/profile/{symbol}", () => {
     }
   });
 
+  it("keeps the 30s hold after a timeout that lasts as long as the hold", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let now = start;
+    vi.setSystemTime(now);
+    let phase: "ok" | "fail" | "recovered" = "ok";
+    let burnedTimeout = false;
+    let fetchCalls = 0;
+    const advance = (ms: number) => {
+      now += ms;
+      vi.setSystemTime(now);
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (phase === "fail") {
+          // Two 15s screener attempts. The hold must start when they finish.
+          if (!burnedTimeout) {
+            burnedTimeout = true;
+            advance(30_000);
+          }
+          throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+        }
+        const name = phase === "recovered" ? "Recovered Co" : "Slow Co";
+        return screenerProfileResponse("SLOWTICK", name);
+      }) as unknown as typeof fetch
+    );
+    try {
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({
+        ticker: "SLOWTICK",
+        companyName: "Slow Co"
+      });
+      advance(PROFILE_TTL_PAST_MS);
+      phase = "fail";
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({
+        ticker: "SLOWTICK",
+        companyName: "Slow Co"
+      });
+      const callsAfterFail = fetchCalls;
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Slow Co" });
+      expect(fetchCalls).toBe(callsAfterFail);
+      advance(29_000);
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Slow Co" });
+      expect(fetchCalls).toBe(callsAfterFail);
+      advance(1_000);
+      phase = "recovered";
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Recovered Co" });
+      expect(fetchCalls).toBeGreaterThan(callsAfterFail);
+    } finally {
+      vi.useRealTimers();
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  });
+
   it("returns null from the helper for an empty symbol", async () => {
     expect(await fetchCompanyProfile("   ", async () => ({ ticker: "X" }))).toBeNull();
   });

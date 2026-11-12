@@ -201,11 +201,12 @@ function parseScreenerMarketCap(raw: unknown): number | undefined {
  * Timeout, non-OK, and throw keep the last successful map when it has rows.
  * An empty map is not written into the 5-minute TTL. With no prior rows the
  * next call retries immediately. With rows, the next live attempt waits
- * SCREENER_PROFILE_STALE_RETRY_MS.
+ * SCREENER_PROFILE_STALE_RETRY_MS from when the failure finishes. A two-attempt
+ * Nasdaq timeout is about 30s, so measuring from fetch start would skip the hold.
  */
-function screenerProfileFailureMap(now: number): Map<string, ProfileRef> {
+function screenerProfileFailureMap(): Map<string, ProfileRef> {
   if (screenerProfileCache && screenerProfileCache.byTicker.size > 0) {
-    screenerProfileRetryAt = now + SCREENER_PROFILE_STALE_RETRY_MS;
+    screenerProfileRetryAt = Date.now() + SCREENER_PROFILE_STALE_RETRY_MS;
     return screenerProfileCache.byTicker;
   }
   return new Map();
@@ -223,7 +224,7 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
     // Only cache successful HTTP responses. Transient failures / non-OK must not
     // poison the 5m TTL with an empty map (valid symbols would 404 until expiry).
     if (!response.ok) {
-      return screenerProfileFailureMap(now);
+      return screenerProfileFailureMap();
     }
     const payload = (await response.json()) as {
       data?: { table?: { rows?: Array<Record<string, unknown>> } };
@@ -246,7 +247,7 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
     return byTicker;
   } catch (err) {
     console.warn("[market-read] screener profile map failed:", err);
-    return screenerProfileFailureMap(now);
+    return screenerProfileFailureMap();
   }
 }
 
