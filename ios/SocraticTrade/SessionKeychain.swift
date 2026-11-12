@@ -397,28 +397,22 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
     override var cookies: [HTTPCookie]? {
         lock.lock()
         defer { lock.unlock() }
+        purgeExpiredLocked(at: Date())
         return stored
     }
 
     override func setCookie(_ cookie: HTTPCookie) {
         lock.lock()
         defer { lock.unlock() }
-        stored.removeAll { existing in
-            existing.name == cookie.name
-                && existing.domain == cookie.domain
-                && existing.path == cookie.path
-        }
+        removeMatchingLocked(cookie)
+        guard !Self.isLiveCookieExpired(cookie) else { return }
         stored.append(cookie)
     }
 
     override func deleteCookie(_ cookie: HTTPCookie) {
         lock.lock()
         defer { lock.unlock() }
-        stored.removeAll { existing in
-            existing.name == cookie.name
-                && existing.domain == cookie.domain
-                && existing.path == cookie.path
-        }
+        removeMatchingLocked(cookie)
     }
 
     override func setCookies(_ cookies: [HTTPCookie], for url: URL?, mainDocumentURL: URL?) {
@@ -428,15 +422,48 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
         }
     }
 
+    override func storeCookies(_ cookies: [HTTPCookie], for task: URLSessionTask) {
+        for cookie in cookies {
+            setCookie(cookie)
+        }
+    }
+
+    override func getCookies(for task: URLSessionTask, completionHandler: @escaping ([HTTPCookie]?) -> Void) {
+        let url = task.currentRequest?.url ?? task.response?.url
+        if let url {
+            completionHandler(cookies(for: url))
+        } else {
+            completionHandler(cookies)
+        }
+    }
+
     override func cookies(for url: URL?) -> [HTTPCookie]? {
         guard let url else { return [] }
         lock.lock()
-        let snapshot = stored
-        lock.unlock()
-        return snapshot.filter { cookieMatches($0, for: url) }
+        defer { lock.unlock() }
+        purgeExpiredLocked(at: Date())
+        return stored.filter { cookieMatches($0, for: url) && !Self.isLiveCookieExpired($0) }
+    }
+
+    static func isLiveCookieExpired(_ cookie: HTTPCookie, at date: Date = Date()) -> Bool {
+        guard let expires = cookie.expiresDate, expires.timeIntervalSince1970 > 0 else { return false }
+        return expires <= date
+    }
+
+    private func removeMatchingLocked(_ cookie: HTTPCookie) {
+        stored.removeAll { existing in
+            existing.name == cookie.name
+                && existing.domain == cookie.domain
+                && existing.path == cookie.path
+        }
+    }
+
+    private func purgeExpiredLocked(at date: Date) {
+        stored.removeAll { Self.isLiveCookieExpired($0, at: date) }
     }
 
     private func cookieMatches(_ cookie: HTTPCookie, for url: URL) -> Bool {
+        if Self.isLiveCookieExpired(cookie) { return false }
         guard let host = url.host?.lowercased() else { return false }
         let requestPath = url.path.isEmpty ? "/" : url.path
         let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
@@ -489,6 +516,10 @@ enum SessionCookiePersistence {
 
         func consider(_ cookie: HTTPCookie) {
             guard AuthSessionCookie.isSessionCookieName(cookie.name) else { return }
+            if IsolatedInMemoryHTTPCookieStorage.isLiveCookieExpired(cookie) {
+                storage.deleteCookie(cookie)
+                return
+            }
             guard ownsDomain(cookie, host: host) else { return }
             let key = cookieKey(cookie)
             guard seenKeys.insert(key).inserted else { return }

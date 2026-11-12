@@ -27,6 +27,58 @@ final class SessionKeychainTests: XCTestCase {
         }
     }
 
+    func testInMemoryCookieStorageRejectsAndPurgesExpiredCookies() throws {
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
+        let past = Date(timeIntervalSince1970: 1_600_000_000)
+        let expired = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "socratictrade.com",
+            .path: "/",
+            .name: "authjs.session-token",
+            .value: "stale",
+            .secure: "TRUE",
+            .expires: past,
+            .version: "0",
+        ]))
+        storage.setCookie(expired)
+        XCTAssertTrue(storage.cookies?.isEmpty ?? true)
+        let origin = URL(string: "https://socratictrade.com/")!
+        XCTAssertTrue(storage.cookies(for: origin)?.isEmpty ?? true)
+
+        installInJar(try makeHostOnlyCookie(name: "authjs.session-token", value: "live"), storage: storage)
+        XCTAssertEqual(
+            SessionCookiePersistence.authSessionCookies(in: storage, owningHost: "socratictrade.com").count,
+            1
+        )
+        XCTAssertTrue(IsolatedInMemoryHTTPCookieStorage.isLiveCookieExpired(expired))
+        XCTAssertFalse(
+            IsolatedInMemoryHTTPCookieStorage.isLiveCookieExpired(
+                try XCTUnwrap(storage.cookies?.first)
+            )
+        )
+    }
+
+    func testInMemoryCookieStorageURLSessionTaskRoundTrip() async throws {
+        let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CookieRoundTripURLProtocol.self]
+        configuration.httpCookieStorage = jar
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        CookieRoundTripURLProtocol.reset()
+        let session = URLSession(configuration: configuration)
+        defer {
+            CookieRoundTripURLProtocol.reset()
+            session.invalidateAndCancel()
+        }
+        let url = URL(string: "https://cookie-roundtrip.test/session")!
+        _ = try await session.data(from: url)
+        XCTAssertEqual(CookieRoundTripURLProtocol.requestCount, 1)
+        XCTAssertNil(CookieRoundTripURLProtocol.lastCookieHeader)
+        _ = try await session.data(from: url)
+        XCTAssertEqual(CookieRoundTripURLProtocol.requestCount, 2)
+        XCTAssertEqual(CookieRoundTripURLProtocol.lastCookieHeader, "authjs.session-token=network-roundtrip")
+    }
+
     func testAuthSessionCookieNameRecognition() {
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("__Secure-authjs.session-token"))
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("authjs.session-token"))
@@ -530,5 +582,47 @@ final class SessionKeychainTests: XCTestCase {
             .secure: "TRUE",
             .version: "0",
         ]))
+    }
+}
+
+private final class CookieRoundTripURLProtocol: URLProtocol {
+    static var requestCount = 0
+    static var lastCookieHeader: String?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "cookie-roundtrip.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        Self.lastCookieHeader = request.value(forHTTPHeaderField: "Cookie")
+        let url = request.url ?? URL(string: "https://cookie-roundtrip.test/session")!
+        let headerFields: [String: String]
+        if Self.requestCount == 1 {
+            headerFields = [
+                "Content-Type": "application/json",
+                "Set-Cookie": "authjs.session-token=network-roundtrip; Path=/; Secure",
+            ]
+        } else {
+            headerFields = ["Content-Type": "application/json"]
+        }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: headerFields
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    static func reset() {
+        requestCount = 0
+        lastCookieHeader = nil
     }
 }
