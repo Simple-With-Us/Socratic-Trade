@@ -154,7 +154,7 @@ who cannot tell whether it ever passed.
 
 ### Running the Litestream B2 restore drill
 
-Manual (any time, on **fleet-hetzner-nbg1** host shell — not in the container):
+Manual (any time, on the production restore-drill **host** shell — not in the container):
 
 ```bash
 # Export AWS_* for the B2 replica from a trusted source first (never log values).
@@ -172,6 +172,12 @@ systemctl list-timers st-litestream-restore-drill.timer
 The wrapper requires **2.2x** live DB free space on the scratch filesystem; the manual script
 defaults to **1.0x** unless `RESTORE_DRILL_MIN_FREE_TENTHS` is set.  Status JSON:
 `/var/lib/st-ops/litestream-restore-drill-status.json`.
+
+**Credentials (manual vs scheduled):** manual tier-1 drills still follow the rule in section 9
+below — export B2 `AWS_*` into the shell for that run only, never into a file that outlives the
+drill.  The **scheduled** lane is the sanctioned exception: a root-owned
+`/etc/default/st-litestream-restore-drill` at mode **0600**, populated from an Infisical service
+token by the operator (see runbook).  Values already in the process environment win over the file.
 
 ### Running the cold-archive drill
 
@@ -345,8 +351,10 @@ Add `-timestamp <ISO8601>` for point-in-time recovery inside the 7-day window.
 `litestream` 0.5.16 and `sqlite3` 3.46.1; the runtime image has **neither** — it ships no
 `sqlite3` CLI, and `coolify-prod-start.sh` puts Litestream on PID 1's `PATH` only, which a
 later `docker exec` does not inherit.  Credentials come from Infisical via the running
-Litestream process and are **not** inherited by a fresh shell: export them into the drill
-shell from a trusted source, never into a file that outlives the drill.
+Litestream process and are **not** inherited by a fresh shell: for **manual** drills, export
+them into the drill shell from a trusted source for that run only, never into a file that
+outlives the drill.  The **scheduled** weekly lane uses the root-only env file documented in
+section 5 (mode 0600, Infisical service token on the host).
 
 The R2 cold-archive drill is the opposite — `verify-cold-snapshot-restore.mjs` uses the
 bundled `better-sqlite3`, needs no `sqlite3` CLI, and does run inside the container —

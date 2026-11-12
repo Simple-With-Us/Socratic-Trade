@@ -54,7 +54,7 @@ npm run build
 
 ## Next Steps & Blockers
 
-1. **Owner:** install on `fleet-hetzner-nbg1`, fill `/etc/default/st-litestream-restore-drill` from Infisical service token, run one `ST_RESTORE_DRILL_NOTIFY=0` manual start.
+1. **Owner:** install on the production restore-drill host, fill `/etc/default/st-litestream-restore-drill` from Infisical service token, run one notify-disabled manual start via the env-file pattern in the runbook.
 2. After first green scheduled run, add rollout receipt to THE BOARD.
 
 ## Zero-Code Findings

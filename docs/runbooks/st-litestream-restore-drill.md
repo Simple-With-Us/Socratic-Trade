@@ -22,7 +22,7 @@ Timer: `st-litestream-restore-drill.timer` — Sunday 04:00 UTC with `Randomized
 
 ## Install (owner on host — agents do not deploy)
 
-From a checkout on **fleet-hetzner-nbg1**, as root:
+From a checkout on the **production restore-drill host**, as root:
 
 ```bash
 cd /path/to/Socratic-Trade
@@ -42,7 +42,20 @@ ST_RESTORE_DRILL_NOTIFY=0 /usr/local/sbin/st-litestream-restore-drill.sh
 
 ```bash
 systemctl list-timers st-litestream-restore-drill.timer
-ST_RESTORE_DRILL_NOTIFY=0 systemctl start st-litestream-restore-drill.service
+# systemd does not inherit the invoking shell's environment; disable notify in the env file:
+(
+  set -e
+  env_file=/etc/default/st-litestream-restore-drill
+  backup=$(mktemp)
+  cp -p -- "$env_file" "$backup"
+  trap 'cp -p -- "$backup" "$env_file"; rm -f -- "$backup"' EXIT
+  if grep -q '^ST_RESTORE_DRILL_NOTIFY=' "$env_file"; then
+    sed -i 's/^ST_RESTORE_DRILL_NOTIFY=.*/ST_RESTORE_DRILL_NOTIFY=0/' "$env_file"
+  else
+    printf '\nST_RESTORE_DRILL_NOTIFY=0\n' >>"$env_file"
+  fi
+  systemctl start st-litestream-restore-drill.service
+)
 journalctl -u st-litestream-restore-drill.service -n 50 --no-pager
 jq . /var/lib/st-ops/litestream-restore-drill-status.json
 ```

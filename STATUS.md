@@ -2,7 +2,7 @@
 
 **What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
 
-**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on fleet-hetzner-nbg1 after merge.  Do not run against live B2 from the agent.
+**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge.  Do not run against live B2 from the agent.
 
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
