@@ -384,15 +384,82 @@ final class InMemorySessionCredentialStore: SessionCredentialStoring, @unchecked
 
 // MARK: - URLSession cookie helpers
 
-enum SessionCookiePersistence {
-    /// A bare HTTPCookieStorage() has no backing store and silently drops writes.
-    /// Use the ephemeral-session store, never the persistent shared jar.
-    static func makeInMemoryCookieStorage() -> HTTPCookieStorage {
-        guard let storage = URLSessionConfiguration.ephemeral.httpCookieStorage else {
-            preconditionFailure("Ephemeral URLSession must provide an in-memory cookie store")
+/// Private in-memory jar; each instance is isolated from other clients and from `HTTPCookieStorage.shared`.
+final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [HTTPCookie] = []
+
+    override init() {
+        super.init()
+        cookieAcceptPolicy = .always
+    }
+
+    override var cookies: [HTTPCookie]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    override func setCookie(_ cookie: HTTPCookie) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored.removeAll { existing in
+            existing.name == cookie.name
+                && existing.domain == cookie.domain
+                && existing.path == cookie.path
         }
-        storage.cookieAcceptPolicy = .always
-        return storage
+        stored.append(cookie)
+    }
+
+    override func deleteCookie(_ cookie: HTTPCookie) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored.removeAll { existing in
+            existing.name == cookie.name
+                && existing.domain == cookie.domain
+                && existing.path == cookie.path
+        }
+    }
+
+    override func setCookies(_ cookies: [HTTPCookie], for url: URL, mainDocumentURL: URL?) {
+        for cookie in cookies {
+            setCookie(cookie)
+        }
+    }
+
+    override func cookies(for url: URL) -> [HTTPCookie]? {
+        lock.lock()
+        let snapshot = stored
+        lock.unlock()
+        return snapshot.filter { cookieMatches($0, for: url) }
+    }
+
+    private func cookieMatches(_ cookie: HTTPCookie, for url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
+        guard requestPath.hasPrefix(cookiePath) else { return false }
+        if cookiePath.count > 1, requestPath.count > cookiePath.count {
+            let index = requestPath.index(requestPath.startIndex, offsetBy: cookiePath.count)
+            guard requestPath[index] == "/" else { return false }
+        }
+        if cookie.isSecure, url.scheme?.lowercased() != "https" {
+            return false
+        }
+        let domain = cookie.domain.lowercased()
+        if domain.hasPrefix(".") {
+            let base = String(domain.dropFirst())
+            return host == base || host.hasSuffix(".\(base)")
+        }
+        return host == domain
+    }
+}
+
+enum SessionCookiePersistence {
+    /// A bare `HTTPCookieStorage()` has no backing store and silently drops writes.
+    /// Never use the persistent shared jar or `URLSessionConfiguration.ephemeral.httpCookieStorage` (nil on some platforms).
+    static func makeInMemoryCookieStorage() -> HTTPCookieStorage {
+        IsolatedInMemoryHTTPCookieStorage()
     }
 
     private static func ensureAlwaysAcceptsCookies(in storage: HTTPCookieStorage) {

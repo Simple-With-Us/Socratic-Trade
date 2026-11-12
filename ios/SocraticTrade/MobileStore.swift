@@ -441,6 +441,7 @@ final class MobileStore: ObservableObject {
     private var didAttemptPersistedSessionRestore = false
     private var persistedSessionRestoreAwaitingRetry = false
     private var persistedSessionRestoreTask: Task<Void, Never>?
+    private let persistedSessionRestoreTaskLock = NSLock()
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var isStreamConnected = false
@@ -543,10 +544,13 @@ final class MobileStore: ObservableObject {
     }
 
     private func persistedSessionRestoreTaskEnsured() -> Task<Void, Never> {
+        persistedSessionRestoreTaskLock.lock()
         if let task = persistedSessionRestoreTask {
+            persistedSessionRestoreTaskLock.unlock()
             return task
         }
         guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else {
+            persistedSessionRestoreTaskLock.unlock()
             return Task {}
         }
         let task = Task<Void, Never> { @MainActor [weak self] in
@@ -554,6 +558,7 @@ final class MobileStore: ObservableObject {
             await self.runPersistedSessionRestoreIfNeeded()
         }
         persistedSessionRestoreTask = task
+        persistedSessionRestoreTaskLock.unlock()
         return task
     }
 
@@ -598,7 +603,9 @@ final class MobileStore: ObservableObject {
                 isAuthenticated = false
                 didAttemptPersistedSessionRestore = false
                 persistedSessionRestoreAwaitingRetry = true
+                persistedSessionRestoreTaskLock.lock()
                 persistedSessionRestoreTask = nil
+                persistedSessionRestoreTaskLock.unlock()
                 return
             }
             if credentialError.shouldDeletePersistedCredentialsOnRestoreFailure {

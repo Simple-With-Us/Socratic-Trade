@@ -13,6 +13,20 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertTrue(second.cookies?.isEmpty ?? true)
     }
 
+    func testMakeInMemoryCookieStorageNeverCrashesAndAcceptsWrites() throws {
+        for index in 0..<4 {
+            let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
+            XCTAssertTrue(storage is IsolatedInMemoryHTTPCookieStorage)
+            let cookie = try makeHostOnlyCookie(
+                name: "__Secure-authjs.session-token",
+                value: "fallback-\(index)"
+            )
+            storage.setCookie(cookie)
+            XCTAssertEqual(storage.cookies?.count, 1)
+            XCTAssertEqual(storage.cookies?.first?.value, "fallback-\(index)")
+        }
+    }
+
     func testAuthSessionCookieNameRecognition() {
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("__Secure-authjs.session-token"))
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("authjs.session-token"))
