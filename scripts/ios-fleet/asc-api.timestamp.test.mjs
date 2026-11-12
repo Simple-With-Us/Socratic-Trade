@@ -68,3 +68,22 @@ test("ios-ship cache key includes run_attempt and splits restore and save", () =
   assert.doesNotMatch(workflow, /uses: actions\/cache@/);
   assert.match(workflow, /ios-fleet-socratic-\$\{\{ github\.run_id \}\}-/);
 });
+
+test("ios-ship clears stale lockdirs after cache restore and before save", () => {
+  const workflow = readFileSync(join(here, "../../.github/workflows/ios-ship.yml"), "utf8");
+  const steps = workflow.split(/- name:/);
+  const restore = steps.findIndex((s) => /Restore iOS ship state/.test(s));
+  const clear = steps.findIndex((s) => /Clear stale ship locks from restored cache/.test(s));
+  const gate = steps.findIndex((s) => /Scheduled ship gate \(skip unless/.test(s));
+  const removeBeforeSave = steps.findIndex((s) =>
+    /Remove ship lockdirs before saving state cache/.test(s)
+  );
+  const save = steps.findIndex((s) => /Save iOS ship state/.test(s));
+  assert.ok(restore >= 0, "restore step exists");
+  assert.equal(clear, restore + 1, "lock clear runs immediately after cache restore");
+  assert.ok(clear < gate, "stale locks are cleared before the scheduled gate");
+  assert.ok(removeBeforeSave > 0 && save > removeBeforeSave, "locks removed before cache save");
+  assert.match(steps[clear], /\.lockdir/);
+  assert.match(steps[removeBeforeSave], /if: always\(\)/);
+  assert.match(steps[removeBeforeSave], /rm -rf/);
+});
