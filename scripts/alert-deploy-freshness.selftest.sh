@@ -213,6 +213,7 @@ run_case() {
     export BASH_ENV="${WORK}/cwd-probe.sh"
     export CWD_PROBE_FILE="$CWD_PROBE"
     for assign in "$@"; do
+      # shellcheck disable=SC2163  # assign is VAR=value from the harness, not a variable name
       export "$assign"
     done
     cd "$workdir" && bash "$UNDER_TEST" "$expect_ref" 2>&1

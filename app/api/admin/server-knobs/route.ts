@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkAdmin, requireAdmin } from "@/lib/auth/admin";
 import { userIdForEmail } from "@/lib/auth/identity";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { audit } from "@/lib/db";
 import {
   SERVER_KNOB_GROUPS,
@@ -89,7 +89,13 @@ export async function POST(request: Request) {
   // verified email on the allowlist path; the legacy `x-admin-token` path has no email by design, so
   // it is recorded as the token principal rather than silently attributed to a person.
   const actor = checkAdmin(request);
-  const actorUserId = actor.email ? userIdForEmail(actor.email) : resolveRequestUserId(request);
+  let actorUserId: string | Response;
+  if (actor.email) {
+    actorUserId = userIdForEmail(actor.email);
+  } else {
+    actorUserId = resolveRequestUserIdOrResponse(request);
+    if (actorUserId instanceof Response) return actorUserId;
+  }
 
   const from = resolveServerKnob(id);
   let infisicalWriteThrough = false;

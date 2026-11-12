@@ -1,7 +1,7 @@
 import { getBrokerGateway } from "@/lib/broker";
 import { getActiveConnectedAccount, getInternalSetting, getPolicy } from "@/lib/db";
 import { deriveExecutionState } from "@/lib/execution-mode";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getLease } from "@/lib/scheduler-lease";
 import { NextResponse } from "next/server";
 
@@ -14,7 +14,8 @@ function protectiveState(state: string | undefined): boolean {
 }
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const checks: Record<string, unknown> = {};
   const failures: string[] = [];
 

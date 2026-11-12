@@ -157,6 +157,7 @@ OLDEST_UNDEPLOYED=""
 OLDEST_AGE=""
 VERDICT="ok"
 NOTIFY_REASON=""
+export VERDICT NOTIFY_REASON
 
 extract_live_sha() {
   # Prefer a live probe so we do not depend on log-line wording.
