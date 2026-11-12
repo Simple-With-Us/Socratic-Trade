@@ -385,6 +385,16 @@ final class InMemorySessionCredentialStore: SessionCredentialStoring, @unchecked
 // MARK: - URLSession cookie helpers
 
 enum SessionCookiePersistence {
+    /// A bare HTTPCookieStorage() has no backing store and silently drops writes.
+    /// Use the ephemeral-session store, never the persistent shared jar.
+    static func makeInMemoryCookieStorage() -> HTTPCookieStorage {
+        guard let storage = URLSessionConfiguration.ephemeral.httpCookieStorage else {
+            preconditionFailure("Ephemeral URLSession must provide an in-memory cookie store")
+        }
+        storage.cookieAcceptPolicy = .always
+        return storage
+    }
+
     private static func ensureAlwaysAcceptsCookies(in storage: HTTPCookieStorage) {
         guard storage !== HTTPCookieStorage.shared else { return }
         guard storage.cookieAcceptPolicy != .always else { return }

@@ -536,7 +536,7 @@ final class MobileSessionHardeningTests: XCTestCase {
     ) -> (URLSession, HTTPCookieStorage) {
         SessionHardeningURLProtocol.log = log
         SessionHardeningURLProtocol.handler = handler
-        let jar = HTTPCookieStorage()
+        let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SessionHardeningURLProtocol.self]
         configuration.httpShouldSetCookies = true

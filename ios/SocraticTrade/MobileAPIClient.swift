@@ -136,7 +136,7 @@ struct MobileAPIClient {
                 self.sessionCookieJar = existingJar
                 self.session = session
             } else {
-                let jar = HTTPCookieStorage()
+                let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
                 let configuration = session.configuration.copy() as? URLSessionConfiguration
                     ?? session.configuration
                 configuration.httpShouldSetCookies = true
@@ -150,14 +150,14 @@ struct MobileAPIClient {
                 )
             }
         } else {
-            let jar = HTTPCookieStorage()
+            let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
             self.sessionCookieJar = jar
             self.session = Self.makeURLSession(cookieJar: jar)
         }
     }
 
     /// In-memory cookie storage only — the durable session lives in the Keychain via `SessionCookieCoordinator`.
-    static func makeURLSession(cookieJar: HTTPCookieStorage = HTTPCookieStorage()) -> URLSession {
+    static func makeURLSession(cookieJar: HTTPCookieStorage = SessionCookiePersistence.makeInMemoryCookieStorage()) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = true
         configuration.httpCookieAcceptPolicy = .always

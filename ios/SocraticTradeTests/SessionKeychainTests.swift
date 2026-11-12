@@ -2,6 +2,17 @@ import XCTest
 @testable import SocraticTrade
 
 final class SessionKeychainTests: XCTestCase {
+    func testInMemoryCookieStoresAcceptWritesAndStayIsolated() throws {
+        let first = SessionCookiePersistence.makeInMemoryCookieStorage()
+        let second = SessionCookiePersistence.makeInMemoryCookieStorage()
+        XCTAssertFalse(first === second)
+        XCTAssertFalse(first === HTTPCookieStorage.shared)
+        let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "isolated-fixture")
+        installInJar(cookie, storage: first)
+        XCTAssertEqual(first.cookies?.count, 1)
+        XCTAssertTrue(second.cookies?.isEmpty ?? true)
+    }
+
     func testAuthSessionCookieNameRecognition() {
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("__Secure-authjs.session-token"))
         XCTAssertTrue(AuthSessionCookie.isSessionCookieName("authjs.session-token"))
@@ -26,7 +37,7 @@ final class SessionKeychainTests: XCTestCase {
         ]))
         let archive = SessionCookieArchive(cookie: cookie, owningHost: "socratictrade.com")
         XCTAssertEqual(archive.expiresAt, past)
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let applied = SessionCookiePersistence.apply(
             [archive],
@@ -46,7 +57,7 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertTrue(restored.isSecure)
         XCTAssertFalse(restored.domain.hasPrefix("."))
 
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
             1
@@ -75,7 +86,7 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertEqual(restored.properties?[.domain] as? String, ".evil.example")
         XCTAssertNil(restored.properties?[.originURL])
 
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
             0
@@ -124,7 +135,7 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testAuthSessionCookiesGuardReturnsEmptyWithoutOwningHost_positiveControlFindsOwnedCookie() throws {
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let cookie = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "tok")
         installInJar(cookie, storage: storage)
 
@@ -151,7 +162,7 @@ final class SessionKeychainTests: XCTestCase {
             recordedOriginHost: "socratictrade.com",
             expiresAt: nil
         )
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "evil.example"),
             0
@@ -175,7 +186,7 @@ final class SessionKeychainTests: XCTestCase {
         let cookie = try XCTUnwrap(HTTPCookie(properties: properties))
         XCTAssertFalse(SessionCookiePersistence.ownsDomain(cookie, host: "socratictrade.com"))
 
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let origin = URL(string: "https://socratictrade.com/")!
         storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
         XCTAssertTrue(
@@ -192,7 +203,7 @@ final class SessionKeychainTests: XCTestCase {
         let domainAttribute = restored.properties?[.domain] as? String
         XCTAssertEqual(domainAttribute, ".socratictrade.com")
 
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         XCTAssertEqual(
             SessionCookiePersistence.apply([archive], to: storage, owningHost: "socratictrade.com"),
             1
@@ -204,7 +215,7 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testApplyRestoresSecureAuthArchiveInJar() throws {
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let archive = SessionCookieArchive(
             cookie: try makeCookie(name: "__Secure-authjs.session-token", value: "tok"),
             owningHost: "socratictrade.com"
@@ -220,7 +231,7 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testAuthSessionCookiesDoesNotTrustGlobalNamePathCollision() throws {
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let origin = URL(string: "https://socratictrade.com/")!
         let owned = try makeHostOnlyCookie(name: "__Secure-authjs.session-token", value: "owned-value")
         storage.setCookies([owned], for: origin, mainDocumentURL: nil)
@@ -242,7 +253,7 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testAuthSessionCookiesMergesLeadingDotDomainWithBareDomain() throws {
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let dotted = try makeDomainScopedCookie(name: "__Secure-authjs.session-token", value: "dotted")
         storage.setCookie(dotted)
 
@@ -318,7 +329,7 @@ final class SessionKeychainTests: XCTestCase {
         let cookie = try XCTUnwrap(HTTPCookie(properties: properties))
         XCTAssertTrue(SessionCookiePersistence.ownsDomain(cookie, host: "socratictrade.com"))
 
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let origin = URL(string: "https://socratictrade.com/")!
         storage.setCookies([cookie], for: origin, mainDocumentURL: nil)
         storage.setCookie(cookie)
@@ -375,7 +386,7 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testApplySkipsExpiredArchives() throws {
-        let storage = HTTPCookieStorage()
+        let storage = SessionCookiePersistence.makeInMemoryCookieStorage()
         let past = Date(timeIntervalSince1970: 1_600_000_000)
         let archive = SessionCookieArchive(
             name: "__Secure-authjs.session-token",
