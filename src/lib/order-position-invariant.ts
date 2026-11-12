@@ -280,7 +280,7 @@ export function applyPositionInvariant(
       // The short's value is a cost-basis fallback (quote failure), not a market price. Sizing a
       // cover from it can buy several times the intended dollars, and whether the buy exceeds
       // the short cannot be told either, so it is refused as retryable (ST-4616). A zero or
-      // negative quantity does not make it a share order: the adapter would still size the dollars.
+      // negative quantity alongside the dollars does not make it a share order.
       throw new OrderPositionInvariantError(
         `${symbol} BUY not placed: the account is short ${formatQty(heldShort)} ${symbol} and no live quote priced it ` +
           `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} buy cannot be sized against the short safely.  ` +
@@ -288,14 +288,15 @@ export function applyPositionInvariant(
         "position_unverified"
       );
     }
-    if (quantity == null && input.dollarAmount != null) {
+    if (isDollarSized(input)) {
       // Dollar-sized buy (the autopilot's default sizing): resolve it against the short's own
       // per-share value before deciding.  Unpriceable, sub-share, or larger than the short ->
-      // unchanged, exactly like a quantity buy above the short.
+      // unchanged, exactly like a quantity buy above the short.  A stale zero/negative quantity
+      // is replaced by the resolved share count.
       const resolved = resolveDollarsAgainstHeld(input.dollarAmount, heldShort, heldMarketValue);
       if (!resolved || resolved.kind === "exceeds") return { input, receipts };
       const dollars = input.dollarAmount;
-      const next = { ...input, quantity: resolved.quantity };
+      const next: EquityOrderInput = { ...input, quantity: resolved.quantity };
       delete next.dollarAmount;
       input = next;
       quantity = resolved.quantity;
@@ -369,10 +370,18 @@ export function applyPositionInvariant(
       "position_unverified"
     );
   }
-  if (input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0) {
-    const fullExit = heldMarketValue > 0 && input.dollarAmount >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE);
+  if (isDollarSized(input)) {
+    const dollars = input.dollarAmount;
+    // A dollar exit carrying a stale zero/negative quantity is still a dollar exit: drop the
+    // quantity so it is resolved below (or left as dollars), never sent as a share count of 0 or
+    // less. Every resolution below is capped at the held quantity, and the clamp after it too.
+    if (input.quantity != null) {
+      const next = { ...input };
+      delete next.quantity;
+      input = next;
+    }
+    const fullExit = heldMarketValue > 0 && dollars >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE);
     if (fullExit) {
-      const dollars = input.dollarAmount;
       const next = { ...input, quantity: closable };
       delete next.dollarAmount;
       input = next;
@@ -383,9 +392,8 @@ export function applyPositionInvariant(
       });
     } else if (options?.resolvePartialDollarExits) {
       const resolved =
-        heldMarketValue > 0 ? resolveDollarsAgainstHeld(input.dollarAmount, closable, heldMarketValue) : undefined;
+        heldMarketValue > 0 ? resolveDollarsAgainstHeld(dollars, closable, heldMarketValue) : undefined;
       if (resolved?.kind === "partial") {
-        const dollars = input.dollarAmount;
         const next = { ...input, quantity: resolved.quantity };
         delete next.dollarAmount;
         input = next;
@@ -402,7 +410,7 @@ export function applyPositionInvariant(
         // broker-verified position that still cannot be priced is the terminal code.
         const unverified = position.source === "caller";
         throw new OrderPositionInvariantError(
-          `${symbol} ${closingSide.toUpperCase()} not placed: a $${input.dollarAmount.toFixed(2)} exit could not be priced inside the held ` +
+          `${symbol} ${closingSide.toUpperCase()} not placed: a $${dollars.toFixed(2)} exit could not be priced inside the held ` +
             `${formatQty(closable)} shares, so the broker's dollar sizing could sell more than the position. Nothing was sent to the broker` +
             (unverified ? ", so this is safe to retry once the position read succeeds." : "."),
           unverified ? "position_unverified" : "dollar_exit_unpriced"
@@ -680,7 +688,8 @@ export function withPositionSides<T extends EquityPosition>(positions: T[]): Arr
 /**
  * Why a proposal must wait for a live quote, or undefined. A dollar-sized BUY against a held short
  * whose value is cost basis (Tradier quote batch failed) cannot be told apart as a cover or an
- * oversized opening, and opening sizing would replace its dollars. A dollar-sized MARKET SELL of
+ * oversized opening, and opening sizing would replace its dollars. A dollar-sized COVER of such a
+ * short cannot be sized either, and is held rather than booked as a failed placement. A dollar-sized MARKET SELL of
  * such a short on a long-only venue (`convertSellToCover`) is an exit that normalization would turn
  * into a cover, and it cannot be sized either. Every other sell of a short keeps the terminal
  * sell_against_short refusal at the choke point, since it can never become a cover.
@@ -693,6 +702,7 @@ export function unpricedShortDollarHold(
   if (!isDollarSized(proposal)) return undefined;
   const mayWait =
     proposal.side === "buy" ||
+    proposal.side === "cover" ||
     (proposal.side === "sell" && options.convertSellToCover === true && proposal.type === "market");
   if (!mayWait) return undefined;
   const held = heldPositionFor(positions, proposal.symbol);
@@ -722,7 +732,8 @@ export function holdUnpricedShortDollarProposals(
   return proposals.filter((proposal) => {
     const hold = unpricedShortDollarHold(proposal, positions, options);
     if (!hold) return true;
-    console.log(`[PositionInvariant] Held ${proposal.symbol} ${proposal.side}: ${hold.reason}`);
+    // A fixed status only: the symbol, size, and position details go to the audit row below.
+    console.log("[PositionInvariant] proposal held: position_unverified");
     audit(
       "proposal_position_unverified",
       {

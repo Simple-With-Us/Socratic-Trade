@@ -37,6 +37,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { roundAlpacaPrice, roundCents } from "../src/lib/money";
 import {
@@ -58,6 +59,10 @@ import type {
   TradingPolicy
 } from "../src/lib/types";
 import { OrderValidationError } from "../src/lib/types";
+
+/** One audit_events row as SQLite returns it, and its decoded JSON payload (trust boundary). */
+const AuditEventRowSchema = z.object({ payload: z.string() });
+const AuditPayloadSchema = z.record(z.string(), z.unknown());
 
 const SEED = 0x4616;
 const CASES = Number(process.env.PROPERTY_CASES ?? 1000);
@@ -1301,26 +1306,74 @@ describe("money-path order invariant properties", () => {
     expect(holdUnpricedShortDollarProposals([sell], pricedShort, context, { convertSellToCover: true })).toEqual([sell]);
   });
 
-  it("the autopilot holds unpriced dollar buys against a short before sizing and audits each as position_unverified", async () => {
+  it("the autopilot holds unpriced dollar buys and covers against a short before sizing and audits each as position_unverified", async () => {
     const db = await import("../src/lib/db");
+    // Kody PRRT_kwDOS7mOVM62pDYL: rows and payloads are parsed at the SQLite/JSON boundary.
     const audits = () =>
       db
         .getDb()
         .prepare("SELECT payload FROM audit_events WHERE kind = ?")
         .all("proposal_position_unverified")
-        .map((row) => JSON.parse((row as { payload: string }).payload) as Record<string, unknown>);
+        .map((row) => AuditPayloadSchema.parse(JSON.parse(AuditEventRowSchema.parse(row).payload)));
     const before = audits().length;
     const context = { userId: "tradier-props", connectedAccountId: "acct-tradier-props", lane: "autopilot" as const, runId: "run-4616" };
     const buy = exitProposal({ dollarAmount: 5000 });
+    // Kody PRRT_kwDOS7mOVM62pDTK: an explicit dollar cover is held too.
+    const cover = exitProposal({ side: "cover", dollarAmount: 300 });
     const qtyBuy = exitProposal({ dollarAmount: undefined, quantity: 4 });
     const other = exitProposal({ symbol: "AAPL" });
-    expect(holdUnpricedShortDollarProposals([buy, qtyBuy, other], unpricedShort, context)).toEqual([qtyBuy, other]);
+    // Kody PRRT_kwDOS7mOVM62pDIb: the console line is a fixed status; details go only to the audit row.
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let kept: TradeProposal[];
+    try {
+      kept = holdUnpricedShortDollarProposals([buy, cover, qtyBuy, other], unpricedShort, context);
+      const lines = log.mock.calls.map((call) => call.map(String).join(" "));
+      expect(lines).toEqual(["[PositionInvariant] proposal held: position_unverified", "[PositionInvariant] proposal held: position_unverified"]);
+      for (const line of lines) expect(line).not.toMatch(/MSFT|5000|300|10/);
+    } finally {
+      log.mockRestore();
+    }
+    expect(kept).toEqual([qtyBuy, other]);
     expect(audits().slice(before)).toEqual([
-      expect.objectContaining({ symbol: "MSFT", side: "buy", dollarAmount: 5000, heldShortQuantity: 10, code: "position_unverified", runId: "run-4616" })
+      expect.objectContaining({ symbol: "MSFT", side: "buy", dollarAmount: 5000, heldShortQuantity: 10, code: "position_unverified", runId: "run-4616" }),
+      expect.objectContaining({ symbol: "MSFT", side: "cover", dollarAmount: 300, heldShortQuantity: 10, code: "position_unverified", runId: "run-4616" })
     ]);
     // Priced control: nothing held, nothing audited.
-    expect(holdUnpricedShortDollarProposals([buy], pricedShort, context)).toEqual([buy]);
-    expect(audits().length).toBe(before + 1);
+    expect(holdUnpricedShortDollarProposals([buy, cover], pricedShort, context)).toEqual([buy, cover]);
+    expect(audits().length).toBe(before + 2);
+  });
+
+  // Kody PRRT_kwDOS7mOVM62pDNf: a priced dollar order with a stale zero/negative quantity is still
+  // resolved to shares (capped at the position), never sent with a share count of 0 or less.
+  it("a priced dollar exit with a zero or negative quantity is resolved to capped shares", () => {
+    const long = heldPositionFor([{ symbol: "MSFT", quantity: 10, averageCost: 20, marketValue: 1000, marketValueSource: "quote" }], "MSFT");
+    const short = heldPositionFor(pricedShort, "MSFT");
+    const base = { accountNumber: TRADIER_ACCOUNT, symbol: "MSFT", type: "market", timeInForce: "gfd", marketHours: "regular_hours" } as const;
+    const tradier = { resolvePartialDollarExits: true };
+    for (const quantity of [0, -3]) {
+      const label = `quantity ${quantity}`;
+      // Partial sell: $500 of a $1000 long -> 5 shares.
+      const partial = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity }, long, tradier).input;
+      expect(partial, label).toMatchObject({ side: "sell", quantity: 5 });
+      expect(partial.dollarAmount, label).toBeUndefined();
+      // Over-sized sell: $5000 of a $1000 long -> the exact held 10, never more.
+      expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 5000, quantity }, long, tradier).input, label).toMatchObject({ quantity: 10 });
+      // Over-sized cover: $5000 against a $1000 short -> the exact held short, 10.
+      expect(applyPositionInvariant({ ...base, side: "cover", dollarAmount: 5000, quantity }, short, tradier).input, label).toMatchObject({
+        side: "cover",
+        quantity: 10
+      });
+      // A fitting buy against the short -> a 1-share cover.
+      const buy = applyPositionInvariant({ ...base, side: "buy", dollarAmount: 100, quantity }, short, tradier).input;
+      expect(buy, label).toMatchObject({ side: "cover", quantity: 1 });
+      expect(buy.dollarAmount, label).toBeUndefined();
+      // Alpaca (no option) keeps a partial dollar sell notional, without the stale quantity.
+      const alpaca = applyPositionInvariant({ ...base, accountNumber: ALPACA_ACCOUNT, side: "sell", dollarAmount: 500, quantity }, long).input;
+      expect(alpaca, label).toMatchObject({ dollarAmount: 500 });
+      expect(alpaca.quantity, label).toBeUndefined();
+    }
+    // Control: the same order with no quantity resolves the same way (the priced path is unchanged).
+    expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500 }, long, tradier).input).toMatchObject({ quantity: 5 });
   });
 
   // Kody PRRT_kwDOS7mOVM62m-NZ: a non-positive dollar buy is invalid input, not a retryable position error.
