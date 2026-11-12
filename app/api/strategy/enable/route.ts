@@ -1,6 +1,6 @@
 import { getPolicy, setPolicy } from "@/lib/db";
 import { verifyAutonomyArmingPreconditions } from "@/lib/autonomy-arming";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
  * checks live in src/lib/autonomy-arming.ts so the ops account-control route runs the same ones.
  */
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const policy = getPolicy(userId);
   const check = await verifyAutonomyArmingPreconditions(policy, userId);
   if (!check.ok) return new NextResponse(check.message, { status: 400 });
