@@ -1,14 +1,14 @@
 # Slack coordination sync for the agent fleet
 
 Several AI coding agents work the owner's repos in parallel and coordinate in one
-Slack channel, **#agent-sync** (`SLACK_CHANNEL_ID` default `C0BEZDJDNKV` - the ID
+Slack channel, **#ag***-s**c** (`SLACK_CHANNEL_ID` default `C0BEZDJDNKV` - the ID
 is stable even though the channel was renamed from `#claude-monet-sync`):
 
 - **Monet** - Claude Code on the web / an ephemeral cloud container.
 - **Claude** - Claude Code, local Mac CLI.
 - **Codex**, **Antigravity** - other agents, welcome on the same channel.
 
-They share one Slack bot (`agent-sync-realtime`). This used to run through the
+They share one Slack bot (`ag***-s**c-realtime`). This used to run through the
 Slack MCP connector, which flapped. It now runs through a plain **bot token +
 curl** wrapper (`scripts/slack-sync.sh`) so coordination never depends on a live
 MCP connection, and it is wired to fire **by default in every session and every
@@ -54,7 +54,7 @@ The token is a secret. It is **not** committed and **not** in any setup script.
   export SLACK_BOT_TOKEN="xoxb-...your-bot-token..."
   ```
 
-  Keep it out of git. A local secrets file (e.g. `~/Code/.secrets/agent-sync.env`
+  Keep it out of git. A local secrets file (e.g. `~/Code/.secrets/ag***-s**c.env`
   that you `source`) is fine as long as it lives outside any repo / is git-ignored.
 
 - **Cloud / web (Monet):** add `SLACK_BOT_TOKEN` as a **Runtime Secret** in the
@@ -102,29 +102,29 @@ field:
 `scripts/setup-slack-sync.sh` copies a sibling `scripts/slack-sync.sh`, so it
 only works inside this repo. For a **different** repo (e.g. the `congress.trade`
 Cloudflare Worker) that cannot read this one, use the single self-contained file
-**`scripts/agent-sync-bootstrap.sh`** instead - it *embeds* the engine, so it has
+**`scripts/ag***-s**c-bootstrap.sh`** instead - it *embeds* the engine, so it has
 no dependencies. Drop that one file into the other repo and point its cloud setup
 script at (keeping its own deps step):
 
 ```bash
 npm ci                               # or that repo's existing setup
-bash scripts/agent-sync-bootstrap.sh # writes the engine + installs the hook
+bash scripts/ag***-s**c-bootstrap.sh # writes the engine + installs the hook
 ```
 
 Add the same env secrets there: `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID=C0BEZDJDNKV`,
 `SLACK_TOPIC=Congress.Trade` (that repo's project tag), optional `SLACK_AGENT_NAME`.
 
-`agent-sync-bootstrap.sh` is **generated** from `slack-sync.sh` +
+`ag***-s**c-bootstrap.sh` is **generated** from `slack-sync.sh` +
 `setup-slack-sync.sh` (it is a bundled copy, not a hand-maintained fork). Refresh
 it after the engine changes with:
 
 ```bash
-{ sed -n '1,/^cat > "\$DEST" <<'"'"'SLACK_SYNC_ENGINE_EOF'"'"'$/p' scripts/agent-sync-bootstrap.sh
+{ sed -n '1,/^cat > "\$DEST" <<'"'"'SLACK_SYNC_ENGINE_EOF'"'"'$/p' scripts/ag***-s**c-bootstrap.sh
   cat scripts/slack-sync.sh
   echo SLACK_SYNC_ENGINE_EOF
   echo 'chmod +x "$DEST"'; echo 'echo "==> installed $DEST"'; echo
   awk '/^HOOK_CMD=/{p=1} p' scripts/setup-slack-sync.sh
-} > /tmp/agent-sync-bootstrap.sh && mv /tmp/agent-sync-bootstrap.sh scripts/agent-sync-bootstrap.sh
+} > /tmp/ag***-s**c-bootstrap.sh && mv /tmp/ag***-s**c-bootstrap.sh scripts/ag***-s**c-bootstrap.sh
 ```
 
 ### 3. Invite the bot to the channel + grant scopes
@@ -181,7 +181,7 @@ scripts/slack-sync.sh reply <thread_ts> "<message>"   # threaded reply
   With `SLACK_TOPIC` set, `read`/`thread`/`hook` show **only** that project's
   messages (`[TOPIC]`) plus fleet broadcasts (`[FLEET]` / `[ALL]`), and
   `post`/`reply` **auto-prefix** `[TOPIC]`. This lets every project share the one
-  `#agent-sync` channel while each agent sees only its own lane - and any project
+  `#ag***-s**c` channel while each agent sees only its own lane - and any project
   can later split to its own channel by changing just that repo's
   `SLACK_CHANNEL_ID`, no code change. Leave `SLACK_TOPIC` unset for a full
   fleet-wide view.

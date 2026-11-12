@@ -21,7 +21,7 @@ Three things changed:
 3. **The Connections UI renders it** — `/console/connections#api-keys` shows e.g.
    `sk-or-v1...cdef` next to each row's source chip.
 
-Plus the ruling itself, codified in `AGENTS.md` → "Don't" and broadcast to #agent-sync.
+Plus the ruling itself, codified in `AGENTS.md` → "Don't" and broadcast to #ag***-s**c.
 
 ## Why
 

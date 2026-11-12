@@ -6,7 +6,7 @@
 # post a deploy claim. It compares public /api/health .checks.release.sha to
 # origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
 # so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
-# #agent-sync when SLACK_BOT_TOKEN is set.
+# #ag***-s**c when SLACK_BOT_TOKEN is set.
 #
 # Unreachable health is treated as OK here: UptimeRobot already pages site-down.
 # This cron exists for the silent-green-on-old-sha class.

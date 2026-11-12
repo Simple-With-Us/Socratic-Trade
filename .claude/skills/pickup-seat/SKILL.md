@@ -32,9 +32,9 @@ git for-each-ref --sort=-committerdate refs/remotes/origin | head -15
 bash scripts/slack-sync.sh read 20
 ```
 
-## CLAIM: Post to #agent-sync before working
+## CLAIM: Post to #ag***-s**c before working
 
-Post repo-first per `/Users/jay/apps/AGENT-SYNC.md`'s canonical format, naming exactly what you are picking up:
+Post repo-first per `/Users/jay/apps/AG***-S**C.md`'s canonical format, naming exactly what you are picking up:
 
 ```bash
 bash scripts/slack-sync.sh post "repo: Socratic-Trade | [CLAUDE->agent/*] picking up MONET: effort#123,124 + PR#1234,1235; do not double-work"
@@ -73,7 +73,7 @@ For each effort, PR, worktree, or branch:
 - **Committed, not landed** = gate + land via the `land-lane` skill (or `land.sh` directly if clean)
 - **Uncommitted, unfinished** = assess scope; adopt + complete only if owner-directed
 - **Uncommitted, finished** = commit with authorship credit; land or hold
-- **Claimed but not started** = release back to unclaimed; post to #agent-sync
+- **Claimed but not started** = release back to unclaimed; post to #ag***-s**c
 - **Genuinely blocked** = board note with reason; escalate if P0
 
 ## HAND BACK: Return gracefully when seat returns
@@ -89,13 +89,13 @@ with final dispositions -- correct any premature claims in place, never delete a
 row. Commit the board update, then create `docs/rollouts/YYYY-MM-DD-pickup-[seat]-cap.md`
 covering: efforts adopted, PRs handled (with final state), disposition summary, and the
 verification commands actually run (`git log`, `gh pr list`, the land gate). Announce the
-close-out on `#agent-sync`, repo-first, naming what is ready for the returning seat to resume.
+close-out on `#ag***-s**c`, repo-first, naming what is ready for the returning seat to resume.
 
 ## Canon (source of truth -- read these if anything conflicts)
 
 - **AGENTS.md** -- effort-log rules (append-mostly, assignment = live claim)
 - **/Users/jay/apps/EFFORT-LOG-PROTOCOL.md** -- protocol detail for board transitions
-- **/Users/jay/apps/AGENT-SYNC.md** -- Slack message format and handoff discipline (canonical)
+- **/Users/jay/apps/AG***-S**C.md** -- Slack message format and handoff discipline (canonical)
 - **memory `codex-automerge-race-and-board-clobber`** -- why live-board-only claims get lost
 - **scripts/land.sh** -- landing gate (tsc -> test -> build, CI checks, PR open)
-- **scripts/slack-sync.sh** -- read/post agent-sync updates
+- **scripts/slack-sync.sh** -- read/post ag***-s**c updates

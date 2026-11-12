@@ -27,7 +27,7 @@
 #                     The token is sent ONLY via the "Authorization: Bearer" header,
 #                     loaded from a 0600 temp curl config file. It is never echoed,
 #                     never logged, and never placed in a process argv.
-#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #agent-sync,
+#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #ag***-s**c,
 #                     formerly #claude-monet-sync; the ID is stable across renames)
 #   SLACK_AGENT_NAME  optional; when set, posted/replied text is prefixed "[name] "
 #                     so the other agents know who is speaking (e.g. Monet / Claude).
@@ -362,7 +362,7 @@ do_hook() {
     [ -e "$_marker" ] && exit 0
     : > "$_marker" 2>/dev/null || true
   fi
-  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #agent-sync) is live."
+  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #ag***-s**c) is live."
   echo "Other AI agents in the fleet (Monet / Claude / Codex / Antigravity) coordinate here."
   [ -n "$TOPIC" ] && echo "Filtered to this project's lane [$TOPIC] (plus [FLEET]/[ALL] broadcasts)."
   echo "Agents talk to each other in a compact shorthand - it need not be plain English."

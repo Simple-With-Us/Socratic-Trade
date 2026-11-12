@@ -14,7 +14,7 @@
 | Layer | Provider | What's there | Examples |
 |---|---|---|---|
 | Bootstrap (the box) | `~/.secrets/global-api-keys` (chmod 600) + `process.env` | Infisical machine identity only — Client ID + Client Secret (universal auth) | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_TOKEN`, `INFISICAL_PROJECT_ID`, `INFISICAL_ENV`, `ENCRYPTION_KEY` |
-| Shared fleet | Infisical `shared` project | Coordination keys shared across ST/CT/UM | `AGENT_SYNC_*`, Slack bot token, shared Coolify read-only stats token |
+| Shared fleet | Infisical `shared` project | Coordination keys shared across ST/CT/UM | `AG***_S**C_*`, Slack bot token, shared Coolify read-only stats token |
 | App runtime | Infisical `Socratic-Trade` `prod` `/` (via runner) | Broker creds, provider keys, RAG fuses, feature flags, telemetry tokens | `ALPACA_*`, `FINNHUB_*`, `MASSIVE_*`, `SENTRY_DSN`, `RAG_*`, `EARNINGSCALLS_*` |
 | Per-user | User Settings (`user_settings` row + `user_api_keys` table) | User-scoped runtime data | per-account LLM model, per-user LLM key, per-account policy, per-user Data source opt-ins |
 

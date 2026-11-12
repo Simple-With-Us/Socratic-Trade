@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Codex Cloud coordination helper.
 # Runtime variables (not setup-only secrets): SLACK_BOT_TOKEN, GH_TOKEN
-# Optional: SLACK_CHANNEL_ID, SLACK_PROJECT, SLACK_AGENT_NAME, AGENT_SYNC_TOKEN
+# Optional: SLACK_CHANNEL_ID, SLACK_PROJECT, SLACK_AGENT_NAME, AG***_S**C_TOKEN
 set -u
 
 CHANNEL_ID="${SLACK_CHANNEL_ID:-C0BEZDJDNKV}"

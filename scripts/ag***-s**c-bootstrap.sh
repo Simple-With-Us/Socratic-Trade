@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# agent-sync-bootstrap.sh - SELF-CONTAINED installer for the Slack coordination
+# ag***-s**c-bootstrap.sh - SELF-CONTAINED installer for the Slack coordination
 # sync. Unlike scripts/setup-slack-sync.sh (which copies a sibling
 # scripts/slack-sync.sh), this file EMBEDS the engine, so it needs no other repo
 # files. Drop this ONE file into any repo (e.g. a Cloudflare Worker app that does
 # not carry the Socratic scripts) and point that environment's setup script at:
 #
-#     bash scripts/agent-sync-bootstrap.sh
+#     bash scripts/ag***-s**c-bootstrap.sh
 #
 # It (1) writes the engine to ~/.claude/slack-sync.sh and (2) merges a global
 # SessionStart hook into ~/.claude/settings.json (idempotent; preserves your
@@ -54,7 +54,7 @@ cat > "$DEST" <<'SLACK_SYNC_ENGINE_EOF'
 #                     The token is sent ONLY via the "Authorization: Bearer" header,
 #                     loaded from a 0600 temp curl config file. It is never echoed,
 #                     never logged, and never placed in a process argv.
-#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #agent-sync,
+#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #ag***-s**c,
 #                     formerly #claude-monet-sync; the ID is stable across renames)
 #   SLACK_AGENT_NAME  optional; when set, posted/replied text is prefixed "[name] "
 #                     so the other agents know who is speaking (e.g. Monet / Claude).
@@ -389,7 +389,7 @@ do_hook() {
     [ -e "$_marker" ] && exit 0
     : > "$_marker" 2>/dev/null || true
   fi
-  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #agent-sync) is live."
+  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #ag***-s**c) is live."
   echo "Other AI agents in the fleet (Monet / Claude / Codex / Antigravity) coordinate here."
   [ -n "$TOPIC" ] && echo "Filtered to this project's lane [$TOPIC] (plus [FLEET]/[ALL] broadcasts)."
   echo "Agents talk to each other in a compact shorthand - it need not be plain English."
