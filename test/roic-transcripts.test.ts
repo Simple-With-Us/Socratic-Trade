@@ -22,6 +22,7 @@ import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/l
 describe("roic-transcripts", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    resetProviderRateLimiterState("roic");
   });
 
   it("retries one ROIC list 429 with a second reserved call", async () => {
@@ -45,6 +46,32 @@ describe("roic-transcripts", () => {
       expect(Date.now() - started).toBeGreaterThanOrEqual(500);
       expect(result.rows).toHaveLength(1);
       expect(calls).toBe(2);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("skips a ROIC list retry when Retry-After exceeds the transcript ceiling", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-skip-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "120" } });
+    }));
+    try {
+      const started = Date.now();
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBe(3);
+      expect(Date.now() - started).toBeLessThan(500);
     } finally {
       if (originalKey === undefined) delete process.env.ROIC_API_KEY;
       else process.env.ROIC_API_KEY = originalKey;

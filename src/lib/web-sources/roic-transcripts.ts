@@ -16,7 +16,7 @@
 
 import "server-only";
 import { z } from "zod";
-import { CircuitOpenError, isPaidQuoteBreakerCooling, quoteRetryAfterCapMs } from "../api-circuit-breaker";
+import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
@@ -529,6 +529,8 @@ type RoicFetchOpts = {
 
 /** Same first step politeFetch uses before a 429 retry. */
 const ROIC_HEADERLESS_RETRY_MS = 600;
+/** The transcript walk has no time budget and tries up to three identifiers. */
+const ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS = 5_000;
 
 async function roicLimitedFetch(url: string, fetchOpts: RoicFetchOpts): Promise<Response | null> {
   return withProviderLimit("roic", async () => {
@@ -557,18 +559,25 @@ async function roicGetJson<T>(
     return parsed.success ? parsed.data : null;
   }
   // 429 is in suppressHealthStatuses, so this call does not open the quote lane.
-  // The second request is reserved on its own. The wait stays outside the limiter
-  // so a long Retry-After does not hold the single ROIC slot.
-  if (first.status !== 429 || admitProviderRequests("roic", credKey, 1) < 1) {
+  // The second request is reserved on its own. The wait stays outside the limiter.
+  // A header longer than the transcript ceiling skips the retry so one 429 cannot
+  // park the identifier loop for an hour.
+  if (first.status !== 429) {
     await cancelResponseBody(first);
     return null;
   }
   const headerWait = retryAfterDelayMs(first) ?? 0;
   await cancelResponseBody(first);
-  const waitMs = Math.min(Math.max(headerWait, ROIC_HEADERLESS_RETRY_MS), quoteRetryAfterCapMs());
+  if (headerWait > ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS) return null;
+  if (admitProviderRequests("roic", credKey, 1) < 1) return null;
+  const waitMs = Math.max(headerWait, ROIC_HEADERLESS_RETRY_MS);
   if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   const second = await roicLimitedFetch(url, fetchOpts);
-  if (!second?.ok) return null;
+  if (!second) return null;
+  if (!second.ok) {
+    await cancelResponseBody(second);
+    return null;
+  }
   const parsed = schema.safeParse(await second.json());
   return parsed.success ? parsed.data : null;
 }
