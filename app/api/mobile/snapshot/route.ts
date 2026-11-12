@@ -1,4 +1,5 @@
 import { getDashboardSnapshot } from "@/lib/dashboard";
+import { coalesceUserDashboardSnapshot } from "@/lib/dashboard-coalesce";
 import { buildMobileBrief, listMobileCommands, mobileControlCatalog, mobileReadiness } from "@/lib/mobile-api";
 import { withMobileEquityCurveCompat } from "@/lib/mobile-equity-curve-compat";
 import { compactMobileMarketScan } from "@/lib/mobile-scan";
@@ -24,7 +25,7 @@ function activeAccountMode(
 export async function GET(request: Request) {
   const user = resolveRequestUserOrResponse(request);
   if (user instanceof Response) return user;
-  const snapshot = await getDashboardSnapshot(user.userId, user.email);
+  const snapshot = await coalesceUserDashboardSnapshot(user.userId, () => getDashboardSnapshot(user.userId, user.email));
   const readiness = mobileReadiness(user.userId);
   const alerts = listAlerts(user.userId, "all");
   const recentCommands = listMobileCommands({ userId: user.userId, limit: 30 });
