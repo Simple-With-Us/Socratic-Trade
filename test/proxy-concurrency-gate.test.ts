@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetProxyFetchForTests,
   createProxiedFetch,
@@ -200,6 +200,19 @@ describe("createProxiedFetch concurrency gate", () => {
     expect(waits.length).toBe(1);
     expect(waits[0]).toBeGreaterThanOrEqual(200);
     expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+  });
+
+  it("reports zero wait for an immediate grant even if the clock ticks during acquire (ST-4634)", async () => {
+    const gate = new ProxyConcurrencyGate(() => 1);
+    let t = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => (t += 5));
+    try {
+      const slot = await gate.acquire();
+      expect(slot.waitMs).toBe(0);
+      slot.release();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("does not report a queue wait when a slot is granted immediately", async () => {
