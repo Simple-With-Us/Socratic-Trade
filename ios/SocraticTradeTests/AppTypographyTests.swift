@@ -50,8 +50,12 @@ final class AppTypographyTests: XCTestCase {
             contentSizeCategory: .accessibilityExtraExtraExtraLarge
         )
         XCTAssertGreaterThan(large.pointSize, small.pointSize)
-        XCTAssertGreaterThan(
+        XCTAssertEqual(
             AppChromeFontScaling.scaledUIFont(.navigationTitle, contentSizeCategory: .large).pointSize,
+            AppChromeFontScaling.navigationTitle.basePointSize
+        )
+        XCTAssertGreaterThan(
+            AppChromeFontScaling.scaledUIFont(.navigationTitle, contentSizeCategory: .extraLarge).pointSize,
             AppChromeFontScaling.navigationTitle.basePointSize
         )
     }

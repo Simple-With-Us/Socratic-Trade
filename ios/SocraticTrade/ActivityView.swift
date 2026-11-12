@@ -798,7 +798,7 @@ struct NotificationHistorySection: View {
                     }
                     .font(.appCaption.weight(filter == option ? .bold : .semibold))
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .frame(minHeight: 44)
                     .background(
                         filter == option ? AppPalette.accent.opacity(0.14) : Color.clear,
                         in: Capsule()
@@ -806,7 +806,7 @@ struct NotificationHistorySection: View {
                     .foregroundStyle(filter == option ? AppPalette.accent : .secondary)
                 }
                 .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Capsule())
+                .contentShape(Rectangle())
                 .buttonStyle(.plain)
                 // Keep the unread badge in the spoken label; an explicit label replaces the
                 // children VoiceOver would otherwise read.
