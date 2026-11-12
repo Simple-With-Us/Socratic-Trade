@@ -4,7 +4,7 @@ import { parseRequestJson } from "@/lib/api-error";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
-import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
+import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
 import {
   apiKeyEnvVarForService,
@@ -19,7 +19,6 @@ import {
 } from "@/lib/db";
 import { isNativeRouteService, llmRouteFor, llmRouteSettingKey } from "@/lib/llm-route";
 import { checkAdmin } from "@/lib/auth/admin";
-import { resolveRequestUserId } from "@/lib/request-user";
 import {
   defaultPlanTierForService,
   isRetiredMarketDataService,
@@ -300,7 +299,8 @@ function canSelectCodeCli(request: NextRequest, userId: string): boolean {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const rawService = searchParams.get("service");
   let service: string | undefined;
   if (rawService !== null) {
@@ -421,7 +421,8 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
 
@@ -530,7 +531,8 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
   if (!parsedService.success) {
     const missing = searchParams.get("service") === null || searchParams.get("service") === "";

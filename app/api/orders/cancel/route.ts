@@ -1,6 +1,6 @@
 import { brokerReadOrRethrow, jsonError, parseRequestJson } from "@/lib/api-error";
 import { cancelWorkingOrder, OrderCancelPreconditionError } from "@/lib/order-cancel";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 
@@ -25,7 +25,8 @@ export async function POST(request: Request) {
     return jsonError(400, "invalid_json", "Request body must be a JSON object.");
   }
   const { orderId } = body;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "orders/cancel", RATE_LIMITS.orders);
   if (limited) return limited;
   try {
