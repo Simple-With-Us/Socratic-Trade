@@ -3,6 +3,11 @@
 **What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
 
 **Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4630 — stale last-good screener profile
+
+**What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows no older than 24 hours (`SCREENER_PROFILE_MAX_STALE_MS`) and waits 30 seconds from when the failure returns before the next live attempt.  A refresh that is still running races a 1-second budget and returns the last-good map so the first request does not wait out two 15-second Nasdaq timeouts.  The map, the hold, and the in-flight refresh are one `globalThis` object so route bundles share them.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
 ## 2026-11-12 CURSOR — ST-3999 proxy gate slot leak
 
 **What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, and `fetchWithRetry` cancels before a 429 retry.  `fetchCancelingErrorBody` is opt-in and is not on the `dataSourceFetch` path, so an unread 5xx there is bounded by the gate.  A max hold that has already delivered a chunk releases the slot without aborting the stream.  The idle timer and the proxy-leg timer stay armed until that stream closes.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
