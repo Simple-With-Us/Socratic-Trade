@@ -11,12 +11,9 @@ export const viewport: Viewport = {
   initialScale: 1,
   viewportFit: "cover",
   interactiveWidget: "resizes-content",
-  // Keep in lockstep with --con-bg in console.css (light :root / dark override) —
-  // a mismatched themeColor tints the phone status bar a different shade than the app.
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f1f4f6" },
-    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" }
-  ]
+  // SSR default matches --con-bg light. applyDocumentTheme rewrites this meta
+  // to #0a0a0a when the resolved theme is dark, including a system choice.
+  themeColor: "#f1f4f6"
 };
 
 export default function ConsoleLayout({ children }: { children: React.ReactNode }) {

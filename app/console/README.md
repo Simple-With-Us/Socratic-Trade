@@ -82,9 +82,7 @@ app/console/
 
 Semantic tokens only (`--con-*`), complete **light and dark** palettes aiming
 WCAG AA; soft fills/borders derived with `color-mix` so every tone adapts.
-Resolution: explicit `data-theme` on `.console-root` (persisted under the
-console-scoped localStorage key `console:theme`, toggled from the chrome) else
-`prefers-color-scheme`. No raw hex in components.
+Resolution is the shared `theme` key (`light`, `dark`, or `system`).  `applyDocumentTheme` writes the resolved value onto `.console-root` `data-theme` and onto `<html>` (`.dark` plus `data-theme`) together.  System follows the OS only after that function resolves it.  Default is light.  No raw hex in components.
 
 ## Data honesty rules
 

@@ -7,8 +7,8 @@
 @source not "../docs";
 @source not "../.worktrees";
 
-/* Class-based dark mode: utilities prefixed `dark:` apply under a `.dark` ancestor. */
-@custom-variant dark (&:where(.dark, .dark *));
+/* Both signals select the same dark utilities. applyDocumentTheme writes them together. */
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
 /* ── Semantic design tokens ───────────────────────────────────────────────
    Components reference these via Tailwind utilities (bg-surface, text-fg,
@@ -67,7 +67,8 @@
   color-scheme: light;
 }
 
-.dark {
+.dark,
+:root[data-theme="dark"] {
   /* Near-black neutral greys — no blue/slate cast. Sign-in + public pages sit on
      --bg alone (logo contrast), so keep chroma near zero. Surfaces are neutral
      charcoal glass, not slate-800. */
@@ -239,8 +240,10 @@ body::after {
 
 /* Dark mode: keep mesh barely-there so --bg stays near-black (not navy/slate).
    Former opacities 0.9/0.7 washed login + public pages blue and hurt logo contrast. */
-.dark body::before { opacity: 0.22; }
-.dark body::after { opacity: 0.12; }
+.dark body::before,
+:root[data-theme="dark"] body::before { opacity: 0.22; }
+.dark body::after,
+:root[data-theme="dark"] body::after { opacity: 0.12; }
 
 :focus-visible {
   outline: 2px solid var(--accent);

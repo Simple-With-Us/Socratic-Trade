@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4195 one dark-mode switch
+
+**What.** `.dark` and `data-theme` are written together by `applyDocumentTheme`, including the boot script and OS preference changes.  Console dark tokens are one block selected by both signals.  The duplicate `prefers-color-scheme` token block is gone, so an explicit Light choice stays light.  Draft PR only.  No merge and no deploy.  Rollout: `docs/rollouts/2026-11-12-st-4195-theme-sync.md`.
+
+**Next.** GB-Designer holds the Linear claim.  Review the draft.  Do not merge from this seat.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.

@@ -876,8 +876,8 @@ function AccountScopedStrategyPage() {
           </Field>
         </div>
         {showCustomModelWarning && (
-          // con-warn tokens (not Tailwind amber + dark:): the console theme is driven by
-          // data-theme on .console-root, which Tailwind's dark: variant never sees.
+          // con-warn tokens. The warning sits on the console surface, so it uses the
+          // console token pair. html.dark and data-theme are the same resolved theme.
           <div className="mt-3 text-[length:var(--con-fs-xs)] rounded-[var(--con-radius-sm)] border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] text-[color:var(--con-warn)] p-2.5 flex items-start gap-1.5">
             <svg className="h-4 w-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
