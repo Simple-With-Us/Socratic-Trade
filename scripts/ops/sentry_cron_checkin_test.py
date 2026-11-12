@@ -216,6 +216,10 @@ class InstallerHostCheckTest(unittest.TestCase):
 
     INSTALLERS = ("install-litestream-l1-trim.sh", "install-st-container-restart-monitor.sh")
 
+    def setUp(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("installer tests must not run as root; they would mutate the host")
+
     def _env(self, bindir: Path | None = None) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
         if bindir is not None:
@@ -223,9 +227,33 @@ class InstallerHostCheckTest(unittest.TestCase):
         return env
 
     def _stub_hostname(self, directory: Path, name: str) -> None:
+        # `hostname` prints NAME; `hostname -s` prints the short form (before the first dot).
         stub = directory / "hostname"
-        stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{name}'\n", encoding="utf-8")
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"FULL='{name}'\n"
+            "SHORT=${FULL%%.*}\n"
+            'if [ "$1" = "-s" ]; then printf "%s\n" "$SHORT"; else printf "%s\n" "$FULL"; fi\n',
+            encoding="utf-8",
+        )
         stub.chmod(0o755)
+
+    def _assert_hostname_stub(self, bindir: Path, env: dict[str, str], full: str) -> None:
+        short = full.split(".", 1)[0]
+        stub = str(bindir / "hostname")
+        got_full = subprocess.run(
+            [stub], check=True, env=env, capture_output=True, text=True, timeout=5
+        )
+        got_short = subprocess.run(
+            [stub, "-s"], check=True, env=env, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(got_full.stdout.strip(), full)
+        self.assertEqual(got_short.stdout.strip(), short)
+        # Also via PATH, the way the installers invoke it.
+        via_path = subprocess.run(
+            ["hostname"], check=True, env=env, capture_output=True, text=True, timeout=5
+        )
+        self.assertEqual(via_path.stdout.strip(), full)
 
     def _run(self, name: str, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -257,6 +285,7 @@ class InstallerHostCheckTest(unittest.TestCase):
             bindir = Path(td)
             self._stub_hostname(bindir, short)
             env = self._env(bindir)
+            self._assert_hostname_stub(bindir, env, short)
             for name in self.INSTALLERS:
                 r = self._run(name, env, "--expected-host", fqdn)
                 self.assertNotIn("refusing to install on host", r.stderr, name)
@@ -282,10 +311,12 @@ class InstallerHostCheckTest(unittest.TestCase):
     def test_installers_accept_short_expected_host_when_hostname_is_fqdn(self) -> None:
         short = "st-unittest-host"
         fqdn = "st-unittest-host.example.ts.net"
+        other = "other-host.example.ts.net"
         with tempfile.TemporaryDirectory() as td:
             bindir = Path(td)
             self._stub_hostname(bindir, fqdn)
             env = self._env(bindir)
+            self._assert_hostname_stub(bindir, env, fqdn)
             for name in self.INSTALLERS:
                 r = self._run(name, env, "--expected-host", short)
                 self.assertNotIn("refusing to install on host", r.stderr, name)
@@ -295,6 +326,12 @@ class InstallerHostCheckTest(unittest.TestCase):
                 r = self._run(name, env, "--expected-host", fqdn)
                 self.assertNotIn("refusing to install on host", r.stderr, name)
                 self.assertIn("must run as root", r.stderr, name)
+                self.assertEqual(r.returncode, 1, name)
+
+                r = self._run(name, env, "--expected-host", other)
+                self.assertEqual(r.returncode, 1, name)
+                self.assertIn("refusing to install on host", r.stderr, name)
+                self.assertIn(other, r.stderr, name)
 
 
 class UnitScheduleTest(unittest.TestCase):
