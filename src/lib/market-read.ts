@@ -183,12 +183,16 @@ export type ProfileRef = CongressRef;
 
 export type ProfileLookup = (symbol: string) => Promise<ProfileRef | null>;
 
-type ScreenerProfileCache = { expiresAt: number; byTicker: Map<string, ProfileRef> };
+type ScreenerProfileCache = { cachedAt: number; expiresAt: number; byTicker: Map<string, ProfileRef> };
 /** Last-good map plus the next live attempt. One object so the hold and the rows stay together. */
-type ScreenerProfileState = { cache: ScreenerProfileCache | null; retryAt: number };
+type ScreenerProfileState = {
+  cache: ScreenerProfileCache | null;
+  retryAt: number;
+  refresh: Promise<Map<string, ProfileRef>> | null;
+  generation: number;
+};
 
 declare global {
-  // eslint-disable-next-line no-var
   var __marketReadScreenerProfileState: ScreenerProfileState | undefined;
 }
 
@@ -198,10 +202,19 @@ declare global {
  */
 const screenerProfileState: ScreenerProfileState =
   globalThis.__marketReadScreenerProfileState ??
-  (globalThis.__marketReadScreenerProfileState = { cache: null, retryAt: 0 });
+  (globalThis.__marketReadScreenerProfileState = {
+    cache: null,
+    retryAt: 0,
+    refresh: null,
+    generation: 0
+  });
 const SCREENER_PROFILE_TTL_MS = 5 * 60_000;
 /** Hold between live retries while a prior map is served. Short so a blip does not stick. */
 const SCREENER_PROFILE_STALE_RETRY_MS = 30_000;
+/** Beyond this age, a failed refresh returns nothing instead of last-good rows. */
+const SCREENER_PROFILE_MAX_STALE_MS = 24 * 60 * 60_000;
+/** Prefer a fast live refresh, then serve last-good rows rather than waiting out Nasdaq timeouts. */
+const SCREENER_PROFILE_STALE_SERVE_BUDGET_MS = 1_000;
 
 function parseScreenerMarketCap(raw: unknown): number | undefined {
   const marketCapStr = String(raw ?? "").replace(/[$,%\s,]/g, "");
@@ -209,35 +222,44 @@ function parseScreenerMarketCap(raw: unknown): number | undefined {
   return Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined;
 }
 
+function screenerProfileCacheIsWithinMaxStale(
+  cache: ScreenerProfileCache | null | undefined,
+  now: number
+): cache is ScreenerProfileCache {
+  return Boolean(cache && cache.byTicker.size > 0 && now - cache.cachedAt <= SCREENER_PROFILE_MAX_STALE_MS);
+}
+
 /**
- * Timeout, non-OK, and throw keep the last successful map when it has rows.
- * An empty map is not written into the 5-minute TTL. With no prior rows the
- * next call retries immediately. With rows, the next live attempt waits
- * SCREENER_PROFILE_STALE_RETRY_MS from when the failure finishes. A two-attempt
- * Nasdaq timeout is about 30s, so measuring from fetch start would skip the hold.
+ * Timeout, non-OK, and throw keep the last successful map when it has rows
+ * and is no older than SCREENER_PROFILE_MAX_STALE_MS. An empty or over-age
+ * map is not written into the 5-minute TTL. With no usable prior rows the
+ * next call retries immediately after the hold. With usable rows, the next
+ * live attempt waits SCREENER_PROFILE_STALE_RETRY_MS from when the failure
+ * finishes. A two-attempt Nasdaq timeout is about 30s, so measuring from
+ * fetch start would skip the hold.
  */
 function screenerProfileFailureMap(): Map<string, ProfileRef> {
   const cache = screenerProfileState.cache;
+  const now = Date.now();
   if (cache && cache.byTicker.size > 0) {
-    screenerProfileState.retryAt = Date.now() + SCREENER_PROFILE_STALE_RETRY_MS;
-    return cache.byTicker;
+    screenerProfileState.retryAt = now + SCREENER_PROFILE_STALE_RETRY_MS;
+    if (screenerProfileCacheIsWithinMaxStale(cache, now)) {
+      return cache.byTicker;
+    }
   }
   return new Map();
 }
 
-async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, ProfileRef>> {
-  const cache = screenerProfileState.cache;
-  if (cache && cache.expiresAt > now) {
-    return cache.byTicker;
-  }
-  if (cache && cache.byTicker.size > 0 && now < screenerProfileState.retryAt) {
-    return cache.byTicker;
-  }
+async function refreshScreenerProfileMap(): Promise<Map<string, ProfileRef>> {
+  const generation = screenerProfileState.generation;
   try {
     const response = await fetchNasdaqScreenerResponse("congress-nasdaq-screener");
     // Only cache successful HTTP responses. Transient failures / non-OK must not
     // poison the 5m TTL with an empty map (valid symbols would 404 until expiry).
     if (!response.ok) {
+      if (screenerProfileState.generation !== generation) {
+        return screenerProfileState.cache?.byTicker ?? new Map();
+      }
       return screenerProfileFailureMap();
     }
     const payload = (await response.json()) as {
@@ -255,20 +277,75 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
       });
       if (ref) byTicker.set(ref.ticker, ref);
     }
+    if (screenerProfileState.generation !== generation) {
+      return screenerProfileState.cache?.byTicker ?? byTicker;
+    }
     // Successful empty screener (legitimately zero rows) is still cacheable.
+    const cachedAt = Date.now();
     screenerProfileState.retryAt = 0;
-    screenerProfileState.cache = { expiresAt: now + SCREENER_PROFILE_TTL_MS, byTicker };
+    screenerProfileState.cache = { cachedAt, expiresAt: cachedAt + SCREENER_PROFILE_TTL_MS, byTicker };
     return byTicker;
   } catch (err) {
     console.warn("[market-read] screener profile map failed:", err);
+    if (screenerProfileState.generation !== generation) {
+      return screenerProfileState.cache?.byTicker ?? new Map();
+    }
     return screenerProfileFailureMap();
   }
 }
 
+function startOrJoinScreenerProfileRefresh(): Promise<Map<string, ProfileRef>> {
+  if (screenerProfileState.refresh) return screenerProfileState.refresh;
+  const pending = refreshScreenerProfileMap().finally(() => {
+    if (screenerProfileState.refresh === pending) {
+      screenerProfileState.refresh = null;
+    }
+  });
+  screenerProfileState.refresh = pending;
+  return pending;
+}
+
+async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, ProfileRef>> {
+  const cache = screenerProfileState.cache;
+  if (cache && cache.expiresAt > now) {
+    return cache.byTicker;
+  }
+  if (now < screenerProfileState.retryAt) {
+    return screenerProfileCacheIsWithinMaxStale(cache, now) ? cache.byTicker : new Map();
+  }
+
+  const alreadyRefreshing = screenerProfileState.refresh !== null;
+  const refresh = startOrJoinScreenerProfileRefresh();
+
+  if (screenerProfileCacheIsWithinMaxStale(cache, now)) {
+    if (alreadyRefreshing) {
+      return cache.byTicker;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const budget = new Promise<"stale">((resolve) => {
+        timer = setTimeout(() => resolve("stale"), SCREENER_PROFILE_STALE_SERVE_BUDGET_MS);
+      });
+      const winner = await Promise.race([
+        refresh.then((map) => ({ kind: "live" as const, map })),
+        budget.then(() => ({ kind: "stale" as const }))
+      ]);
+      if (winner.kind === "live") return winner.map;
+      return cache.byTicker;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  return refresh;
+}
+
 /** Test seam: drop the screener profile cache. */
 export function clearScreenerProfileCacheForTests(): void {
+  screenerProfileState.generation += 1;
   screenerProfileState.cache = null;
   screenerProfileState.retryAt = 0;
+  screenerProfileState.refresh = null;
 }
 
 /**
