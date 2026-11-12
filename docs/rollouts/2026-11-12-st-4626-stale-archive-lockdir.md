@@ -27,9 +27,19 @@ actionlint .github/workflows/ios-ship.yml
 
 The contract test passed 6, and `ship-tf-ready-labels.test.mjs` passed 3.  `test/ios-ship-plan-build.test.ts` and `test/ios-manual-signing.test.ts` passed 17.  actionlint 1.7.7 reported no findings on `.github/workflows/ios-ship.yml`.  Full `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` stay with the `verify` job.  This diff does not touch the Next.js app.
 
+`origin/main` (`ba400936`, ST-4607) merged with no conflict markers.  `STATUS.md` and `PLAN.md` keep main's ST-4607 notes and the ST-4626 note.  The workflow and contract test are the only code delta versus that main.  Re-ran after the merge:
+
+```bash
+node --test scripts/ios-fleet/asc-api.timestamp.test.mjs scripts/ios-fleet/ship-tf-ready-labels.test.mjs
+npx vitest run test/ios-ship-plan-build.test.ts test/ios-manual-signing.test.ts test/rag-ingest-embed-timeout-classification.test.ts test/rag-sentry-cooldown-key.test.ts
+actionlint .github/workflows/ios-ship.yml
+```
+
+Those commands passed 9, 27, and actionlint with no findings.
+
 ## Next Steps & Blockers
 
-Open a ready PR against `main` that says `Fixes ST-4626`.  Do not dispatch `ios-ship` and do not deploy.  Merge waits on green `verify`.
+PR #5171 says `Fixes ST-4626`.  Do not dispatch `ios-ship` and do not deploy.  Do not merge the PR from this lane.  Merge waits on green `verify`.
 
 ## Zero-Code Findings
 
