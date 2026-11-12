@@ -22,7 +22,9 @@ load_nvm() {
   # nvm is a shell function; non-interactive bash never has `command -v nvm` true
   # until nvm.sh is sourced.  Upstream recommends --no-use to avoid default-alias
   # activation side effects under strict mode.
+  # shellcheck disable=SC1090  # nvm path is resolved at runtime from install location
   if ! . "${nvm_sh}" --no-use 2>/dev/null; then
+    # shellcheck disable=SC1090
     if ! . "${nvm_sh}" 2>/dev/null; then
       set -euo pipefail
       return 1
