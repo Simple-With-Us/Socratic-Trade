@@ -113,13 +113,18 @@ function adminRequest(path: string, init: RequestInit, auth: Auth): Request {
 
 const tokenAuth: Auth = { token: TOKEN };
 
-function saturate(auth: Auth, route: string, kind: AdminIngestLimitKind): void {
+function prime(auth: Auth, route: string, kind: AdminIngestLimitKind, count: number): void {
   const probe = adminRequest("/api/admin/reembed", { method: "POST" }, auth);
   const key = adminIngestBucketKey(probe, route, kind);
   const options = kind === "job" ? RATE_LIMITS.adminIngest : RATE_LIMITS.adminIngestRead;
-  for (let i = 0; i < options.limit; i += 1) {
+  for (let i = 0; i < count; i += 1) {
     expect(rateLimit(key, options).allowed).toBe(true);
   }
+}
+
+function saturate(auth: Auth, route: string, kind: AdminIngestLimitKind): void {
+  const options = kind === "job" ? RATE_LIMITS.adminIngest : RATE_LIMITS.adminIngestRead;
+  prime(auth, route, kind, options.limit);
 }
 
 async function expectLimited(response: Response, spy: { mock: { calls: unknown[] } }): Promise<void> {
@@ -262,6 +267,7 @@ describe("admin ingest jobs", () => {
   });
 
   it("keeps an empty 10-K symbol list at 400 and still allows the next real start", async () => {
+    prime(tokenAuth, "reindex-10k", "job", RATE_LIMITS.adminIngest.limit - 1);
     const empty = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
       method: "POST",
       body: JSON.stringify({ symbols: [] })
@@ -275,9 +281,17 @@ describe("admin ingest jobs", () => {
     }, tokenAuth));
     expect(started.status).not.toBe(429);
     expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
+
+    const exhausted = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
+      method: "POST",
+      body: JSON.stringify({ symbols: ["AAPL"] })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
+    expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
   });
 
   it("keeps an unknown web-source id at 400 and still allows a congress refresh", async () => {
+    prime(tokenAuth, "refresh-websource", "job", RATE_LIMITS.adminIngest.limit - 1);
     const unknown = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
       method: "POST",
       body: JSON.stringify({ id: "unknown" })
@@ -291,6 +305,13 @@ describe("admin ingest jobs", () => {
       body: JSON.stringify({ id: "congress" })
     }, tokenAuth));
     expect(started.status).not.toBe(429);
+    expect(mocks.refreshCongress).toHaveBeenCalledOnce();
+
+    const exhausted = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
+      method: "POST",
+      body: JSON.stringify({ id: "congress" })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
     expect(mocks.refreshCongress).toHaveBeenCalledOnce();
   });
 
@@ -327,13 +348,7 @@ describe("admin ingest jobs", () => {
   });
 
   it("sec-ingest POST invalid_payload does not spend the job budget", async () => {
-    const probe = adminRequest("/api/admin/reembed", { method: "POST" }, tokenAuth);
-    const key = adminIngestBucketKey(probe, "sec-ingest", "job");
-    const options = RATE_LIMITS.adminIngest;
-    for (let i = 0; i < options.limit - 1; i += 1) {
-      expect(rateLimit(key, options).allowed).toBe(true);
-    }
-
+    prime(tokenAuth, "sec-ingest", "job", RATE_LIMITS.adminIngest.limit - 1);
     const rejected = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
       method: "POST",
       body: JSON.stringify({ action: "seed", unexpected: true })
