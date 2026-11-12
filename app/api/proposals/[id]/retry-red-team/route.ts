@@ -10,8 +10,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const body = (await request.json().catch(() => ({}))) as { userId?: unknown };
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/retry-red-team", RATE_LIMITS.orders);
     if (limited) return limited;

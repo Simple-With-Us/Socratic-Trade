@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     watchlistDigestEnabled?: unknown;
     userId?: unknown;
   };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   return NextResponse.json({ prefs: setNotifyPrefs(userId, body) });
 }

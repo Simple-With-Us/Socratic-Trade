@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     note?: unknown;
     userId?: unknown;
   };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   if (typeof body.symbol !== "string" || typeof body.op !== "string" || body.price == null) {
     return NextResponse.json({ error: "symbol, op, and price are required" }, { status: 400 });
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const url = new URL(request.url);
   const body = (await request.json().catch(() => ({}))) as { id?: unknown; userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const id = typeof body.id === "string" ? body.id : url.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });

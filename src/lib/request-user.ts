@@ -129,16 +129,21 @@ export function authErrorResponse(error: unknown): Response | null {
   const identityDenied = identityErrorResponse(error);
   if (identityDenied) return identityDenied;
   if (!(error instanceof Error)) return null;
-  if (
-    /session revoked or expired/i.test(error.message) ||
-    /fresh provider sign-in is required/i.test(error.message)
-  ) {
-    return Response.json(
-      { error: error.message },
-      { status: 401, headers: { "content-type": "application/json" } }
-    );
-  }
-  return null;
+  // Session/account-generation failures carry an explicit client status (401 stale session,
+  // 409 stale account generation). Anything without one is a server fault and is rethrown.
+  const tagged = (error as { status?: unknown }).status;
+  const status =
+    tagged === 401 || tagged === 403 || tagged === 409
+      ? tagged
+      : /session revoked or expired/i.test(error.message) ||
+          /fresh provider sign-in is required/i.test(error.message)
+        ? 401
+        : null;
+  if (status === null) return null;
+  return Response.json(
+    { error: error.message },
+    { status, headers: { "content-type": "application/json" } }
+  );
 }
 
 export function resolveRequestUserOrResponse(request: Request): ResolvedRequestUser | Response {
@@ -151,9 +156,10 @@ export function resolveRequestUserOrResponse(request: Request): ResolvedRequestU
   }
 }
 
-export function resolveRequestUserIdOrResponse(request: Request, body?: unknown): string | Response {
+/** Identity comes only from middleware-established headers; request bodies are never consulted. */
+export function resolveRequestUserIdOrResponse(request: Request): string | Response {
   try {
-    return resolveRequestUserId(request, body);
+    return resolveRequestUserId(request);
   } catch (error) {
     const denied = authErrorResponse(error);
     if (denied) return denied;

@@ -6,8 +6,7 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const notifyResults = await notify(userId, {
     title: "Test notification",

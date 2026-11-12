@@ -16,7 +16,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 export async function PUT(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   const body = await request.json();
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   try {
     const profile = updateStrategyProfile(id, {

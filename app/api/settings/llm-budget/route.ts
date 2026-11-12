@@ -47,7 +47,7 @@ function payloadFor(userId: string) {
 
 /** GET — per-user daily LLM cap + today's spend. Not an Infisical secret. */
 export async function GET(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   return NextResponse.json(payloadFor(userId));
 }
@@ -62,7 +62,7 @@ export async function PATCH(request: NextRequest) {
       tokenBudget?: number | null;
       costBudgetUsd?: number | null;
     };
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const tokenBudget = parseOptionalBudget(body.tokenBudget, "tokenBudget");
     const costBudgetUsd = parseOptionalBudget(body.costBudgetUsd, "costBudgetUsd");

@@ -16,7 +16,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { key?: unknown; mute?: unknown; userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const key = typeof body.key === "string" && body.key.trim() ? body.key : undefined;
   if (!key) return NextResponse.json({ error: "key is required" }, { status: 400 });

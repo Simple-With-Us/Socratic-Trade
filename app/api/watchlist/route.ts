@@ -63,7 +63,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { symbol?: unknown; userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   if (typeof body.symbol !== "string" || body.symbol.trim().length === 0) {
     return NextResponse.json({ error: "symbol is required" }, { status: 400 });
@@ -79,7 +79,7 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const url = new URL(request.url);
   const body = (await request.json().catch(() => ({}))) as { symbol?: unknown; userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const symbol = typeof body.symbol === "string" ? body.symbol : url.searchParams.get("symbol");
   if (!symbol) return NextResponse.json({ error: "symbol is required" }, { status: 400 });

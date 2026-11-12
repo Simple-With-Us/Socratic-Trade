@@ -18,7 +18,7 @@ const CANARY_TIMEOUT_MS = 8_000;
  * Rate-limited: it performs a real outbound request.
  */
 export async function POST(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "settings-proxy-test", { limit: 10, windowMs: 60_000 });
   if (limited) return limited;

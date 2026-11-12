@@ -15,7 +15,7 @@ export async function POST(request: Request) {
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "New Strategy";
   const profile = createStrategyProfile({

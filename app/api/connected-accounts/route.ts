@@ -37,7 +37,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const userId = resolveRequestUserIdOrResponse(req, body);
+    const userId = resolveRequestUserIdOrResponse(req);
     if (userId instanceof Response) return userId;
     if (body.broker === "test") {
       return new NextResponse("Test broker accounts are test infrastructure and cannot be added.", { status: 400 });

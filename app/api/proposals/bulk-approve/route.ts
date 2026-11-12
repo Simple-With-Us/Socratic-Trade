@@ -63,7 +63,7 @@ export async function POST(request: Request) {
       liveConfirmation?: { typedText?: unknown };
       userId?: unknown;
     };
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const proposalIds = Array.isArray(body.proposalIds)
       ? Array.from(new Set(body.proposalIds.filter((id): id is string => typeof id === "string" && id.length > 0)))

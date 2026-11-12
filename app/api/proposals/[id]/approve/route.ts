@@ -15,7 +15,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       liveConfirmation?: LiveApprovalConfirmation;
       userId?: unknown;
     };
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/approve", RATE_LIMITS.orders);
     if (limited) return limited;

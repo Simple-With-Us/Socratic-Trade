@@ -23,7 +23,7 @@ export async function POST(request: Request) {
       liveConfirmation?: MarketReplaceConfirmation;
       userId?: unknown;
     };
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "orders/replace-market", RATE_LIMITS.orders);
     if (limited) return limited;

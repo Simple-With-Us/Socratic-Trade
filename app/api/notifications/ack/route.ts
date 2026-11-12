@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  *  app/api/notifications/route.ts). */
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { ids?: unknown; all?: unknown; filter?: unknown; connectedAccountId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
 
   if (body.all === true) {

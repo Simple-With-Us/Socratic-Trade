@@ -51,7 +51,7 @@ export async function PUT(request: Request) {
     return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
   }
   const body = rawBody as Record<string, unknown>;
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {

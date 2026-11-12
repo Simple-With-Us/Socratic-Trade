@@ -33,7 +33,7 @@ function payloadFor(userId: string) {
 
 /** GET — the caller's own proxy settings (masked) + what egress will actually use. */
 export async function GET(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   return NextResponse.json(payloadFor(userId));
 }
@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
  * Omit password to keep the stored one; pass "" / null to clear it.
  */
 export async function PUT(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   let body: unknown;
   try {
@@ -61,7 +61,7 @@ export async function PUT(request: NextRequest) {
 
 /** DELETE — remove the caller's proxy override; egress falls back to the operator default. */
 export async function DELETE(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   deleteUserProxySettings(userId);
   return NextResponse.json(payloadFor(userId));

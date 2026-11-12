@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
  * PATCH — { settings: { [id]: value | null } } null resets to env+default.
  */
 export async function GET(request: NextRequest) {
-  const userId = resolveRequestUserIdOrResponse(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const rows = listEffectiveSourceSettings(userId).map((row) => {
     return {
@@ -60,7 +60,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "settings object required (values: boolean, number, string or null)" }, { status: 400 });
     }
     const body = parsed.data;
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
 
     const sourcePatch: Record<string, boolean | number | string | null> = {};

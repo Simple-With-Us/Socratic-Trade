@@ -19,8 +19,7 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const body = (await request.json().catch(() => ({}))) as { userId?: unknown };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   return NextResponse.json({ cleared: clearTurns(userId) });
 }

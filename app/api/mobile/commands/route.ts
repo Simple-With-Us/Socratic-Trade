@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     idempotencyKey?: unknown;
     client?: unknown;
   };
-  const userId = resolveRequestUserIdOrResponse(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/commands", { limit: 60, windowMs: 60_000 });
   if (limited) return limited;
