@@ -2115,7 +2115,7 @@ Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
 Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
 realized P&L and balance/drawdown history for the owner's real live accounts (Roth IRA, Agentic,
 Sandbox/Tradier) into `docs/reviews/2026-09-25-trading-performance-report.md`, and this repo
-(`jaywedgeworth22/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
+(`Simple-With-Us/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
 `isPrivate: false`, and every dollar figure the finding cited is present verbatim in the merged
 doc.  Declined as a code/content defect — this exact unchanged copy was the lane's own explicit
 instruction, it matches existing published precedent (Roth IRA dollar caps already public in
@@ -2713,7 +2713,7 @@ the narrative round label and the cap count are off by one here, and the rollout
 that explicitly.  **5 of 10** against the cap.
 
 Also recorded: Codex cited commit `22efe659` as its fresh evidence for (a).  That SHA resolves
-nowhere (`gh api repos/jaywedgeworth22/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
+nowhere (`gh api repos/Simple-With-Us/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
 found for SHA") and is not one of the PR's six commits.  The finding was still correct on its
 merits, verified independently against the repo's squash settings and the PR's commit subjects,
 so it was fixed rather than disputed.  Documentation only — no source, dependency, or lockfile
@@ -3860,7 +3860,7 @@ COMPLETED (merged to `main`) #3103 squash `64a06e78`.  #3102 squash `df75ca6f` l
 
 ## 2026-08-25 CURSOR — AppUpdatePrompt Apple IDs off Swift (live DealDex net.dealdex)
 
-COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` and the local `ios-app-versions.json` mirror.  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
+COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` at that date and the local `ios-app-versions.json` mirror (manifest later moved to `Simple-With-Us/AI-Fleet-Coordinator` `site/ios-versions.json` on 2026-09-03 per `docs/rollouts/2026-09-03-ios-versions-home.md`).  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
 
 ## 2026-08-25 CURSOR — Playwright smoke: dismiss ConsentGate before More
 
@@ -7068,7 +7068,7 @@ tests, build clean. Rollout: `docs/rollouts/2026-08-02-data-provider-round2.md`.
    Also fixed forward: `allowScripts` git-dep keys in tag form (`#vX.Y.Z`) can never match
    (npm compares against the resolved 40-char SHA), which npm 12 escalates from a warning
    to a hard block on the dep's `prepare` — the key is now committish-free
-   (`"github:jaywedgeworth22/congress-trading-shared": true`, verified: coverage warning
+   (`"github:Simple-With-Us/congress-trading-shared": true`, verified: coverage warning
    gone). #2345's lockfile regen also fixed a real silent bug: the old lockfile pinned the
    v2.3.0 commit while package.json said v2.4.x, so `npm ci` was silently shipping the old
    shared package. Verified 2026-08-02: plain `npm ci` = exit 0, 575 packages, clean shell.
