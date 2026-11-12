@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import {
@@ -33,6 +34,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "earningscalls", "read");
+  if (limited) return limited;
 
   return NextResponse.json({
     ok: true,
@@ -70,6 +73,9 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+
+  const limited = enforceAdminIngestRateLimit(request, "earningscalls", "job");
+  if (limited) return limited;
 
   if (action === "clear-entitlement-block") {
     // No provider spend, no lease contention risk — a plain settings write.

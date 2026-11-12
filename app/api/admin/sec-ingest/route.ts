@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import { getSecIngestJobReceipt, reconcileSecIngestJob, requeueSecIngestDeadLetters, type SecIngestJobReceipt } from "@/lib/db-rag-ingest";
 import { seedSecIngestJobsFromManifest } from "@/lib/rag/sec-ingest-seeder";
 import { padCik } from "@/lib/web-sources/sec-filings";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -20,6 +21,8 @@ const JOB_TERMINAL_STATUSES = new Set(["complete", "complete_with_errors", "fail
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "read");
+  if (limited) return limited;
 
   const db = getDb();
   const jobRows = db.prepare("SELECT id FROM sec_ingest_jobs ORDER BY created_at ASC").all() as Array<{ id: string }>;
@@ -92,6 +95,13 @@ export async function POST(request: Request) {
     // no body / not JSON -> action stays undefined (will return error below)
   }
 
+  if (action !== "seed" && action !== "requeue-dead-letter") {
+    return NextResponse.json({ ok: false, error: 'Provide { action: "seed" | "requeue-dead-letter", offset?: number, limit?: number, ciks?: string[] } in the request body.' }, { status: 400 });
+  }
+
+  const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "job");
+  if (limited) return limited;
+
   if (action === "requeue-dead-letter") {
     // Recovery after an infra-level failure (EDGAR access block, since-fixed bug) buried healthy
     // tasks: fresh stage-attempt budget, reopens complete_with_errors jobs. Idempotent.
@@ -101,10 +111,6 @@ export async function POST(request: Request) {
     } catch (err) {
       return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
     }
-  }
-
-  if (action !== "seed") {
-    return NextResponse.json({ ok: false, error: 'Provide { action: "seed" | "requeue-dead-letter", offset?: number, limit?: number, ciks?: string[] } in the request body.' }, { status: 400 });
   }
 
   return withAdminOperationGuard(request, "sec-ingest-seed", async (claim) => {

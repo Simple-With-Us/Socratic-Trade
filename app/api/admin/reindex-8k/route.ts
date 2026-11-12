@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getEightKDataset, reindexEightKDataset } from "@/lib/web-sources/sec8k";
 import { getVectorStoreStats } from "@/lib/vector-db";
 import { resolveRequestUserId } from "@/lib/request-user";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy } from "@/lib/operation-lease";
@@ -16,6 +17,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "read");
+  if (limited) return limited;
   const dataset = getEightKDataset();
   const stats = await getVectorStoreStats(resolveRequestUserId(request));
   return NextResponse.json({
@@ -29,6 +32,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "job");
+  if (limited) return limited;
   const userId = resolveRequestUserId(request);
   let limit = Number.POSITIVE_INFINITY;
   try {

@@ -164,6 +164,11 @@ same underlying share, filing-ingest, or web-refresh functions; moving the lock 
 boundaries is tracked separately. These budgets are anti-repeat controls, not hard cost ceilings for one
 accepted backfill; operator-selected batch/limit inputs remain unchanged.
 
+### Admin ingest burst cap (ST-4632)
+
+`enforceAdminIngestRateLimit` runs after `requireAdmin` on the routes that can start a corpus reembed, a 10-K or 8-K reindex, an SEC seed or dead-letter requeue, a forced web-source refresh, or an earnings-call probe.  Job starts are 6 per 10 minutes per admin per route.  Status reads, including `GET /api/admin/transcript`, are 30 per minute.  A call over the limit returns 429 with `Retry-After` and does not start the provider job.  Who may call the route is unchanged.  Validation rejects (an empty 10-K symbol list, an unknown web-source id) still return 400 and do not spend this budget.  The older hourly `withAdminOperationGuard` budgets remain on the routes that already had them.
+
+
 - **Infisical is the canonical store for production secrets** (see `docs/secrets.md`
   and `docs/deployment.md` → "Configuration & secrets"); deliver them with the
   `*:secrets` runner and enforce it with `REQUIRE_SECRETS_MANAGER=1` so the app

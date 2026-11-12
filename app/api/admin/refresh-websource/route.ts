@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { refreshCongress, getCongressDataset } from "@/lib/web-sources/congress";
 import { refreshEightK, getEightKDataset } from "@/lib/web-sources/sec8k";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy, OPERATION_LEASE_GROUPS } from "@/lib/operation-lease";
@@ -25,6 +26,9 @@ export async function POST(request: Request) {
   if (id !== "congress" && id !== "sec8k") {
     return NextResponse.json({ ok: false, error: `Unknown web-source id: ${id} (supported: congress, sec8k)` }, { status: 400 });
   }
+
+  const limited = enforceAdminIngestRateLimit(request, "refresh-websource", "job");
+  if (limited) return limited;
 
   const durableGroup = id === "congress"
     ? OPERATION_LEASE_GROUPS.CONGRESS_WEB_SOURCE

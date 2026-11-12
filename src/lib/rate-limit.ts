@@ -171,7 +171,16 @@ export const RATE_LIMITS = {
   /** Failed bearer on securities import — cap audit rows from internet credential stuffing. */
   securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
   /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
-  congressWebhookUnauth: { limit: 60, windowMs: 60_000 }
+  congressWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  /**
+   * Admin ingest/backfill starts (corpus reembed, SEC reindex/seed/requeue, forced web-source
+   * refresh, earnings-call probe/burst). Per admin, per route. Tighter than interactive chat/scan.
+   * Routes that already have an hourly operation budget keep that budget; this stops the burst
+   * before the job starts, including paths the operation guard does not wrap.
+   */
+  adminIngest: { limit: 6, windowMs: 10 * 60_000 },
+  /** Status reads on those same admin routes (vector stats, ingest receipts, chat transcript). */
+  adminIngestRead: { limit: 30, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**
