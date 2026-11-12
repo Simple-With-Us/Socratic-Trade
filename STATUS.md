@@ -1,3 +1,9 @@
+## 2026-11-12 [gb-trader] ST-4623 — host systemd timer Sentry Crons dead-man
+
+**What.**  `scripts/ops/sentry-cron-checkin.py` wraps ST host oneshots (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) with Sentry Crons in_progress/ok/error, shared `/etc/default/st-host-cron-sentry`, and installer updates.  Rollout: `docs/rollouts/2026-11-12-st-4623-host-timer-deadman.md`.
+
+**Next.**  PR on `gb-trader/ST-4623-host-timer-deadman`; green `verify`; Jay re-installs on fleet-hetzner-nbg1 with DSN in place.  Do not merge or deploy from agent.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.

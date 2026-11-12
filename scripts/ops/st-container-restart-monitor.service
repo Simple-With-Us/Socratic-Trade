@@ -7,6 +7,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Nice=10
+EnvironmentFile=-/etc/default/st-host-cron-sentry
 EnvironmentFile=-/etc/default/st-container-restart-monitor
-ExecStart=/usr/local/sbin/st-container-restart-monitor.sh
+ExecStart=/usr/local/sbin/sentry-cron-checkin.py wrap --monitor-slug st-host-st-container-restart-monitor --schedule "2,17,32,47 * * * *" --checkin-margin 20 --max-runtime 15 --treat-exit-2-as-ok -- /usr/local/sbin/st-container-restart-monitor.sh
 SyslogIdentifier=st-restart-monitor
