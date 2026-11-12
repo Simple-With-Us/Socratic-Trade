@@ -3,6 +3,11 @@
 **What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once, so a persistent timeout cannot hold refresh for about 136s.  POST, PUT, PATCH, and DELETE stay single-shot.  The existing GET retry for HTTP 5xx is unchanged, and Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
 **Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
+
+**What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
+
+**Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
 ## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
 
 **What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
