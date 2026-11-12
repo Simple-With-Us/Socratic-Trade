@@ -65,6 +65,11 @@ import {
   resolveCspDecision,
   stampCspRequestHeaders
 } from "./src/lib/csp-policy";
+import {
+  middlewareOriginDecision,
+  ORIGIN_LOCK_HEADER,
+  ORIGIN_PEER_STAMP_HEADER
+} from "./src/lib/cloudflare-origin-lock";
 
 const PRIMARY_EMAIL = (process.env.PRIMARY_USER_EMAIL || "mail@jays.services").trim().toLowerCase();
 // The primary operator's aliases — additional addresses that map to the same primary account. Kept in sync
@@ -336,7 +341,32 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   const cspNonce = generateCspNonce();
   const secure = (res: NextResponse): NextResponse => withSecurityHeaders(res, cspNonce, pathname);
 
-  // Alt domain -> canonical domain. This runs FIRST so socratic.trade/ lands on
+  // ST-4595. Off unless REQUIRE_CLOUDFLARE_ORIGIN is set. The Node hook in
+  // instrumentation.ts stamps the TCP peer; this repeats that decision when the
+  // stamp is visible here. A caller-supplied stamp does not count.
+  if (
+    middlewareOriginDecision({
+      method: req.method,
+      pathname,
+      stamp: req.headers.get(ORIGIN_PEER_STAMP_HEADER),
+      forwardedFor: req.headers.get("x-forwarded-for"),
+      xRealIp: req.headers.get("x-real-ip"),
+      originLockHeader: req.headers.get(ORIGIN_LOCK_HEADER)
+    }) === "deny"
+  ) {
+    return secure(
+      new NextResponse("Forbidden", {
+        status: 403,
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store"
+        }
+      })
+    );
+  }
+
+  // Alt domain -> canonical domain. This runs before the other host routing so
+  // socratic.trade/ lands on
   // https://socratictrade.com/welcome in a single hop instead of bouncing off
   // the marketing redirect while still on the alt host. Anonymous traffic is
   // forwarded; a signed-in operator stays on the alt host (see below).
