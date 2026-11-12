@@ -11,9 +11,17 @@ cannot heal a stale scheduler, a silent trading loop, or a wedged Litestream
 tier.
 
 A warm process answers this URL from a memory snapshot (default 2 seconds,
-`HEALTH_SNAPSHOT_TTL_MS`) and refreshes SQLite, Litestream, and OpenRouter
-credits after the response.  Critical hard-stops still update `ok` on that
-refresh, so a 503 can lag by about one refresh.  `/api/live` does not open
+`HEALTH_SNAPSHOT_TTL_MS`) and refreshes lightweight checks (SQLite reachability,
+scheduler age, connection-health summaries) after the response.  OpenRouter
+credits, disk `statfs`, and Litestream IPC/log subsections are memoized
+separately for 20 seconds (`HEALTH_HEAVY_SECTION_TTL_MS`, single-flight per
+process).  A fresh snapshot can still carry heavy fields up to one heavy-section
+window old; served-from-cache subsections expose their age in
+`openrouterCredits.cachedAgeSeconds`, `storage.diskCachedAgeSeconds`, and
+`storage.litestreamCachedAgeSeconds`.  Critical hard-stops still update `ok` on
+the snapshot refresh, but `openrouterCredits.ok` and
+`storage.litestreamTiersDegraded` can lag by about one heavy-section window
+rather than one 2s snapshot tick.  `/api/live` does not open
 `app.db`.  Docker and the entrypoint watchdog stay on `/api/live`.  A single
 main-thread native call longer than the probe timeout can still delay the
 handler from starting; the snapshot stops the probe from adding its own wait.
