@@ -12,6 +12,8 @@ import {
   STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE,
   isStrategyRagRetrievalTimeout
 } from "../src/lib/rag-retrieval-deadline";
+import { resetRetrievalPressureForTests } from "../src/lib/rag/retrieval-pressure";
+import { resetQdrantMetricCheckedForTests } from "../src/lib/vector-store/qdrant-read";
 import { pinRagQualityFlagsOff } from "./rag-test-env";
 
 const mocks = vi.hoisted(() => {
@@ -92,8 +94,26 @@ function messages(): string[] {
   return mocks.captureMessage.mock.calls.map((call) => String(call[0]));
 }
 
+function capturedAt(level: "warning" | "error", message: string): boolean {
+  return messages().some((text, index) => text === message && mocks.levels[index] === level);
+}
+
+function abortError(message = "The operation was aborted"): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+async function seedLocalRagKeys(): Promise<void> {
+  const { upsertUserApiKey } = await import("../src/lib/db");
+  upsertUserApiKey("local", "openrouter", "sk-or-test-not-mock", "test fixture");
+  upsertUserApiKey("local", "pinecone", "pinecone-test", "test fixture");
+}
+
 beforeEach(() => {
   pinRagQualityFlagsOff();
+  resetRetrievalPressureForTests();
+  resetQdrantMetricCheckedForTests();
   vi.resetModules();
   vi.clearAllMocks();
   mocks.tags.length = 0;
@@ -147,15 +167,16 @@ describe("strategy RAG deadline classification (ST-4601)", () => {
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     const chunks = await retrieveContextDetailed("AAPL catalysts", "AAPL", 2, "local");
     expect(chunks).toEqual([]);
-    await vi.waitFor(() => {
-      expect(messages().some((message) => message === "RAG retrieval timed out")).toBe(true);
-    });
-    expect(messages().some((message) => /connection failed/i.test(message))).toBe(false);
+    // The embed alert is not awaited. Give it time to capture before asserting it stayed quiet.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(mocks.embed).toHaveBeenCalled();
+    expect(capturedAt("error", "RAG retrieval failed")).toBe(false);
     expect(messages().some((message) => message === "RAG retrieval failed")).toBe(false);
-    expect(mocks.levels.every((level) => level === "warning")).toBe(true);
+    expect(messages().some((message) => message === "RAG retrieval timed out")).toBe(false);
+    expect(messages().some((message) => /connection failed/i.test(message))).toBe(false);
+    expect(mocks.levels).not.toContain("error");
     expect(mocks.tags.some((tag) => tag["health.failure_class"] === "hard")).toBe(false);
-    expect(mocks.tags.some((tag) => tag["health.failure_class"] === "timeout")).toBe(true);
-    expect(mocks.fingerprints).toContainEqual(["rag", "retrieval-timeout"]);
+    expect(mocks.fingerprints).not.toContainEqual(["rag", "retrieval-timeout"]);
     expect(send.mock.calls.some((call) => JSON.stringify(call).includes("connection failed"))).toBe(false);
 
     const { getDb } = await import("../src/lib/db");
@@ -226,5 +247,60 @@ describe("strategy RAG deadline classification (ST-4601)", () => {
     expect(mocks.tags.some((tag) => tag["health.failure_class"] === "timeout")).toBe(false);
     expect(messages().some((message) => message === "RAG retrieval timed out")).toBe(false);
     expect(mocks.levels).toContain("error");
+  });
+
+  it("does not page an abort that escapes the retrieval slot as RAG retrieval failed", async () => {
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    const caller = new AbortController();
+    mocks.query.mockImplementation(() => {
+      caller.abort(abortError());
+      return new Promise(() => undefined);
+    });
+    await seedLocalRagKeys();
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const chunks = await retrieveContextDetailed("AAPL catalysts", "AAPL", 2, "local", { signal: caller.signal });
+    expect(chunks).toEqual([]);
+    expect(mocks.embed).toHaveBeenCalled();
+    expect(capturedAt("error", "RAG retrieval failed")).toBe(false);
+    expect(messages().some((message) => message === "RAG retrieval failed")).toBe(false);
+  });
+
+  it("does not page a deadline that escapes the retrieval slot as RAG retrieval failed", async () => {
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    const caller = new AbortController();
+    mocks.query.mockImplementation(() => {
+      caller.abort(deadlineError());
+      return new Promise(() => undefined);
+    });
+    await seedLocalRagKeys();
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const chunks = await retrieveContextDetailed("AAPL catalysts", "AAPL", 2, "local", { signal: caller.signal });
+    expect(chunks).toEqual([]);
+    expect(capturedAt("error", "RAG retrieval failed")).toBe(false);
+    expect(messages().some((message) => message === "RAG retrieval timed out")).toBe(false);
+  });
+
+  it("still pages a real non-timeout lookup failure as RAG retrieval failed", async () => {
+    process.env.QDRANT_URL = "http://127.0.0.1:6333";
+    process.env.QDRANT_API_KEY = "qdrant-test";
+    process.env.RAG_VECTOR_READ_BACKEND = "qdrant";
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("/points/search")) throw new Error("lookup blew up");
+      if (href.includes("/collections/")) {
+        return new Response(JSON.stringify({
+          result: { status: "green", config: { params: { vectors: { size: 1024, distance: "Cosine" } } } }
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    await seedLocalRagKeys();
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const chunks = await retrieveContextDetailed("AAPL catalysts", "AAPL", 2, "local");
+    expect(chunks).toEqual([]);
+    await vi.waitFor(() => {
+      expect(capturedAt("error", "RAG retrieval failed")).toBe(true);
+    });
   });
 });

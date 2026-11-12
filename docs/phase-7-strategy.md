@@ -2,9 +2,13 @@
 
 This document defines the comprehensive architecture for the AI Trading Strategy, including how the LLM evaluates the market, scores individual equities, and continuously learns from its own outcomes.
 
+## 2026-11-12 Retrieval timeouts do not page (ST-4629)
+
+The 15s strategy retrieval deadline stays.  A deadline, abort, or timeout on the retrieve path logs locally and returns no chunks.  It does not call captureMessage, because a warning capture was filed as error issue SOCRATIC-TRADE-3Q.  acquireRetrievalSlot still runs before the embed and the vector read.  A timeout that escapes the slot is classified in the retrieve catch and does not capture error-level "RAG retrieval failed".  A real lookup failure still can.  Ingest-embed classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+
 ## 2026-11-11 Strategy RAG deadline is a timeout (ST-4601)
 
-The 15s strategy retrieval deadline stays.  A deadline abort is a caller timeout, not an OpenRouter or Qdrant connection failure.  Health rows use a caller-timeout mark and stay out of the hard STOPPED streak.  Sentry for that abort is a warning with its own fingerprint, so it does not join SOCRATIC-TRADE-1X or SOCRATIC-TRADE-2G.  The embed retry loop stops when the caller signal is already aborted.  After one deadline in a strategy run, later symbols skip retrieval and the run logs how many were skipped.  The timed-out symbol still continues with no chunks.  Do not raise `RAG_QUERY_IO_DEADLINE_MS`.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+The 15s strategy retrieval deadline stays.  A deadline abort is a caller timeout, not an OpenRouter or Qdrant connection failure.  Health rows use a caller-timeout mark and stay out of the hard STOPPED streak.  ST-4629 stopped sending that abort to Sentry.  A warning captureMessage was still filed as error issue SOCRATIC-TRADE-3Q.  The embed retry loop stops when the caller signal is already aborted.  After one deadline in a strategy run, later symbols skip retrieval and the run logs how many were skipped.  The timed-out symbol still continues with no chunks.  Do not raise `RAG_QUERY_IO_DEADLINE_MS`.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
 
 
 ## 2026-10-15 Restart sweep stays off other instances' live runs (ST-8)

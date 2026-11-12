@@ -84,6 +84,7 @@ import {
   countsTowardRetrievalBackoff,
   noteRetrievalPressureFailure,
   noteRetrievalPressureSuccess,
+  retrievalBackoffRemainingMs,
   retrievalPressureEpoch
 } from "./rag/retrieval-pressure";
 import { pineconeMonthToDateWriteUnits } from "./pinecone-monthly-pace";
@@ -1722,22 +1723,29 @@ const RAG_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   siliconflow: "SiliconFlow"
 };
 
-const RAG_RETRIEVAL_TIMEOUT_FINGERPRINT = ["rag", "retrieval-timeout"];
-
-/** Caller-side 15s deadline. Warning only, and not the provider-outage fingerprint. */
+/**
+ * Caller-side retrieval deadline or abort. Local warning only.
+ *
+ * `captureMessage` attaches a synthetic stack, so Sentry files the event as an
+ * error issue titled "Error: RAG retrieval timed out" (SOCRATIC-TRADE-3Q) even
+ * when the scope level is warning, and that issue escalates. The pressure gate
+ * already backs off, and callers fail open to empty chunks. Mark the error
+ * captured so a later catch cannot page it as "RAG retrieval failed".
+ * Ingest-embed classification is unchanged: this runs only for a retrieval
+ * deadline or abort, not for document-embed HTTP classification.
+ */
 async function reportStrategyRagRetrievalTimeout(
   error: unknown,
   context: Record<string, string | number | boolean | null | undefined>,
   leaseGuard?: VectorStoreLeaseGuard
 ): Promise<void> {
+  assertVectorStoreLease(leaseGuard);
   markRagSentryCaptured(error);
-  await captureRagSentryMessage(
-    "warning",
-    "RAG retrieval timed out",
-    { ...context, failureClass: "timeout" },
-    leaseGuard,
-    { fingerprint: RAG_RETRIEVAL_TIMEOUT_FINGERPRINT }
-  );
+  logWarn("rag.retrieval_timeout", {
+    provider: context.provider != null ? String(context.provider) : undefined,
+    operation: context.operation != null ? String(context.operation) : undefined,
+    lane: context.lane != null ? String(context.lane) : undefined
+  });
 }
 
 async function alertRagConnectionFailure(
@@ -9255,10 +9263,15 @@ export async function retrieveContextDetailed(
       reportRetrievalStatus(options, "degraded");
       return finish([]);
     }
-    if (isStrategyRagRetrievalTimeout(err)) {
+    // Deadline text, AbortError, and TimeoutError. A query abort can surface as
+    // AbortError after acquireRetrievalSlot has already been taken, and that used
+    // to fall through to the error capture below. The pressure gate's null slot
+    // already skipped the provider; if a timeout still reaches here during backoff,
+    // do not open another Sentry issue.
+    if (isStrategyRagRetrievalTimeout(err) || countsTowardRetrievalBackoff(err)) {
       console.warn("[vector-db] RAG retrieval timed out:", err instanceof Error ? err.message : String(err));
-      if (!wasRagSentryCaptured(err)) {
-        // Same caller-side deadline the embed lane used to file as a hard connection failure.
+      const pressureAlreadyDegraded = quietEmbedDegrade || retrievalBackoffRemainingMs() > 0;
+      if (!pressureAlreadyDegraded && !wasRagSentryCaptured(err)) {
         await reportStrategyRagRetrievalTimeout(err, {
           provider: readBackend,
           operation: "retrieveContext",
@@ -9266,6 +9279,8 @@ export async function retrieveContextDetailed(
           symbol,
           reason: err instanceof Error ? err.message : String(err)
         });
+      } else if (!wasRagSentryCaptured(err)) {
+        markRagSentryCaptured(err);
       }
     } else {
       console.error("[vector-db] Error retrieving context:", err);
