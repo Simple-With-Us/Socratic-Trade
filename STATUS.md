@@ -3,6 +3,11 @@
 **What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows no older than 24 hours (`SCREENER_PROFILE_MAX_STALE_MS`) and waits 30 seconds from when the failure returns before the next live attempt.  A refresh that is still running races a 1-second budget and returns the last-good map so the first request does not wait out two 15-second Nasdaq timeouts.  The map, the hold, and the in-flight refresh are one `globalThis` object so route bundles share them.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
 
 **Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
+## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
+
+**What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
+
+**Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
 ## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
 
 **What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
