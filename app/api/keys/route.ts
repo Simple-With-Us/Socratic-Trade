@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { jsonError, parseRequestJson } from "@/lib/api-error";
+import { parseRequestJson } from "@/lib/api-error";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";

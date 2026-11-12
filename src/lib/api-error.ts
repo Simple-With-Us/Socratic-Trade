@@ -27,29 +27,49 @@ function httpStatusFromError(error: unknown): number | undefined {
 }
 
 function extractHttpStatusFromMessage(message: string): number | undefined {
-  const match = message.match(/HTTP\s+(\d{3})\b/i);
+  const match =
+    message.match(/HTTP\s+(\d{3})\b/i) ??
+    // Public.com adapters throw "Public cancel 500" / "Public accounts 401" (no "HTTP" prefix).
+    message.match(/\bPublic(?:\.com)?(?:\s+\w+){1,3}\s+(\d{3})\b/) ??
+    message.match(/\bfailed\s+\((\d{3})\)/i);
   if (!match) return undefined;
   const code = Number(match[1]);
   return Number.isFinite(code) ? code : undefined;
 }
+
+function isBrokerDeadlineMessage(message: string): boolean {
+  return /timed out waiting for/i.test(message);
+}
+
+/**
+ * Adapter-originated broker failures that do not carry a numeric status or "HTTP NNN" text.
+ * Kept narrow so a post-cancel database or notification fault is not classified as a broker outage.
+ */
+const BROKER_ADAPTER_MESSAGE =
+  /robinhood not connected|robinhood session expired|robinhood mcp (?:tool reported an error|sse response)|alpaca mcp\b|no public\.com account connected|public\.com secret is missing|public token mint|no tradier account connected/i;
 
 /**
  * Maps an uncaught broker-gateway read failure to a JSON envelope clients can parse.
  * Never forwards raw upstream bodies or credential material (uses status codes only).
  */
 export function brokerReadError(error: unknown): NextResponse<ApiErrorBody> {
-  if (isAbortOrTimeoutError(error)) {
+  const message = safeErrorMessage(error);
+  if (isAbortOrTimeoutError(error) || isBrokerDeadlineMessage(message)) {
     return jsonError(504, "broker_timeout", "The broker did not respond in time.");
   }
 
-  const message = safeErrorMessage(error);
   const httpStatus = httpStatusFromError(error) ?? extractHttpStatusFromMessage(message);
 
-  if (httpStatus === 401 || httpStatus === 403) {
+  if (httpStatus === 401 || httpStatus === 403 || /robinhood session expired/i.test(message)) {
     return jsonError(502, "broker_auth_failed", "Broker credentials were rejected.");
   }
 
-  if (/no connected broker account/i.test(message)) {
+  if (
+    /no connected broker account/i.test(message) ||
+    /robinhood not connected/i.test(message) ||
+    /no public\.com account connected/i.test(message) ||
+    /no tradier account connected/i.test(message)
+  ) {
     return jsonError(502, "broker_unavailable", "No connected broker account.");
   }
 
@@ -73,7 +93,15 @@ export function isBrokerGatewayError(error: unknown): boolean {
   if (isAbortOrTimeoutError(error) || isTransientNetworkError(error)) return true;
   const message = safeErrorMessage(error);
   if ((httpStatusFromError(error) ?? extractHttpStatusFromMessage(message)) !== undefined) return true;
-  return /no connected broker account/i.test(message);
+  if (isBrokerDeadlineMessage(message)) return true;
+  if (/no connected broker account/i.test(message)) return true;
+  return BROKER_ADAPTER_MESSAGE.test(message);
+}
+
+/** Map broker-originated failures to the JSON envelope; rethrow adapter/server defects as 500. */
+export function brokerReadOrRethrow(error: unknown): NextResponse<ApiErrorBody> {
+  if (isBrokerGatewayError(error)) return brokerReadError(error);
+  throw error;
 }
 
 export async function parseRequestJson(
@@ -86,6 +114,6 @@ export async function parseRequestJson(
     if (error instanceof SyntaxError) {
       return { ok: false, response: jsonError(400, "invalid_json", "Request body must be valid JSON.") };
     }
-    return { ok: false, response: jsonError(400, "invalid_json", "Request body must be valid JSON.") };
+    throw error;
   }
 }

@@ -1,4 +1,4 @@
-import { brokerReadError } from "@/lib/api-error";
+import { brokerReadOrRethrow } from "@/lib/api-error";
 import { getBrokerGateway } from "@/lib/broker";
 import { getPolicy } from "@/lib/db";
 import { resolveRequestUserId } from "@/lib/request-user";
@@ -14,6 +14,6 @@ export async function GET(request: Request) {
   try {
     return NextResponse.json(await getBrokerGateway(policy, userId).getPortfolio(accountNumber));
   } catch (error) {
-    return brokerReadError(error);
+    return brokerReadOrRethrow(error);
   }
 }

@@ -4,8 +4,8 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { brokerReadError, isBrokerGatewayError, jsonError } from "../src/lib/api-error";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { brokerReadError, isBrokerGatewayError, jsonError, parseRequestJson } from "../src/lib/api-error";
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
 
 const brokerStub = vi.hoisted(() => ({
@@ -25,7 +25,11 @@ beforeEach(() => {
   brokerStub.getEquityPositions.mockReset();
   brokerStub.getEquityOrders.mockReset();
   brokerStub.getPortfolio.mockReset();
-  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-broker-route-err-${randomUUID()}.db`)}`;
+  vi.stubEnv("DATABASE_URL", `file:${join(tmpdir(), `agentic-broker-route-err-${randomUUID()}.db`)}`);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 async function seedRobinhoodAccount(email: string, accountNumber = "RH-ERR-TEST") {
@@ -73,6 +77,24 @@ describe("src/lib/api-error", () => {
     const body = await res.json();
     expect(body.error).toBe("broker_timeout");
   });
+
+  it("brokerReadError maps Public.com bare status throws to HTTP 502", async () => {
+    const res = brokerReadError(new Error("Public cancel 500"));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, error: "broker_unavailable", message: "Broker returned HTTP 500." });
+  });
+
+  it("brokerReadError maps Robinhood session expiry to broker_auth_failed", async () => {
+    const res = brokerReadError(new Error("Robinhood session expired — reconnect your account in Connections"));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, error: "broker_auth_failed" });
+  });
+
+  it("parseRequestJson rethrows non-syntax body errors", async () => {
+    const request = { json: async () => { throw new TypeError("Body is unusable"); } } as unknown as Request;
+    await expect(parseRequestJson(request)).rejects.toThrow(TypeError);
+  });
 });
 
 describe("broker-backed GET routes", () => {
@@ -99,6 +121,16 @@ describe("broker-backed GET routes", () => {
     expect(await res.json()).toEqual(positions);
   });
 
+  it("GET /api/positions rethrows non-broker adapter defects", async () => {
+    await seedRobinhoodAccount(email);
+    brokerStub.getEquityPositions.mockRejectedValue(new TypeError("Cannot read properties of null"));
+    const { GET } = await import("../app/api/positions/route");
+    await expect(
+      GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }))
+    ).rejects.toThrow(TypeError);
+    expect(brokerStub.getEquityPositions).toHaveBeenCalledOnce();
+  });
+
   it("GET /api/orders returns 504 on broker timeout", async () => {
     await seedRobinhoodAccount(email);
     const err = new Error("aborted");
@@ -111,6 +143,28 @@ describe("broker-backed GET routes", () => {
     expect(body.error).toBe("broker_timeout");
   });
 
+  it("GET /api/orders success shape unchanged", async () => {
+    await seedRobinhoodAccount(email);
+    const orders = [
+      { id: "ord-1", symbol: "AAPL", side: "buy", type: "market", state: "filled", createdAt: "2026-11-11T00:00:00.000Z" }
+    ];
+    brokerStub.getEquityOrders.mockResolvedValue(orders);
+    const { GET } = await import("../app/api/orders/route");
+    const res = await GET(new Request("http://localhost/api/orders", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(orders);
+  });
+
+  it("GET /api/orders returns 502 when the broker payload is not an order list", async () => {
+    await seedRobinhoodAccount(email);
+    brokerStub.getEquityOrders.mockResolvedValue({ unexpected: true });
+    const { GET } = await import("../app/api/orders/route");
+    const res = await GET(new Request("http://localhost/api/orders", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, error: "broker_unavailable" });
+    expect(brokerStub.getEquityOrders).toHaveBeenCalledOnce();
+  });
+
   it("GET /api/portfolio returns 502 JSON when the broker throws", async () => {
     await seedRobinhoodAccount(email);
     brokerStub.getPortfolio.mockRejectedValue(new Error("HTTP 502"));
@@ -118,6 +172,7 @@ describe("broker-backed GET routes", () => {
     const res = await GET(new Request("http://localhost/api/portfolio", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
     expect(res.status).toBe(502);
     expect(await res.json()).toMatchObject({ ok: false, error: "broker_unavailable" });
+    expect(brokerStub.getPortfolio).toHaveBeenCalledOnce();
   });
 
   it("GET /api/accounts returns 502 on broker auth failure", async () => {
@@ -180,8 +235,19 @@ describe("isBrokerGatewayError (ST-2797 cancel bookkeeping)", () => {
     expect(isBrokerGatewayError(new TypeError("fetch failed"))).toBe(true);
   });
 
+  it("recognises Public.com and Robinhood adapter error shapes without an HTTP prefix", () => {
+    expect(isBrokerGatewayError(new Error("Public cancel 500"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Public portfolio 401"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Public token mint failed (401)"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Robinhood not connected — reconnect your account in Connections"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Robinhood session expired — reconnect your account in Connections"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Robinhood MCP tool reported an error: rate limited"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Timed out waiting for alpaca.getOrders after 2000+2000ms."))).toBe(true);
+  });
+
   it("leaves local bookkeeping faults (DB, notifications) as non-broker errors", () => {
     expect(isBrokerGatewayError(new Error("SQLITE_BUSY: database is locked"))).toBe(false);
     expect(isBrokerGatewayError(new Error("notification dispatch failed"))).toBe(false);
+    expect(isBrokerGatewayError(new TypeError("Cannot read properties of null"))).toBe(false);
   });
 });
