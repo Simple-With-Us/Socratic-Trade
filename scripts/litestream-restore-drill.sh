@@ -16,7 +16,7 @@
 # therefore unrunnable as written, which is part of why the continuous tier has exactly one
 # recorded restore proof (2026-08-18) and none since.
 #
-# WHERE TO RUN IT: on the HOST (fleet-hetzner-nbg1), NOT inside the app container.  Verified
+# WHERE TO RUN IT: on the production restore-drill HOST, NOT inside the app container.  Verified
 # 2026-09-09: the host has `litestream` 0.5.16 at /usr/local/bin and `sqlite3` 3.46.1 at
 # /usr/bin, both of which this script needs.  The runtime image has NEITHER — it ships no
 # `sqlite3` CLI at all, and `coolify-prod-start.sh` downloads Litestream into
@@ -57,6 +57,10 @@ TIMESTAMP_FLAG=""
 START_EPOCH="$(date +%s)"
 START_ISO="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 MIN_FREE_TENTHS="${RESTORE_DRILL_MIN_FREE_TENTHS:-10}"
+if ! printf '%s' "$MIN_FREE_TENTHS" | grep -Eq '^[0-9]+$'; then
+  echo "ERROR: RESTORE_DRILL_MIN_FREE_TENTHS must be an integer." >&2
+  exit 1
+fi
 RESTORED_BYTES=0
 INTEGRITY_RESULT=""
 DRILL_PASS="false"
@@ -92,7 +96,7 @@ write_status_json() {
   for table in "${TABLES[@]:-}"; do
     [[ -n "${table:-}" ]] || continue
     printf '%s %s %s %s\n' \
-      "$table" "${ROW_RESTORED[$table]:-}" "${ROW_LIVE[$table]:-}" "${ROW_DELTA[$table]:-}" >>"$ROW_JSON_FILE"
+      "$table" "${ROW_RESTORED[$table]:-}" "${ROW_LIVE[$table]:-}" "${ROW_DELTA[$table]:-n/a}" >>"$ROW_JSON_FILE"
   done
   RESTORE_DRILL_STATUS_JSON="$status_path" \
   RESTORE_DRILL_START_ISO="$START_ISO" \
@@ -132,13 +136,13 @@ PY
 
 finalize_exit() {
   local rc="${1:-1}"
-  write_status_json
+  write_status_json || true
   cleanup_scratch
   trap - EXIT
   exit "$rc"
 }
 
-trap 'write_status_json; cleanup_scratch' EXIT
+trap 'write_status_json || true; cleanup_scratch' EXIT
 
 if [[ -n "${RESTORE_PITR_TIMESTAMP:-}" ]]; then
   TIMESTAMP_FLAG="-timestamp ${RESTORE_PITR_TIMESTAMP}"
