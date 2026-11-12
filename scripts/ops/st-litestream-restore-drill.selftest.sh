@@ -39,8 +39,8 @@ ST_RESTORE_DRILL_STATE_DIR=${WORK}/state
 ST_RESTORE_DRILL_STATUS_JSON=${STATUS_JSON}
 AWS_S3_BUCKET_NAME=test-bucket
 LIVE_DB=${LIVE_DB}
-INFISICAL_TOKEN_FILE=${TOKEN_FILE}
-INFISICAL_PROJECT_ID=test-project-id
+INFISICAL_TOKEN_FILE=${ENV_TOKEN_FILE:-$TOKEN_FILE}
+INFISICAL_PROJECT_ID=${ENV_PROJECT_ID-test-project-id}
 INFISICAL_ENV=prod
 INFISICAL_SECRET_PATH=/
 INFISICAL_DOMAIN=https://app.infisical.com
@@ -86,10 +86,14 @@ cat >"${STUB_DIR}/infisical" <<'STUB'
 if [[ "${1:-}" == "secrets" && "${2:-}" == "get" ]]; then
   name=""
   plain=0
+  project=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --plain) plain=1; shift ;;
-      --projectId|--env|--path|--domain|--token) shift 2 ;;
+      --projectId=*) project="${1#--projectId=}"; shift ;;
+      --projectId) project="${2:-}"; shift 2 ;;
+      --env=*|--path=*|--domain=*|--token=*) shift ;;
+      --env|--path|--domain|--token) shift 2 ;;
       secrets|get) shift ;;
       *)
         if [ -z "$name" ]; then name="$1"; fi
@@ -97,6 +101,14 @@ if [[ "${1:-}" == "secrets" && "${2:-}" == "get" ]]; then
         ;;
     esac
   done
+  # Record the secret name only (never the token or the value).
+  if [ -n "${STUB_INFISICAL_CALLS:-}" ]; then
+    printf '%s\n' "$name" >>"${STUB_INFISICAL_CALLS}"
+  fi
+  if [ -z "$project" ]; then
+    echo "infisical stub: --projectId missing" >&2
+    exit 1
+  fi
   if [ -z "${INFISICAL_TOKEN:-}" ]; then
     echo "infisical stub: missing token" >&2
     exit 1
@@ -145,8 +157,15 @@ fi
 if [[ -n "${STUB_ASSERT_BUCKET:-}" ]]; then
   printf '%s' "${AWS_S3_BUCKET_NAME:-}" >"${STUB_ASSERT_BUCKET}"
 fi
+# Compare the access key in memory against a fake expected value; persist only
+# a non-secret marker, never the key itself.
 if [[ -n "${STUB_ASSERT_ACCESS_KEY:-}" ]]; then
-  printf '%s' "${AWS_ACCESS_KEY_ID:-}" >"${STUB_ASSERT_ACCESS_KEY}"
+  if [[ -n "${STUB_EXPECTED_ACCESS_KEY:-}" && "${AWS_ACCESS_KEY_ID:-}" == "${STUB_EXPECTED_ACCESS_KEY}" ]]; then
+    printf '%s' matched >"${STUB_ASSERT_ACCESS_KEY}"
+  else
+    printf '%s' mismatch >"${STUB_ASSERT_ACCESS_KEY}"
+    exit 1
+  fi
 fi
 exit "${STUB_DRILL_RC:-0}"
 STUB
@@ -162,7 +181,12 @@ if not out:
     sys.exit(0)
 reason = sys.argv[1] if len(sys.argv) > 1 else ""
 message = sys.argv[2] if len(sys.argv) > 2 else ""
-out.write_text(reason + "\n" + message + "\n")
+# Compare the DSN in memory; record only a non-secret marker.
+expected = os.environ.get("STUB_EXPECTED_DSN", "")
+dsn_line = ""
+if expected:
+    dsn_line = "dsn=matched\n" if os.environ.get("SENTRY_FLEET_DSN", "") == expected else "dsn=mismatch\n"
+out.write_text(reason + "\n" + message + "\n" + dsn_line)
 sys.exit(0)
 PY
 chmod +x "$SENTRY_HELPER"
@@ -180,7 +204,8 @@ run_case() {
   export STUB_DB_BYTES=1000 STUB_DF_FREE_KB=10000000
   export STUB_DRILL_RC=0 STUB_INTEGRITY=ok STUB_DRILL_PASS=true STUB_CREATE_SCRATCH_FILE=
   export CASE_AWS_S3_BUCKET_NAME='' CASE_AWS_ACCESS_KEY_ID='' CASE_AWS_SECRET_ACCESS_KEY=''
-  export STUB_ASSERT_BUCKET='' STUB_ASSERT_ACCESS_KEY=''
+  export STUB_ASSERT_BUCKET='' STUB_ASSERT_ACCESS_KEY='' STUB_EXPECTED_ACCESS_KEY=''
+  export STUB_EXPECTED_DSN='' STUB_INFISICAL_CALLS=''
   export STUB_DRILL_SKIP_STATUS=0 STUB_DRILL_SLEEP_SECONDS=0
   export STUB_INFISICAL_FAIL=0
   export CASE_ALLOW_ENV_CREDS=1
@@ -218,6 +243,9 @@ run_case() {
       STUB_CREATE_SCRATCH_FILE="${STUB_CREATE_SCRATCH_FILE:-}" \
       STUB_ASSERT_BUCKET="${STUB_ASSERT_BUCKET:-}" \
       STUB_ASSERT_ACCESS_KEY="${STUB_ASSERT_ACCESS_KEY:-}" \
+      STUB_EXPECTED_ACCESS_KEY="${STUB_EXPECTED_ACCESS_KEY:-}" \
+      STUB_EXPECTED_DSN="${STUB_EXPECTED_DSN:-}" \
+      STUB_INFISICAL_CALLS="${STUB_INFISICAL_CALLS:-}" \
       STUB_DRILL_SKIP_STATUS="${STUB_DRILL_SKIP_STATUS:-0}" \
       STUB_DRILL_SLEEP_SECONDS="${STUB_DRILL_SLEEP_SECONDS:-0}" \
       STUB_INFISICAL_FAIL="${STUB_INFISICAL_FAIL:-0}" \
@@ -246,6 +274,31 @@ check_failure_status() {
   else
     FAILURES=$((FAILURES + 1))
     echo "FAIL ${name}_status_pass_false (status json missing or not pass:false)" >&2
+  fi
+}
+
+# The stub drill writes only "matched"/"mismatch", never the key.
+assert_access_marker() {
+  local name="$1"
+  if [ -f "${WORK}/access.out" ] && [ "$(cat "${WORK}/access.out")" = "matched" ]; then
+    PASSES=$((PASSES + 1))
+    echo "PASS ${name}"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "FAIL ${name}" >&2
+  fi
+  rm -f "${WORK}/access.out"
+}
+
+pass_if() {
+  local name="$1"
+  shift
+  if "$@"; then
+    PASSES=$((PASSES + 1))
+    echo "PASS ${name}"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "FAIL ${name}" >&2
   fi
 }
 
@@ -303,6 +356,8 @@ run_case env_first_credentials 0 '
   export CASE_AWS_ACCESS_KEY_ID=env-key
   export CASE_AWS_SECRET_ACCESS_KEY=env-secret
   export STUB_ASSERT_BUCKET="${WORK}/bucket.out"
+  export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=env-key
   export CASE_ALLOW_ENV_CREDS=1
 '
 if [ -f "${WORK}/bucket.out" ] && [ "$(cat "${WORK}/bucket.out")" = "env-bucket" ]; then
@@ -312,6 +367,9 @@ else
   FAILURES=$((FAILURES + 1))
   echo "FAIL env_first_credentials_bucket" >&2
 fi
+# Control: the access key must be the process-env fake (env-key), not the
+# file (file-key-id) or Infisical (infisical-key-id) value.
+assert_access_marker env_first_credentials_access_key_from_env
 
 write_env_creds
 run_case invalid_min_free_tenths 1 '
@@ -326,8 +384,11 @@ run_case status_not_refreshed 1 '
   export CASE_ALLOW_ENV_CREDS=1
   export CASE_NOTIFY=1
   export CASE_SENTRY_DSN=https://test-dsn@example.test/1
+  export STUB_EXPECTED_DSN=https://test-dsn@example.test/1
 '
 check_failure_status status_not_refreshed
+# Allowed path (gate=1): the inherited process-env DSN is kept and used.
+pass_if status_not_refreshed_uses_env_dsn_when_allowed grep -q 'dsn=matched' "$SENTRY_OUT"
 if [ -f "$SENTRY_OUT" ] && grep -q 'status_unwritten' "$SENTRY_OUT"; then
   PASSES=$((PASSES + 1))
   echo "PASS status_not_refreshed_notifies_sentry"
@@ -374,14 +435,9 @@ run_case infisical_creds 0 '
   export CASE_AWS_ACCESS_KEY_ID=
   export CASE_AWS_SECRET_ACCESS_KEY=
   export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=infisical-key-id
 '
-if [ -f "${WORK}/access.out" ] && [ "$(cat "${WORK}/access.out")" = "infisical-key-id" ]; then
-  PASSES=$((PASSES + 1))
-  echo "PASS infisical_creds_used_stub_value"
-else
-  FAILURES=$((FAILURES + 1))
-  echo "FAIL infisical_creds_used_stub_value" >&2
-fi
+assert_access_marker infisical_creds_used_stub_value
 if output_leaks_secret; then
   FAILURES=$((FAILURES + 1))
   echo "FAIL infisical_creds_no_secret_in_logs" >&2
@@ -408,6 +464,8 @@ run_case infisical_missing_token 1 '
   export CASE_SENTRY_DSN=
 '
 check_failure_status infisical_missing_token
+# Early config failures still carry this run's id.
+pass_if infisical_missing_token_status_has_run_id grep -q '"runId":"' "$STATUS_JSON"
 if printf '%s' "$LAST_OUT" | grep -q 'INFISICAL_TOKEN_FILE'; then
   PASSES=$((PASSES + 1))
   echo "PASS infisical_missing_token_names_file"
@@ -472,6 +530,130 @@ else
   PASSES=$((PASSES + 1))
   echo "PASS malformed_env_key_no_secret_in_logs"
 fi
+
+# 7: inherited process-env AWS creds and DSN are dropped without the gate, so
+# Infisical supplies both.  (The gate=1 path is env_first_credentials above.)
+# Config-only env file: the inherited values are not also listed in the file.
+write_env_config
+run_case inherited_env_creds_ignored 2 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export CASE_AWS_ACCESS_KEY_ID=inherited-env-key
+  export CASE_AWS_SECRET_ACCESS_KEY=inherited-env-secret
+  export CASE_SENTRY_DSN=https://inherited-dsn@example.test/2
+  export CASE_NOTIFY=1
+  export STUB_DRILL_RC=1
+  export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=infisical-key-id
+  export STUB_EXPECTED_DSN=https://infisical-dsn@example.test/9
+'
+assert_access_marker inherited_env_creds_ignored_uses_infisical_key
+pass_if inherited_env_creds_ignored_uses_infisical_dsn grep -q 'dsn=matched' "$SENTRY_OUT"
+pass_if inherited_env_creds_ignored_no_secret_in_logs \
+  bash -c '! printf "%s" "$1" | grep -q "inherited-env-secret"' _ "$LAST_OUT"
+
+# 8: token-file shape.  Fake tokens only.  A rejected token is never sent to
+# Infisical (no stub call recorded) and never printed.
+TOKEN_DIR="${WORK}/secrets"
+make_token_file() {
+  local path="$1" content="$2"
+  printf '%s\n' "$content" >"$path"
+  chmod 600 "$path"
+}
+run_token_case() {
+  local name="$1" expect_rc="$2" token_path="$3"
+  rm -f "${WORK}/infisical.calls"
+  ENV_TOKEN_FILE="$token_path" write_env_config
+  run_case "$name" "$expect_rc" '
+    export CASE_ALLOW_ENV_CREDS=0
+    export CASE_NOTIFY=1
+    export STUB_INFISICAL_CALLS="${WORK}/infisical.calls"
+  '
+}
+infisical_not_called() { [ ! -s "${WORK}/infisical.calls" ]; }
+
+LONG_2045="$(printf '%*s' 2045 '' | tr ' ' 'x')"
+make_token_file "${TOKEN_DIR}/ok-min.token" "st.fake-token-000020"
+make_token_file "${TOKEN_DIR}/ok-max.token" "st.${LONG_2045}"
+make_token_file "${TOKEN_DIR}/short.token" "st.fake-token-00019"
+make_token_file "${TOKEN_DIR}/long.token" "st.${LONG_2045}x"
+make_token_file "${TOKEN_DIR}/machine.token" "eyJfake.machine-identity-token-0000"
+make_token_file "${TOKEN_DIR}/space.token" "st.fake service token 000000"
+ln -sf "${TOKEN_DIR}/ok-min.token" "${TOKEN_DIR}/link.token"
+
+run_token_case token_shape_accepts_20_chars 0 "${TOKEN_DIR}/ok-min.token"
+run_token_case token_shape_accepts_2048_chars 0 "${TOKEN_DIR}/ok-max.token"
+for bad in short long machine space link; do
+  run_token_case "token_rejects_${bad}" 1 "${TOKEN_DIR}/${bad}.token"
+  check_failure_status "token_rejects_${bad}"
+  pass_if "token_rejects_${bad}_no_infisical_call" infisical_not_called
+  pass_if "token_rejects_${bad}_no_token_in_logs" \
+    bash -c '! printf "%s" "$1" | grep -Eq "fake-token|machine-identity-token|fake service token|xxxxxxxx"' _ "$LAST_OUT"
+  if [ "$bad" = link ]; then
+    pass_if token_rejects_link_names_symlink grep -q 'symbolic link' "$STATUS_JSON"
+  else
+    pass_if "token_rejects_${bad}_names_service_token" grep -q 'service token (st\.\*)' "$STATUS_JSON"
+  fi
+  pass_if "token_rejects_${bad}_status_has_run_id" grep -q '"runId":"' "$STATUS_JSON"
+done
+
+# 10: token-file failures alert.  A valid token with loose mode can still fetch
+# the DSN from Infisical; a symlinked token is never used, so only a DSN that
+# is already available (gate=1) can alert.
+make_token_file "${TOKEN_DIR}/loose.token" "st.fake-token-loose-mode"
+chmod 644 "${TOKEN_DIR}/loose.token"
+ENV_TOKEN_FILE="${TOKEN_DIR}/loose.token" write_env_config
+run_case token_mode_0644_alerts 1 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export CASE_NOTIFY=1
+  export STUB_EXPECTED_DSN=https://infisical-dsn@example.test/9
+'
+check_failure_status token_mode_0644_alerts
+pass_if token_mode_0644_alerts_sentry grep -q 'token_file_invalid' "$SENTRY_OUT"
+pass_if token_mode_0644_alerts_infisical_dsn grep -q 'dsn=matched' "$SENTRY_OUT"
+
+ENV_TOKEN_FILE="${TOKEN_DIR}/link.token" write_env_config
+run_case token_symlink_alerts_with_env_dsn 1 '
+  export CASE_ALLOW_ENV_CREDS=1
+  export CASE_NOTIFY=1
+  export CASE_SENTRY_DSN=https://test-dsn@example.test/1
+'
+pass_if token_symlink_alerts_with_env_dsn_sentry grep -q 'token_file_invalid' "$SENTRY_OUT"
+
+# 11: INFISICAL_PROJECT_ID is required even when the Infisical CLI exists.
+rm -f "${WORK}/infisical.calls"
+ENV_PROJECT_ID='' write_env_config
+run_case project_id_required_with_cli 1 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export STUB_INFISICAL_CALLS="${WORK}/infisical.calls"
+'
+check_failure_status project_id_required_with_cli
+pass_if project_id_required_with_cli_names_var grep -q 'INFISICAL_PROJECT_ID' "$STATUS_JSON"
+pass_if project_id_required_with_cli_no_infisical_call infisical_not_called
+
+# 3 + 4: installer strips every secret key (including the INFISICAL_ST_* pair)
+# and drops `export ` prefixes from kept lines.  Fake values only.
+INSTALLER="${SCRIPT_DIR}/install-st-litestream-restore-drill.sh"
+STRIP_FN="$(sed -n '/^strip_secrets_from_env_file() {/,/^}/p' "$INSTALLER")"
+STRIP_ENV="${WORK}/strip.env"
+cat >"$STRIP_ENV" <<'STRIPENV'
+# comment kept
+export AWS_S3_BUCKET_NAME=fake-bucket
+INFISICAL_PROJECT_ID=fake-project
+INFISICAL_ST_CLIENT_ID=fake-st-client-id
+export INFISICAL_ST_CLIENT_SECRET=fake-st-client-secret
+INFISICAL_CLIENT_SECRET=fake-client-secret
+AWS_SECRET_ACCESS_KEY=fake-aws-secret
+STRIPENV
+(eval "$STRIP_FN"; strip_secrets_from_env_file "$STRIP_ENV") >/dev/null
+pass_if installer_strips_infisical_st_client_creds \
+  bash -c '! grep -Eq "INFISICAL_ST_CLIENT|INFISICAL_CLIENT_SECRET|AWS_SECRET_ACCESS_KEY|fake-st-client|fake-aws-secret" "$1"' _ "$STRIP_ENV"
+pass_if installer_drops_export_prefix \
+  bash -c 'grep -qx "AWS_S3_BUCKET_NAME=fake-bucket" "$1" && ! grep -q "^[[:space:]]*export" "$1" && grep -qx "INFISICAL_PROJECT_ID=fake-project" "$1" && grep -qx "# comment kept" "$1"' _ "$STRIP_ENV"
+write_env_config
+cat "$STRIP_ENV" >>"$ENV_FILE"
+run_case installer_output_loads_in_wrapper 0 '
+  export CASE_ALLOW_ENV_CREDS=0
+'
 
 # 7: SIGTERM writes pass:false AND notifies Sentry, then exits 143.
 write_env_creds
@@ -538,6 +720,11 @@ else
   FAILURES=$((FAILURES + 1))
   echo "FAIL sigterm_notifies_sentry" >&2
 fi
+
+# 1: the helper routes HUP/INT/TERM through its cleanup trap and offers --cleanup
+# to recover from a SIGKILL that left the drop-in behind.
+pass_if notify_off_helper_traps_signals_and_has_cleanup \
+  bash -c 'grep -q "trap .exit 143. TERM" "$1" && grep -q "trap .exit 130. INT" "$1" && grep -q "trap .exit 129. HUP" "$1" && grep -q -- "--cleanup" "$1"' _ "${SCRIPT_DIR}/st-litestream-restore-drill-start-notify-off.sh"
 
 # Helper script must use a /run drop-in and must not patch the persistent env file.
 HELPER="${SCRIPT_DIR}/st-litestream-restore-drill-start-notify-off.sh"

@@ -34,7 +34,7 @@
 #   AWS_S3_BUCKET_NAME / AWS_S3_ENDPOINT / AWS_REGION   non-secret B2 config (env file is OK)
 #   INFISICAL_TOKEN_FILE               required for the scheduled lane (path only)
 #   INFISICAL_DOMAIN                   documented default https://app.infisical.com (confirm)
-#   INFISICAL_PROJECT_ID               required; no implied project — confirm on the host
+#   INFISICAL_PROJECT_ID               always required; always passed as --projectId
 #   INFISICAL_ENV                      documented default prod (confirm)
 #   INFISICAL_SECRET_PATH              documented default / (confirm; do not assume a subpath)
 #   INFISICAL_SECRET_AWS_ACCESS_KEY_ID default AWS_ACCESS_KEY_ID (confirm)
@@ -69,6 +69,12 @@ MIN_FREE_TENTHS="${ST_RESTORE_DRILL_MIN_FREE_TENTHS:-22}"
 LIVE_DB="${LIVE_DB:-/app/data/app.db}"
 LITESTREAM_CONFIG="${LITESTREAM_CONFIG:-/app/litestream.coolify.yml}"
 LOAD_ENV_MALFORMED=0
+# Run id before the env file is parsed so every status write, including early
+# config failures, carries it.
+if [ -z "${RESTORE_DRILL_RUN_ID:-}" ]; then
+  RESTORE_DRILL_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fi
+export RESTORE_DRILL_RUN_ID
 
 log() { printf '[st-litestream-restore-drill] %s\n' "$*" >&2; }
 
@@ -248,6 +254,13 @@ elif [ -f "$DEFAULT_ENV" ]; then
   load_env_file_respecting_env_first "$DEFAULT_ENV"
 fi
 
+# Credentials inherited from the process environment (a leftover systemd
+# Environment= line, systemctl set-environment, an operator shell) must not
+# bypass Infisical.  Drop them unless the explicit test/manual gate is set.
+if [ "${ST_RESTORE_DRILL_ALLOW_ENV_CREDS:-0}" != "1" ]; then
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SENTRY_FLEET_DSN
+fi
+
 # Refresh non-secret config that the file (or process env) may have set.
 NOTIFY="${ST_RESTORE_DRILL_NOTIFY:-$NOTIFY}"
 TIMEOUT_SECONDS="${ST_RESTORE_DRILL_TIMEOUT_SECONDS:-$TIMEOUT_SECONDS}"
@@ -276,6 +289,8 @@ infisical_get_plain() {
   local err out rc=1
   [ -n "$secret_name" ] || return 1
   [ -n "$token_file" ] && [ -f "$token_file" ] || return 1
+  # Always name the project; never let the CLI pick a workspace on its own.
+  [ -n "${INFISICAL_PROJECT_ID:-}" ] || return 1
 
   if command -v infisical >/dev/null 2>&1; then
     err="$(mktemp "${TMPDIR:-/tmp}/st-restore-drill-infisical.XXXXXX")" || return 1
@@ -284,18 +299,11 @@ infisical_get_plain() {
     out="$(
       INFISICAL_TOKEN="$(tr -d '\n' <"$token_file")"
       export INFISICAL_TOKEN
-      if [ -n "$INFISICAL_PROJECT_ID" ]; then
-        infisical secrets get "$secret_name" --plain \
-          --projectId="$INFISICAL_PROJECT_ID" \
-          --env="$INFISICAL_ENV" \
-          --path="$INFISICAL_SECRET_PATH" \
-          --domain="$INFISICAL_DOMAIN" 2>"$err"
-      else
-        infisical secrets get "$secret_name" --plain \
-          --env="$INFISICAL_ENV" \
-          --path="$INFISICAL_SECRET_PATH" \
-          --domain="$INFISICAL_DOMAIN" 2>"$err"
-      fi
+      infisical secrets get "$secret_name" --plain \
+        --projectId="$INFISICAL_PROJECT_ID" \
+        --env="$INFISICAL_ENV" \
+        --path="$INFISICAL_SECRET_PATH" \
+        --domain="$INFISICAL_DOMAIN" 2>"$err"
     )" || rc=$?
     rm -f "$err"
     if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
@@ -364,22 +372,56 @@ sys.stdout.write(value)
 PY
 }
 
+# True when the token file holds one Infisical service token: not a symlink,
+# a readable regular file, st.* prefix, no whitespace, 20-2048 characters.
+# The token is never printed.  Mode is checked separately.
+token_file_shape_ok() {
+  local token_file="$1" token
+  [ -n "$token_file" ] || return 1
+  [ ! -L "$token_file" ] || return 1
+  [ -f "$token_file" ] && [ -r "$token_file" ] || return 1
+  set +x
+  token="$(cat <"$token_file" 2>/dev/null)" || return 1
+  [[ "$token" == st.* ]] || return 1
+  [[ "$token" != *[[:space:]]* ]] || return 1
+  [ "${#token}" -ge 20 ] && [ "${#token}" -le 2048 ]
+}
+
+# Alert, then fail.  The DSN is fetched through Infisical only when the token
+# itself passed validation (fetch=1); otherwise only an already-available DSN
+# can be used, and the pass:false status from fail_op is the remaining signal.
+token_file_fail() {
+  local msg="$1" fetch="${2:-0}"
+  if [ "$fetch" = "1" ]; then
+    fetch_optional_sentry_dsn || true
+  fi
+  notify_sentry "Litestream restore drill: ${msg}" "token_file_invalid" || true
+  fail_op "$msg"
+}
+
 require_token_file() {
   local token_file="$INFISICAL_TOKEN_FILE"
   if [ -z "$token_file" ]; then
-    fail_op "INFISICAL_TOKEN_FILE is not set.  The scheduled drill reads B2 credentials from Infisical with a service token file (not from the env file, and not with a machine identity)."
+    token_file_fail "INFISICAL_TOKEN_FILE is not set.  The scheduled drill reads B2 credentials from Infisical with a service token file (not from the env file, and not with a machine identity)."
+  fi
+  if [ -L "$token_file" ]; then
+    token_file_fail "INFISICAL_TOKEN_FILE must not be a symbolic link."
   fi
   if [ ! -f "$token_file" ] || [ ! -r "$token_file" ]; then
-    fail_op "INFISICAL_TOKEN_FILE is missing or unreadable (path configured in the env file)."
+    token_file_fail "INFISICAL_TOKEN_FILE is missing or unreadable (path configured in the env file)."
+  fi
+  if [ ! -s "$token_file" ]; then
+    token_file_fail "INFISICAL_TOKEN_FILE is empty."
+  fi
+  if ! token_file_shape_ok "$token_file"; then
+    token_file_fail "INFISICAL_TOKEN_FILE must contain one 20-2048 character Infisical service token (st.*) with no whitespace; machine-identity and personal tokens are not accepted."
   fi
   local perm
   perm="$(stat -c '%a' "$token_file" 2>/dev/null || stat -f '%OLp' "$token_file" 2>/dev/null || echo "")"
   perm="${perm#0}"
   if [ "$perm" != "600" ]; then
-    fail_op "INFISICAL_TOKEN_FILE must be mode 0600."
-  fi
-  if [ ! -s "$token_file" ]; then
-    fail_op "INFISICAL_TOKEN_FILE is empty."
+    # The token passed validation, so it can still fetch the DSN for the alert.
+    token_file_fail "INFISICAL_TOKEN_FILE must be mode 0600." 1
   fi
 }
 
@@ -388,9 +430,9 @@ fetch_optional_sentry_dsn() {
   if [ -n "${SENTRY_FLEET_DSN:-}" ]; then
     return 0
   fi
-  if [ -z "${INFISICAL_TOKEN_FILE:-}" ] || [ ! -f "${INFISICAL_TOKEN_FILE}" ]; then
-    return 1
-  fi
+  # Only a valid service token is ever sent to Infisical.
+  token_file_shape_ok "${INFISICAL_TOKEN_FILE:-}" || return 1
+  [ -n "${INFISICAL_PROJECT_ID:-}" ] || return 1
   local value
   value="$(infisical_get_plain "$INFISICAL_SECRET_SENTRY_FLEET_DSN" || true)"
   if [ -n "$value" ]; then
@@ -422,8 +464,9 @@ resolve_scheduled_credentials() {
     return 0
   fi
   require_token_file
-  if [ -z "${INFISICAL_PROJECT_ID:-}" ] && ! command -v infisical >/dev/null 2>&1; then
-    fail_op "INFISICAL_PROJECT_ID is not set.  Confirm the Infisical project id on the host; this wrapper does not assume one."
+  if [ -z "${INFISICAL_PROJECT_ID:-}" ]; then
+    notify_sentry "Litestream restore drill: INFISICAL_PROJECT_ID is not set." "config_invalid" || true
+    fail_op "INFISICAL_PROJECT_ID is not set.  Supply the Infisical project id at install time; this wrapper does not assume one."
   fi
   local missing=0
   fetch_required_secret AWS_ACCESS_KEY_ID "$INFISICAL_SECRET_AWS_ACCESS_KEY_ID" || missing=1
@@ -441,11 +484,6 @@ if [ "$LOAD_ENV_MALFORMED" -ne 0 ]; then
 fi
 
 resolve_scheduled_credentials
-
-if [ -z "${RESTORE_DRILL_RUN_ID:-}" ]; then
-  RESTORE_DRILL_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-fi
-export RESTORE_DRILL_RUN_ID
 
 require_creds() {
   local missing=0

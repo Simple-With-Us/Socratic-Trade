@@ -35,9 +35,10 @@ On the host, after install:
 1. Create a mode-0600 token file (suggested path
    `/etc/default/st-litestream-restore-drill.infisical-token`) containing only the service
    token.  Point `INFISICAL_TOKEN_FILE` at that path in the env file.
-2. Set `INFISICAL_PROJECT_ID` (required).  A candidate Socratic-Trade prod project id is
-   documented in `docs/secrets.md` (`39d93bb7-76f9-498c-8b50-a7def52e072f`) and **must be
-   confirmed** before use.  This wrapper does not assume it.
+2. Set `INFISICAL_PROJECT_ID` (always required) in the env file at install time.  Supply
+   the id of the Infisical project that holds the B2 secrets; this repo does not ship one,
+   and the wrapper always passes it as `--projectId` so the CLI never picks a project on
+   its own.
 3. Confirm `INFISICAL_DOMAIN` (documented default `https://app.infisical.com`),
    `INFISICAL_ENV` (documented default `prod`), and `INFISICAL_SECRET_PATH` (documented
    default `/`).  Do not assume a subpath already exists.
@@ -71,8 +72,14 @@ values.  Fill the Infisical settings above.  Never commit secrets.
 
 systemd does not inherit the invoking shell's environment.  To run one notify-disabled
 start **without** patching the persistent env file, use the helper, which writes a
-non-persistent runtime drop-in under `/run/systemd/system/` and removes it afterward
-(`/run` is tmpfs, so a reboot also clears it):
+non-persistent runtime drop-in under `/run/systemd/system/` and removes it when it exits
+(including on Ctrl-C, SIGHUP or SIGTERM).  If the helper is killed with SIGKILL, or the
+host crashes, before it cleans up, the drop-in survives until the next reboot and every
+scheduled run until then writes `pass:false` without a Sentry alert.  Recover before the
+next Sunday run with `/usr/local/sbin/st-litestream-restore-drill-start-notify-off.sh
+--cleanup` (or rerun the helper, or reboot), then confirm with
+`systemctl show st-litestream-restore-drill.service -p Environment` that
+`ST_RESTORE_DRILL_NOTIFY=0` is gone:
 
 ```bash
 systemctl list-timers st-litestream-restore-drill.timer

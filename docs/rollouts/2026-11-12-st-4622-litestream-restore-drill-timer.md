@@ -41,8 +41,12 @@ weekly off-hours with disk preflight, bounded timeout, JSON status, and Sentry o
   (`INFISICAL_TOKEN_FILE`), not from plaintext keys in the env file, and not
   via machine identities or universal auth.  Project id, path, and secret names
   are config that must be confirmed on the host.
-- A notify-disabled `systemctl start` uses a non-persistent `/run` drop-in so an
-  interrupted dry-run cannot leave weekly alerts off.
+- A notify-disabled `systemctl start` uses a non-persistent `/run` drop-in that the
+  helper removes when it exits, including on HUP, INT or TERM.  If the helper is
+  killed with SIGKILL (or the host crashes) before its trap runs, the override
+  survives until the next reboot and later scheduled failures send no Sentry
+  alert, so run the helper with `--cleanup` (or rerun it, or reboot the host)
+  before the next scheduled run to restore weekly failure alerts.
 
 ## Verification State
 

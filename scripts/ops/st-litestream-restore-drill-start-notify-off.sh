@@ -3,14 +3,17 @@
 # patching /etc/default/st-litestream-restore-drill.
 #
 # Writes a non-persistent systemd runtime drop-in under /run/systemd/system/.
-# /run is a tmpfs, so a reboot clears the override even if this shell is killed
-# and the EXIT trap never runs.  The trap still removes the drop-in after a
-# normal start so later weekly runs keep their usual notify setting.
+# The EXIT trap removes it after the start returns, and HUP/INT/TERM are routed
+# through that trap.  A SIGKILL (or a host crash) cannot run the trap, so the
+# override then stays in place, and later scheduled runs send no Sentry alert,
+# until the operator runs this helper with --cleanup (or reruns it) or the host
+# reboots (/run is a tmpfs).
 #
 # Usage (root, on the production restore-drill host):
 #   bash scripts/ops/st-litestream-restore-drill-start-notify-off.sh
+#   bash scripts/ops/st-litestream-restore-drill-start-notify-off.sh --cleanup
 #   # or, once installed:
-#   /usr/local/sbin/st-litestream-restore-drill-start-notify-off.sh
+#   /usr/local/sbin/st-litestream-restore-drill-start-notify-off.sh [--cleanup]
 set -euo pipefail
 
 UNIT="st-litestream-restore-drill.service"
@@ -28,7 +31,17 @@ cleanup_dropin() {
   systemctl daemon-reload
 }
 
+if [ "${1:-}" = "--cleanup" ]; then
+  # Recovery after a killed run: remove a leftover notify-off drop-in only.
+  cleanup_dropin
+  echo "st-litestream-restore-drill-start-notify-off: removed any leftover notify-off drop-in."
+  exit 0
+fi
+
 trap cleanup_dropin EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p -- "$DROP_DIR"
 cat >"$DROP_FILE" <<'UNIT'

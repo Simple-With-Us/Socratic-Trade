@@ -98,6 +98,8 @@ strip_secrets_from_env_file() {
       skip["INFISICAL_TOKEN"]=1
       skip["INFISICAL_CLIENT_ID"]=1
       skip["INFISICAL_CLIENT_SECRET"]=1
+      skip["INFISICAL_ST_CLIENT_ID"]=1
+      skip["INFISICAL_ST_CLIENT_SECRET"]=1
     }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { print; next }
     {
@@ -107,7 +109,8 @@ strip_secrets_from_env_file() {
       sub(/=.*/, "", key)
       gsub(/[[:space:]]/, "", key)
       if (key in skip) next
-      print
+      # Drop any `export ` prefix: the wrapper accepts bare KEY=VALUE only.
+      print line
     }
   ' "$src" >"$tmp"
   if ! cmp -s "$src" "$tmp"; then
