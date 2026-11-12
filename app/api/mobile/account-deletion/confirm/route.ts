@@ -5,7 +5,7 @@ import {
   getAccountDeletionBlockers,
   prepareAccountDeletion
 } from "@/lib/account-deletion";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,8 @@ function blockerCount(blockers: ReturnType<typeof getAccountDeletionBlockers>): 
 }
 
 export async function POST(request: Request) {
-  const user = resolveRequestUser(request);
+  const user = resolveRequestUserOrResponse(request);
+  if (user instanceof Response) return user;
   const body = (await request.json().catch(() => ({}))) as {
     typedText?: unknown;
     typedIdentity?: unknown;
