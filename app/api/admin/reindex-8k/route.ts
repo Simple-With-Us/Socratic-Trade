@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getEightKDataset, reindexEightKDataset } from "@/lib/web-sources/sec8k";
 import { getVectorStoreStats } from "@/lib/vector-db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
@@ -20,7 +20,9 @@ export async function GET(request: Request) {
   const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "read");
   if (limited) return limited;
   const dataset = getEightKDataset();
-  const stats = await getVectorStoreStats(resolveRequestUserId(request));
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  const stats = await getVectorStoreStats(userId);
   return NextResponse.json({
     ok: true,
     datasetRecordCount: dataset?.recordCount ?? 0,
@@ -34,7 +36,8 @@ export async function POST(request: Request) {
   if (denied) return denied;
   const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "job");
   if (limited) return limited;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   let limit = Number.POSITIVE_INFINITY;
   try {
     const body = (await request.json()) as { limit?: number };

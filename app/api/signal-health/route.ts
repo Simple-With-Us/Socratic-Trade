@@ -1,5 +1,5 @@
 import { listSignalHealthSnapshots } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   SIGNAL_HEALTH_COST_ROUND_TRIP_BPS,
   SIGNAL_HEALTH_HORIZONS,
@@ -15,7 +15,8 @@ export const dynamic = "force-dynamic";
 // section renders the latest row + rolling series per horizon. Horizons with no rows yet simply
 // return an empty series — the UI shows an honest empty state, never an estimate.
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json({
     minObservations: SIGNAL_HEALTH_MIN_OBSERVATIONS,
     topK: SIGNAL_HEALTH_TOP_K,
