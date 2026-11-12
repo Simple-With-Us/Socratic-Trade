@@ -3,6 +3,11 @@
 **What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
 
 **Next.**  PR open; green `verify`; no merge from agent.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
