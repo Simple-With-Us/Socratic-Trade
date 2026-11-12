@@ -62,6 +62,7 @@ import {
   runFailureWatchStateKey,
 } from "./trading-liveness";
 import { alertLivenessWarning, clearLivenessWarning } from "./db-health";
+import { runFailureLivenessSentrySignature } from "./trading-liveness";
 
 const STATE_PREFIX = RUN_FAILURE_WATCH_STATE_PREFIX;
 const HALT_MARKER_PREFIX = "runFailureHaltMarker";
@@ -336,7 +337,10 @@ async function haltAccountForRunFailures(
     "run_failure_streak_halted",
     `AUTO-HALTED ${label || accountId}: ${streak} consecutive strategy-run failures. ` +
       `The account is halted until re-armed from the console. Last failures need investigation.`,
-    { account: { accountKey: `${userId}:${accountId}`, accountLabel: label || accountId } }
+    {
+      account: { accountKey: `${userId}:${accountId}`, accountLabel: label || accountId },
+      stateSignature: runFailureLivenessSentrySignature(userId, accountId, "halted")
+    }
   );
 }
 
@@ -549,7 +553,10 @@ export async function runFailureWatchdogTick(now: number = Date.now()): Promise<
               `First seen ${state.firstSeenAt}. Trading on this account is failing every run; ` +
               `backoff ${effective >= backoffAfter() ? "engaged" : `engages at ${backoffAfter()}`} ` +
               `failures, auto-halt at ${haltAfter()} broker or LLM failures.`,
-            { account: { accountKey: `${userId}:${accountId}`, accountLabel: label || accountId } }
+            {
+              account: { accountKey: `${userId}:${accountId}`, accountLabel: label || accountId },
+              stateSignature: runFailureLivenessSentrySignature(userId, accountId, "streak", effective)
+            }
           );
         }
 

@@ -1068,15 +1068,15 @@ async function captureHealthSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>
-): Promise<void> {
-  if (!process.env.SENTRY_DSN) return;
+): Promise<boolean> {
+  if (!process.env.SENTRY_DSN) return false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
     };
     const captureMessage = mod.captureMessage ?? mod.default?.captureMessage;
     const withScope = mod.withScope ?? mod.default?.withScope;
-    if (typeof captureMessage !== "function" || typeof withScope !== "function") return;
+    if (typeof captureMessage !== "function" || typeof withScope !== "function") return false;
     withScope((scope) => {
       scope.setLevel(level);
       scope.setTag("component", "api-health");
@@ -1101,9 +1101,21 @@ async function captureHealthSentryMessage(
       scope.setContext("api-health", context);
       captureMessage(message);
     });
+    return true;
   } catch {
     // Observability must not affect trading control flow.
+    return false;
   }
+}
+
+function livenessWarningSentryService(warningType: string): string {
+  if (warningType.startsWith("run_failure")) {
+    return "run-failure-watchdog";
+  }
+  if (warningType.startsWith("scheduler")) {
+    return "scheduler";
+  }
+  return "trading-liveness";
 }
 
 /**
@@ -1352,7 +1364,10 @@ export async function alertStorageWarning(warningType: string, message: string):
 }
 
 const LIVENESS_ALERT_COOLDOWN_PREFIX = "livenessAlertSent";
-const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000; // 15 mins for liveness since it's more critical, or maybe 12 hours? Let's use 1 hour.
+const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000;
+const LIVENESS_SENTRY_COOLDOWN_MS = 60 * 60_000;
+const LIVENESS_SENTRY_SIGNATURE_PREFIX = "livenessSentrySignature";
+const LIVENESS_SENTRY_SENT_PREFIX = "livenessSentrySentAt";
 // Episode tracking for escalation: a degradation nobody acts on must get LOUDER,
 // not just repeat.  Per-account types store `livenessDegradedSince:<type>:<accountKey>`;
 // fleet-global types keep `livenessDegradedSince:<type>`.  `livenessEscalatedAt:<type>`
@@ -1371,11 +1386,33 @@ export type LivenessWarningAccountRef = {
   accountLabel?: string;
 };
 
-export type LivenessWarningContext =
-  | { account: LivenessWarningAccountRef }
-  | { accounts: LivenessWarningAccountRef[] };
+export type LivenessWarningContext = {
+  account?: LivenessWarningAccountRef;
+  accounts?: LivenessWarningAccountRef[];
+  stateSignature?: string;
+};
 
 type StoredLivenessEpisode = string | { since: string; label?: string };
+
+export function evaluateLivenessSentryCapture(input: {
+  stateSignature: string;
+  previousSignature: string | undefined;
+  lastSentAtIso: string | undefined;
+  dueForEscalation: boolean;
+  nowMs?: number;
+}): boolean {
+  const now = input.nowMs ?? Date.now();
+  if (input.previousSignature !== input.stateSignature) {
+    return true;
+  }
+  if (input.dueForEscalation) {
+    return true;
+  }
+  if (!input.lastSentAtIso || Number.isNaN(Date.parse(input.lastSentAtIso))) {
+    return true;
+  }
+  return now - Date.parse(input.lastSentAtIso) >= LIVENESS_SENTRY_COOLDOWN_MS;
+}
 
 function livenessEscalationHours(): number {
   const raw = Number(process.env.ST_LIVENESS_ESCALATION_HOURS ?? 4);
@@ -1384,6 +1421,21 @@ function livenessEscalationHours(): number {
 
 function isPerAccountLivenessWarningType(warningType: string): boolean {
   return PER_ACCOUNT_LIVENESS_WARNING_TYPES.has(warningType);
+}
+
+function resolveLivenessWarningArg(
+  contextOrSignature?: LivenessWarningContext | string
+): { accounts: LivenessWarningAccountRef[]; stateSignature?: string } {
+  if (contextOrSignature === undefined) {
+    return { accounts: [] };
+  }
+  if (typeof contextOrSignature === "string") {
+    return { accounts: [], stateSignature: contextOrSignature };
+  }
+  return {
+    accounts: normalizeLivenessWarningAccounts(contextOrSignature),
+    stateSignature: contextOrSignature.stateSignature
+  };
 }
 
 function livenessAccountSinceKey(warningType: string, accountKey: string): string {
@@ -1411,12 +1463,10 @@ function readLivenessEpisodeLabel(stored: unknown): string | undefined {
   return undefined;
 }
 
-function normalizeLivenessWarningAccounts(
-  context?: LivenessWarningContext
-): LivenessWarningAccountRef[] {
-  if (!context) return [];
-  if ("account" in context) return [context.account];
-  return context.accounts;
+function normalizeLivenessWarningAccounts(context: LivenessWarningContext): LivenessWarningAccountRef[] {
+  if (context.account) return [context.account];
+  if (context.accounts) return context.accounts;
+  return [];
 }
 
 function discardLegacyGlobalLivenessEpisode(
@@ -1524,9 +1574,12 @@ export async function reconcileLivenessAccountEpisodes(
 export async function alertLivenessWarning(
   warningType: string,
   message: string,
-  context?: LivenessWarningContext
+  contextOrSignature?: LivenessWarningContext | string
 ): Promise<void> {
   try {
+    const adminCooldownKey = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
+    const sentrySignatureKey = `${LIVENESS_SENTRY_SIGNATURE_PREFIX}:${warningType}`;
+    const sentrySentKey = `${LIVENESS_SENTRY_SENT_PREFIX}:${warningType}`;
     const {
       getInternalSetting,
       setInternalSetting,
@@ -1536,7 +1589,8 @@ export async function alertLivenessWarning(
     } = await import("./db");
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
-    const accounts = normalizeLivenessWarningAccounts(context);
+    const { accounts, stateSignature } = resolveLivenessWarningArg(contextOrSignature);
+    const effectiveSignature = stateSignature ?? warningType;
 
     if (isPerAccountLivenessWarningType(warningType)) {
       for (const account of accounts) {
@@ -1551,26 +1605,31 @@ export async function alertLivenessWarning(
       }
     }
 
-    const key = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
-    const last = getInternalSetting<string>(key);
-    if (last && nowMs - Date.parse(last) < LIVENESS_ALERT_COOLDOWN_MS) return;
-    setInternalSetting(key, nowIso);
-
     let degradedHours = 0;
     let escalationSubjectLabel: string | undefined;
     if (isPerAccountLivenessWarningType(warningType)) {
-      const oldest = oldestOpenLivenessAccountEpisode(
-        warningType,
-        nowMs,
-        getInternalSetting,
-        listInternalSettingKeysByPrefix,
-        deleteInternalSetting
-      );
-      if (!oldest) {
-        return;
+      const oldest =
+        accounts.length > 0
+          ? oldestOpenLivenessAccountEpisode(
+              warningType,
+              nowMs,
+              getInternalSetting,
+              listInternalSettingKeysByPrefix,
+              deleteInternalSetting
+            )
+          : null;
+      if (oldest) {
+        degradedHours = oldest.degradedHours;
+        escalationSubjectLabel = oldest.accountLabel ?? oldest.accountKey;
+      } else {
+        const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+        let sinceIso = readLivenessEpisodeSince(getInternalSetting(sinceKey));
+        if (!sinceIso) {
+          sinceIso = nowIso;
+          setInternalSetting(sinceKey, sinceIso);
+        }
+        degradedHours = (nowMs - Date.parse(sinceIso)) / 3_600_000;
       }
-      degradedHours = oldest.degradedHours;
-      escalationSubjectLabel = oldest.accountLabel ?? oldest.accountKey;
     } else {
       const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
       let sinceIso = readLivenessEpisodeSince(getInternalSetting(sinceKey));
@@ -1589,6 +1648,25 @@ export async function alertLivenessWarning(
       degradedHours >= escalationHours &&
       (Number.isNaN(escalatedAtMs) || nowMs - escalatedAtMs >= escalationHours * 3_600_000);
 
+    const shouldCaptureSentry = evaluateLivenessSentryCapture({
+      stateSignature: effectiveSignature,
+      previousSignature: getInternalSetting<string>(sentrySignatureKey),
+      lastSentAtIso: getInternalSetting<string>(sentrySentKey),
+      dueForEscalation
+    });
+
+    const lastAdminSent = getInternalSetting<string>(adminCooldownKey);
+    const lastAdminMs = lastAdminSent ? Date.parse(lastAdminSent) : NaN;
+    const adminDue =
+      dueForEscalation ||
+      !lastAdminSent ||
+      Number.isNaN(lastAdminMs) ||
+      nowMs - lastAdminMs >= LIVENESS_ALERT_COOLDOWN_MS;
+
+    if (!shouldCaptureSentry && !adminDue) {
+      return;
+    }
+
     const typeLabel = warningType.replace(/_/g, " ");
     const title = dueForEscalation
       ? escalationSubjectLabel
@@ -1603,31 +1681,42 @@ export async function alertLivenessWarning(
       message,
       degradedHours: Math.round(degradedHours * 10) / 10,
       escalated: dueForEscalation,
+      sentryStateSignature: effectiveSignature,
       ...(escalationSubjectLabel ? { accountLabel: escalationSubjectLabel } : {})
     };
 
-    audit("liveness_warning_alert", payload, "local");
-
-    await captureHealthSentryMessage("error", `${title}: ${message}`, {
-      service: "trading-liveness",
-      failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
-      warningType,
-      degradedHours: Math.round(degradedHours * 10) / 10,
-      escalated: dueForEscalation,
-      ...(escalationSubjectLabel ? { accountLabel: escalationSubjectLabel } : {})
-    });
-
-    if (dueForEscalation) {
-      setInternalSetting(escalatedAtKey, nowIso);
+    const sentryService = livenessWarningSentryService(warningType);
+    if (shouldCaptureSentry) {
+      const sentryMessage = dueForEscalation ? `${title} (escalated)` : title;
+      const captured = await captureHealthSentryMessage("error", sentryMessage, {
+        service: sentryService,
+        failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
+        warningType,
+        degradedHours: Math.round(degradedHours * 10) / 10,
+        escalated: dueForEscalation,
+        stateSignature: effectiveSignature,
+        ...(escalationSubjectLabel ? { accountLabel: escalationSubjectLabel } : {})
+      });
+      if (captured) {
+        setInternalSetting(sentrySignatureKey, effectiveSignature);
+        setInternalSetting(sentrySentKey, new Date().toISOString());
+      }
     }
 
-    await deliverSystemAlertToAdmins({
-      type: "liveness_warning",
-      title,
-      body,
-      payload,
-      kind: "liveness_warning"
-    });
+    if (adminDue) {
+      setInternalSetting(adminCooldownKey, nowIso);
+      if (dueForEscalation) {
+        setInternalSetting(escalatedAtKey, nowIso);
+      }
+      audit("liveness_warning_alert", payload, "local");
+      await deliverSystemAlertToAdmins({
+        type: "liveness_warning",
+        title,
+        body,
+        payload,
+        kind: "liveness_warning"
+      });
+    }
   } catch {
     // never throw on warnings
   }
@@ -1664,14 +1753,26 @@ export async function clearLivenessWarning(
         deleteInternalSetting(key);
         cleared = true;
       }
-      const escalatedAtKey = `${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`;
-      if (getInternalSetting<string>(escalatedAtKey) !== undefined) {
-        deleteInternalSetting(escalatedAtKey);
-        cleared = true;
+      for (const episodePrefix of [
+        LIVENESS_ESCALATED_AT_PREFIX,
+        LIVENESS_SENTRY_SIGNATURE_PREFIX,
+        LIVENESS_SENTRY_SENT_PREFIX,
+        LIVENESS_DEGRADED_SINCE_PREFIX
+      ]) {
+        const key = `${episodePrefix}:${warningType}`;
+        if (getInternalSetting<string>(key) !== undefined) {
+          deleteInternalSetting(key);
+          cleared = true;
+        }
       }
       return cleared;
     }
-    for (const prefix of [LIVENESS_DEGRADED_SINCE_PREFIX, LIVENESS_ESCALATED_AT_PREFIX]) {
+    for (const prefix of [
+      LIVENESS_DEGRADED_SINCE_PREFIX,
+      LIVENESS_ESCALATED_AT_PREFIX,
+      LIVENESS_SENTRY_SIGNATURE_PREFIX,
+      LIVENESS_SENTRY_SENT_PREFIX
+    ]) {
       const key = `${prefix}:${warningType}`;
       if (getInternalSetting<string>(key) !== undefined) {
         deleteInternalSetting(key);
