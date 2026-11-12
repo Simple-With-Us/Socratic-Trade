@@ -1,8 +1,12 @@
 import { deleteConnectedAccount, renameConnectedAccount } from "@/lib/db";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
+
+// Unknown keys (e.g. a client-sent accountNumber) are stripped, never forwarded: only `label` is renameable.
+const RenameConnectedAccountBodySchema = z.object({ label: z.string() });
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -22,13 +26,13 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const body = (await req.json().catch(() => ({}))) as { label?: unknown };
-    if (typeof body.label !== "string") {
+    const parsedBody = RenameConnectedAccountBodySchema.safeParse(await req.json().catch(() => ({})));
+    if (!parsedBody.success) {
       return new NextResponse("A `label` string is required.", { status: 400 });
     }
     const userId = resolveRequestUserIdOrResponse(req);
     if (userId instanceof Response) return userId;
-    const renamed = renameConnectedAccount(id, body.label, userId);
+    const renamed = renameConnectedAccount(id, parsedBody.data.label, userId);
     if (!renamed) return new NextResponse("Connected account not found.", { status: 404 });
     return NextResponse.json({ ok: true });
   } catch (err) {
