@@ -3,6 +3,11 @@
 **What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once, so a persistent timeout cannot hold refresh for about 136s.  POST, PUT, PATCH, and DELETE stay single-shot.  The existing GET retry for HTTP 5xx is unchanged, and Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
 **Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
+
+**What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
+
+**Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
 ## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
 
 **What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
