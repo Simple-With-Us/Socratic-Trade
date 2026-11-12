@@ -3,6 +3,11 @@
 **What.**  The expensive admin ingest and backfill routes now call `enforceRateLimit` after the existing admin check.  A caller who already passed that check is still allowed the same way.  Starting a job is capped at 6 calls per 10 minutes per admin per route, and the next call returns 429 without starting OpenRouter, Qdrant, or SEC work.  Status reads on those routes, including the chat transcript, are capped at 30 per minute.  Hourly operation budgets that already covered some of these posts stay in place.  Empty 10-K lists and unknown web-source ids still return 400 and do not spend the new budget.  Rollout: `docs/rollouts/2026-11-12-st-4632-admin-ingest-rate-limits.md`.
 
 **Next.**  The PR is the delivery.  Do not merge, do not enable auto-merge, and do not deploy from this lane.
+## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
+
+**What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
+
+**Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
 ## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
 
 **What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
