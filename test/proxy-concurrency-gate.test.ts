@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetProxyFetchForTests,
   createProxiedFetch,
@@ -14,6 +14,26 @@ import { dataSourceFetch } from "../src/lib/data-source-fetch";
 import { __resetProxyUseLogForTests, getProxyUseSnapshot } from "../src/lib/proxy-use-log";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Immediate grants call Date.now() twice inside one synchronous pump. On a
+// loaded host those two reads can straddle a millisecond (CI got waitMs 1,
+// and a 250k-grant probe under CPU pressure saw waits up to 4ms). Freeze the
+// clock so a grant that did not queue is exactly 0, and advance it only when
+// the test is actually waiting for a slot.
+const FROZEN_CLOCK = new Date("2026-06-15T14:00:00.000Z");
+
+function freezeClock(): void {
+  vi.useFakeTimers();
+  vi.setSystemTime(FROZEN_CLOCK);
+}
+
+function restoreClock(): void {
+  vi.useRealTimers();
+}
+
+// The in-test `finally` is the first cleanup. Vitest still runs afterEach after a test
+// times out, which can skip that `finally`, so fake timers never leak into a later
+// case's real sleep or the local proxy server's setTimeout.
 
 describe("resolveProxyMaxConcurrency", () => {
   it("defaults to 4 and honors a valid env override", () => {
@@ -45,6 +65,10 @@ describe("resolveProxyLegTimeoutMs", () => {
 });
 
 describe("ProxyConcurrencyGate", () => {
+  afterEach(() => {
+    restoreClock();
+  });
+
   it("caps in-flight holders and admits waiters in FIFO order", async () => {
     const gate = new ProxyConcurrencyGate(() => 1);
     const order: string[] = [];
@@ -86,16 +110,20 @@ describe("ProxyConcurrencyGate", () => {
   });
 
   it("reports the queue wait on the granted slot", async () => {
-    const gate = new ProxyConcurrencyGate(() => 1);
-    const held = await gate.acquire();
-    // Immediate grant still crosses a Date.now() boundary on loaded CI hosts (1ms is normal).
-    expect(held.waitMs).toBeLessThan(5);
-    const waiting = gate.acquire();
-    await sleep(70);
-    held.release();
-    const slot = await waiting;
-    expect(slot.waitMs).toBeGreaterThanOrEqual(40);
-    slot.release();
+    freezeClock();
+    try {
+      const gate = new ProxyConcurrencyGate(() => 1);
+      const held = await gate.acquire();
+      expect(held.waitMs).toBe(0);
+      const waiting = gate.acquire();
+      await vi.advanceTimersByTimeAsync(70);
+      held.release();
+      const slot = await waiting;
+      expect(slot.waitMs).toBe(70);
+      slot.release();
+    } finally {
+      restoreClock();
+    }
   });
 
   it("rejects a waiter whose signal aborts while queued and frees its place", async () => {
@@ -273,74 +301,87 @@ describe("createProxiedFetch concurrency gate", () => {
   });
 
   afterEach(() => {
+    restoreClock();
     if (savedCap === undefined) delete process.env.PROXY_MAX_CONCURRENCY;
     else process.env.PROXY_MAX_CONCURRENCY = savedCap;
     __resetProxyFetchForTests();
   });
 
   it("queue wait does not count against the proxy-leg timeout", async () => {
-    process.env.PROXY_MAX_CONCURRENCY = "1";
-    // First request: headers return at once, but its body stays open until
-    // the test closes it — the gate slot is held for exactly that long.
-    let closeBody!: () => void;
-    const bodyA = new ReadableStream<Uint8Array>({
-      start(controller) {
-        closeBody = () => {
-          controller.enqueue(new TextEncoder().encode("a"));
-          controller.close();
-        };
-      }
-    });
-    const holdingFetch = createProxiedFetch(
-      "http://proxy-a.test:8888",
-      (async () => new Response(bodyA, { status: 200 })) as typeof fetch,
-      { proxyTimeoutMs: 30_000 }
-    );
-    const waits: number[] = [];
-    const queuedFetch = createProxiedFetch(
-      "http://proxy-b.test:8888",
-      (async () => new Response("b", { status: 200 })) as typeof fetch,
-      {
-        proxyTimeoutMs: 150,
-        onQueueWait: (ms) => {
-          waits.push(ms);
+    freezeClock();
+    try {
+      process.env.PROXY_MAX_CONCURRENCY = "1";
+      // First request: headers return at once, but its body stays open until
+      // the test closes it — the gate slot is held for exactly that long.
+      let closeBody!: () => void;
+      const bodyA = new ReadableStream<Uint8Array>({
+        start(controller) {
+          closeBody = () => {
+            controller.enqueue(new TextEncoder().encode("a"));
+            controller.close();
+          };
         }
-      }
-    );
+      });
+      const holdingFetch = createProxiedFetch(
+        "http://proxy-a.test:8888",
+        (async () => new Response(bodyA, { status: 200 })) as typeof fetch,
+        { proxyTimeoutMs: 30_000 }
+      );
+      const waits: number[] = [];
+      const queuedFetch = createProxiedFetch(
+        "http://proxy-b.test:8888",
+        (async () => new Response("b", { status: 200 })) as typeof fetch,
+        {
+          proxyTimeoutMs: 150,
+          onQueueWait: (ms) => {
+            waits.push(ms);
+          }
+        }
+      );
 
-    const resA = await holdingFetch("https://example.test/a");
-    expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
-    const pB = queuedFetch("https://example.test/b");
-    // Queued for well past the second request's 150ms leg timeout. If the
-    // leg timer started at call time instead of at slot grant, this request
-    // would already be aborted.
-    await sleep(300);
-    expect(sharedProxyConcurrencyGate.queued).toBe(1);
-    closeBody();
-    await expect(resA.text()).resolves.toBe("a");
-    const resB = await pB;
-    expect(resB.status).toBe(200);
-    await expect(resB.text()).resolves.toBe("b");
-    expect(waits.length).toBe(1);
-    expect(waits[0]).toBeGreaterThanOrEqual(200);
-    expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+      const resA = await holdingFetch("https://example.test/a");
+      expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
+      const pB = queuedFetch("https://example.test/b");
+      // Queued for well past the second request's 150ms leg timeout. If the
+      // leg timer started at call time instead of at slot grant, this request
+      // would already be aborted. The clock advances 300ms with no real sleep,
+      // so a loaded host cannot shrink or stretch the queued interval.
+      await vi.advanceTimersByTimeAsync(300);
+      expect(sharedProxyConcurrencyGate.queued).toBe(1);
+      closeBody();
+      await expect(resA.text()).resolves.toBe("a");
+      const resB = await pB;
+      expect(resB.status).toBe(200);
+      await expect(resB.text()).resolves.toBe("b");
+      expect(waits).toEqual([300]);
+      expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+    } finally {
+      restoreClock();
+    }
   });
 
   it("does not report a queue wait when a slot is granted immediately", async () => {
-    const waits: number[] = [];
-    const proxied = createProxiedFetch(
-      "http://proxy-c.test:8888",
-      (async () => new Response("ok", { status: 200 })) as typeof fetch,
-      {
-        proxyTimeoutMs: 5_000,
-        onQueueWait: (ms) => {
-          waits.push(ms);
+    freezeClock();
+    try {
+      const waits: number[] = [];
+      const proxied = createProxiedFetch(
+        "http://proxy-c.test:8888",
+        (async () => new Response("ok", { status: 200 })) as typeof fetch,
+        {
+          proxyTimeoutMs: 5_000,
+          onQueueWait: (ms) => {
+            waits.push(ms);
+          }
         }
+      );
+      for (let i = 0; i < 200; i++) {
+        const res = await proxied("https://example.test/x");
+        await expect(res.text()).resolves.toBe("ok");
       }
-    );
-    const res = await proxied("https://example.test/x");
-    await expect(res.text()).resolves.toBe("ok");
-    expect(waits).toEqual([]);
+      expect(waits).toEqual([]);
+    } finally {
+      restoreClock();
+    }
   });
 });
 

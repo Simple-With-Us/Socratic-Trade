@@ -832,6 +832,10 @@ export async function fetchWithRetry(
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
       if (response.status === 429 && attempt < retries) {
+        // The body is discarded on retry.  Cancel it before the backoff so a
+        // proxied 429 cannot hold a concurrency slot while we wait.  5xx is
+        // not an internal continue here; it is returned to the caller.
+        await response.body?.cancel().catch(() => undefined);
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
