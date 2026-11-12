@@ -64,6 +64,7 @@ file_matches_pattern() {
   fi
 
   if [ "$anchored" = 1 ]; then
+    # shellcheck disable=SC2254  # CODEOWNERS patterns are globs, not literal strings
     case "$file" in
       $pat) return 0 ;;
     esac
@@ -73,6 +74,7 @@ file_matches_pattern() {
   # Slash-less unanchored patterns: basename at any directory depth (GitHub CODEOWNERS).
   if [[ "$pat" != */* ]]; then
     local base="${file##*/}"
+    # shellcheck disable=SC2254
     case "$base" in
       $pat) return 0 ;;
     esac
@@ -80,6 +82,7 @@ file_matches_pattern() {
   fi
 
   # Unanchored path pattern (contains / but no leading /): match anywhere in the tree.
+  # shellcheck disable=SC2254
   case "$file" in
     $pat | */$pat) return 0 ;;
   esac
@@ -116,7 +119,7 @@ load_patterns() {
 load_patterns_into_array() {
   local -n _out=$1
   _out=()
-  local row anchored pat
+  local anchored pat
   while IFS=$'\t' read -r anchored pat || [ -n "$anchored" ]; do
     [ -z "$anchored" ] && continue
     _out+=("$anchored" "$pat")
