@@ -267,6 +267,7 @@ key_preview() {
   printf '%s...%s' "${v:0:8}" "${v: -4}"
 }
 
+# shellcheck disable=SC2120  # optional required-mode argument; callers pass 1 at upload time
 load_secrets() {
   # load_secrets [required]
   #
