@@ -19,13 +19,17 @@ export function Card({
   className,
   padded = true,
   collapsible = false,
-  defaultOpen = true
+  defaultOpen = true,
+  stackAction = false
 }: {
   title?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
   padded?: boolean;
+  /** On narrow screens, put `action` on its own row under the title so a
+   *  cluster of buttons does not sit in a cramped side column. */
+  stackAction?: boolean;
   /** Render the card as a collapsible disclosure (native <details>) with the title as the
    *  summary and a chevron. Requires a title. Off by default so existing cards are unchanged. */
   collapsible?: boolean;
@@ -54,7 +58,14 @@ export function Card({
   return (
     <section className={cx("con-card", className)}>
       {(title || action) && (
-        <header className="flex items-center justify-between gap-3 px-4 pt-3.5 pb-1">
+        <header
+          className={cx(
+            "flex gap-3 px-4 pt-3.5 pb-1",
+            stackAction
+              ? "flex-col items-stretch sm:flex-row sm:items-center sm:justify-between"
+              : "items-center justify-between"
+          )}
+        >
           {title ? <h2 className="con-card-title">{title}</h2> : <span />}
           {action}
         </header>

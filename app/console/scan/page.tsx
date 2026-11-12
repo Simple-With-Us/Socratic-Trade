@@ -79,12 +79,12 @@ export default function ScanPage() {
   const tabDefs = [
     {
       id: "scan" as Tab,
-      label: scan ? `Market scan (${scan.topCandidates.length})` : "Market scan",
+      label: scan ? `Market Scan (${scan.topCandidates.length})` : "Market Scan",
       title: "Screened and scored candidates from the market scan, with per-field source attribution."
     },
     {
       id: "smart" as Tab,
-      label: smartCount > 0 ? `Smart money (${smartCount})` : "Smart money",
+      label: smartCount > 0 ? `Smart Money (${smartCount})` : "Smart Money",
       title: "Recently disclosed congressional trades and insider (Form 4) activity — everything on file, not just scan overlaps."
     }
   ] as const;
@@ -109,7 +109,7 @@ export default function ScanPage() {
             title={
               isFresh
                 ? "This scan was generated within the last 15 minutes."
-                : "Captured earlier.  Hit Refresh scan for a current view."
+                : "Captured earlier.\u00A0 Hit Refresh Scan for a current view."
             }
           >
             {/* Ago already renders "…ago" — no trailing "old" (read "1h ago old"). */}
@@ -134,7 +134,7 @@ export default function ScanPage() {
           title="Run a fresh market scan now — re-screens the universe and re-pulls quotes and enrichment.  Read-only: it never places trades.  Can take up to ~25 seconds when caches are cold."
         >
           <RefreshCw size={13} className={cx(live.refreshing && "animate-spin")} aria-hidden />
-          {live.refreshing ? "Scanning…" : "Refresh scan"}
+          {live.refreshing ? "Scanning…" : "Refresh Scan"}
         </Btn>
       </div>
 
@@ -226,7 +226,7 @@ function MarketScanTab({
             </Empty>
             <div className="flex justify-center pb-2">
               <Btn variant="primary" onClick={onRefresh} title="Run a fresh market scan now.  Read-only: it never places trades.">
-                Run scan
+                Run Scan
               </Btn>
             </div>
           </>

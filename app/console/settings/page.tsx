@@ -14,9 +14,9 @@
  *  Sub-sections live in sibling modules (delivery/danger/help/sharing/
  *  learning-review / llm-budget) with their fetch helpers in ./lib. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 import type { NotificationEventType } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPE_LABELS } from "@/lib/dashboard-ui";
@@ -57,10 +57,10 @@ const SETTINGS_TOC: ReadonlyArray<{ id: string; label: string }> = [
   { id: "delivery", label: "Delivery" },
   { id: "sharing", label: "Sharing" },
   { id: "legal", label: "Legal" },
-  { id: "learning-review", label: "Learning review" },
-  { id: "llm-budget", label: "AI budget" },
-  { id: "scan-shape", label: "Scan shape" },
-  { id: "data-sources", label: "Data sources" },
+  { id: "learning-review", label: "Learning Review" },
+  { id: "llm-budget", label: "AI Budget" },
+  { id: "scan-shape", label: "Scan Shape" },
+  { id: "data-sources", label: "Data Sources" },
   { id: "confirmation", label: "Confirmation" },
   { id: "boot", label: "Boot" },
   { id: "you", label: "Account" },
@@ -81,12 +81,12 @@ const SECTION_SCROLL_MT = "scroll-mt-36";
  *  production UI. */
 const EVENT_HINT: Record<NotificationEventType, string> = {
   fill: "an order filled",
-  block: "the policy gate blocked an order",
+  block: "a trading rule blocked an order",
   run_failed: "a strategy run failed",
   pending_approval: "a trade is waiting for you",
-  kill_switch: "a circuit breaker fired",
+  kill_switch: "trading stopped on a safety limit",
   price_alert: "a price alert triggered",
-  proposal_withdrawn: "the strategist took an idea back",
+  proposal_withdrawn: "a trade idea was withdrawn",
   limit_order_stale: "a limit order has been working too long",
   provider_degraded: "a data provider is failing",
   liveness_warning: "the trading liveness check degraded",
@@ -118,6 +118,8 @@ const EVENT_HINT: Record<NotificationEventType, string> = {
  *  Sticks under the console topbar (measured) so chips stay reachable while
  *  scrolling; mobile overflow-x scrolls the chip row. No policy writes. */
 function SettingsToc() {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [canScrollRight, setCanScrollRight] = useState(false);
   // Seed from hash on first client paint so deep links highlight without an effect.
   const [activeId, setActiveId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
@@ -125,6 +127,26 @@ function SettingsToc() {
     return SETTINGS_TOC.some((s) => s.id === hash) ? hash : null;
   });
   const [topOffset, setTopOffset] = useState(0);
+
+  // The chip row hides its scrollbar. Without a control, the next label is
+  // cut mid-word ("Lear") and looks like the name of a section.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const measure = () => {
+      setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+    };
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      ro?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
 
   // Stick just below the console topbar (RealityBanner + ChromeBar + mobile
   // freshness). Measure live so desktop/mobile chrome heights both work.
@@ -185,7 +207,11 @@ function SettingsToc() {
       className="sticky z-30 -mx-4 border-b border-[color:var(--con-line)] bg-[color:var(--con-bg)]/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-[color:var(--con-bg)]/85 lg:-mx-6 lg:px-6"
       style={{ top: topOffset }}
     >
-      <div className="flex gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="relative">
+      <div
+        ref={scrollerRef}
+        className={`flex gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${canScrollRight ? "pr-10" : ""}`}
+      >
         {SETTINGS_TOC.map((item) => {
           const isActive = activeId === item.id;
           return (
@@ -204,6 +230,17 @@ function SettingsToc() {
             </button>
           );
         })}
+      </div>
+      {canScrollRight ? (
+        <button
+          type="button"
+          className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm"
+          aria-label="More sections"
+          onClick={() => scrollerRef.current?.scrollBy({ left: 160, behavior: "smooth" })}
+        >
+          <ChevronRight size={18} aria-hidden />
+        </button>
+      ) : null}
       </div>
     </nav>
   );

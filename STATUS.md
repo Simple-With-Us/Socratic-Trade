@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4627 UI polish
+
+**What.**  Phone chrome is two rows so Run Once and Start stay on screen.  Settings chips are Title Case, and a More sections control stops the next label being cut mid-word.  Orders, scan, connections, the home checklist, and the unconfigured login state use plain copy.  No trading, order, risk, auth, or theme-switch change.  Rollout: `docs/rollouts/2026-11-12-st-4627-ui-polish.md`.
+
+**Next.**  Draft PR against `main`.  Do not merge or deploy.  `verify` is the merge gate.  Visual baselines were not regenerated against the dev server.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
