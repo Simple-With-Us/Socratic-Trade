@@ -252,12 +252,19 @@ describe("provider timeout classification (ST-4608)", () => {
     const { logApiHealth, getLaneHealth, HEALTH_SOFT_FAILURE_PREFIX } = await import("../src/lib/db-health");
     for (const errorText of ["cascade budget elapsed", "yahoo floor ready", "The operation was aborted due to timeout"]) {
       const service = `quote-budget-${randomUUID().slice(0, 8)}`;
+      // One recent success keeps the "no success ever" heuristic from stopping a soft lane.
+      // The five failures are written with keySource "env". Reading null would miss them
+      // and report stoppedWorking false even if these rows were hard.
+      logApiHealth({ service, ok: true, keySource: "env" });
       for (let i = 0; i < 5; i++) {
         logApiHealth({ service, ok: false, errorText, keySource: "env" });
       }
       await settleAlerts();
       expect(await newestErrorText(service), errorText).toBe(`${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`);
-      expect(getLaneHealth(service, null).stoppedWorking, errorText).toBe(false);
+      const lane = getLaneHealth(service, "env");
+      expect(lane.lastFailureTs, errorText).toBeTruthy();
+      expect(lane.reason, errorText).toBeNull();
+      expect(lane.stoppedWorking, errorText).toBe(false);
     }
     expect(sentry.captureMessage).not.toHaveBeenCalled();
     expect(sendNotification).not.toHaveBeenCalled();
