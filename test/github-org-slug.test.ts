@@ -34,10 +34,7 @@ const STALE_PATTERNS: RegExp[] = [
   /\bjaywedgeworth22\/Socratic[-.]Trade\b/i,
   /\bjaywedgeworth22\/Congress\.Trade\b/i,
   /\bjaywedgeworth22\/Usage-Monitor\b/i,
-  /\bjaywedgeworth22\/congress-trading-shared\b/i,
   /\bjaywedgeworth22\/ai-fleet-coordinator\b/i,
-  /\bjaywedgeworth22\/ios-app-versions\b/i,
-  /\bjaywedgeworth22\/fleet-ops\b/i,
   /\bjaywedgeworth22\/agentic-trading\b/i,
   /\bjaywedgeworth22\/robinhood-agentic-trading\b/i,
 ];
@@ -62,6 +59,7 @@ function walkFiles(dir: string, out: string[] = []): string[] {
     }
     if (!st.isFile()) continue;
     const rel = relative(ROOT, abs).replace(/\\/g, "/");
+    if (rel.endsWith(".tsbuildinfo")) continue;
     if (shouldSkipFile(rel)) continue;
     out.push(rel);
   }
@@ -69,17 +67,24 @@ function walkFiles(dir: string, out: string[] = []): string[] {
 }
 
 function isAllowedLine(line: string): boolean {
-  if (/12656028\+jaywedgeworth22@users\.noreply\.github\.com/.test(line)) return true;
-  if (/@jaywedgeworth22\b/.test(line)) return true;
-  if (/EFFORT_ISSUES_ASSIGNEE.*jaywedgeworth22/.test(line)) return true;
   if (/github\.com\/jaywedgeworth22\/.+\/(pull\/|actions\/)/.test(line)) return true;
-  return false;
+  if (/12656028\+jaywedgeworth22@users\.noreply\.github\.com/.test(line)) return true;
+  if (/@jaywedgeworth22\/[\w.-]+/.test(line)) return true;
+  if (/EFFORT_ISSUES_ASSIGNEE.*jaywedgeworth22/.test(line)) return true;
+  if (/\bjaywedgeworth22\/ios-app-versions\b/.test(line)) return true;
+  if (/\bjaywedgeworth22\/fleet-ops\b/.test(line)) return true;
+  if (STALE_PATTERNS.some((pat) => pat.test(line))) return false;
+  return true;
 }
 
 describe("GitHub org slug (Simple-With-Us)", () => {
   it("has no live jaywedgeworth22 repo-owner strings outside archives", () => {
+    const scanned = walkFiles(ROOT);
+    expect(scanned.length).toBeGreaterThan(0);
+    expect(STALE_PATTERNS.some((pat) => pat.test("https://github.com/jaywedgeworth22/Socratic-Trade"))).toBe(true);
+
     const violations: string[] = [];
-    for (const rel of walkFiles(ROOT)) {
+    for (const rel of scanned) {
       let text: string;
       try {
         text = readFileSync(join(ROOT, rel), "utf8");

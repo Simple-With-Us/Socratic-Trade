@@ -1,6 +1,6 @@
 # Atlas Public Repo Integration Map
 
-This document records how work from the public [`Simple-With-Us/public`](https://github.com/Simple-With-Us/public) repository ("Atlas" BFF chat assistant) relates to the private [`robinhood-agentic-trading`](https://github.com/Simple-With-Us/Socratic-Trade) dashboard.
+This document records how work from the public [`Simple-With-Us/public`](https://github.com/Simple-With-Us/public) repository ("Atlas" BFF chat assistant) relates to the private [`Socratic-Trade`](https://github.com/Simple-With-Us/Socratic-Trade) dashboard.
 
 The public repo explored a chat-first BFF MVP (`apps/bff` + `apps/web`) from the multi-expert analysis in `docs/atlas/multi-expert-app-analysis.md`. The private repo remains the canonical product: a Next.js dashboard with strategy runs, market scan, multi-broker execution, and production RAG.
 
