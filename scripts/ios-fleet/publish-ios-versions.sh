@@ -253,6 +253,9 @@ fi
 # possibly publish says why, instead of failing later on an authorization
 # error that reads like a branch rule.
 resolve_token || exit 1
+if [[ -n "$TOKEN_SOURCE" ]]; then
+  echo "publish: credential source=${TOKEN_SOURCE}" >&2
+fi
 if [[ -n "$TOKEN" ]]; then
   export GH_TOKEN="$TOKEN"
   unset GITHUB_TOKEN || true
