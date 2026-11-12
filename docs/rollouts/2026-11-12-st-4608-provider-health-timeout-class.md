@@ -6,7 +6,7 @@ Keyless provider timeouts were paging as hard connection failures.  Sentry issu
 
 ## Changes Made
 
-The health classifier in `src/lib/db-health.ts` now treats a named provider timeout as a transport blip.  A short burst is a warning with `failureClass` `transient-network`, the `:transient` cooldown key, and no operator push.  The same streak still escalates to error after `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare caller-budget abort (`This operation was aborted`) stays an expected limit.  Strategy RAG deadlines stay caller timeouts.
+The health classifier in `src/lib/db-health.ts` now treats a named provider timeout as a transport blip.  A short burst is a warning with `failureClass` `transient-network`, the `:transient` cooldown key, and no operator push.  The same streak still escalates to error after `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A caller-budget abort that does not name the error (`This operation was aborted`, `The operation was aborted due to timeout`, or the quote cascade's `cascade budget elapsed` / `yahoo floor ready`) stays an expected limit.  Strategy RAG deadlines stay caller timeouts.
 
 - `src/lib/db-health.ts` — `isProviderTimeoutHealthText` and the log stamp.  Named timeouts win over a caller's `soft: true` flag so a TimeoutError is not stored as an expected limit.
 - `test/provider-health-timeout-classification.test.ts` — Nasdaq message, AbortError, TimeoutError, undici timeout codes, escalation, HTTP 401/500, and per-user lanes.
@@ -18,7 +18,7 @@ Quote, scan, screener, order, and strategy fetch code is untouched.  `isTransie
 
 Classification lives in the health layer only.  Open PRs already edit `nasdaq-screener-fetch.ts`, `data-source-fetch.ts`, `proxy-fetch.ts`, `market.ts`, and `data-providers.ts`.  Importing `NASDAQ_SCREENER_TIMEOUT_MESSAGE` into `db-health.ts` would cycle through those fetch modules, so the matcher uses the phrase `timed out waiting for`, which is that constant's text.
 
-A row that names `AbortError` or `TimeoutError` counts toward the hard streak and can escalate.  The quote-cascade budget abort is stored as `This operation was aborted` without that name, and it stays soft so five budget cancels do not page.  An HTTP status is rejected before the timeout phrases, so a 500 body that says `timed out waiting for` stays hard.
+A row that names `AbortError` or `TimeoutError` counts toward the hard streak and can escalate.  Caller-budget cancels that do not name the error stay soft so five of them do not page.  nasdaq-calendar's per-day abort stores `This operation was aborted`, and an `AbortSignal.timeout()` budget such as `brokerAbortSignal` stores the message-only `The operation was aborted due to timeout`.  The `/api/quote` 6s cascade aborts with its own reasons, `cascade budget elapsed` (`quote-cascade-budget.ts`) or `yahoo floor ready` (`app/api/quote/route.ts`).  `isAbortOrTimeoutError` does not match those two, so the soft list in `isSoftHealthFailure` names them.  A row already stamped `[expected-limit] ` stays soft even when its text names a timeout.  A provider status is rejected before the timeout phrases, both `HTTP <status>` and the embed/rerank `API failed …: <status>` form, so a 500 body that says `timed out waiting for` stays hard.
 
 No phase doc owns this classifier.  The 2026-09-08 transient-network rollout remains the design for the blip window.
 
@@ -28,7 +28,7 @@ No phase doc owns this classifier.  The 2026-09-08 transient-network rollout re
 npx vitest run test/provider-health-timeout-classification.test.ts test/transient-network-resilience.test.ts test/health-transient-network-classification.test.ts test/rag-deadline-timeout-classification.test.ts
 ```
 
-`npx tsc --noEmit` is clean on Node 26.13.1.  `npm run lint` is 0 errors and 869 grandfathered warnings.  Focused vitest (the four files above) passed, 41 tests.  Full `npm test` is 10233 passed, 41 skipped, and 18 failed across 12 files.  None of those failures are in the health classifier.  They are injected credentials and host detection on this VM: `gh` 401 on the auto-merge pin, Pushover and LLM keys present where a test expects none, and `usesLocalHost` false.  `npm run build` completed (Next.js 16.4.5).  The first attempt aborted at the default heap limit.  The retry used `NODE_OPTIONS=--max-old-space-size=5120`.
+`npx tsc --noEmit` is clean on Node 26.13.1.  `npm run lint` is 0 errors and 869 grandfathered warnings.  Focused vitest (the four files above) passed, 43 tests.  Full `npm test` is 10233 passed, 41 skipped, and 18 failed across 12 files.  None of those failures are in the health classifier.  They are injected credentials and host detection on this VM: `gh` 401 on the auto-merge pin, Pushover and LLM keys present where a test expects none, and `usesLocalHost` false.  `npm run build` completed (Next.js 16.4.5).  The first attempt aborted at the default heap limit.  The retry used `NODE_OPTIONS=--max-old-space-size=5120`.
 
 ## Next Steps & Blockers
 
