@@ -134,7 +134,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'github-actions[bot]'|'swu-echo[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -151,7 +151,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.classify.outputs.docs-only != 'true'
         with:
-          node-version: 24
+          node-version: 26
       # Long-lived socratic-ci workspaces have lost the tree between checkout and
       # npm install when a concurrent job's clean step overlapped (ENOENT package.json
       # on the 2026-07-26 scheduled smoke). Same re-checkout boundary as ci.yml

@@ -225,10 +225,17 @@ async function commitRecoveredOpeningStopPlan(input: {
     let basis = input.price;
     try {
       const positions = await input.gateway.getEquityPositions(input.accountNumber);
-      basis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost ?? basis;
+      // Only a positive broker averageCost replaces the fill-price basis: a position
+      // reporting 0 (e.g. just-opened, not yet priced) must not discard a usable basis.
+      const brokerBasis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost;
+      if (brokerBasis != null && brokerBasis > 0) basis = brokerBasis;
     } catch {
       // The broker fill price remains a valid fallback for a fresh position.
     }
+    // No positive anchor (broker omitted averagePrice, proposal had no referencePrice, and no
+    // live position basis): a stop plan recorded at avg_cost 0 prices every derived stop at $0.
+    // Skip the plan rather than persist a zero-basis plan; the fill receipt itself stays booked.
+    if (!(basis > 0)) return;
     const openingOrderId = (proposal.bracketStopLoss != null || proposal.bracketTakeProfit != null) ? input.orderId : undefined;
     const contract = deriveExitContractFromOpening({
       side: proposal.side === "short" ? "short" : "buy",
@@ -1887,7 +1894,12 @@ async function reconcilePendingReceipts(ctx: BrokerTruthContext): Promise<void> 
             if (openingProposal.stopPlan.style === "default") {
               clearStopPlans(accountNumber, [fill.symbol], userId);
             } else {
-              const basis = (await liveBasisFor(fill.symbol)) ?? price;
+              // Same guard as recordFillFromProposal: only a positive broker averageCost
+              // replaces the fill-price basis, and with no positive anchor at all we skip
+              // the plan rather than persist a zero-basis one (the fill stays booked).
+              const liveBasis = await liveBasisFor(fill.symbol);
+              const basis = liveBasis != null && liveBasis > 0 ? liveBasis : price;
+              if (!(basis > 0)) return;
               // See performance.ts's identical reasoning: bracket fields survive on the proposal
               // only when a broker-native bracket was (or was meant to be) attached, so this
               // naturally scopes to fixed/atr plans.
@@ -2474,7 +2486,10 @@ export async function flagStalePlacingIntents(gateway: BrokerGateway, accountNum
         if (!alreadyBooked) {
           const recoveredExecutionMode = row.executionMode ?? "broker/live";
           const recoveredSource: FillSource = recoveredExecutionMode === "broker/live" ? "live" : "paper";
-          const existingAvgCost = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          const recoveredLiveBasis = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          // Only a positive broker averageCost overrides the fill-price basis: a 0 (position
+          // not priced yet) must fall back to the recovered fill price, not write a 0 basis.
+          const existingAvgCost = recoveredLiveBasis != null && recoveredLiveBasis > 0 ? recoveredLiveBasis : undefined;
           recordFillFromProposal({
             userId,
             connectedAccountId,

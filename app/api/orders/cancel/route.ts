@@ -1,5 +1,5 @@
 import { cancelWorkingOrder, OrderCancelPreconditionError } from "@/lib/order-cancel";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 
@@ -22,7 +22,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
   const { orderId } = body;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "orders/cancel", RATE_LIMITS.orders);
   if (limited) return limited;
   try {

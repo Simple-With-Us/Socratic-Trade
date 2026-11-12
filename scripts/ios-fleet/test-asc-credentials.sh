@@ -302,6 +302,29 @@ if grep -Fq 'SYNTHETICBADBODYHERE' "${tmp}/preview.err"; then
   fail "the whole PEM body was printed"
 fi
 
+# 2c-quater. A .p8 that comes from Infisical /asc and is not a PEM is
+# refused the same way, with the masked preview.  This refusal comes out of
+# the key-file write rather than out of a validate call, so without the
+# preview this class of failure was reported with no masked identifier at
+# all, while the ambient value and the client refusals both carried one.
+: > "$FAKE_LOG"
+: > "$ASC_TEST_LOG"
+printf 'not a pem at all\n' > "${tmp}/not-a-pem.p8"
+not_pem="$(<"${tmp}/not-a-pem.p8")"
+not_pem_preview="$(printf '%s' "$not_pem" | cut -c1-8)...$(printf '%s' "$not_pem" | tail -c 4)"
+if FAKE_ASC_PEM="${tmp}/not-a-pem.p8" env -u ASC_KEY_ID -u ASC_ISSUER_ID -u ASC_KEY_PATH -u ASC_KEY_P8 bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/asc-not-a-pem.err"; then
+  fail "a .p8 from Infisical /asc that is not a PEM was accepted"
+fi
+grep -Fq "preview: ${not_pem_preview}" "${tmp}/asc-not-a-pem.err" ||
+  fail "the refused /asc .p8 carried no masked preview"
+if grep -Fq "$not_pem" "${tmp}/asc-not-a-pem.err"; then
+  fail "the refused /asc .p8 was printed"
+fi
+
 # 2c-bis. A PEM stored with literal backslash-n separators is a real key, so
 # the separators become newlines before the module sees the value.  Without
 # this, the key is refused and the run fails closed on a key that is fine.
@@ -332,6 +355,55 @@ if ASC_KEY_ID="" ASC_ISSUER_ID="" ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
 fi
 grep -q 'ASC_KEY_ID is missing' "${tmp}/no-key-id.err" ||
   fail "the missing key id was not named in the failure"
+
+# 2d-bis. The refusal names a remedy that can actually work.  The ambient
+# ASC_KEY_P8 is resolved BEFORE Infisical /asc is read, so a complete /asc
+# credential is never reached while the ambient key is set:  telling the
+# operator to add the trio to /asc cannot help, because the code that would
+# read it is never reached.  The remedy that does work is to unset the
+# ambient key, and /asc must not have been consulted at all.
+: > "$FAKE_LOG"
+if ASC_KEY_ID="" ASC_ISSUER_ID="" ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/no-key-id-bis.err"; then
+  fail "an ASC_KEY_P8 without a key id was accepted"
+fi
+grep -q 'unset ASC_KEY_P8' "${tmp}/no-key-id-bis.err" ||
+  fail "the refusal did not name the reachable remedy (unset ASC_KEY_P8)"
+if grep -q 'add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc' "${tmp}/no-key-id-bis.err"; then
+  fail "the refusal still names the /asc remedy, which it never reads"
+fi
+if [ -s "$FAKE_LOG" ]; then
+  fail "Infisical /asc was consulted even though the ambient key was refused"
+fi
+
+# 2d-ter. The ASC_ISSUER_ID refusal names a remedy that can actually work.
+# The ambient ASC_KEY_P8 is resolved BEFORE Infisical /asc is read, so the
+# ambient key refuses here for the missing issuer.  Unsetting only ASC_KEY_P8
+# is NOT enough: an env ASC_KEY_ID still wins in tier 3, where a key id that
+# is not the /asc one never reaches the /asc key and the /asc issuer is never
+# paired with it, so the operator would land on the same dead end this change
+# exists to remove.  The remedy must name both variables.
+: > "$FAKE_LOG"
+if ASC_KEY_PATH="" ASC_ISSUER_ID="" ASC_KEY_ID=OTHERKEY01 ASC_KEY_P8="$(<"${tmp}/other.p8")" bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  load_secrets required
+' 2>"${tmp}/no-issuer-bis.err"; then
+  fail "an ambient key with a foreign key id and no issuer was accepted"
+fi
+grep -q 'ASC_ISSUER_ID is missing' "${tmp}/no-issuer-bis.err" ||
+  fail "the missing issuer was not named in the failure"
+grep -q 'unset ASC_KEY_P8 and ASC_KEY_ID' "${tmp}/no-issuer-bis.err" ||
+  fail "the refusal did not name the reachable remedy (unset ASC_KEY_P8 and ASC_KEY_ID)"
+if grep -q 'add ASC_ISSUER_ID to Infisical /asc' "${tmp}/no-issuer-bis.err"; then
+  fail "the refusal still names the /asc remedy, which it never reads for a foreign key id"
+fi
+if [ -s "$FAKE_LOG" ]; then
+  fail "Infisical /asc was consulted even though the ambient key was refused"
+fi
 
 # 2e. An env key id that is NOT the /asc one never gets the /asc key:  its own .p8 comes from
 # /authkey-<id>-p8, and /asc ASC_KEY_P8 is not requested.
@@ -426,10 +498,35 @@ APPLE_API_KEY_ID=APPLEKEY01 APPLE_API_ISSUER_ID=apple-issuer \
 #  into an empty one.  What the guard still insists on is the here-string:
 #  the value has to reach the decoder without ever appearing in an argument
 #  list or on a pipe.
-if ! grep -qE 'base64 (-d|-D) <<<"\$APPLE_API_KEY_P8_BASE64"' "$script"; then
+here_string_pattern='base64 (-d|-D) <<<"\$APPLE_API_KEY_P8_BASE64"'
+pipe_pattern='base64 (-d|-D) <<<[^)]*\|'
+#  A detector is only worth anything while it still recognizes the form it is
+#  there for, so the allowed form and the forbidden one are both matched
+#  against the same patterns before either is pointed at the script:  a
+#  pattern that stopped matching would let these guards pass without
+#  detecting anything, which reads as a passing check.
+cat > "${tmp}/probe-allowed-decode.sh" <<'PROBE'
+p8="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" 2>/dev/null)" || p8=""
+PROBE
+grep -qE "$here_string_pattern" "${tmp}/probe-allowed-decode.sh" ||
+  fail "the here-string detector no longer recognizes the allowed form"
+cat > "${tmp}/probe-piped-decode.sh" <<'PROBE'
+p8="$(base64 -d <<<"$APPLE_API_KEY_P8_BASE64" | cat)"
+PROBE
+grep -qE "$pipe_pattern" "${tmp}/probe-piped-decode.sh" ||
+  fail "the pipe detector no longer recognizes a piped base64 decode"
+#  The pipe has to sit between the here-string and the end of the command
+#  substitution, because that is where the decode output would leave the
+#  decoder.  A detector loose enough to also match the `||` of the
+#  command chain the decode is part of would fail this script on its own
+#  decode, which is the form the first guard exists to allow.
+if grep -qE "$pipe_pattern" "${tmp}/probe-allowed-decode.sh"; then
+  fail "the pipe detector matches the decoder's own command chain"
+fi
+if ! grep -qE "$here_string_pattern" "$script"; then
   fail "the base64 body is not decoded through a here-string"
 fi
-if grep -qE 'base64 (-d|-D) [^<]*\|' "$script"; then
+if grep -qE "$pipe_pattern" "$script"; then
   fail "the base64 body is decoded through a pipe"
 fi
 
@@ -531,6 +628,49 @@ env -u ASC_KEY_PATH -u ASC_KEY_P8 -u ASC_KEY_ID -u ASC_ISSUER_ID bash -c '
   load_secrets
   [[ "$AUTH_MODE" == none && -z "$ASC_TMP_DIR" ]]
 ' || fail "the optional call did not survive a missing credential"
+
+# 2m. The upload path hands off instead of dying in silence.  The package
+# has already been built at that point, so an operator whose credential is
+# missing has to learn where the artifact is and how to provision the key.
+# The handoff has to be REACHABLE:  a required credential load refuses every
+# missing credential before it, so the guidance behind it never ran.  The
+# upload still does not happen either way, because the handoff ends the run
+# with a nonzero exit.
+upload_block="$(awk '
+  /^PACKAGE="\$\(ls -1 "\$EXPORT_DIR/ { grab = 1 }
+  grab { print }
+  grab && /^fi$/ { grab = 0 }
+' "$script")"
+if [ -z "$upload_block" ]; then
+  fail "could not extract the upload path from ship-testflight.sh"
+fi
+printf '%s\n' "$upload_block" > "${tmp}/upload-block.sh"
+: > "$FAKE_LOG"
+: > "$ASC_TEST_LOG"
+mkdir -p "${tmp}/export"
+: > "${tmp}/export/app.ipa"
+#  The handoff ends the run with a nonzero exit, so the exit code is read
+#  without tripping errexit.
+rc=0
+out="$(env -u ASC_KEY_ID -u ASC_ISSUER_ID -u ASC_KEY_PATH -u ASC_KEY_P8 \
+  EXPORT_DIR="${tmp}/export" APP_KEY=socratic BUNDLE_ID=com.socratictrade.ios \
+  bash -c '
+  set -euo pipefail
+  source "'"$funcs"'"
+  #  No reader at all, so the credential is ABSENT rather than rejected.
+  FLEET_SECRETS_BIN=/nonexistent/fleet-secrets
+  PATH="$(dirname "$(command -v node)"):/usr/bin:/bin"
+  source "'"$tmp"'/upload-block.sh"
+' 2>&1)" || rc=$?
+if [ "$rc" -ne 3 ]; then
+  fail "the upload path did not hand off with exit 3 (rc=$rc): $out"
+fi
+grep -Fq "Package ready at: ${tmp}/export/app.ipa" "$ASC_TEST_LOG" ||
+  fail "the handoff did not report where the built package is"
+grep -Fq 'Upload blocked' "$ASC_TEST_LOG" ||
+  fail "the handoff did not report that the upload is blocked"
+grep -Fq 'Owner handoff:' "$ASC_TEST_LOG" ||
+  fail "the handoff did not carry the owner handoff steps"
 
 # 3. The credential never travels in a command argument.  The secret reaches
 #    the child through the environment, so its own argv must not carry it.
@@ -642,5 +782,31 @@ done
 if grep -nE '(~|\$\{?HOME\}?)/\.secrets' "$script" >/dev/null; then
   fail "ship-testflight.sh still names the old secrets folder"
 fi
+
+# The version helpers run inside command substitutions, where load_secrets
+# would write a temp key whose cleanup trap dies with the subshell.  They must
+# check for a credential instead.
+for fn in asc_next_shared_build asc_released_store_version; do
+  body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{" {g=1} g {print} g && /^}/ {exit}' "$script")"
+  [[ -n "$body" ]] || fail "could not read ${fn}"
+  if grep -v '^[[:space:]]*#' <<<"$body" | grep -q 'load_secrets'; then
+    fail "${fn} calls load_secrets inside a command substitution (leaks the temp key dir)"
+  fi
+  grep -q 'asc_credential_available' <<<"$body" || fail "${fn} does not check for a credential"
+done
+
+# The released-version helper keeps the client's reason and its auth status:
+# a discarded stderr or a flattened status 4 hides a credential fault behind
+# a generic "cannot read the released version".
+body="$(awk '/^asc_released_store_version\(\) \{/ {g=1} g {print} g && /^}/ {exit}' "$script")"
+if grep -v '^[[:space:]]*#' <<<"$body" | grep -q '2>/dev/null'; then
+  fail "asc_released_store_version discards the client's stderr"
+fi
+grep -q 'return 4' <<<"$body" || fail "asc_released_store_version does not preserve the auth status 4"
+grep -q 'released-store-version:\*' <<<"$body" || fail "asc_released_store_version does not log the client's reason"
+if grep -q 'asc_released_store_version "\$ASC_PLATFORM" 2>/dev/null' "$script"; then
+  fail "the fixed-version caller discards the released-version reason"
+fi
+unset body
 
 echo "ok: ASC credential resolution (environment first, then Infisical, a named path ignored, temp key removed)"

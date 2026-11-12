@@ -282,7 +282,7 @@ export async function runSignalHealthRefresh(
   const now = opts.now ?? Date.now();
   const nowIso = new Date(now).toISOString();
   const periodEnd = utcDate(now);
-  const rows = listSignalHealthDecisionRows(userId);
+  const rows = listSignalHealthDecisionRows(userId, { now });
   const result: SignalHealthRefreshResult = { horizons: [] };
   const newAlarms: DriftState[] = [];
 

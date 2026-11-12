@@ -168,8 +168,8 @@ Superseded on 2026-10-17: #4727 has since landed on `main`.  The workflow, `scri
 
 ## Zero-Code Findings
 
-- The first Agent-Sync `linear_claim` returned `not_configured` for CURSOR.  A later session confirmed `linear_whoami` is CURSOR, and the claim plus the progress comment with the PR link are on ST-3326 through Agent-Sync.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
-- Agent-Sync `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+- The first Ag***-S**c `linear_claim` returned `not_configured` for CURSOR.  A later session confirmed `linear_whoami` is CURSOR, and the claim plus the progress comment with the PR link are on ST-3326 through Ag***-S**c.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
+- Ag***-S**c `linear_claim` returns `not_configured` for CURSOR (`LINEAR_SEATS` is GROK-WEB only).  The claim was made with the board CLI as the Cursor Linear app.  Zulip post returned `not_authorized` (no CURSOR Zulip key on the MCP host).
 
 ## Merge-main (MM takeover, 2026-10-16)
 

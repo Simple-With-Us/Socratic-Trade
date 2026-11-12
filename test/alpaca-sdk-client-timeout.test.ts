@@ -47,3 +47,66 @@ describe("Alpaca SDK client timeout", () => {
     expect(trades?.BAD).toBeUndefined();
   });
 });
+
+// Kody review on PR #5005: the `stockLatestQuotes` response is UNTRUSTED vendor
+// data.  It must be validated before `resp.quotes` is used, and the schema
+// must stay NON-STRICT so vendor fields we do not model are preserved.
+describe("Alpaca legacy client — latest quotes validation", () => {
+  const opts: LegacyAlpacaConstructorOptions = { paper: true };
+
+  const clientWithQuotes = (quotes: unknown) =>
+    createLegacyAlpacaRestClient(
+      {
+        marketData: {
+          stocks: {
+            stockLatestQuotes: async () => ({ quotes })
+          }
+        }
+      } as never,
+      opts
+    );
+
+  it("keeps the quote fields and PRESERVES vendor fields", async () => {
+    const client = clientWithQuotes({
+      AAPL: {
+        ap: 201,
+        bp: 199,
+        as: 5,
+        bs: 10,
+        t: "2026-11-05T19:45:00.000Z",
+        x: "D",
+        z: "C"
+      }
+    });
+    const quotes = await client.getLatestQuotes(["AAPL"]);
+    expect(quotes.AAPL?.ap).toBe(201);
+    expect(quotes.AAPL?.bp).toBe(199);
+    expect(quotes.AAPL?.t).toBe("2026-11-05T19:45:00.000Z");
+    // Unknown-to-us vendor fields survive the validation.
+    expect(quotes.AAPL?.x).toBe("D");
+    expect(quotes.AAPL?.z).toBe("C");
+  });
+
+  it("fails closed on a malformed quotes envelope", async () => {
+    const client = clientWithQuotes("not-a-map");
+    expect(await client.getLatestQuotes(["AAPL"])).toEqual({});
+  });
+
+  it("drops only the malformed row, not the whole batch", async () => {
+    const client = clientWithQuotes({
+      AAPL: { ap: 201, bp: 199, t: "2026-11-05T19:45:00.000Z" },
+      BAD: null
+    });
+    const quotes = await client.getLatestQuotes(["AAPL", "BAD"]);
+    expect(quotes.AAPL?.ap).toBe(201);
+    expect(quotes.BAD).toBeUndefined();
+  });
+
+  it("returns no quotes when the response has no quotes map", async () => {
+    const client = createLegacyAlpacaRestClient(
+      { marketData: { stocks: { stockLatestQuotes: async () => ({}) } } } as never,
+      opts
+    );
+    expect(await client.getLatestQuotes(["AAPL"])).toEqual({});
+  });
+});

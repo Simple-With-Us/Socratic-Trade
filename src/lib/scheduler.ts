@@ -6,7 +6,11 @@
 
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
-import { probeCongressShareTokenIfDue, runCongressDailyShareIfDue } from "./congress-share";
+import {
+  probeCongressShareTokenIfDue,
+  runCongressDailyShareIfDue,
+  runCongressStaleCatchupIfDue
+} from "./congress-share";
 import { secXbrlEnrichmentEnabled } from "./data-providers";
 import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
@@ -17,7 +21,7 @@ import { isEarningsCallsRefreshDue, refreshEarningsCallsTranscriptsIfDue } from 
 import { isRoicTranscriptRefreshDue, refreshRoicTranscriptsIfDue } from "./web-sources/roic-transcripts";
 import { runDailyLearningReviewIfDue } from "./learning-review";
 import { isRunAllowedNow } from "./market-hours";
-import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry } from "./sqlite-event-loop";
+import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry, yieldIfDue } from "./sqlite-event-loop";
 import { serverKnobBool } from "./server-knobs";
 import { runProviderTierCheckIfDue } from "./provider-tier";
 import { isRunBackedOff } from "./run-failure-watchdog";
@@ -938,6 +942,10 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // close its own now-stale check-in a second time, or worse, clobber a newer tick's still-open
   // in-progress check-in (tickGuardHost.__tickSentryCheckInId by then belongs to that newer tick).
   const myTickGeneration = tickGuardHost.__tickGeneration;
+  // Phase-boundary yields: synchronous DB helpers in the sweeps below can pin
+  // the event loop; yield between phases so /api/live can answer (stall class
+  // behind SOCRATIC-TRADE-2Q). yieldIfDue caps this at one yield per 50ms.
+  const tickYield = { ms: Date.now() };
   // Crashed-run sweep for rows THIS instance started.  Runs before the leader gate so a process
   // that lost leadership can still close its own wedged run.  reapUnowned stays false: a follower
   // must never close the leader's runs (ST-8).  The leader reaps other instances after the gate.
@@ -956,6 +964,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   } catch (err) {
     console.error("[scheduler] stale-run sweep error:", err);
   }
+  await yieldIfDue(tickYield);
 
   // Same repair for the mobile/PWA command queue: claimNextQueuedCommand marks a row 'running' and
   // nothing else in the codebase ever selects that status, so a crash mid-command strands the row
@@ -977,6 +986,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
+  await yieldIfDue(tickYield);
   // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
@@ -1019,6 +1029,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   } catch (err) {
     console.error("[scheduler] unowned stale-run sweep error:", err);
   }
+  await yieldIfDue(tickYield);
 
   // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
   // reclaim (no row deletes).  Leader only: every replica checkpointing
@@ -1052,6 +1063,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   let sentryStatus: SentrySchedulerCheckInStatus = "ok";
 
   try {
+  await yieldIfDue(tickYield);
 
   // Drain durable material-event inboxes on every leader tick, independent of SEC ingestion
   // flags. Events may be produced by filings, transcripts, broker state, or operator actions;
@@ -1222,6 +1234,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // CONGRESS_SHARE_ENABLED are set and the batch hasn't already run today. Fully self-guarded.
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
+  );
+
+  // Same-session retry of the tickers the nightly share withheld as stale (late-posting NAVs and
+  // thin names), so they do not wait a whole UTC day.  Bounded retries; no-op when nothing pending.
+  void journalLane("congress-stale-catchup", {}, () => runCongressStaleCatchupIfDue(Date.now())).catch((err) =>
+    console.error("[scheduler] congress-share stale catch-up error:", err)
   );
 
   if (secXbrlEnrichmentEnabled()) {
@@ -1492,7 +1510,20 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           continue;
         }
         const executionState = deriveExecutionState(policy, account);
-        const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        let brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+        try {
+          brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        } catch (error) {
+          // One account with unusable stored credentials (e.g. a key saved without its
+          // secret) must not abort the tick for every other account's lanes.
+          audit(
+            "scheduler_broker_gateway_unavailable",
+            { connectedAccountId: account.id, error: error instanceof Error ? error.message.slice(0, 300) : "unknown" },
+            userId,
+            account.id
+          );
+          continue;
+        }
         
         if (account.isDraining) {
           if (brokerGateway && policy.accountNumber) {

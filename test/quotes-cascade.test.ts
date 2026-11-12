@@ -60,7 +60,15 @@ const mockFetchYahooFinanceQuote = vi.fn();
 const mockFetchYahooFinanceQuotesBatch = vi.fn();
 vi.mock("../src/lib/yahoo-finance", () => ({
   fetchYahooFinanceQuote: (sym: string) => mockFetchYahooFinanceQuote(sym),
-  fetchYahooFinanceQuotesBatch: (syms: string[]) => mockFetchYahooFinanceQuotesBatch(syms)
+  fetchYahooFinanceQuotesBatch: (syms: string[]) => mockFetchYahooFinanceQuotesBatch(syms),
+  fetchYahooFinanceChartQuotes: async (syms: string[]) => {
+    const map = new Map();
+    for (const sym of syms) {
+      const quote = await mockFetchYahooFinanceQuote(sym);
+      if (quote) map.set(sym, quote);
+    }
+    return map;
+  }
 }));
 
 describe("isQuoteFresh / cascadeFreshMaxAgeMs", () => {
@@ -325,7 +333,7 @@ describe("resolveVenueQuoteMode", () => {
     ).toBe("venue_locked");
   });
 
-  it("returns realtime for Alpaca paper (real-time paper simulation)", () => {
+  it("returns venue_delayed for the connected Alpaca paper account (delayed_sip tape)", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "ap",
       broker: "alpaca",
@@ -333,6 +341,17 @@ describe("resolveVenueQuoteMode", () => {
     });
     expect(
       resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap" }, "local")
+    ).toBe("venue_delayed");
+  });
+
+  it("keeps Alpaca live on the realtime tape", () => {
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-live",
+      broker: "alpaca",
+      environment: "live"
+    });
+    expect(
+      resolveVenueQuoteMode({ activeBroker: "alpaca", connectedAccountId: "ap-live" }, "local")
     ).toBe("realtime");
   });
 });
@@ -349,7 +368,9 @@ describe("fetchFreshQuotesCascade", () => {
   beforeEach(() => {
     vi.resetAllMocks();
 
-    // Default: Alpaca realtime venue
+    // Default: Alpaca LIVE (real-time venue).  The connected Alpaca PAPER
+    // account is a venue-delayed tape (owner authorization 2026-11-05) and has
+    // its own coverage in test/alpaca-paper-delayed-sip.test.ts.
     mockGetPolicy.mockReturnValue({
       activeBroker: "alpaca",
       accountNumber: "ACC123",
@@ -359,7 +380,7 @@ describe("fetchFreshQuotesCascade", () => {
     mockGetConnectedAccount.mockReturnValue({
       id: "alp-1",
       broker: "alpaca",
-      environment: "paper"
+      environment: "live"
     });
     mockGetActiveConnectedAccount.mockReturnValue(undefined);
     mockResolveAlpacaMarketData.mockReturnValue({
@@ -534,6 +555,90 @@ describe("fetchFreshQuotesCascade", () => {
     expect(age.ageSec!).toBeLessThan(5);
   });
 
+  it("venue_delayed WITHOUT skipActiveBroker: later levels do NOT fill (the venue tape is authoritative)", async () => {
+    // L1a ran and the Alpaca paper venue priced nothing — the pending list is
+    // cleared so Alpaca/Yahoo can never overlay the paper venue tape (Q5's
+    // unpriced-symbol cascade is Tradier-only; see the Tradier case below).
+    const now = Date.now();
+    const freshIso = new Date(now - 20_000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      accountNumber: "PA33IDTHMFK9",
+      connectedAccountId: "ap-paper",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-paper",
+      broker: "alpaca",
+      environment: "paper"
+    });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 210,
+        asOf: freshIso,
+        bid: 209.9,
+        ask: 210.1,
+        prevClose: 205,
+        open: 206,
+        high: 211,
+        low: 204,
+        volume: 1000
+      }
+    });
+
+    const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper");
+
+    expect(mockGetEquityQuotes).toHaveBeenCalled();
+    expect(mockEnrich).not.toHaveBeenCalled();
+    expect(result.AAPL).toBeUndefined();
+  });
+
+  it("venue_delayed WITH skipActiveBroker: later levels may still fill (L1a never ran — Sentry pendingSymbols thread)", async () => {
+    // The caller already hit the broker itself, so L1a is skipped.  Blanking
+    // the pending list here would drop every fallback and leave the caller
+    // with an empty result.
+    const now = Date.now();
+    const freshIso = new Date(now - 20_000).toISOString();
+
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "alpaca",
+      accountNumber: "PA33IDTHMFK9",
+      connectedAccountId: "ap-paper",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({
+      id: "ap-paper",
+      broker: "alpaca",
+      environment: "paper"
+    });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 210,
+        asOf: freshIso,
+        bid: 209.9,
+        ask: 210.1,
+        prevClose: 205,
+        open: 206,
+        high: 211,
+        low: 204,
+        volume: 1000
+      }
+    });
+
+    const result = await fetchFreshQuotesCascade(["AAPL"], "local", "PA33IDTHMFK9", "ap-paper", {
+      skipActiveBroker: true
+    });
+
+    expect(mockGetEquityQuotes).not.toHaveBeenCalled();
+    expect(mockEnrich).toHaveBeenCalled();
+    expect(result.AAPL?.price).toBe(210);
+  });
+
   it("on Tradier live, KEEPS the Tradier quote and does not overlay Alpaca or Yahoo", async () => {
     const now = Date.now();
     const livePrint = new Date(now - 30 * 1000).toISOString();
@@ -566,6 +671,26 @@ describe("fetchFreshQuotesCascade", () => {
     expect(result.MSFT.provider).toBe("tradier");
     expect(result.MSFT.asOf).toBe(livePrint);
     expect(result.MSFT.venuePriceAuthoritative).toBeUndefined();
+  });
+
+  it("on Tradier paper, cascades externally for symbols the venue could not price at all (Q5)", async () => {
+    const liveIso = new Date(Date.now() - 20 * 1000).toISOString();
+    mockGetPolicy.mockReturnValue({
+      activeBroker: "tradier",
+      accountNumber: "VA00000000",
+      connectedAccountId: "tr-sand",
+      maxQuoteAgeSec: 120
+    });
+    mockGetConnectedAccount.mockReturnValue({ id: "tr-sand", broker: "tradier", environment: "paper" });
+    mockGetEquityQuotes.mockResolvedValue({});
+    mockEnrich.mockResolvedValue({
+      MSFT: { price: 305, asOf: liveIso, bid: 304, ask: 306, volume: 1000, prevClose: 300, open: 301, high: 306, low: 300.5 }
+    });
+
+    const result = await fetchFreshQuotesCascade(["MSFT"], "local", "VA00000000", "tr-sand");
+
+    expect(mockEnrich).toHaveBeenCalledWith(["MSFT"]);
+    expect(result.MSFT.price).toBe(305);
   });
 
   it("falls back to Level 2 (Alpaca Snapshot) if Level 1 returns a quote older than maxQuoteAgeSec (realtime)", async () => {
@@ -775,6 +900,9 @@ describe("fetchFreshQuotesCascade", () => {
         bid: 149.9,
         ask: 150.1,
         prevClose: 148,
+        open: 149.8,
+        high: 150.4,
+        low: 149.6,
         vwap: 149.5,
         asOf: freshIso,
         provider: "alpaca"
@@ -1118,6 +1246,29 @@ describe("syncQuotesToFieldStore field provenance", () => {
     // The winning price keeps Finnhub's stamps.
     expect(byField.price.source).toBe("finnhub");
     expect(byField.price.asOf).toBe("2026-09-21T14:00:00.000Z");
+  });
+
+  it("persists bidSize/askSize/close/netChange fetched by the cascade (Q1)", () => {
+    mockUpsertSymbolFieldLatest.mockClear();
+    const quote: BrokerQuote = {
+      symbol: "AAPL",
+      price: 180.5,
+      bid: 180.4,
+      ask: 180.6,
+      bidSize: 300,
+      askSize: 200,
+      close: 180.5,
+      netChange: 2.5,
+      asOf: "2026-09-21T14:00:00.000Z",
+      fetchedAt: "2026-09-21T14:00:05.000Z",
+      provider: "finnhub"
+    };
+
+    syncQuotesToFieldStore({ AAPL: quote });
+
+    const records = mockUpsertSymbolFieldLatest.mock.calls[0][0] as any[];
+    const fields = records.map((r) => r.field);
+    expect(fields).toEqual(expect.arrayContaining(["bidSize", "askSize", "close", "netChange"]));
   });
 
   it("falls back to quote-level stamps when a field has no provenance receipt", () => {

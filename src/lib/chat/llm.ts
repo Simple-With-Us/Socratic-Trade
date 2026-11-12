@@ -14,7 +14,8 @@ import { resolveLlmCredential } from "../db";
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "../llm-usage";
 import { isAbortOrTimeoutError } from "../network-errors";
 import { applyOpenRouterClassifierEnrichment, applyOpenRouterProviderRouting } from "../llm-call";
-import { llmFetch, LLM_TIMEOUT_MS, reasoningCapabilityForModel, withLlmRequestBounds } from "../llm-request";
+import { llmFetch, LLM_TIMEOUT_MS, normalizeReasoningEffortForModel, reasoningCapabilityForModel, withLlmRequestBounds } from "../llm-request";
+import { isCodeCliOnlyModel } from "../llm-model-catalog";
 // Reuse the SAME model-family + OpenRouter-wire-id helpers the strategy engine's
 // resolveLlmEndpoint uses (llm-provider.ts), so the Coach's provider precedence and model-id
 // normalization can never drift from the engine's.  See llmForModel / chatProviderForModel below.
@@ -709,7 +710,8 @@ export class OpenAILLM implements ChatLLM {
         ? withLlmRequestBounds(baseBody, "chat-completions", {
             model: this.model,
             maxOutputTokens: 1024,
-            reasoningEffort: this.reasoningEffort
+            reasoningEffort: this.reasoningEffort,
+            endpointProvider: this.provider
           })
         : { ...baseBody, max_tokens: 1024 };
       if (this.provider === "openrouter") applyOpenRouterProviderRouting(requestBody);
@@ -878,10 +880,15 @@ export function llmForModel(
   if ((cliFamily === "meta" || cliFamily === "minimax") && llmRouteFor(cliFamily, userId ?? "local") === "code-cli") {
     const url = codeCliUrl(cliFamily, userId ?? "local");
     const cliModel = nativeSlugFor(trimmed);
+    // Explicit effort so the provider default (max on MiniMax-M3.1-Flash) never applies; undefined
+    // for models with no documented effort (MiniMax-M3), which the broker then receives without one.
+    const cliEffort = reasoningCapabilityForModel(cliModel)
+      ? normalizeReasoningEffortForModel(cliModel, opts.reasoningEffort)
+      : undefined;
     // No agent tool loop: only existing plain-text context is sent. Never executeTool.
     return { modelName: cliModel, async run(args) {
       const res = await llmFetch(url, { method: "POST", signal: args.abortSignal,
-        body: JSON.stringify({ model: cliModel, max_tokens: 1500, messages: [
+        body: JSON.stringify({ model: cliModel, max_tokens: 1500, ...(cliEffort ? { reasoning_effort: cliEffort } : {}), messages: [
           { role: "system", content: args.system },
           ...(args.history ?? []).map(turn => ({ role: turn.role, content: turn.text })),
           { role: "user", content: args.message }
@@ -892,6 +899,10 @@ export function llmForModel(
       return { text: result.choices[0].message.content, toolCalls: [], citations: [] };
     } };
   }
+
+  // Code CLI-only ids (muse-wonder-*-contributor) exist on no other route: never send them to
+  // OpenRouter or api.meta.ai.  Same offline fallback as a model with no usable key.
+  if (isCodeCliOnlyModel(trimmed)) return new MockLLM();
 
   // 0. Native Meta: when the user chose "direct" for Meta and has a Meta key, a Muse Spark model
   //    goes straight to api.meta.ai.  Otherwise it falls through to the OpenRouter path below.

@@ -12,7 +12,7 @@ Only the SSE delivery path was actually interoperating.
 
 ## Why
 
-Flagged in a Congress.Trade cross-agent multi-agent-audit closeout in `#agent-sync` on
+Flagged in a Congress.Trade cross-agent multi-agent-audit closeout in `#ag***-s**c` on
 2026-07-12: "Socratic webhook channel is dead on arrival: webhook.ts:317 sends
 `X-Signature: sha256=<hex>` but Socratic's verifier compares bare hex — every signed
 delivery 401s and burns all 5 retries; only SSE interops. Fix belongs in

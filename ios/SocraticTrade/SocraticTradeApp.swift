@@ -229,7 +229,7 @@ struct LegalConsentSheet: View {
                     .font(.appBody)
                     .foregroundStyle(.secondary)
 
-                Text("You can delete your account yourself in Account & Settings.  Database backups are kept for 7 days.  Fact-level research notes may join a shared research corpus; risk rules and strategy instructions stay private.")
+                Text("You can delete your account yourself in Account & Settings.  Backups are kept for at most 2 weeks: short-term backups for 3 days, and weekly backups for 2 weeks, then deleted.  Fact-level research notes may join a shared research corpus; risk rules and strategy instructions stay private.")
                     .font(.appBody)
                     .foregroundStyle(.secondary)
 

@@ -7,7 +7,7 @@
 // short backoff elapses.  Queued callers still run once a slot frees.  Callers that arrive
 // during backoff get a null slot and degrade without another Sentry error.
 
-import { isAbortOrTimeoutError } from "../network-errors";
+import { isStrategyRagRetrievalTimeout } from "../rag-retrieval-deadline";
 
 export const DEFAULT_RAG_RETRIEVAL_CONCURRENCY = 4;
 export const DEFAULT_RAG_RETRIEVAL_BACKOFF_BASE_MS = 2_000;
@@ -65,10 +65,26 @@ export function retrievalBackoffEnabled(): boolean {
   return process.env.NODE_ENV !== "test";
 }
 
-export function countsTowardRetrievalBackoff(error: unknown): boolean {
-  if (isAbortOrTimeoutError(error)) return true;
-  if (error instanceof Error && /timed out|timeout|deadline/i.test(error.message)) return true;
+function isRetrievalAbortSignal(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    const name = (current as { name?: unknown }).name;
+    if (name === "AbortError" || name === "TimeoutError") return true;
+    current =
+      typeof current === "object" && "cause" in current
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+  }
   return false;
+}
+
+/**
+ * Our retrieval deadline (`__deadlineTimeout` / the strategy deadline message) or an
+ * AbortError / TimeoutError. Provider prose that merely contains "timeout" stays out,
+ * so a 504 Gateway Timeout still pages as a lookup failure.
+ */
+export function countsTowardRetrievalBackoff(error: unknown): boolean {
+  return isStrategyRagRetrievalTimeout(error) || isRetrievalAbortSignal(error);
 }
 
 export function retrievalBackoffRemainingMs(now = Date.now()): number {

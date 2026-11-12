@@ -15,7 +15,9 @@
 # THE CREDENTIAL IS RESOLVED FROM TWO PLACES (AFC-459, revision 2):
 #   1. APPLE_API_KEY_ID / APPLE_API_ISSUER_ID / APPLE_API_KEY_P8_BASE64, the
 #      hosted trio, when all three names are in the environment
-#   2. Infisical prod /asc, the folder the ASC trio lives in
+#   2. Infisical prod, the Fleet-OPS project's /asc folder, and nowhere else
+#      (owner ruling 2026-10-11, any app may use Fleet-OPS /asc, ruling
+#      2026-10-17; no fallbacks and no overrides, owner policy 2026-10-24)
 # The environment beats the network, in this helper and in the client, so both
 # sides resolve the credential the same way.
 #
@@ -28,39 +30,44 @@ set +o xtrace
 set -euo pipefail
 export INFISICAL_DISABLE_UPDATE_CHECK=true
 
+# The App Store Connect credentials live in the Fleet-OPS project, in its
+# /asc folder (owner ruling 2026-10-11; any app may use it, ruling
+# 2026-10-17).  It is the id the other fleet ship lanes read from, and it is
+# not overridable:  there is one source, and a missing secret fails closed.
+FLEET_ASC_PROJECT_ID="8dae6d03-8f12-48b2-adf3-e5c1b881c8c5"
+
 if [[ $# -lt 1 ]]; then
   echo "usage: ios-asc-key-env.sh <command> [args...]" >&2
   exit 2
 fi
 
-# A masked preview of a value:  the first eight and the last four
-# characters, and nothing else.  A value too short to mask safely is
-# withheld whole, so a preview can never become the secret it describes.
-#
-# The shape is the fleet's blessed one (HogHunter #213):  every copy of the
-# App Store Connect shell layer masks a refused value the same way.
-key_preview() {
-  local v="${1:-}" n
-  n=${#v}
-  if [[ "$n" -eq 0 ]]; then
-    printf '%s' "(empty)"
-    return 0
-  fi
-  if [[ "$n" -le 12 ]]; then
-    printf '[%d chars, withheld]' "$n"
-    return 0
-  fi
-  printf '%s...%s' "${v:0:8}" "${v: -4}"
-}
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 module="${repo_root}/scripts/ios-fleet/asc-key.mjs"
 
-# Refuse a value that is not a usable key, and say so with a masked preview:
-# a refused credential has to be identifiable without ever being printed.
+# The fleet's blessed masked preview (scripts/ios-fleet/asc-api.mjs):  the
+# first eight and the last four characters, and nothing else.  A value too
+# short to mask safely is withheld whole, so a preview can never become the
+# secret it describes.
+#
+# A refused credential is named this way.  The operator has to be able to tell
+# WHICH key was refused without the key ever being printed (owner ruling
+# 2026-07-16), and the shell layer and the client have to name it the same
+# way:  the client prints this exact shape for the same refusal, so the two
+# read alike in a log.
+masked_preview() {
+  local text="$1"
+  if [[ -z "$text" ]]; then printf '(empty)'; return; fi
+  if [[ "${#text}" -le 12 ]]; then printf '[%d chars, withheld]' "${#text}"; return; fi
+  printf '%s...%s' "${text:0:8}" "${text: -4}"
+}
+
+# Refuse a value that is not a usable key.  The refusal names where the key
+# came from, why it was refused, and a masked preview of the value, so the
+# operator can tell which credential was refused.  The value itself is never
+# printed, and the preview stays by Jay's decision of 2026-10-25 (ST-4579).
 refuse_unusable_key() {
   local where="$1" value="$2"
-  echo "::error::The ASC key from ${where} is not a PEM private key; preview: $(key_preview "$value")" >&2
+  echo "::error::The ASC key from ${where} is not a PEM private key (error: invalid-key-format; preview: $(masked_preview "$value"))." >&2
   exit 1
 }
 
@@ -91,12 +98,10 @@ usable_pem() {
 
 key=""
 source_name=""
-hosted_value=""
 
 # 1. The hosted trio.  The key id, the issuer and the key belong together, so
 #    all three names have to be there.
 if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE_API_KEY_P8_BASE64:-}" ]]; then
-  hosted_value="$APPLE_API_KEY_P8_BASE64"
   #  Whether this host can decode base64 at all is settled with a known-good
   #  body, so a refusal on the operator's value is reported as a bad body and
   #  not as a machine that cannot decode.  The two are different problems and
@@ -130,12 +135,15 @@ if [[ -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" && -n "${APPLE
   #  The decode is not trusted to fail on a bad body -- BSD decodes what it
   #  can and returns 0, GNU fails on the invalid byte -- so the body is
   #  checked here, where the value the operator set is still in hand and can
-  #  be named in the refusal.  A masked preview, never the value.
+  #  be named in the refusal.  The refusal names the variable, the error
+  #  class and a masked preview of the value, which is the shape the client
+  #  prints for the same refusal.  The key ID is not printed:  the workflow
+  #  masks it as a credential name (Kody 4369830785).
   if [[ -z "$key" ]] || ! node "$module" validate >/dev/null 2>&1 <<< "$key"; then
     if [[ "$decoder_ok" -eq 0 ]]; then
-      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read; preview: $(key_preview "$hosted_value")" >&2
+      echo "::error::No usable base64 decoder on this host, so APPLE_API_KEY_P8_BASE64 could not be read (error: no-base64-decoder; preview: $(masked_preview "$APPLE_API_KEY_P8_BASE64"))." >&2
     else
-      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key; preview: $(key_preview "$hosted_value")" >&2
+      echo "::error::APPLE_API_KEY_P8_BASE64 is set but does not decode to a PEM private key (error: invalid-hosted-key; preview: $(masked_preview "$APPLE_API_KEY_P8_BASE64"))." >&2
     fi
     exit 1
   fi
@@ -146,10 +154,6 @@ fi
 if [[ -z "$key" ]]; then
   if ! command -v infisical >/dev/null 2>&1; then
     echo "::error::Infisical CLI is not installed." >&2
-    exit 1
-  fi
-  if [[ -z "${INFISICAL_PROJECT_ID:-}" ]]; then
-    echo "::error::Missing INFISICAL_PROJECT_ID." >&2
     exit 1
   fi
 
@@ -175,23 +179,24 @@ if [[ -z "$key" ]]; then
     exit 1
   fi
 
-  #  The ASC trio lives in the /asc folder:  ASC_KEY_ID, ASC_ISSUER_ID and
-  #  ASC_KEY_P8 are all there, and every other reader in this repository asks
-  #  for that folder.  The root copy of ASC_KEY_P8 is the same value, but the
-  #  key id and the issuer are only in /asc, so /asc is the folder that
-  #  carries the credential as a whole.
+  #  The ASC trio has exactly one home:  Fleet-OPS /asc (owner ruling
+  #  2026-10-11; any app may use it, ruling 2026-10-17).  INFISICAL_PROJECT_ID
+  #  here is the application project, which has no /asc folder (ST-4579), so
+  #  it is never asked for the key:  the key id and the issuer the workflow
+  #  exports come from the same Fleet-OPS folder, and a key from anywhere
+  #  else could not pair with them.
   key="$(
     INFISICAL_TOKEN="$token" infisical secrets get ASC_KEY_P8 \
       --plain --silent --telemetry=false --expand=false \
-      --projectId="$INFISICAL_PROJECT_ID" --env=prod --path=/asc \
+      --projectId="$FLEET_ASC_PROJECT_ID" --env=prod --path=/asc \
       2>/dev/null || true
   )"
   unset token
-  source_name="Infisical prod"
+  source_name="Infisical prod (Fleet-OPS /asc)"
 fi
 
 if [[ -z "$key" ]]; then
-  echo "::error::Missing ASC key material in Infisical prod /asc." >&2
+  echo "::error::Missing required secret ASC_KEY_P8:  no ASC key material in Infisical prod (Fleet-OPS /asc)." >&2
   exit 1
 fi
 

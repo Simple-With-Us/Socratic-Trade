@@ -18,7 +18,12 @@
 // this module is on the instrumentation import chain, which Next also bundles for the edge runtime, so
 // it must NOT statically import Node-only modules (crypto, better-sqlite3/db) — keep it fetch-only.
 
-import { applyCongressEvent, type CongressEvent } from "./congress-trade-events";
+import {
+  applyCongressEvent,
+  type CongressEvent,
+  TradeRetractEventSchema,
+  type TradeRetractEvent
+} from "./congress-trade-events";
 import { logApiHealth } from "./db-health";
 import {
   PEER_LANE_CONGRESS_SSE,
@@ -234,17 +239,48 @@ const CONTROL_EVENTS = new Set(["cursor", "ping", "reconnect", "error"]);
  *    lines when absent (a webhook-style envelope delivered over SSE).
  * Returns null when the payload isn't an object.
  */
-export function toCongressEventEnvelope(parsed: unknown, msg: SseMessage): CongressEvent | null {
+export function toCongressEventEnvelope(parsed: unknown, msg: SseMessage): CongressEvent | TradeRetractEvent | null {
   if (!parsed || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
   if (msg.event === "trade.new") {
     const txId = typeof obj.id === "string" ? obj.id : msg.id;
     return { type: "congress.trade", id: txId, data: { transaction: obj } };
   }
+  if (msg.event === "trade.retract") return toRetractEnvelope(obj, msg);
   const env = obj as unknown as CongressEvent;
   if (!env.type && msg.event) env.type = msg.event;
   if (!env.id && msg.id) env.id = msg.id;
   return env;
+}
+
+/** Fields that carry retraction ids directly (see TradeRetractEventSchema). */
+const RETRACT_ID_KEYS = ["txId", "transactionId", "ids", "transactionIds", "transaction", "transactions", "trades", "retraction"];
+
+/**
+ * Map a `trade.retract` SSE payload to a validated retract event, or null when
+ * it fails TradeRetractEventSchema (applySseMessage then reports it dropped).
+ * Only a payload that names itself `trade.retract` (type or event) is taken as
+ * an envelope.  Anything else is a bare frame: a `type` field there is
+ * transaction data (for example "P"), not an event name.  A bare frame that
+ * already carries id fields becomes `data` as is; a bare transaction row is
+ * wrapped as `data.transaction`.  The event id is `ct-retract-<retractSeq>`
+ * (the webhook's id for the same retraction) when the frame has a retractSeq,
+ * so both channels dedupe together; otherwise the SSE id line, if any.
+ */
+function toRetractEnvelope(obj: Record<string, unknown>, msg: SseMessage): TradeRetractEvent | null {
+  const isEnvelope = obj.type === "trade.retract" || obj.event === "trade.retract";
+  const candidate: unknown = isEnvelope
+    ? obj
+    : { type: "trade.retract", data: RETRACT_ID_KEYS.some((k) => obj[k] !== undefined) ? obj : { transaction: obj } };
+  const parsed = TradeRetractEventSchema.safeParse(candidate);
+  if (!parsed.success) return null;
+  const event = parsed.data;
+  if (event.id === undefined) {
+    const seq = event.retractSeq ?? event.retraction?.retractSeq ?? event.data?.retractSeq ?? event.data?.retraction?.retractSeq;
+    const id = seq !== undefined ? `ct-retract-${seq}` : msg.id;
+    if (id) event.id = id;
+  }
+  return event;
 }
 
 /**

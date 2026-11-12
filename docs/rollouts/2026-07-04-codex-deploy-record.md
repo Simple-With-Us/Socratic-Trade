@@ -23,7 +23,7 @@
 
 ## Verification
 
-- `AGENT_TAG=CODEX /usr/bin/python3 /Users/jay/apps/agent-sync-poll.py`
+- `AGENT_TAG=CODEX /usr/bin/python3 /Users/jay/apps/ag***-s**c-poll.py`
 - `gh run list --workflow Deploy --limit 10`
 - `gh run view 18074904747 --json conclusion,headSha,status,updatedAt,workflowName`
 - `gh run list --workflow "Sync Preview Lanes" --limit 10`

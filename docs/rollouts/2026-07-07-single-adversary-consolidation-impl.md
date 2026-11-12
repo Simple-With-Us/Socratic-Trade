@@ -13,7 +13,7 @@
   called `src/lib/strategy.ts:1282`, gated by `shouldRunRedTeamDebate` `:2206`). Code
   cross-check: `grep -rn "approve-at-half\|adversaryUnavailable\|extractJsonPayload\|fetchLlmWithRetry" src` → nothing.
 - **New binding rule** added to `AGENTS.md` ("Design-vs-implementation drift — FLAG
-  IT") + announced in `#agent-sync`: every agent must verify design docs against code,
+  IT") + announced in `#ag***-s**c`: every agent must verify design docs against code,
   flag decided-but-unimplemented work to the owner, stamp the doc, keep an EFFORT-LOG row.
 - **Owner revision (2026-07-07)** of the spec's independence model (banner added to the
   spec top). New rules govern and override §3.8/§8/O4/R12–R14:
@@ -227,4 +227,4 @@ Tests: listed under Stage 5. Docs: this note, the spec banner, `docs/phase-7-str
   (accepted migration consequence; runs fail closed with an actionable message until then). Env-
   override deployments are seeded by migration v15 instead.
 - Landing: the Cowork sandbox cannot push or run `npm run build`; the Mac-side Claude helper (per
-  its standing #agent-sync offer) runs `scripts/land.sh` from a synced worktree of this branch.
+  its standing #ag***-s**c offer) runs `scripts/land.sh` from a synced worktree of this branch.

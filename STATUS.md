@@ -1,8 +1,243 @@
+## 2026-11-12 [gb-trader] ST-4630 — stale last-good screener profile
+
+**What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows no older than 24 hours (`SCREENER_PROFILE_MAX_STALE_MS`) and waits 30 seconds from when the failure returns before the next live attempt.  A refresh that is still running races a 1-second budget and returns the last-good map so the first request does not wait out two 15-second Nasdaq timeouts.  The map, the hold, and the in-flight refresh are one `globalThis` object so route bundles share them.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
+## 2026-11-12 CURSOR — ST-3999 proxy gate slot leak
+
+**What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, and `fetchWithRetry` cancels before a 429 retry.  `fetchCancelingErrorBody` is opt-in and is not on the `dataSourceFetch` path, so an unread 5xx there is bounded by the gate.  A max hold that has already delivered a chunk releases the slot without aborting the stream.  The idle timer and the proxy-leg timer stay armed until that stream closes.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
+
+**Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
+## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
+
+**What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
+## 2026-11-12 [gb-trader] ST-4624 — ops scripts CI workflow
+
+**What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
+
+**Next.**  PR open; `verify` green required.  Jay may add the job to branch protection later.  Do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
+
+**What.**  Keyless and global provider timeouts were paging as hard connection failures.  Nasdaq delayed screener, congress-nasdaq-screener, finnhub, and alpaca-broker (Sentry SOCRATIC-TRADE-3K, 3M, 3R, and 3D) logged a named timeout that matched neither the expected-limit shapes nor the ST-3079 transport-blip shapes.  `db-health` now records AbortError, TimeoutError, undici header and body timeouts, "timed out waiting for", and broker-call timeouts as transient-network.  They warn, use the short transient cooldown, and escalate to error once the streak passes `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare "This operation was aborted" stays an expected limit.  Quote, scan, screener, order, and strategy fetch behavior is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4608-provider-health-timeout-class.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  The budget-cancel test reads the `env` lane it writes, after one success, so five hard rows would show the lane stopped.
+## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
+
+**What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+
+**Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
+
+**What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
+
+**Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
+## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
+
+**What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
+
+**Next.**  PR open against `main`.  Do not merge and do not dispatch a deploy.
+
+## 2026-11-12 CURSOR — ST-4617 flaky verify tests
+
+**What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
+
+**Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
+
+**What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  SOCRATIC-TRADE-2E on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  Do not raise the cap.
+## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
+
+**What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
+
+**Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
+
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
+
+## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
+
+**What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
+
+**Next.**  PR open; wait for `verify` green; do not merge from agent.
+## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
+
+**What.** The app can reject traffic that did not come from Cloudflare.  The check stays off until `REQUIRE_CLOUDFLARE_ORIGIN` is set, so merging does not change production.  A Node hook reads the TCP peer and middleware repeats it.  `CF-Connecting-IP` and `X-Forwarded-For` stay as they are while the flag is off, and are removed while it is on unless the peer is Cloudflare or the origin secret matched.  `GET` and `HEAD /api/live`, loopback, and Tailscale `100.64.0.0/10` stay open and do not make those headers trusted.  Rollout: `docs/rollouts/2026-11-12-st-4595-cloudflare-origin-lock.md`.  Runbook: `docs/runbooks/cloudflare-origin-lock.md`.
+
+**Next.** PR is the delivery.  Do not set the flag and do not edit the Hetzner firewall from this change.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
+
+## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
+
+**What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
+
+**Next.**  PR open; wait for Playwright Smoke + `verify` green; do not merge from agent.
+## 2026-11-11 [gb-trader] ST-4601 — deadline Sentry cooldown is its own key
+
+**What.**  A retrieval-timeout warning used the same 15-minute cooldown key as other rag-embed warnings, so it could suppress a later transient-network warning.  A fingerprint that leaves the lane issue now has its own key.{nb} Skipping episodic retrieval after a filings timeout stays intentional: that pass is another RAG wait.
+
+## 2026-11-11 [gb-trader] ST-4601 — RAG deadline is a timeout, not a provider outage
+
+**What.** A strategy-run retrieval deadline (`RAG_QUERY_IO_DEADLINE_MS`, 15s) was filed twice at error level: "RAG retrieval failed" (SOCRATIC-TRADE-2G) and "OpenRouter embed connection failed" with `failureClass` hard (SOCRATIC-TRADE-1X).  The same abort is now a warning timeout.  It does not count as a hard provider outage in api-health or RAG health, and the embed retry loop does not start another backoff after the caller aborts.  After the first deadline in a run, later symbols skip RAG and the run logs the skipped count once.  Empty-chunk continuation is unchanged.  The 15s budget is unchanged.  Order placement, sizing, prompts, and strategy settings are untouched.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+**Next.** PR is open against `main` and is not merged.  `verify` CI is the gate.  Jay merges.  Do not enable auto-merge.
+
+## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
+
+**What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout stays cacheable.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` keep hourly ISR under a hash CSP stamped from that build's HTML.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
+
+**Next.**  Watch `[csp-report]` after deploy.  Enforce only with `CSP_REPORT_ONLY=0` once those reports are clean.
+
+## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
+
+**What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.
+
+**Next.**  PR #5121 Kody/Sentry review fixes landed on branch; green `verify`, then merge (weekday RTH latch applies).
+
+## 2026-11-07 CURSOR — PR #4998 Kody follow-ups (ST-4574 / MiniMax M3.1 Flash)
+
+**What.**  Stacked branch `cursor/pr-4998-review-fixes-21a3` merges `main` into PR #4998 and closes valid Kody threads: retired-catalog reconciliation (no `minimax/minimax-m3` alias on the M3.1 row), alias-aware rotation-pin validation, OpenRouter availability regression test, rollout doc hygiene (no account ids; predecessor attribution fixed).  Rollouts: `docs/rollouts/2026-11-07-pr-4998-kody-followups.md`, updated `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.## 2026-11-09 draft-PR sweep (ST-4597)  
+44 restore-event drafts triaged: 39 closed with evidence, #5062 merged (autofix token grants), telemetry URL redaction ported from #5046 (this PR), #5098 FilingAPI retirement and #5093 pinecone residual removal queued as fresh branches.  See docs/rollouts/2026-11-09-draft-pr-sweep.md.
+
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.
+
+## 2026-11-11 CURSOR — ST-4594 iOS session hardening
+
+**What.**  The iOS app now prepares a PKCE handoff nonce before Google/GitHub sign-in, fetches the server Apple nonce before native Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out unregisters the push token before clearing cookies.  A replacement sign-in unregisters the previous account only after login succeeds.  A push-register 409 is surfaced once.  The next sign-in gets one attempt, and a fresh 409 holds the token again so callbacks do not loop.  Server `__legacy_compat__` paths stay for older builds.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+
+**Next.**  PR #5132 review threads are resolved.  The account-change DELETE uses an ephemeral session, does not restore the shared jar, and is skipped when there are no previous cookies.  Merge waits on green `verify` and `verify-ios`.  Do not drop the server legacy paths until this build is on TestFlight and the App Store.
+
+## 2026-11-06 [gb-trader] PR #5005 — Kody review fixes (Alpaca PAPER `delayed_sip`)
+
+**What.**  Kody's eight review findings on `gb-trader/alpaca-paper-delayed-quotes` are resolved.  (1) **Vendor payload validated:** `stockLatestQuotes` is Zod-validated before use — `AlpacaLatestQuotesResponseSchema` pins the envelope (a missing/`null`/non-map `quotes` yields no quotes instead of a `TypeError`) and `AlpacaLatestQuoteSchema` is deliberately NON-STRICT (`.passthrough()`) so unknown vendor fields survive verbatim; each row is validated individually so one bad symbol cannot discard a batch.  (2) **Credential guard:** the connected-account lookup that decides the account-scoped tape now lives INSIDE the `alpacaData.apiKey && alpacaData.secretKey` branch, so a scan with no Alpaca credentials no longer pays for a connected-account DB read on a path that has no snapshot provider.  (3) **Delayed-tape metadata reaches the scan:** `expectedDelaySec` / `delayToleranceSec` / `venuePriceAuthoritative` / `fetchedAt` (the RETRIEVAL stamp — a delayed tape ages by when it was pulled, never by its ~900s-old print) now travel `parseAlpacaSnapshot` → `SymbolEnrichment` → cascade merge → `applyEnrichment` → `MarketQuote` (and the cascade's Level-2 `BrokerQuote`); before, the `delayed_sip` snapshot reached the scan as a bare quote whose ~900s-old `asOf` looked realtime-STALE and healthy delayed rows tripped the gate.  The metadata is stamped only for the account-scoped `delayed_sip` feed, so Alpaca LIVE / Tradier / Robinhood are unchanged.  (4) **Server-only boundary:** `src/lib/quotes-cascade.ts` now starts with `import "server-only";` — the module resolves connected accounts, reads the trading policy and calls broker gateways, and every importer is server-side.  (5) **DISPUTED (no change needed):** the lag reason and the closed-session split are already implemented at branch head — the reason is `quote_last_print_beyond_delayed_sla` ("illiquid last print or excess tape lag", never "feed broken"), `delayedTapeStatus` takes `marketOpen` and reports `marketSessionOpen`, a shut market is not excess delay but stays unusable, and the gate blocks it with `quote_delayed_tape_session_closed`; during RTH a print beyond 900±120s is excess delay and fails closed.  (6) **Unusable tapes are not authoritative:** the Level-1a `venueDelayed` accept path now evaluates the delayed-tape usability (`isQuoteFresh` → `delayedTapeStatus`) BEFORE stamping `venuePriceAuthoritative` — a usable tape (fresh retrieval, no lag beyond 900±120s) is accepted as before, an UNUSABLE tape (excess lag, or a stale/future/missing retrieval stamp) is NOT accepted as the authoritative venue price (the observation is kept as non-authoritative so the gate can report why), and a tape with no documented delay (Tradier sandbox) keeps the owner rule; the market-session split stays in the policy gate (`quote_delayed_tape_session_closed`), so the accept path has no wall-clock dependence; the `skipActiveBroker` guard is untouched, and a symbol the delayed tape could not price still stays MISSING (no Yahoo/IEX overlay on the execution path).  (7) **Test hygiene:** the `apiKeyFingerprint` mock no longer echoes the credential it fingerprints (fixed synthetic `"fp:test"`).  (8) **Test hygiene:** the `delayed_sip` test restores `ALPACA_DATA_FEED` in a `try`/`finally`.  No deploy, no orders, no account/DB/credential changes, no merge, no Muse.  Rollout: `docs/rollouts/2026-11-06-pr5005-kody-review-fixes.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run lint` 0 errors (856 grandfathered warnings); the focused suite `npx vitest run test/alpaca-paper-delayed-sip.test.ts test/alpaca-paper-gateway-feed.test.ts test/quotes-cascade.test.ts test/data-providers.test.ts test/staleness-gate.test.ts test/market.test.ts test/alpaca-sdk-client-timeout.test.ts` is **297 passed / 297** across 7 files.  New tests: "does NOT accept an UNUSABLE delayed tape as the authoritative venue price", "Alpaca legacy client — latest quotes validation" (4 cases), "stamps the DELAYED-TAPE metadata on a delayed_sip snapshot", "does NOT stamp delayed-tape metadata on a realtime (iex) snapshot", "stamps the delayed-tape metadata onto the parsed snapshot" / "onto the enriched snapshot", two `getEnrichmentProvider — Alpaca credential guard` tests, and two `applyEnrichment` delayed-tape-metadata tests.  Full `npm test` / `npm run build` are left to CI on this pre-merge branch.
+
+**Next.**  Operator reviews PR #5005 and lets CI run the full gate; merging to `main` auto-deploys under the weekday RTH latch.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).  After deploy, confirm the paper account's scan rows carry `expectedDelaySec ≈ 900` and no longer trip the realtime-stale branch of the gate.
+
+## 2026-11-05 [gb-trader] Alpaca PAPER `delayed_sip` — PR #5005 continue pass
+
+**What.**  Five follow-on review findings on `gb-trader/alpaca-paper-delayed-quotes` are closed.  (1) **Alerts scope:** `checkPriceAlerts` now calls `fetchFreshQuotesCascade(symbols, userId, policy.accountNumber, policy.connectedAccountId)`, so a price alert evaluates against the OPERATING account's tape instead of the process-global path.  (2) **Dashboard paper fill:** the `marketValue / quantity` fallback is now `applyPositionPriceFallback` (`src/lib/dashboard-price-fallback.ts`) and is SKIPPED on a `venue_delayed` tape — a derived cost basis is no longer shown as a live paper price; realtime/venue-locked keep the old behaviour.  (3) **Lag honesty:** the policy reason `quote_feed_excess_delay` became `quote_last_print_beyond_delayed_sla` ("illiquid last print or excess tape lag" — the number cannot tell them apart), and a CLOSED session is now split out: `delayedTapeStatus` takes `marketOpen`, reports `marketSessionOpen`, reports NO excess while the market is shut, stays unusable, and the policy blocks it with `quote_delayed_tape_session_closed` instead of the excess reason.  (4) **Cascade:** `pendingSymbols` is only cleared when L1a actually ran — `if (venueMode !== "realtime" && !options?.skipActiveBroker)` — so the `skipActiveBroker` path keeps its fallbacks (the Sentry `pendingSymbols` empty-result thread) while the execution path keeps its intentional fail-closed overlay protection.  (5) **API scan test:** new `test/scan-route-account-scope.test.ts` proves `GET /api/scan` hands `policy.connectedAccountId` to `scanMarket`.  Docs: the redacted `PA…` value in the sibling rollout note is an Alpaca PAPER ACCOUNT IDENTIFIER, not an API secret (redacted for privacy; no rotation required) — it is not echoed anywhere.  No deploy, no orders, no account/DB/secret changes, no merge, no Muse.
+
+**Next.**  Operator reviews PR #5005 and lets CI run the full gate.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).
+
+## 2026-11-05 [gb-trader] Alpaca PAPER `delayed_sip` — PR #5005 readiness gaps
+
+**What.**  Three pre-merge gaps on `gb-trader/alpaca-paper-delayed-quotes` are closed.  (1) The market-scan paths now forward the operating account into the scan: both `refreshUserMarketScanIfDue` (`src/lib/market-scan-freshness.ts`) and the interactive `app/api/scan/route.ts` pass `connectedAccountId: policy.connectedAccountId` into `scanMarket`, so the full-universe enrichment binds to the Alpaca PAPER `delayed_sip` tape and its account-scoped cache identity instead of running unbound.  (2) Future provider timestamps now FAIL CLOSED instead of being clamped to age 0: a future `asOf` reads as a missing observation and a future `fetchedAt` as a stale retrieval (`delayedTapeStatus`), and `quoteAgeSecForStalenessGate` returns `missing: true` for a future stamp rather than handing the gate a negative age.  (3) The expected-900 ± 120s edge matrix is now pinned by tests, including future `asOf`, future `fetchedAt`, missing `fetchedAt`, and a market-closed post-session print (no carve-out accepts stale session data).  No deploy, no orders, no account/DB/credential changes; live Alpaca and Tradier tape selection, order placement, sizing, risk gates and the global `ALPACA_DATA_FEED` env behavior are untouched.  Rollout: `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip-readiness-gaps.md`.
+
+**Next.**  Operator opens the PR for `gb-trader/alpaca-paper-delayed-quotes` and lets CI run the full gate; merging to `main` auto-deploys under the weekday RTH latch.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).  Known coverage gap: `/api/scan`'s forwarding has no dedicated route-level test.
+
+## 2026-11-05 [gb-trader] Alpaca PAPER — account-scoped `delayed_sip` quote tape
+
+**What.**  The connected Alpaca PAPER account (`broker=alpaca`, `environment=paper`) now trades against Alpaca's `delayed_sip` feed — a tape with an expected ~900s publication delay (measured in prod 2026-11-05: asOf ages 900-902s).  The switch is ACCOUNT SCOPED: it is read from the connected account row, never from the global `ALPACA_DATA_FEED` env var, so Alpaca live, Tradier (live + paper), Robinhood and every other account keep their existing tape.  The broker gateway, the quote cascade, the market-scan enrichment and the sizing/freshness gates all use the same tape; the expected ~900s delay is no longer staleness (the snapshot is aged by `fetchedAt`), while EXCESS lag beyond expected + 120s tolerance is detected independently and fails closed.  No realtime overlay: a symbol the delayed tape priced is never replaced by Yahoo/IEX, and a symbol the delayed feed did not price stays missing instead of silently becoming a realtime quote.  The Alpaca snapshot enrichment cache key now folds in account + feed identity so the delayed tape cannot contaminate another account's cache.  No orders, strategies, DB rows, credentials or learning pending rows were touched, and nothing was deployed.  Rollout: `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip.md`.
+
+**Next.**  Operator opens the PR for `gb-trader/alpaca-paper-delayed-quotes`; merging to `main` auto-deploys under the weekday RTH latch.  After deploy, confirm the paper account's quotes carry ~900s asOf ages and that the staleness gate does not trip on the expected delay.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).
+
+## 2026-11-05 CLAUDE — iOS benchmark flow captions (ST-4589)
+
+**What.**  Two iOS caption strings (Results and Home) now say transfers are counted from the start of the day they land, matching the web copy and the benchmark math that merged in #5000.  String literals only.  Rollout: `docs/rollouts/2026-11-05-ios-benchmark-flow-captions.md`.
+
+**Next.**  Lands when the hosted iOS compile finishes inside the merge queue's 60-minute limit.
+
+## 2026-11-05 CLAUDE — Catalog: MiniMax M3.1 Flash only, Muse contributor models only (ST-4589)
+
+**What.**  Owner correction to the ST-4589 catalog: MiniMax is M3.1 Flash only and Muse is the three contributor ids only (the two Wonder contributors are Code CLI only).  MiniMax M3, Muse Spark 1.3, Glimmer and Wonder 1.0 are retired: a seat's stored model keeps working, and they are out of the picker, rotation and failover.  An automatic budget downgrade never lands on a contributor row unless the source is one.  Rollout: `docs/rollouts/2026-11-05-minimax-flash-muse-contributor-only.md`.
+
+**Next.**  Until this merges, production offers the four retired rows (#4999 is live).
+
+## 2026-11-04 CLAUDE — Model classes, rotation selection and catalog refresh (ST-4589)
+
+**What.**  Owner review of the Model Stats view.  Each model's stats are now strictly its own: predecessor figures show only as a labelled same-class estimate, never added into the live count and never chained, so gpt-5.6-terra no longer feeds Sol or Astra.  Alias rows show what `-latest` currently resolves to.  Green and Red each get a Rotation Models checklist (`llmRotationModels`, `redTeamRotationModels`).  Catalog: OpenAI is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`; Astra Pro and the 5.6 models are retired without migrating stored selections; other providers move to current versions; added MiniMax M3.1 Flash, Muse Wonder 1.0 and the two Muse Wonder contributor ids (Code CLI only); Llama removed.  MiniMax M3.1 Flash and Muse now get an explicit effort (default medium, contributors capped at xhigh).  A model the route cannot serve now fails over instead of aborting the run.  Rollout: `docs/rollouts/2026-11-04-model-classes-rotation-catalog-refresh.md`.
+
+**Next.**  No running Code CLI broker was found on the server, so the Wonder contributor models cannot complete a call yet.  Native Anthropic route needs structured outputs before its Sonnet id can move to 5.5.  Benchmarks are from July and cover none of the new ids.
+
+## 2026-11-03 Muse-Assist — Retired fleet name removed from ops surfaces
+
+**What.**  The retired two-part fleet name is removed from this repository's ops tooling under the owner's fleet-wide directive.  The fleet post helper is now `scripts/simple-tools-fleet-post.sh`, driven by the `FLEET_POST_*` env family and posting through `simple-chat` to Zulip #Work-In-Progress; its callers (the deploy-freshness workflow, the freshness alerter, provider knob sync, the Slack retirement shim, the launchd plist) and the CI syntax check use the new names in the same change.  `scripts/install-fleet-coordination.sh` now installs `simple-chat` and `simple-board` plus `FLEET-PROTOCOL.md` from the current AFC tool-names pin.  Historical prose is masked, including the older entries below.  Two slices stay as documented exceptions: the fail-closed bootstrap stub keeps its path so old setup calls cannot reinstall the Slack engine, and the coordination installer keeps a two-entry legacy-link removal list so pre-rename installs stop resolving the old command names, and the three doc labels for the shared Infisical token pair now carry the fleet's canonical new names (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`) ahead of the centrally sequenced key rename.  No trading logic was touched.  Rollout: `docs/rollouts/2026-11-03-retired-name-sweep.md`.
+
+**Next.**  Land on green verify; the shared token pair's key rename is sequenced centrally after all consumers land, and the AFC pin advances to the tool-names merge commit when that lands.
+
+## 2026-11-04 CLAUDE — Learning-loop wiring fixes and performance evaluation (ST-4589)
+
+**What.**  Owner-requested evaluation of trading performance against the S&P 500 and of the RAG learning loop: `docs/reviews/2026-11-04-performance-and-learning-evaluation.md`.  No demonstrated edge as of the Sep 25 report, and several lesson types were written but never retrieved.  Fixed the small, clearly wrong parts: user-level reflection lessons now reach the decision prompt (approved risk lessons deliberately still do not, pending an owner decision), regime and thesis relevance can score, statistics-only lessons no longer need an LLM key, scorecards stamp excess return against SPY, the benchmark treats cash flows the same on both sides, and the Results card shows a round-trip win rate.  No change to order placement, sizing or risk gates.  Rollout: `docs/rollouts/2026-11-04-learning-loop-wiring-fixes.md`.
+
+**Next.**  Owner decisions in the evaluation (core-satellite, deterministic sizing control, Red Team veto, fixed model arms).  Refresh the Sep 25 numbers from `/api/ops/performance`.
+## 2026-11-03 [Muse-Assist] Mango proxy pacing: concurrency gate + 15s leg timeout
+
+**What.**  Proxied data-source requests now pass through one process-wide concurrency gate in `createProxiedFetch` (`ProxyConcurrencyGate` in `src/lib/proxy-fetch.ts`, default cap 4 via `PROXY_MAX_CONCURRENCY`), so a provider cascade burst can no longer hit the Mango's tinyproxy all at once.  Queue wait never counts against the leg timeout (the timer starts at slot grant) and is logged as `queueWaitMs` on the proxy-use entry.  The leg timeout default rose from 3000ms to 15000ms (`RESIDENTIAL_PROXY_LEG_TIMEOUT_MS` overrides); fail_soft / fail_closed are unchanged.  Rollout: `docs/rollouts/2026-11-03-st-proxy-pacing.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; the 7 proxy-adjacent test files pass 108/108 (15 new tests in `test/proxy-concurrency-gate.test.ts`); full `npm test` is 9,902 passed / 3 failed of 9,947, and all 3 failures are proven environmental against a pristine-main baseline (one real-DNS case that fails on main in this sandbox, two latch-CLI cases that fail only on TMPDIR path-length/disk artifacts of this VM and pass with a short TMPDIR).
+
+**Next.**  Committed on `Muse-Assist/st-proxy-pacing`, not pushed.  MA reviews, pushes via the Mac route, opens the PR, and makes the Linear + #Work-In-Progress claim.  After deploy, watch `/api/proxy-use` for `queueWaitMs` entries replacing fail_soft fallback spikes during scan bursts.
+
+## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
+
+Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
+
+## 2026-10-30 CODEX — Repository Report Library (AFC-580)
+
+Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
+## 2026-10-29 [Cursor] PR #4953 Node 26 toolchain alignment
+
+**What.**  Renovate bumped CI/Docker to Node 26; required verify failed because `.nvmrc`, `@types/node`, `land.sh`, devcontainer, and `test/toolchain-policy.test.ts` still asserted Node 24.  Aligned those pins to 26 (no runtime workaround).  Rollout `docs/rollouts/2026-10-29-node-26-toolchain-alignment.md`.
+
+**Next.**  Hosted verify on PR head; owner Mac seats use Node 26 for `land.sh`.
+
+## 2026-10-29 [Cursor] PR #4938 OpenTelemetry v3 blocked by Langfuse peers
+
+**What.**  Renovate observability major for `@opentelemetry/core` / `@opentelemetry/resources` v3 fails `npm ci`: `@langfuse/otel@6` peers `@opentelemetry/core@^2.0.1`.  Reverted pins to `^2.10.0`, added Renovate rule to skip those majors until Langfuse ships OTel 3 peers.  Rollout `docs/rollouts/2026-10-29-otel-3-langfuse-peer-block.md`.  PR #4935 instrumentation path unchanged.
+
+**Next.**  Merge when `verify` is green; OTel 3 lands with a Langfuse upgrade, not before.
+## 2026-10-28 [MM] The issuer refusal names both variables it needs, not one (ST-4585)
+
+**What.**  The Kody review on pull request #4960 found a real defect in the remedy this change had just added, and it was HIGH severity.  The tier-2 `ASC_ISSUER_ID` refusal told the operator to unset `ASC_KEY_P8`, but an environment `ASC_KEY_ID` still wins in tier 3, so unsetting the ambient key alone does not reliably select the Infisical `/asc` credential.  With a key id that is not the `/asc` one, tier 3 never reaches the `/asc` key and never pairs the `/asc` issuer with it, so the operator lands on the same dead end the change exists to remove.  The remedy now names `unset ASC_KEY_P8 and ASC_KEY_ID`, which makes tier 3 read the key id, the issuer and the `.p8` from `/asc` whatever `/asc`'s own key id is.  The `ASC_KEY_ID` refusal keeps its own remedy, which was already reachable: there the key id is empty, so unsetting the ambient key alone is enough.
+
+**Verification.**  `bash scripts/ios-fleet/test-asc-credentials.sh` is `ok: ASC credential resolution`, exit 0, with a new case **2d-ter** that reaches the issuer path that 2d-bis does not.  A mutation run that reverted only the issuer remedy to name `ASC_KEY_P8` failed with `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8 and ASC_KEY_ID)`, which is what proves the new case tests the defect and not something else.  The credential is handed to the subshell as a shell assignment prefix and never through `env`, so it stays out of the process arguments of every child, which is what the suite's own guard requires.
+
+**Next.**  Land it, reply to the two review findings on #4960 with the commit evidence, and close ST-4585 with the merge evidence.  Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
+
+## 2026-10-28 [MM] The credential refusal names a remedy the operator can reach, and the upload handoff can run (ST-4585)
+
+**What.**  Pull request #4914 (AFC-459) merged on Oct 21, 2026 with six of its review threads unanswered, and an audit of the merged tree found three of them still real.  The missing-identifier refusal told the operator to "add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc", but the ambient `ASC_KEY_P8` is resolved BEFORE `/asc` is read, so that code is never reached while the ambient key is set and the instruction cannot work; running the real code on this Mac showed the refusal firing with 0 `/asc` lookups made.  The upload path was dead code: `load_secrets required` died with exit 1 one line above the `if [[ "$AUTH_MODE" != "api_key" ]]` branch, and `AUTH_MODE` is only ever "none" or "api_key", so the operator never learned where the built package was.  The refused `/asc` `.p8` carried no masked preview, while the ambient value and the client refusals both carried one.  All three are fixed: the refusal now names `unset ASC_KEY_P8`, which lets `/asc` be selected, the `/asc` refusal carries `; preview: $(key_preview "$key_pem")`, and the upload path reports an ABSENT credential instead of dying, so the package path, the `Upload blocked` line, the owner handoff steps and the exit 3 are reachable.  A REJECTED credential is still fatal inside `load_secrets` in both modes, because a value that is not a key must not be signed with and must not be handed on as if it were.
+
+**Verification.**  `bash scripts/ios-fleet/test-asc-credentials.sh` is `ok: ASC credential resolution`, exit 0.  Three independent mutation runs against the pre-change script, one per change, and each named its own defect: the masked preview reverted gives `FAIL: the refused /asc .p8 carried no masked preview`, the remedy reverted gives `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8)`, and the upload path reverted gives `FAIL: the upload path did not hand off with exit 3 (rc=1)`.  The three new cases are 2c-quater, 2d-bis and 2m, and 2m reads the exit code as `rc=0; out="$(...)" || rc=$?` so `set -euo pipefail` does not abort the suite.
+
+**Next.**  Land it, reply to the six open threads on #4914 with the commit evidence, and close ST-4585 with the merge evidence.  Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
+
+## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
+
+**What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
+## 2026-10-26 WISE: ST-4583 public footer logo
+
+Restore bundled transparent theme-aware wordmarks in the shared public footer.  Component previews pass mobile/desktop inspection; current-head hosted verification and review, then automatic deployment/live pixels, remain pending.  No native release or trading changes.  Rollout: `docs/rollouts/2026-10-26-st-4583-public-footer-logo.md`.
+
+## 2026-10-23 [GB-COMPILER] ST-3853 share payload schemaVersion from the shared contract
+
+**What.**  `@jaywedgeworth22/congress-trading-shared` is pinned to v2.9.0 (upstream commit `72febd04`), and the outbound congress.trade share sender now stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every import POST body (`CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION` stays as a deprecated alias);  Congress.Trade gets a paired PR that resolves the received version and warns without rejecting, and Usage-Monitor still pins v2.8.1 so the soft three-repo pin check flags until UM bumps.  Rollout `docs/rollouts/2026-10-23-st-3853-share-schema-version.md`.
+
 ## 2026-10-21 [MM] AFC-459 App Store Connect credential hardening (revision 2)
 
 **What.**  The App Store Connect private key is now taken only from the process environment or from Fleet-OPS prod `/asc` through `fleet-secrets`.  `scripts/ios-fleet/asc-key.mjs` is new and never reads a file:  it validates a PEM, writes the mode-600 materialization `altool` and Xcode read, and hands the key to a child in an allowlisted environment.  `scripts/ios-fleet/asc-api.mjs` resolves the credential in the order `APPLE_API_*` trio, then `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`, then Infisical `/asc`, and validates the PEM with `normalizePrivateKey`.  The `ASC_KEY_PATH` branch and the `readFileSync` of the key path are gone, so a named path on disk can never decide which key signs a request.  `load_secrets` in `scripts/ios-fleet/ship-testflight.sh` resolves an ambient `ASC_KEY_P8` first, then Infisical, writes the staged file and exports the key to the client;  a named `ASC_KEY_PATH` is ignored, and the run says so in a log line.  A missing credential is fatal where it is required, before the upload, and named;  a refused key carries a masked preview of its PEM body.  Two new offline suites (`test-asc-key.test.mjs`, `test-asc-credentials.sh`) and a rewritten `asc-api.credentials.test.mjs` cover it, and the ios-fleet pin carries the new module.
 
-**Fleet alignment pass.**  The masked preview now has the fleet's blessed shape on both sides (the first eight and the last four characters, `(empty)`, `[N chars, withheld]`), the hosted `APPLE_API_*` trio is the first source in the shell layer as well, with its base64 body decoded through a here-string, and the shell test proves the credential handoff with the signed request instead of reading another process's environment.  `scripts/ios-asc-key-env.sh` and its test carry the same helper shape, and the hosted handoff test now uses a real key generated at test time.
+**Fleet alignment pass.**  The masked preview now has the fleet's blessed shape on both sides (the first eight and the last four characters, `(empty)`, `[N chars, withheld]`), the hosted `APPLE_API_*` trio is the first source in the shell layer as well, with its base64 body decoded through a here-string, and the shell test proves the credential handoff with the signed request instead of reading another process's environment.  `scripts/ios-asc-key-env.sh` takes the hosted trio first too, and its refusal names the key's source (for example `Infisical prod (Fleet-OPS /asc)`), the error class and the same masked first-eight/last-four preview, never the whole value and never the key ID.  Jay decided on 2026-10-25 to keep that preview (ST-4579), and its test asserts the exact refusal line.  The hosted handoff test now uses a real key generated at test time.
 
 **Open review findings closed in the same pass.**  The hosted helper read the key from the Infisical root folder while every other reader asks for `/asc`, and the root has no `ASC_KEY_ID` and no `ASC_ISSUER_ID` at all, so the workflow published no key id and the ship step had nothing to publish;  the helper, the workflow's load step and the staged key now all read the `/asc` folder, and the fake Infisical CLI in the test answers the key only from that folder, so a wrong folder fails the suite.  The client now names the missing secret (`ASC_KEY_P8 in Infisical /asc`, or `AUTHKEY_<id> in Infisical /authkey-<id>-p8`) instead of a generic refusal, and the rollout note carries an install-time placeholder instead of a machine path.
 
@@ -11,6 +246,15 @@
 **Next.**  The hosted `ios-ship.yml` now fetches the key in the step that calls the client, through the new `scripts/ios-asc-key-env.sh`, and hands it over in the environment, so no key material crosses a step boundary and the environment file never holds it.  The other eight fleet copies of this client need the same handoff;  the shape is posted in the AFC-459 topic so one lands across the copies.
 
 **One finding to carry.**  The client only runs when the path it was started with is the path its own module reports, because node resolves a symlinked directory to its real path.  A lane behind a symlink starts the client to a silent no-op:  exit 0, no output, no request.  The test harness starts it by its real path now;  the product behaviour is unchanged and is a fleet-wide item.
+## 2026-10-21 CLAUDE — ST-4574 in-app MiniMax model moves to MiniMax-M3.1-Flash
+
+**What.**  The catalog row `minimax-m3` is now `minimax-m3.1-flash` (OpenRouter `minimax/minimax-m3.1-flash`, native `MiniMax-M3.1-Flash`, $0.15 in and $0.60 out per 1M).  `minimax-m3` stays an alias, so a stored selection resolves to the new row with no database change.  Production has `llm_route_minimax=native`, so Sandbox Green and Alpaca Paper Red (both stored as `minimax-m3`) reach `api.minimax.io` with exactly `MiniMax-M3.1-Flash` after deploy.
+
+**Verified.**  The native slug returned HTTP 200 live.  OpenRouter lists only the retired `:free` variant and 404s on the paid id until MiniMax publishes it there, so OpenRouter-routed MiniMax calls fail until then.
+
+**Next.**  Merge after CI, confirm the deploy SHA, then watch whether Sandbox's six-run failure streak clears.
+
+Rollout: `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
 
 ## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
 
@@ -553,7 +797,7 @@ after sourcing the handoff file.  The profile installer does the same for a stan
 local run when the file exists and the variable is unset.  Kody confirmed the rule 33
 fix on the review thread.
 
-**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Ag***-S**c).
 
 **Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  The profile installer exports ASC_SECRETS_ENV for standalone local runs.  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
 
@@ -596,11 +840,11 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
-**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
+**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `ag***-s**c-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
 
 **Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (post-merge follow-up).
 
-**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
+**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/ag***-s**c-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
 
 **Next.**  PR #4733 ready for merge after its required checks are green; Refs ST-4531.
 
@@ -664,7 +908,7 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
 
-**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Agent-Sync (not before merge).
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Ag***-S**c (not before merge).
 ## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
 
 **What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
@@ -1448,7 +1692,7 @@ rollout note and the schema file.
 
 **Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
 
-**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, agent-sync claim) until Jay or a Mac seat clears them.
+**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, ag***-s**c claim) until Jay or a Mac seat clears them.
 ## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
 
 **What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
@@ -1495,7 +1739,7 @@ rollout note and the schema file.
 
 **What.**  Board `77590d59` (GROK in_progress), issue #3888 / PR #4212: harden `isTradierOrderNotFound` — `^Tradier HTTP 404`, or `^Tradier HTTP 422:` with body-prefix order not-found / bare `not found`; reject incidental or echoed 422 prose on other statuses (incl. 502 echo fixture); lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Coordination.**  AGENT-SYNC.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#agent-sync` post is recorded from this cloud follow-up pass.
+**Coordination.**  AG***-S**C.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#ag***-s**c` post is recorded from this cloud follow-up pass.
 
 **Verification.**  CI `verify` on PR #4212 is the merge gate.
 
@@ -1528,7 +1772,7 @@ rollout note and the schema file.
 
 ## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
 
-**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #ag***-s**c post from this cloud VM.
 
 **What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
 
@@ -1942,7 +2186,7 @@ Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
 Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
 realized P&L and balance/drawdown history for the owner's real live accounts (Roth IRA, Agentic,
 Sandbox/Tradier) into `docs/reviews/2026-09-25-trading-performance-report.md`, and this repo
-(`jaywedgeworth22/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
+(`Simple-With-Us/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
 `isPrivate: false`, and every dollar figure the finding cited is present verbatim in the merged
 doc.  Declined as a code/content defect — this exact unchanged copy was the lane's own explicit
 instruction, it matches existing published precedent (Roth IRA dollar caps already public in
@@ -2540,7 +2784,7 @@ the narrative round label and the cap count are off by one here, and the rollout
 that explicitly.  **5 of 10** against the cap.
 
 Also recorded: Codex cited commit `22efe659` as its fresh evidence for (a).  That SHA resolves
-nowhere (`gh api repos/jaywedgeworth22/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
+nowhere (`gh api repos/Simple-With-Us/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
 found for SHA") and is not one of the PR's six commits.  The finding was still correct on its
 merits, verified independently against the repo's squash settings and the PR's commit subjects,
 so it was fixed rather than disputed.  Documentation only — no source, dependency, or lockfile
@@ -3687,7 +3931,7 @@ COMPLETED (merged to `main`) #3103 squash `64a06e78`.  #3102 squash `df75ca6f` l
 
 ## 2026-08-25 CURSOR — AppUpdatePrompt Apple IDs off Swift (live DealDex net.dealdex)
 
-COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` and the local `ios-app-versions.json` mirror.  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
+COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` at that date and the local `ios-app-versions.json` mirror (manifest later moved to `Simple-With-Us/AI-Fleet-Coordinator` `site/ios-versions.json` on 2026-09-03 per `docs/rollouts/2026-09-03-ios-versions-home.md`).  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
 
 ## 2026-08-25 CURSOR — Playwright smoke: dismiss ConsentGate before More
 
@@ -4328,7 +4572,7 @@ Branch `cursor/deploy-freshness-ocr-isolate-d4cf`.  PR #2796.  Rollout:
 P0 silent-freeze class from 2026-08-06: Coolify SSH exec died mid-build while
 webhooks stayed 200 and `/api/health` stayed green on the old sha.  This branch
 adds a 20-minute freshness cron (oldest undeployed main commit >1h pages
-Sentry / optional `#agent-sync`) and a dry-run-default `docker update` CPU cap
+Sentry / optional `#ag***-s**c`) and a dry-run-default `docker update` CPU cap
 for CT OCR/scan workers that never restarts and never touches ST.  Remaining
 host constraint: durable isolation is Coolify/CT-repo; this repo cannot set
 those or a Coolify retry-on-255.  Did not touch prod.
@@ -5189,7 +5433,7 @@ Fix on `grok/stop-ghost-native-keys`, issue #2728 / PR #2729: never remigrate a 
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -5621,7 +5865,7 @@ Branch `grok/fleet-alerts-aug13`.  Rollout: `docs/rollouts/2026-08-13-fleet-aler
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -6895,7 +7139,7 @@ tests, build clean. Rollout: `docs/rollouts/2026-08-02-data-provider-round2.md`.
    Also fixed forward: `allowScripts` git-dep keys in tag form (`#vX.Y.Z`) can never match
    (npm compares against the resolved 40-char SHA), which npm 12 escalates from a warning
    to a hard block on the dep's `prepare` — the key is now committish-free
-   (`"github:jaywedgeworth22/congress-trading-shared": true`, verified: coverage warning
+   (`"github:Simple-With-Us/congress-trading-shared": true`, verified: coverage warning
    gone). #2345's lockfile regen also fixed a real silent bug: the old lockfile pinned the
    v2.3.0 commit while package.json said v2.4.x, so `npm ci` was silently shipping the old
    shared package. Verified 2026-08-02: plain `npm ci` = exit 0, 575 packages, clean shell.
@@ -7647,8 +7891,8 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 **What.**  The three Kody threads on PR #4911 that carried no reply are now answered, and two
 defects behind them are fixed.  The `DATABASE_URL` override in the two files PR #4911 gave a
 database to moves from module scope into `beforeAll`, the same remedy ST-4572 applied to the
-PR #4912 files, and the teardown of every file that restores the path now waits for the pending
-coverage write before it restores anything.
+PR #4912 files, and the teardown of each of the six files that restore the shared path at file
+scope waits for the pending coverage write before it restores anything.
 
 **The race is real.**  The persist is scheduled as a fire-and-forget dynamic import and
 `persistEnrichmentCoverageReport` resolves the database it writes to when the write lands, not
@@ -7751,6 +7995,15 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 
 **Next.**  Land it on its own pull request, then close ST-4573 with the merge evidence.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
 
+## 2026-10-22 [MM] The watchdog decides image impact with the allow list (ST-4575)
+
+**What.**  The deploy-freshness watchdog paged on four consecutive scheduled runs while production was correctly still.  It decided image impact with an exclusion list that named only `docs`, so a commit that changed just a CI workflow file was aged like a runtime change, and the guard reported production stale while production was exactly where it should be.  The image-affecting set is Coolify's allow list, and the repo already had it: `src/lib/deploy-image-impact.ts` exports `COOLIFY_WATCH_PATHS_LIVE`, and `scripts/rth-deploy-drain.sh` already implements the same rule through `CHANGED_FILES` and `scripts/assert-rth-deploy-latch.ts`.  The watchdog was the one place that had re-derived the question with a weaker rule.  The fix mirrors the allow list into the shell script and applies one rule to the whole gap: a deployment is owed only if some commit in the gap changed a watched path.  The "newest image-affecting commit" narrowing is gone, because it compared production against a commit that might never deploy, and the expected sha is no longer narrowed at all.  An empty watched-commit list is now a verdict, `image-noop` and exit 0, rather than an operational error through `fail_usage` that would have masked a real usage error.  The classification uses `--first-parent`, which is load-bearing: without it a merge commit is compared against its branch tip, so a docs-only pull request looks like it changed every path `main` gained since the branch point.  The guard still pages on a real gap, because the selftest keeps a case where the gap does change a watched path and the verdict is still stale.
+
+**Verification.**  The selftest is 12 passed, 0 failed, and the drift guard that fails if the shell `WATCH_PATHS` and `COOLIFY_WATCH_PATHS_LIVE` disagree is 4 passed, 0 failed.  A negative control against the pre-fix script on `origin/main` shows the two false-positive cases fail as intended with exit 3 where 0 was wanted, and the still-stale case passes, so the new cases detect the old behaviour and the guard is not merely quieter.  `npx tsc --noEmit` exits 0, `npx eslint` over the changed files exits 0, and `npm test` is 9737 passed, 51 skipped, 0 failed, across 865 test files passed and 1 skipped.
+
+**Review round.**  A review on the pull request raised four findings against the first version of this change, and three were real defects that are fixed here.  The `git rev-list` exit status was swallowed, so a git failure became a green `image-noop` pass, and the status is captured separately now and raised through `fail_usage`.  The watched pathspecs were resolved against the caller's working directory, so a run from a subdirectory matched nothing and took the `image-noop` branch, and the script now anchors itself to the repository root.  The `image-noop` branch never posted the recovery notification, so the incidents this fix resolves would have stayed open forever, and it posts `maybe_notify recovered` now.  The fourth finding asked for `docs/benchmarks` in the watched set and was not applied:  the watched set is the TRIGGER list, the list that decides whether Coolify creates a deployment, and `test/rth-deploy-latch.test.ts` already asserts both halves of the difference, that `docs/**` is omitted from the trigger and that `docs/benchmarks` is image-relevant for the build-time latch.  The selftest is 14 passed, 0 failed after the review round, and a negative control against this branch's own first version shows the two new cases fail with exit 0 where 1 and 3 were wanted.  A second review round made both new cases prove what they claim:  the subdirectory case now carries a control that records the directory the script under test started in, so a broken handoff fails the case instead of passing it vacuously, and the git-failure case pins the failure to the rev-list branch with the expected-output mechanism instead of relying on exit 1 alone, which several unrelated guards also produce.  Each control has a negative control of its own.  A third review round caught the fix for the swallowed git failure introducing a second defect:  capturing stderr into the same value would let a git warning on stderr with a zero exit become the first "commit" of the list, and the next `git log` would then kill the script with git's own exit 128, which is outside the exit-code contract.  The captured value is stdout only now, and the selftest covers it with a second `git` shim that warns on stderr and exits 0;  the selftest is 15 passed, 0 failed, and the negative control against the `2>&1` version fails with exactly that exit 128.  A fourth review round found the warning case could pass without exercising its own fixture:  the watchdog sends git's stderr to /dev/null, so the warning the shim writes never reached the captured output, and the case asserted only the stale exit code, which a run without the shim produced just the same.  The shim now records the warning it emitted, the case fails unless that record is there, and the same shim is probed again after the case so a broken or replaced shim cannot pass either.  The selftest is 15 passed, 0 failed, and both negative controls show it:  with the shim off PATH the verdict is still a normal stale and the case fails on the control, and with the shim on PATH but emitting nothing the case fails the same way.
+
+**Next.**  Land it, then close ST-4575 with the merge evidence.  Rollout: `docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md`.
 ## 2026-10-22 [MM] The shape guard stops matching fixture text outside the hook body (ST-4572)
 
 **What.**  A fifth review round found two real weaknesses in the shape guard the fourth round added, and three errors in this branch's own audit trail.  The guard searched the whole span between the `beforeAll` and the `afterAll`, which also holds any helper declared between them, so a fixture that moved the differential assertion and the override into such a helper satisfied both string checks and the order comparison, and the regression the file exists to catch passed unnoticed; the hook body is now located by brace depth.  The guard also resolved its repo root from the runner's working directory, so a run from anywhere other than the repository root failed every case with an opaque ENOENT; the root now comes from the module's own path, in the same form `test/ci-workflow-queue-safety.test.ts` already uses.  The audit trail said nine files changed and two were new when the diff is thirteen changed and four new, it described five files as restoring `DATABASE_URL` when nine do, and the ST-4570 note pointed the shared-database differential at the miniature reproduction in `test/coverage-persist-isolation.test.ts`, which never reads the run's shared database, rather than at the two files that assert `sharedCoverageRowCount(prevDb)` is zero.  All three are corrected in place.
@@ -7771,6 +8024,45 @@ Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
 
 **What.**  A seventh review round raised two findings against this branch's own audit trail, and both were taken.  The note's bound paragraph said only six files restore the path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore the shared path: `test/data-catalog-completeness.test.ts`, `test/health-lane-reprobe.test.ts` and `test/symbol-field-latest.test.ts` each capture it inside `beforeEach` and put it back in their `afterEach`.  The sentence hid three restorers and overstated the set of files whose late write can reach the shared database, because a late write in one of those three lands in the shared database rather than in that file's own.  The bound paragraph now names all nine, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back.  The second finding said the note described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, and it does: the `previous` it captures at line 745 is the file's own path and not the shared one, and the restore at line 790 puts its own database back.  Saying it "never restores it" was wrong, and the sixth-round section now says what the file actually does.  The inventory stays at nine either way, because that file never puts the shared path back.
 
-**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
+**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The five guard fixtures wait while their own database is still the target, and `test/coverage-persist-isolation.test.ts` waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The shape guard pins the wait and its order for all six, so this is a property of the tree rather than a claim in the note.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
 
 **Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The sixth file waits too (ST-4572)
+
+**What.**  An eighth review round raised one finding against this branch's own audit trail, and it was taken.  The note claimed that the six files which restore the shared path at file scope each wait for the pending write before they restore, and that was true of the five guard fixtures and false of the sixth: `test/coverage-persist-isolation.test.ts` restored the shared path in a synchronous `afterAll` with no wait at all.  Two remedies were taken.  The file's `afterAll` now awaits `__awaitPendingEnrichmentCoveragePersist()` before `resetDbForTesting()` and before the restore, which makes the six-file property uniform and true, and the wording now says where the wait sits, because the two groups are not the same — the five guard fixtures wait while their own database is still the target, and the isolation fixture waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The claim was prose, so it is now pinned: `test/db-isolation-fixture-shape.test.ts` gained a case for each of the six that the file imports the helper, that the wait is inside the `afterAll` body rather than in a test, and that the wait comes before the restore.
+
+**Verification.**  The claims come from the tree rather than from the note.  The await sits ahead of the restore in each of the six `afterAll` bodies, and the shape guard proves that rather than trusting a grep to see it.  Two negative controls were run and both bit: removing the wait from the isolation fixture's `afterAll` failed the guard with `AssertionError: expected '\n  // The coverage persist is schedu…' to contain 'await __awaitPendingEnrichmentCoverag…'`, and moving that wait after the restore failed it with `AssertionError: expected 698 to be less than 661`.  The fixture was restored byte-for-byte after each control, and its checksum after both controls matched the checksum before them.  The two files this round touches pass together: 22 tests passed across 2 files.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  The pull request carrying the seventh round merged as `bbd6c43cb` while this round was in flight, so this round lands as its own pull request against `main` rather than inside that one, and the claim this round corrects was still true in `main` when it was written.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] ST-4572 — the ninth round: a rejected wait could skip the restore, and the guard passed on a commented-out wait
+
+**What.**  Four more Kody threads on PR #4919, two against the teardown wait the eighth round added
+to the sixth restorer and two against the three shape-guard checks the same round added.  All four
+were checked against the tree and all four were real.
+
+**A rejected await skipped the restore.**  `__awaitPendingEnrichmentCoveragePersist()` ends in
+`await Promise.all(handles)`, so a persist that rejects rejects the teardown, and everything after
+the wait — the reset, the restore of `prevDb`, and the `rmSync` that deletes the fixture's own
+temporary directory — was skipped on that path.  The file owns the run's `DATABASE_URL` from module
+scope onward, so the skipped restore carried a temporary path into the rest of the worker and the
+next statement deleted the file that path points at.  The reset, the restore and the cleanup now sit
+in a `finally`, pinned by a new guard so it cannot go back to the unwrapped shape.
+
+**The guard's own three checks were substring matches.**  A wait disabled by commenting the line out
+carries the same literal as a comment, so it satisfied every check while the race was fully back —
+the eighth round's two documented controls only proved the deleted and misordered variants bite.
+Both patterns are anchored to a line of their own now, the order check asserts both offsets were
+found before comparing them, and the import assertion matches the import statement rather than the
+call it claimed to check.
+
+**Four negative controls, each proved to bite, fixture restored byte-for-byte after each.**  The
+commented-out wait, the wait placed after the restore, the call with the import removed, and the
+`try`/`finally` removed.  The two files this diff touches pass 28 of 28 together, up from 22.
+
+**Left open on purpose.**  The same rejected-await shape is real in the five guard fixtures this
+branch inherited from earlier merged rounds.  They were not fixed here, because this PR's diff is
+the sixth restorer, and the new guard does not forbid them from having the same fix later.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

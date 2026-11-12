@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { PriceClose, PriceSeries, SecurityRefInput } from "@jaywedgeworth22/congress-trading-shared";
 import { audit } from "@/lib/db";
+import { isSqliteBusy, PEER_READ_SQLITE_RETRY_AFTER_SECONDS } from "@/lib/sqlite-peer-read";
 import { alertPeerPushReceiptGap, logApiHealth } from "@/lib/db-health";
 import {
   getImportedCacheCounts,
@@ -204,6 +205,21 @@ export async function POST(req: Request) {
       }
     });
   } catch (error) {
+    if (isSqliteBusy(error)) {
+      audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown", pushId });
+      const busyResponse = await finishPeerPush({
+        pushId,
+        at,
+        payloadHash,
+        delivered: null,
+        consumed: null,
+        status: 503,
+        store: true,
+        body: { ok: false, error: "database temporarily unavailable" }
+      });
+      busyResponse.headers.set("retry-after", String(PEER_READ_SQLITE_RETRY_AFTER_SECONDS));
+      return busyResponse;
+    }
     audit("securities_import_error", { error: error instanceof Error ? error.message : "unknown", pushId });
     return finishPeerPush({
       pushId,

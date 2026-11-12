@@ -16,7 +16,7 @@ import {
   normalizeMarketScanCandidateLimit,
   normalizeMarketScanOutlierReserve
 } from "./scan-settings";
-import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
 import type {
   BrokerQuote,
   EnrichmentFieldObservations,
@@ -42,6 +42,7 @@ import {
 } from "./nasdaq-screener-fetch";
 import { fetchFallbackUniverseRows } from "./nasdaq-universe-fallback";
 import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
+import { recoverUniverseQuotesFromBroker } from "./scan-broker-universe-recovery";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
@@ -292,6 +293,8 @@ export async function scanMarket(
      * refreshes can reuse these locally while replacing price-family fields. */
     seedEnrichment?: Record<string, MarketQuoteSummary>;
     deadlineAt?: number;
+    /** Connected account the scan operates for (account-scoped market-data tape). */
+    connectedAccountId?: string;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -306,7 +309,8 @@ export async function scanMarket(
     congressMultiplier: scanOptions.congressMultiplier,
     enrichmentMode: scanOptions.enrichmentMode,
     seedEnrichment: scanOptions.seedEnrichment,
-    deadlineAt: scanOptions.deadlineAt
+    deadlineAt: scanOptions.deadlineAt,
+    connectedAccountId: scanOptions.connectedAccountId
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -334,6 +338,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     let cached = false;
     let breadthPct: number | undefined;
     let quoteFallbackAttempted = false;
+    let universeQuoteRecoverySource: string | undefined;
     const universeSources = new Set<string>();
 
     try {
@@ -359,19 +364,26 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       if (dynamicResult.cached) cached = true;
 
       if (quotes.length === 0 && allowed.size > 0) {
-        // A usable last-good seed must win before Yahoo-pricing the whole
-        // allowed set.  Live Refresh of a 5k-name universe (nasdaq composite)
-        // used to start that fallback, miss the 35s interactive budget / edge
-        // 503, and never reach the seed that web already shows as last-good.
+        // Yahoo whole-set pricing, then broker universe recovery, then last-good
+        // seed (ST-4590).  Live Refresh of a 5k-name universe used to start
+        // Yahoo-only fallback and miss the interactive budget / edge 503.
         quoteFallbackAttempted = true;
         const recovered = await recoverQuotesWhenScreenerEmpty({
           allowed,
           positions,
-          seed: options?.seedEnrichment
+          seed: options?.seedEnrichment,
+          userId: options?.userId,
+          connectedAccountId: options?.connectedAccountId,
+          signal: options?.signal,
+          deadlineAt: options?.deadlineAt
         });
         quotes = [...quotes, ...recovered.quotes];
         warnings.push(...recovered.warnings);
         if (recovered.usedSeed) cached = true;
+        if (recovered.recoverySource) {
+          universeQuoteRecoverySource = recovered.recoverySource;
+          universeSources.add(recovered.recoverySource);
+        }
         for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
       } else {
         const returnedSymbols = new Set(quotes.map((quote) => quote.symbol));
@@ -401,23 +413,20 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       const recovered = await recoverQuotesWhenScreenerEmpty({
         allowed,
         positions,
-        seed: options?.seedEnrichment
+        seed: options?.seedEnrichment,
+        userId: options?.userId,
+        connectedAccountId: options?.connectedAccountId,
+        signal: options?.signal,
+        deadlineAt: options?.deadlineAt
       });
       quotes = [...quotes, ...recovered.quotes];
       warnings.push(...recovered.warnings);
       if (recovered.usedSeed) cached = true;
-      for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
-    }
-
-    if (quotes.length === 0 && options?.seedEnrichment) {
-      const seeded = persistedMarketQuotes(options.seedEnrichment, positions);
-      if (seeded.length > 0) {
-        quotes = seeded;
-        cached = true;
-        warnings.push(
-          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
-        );
+      if (recovered.recoverySource) {
+        universeQuoteRecoverySource = recovered.recoverySource;
+        universeSources.add(recovered.recoverySource);
       }
+      for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
     }
 
     if (quotes.length === 0 && allowed.size === 0) {
@@ -490,7 +499,9 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // symbols' last known fields available even if they are not in today's ranked set.
     const enrichPlan = enrichmentPlanForDeadline(options?.deadlineAt);
     const skipLiveEnrich = options?.enrichmentMode === "skip" || enrichPlan.skipLiveEnrich;
-    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId);
+    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId, {
+      connectedAccountId: options?.connectedAccountId
+    });
     let rescoredRanked: MarketQuote[] = ranked;
     const preselectionPool = buildEnrichmentPreselectionPool(
       ranked,
@@ -779,6 +790,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       cacheTtlMs: options?.ttlMs ?? marketCacheTtlMs(),
       cached,
       warnings,
+      ...(universeQuoteRecoverySource ? { universeQuoteRecoverySource } : {}),
       dataCoverage
     };
 
@@ -1254,6 +1266,8 @@ export function mergeQuoteData(
       // Venue-delayed execution prices (Tradier sandbox) must survive the merge so policy ages
       // the snapshot, not the delayed trade print, and the cascade never re-overwrites them.
       venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+      expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+      delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
       fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
       delayedFallback: extra.delayedFallback ?? quote.delayedFallback,
       // Carry synthetic bid/ask flags through from the broker/Yahoo quote. When a side had a real value
@@ -1317,6 +1331,8 @@ export function mergeQuoteData(
         provider: extra?.provider ?? quote.provider,
         asOf: extra?.asOf ?? quote.asOf,
         venuePriceAuthoritative: extra?.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+        expectedDelaySec: extra?.expectedDelaySec ?? quote.expectedDelaySec,
+        delayToleranceSec: extra?.delayToleranceSec ?? quote.delayToleranceSec,
         fetchedAt: extra?.fetchedAt ?? quote.fetchedAt,
         delayedFallback: extra?.delayedFallback ?? quote.delayedFallback,
         syntheticBid: usedBid ? bidSynthetic : quote.syntheticBid,
@@ -1371,6 +1387,8 @@ export function mergeQuoteData(
       provider: quote.provider,
       asOf: quote.asOf,
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
+      expectedDelaySec: quote.expectedDelaySec,
+      delayToleranceSec: quote.delayToleranceSec,
       fetchedAt: quote.fetchedAt,
       delayedFallback: quote.delayedFallback,
       syntheticBid: quote.syntheticBid ?? quote.syntheticSpread ?? false,
@@ -1650,27 +1668,71 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   allowed: Set<string>;
   positions: EquityPosition[];
   seed?: Record<string, MarketQuoteSummary>;
-}): Promise<{ quotes: MarketQuote[]; warnings: string[]; usedSeed: boolean }> {
-  const seeded = input.seed ? persistedMarketQuotes(input.seed, input.positions) : [];
-  if (seeded.length > 0) {
-    return {
-      quotes: seeded,
-      warnings: [
-        "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
-      ],
-      usedSeed: true
-    };
+  userId?: string;
+  connectedAccountId?: string;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}): Promise<{
+  quotes: MarketQuote[];
+  warnings: string[];
+  usedSeed: boolean;
+  recoverySource?: string;
+}> {
+  const requested = Array.from(input.allowed);
+  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
+    signal: input.signal,
+    deadlineAt: input.deadlineAt,
+    userId: input.userId
+  });
+  let quotes = quoteOnly.quotes;
+  const warnings = [...quoteOnly.warnings];
+  let recoverySource: string | undefined;
+
+  if (quotes.length === 0 && input.userId && !input.signal?.aborted) {
+    const brokerRecovery = await recoverUniverseQuotesFromBroker({
+      symbols: requested,
+      positions: input.positions,
+      userId: input.userId,
+      connectedAccountId: input.connectedAccountId,
+      signal: input.signal,
+      deadlineAt: input.deadlineAt
+    });
+    warnings.push(...brokerRecovery.warnings);
+    if (brokerRecovery.quotes.length > 0) {
+      quotes = brokerRecovery.quotes;
+      recoverySource = brokerRecovery.recoverySource;
+    }
   }
-  const quoteOnly = await fetchAllowedSetMarketQuotes(Array.from(input.allowed), input.positions);
-  return { quotes: quoteOnly.quotes, warnings: quoteOnly.warnings, usedSeed: false };
+
+  if (quotes.length === 0 && input.seed) {
+    const seeded = persistedMarketQuotes(input.seed, input.positions);
+    if (seeded.length > 0) {
+      return {
+        quotes: seeded,
+        warnings: [
+          ...warnings,
+          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
+        ],
+        usedSeed: true,
+        recoverySource
+      };
+    }
+  }
+
+  return { quotes, warnings, usedSeed: false, recoverySource };
 }
 
 async function fetchAllowedSetMarketQuotes(
   symbols: string[],
-  positions: EquityPosition[]
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineAt?: number; userId?: string }
 ): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, { concurrency: 4 });
+  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, {
+    concurrency: 4,
+    userId: options?.userId,
+    signal: options?.signal
+  });
   const quotes: MarketQuote[] = [];
   const missing: string[] = [];
   for (const symbol of requested) {
@@ -1679,8 +1741,14 @@ async function fetchAllowedSetMarketQuotes(
     else missing.push(symbol);
   }
   const warnings: string[] = [];
-  if (missing.length > 0) {
-    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions);
+  if (missing.length > 0 && !options?.signal?.aborted) {
+    const remainingMs =
+      options?.deadlineAt != null ? Math.max(0, options.deadlineAt - Date.now()) : undefined;
+    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions, {
+      signal: options?.signal,
+      deadlineMs: remainingMs,
+      userId: options?.userId
+    });
     quotes.push(...chart.quotes);
     if (requested.length <= 8) warnings.push(...chart.warnings);
   }
@@ -1690,12 +1758,24 @@ async function fetchAllowedSetMarketQuotes(
   return { quotes, warnings };
 }
 
-async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPosition[]): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
+async function fetchQuoteOnlyMarketQuotes(
+  symbols: string[],
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineMs?: number; userId?: string }
+): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const quotes: MarketQuote[] = [];
   const unresolved: string[] = [];
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const results = await Promise.all(requested.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const));
-  for (const [symbol, quote] of results) {
+  // Bounded pool, not Promise.all: firing one chart call per symbol at once
+  // queued hundreds of requests behind the proxy gate, where each one's 5s
+  // timer fired before a slot freed up — zero quotes (prod 2026-11-06).
+  const bySymbol = await fetchYahooFinanceChartQuotes(requested, {
+    signal: options?.signal,
+    deadlineMs: options?.deadlineMs,
+    userId: options?.userId
+  });
+  for (const symbol of requested) {
+    const quote = bySymbol.get(symbol);
     if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
     else unresolved.push(symbol);
   }
@@ -1799,6 +1879,16 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     intradayChangePct: typeof extra.intradayChangePct === "number" ? extra.intradayChangePct : quote.intradayChangePct,
     vwap: extra.vwap && extra.vwap > 0 ? extra.vwap : quote.vwap,
     asOf: extra.asOf ?? quote.asOf,
+    // DELAYED-TAPE METADATA: a `delayed_sip` enrichment (Alpaca PAPER) must be
+    // aged with the delayed-tape rules, not the realtime-stale bar — otherwise
+    // a healthy ~900s-old print is treated as a stale realtime quote and every
+    // scan row fails the staleness gate.
+    expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+    delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
+    venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+    // A delayed tape ages by its RETRIEVAL stamp; a realtime quote keeps the
+    // observation time as its freshness signal (undefined here → unchanged).
+    fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
     companyName: extra.companyName ?? quote.companyName,
     sentiment: extra.sentiment ?? quote.sentiment,
     peRatio: extra.peRatio ?? quote.peRatio,
