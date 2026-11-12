@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getConnectedAccountByBroker } from "@/lib/db";
 import { DEFAULT_COPY_FOLLOW_POLICY, scoreCopyInvestor, shouldObserve } from "@/lib/copy-intel";
 import { fetchEToroRankings } from "@/lib/etoro-copy";
@@ -11,7 +11,8 @@ export const dynamic = "force-dynamic";
  * Requires a connected eToro account.  Never starts a copy from this route.
  */
 export async function GET(req: Request) {
-  const userId = resolveRequestUserId(req);
+  const userId = resolveRequestUserIdOrResponse(req);
+  if (userId instanceof Response) return userId;
   if (!shouldObserve(DEFAULT_COPY_FOLLOW_POLICY)) {
     return NextResponse.json({ error: "Copy intel is off." }, { status: 404 });
   }
