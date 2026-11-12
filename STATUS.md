@@ -3,6 +3,11 @@
 **What.** Property tests place 1000 seeded Alpaca and Tradier orders through `getBrokerGateway` and check the final payload.  Two money-path bugs were real.  `BRK.B` now matches a `BRK-B` position.  A Tradier partial dollar exit becomes a share quantity from the position value, or is refused when that quantity cannot be priced.  Alpaca partial dollar sells stay notional.  Rollout: `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`.
 
 **Next.** PR #5160 stays open against `main`.  `verify` is the gate.  Do not merge or deploy from this lane.  Jay reviews the money-path behavior change.  Merged `origin/main` through `878d8edf` and kept every STATUS entry.
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
 ## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
 
 **What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
