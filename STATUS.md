@@ -3,6 +3,11 @@
 **What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, `fetchWithRetry` cancels before a 429 retry, and `proxiedFetch` cancels status >= 400 unless the caller opts in.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
 
 **Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
