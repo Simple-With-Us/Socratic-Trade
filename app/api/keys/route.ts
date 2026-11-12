@@ -1,6 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
+import { KeyUpsertSchema } from "@/lib/key-upsert-schema";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
@@ -274,23 +275,6 @@ const VALID_SERVICES: ReadonlySet<string> = new Set(API_KEY_CATALOG.map((item) =
 const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
 
 const ServiceQueryParamSchema = z.string().min(1);
-
-/**
- * Inbound POST /api/keys body.  Domain checks (catalog service, plan-tier options, route
- * eligibility) still run after this parse.  `.strict()` rejects unknown keys.  The Zod error
- * is never returned or logged, so a submitted apiKey value cannot leak into the 400 envelope.
- */
-export const KeyUpsertSchema = z
-  .object({
-    service: z.string().optional(),
-    apiKey: z.string().optional(),
-    label: z.string().nullable().optional(),
-    planTier: z.string().nullable().optional(),
-    route: z.string().optional(),
-    // Accepted for client compatibility; identity comes only from middleware headers.
-    userId: z.string().optional()
-  })
-  .strict();
 
 function isAllowedService(canonical: string): boolean {
   return VALID_SERVICES.has(canonical) || isRetiredMarketDataService(canonical);
