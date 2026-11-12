@@ -49,4 +49,19 @@ enum MobileAPIHTTPRetryPolicy {
         if (505...599).contains(statusCode) { return true }
         return false
     }
+
+    static func shouldRetryNetworkError(
+        method: String?,
+        attemptIndex: Int,
+        maxRetries: Int = defaultMaxRetries
+    ) -> Bool {
+        isIdempotentRead(method: method) && attemptIndex < maxRetries
+    }
+
+    /// Manual capture after retries exhaust — never 4xx; transient gateway always; other 5xx when enabled.
+    static func shouldCaptureExhaustedServerError(statusCode: Int, captureFailures: Bool) -> Bool {
+        guard statusCode >= 500 else { return false }
+        if transientGatewayStatusCodes.contains(statusCode) { return true }
+        return captureFailures
+    }
 }

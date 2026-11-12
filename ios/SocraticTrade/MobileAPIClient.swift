@@ -210,6 +210,18 @@ struct MobileAPIClient {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
+                    method: req.httpMethod,
+                    attemptIndex: attemptIndex
+                ) {
+                    let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                        attemptIndex: attemptIndex,
+                        retryAfterSeconds: nil
+                    )
+                    attemptIndex += 1
+                    try await Task.sleep(nanoseconds: delay)
+                    continue
+                }
                 SentryTelemetry.captureAPIFailure(error: error, endpoint: endpoint)
                 throw MobileAPIError.network(error)
             }
@@ -241,7 +253,11 @@ struct MobileAPIClient {
         do {
             try Self.requireSuccess(response, body: data)
         } catch let error as MobileAPIError {
-            if case .serverError(let statusCode, _) = error {
+            if case .serverError(let statusCode, _) = error,
+               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(
+                   statusCode: statusCode,
+                   captureFailures: true
+               ) {
                 SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
             }
             throw error
@@ -545,11 +561,11 @@ struct MobileAPIClient {
         return request
     }
 
-    private func get<T: Decodable>(_ path: String, retries _: Int = 2, timeout: TimeInterval = 30) async throws -> T {
+    private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
         var req = request(path: path)
         req.timeoutInterval = timeout
         do {
-            return try await send(req, captureFailures: false)
+            return try await send(req, captureFailures: false, maxTransientRetries: retries)
         } catch let error as MobileAPIError {
             if case .network(let underlying) = error {
                 SentryTelemetry.captureAPIFailure(error: underlying, endpoint: path)
@@ -571,8 +587,16 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest, captureFailures: Bool = true) async throws -> T {
-        let data = try await successfulResponseData(for: request, captureFailures: captureFailures)
+    private func send<T: Decodable>(
+        _ request: URLRequest,
+        captureFailures: Bool = true,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
+    ) async throws -> T {
+        let data = try await successfulResponseData(
+            for: request,
+            captureFailures: captureFailures,
+            maxTransientRetries: maxTransientRetries
+        )
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -584,13 +608,15 @@ struct MobileAPIClient {
         for request: URLRequest,
         captureFailures: Bool = true,
         deviceTokenConflictPath: Bool = false,
-        transport: URLSession? = nil
+        transport: URLSession? = nil,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
     ) async throws -> Data {
         let (data, _) = try await transientAwareData(
             for: request,
             captureFailures: captureFailures,
             deviceTokenConflictPath: deviceTokenConflictPath,
-            transport: transport
+            transport: transport,
+            maxTransientRetries: maxTransientRetries
         )
         return data
     }
@@ -600,7 +626,8 @@ struct MobileAPIClient {
         captureFailures: Bool = true,
         deviceTokenConflictPath: Bool = false,
         transport: URLSession? = nil,
-        pathForTelemetry: String? = nil
+        pathForTelemetry: String? = nil,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
     ) async throws -> (Data, URLResponse) {
         let endpoint = pathForTelemetry ?? request.url?.absoluteString ?? ""
         var attemptIndex = 0
@@ -614,6 +641,19 @@ struct MobileAPIClient {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
+                    method: request.httpMethod,
+                    attemptIndex: attemptIndex,
+                    maxRetries: maxTransientRetries
+                ) {
+                    let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                        attemptIndex: attemptIndex,
+                        retryAfterSeconds: nil
+                    )
+                    attemptIndex += 1
+                    try await Task.sleep(nanoseconds: delay)
+                    continue
+                }
                 if captureFailures {
                     SentryTelemetry.captureAPIFailure(error: error, endpoint: endpoint)
                 }
@@ -630,7 +670,8 @@ struct MobileAPIClient {
                MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
                    statusCode: http.statusCode,
                    method: request.httpMethod,
-                   attemptIndex: attemptIndex
+                   attemptIndex: attemptIndex,
+                   maxRetries: maxTransientRetries
                ) {
                 let retryAfter = MobileAPIHTTPRetryPolicy.parseRetryAfterSeconds(
                     http.value(forHTTPHeaderField: "Retry-After")
@@ -647,7 +688,11 @@ struct MobileAPIClient {
             do {
                 try Self.requireSuccess(response, body: data)
             } catch let error as MobileAPIError {
-                if case .serverError(let statusCode, _) = error {
+                if case .serverError(let statusCode, _) = error,
+                   MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(
+                       statusCode: statusCode,
+                       captureFailures: captureFailures
+                   ) {
                     SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
                 }
                 throw error

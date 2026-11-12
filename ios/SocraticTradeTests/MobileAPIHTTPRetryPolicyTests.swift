@@ -78,4 +78,17 @@ final class MobileAPIHTTPRetryPolicyTests: XCTestCase {
         XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportAutomaticFailedRequest(statusCode: 505))
     }
 
+    func testExhaustedServerErrorCaptureFilter() {
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 404, captureFailures: true))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 500, captureFailures: false))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 500, captureFailures: true))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 503, captureFailures: false))
+    }
+
+    func testNetworkRetryOnIdempotentReads() {
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(method: "GET", attemptIndex: 0))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(method: "POST", attemptIndex: 0))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(method: "GET", attemptIndex: 2))
+    }
+
 }
