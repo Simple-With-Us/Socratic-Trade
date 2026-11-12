@@ -32,7 +32,8 @@ describe("POST /api/profiles strict payload", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "Invalid profile payload" });
     const { listStrategyProfiles } = await import("../src/lib/db");
-    expect(listStrategyProfiles("local").some((p) => p.name === "Momentum")).toBe(false);
+    const { DEFAULT_REQUEST_USER_ID } = await import("../src/lib/request-user");
+    expect(listStrategyProfiles(DEFAULT_REQUEST_USER_ID).some((p) => p.name === "Momentum")).toBe(false);
   });
 
   it.each([
@@ -76,11 +77,19 @@ describe("POST /api/profiles/[id]/activate error mapping", () => {
     await expect(POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) })).rejects.toThrow(/SQLITE_BUSY/);
   });
 
-  it("returns the 401 identity denial unchanged", async () => {
-    vi.stubEnv("CODE_CLI_ENABLED", "true");
+  it.each([
+    ["Code CLI mode", "CODE_CLI_ENABLED", "true", /Code CLI/],
+    ["live bootstrap", "DB_BOOTSTRAP", "live", /live bootstrap/]
+  ])("returns the verified_identity_required 401 unchanged under %s", async (_label, name, value, reason) => {
+    vi.stubEnv(name, value);
     const { POST } = await import("../app/api/profiles/[id]/activate/route");
     const response = await POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) });
     expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: "verified_identity_required",
+      reason: expect.stringMatching(reason)
+    });
   });
 
   it("maps a missing profile to HTTP 404", async () => {
@@ -101,9 +110,17 @@ describe("POST /api/profiles/[id]/activate error mapping", () => {
     await expect(POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) })).rejects.toThrow(/SQLITE_BUSY/);
   });
 
-  it("activates an existing profile", async () => {
+  // The route resolves the request user itself (DEV_USER_ID, defaulting to "local"), so the fixture
+  // is created under the same DEFAULT_REQUEST_USER_ID whether or not DEV_USER_ID is set.
+  it.each([
+    ["DEV_USER_ID unset", undefined, "local"],
+    ["DEV_USER_ID set", "dev-fixture-user", "dev-fixture-user"]
+  ])("activates an existing profile with %s", async (_label, devUserId, expectedUserId) => {
+    vi.stubEnv("DEV_USER_ID", devUserId);
+    const { DEFAULT_REQUEST_USER_ID } = await import("../src/lib/request-user");
+    expect(DEFAULT_REQUEST_USER_ID).toBe(expectedUserId);
     const { createStrategyProfile } = await import("../src/lib/db");
-    const created = createStrategyProfile({ name: "Swing" }, "local");
+    const created = createStrategyProfile({ name: "Swing" }, DEFAULT_REQUEST_USER_ID);
     const { POST } = await import("../app/api/profiles/[id]/activate/route");
     const response = await POST(activate(created.id), { params: Promise.resolve({ id: created.id }) });
     expect(response.status).toBe(200);
