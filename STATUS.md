@@ -3,6 +3,11 @@
 **What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` returns 502 `broker_unavailable` when the history provider fails, instead of 200 with empty bars.  PUT `/api/policy` rejects unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
 
 **Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
 ## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
 
 **What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
