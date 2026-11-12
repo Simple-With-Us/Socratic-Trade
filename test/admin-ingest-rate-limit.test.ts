@@ -53,7 +53,8 @@ vi.mock("@/lib/rag/corpus-reembed", () => ({
 }));
 vi.mock("@/lib/web-sources/sec-filings", () => ({
   refreshFilingBodies: mocks.refreshFilingBodies,
-  padCik: (cik: string) => cik
+  // Match production padCik so the route's 10-digit padding and dedupe are actually covered.
+  padCik: (cik: string | number) => String(cik).replace(/\D/g, "").padStart(10, "0")
 }));
 vi.mock("@/lib/vector-db", () => ({ getVectorStoreStats: mocks.getVectorStoreStats }));
 vi.mock("@/lib/web-sources/sec8k", () => ({
@@ -296,7 +297,8 @@ describe("admin ingest jobs", () => {
   it("sec-ingest POST rejects an invalid body with 400 invalid_payload and does not seed", async () => {
     const cases: unknown[] = [
       { action: "unknown" },
-      { action: "seed", offset: "1" },
+      { action: "seed", offset: "" },
+      { action: "seed", offset: "abc" },
       { action: "seed", limit: -1 },
       { action: "seed", ciks: [""] },
       { action: "seed", unexpected: true },
@@ -325,16 +327,24 @@ describe("admin ingest jobs", () => {
   });
 
   it("sec-ingest POST invalid_payload does not spend the job budget", async () => {
+    const probe = adminRequest("/api/admin/reembed", { method: "POST" }, tokenAuth);
+    const key = adminIngestBucketKey(probe, "sec-ingest", "job");
+    const options = RATE_LIMITS.adminIngest;
+    for (let i = 0; i < options.limit - 1; i += 1) {
+      expect(rateLimit(key, options).allowed).toBe(true);
+    }
+
     const rejected = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
       method: "POST",
       body: JSON.stringify({ action: "seed", unexpected: true })
     }, tokenAuth));
     expect(rejected.status).toBe(400);
+    expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
 
     mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 1 });
     const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
       method: "POST",
-      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "1018724"] })
+      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "0000320193", "1018724"] })
     }, tokenAuth));
     expect(allowed.status).not.toBe(429);
     expect(allowed.status).not.toBe(400);
@@ -342,7 +352,30 @@ describe("admin ingest jobs", () => {
     expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
       offset: 2,
       limit: 3,
-      issuerCiks: ["320193", "1018724"]
+      issuerCiks: ["0000320193", "0001018724"]
+    });
+
+    const exhausted = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "1018724"] })
+    }, tokenAuth));
+    expect(exhausted.status).toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+  });
+
+  it("sec-ingest POST accepts a quoted offset and still normalizes CIKs", async () => {
+    mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 1 });
+    const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: "2", limit: "3", ciks: ["320193", "0000320193"] })
+    }, tokenAuth));
+    expect(response.status).not.toBe(400);
+    expect(response.status).not.toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+    expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
+      offset: 2,
+      limit: 3,
+      issuerCiks: ["0000320193"]
     });
   });
 
