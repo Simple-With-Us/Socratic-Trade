@@ -214,20 +214,87 @@ class WrapTest(unittest.TestCase):
 class InstallerHostCheckTest(unittest.TestCase):
     """Installers refuse a host other than the expected one before touching anything."""
 
-    def test_installers_refuse_unexpected_host(self) -> None:
+    INSTALLERS = ("install-litestream-l1-trim.sh", "install-st-container-restart-monitor.sh")
+
+    def _env(self, bindir: Path | None = None) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
+        if bindir is not None:
+            env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+        return env
+
+    def _stub_hostname(self, directory: Path, name: str) -> None:
+        stub = directory / "hostname"
+        stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{name}'\n", encoding="utf-8")
+        stub.chmod(0o755)
+
+    def _run(self, name: str, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(HERE / name), *args],
+            check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_installers_refuse_unexpected_host(self) -> None:
+        env = self._env()
         env["ST_INSTALL_EXPECTED_HOST"] = "st-unittest-no-such-host"
-        for name in ("install-litestream-l1-trim.sh", "install-st-container-restart-monitor.sh"):
-            r = subprocess.run(
-                ["bash", str(HERE / name)], check=False, env=env, capture_output=True, text=True, timeout=30
-            )
+        for name in self.INSTALLERS:
+            r = self._run(name, env)
             self.assertEqual(r.returncode, 1, name)
             self.assertIn("refusing to install on host", r.stderr, name)
             self.assertIn("st-unittest-no-such-host", r.stderr, name)
-            r = subprocess.run(
-                ["bash", str(HERE / name), "--bogus"], check=False, env=env, capture_output=True, timeout=30
-            )
+            r = self._run(name, env, "--bogus")
             self.assertEqual(r.returncode, 2, name)
+
+    def test_installers_accept_fqdn_expected_host_when_hostname_is_short(self) -> None:
+        """An FQDN expected host must match when `hostname` returns the short name."""
+        short = "st-unittest-host"
+        fqdn = "st-unittest-host.example.ts.net"
+        other = "other-host.example.ts.net"
+        with tempfile.TemporaryDirectory() as td:
+            bindir = Path(td)
+            self._stub_hostname(bindir, short)
+            env = self._env(bindir)
+            for name in self.INSTALLERS:
+                r = self._run(name, env, "--expected-host", fqdn)
+                self.assertNotIn("refusing to install on host", r.stderr, name)
+                self.assertIn("must run as root", r.stderr, name)
+                self.assertEqual(r.returncode, 1, name)
+
+                env_var = dict(env)
+                env_var["ST_INSTALL_EXPECTED_HOST"] = fqdn
+                r = self._run(name, env_var)
+                self.assertNotIn("refusing to install on host", r.stderr, name)
+                self.assertIn("must run as root", r.stderr, name)
+                self.assertEqual(r.returncode, 1, name)
+
+                r = self._run(name, env, "--expected-host", short)
+                self.assertNotIn("refusing to install on host", r.stderr, name)
+                self.assertIn("must run as root", r.stderr, name)
+
+                r = self._run(name, env, "--expected-host", other)
+                self.assertEqual(r.returncode, 1, name)
+                self.assertIn("refusing to install on host", r.stderr, name)
+                self.assertIn(other, r.stderr, name)
+
+    def test_installers_accept_short_expected_host_when_hostname_is_fqdn(self) -> None:
+        short = "st-unittest-host"
+        fqdn = "st-unittest-host.example.ts.net"
+        with tempfile.TemporaryDirectory() as td:
+            bindir = Path(td)
+            self._stub_hostname(bindir, fqdn)
+            env = self._env(bindir)
+            for name in self.INSTALLERS:
+                r = self._run(name, env, "--expected-host", short)
+                self.assertNotIn("refusing to install on host", r.stderr, name)
+                self.assertIn("must run as root", r.stderr, name)
+                self.assertEqual(r.returncode, 1, name)
+
+                r = self._run(name, env, "--expected-host", fqdn)
+                self.assertNotIn("refusing to install on host", r.stderr, name)
+                self.assertIn("must run as root", r.stderr, name)
 
 
 class UnitScheduleTest(unittest.TestCase):

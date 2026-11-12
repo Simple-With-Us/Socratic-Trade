@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-`<host>` below is the dedicated fleet host that runs the ST systemd timers.  Both installers refuse (exit 1, nothing changed) unless `hostname` matches the expected host: the dedicated fleet host by default, or `ST_INSTALL_EXPECTED_HOST` / `--expected-host NAME`.  `--skip-host-check` is the explicit override and logs a warning.
+`<host>` below is the dedicated fleet host that runs the ST systemd timers.  Both installers refuse (exit 1, nothing changed) unless `hostname` matches the expected host (full name, short name, or the expected host's short form, so an FQDN expected host still matches when `hostname` returns the short name): the dedicated fleet host by default, or `ST_INSTALL_EXPECTED_HOST` / `--expected-host NAME`.  `--skip-host-check` is the last-resort override and logs a warning.
 
 ST host systemd timers on `<host>` (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) had no dead-man alerting when a timer stopped firing or the oneshot kept failing.  This adds reusable Sentry Crons check-ins (in_progress then ok/error) around each ST oneshot, mirroring `scripts/sentry-ci-report.py`.
 

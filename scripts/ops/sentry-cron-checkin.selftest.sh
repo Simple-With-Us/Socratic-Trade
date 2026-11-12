@@ -127,5 +127,5 @@ raise SystemExit(main())
 PY
 
 # Unittests: missing DSN, --env-file after wrap, spawn failure, SIGTERM,
-# signal exit codes, exit 2, timer UTC pin.
+# signal exit codes, exit 2, timer UTC pin, installer host check including FQDN vs short.
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/sentry_cron_checkin_test.py"
