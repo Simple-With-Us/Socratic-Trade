@@ -2,6 +2,7 @@ import Foundation
 import LocalAuthentication
 import Observation
 import SwiftUI
+import UIKit
 
 /// Pure lock decision. The product timeout is `defaultGracePeriod` (one minute).
 enum AppLockPolicy {
@@ -209,6 +210,7 @@ struct AppLockView: View {
             }
             .padding(32)
         }
+        .preferredColorScheme(.light)
         .onAppear {
             controller.refreshDeviceAuthenticationAvailability()
             guard !didAttemptInitialUnlock else { return }
@@ -264,6 +266,106 @@ struct AppLockView: View {
         default:
             controller.refreshDeviceAuthenticationAvailability()
             controller.reportUnlockFailure("Could not unlock.\u{00A0} Try again.")
+        }
+    }
+}
+
+/// Above the app window, so a sheet that is already presented cannot sit on top
+/// of the lock. Below system alerts, so the device-passcode UI still appears.
+enum AppLockCoverWindow {
+    static var level: UIWindow.Level {
+        UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue + 1)
+    }
+}
+
+/// A root `.fullScreenCover` is dropped while a descendant sheet owns the
+/// hosting controller. This host puts the lock in its own window instead.
+struct AppLockCoverHost: UIViewRepresentable {
+    var isPresented: Bool
+    var controller: AppLockController
+
+    func makeUIView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.isHidden = true
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: AnchorView, context: Context) {
+        context.coordinator.isPresented = isPresented
+        context.coordinator.controller = controller
+        context.coordinator.sync(anchor: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: AnchorView, coordinator: Coordinator) {
+        coordinator.dismiss()
+        uiView.coordinator = nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class AnchorView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.coordinator?.sync(anchor: self)
+            }
+        }
+    }
+
+    final class Coordinator {
+        var isPresented = false
+        var controller: AppLockController?
+        private var coverWindow: UIWindow?
+        private weak var previousKeyWindow: UIWindow?
+
+        func sync(anchor: UIView) {
+            guard isPresented, let controller else {
+                dismiss()
+                return
+            }
+            guard let scene = anchor.window?.windowScene else { return }
+            if let coverWindow, coverWindow.windowScene === scene, !coverWindow.isHidden {
+                if !coverWindow.isKeyWindow {
+                    claimKey(coverWindow, in: scene)
+                }
+                return
+            }
+            dismiss()
+            let hosting = UIHostingController(rootView: AppLockView(controller: controller))
+            hosting.view.backgroundColor = .clear
+            hosting.overrideUserInterfaceStyle = .light
+            let cover = UIWindow(windowScene: scene)
+            cover.windowLevel = AppLockCoverWindow.level
+            cover.backgroundColor = .clear
+            cover.rootViewController = hosting
+            claimKey(cover, in: scene)
+            coverWindow = cover
+        }
+
+        func dismiss() {
+            guard let coverWindow else { return }
+            let previous = previousKeyWindow
+            let scene = coverWindow.windowScene
+            coverWindow.isHidden = true
+            coverWindow.rootViewController = nil
+            self.coverWindow = nil
+            previousKeyWindow = nil
+            if previous?.isHidden == false {
+                previous?.makeKey()
+                return
+            }
+            scene?.windows.first { $0 !== coverWindow && $0.isHidden == false }?.makeKey()
+        }
+
+        private func claimKey(_ cover: UIWindow, in scene: UIWindowScene) {
+            previousKeyWindow = scene.windows.first { $0.isKeyWindow && $0 !== cover }
+            cover.makeKeyAndVisible()
         }
     }
 }

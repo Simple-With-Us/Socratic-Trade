@@ -63,9 +63,6 @@ struct ContentView: View {
     /// animation and a slow one is never held back — the splash leaves when BOTH are done.
     @State private var minimumSplashElapsed = false
     @State private var didConfigurePush = false
-    /// fullScreenCover misses a binding that is already true on the first frame.
-    /// Arming it on appear turns the lock into a false-to-true presentation.
-    @State private var lockCoverArmed = false
 
     private var showSplash: Bool { !store.hasInitialized || !minimumSplashElapsed }
 
@@ -135,9 +132,8 @@ struct ContentView: View {
             }
 
             if showsAppLock {
-                // Covers the session until the full-screen lock is up, including the
-                // frame before that cover presents. The cover itself is outside this
-                // stack so it still receives taps.
+                // Covers this stack while the lock window attaches. Presented sheets
+                // live above this stack, so AppLockCoverHost covers those.
                 AppPalette.background
                     .ignoresSafeArea()
                     .zIndex(2)
@@ -147,14 +143,9 @@ struct ContentView: View {
         .accessibilityHidden(showsAppLock)
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
-        .fullScreenCover(isPresented: Binding(
-            get: { lockCoverArmed && showsAppLock },
-            set: { _ in }
-        )) {
-            AppLockView(controller: appLock)
-                .interactiveDismissDisabled(true)
+        .background {
+            AppLockCoverHost(isPresented: showsAppLock, controller: appLock)
         }
-        .onAppear { lockCoverArmed = true }
         .task {
             guard !didConfigurePush else { return }
             didConfigurePush = true

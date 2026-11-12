@@ -1,9 +1,15 @@
+import UIKit
 import XCTest
 @testable import SocraticTrade
 
 final class AppLockPolicyTests: XCTestCase {
     func testGracePeriodIsOneMinute() {
         XCTAssertEqual(AppLockPolicy.defaultGracePeriod, 60)
+    }
+
+    func testCoverWindowSitsAboveTheAppAndBelowSystemAlerts() {
+        XCTAssertGreaterThan(AppLockCoverWindow.level.rawValue, UIWindow.Level.normal.rawValue)
+        XCTAssertLessThan(AppLockCoverWindow.level.rawValue, UIWindow.Level.alert.rawValue)
     }
 
     func testDisabledNeverLocks() {

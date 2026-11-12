@@ -2,7 +2,7 @@
 
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
 
-**Next.** Hosted `verify-ios` on the PR.  No TestFlight and no deploy.
+**Next.** Hosted `verify-ios` on the PR, including the lock window that covers an already-presented sheet.  No TestFlight and no deploy.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
