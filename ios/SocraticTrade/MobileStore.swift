@@ -1359,6 +1359,12 @@ final class MobileStore: ObservableObject {
 
     @discardableResult
     private func clearSessionCookiesReportingFailure() -> String? {
+        // Sign-out drops every first-party cookie in the client jar, not only the auth
+        // session cookie, so no CSRF or callback cookie outlives the signed-in session.
+        let jar = client.sessionCookieJar
+        for cookie in jar.cookies ?? [] where client.ownsCookie(cookie) {
+            jar.deleteCookie(cookie)
+        }
         do {
             try sessionCookieCoordinator.clearSession(from: client)
             return nil

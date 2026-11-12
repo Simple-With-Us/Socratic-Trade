@@ -652,9 +652,10 @@ enum SessionCookiePersistence {
     static func migrateFromLegacySharedStorageIfNeeded(
         into storage: HTTPCookieStorage,
         owningHost host: String?,
-        credentialStore: SessionCredentialStoring
+        credentialStore: SessionCredentialStoring,
+        hasPersistedArchives: Bool
     ) throws {
-        guard (try credentialStore.load()) == nil else { return }
+        guard !hasPersistedArchives else { return }
         let legacy = authSessionCookies(in: HTTPCookieStorage.shared, owningHost: host)
         guard !legacy.isEmpty else { return }
         let archives = legacy.map { SessionCookieArchive(cookie: $0, owningHost: host) }
@@ -673,11 +674,15 @@ struct SessionCookieCoordinator: Sendable {
 
     func prepareClientSession(_ client: MobileAPIClient) throws {
         let storage = cookieStorage(for: client)
-        if let archives = try credentialStore.load(), !archives.isEmpty {
+        // Read the Keychain once per restore; the migration below reuses this result.
+        var hasPersistedArchives = false
+        if let archives = try credentialStore.load() {
+            hasPersistedArchives = true
             let now = Date()
-            if archives.allSatisfy({ $0.isExpired(at: now) }) {
+            if !archives.isEmpty, archives.allSatisfy({ $0.isExpired(at: now) }) {
                 try credentialStore.delete()
-            } else {
+                hasPersistedArchives = false
+            } else if !archives.isEmpty {
                 _ = SessionCookiePersistence.apply(
                     archives,
                     to: storage,
@@ -689,7 +694,8 @@ struct SessionCookieCoordinator: Sendable {
         try SessionCookiePersistence.migrateFromLegacySharedStorageIfNeeded(
             into: storage,
             owningHost: client.baseURL.host,
-            credentialStore: credentialStore
+            credentialStore: credentialStore,
+            hasPersistedArchives: hasPersistedArchives
         )
     }
 

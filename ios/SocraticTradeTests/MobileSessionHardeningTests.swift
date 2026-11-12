@@ -405,7 +405,12 @@ final class MobileSessionHardeningTests: XCTestCase {
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let release = ScriptedPushRelease(client: client, token: "abc123")
-        let store = MobileStore(client: client)
+        let store = MobileStore(
+            client: client,
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
+            )
+        )
         store.pushTokenRelease = release
 
         await store.signOut()
