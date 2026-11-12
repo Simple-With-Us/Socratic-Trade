@@ -241,9 +241,16 @@ describe("createProxiedFetch concurrency gate", () => {
     let t = 1_000;
     const spy = vi.spyOn(Date, "now").mockImplementation(() => (t += 5));
     try {
+      // Control: the mocked clock is active and advances on every read.
+      expect(Date.now()).toBe(1_005);
+      t = 1_000;
       const slot = await gate.acquire();
+      // Control: the slot was granted immediately (no queue), while the clock still ticked.
+      expect(gate.inFlight).toBe(1);
+      expect(t).toBeGreaterThan(1_000);
       expect(slot.waitMs).toBe(0);
       slot.release();
+      expect(gate.inFlight).toBe(0);
     } finally {
       spy.mockRestore();
     }
