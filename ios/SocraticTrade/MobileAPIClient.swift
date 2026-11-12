@@ -5,6 +5,8 @@ import Security
 enum MobileAPIError: Error, LocalizedError {
     case unauthorized(statusCode: Int)
     case serverError(statusCode: Int, message: String?)
+    /// POST /api/mobile/push/register returned 409. The token still belongs to another account.
+    case deviceTokenConflict(message: String?)
     case scanQuotesUnavailable(MarketScanResponse)
     case network(Error)
     case decoding(Error)
@@ -13,6 +15,8 @@ enum MobileAPIError: Error, LocalizedError {
         switch self {
         case .unauthorized:
             return "Your session expired.  Sign in again."
+        case .deviceTokenConflict:
+            return PushRegistrationPolicy.conflictMessage
         case .serverError(let statusCode, let message):
             // Cloudflare 521-523: origin unreachable.  Keep the reason, drop the vendor and code.
             if (521...523).contains(statusCode) {
@@ -30,11 +34,55 @@ enum MobileAPIError: Error, LocalizedError {
                 return reasons.joined(separator: "  ")
             }
             return "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
-        case .network:
-            return "Check your connection and try again."
+        case .network(let underlying):
+            if Self.isUserCancellation(underlying) { return nil }
+            return Self.userFacingNetworkMessage(for: underlying) ?? "Couldn't reach Socratic Trade"
         case .decoding:
             return "Couldn’t load your workspace.  Try again."
         }
+    }
+
+    /// A push upload can be sent again. A 409 is not transient: another account owns the token.
+    var isTransientPushRegistrationFailure: Bool {
+        switch self {
+        case .network, .decoding:
+            return true
+        case .serverError(let statusCode, _) where statusCode >= 500:
+            return true
+        case .serverError, .unauthorized, .deviceTokenConflict, .scanQuotesUnavailable:
+            return false
+        }
+    }
+
+    /// True when the failure is user- or task-initiated cancellation (no alert copy).
+    static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        if case MobileAPIError.network(let underlying) = error {
+            return isUserCancellation(underlying)
+        }
+        return false
+    }
+
+    /// Maps URLSession failures to short, accurate copy.  Returns nil for user-cancelled work.
+    static func userFacingNetworkMessage(for error: Error) -> String? {
+        if isUserCancellation(error) { return nil }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return nil
+            case .timedOut:
+                return "Server is slow, still trying"
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "Check your connection"
+            default:
+                return "Couldn't reach Socratic Trade"
+            }
+        }
+        if case MobileAPIError.network(let underlying) = error {
+            return userFacingNetworkMessage(for: underlying)
+        }
+        return nil
     }
 }
 
@@ -59,19 +107,33 @@ struct MobileAPIClient {
     /// handed the store's client) targets the same host — and therefore the same
     /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
     static let productionBaseURL = URL(string: "https://socratictrade.com")!
+    /// Sent on mobile auth requests so the server applies ST-2599 strict checks.
+    static let sessionHardeningHeaderField = "x-socratic-mobile-session-hardening"
+    static let sessionHardeningHeaderValue = "1"
 
     let baseURL: URL
     var session: URLSession = .shared
+    /// Custom URL protocols for the account-change DELETE session. A live
+    /// URLSession does not return `configuration.protocolClasses`, so a stub
+    /// installed on `session` has to be repeated here.
+    var isolatedProtocolClasses: [AnyClass]? = nil
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
         return snap
     }
 
-    func snapshotData(timeout: TimeInterval = 30) async throws -> (MobileSnapshot, Data) {
+    func snapshotData(
+        timeout: TimeInterval = 30,
+        captureFailures: Bool = true
+    ) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
+        // A shared URL cache can replay the previous account after a switch or sign-out.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = timeout
-        let data = try await successfulResponseData(for: req)
+        // Retrying callers pass captureFailures: false and report only the terminal
+        // failure, so a recovered transient does not mint a Sentry issue per attempt.
+        let data = try await successfulResponseData(for: req, captureFailures: captureFailures)
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
             return (snap, data)
@@ -145,6 +207,7 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: req.url?.absoluteString ?? "/api/scan")
             throw MobileAPIError.network(error)
         }
         if let http = response as? HTTPURLResponse, http.statusCode == 503 {
@@ -229,17 +292,41 @@ struct MobileAPIClient {
         var request = request(path: "/api/mobile/push/register", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: registration.jsonBody)
-        _ = try await successfulResponseData(for: request)
+        _ = try await successfulResponseData(for: request, deviceTokenConflictPath: true)
     }
 
     /// Sign-out counterpart.  Sends the token so the server drops the exact row rather than
     /// every token the session's user owns — signing out of one device must not silence
     /// another one the same owner is still signed in on.
     func unregisterPushToken(_ token: String) async throws {
+        _ = try await successfulResponseData(for: unregisterPushRequest(token))
+    }
+
+    /// Account-change DELETE. The prior account's cookies go on this request only.
+    /// The shared cookie jar is not read or written, so other in-flight calls keep
+    /// the signed-in session.
+    func unregisterPushToken(_ token: String, isolatedCookies: [HTTPCookie]) async throws {
+        var request = try unregisterPushRequest(token)
+        request.httpShouldHandleCookies = false
+        let cookie = HTTPCookie.requestHeaderFields(with: isolatedCookies)["Cookie"]
+        if let cookie {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        configuration.protocolClasses = isolatedProtocolClasses ?? session.configuration.protocolClasses
+        let isolated = URLSession(configuration: configuration)
+        defer { isolated.finishTasksAndInvalidate() }
+        _ = try await successfulResponseData(for: request, transport: isolated)
+    }
+
+    private func unregisterPushRequest(_ token: String) throws -> URLRequest {
         var request = request(path: "/api/mobile/push/register", method: "DELETE")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
-        _ = try await successfulResponseData(for: request)
+        return request
     }
 
     func acknowledgeNotifications(ids: [String]) async throws -> Int {
@@ -282,25 +369,66 @@ struct MobileAPIClient {
         return (try? JSONDecoder().decode(AccountDeletionResult.self, from: data)) ?? .successfulHTTP
     }
 
-    func loginWithApple(identityToken: String, name: String?) async throws -> AppleLoginResponse {
-        var request = request(path: "/api/mobile/auth/apple", method: "POST")
+    func prepareHandoff(codeChallenge: String) async throws -> String {
+        let response: HandoffNonceResponse = try await send(try handoffPrepareRequest(codeChallenge: codeChallenge))
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.handoffUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func fetchAppleSignInNonce() async throws -> String {
+        let response: AppleServerNonceResponse = try await send(appleNonceRequest())
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.appleNonceUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func handoffPrepareRequest(codeChallenge: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/handoff-prepare", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        var body: [String: Any] = ["identityToken": identityToken]
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["codeChallenge": codeChallenge])
+        return request
+    }
+
+    func appleNonceRequest() -> URLRequest {
+        authRequest(path: "/api/mobile/auth/apple/nonce", method: "GET")
+    }
+
+    func appleLoginRequest(identityToken: String, name: String?, nonce: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/apple", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        var body: [String: Any] = ["identityToken": identityToken, "nonce": nonce]
         if let name, !name.isEmpty {
             body["name"] = name
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
+        return request
     }
 
-    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
-        var request = request(path: "/api/mobile/auth/exchange", method: "POST")
+    func webAuthExchangeRequest(code: String, verifier: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/exchange", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "code": code,
             "codeVerifier": verifier
         ])
-        let _: WebAuthExchangeResponse = try await send(request)
+        return request
+    }
+
+    func loginWithApple(identityToken: String, name: String?, nonce: String) async throws -> AppleLoginResponse {
+        try await send(try appleLoginRequest(identityToken: identityToken, name: name, nonce: nonce))
+    }
+
+    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
+        let _: WebAuthExchangeResponse = try await send(try webAuthExchangeRequest(code: code, verifier: verifier))
     }
 
     /// `onConnect` fires when the stream response is established and again on every received
@@ -315,6 +443,7 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
         try Self.requireSuccess(response, body: nil)
@@ -329,9 +458,10 @@ struct MobileAPIClient {
                     onEvent()
                 }
             }
-        } catch is CancellationError {
+            } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
     }
@@ -380,13 +510,19 @@ struct MobileAPIClient {
         return request
     }
 
+    private func authRequest(path: String, method: String) -> URLRequest {
+        var request = request(path: path, method: method)
+        request.setValue(Self.sessionHardeningHeaderValue, forHTTPHeaderField: Self.sessionHardeningHeaderField)
+        return request
+    }
+
     private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
         var attempt = 0
         while true {
             do {
                 var req = request(path: path)
                 req.timeoutInterval = timeout
-                return try await send(req)
+                return try await send(req, captureFailures: false)
             } catch let error as MobileAPIError {
                 let shouldRetry = {
                     if case .network = error { return true }
@@ -398,6 +534,9 @@ struct MobileAPIClient {
                     let delayMs = UInt64(150_000_000 * (1 << attempt)) // 300ms, 600ms backoff
                     try await Task.sleep(nanoseconds: delayMs)
                     continue
+                }
+                if case .network(let underlying) = error {
+                    SentryTelemetry.captureAPIFailure(error: underlying, endpoint: path)
                 }
                 throw error
             } catch {
@@ -419,8 +558,8 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let data = try await successfulResponseData(for: request)
+    private func send<T: Decodable>(_ request: URLRequest, captureFailures: Bool = true) async throws -> T {
+        let data = try await successfulResponseData(for: request, captureFailures: captureFailures)
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -428,15 +567,28 @@ struct MobileAPIClient {
         }
     }
 
-    private func successfulResponseData(for request: URLRequest) async throws -> Data {
+    private func successfulResponseData(
+        for request: URLRequest,
+        captureFailures: Bool = true,
+        deviceTokenConflictPath: Bool = false,
+        transport: URLSession? = nil
+    ) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await (transport ?? session).data(for: request)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if captureFailures {
+                SentryTelemetry.captureAPIFailure(error: error, endpoint: request.url?.absoluteString ?? "")
+            }
             throw MobileAPIError.network(error)
+        }
+        if deviceTokenConflictPath,
+           let http = response as? HTTPURLResponse,
+           http.statusCode == 409 {
+            throw MobileAPIError.deviceTokenConflict(message: Self.serverMessage(from: data))
         }
         try Self.requireSuccess(response, body: data)
         return data
@@ -485,6 +637,14 @@ private struct AcknowledgeNotificationsResponse: Decodable {
 
 private struct WebAuthExchangeResponse: Decodable {
     let success: Bool
+}
+
+private struct HandoffNonceResponse: Decodable {
+    let nonce: String
+}
+
+private struct AppleServerNonceResponse: Decodable {
+    let nonce: String
 }
 
 struct WebAuthCodeVerifier {

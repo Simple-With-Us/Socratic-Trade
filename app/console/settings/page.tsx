@@ -30,6 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
+import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
 import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
@@ -39,6 +40,7 @@ import { HelpGlossaryCard } from "./help";
 import { LearningReviewCard } from "./learning-review";
 import { LegalCard } from "./legal";
 import { LlmBudgetCard } from "./llm-budget";
+import { ProxyCard } from "./proxy";
 import { DataSharingCard } from "./sharing";
 import {
   fetchSourceFeatures,
@@ -290,6 +292,9 @@ export default function SettingsPage() {
         <div id="data-sources" className={SECTION_SCROLL_MT}>
           <div id="fmp-features" className="contents">
             <DataSourcesCard />
+          </div>
+          <div className="mt-4">
+            <ProxyCard />
           </div>
         </div>
         {/* requireTypedConfirmation is a USER-level policy field
@@ -644,14 +649,16 @@ function BootBehaviorCard() {
     <Card title="After a restart">
       <div
         className="flex items-center justify-between gap-4 rounded-control px-1.5 py-1 transition-colors hover:bg-[color:var(--con-surface-2)]"
-        title="Controls what happens to Running accounts when the server process restarts.  Off keeps the safety net: a human must start trading again."
+        title="Controls what happens to Running and auto-paused accounts when the server restarts or deploys.  Off keeps the safety net: a human must start trading again."
       >
         <div>
           <div className="text-[length:var(--con-fs-sm)] font-semibold">Auto-resume on boot</div>
           <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-            Off (recommended): whenever the server restarts, any Running account is stopped until a person starts it
-            again — a restored backup or crash-loop can never silently resume trading.  Turning this ON removes that
-            safety net.
+            Off (recommended): whenever the server restarts or deploys, any Running account is stopped until a person
+            starts it again — a restored backup or crash-loop can never silently resume trading.  An account the app
+            auto-paused for a broker problem loses its auto-resume too, and stays stopped after the broker
+            recovers.  Turning this on removes that safety net: Running accounts keep running, and auto-paused
+            accounts start again by themselves once the broker recovers.
           </p>
         </div>
         <Toggle
@@ -678,6 +685,43 @@ function BootBehaviorCard() {
 
 // ── You ──────────────────────────────────────────────────────────────────────
 
+function SignOutEverywhereButton() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (
+      !window.confirm(
+        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
+      if (!res.ok) throw new Error(`Request failed (${res.status}).`);
+      window.location.href = "/login";
+    } catch (err) {
+      toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="con-btn con-btn-outline"
+      disabled={busy}
+      onClick={() => void run()}
+      title="Revoke every server session for this account, then return to sign in."
+    >
+      Sign out everywhere
+    </button>
+  );
+}
+
 function YouCard() {
   const { snapshot } = useConsoleData();
   if (!snapshot?.currentUser) return null;
@@ -700,13 +744,16 @@ function YouCard() {
           </span>
         )}
       </div>
+      <div className="mt-3">
+        <SignOutEverywhereButton />
+      </div>
     </Card>
   );
 }
 
 // ── All accounts: Data sources + per-user feature knobs ──────────────────────
 
-const GROUP_ORDER = ["fmp", "sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
+const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
 
 /** Decides what a "Data sources" number row's blur should persist, given the
  *  raw text just typed and the row's last committed value. Returns null when

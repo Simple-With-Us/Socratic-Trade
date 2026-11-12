@@ -13,7 +13,6 @@
 import crypto from "crypto";
 import { audit, getDb, getInternalSetting, setInternalSetting } from "./db";
 import { recordPineconeWriteUnits } from "./pinecone-monthly-pace";
-import { pushRagUsage } from "./usage-monitor-push";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +41,12 @@ export interface RagUsageEntry {
   /** OpenRouter's generation id for this call (embed/rerank via `baai/bge-m3`/`cohere/rerank-v3.5`).
    *  Undefined for Voyage/SiliconFlow/Pinecone. */
   providerRequestId?: string;
+  /**
+   * Embed rows only. True (default) spends RAG_INGEST_MAX_TEXTS_PER_DAY. False is a retrieval
+   * or search embed: it still lands in the cost ledger, and it does not spend the ingest cap.
+   * Omitted on non-embed rows. Legacy embed rows (column NULL) still count.
+   */
+  countsTowardIngest?: boolean;
 }
 
 export interface RagUsageRow {
@@ -160,11 +165,14 @@ export function recordRagUsage(entry: RagUsageEntry): void {
     const tokensOut = entry.tokensOut ?? 0;
     const batchCount = entry.batchCount ?? 1;
     const cost = estimateRagCost(provider, entry.model, entry.operation, tokensIn, batchCount);
+    const countsTowardIngest = entry.operation === "embed"
+      ? (entry.countsTowardIngest === false ? 0 : 1)
+      : null;
 
     getDb()
       .prepare(
-        `INSERT INTO rag_usage (id, user_id, operation, provider, model, tokens_in, tokens_out, batch_count, cost_est_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO rag_usage (id, user_id, operation, provider, model, tokens_in, tokens_out, batch_count, cost_est_usd, counts_toward_ingest, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         usageId,
@@ -176,22 +184,15 @@ export function recordRagUsage(entry: RagUsageEntry): void {
         tokensOut,
         batchCount,
         cost ?? null,
+        countsTowardIngest,
         occurredAt
       );
-    // Fire-and-forget forward to the API Usage Monitor (no-op unless configured; never throws).
-    pushRagUsage({
-      sourceEventId: usageId,
-      occurredAt,
-      provider,
-      operation: entry.operation,
-      model: entry.model,
-      userId,
-      tokensIn,
-      tokensOut,
-      batchCount,
-      costUsd: cost,
-      providerRequestId: entry.providerRequestId,
-    });
+    // No live push to the API Usage Monitor.  RAG rows reach it only through the replay lane's
+    // closed 10-minute windows (usage-monitor-replay.ts):  one summed row per provider, operation,
+    // user and model instead of one per call.  Self-hosted Qdrant is rolled up as call volume
+    // only (unit "request", requests = rows, no quantity or cost, record count in metadata),
+    // because its token columns hold a record count and it has no cost.  Live plus replay both
+    // sending per-row events was most of the ~8,000 rows a day this family produced.
   } catch {
     /* ledger is best-effort; never break the caller */
   }
@@ -210,7 +211,9 @@ export function meterEmbed(
   model?: string,
   userId?: string,
   provider: RagEmbedRerankProvider = "openrouter",
-  providerRequestId?: string
+  providerRequestId?: string,
+  batchCount?: number,
+  countsTowardIngest: boolean = true
 ): void {
   const tokens = approxTokens(texts);
   recordRagUsage({
@@ -221,9 +224,29 @@ export function meterEmbed(
       model ||
       (provider === "openrouter" ? "baai/bge-m3" : "BAAI/bge-m3"),
     tokensIn: tokens,
-    batchCount: texts.length,
-    providerRequestId
+    batchCount: batchCount ?? texts.length,
+    providerRequestId,
+    countsTowardIngest
   });
+}
+
+/**
+ * Embed windows that spend RAG_INGEST_MAX_TEXTS_PER_DAY for this user since `sinceIso`.
+ * Retrieval embeds (`counts_toward_ingest = 0`) are excluded. Legacy rows (NULL) still count,
+ * so turning the flag on does not grant a cap holiday for usage already booked.
+ */
+export function usedIngestEmbedWindowsLast24h(userId: string, sinceIso: string): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(batch_count), 0) AS total
+       FROM rag_usage
+       WHERE user_id = ?
+         AND operation = 'embed'
+         AND created_at >= ?
+         AND COALESCE(counts_toward_ingest, 1) = 1`
+    )
+    .get(userId, sinceIso) as { total: number } | undefined;
+  return Number(row?.total ?? 0);
 }
 
 /**

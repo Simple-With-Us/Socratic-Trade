@@ -1,7 +1,8 @@
-import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getPolicy, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listDailyPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
+import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listDailyPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, peekPolicy, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
 import { applyExecutionCost, estimateExecutionCostBps, executionCostConfig } from "./execution-cost";
 import { canonicalModelId } from "./model-identity";
 import { normalizeSymbol } from "./money";
+import { marketDateOf } from "./market-calendar";
 import { aggregateSourceValue, type SourceValueObservation } from "./source-value";
 import type {
   CandidateEvidence,
@@ -121,6 +122,57 @@ export function aggregateRoundTrip(exits: ClosedLot[], entryQuantity: number): C
   return { ...last, pnl, returnPct, quantity: closedQuantity };
 }
 
+/** Round-trip identity of one OPENING fill: symbol + the timestamp `calculatePnl` stamps onto
+ *  every exit it books against that lot. Deliberately the same pair, so grouping exits here lines
+ *  up with the FIFO match `calculatePnl` already performed — this never re-derives lot matching. */
+function roundTripKey(symbol: string | undefined, entryAt: string | undefined): string {
+  // A legacy lot with no symbol and no entryAt cannot be attributed to an opening fill at all;
+  // give it a stable singleton key so it forms its own group and is reported as incomplete
+  // rather than silently merged into some other position's round trip.
+  return `${symbol ? normalizeSymbol(symbol) : "?"}|${entryAt ?? ""}`;
+}
+
+/**
+ * Group FIFO `closedLots` into COMPLETED round trips (one per opening fill), via aggregateRoundTrip.
+ * `fills` supplies each opening's size (buy/short fills).  A still-partly-open position is counted
+ * in `incompleteRoundTrips`, never graded.  Shared by the ops round-trip stats and the console win
+ * rate so a scaled-out position counts as ONE trade everywhere.
+ */
+export function completedRoundTrips(
+  closedLots: ClosedLot[],
+  fills: FillEvent[]
+): { trips: Array<{ trip: ClosedLot; lots: ClosedLot[] }>; incompleteRoundTrips: number } {
+  const entrySize = new Map<string, number>();
+  for (const fill of fills) {
+    if (fill.side !== "buy" && fill.side !== "short") continue; // closing side
+    const key = roundTripKey(fill.symbol, fill.filledAt);
+    entrySize.set(key, (entrySize.get(key) ?? 0) + Number(fill.quantity));
+  }
+
+  const groups = new Map<string, ClosedLot[]>();
+  for (const lot of closedLots) {
+    const key = roundTripKey(lot.symbol, lot.entryAt);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(lot);
+    else groups.set(key, [lot]);
+  }
+
+  const trips: Array<{ trip: ClosedLot; lots: ClosedLot[] }> = [];
+  let incompleteRoundTrips = 0;
+  for (const [key, lots] of groups) {
+    // Terminal ordering matters: `aggregateRoundTrip` takes exitAt/mae/mfe from the LAST exit,
+    // so a group read out of order would stamp the wrong holding period.
+    lots.sort((a, b) => String(a.exitAt ?? "").localeCompare(String(b.exitAt ?? "")));
+    const trip = aggregateRoundTrip(lots, entrySize.get(key) ?? 0);
+    if (!trip) {
+      incompleteRoundTrips += 1;
+      continue;
+    }
+    trips.push({ trip, lots });
+  }
+  return { trips, incompleteRoundTrips };
+}
+
 /** Realized-outcome stats grouped by the thesis a position was opened under. */
 export interface ThesisStat {
   thesisTag: string;
@@ -177,10 +229,40 @@ export interface OpenLot {
   entryAt?: string;
 }
 
+/**
+ * Mark-to-market unrealized P&L over already-computed `OpenLot`s (`calculatePnl`'s own
+ * `openLots`) and a freshly fetched price map, WITHOUT re-running `calculatePnl` — that would
+ * repeat the whole FIFO ledger walk for the same book just to apply prices the first pass did not
+ * have.  Mirrors `calculatePnl`'s own unrealized arithmetic exactly (long: qty * (mark - entry);
+ * short: qty * (entry - mark), with the short lot's signed quantity taken as a magnitude).  A
+ * symbol with no usable price is SKIPPED, never fabricated as a $0 mark, same as `calculatePnl`'s
+ * `if (!current) continue`.  A caller that must say which symbols were left unmarked diffs
+ * `openLotSymbols` against its price map.
+ */
+export function unrealizedFromOpenLots(openLots: OpenLot[], currentPrices: Record<string, number>): number {
+  let unrealized = 0;
+  for (const lot of openLots) {
+    const mark = currentPrices[normalizeSymbol(lot.symbol)];
+    if (typeof mark !== "number" || !(mark > 0)) continue;
+    const quantity = Math.abs(lot.quantity);
+    unrealized += lot.side === "short" ? quantity * (lot.entryPrice - mark) : quantity * (mark - lot.entryPrice);
+  }
+  return unrealized;
+}
+
+/** Distinct normalized symbols across `OpenLot`s — the set a quote fetch has to cover. */
+export function openLotSymbols(...books: OpenLot[][]): string[] {
+  const symbols = new Set<string>();
+  for (const book of books) for (const lot of book) symbols.add(normalizeSymbol(lot.symbol));
+  return Array.from(symbols);
+}
+
 /** Close on or immediately before `iso`. Bars must be chronological. */
 function closeOnOrBefore(bars: Array<{ date: string; close: number }>, iso?: string): number | undefined {
   if (!iso || bars.length === 0) return undefined;
-  const day = iso.slice(0, 10);
+  // Market (America/New_York) day, not the UTC date: an entry/exit after ~8 PM ET must not match
+  // the next session's close (ST-4589).
+  const day = marketDateOf(iso) ?? iso.slice(0, 10);
   let found: number | undefined;
   for (const bar of bars) {
     if (bar.date <= day && Number.isFinite(bar.close) && bar.close > 0) found = bar.close;
@@ -598,6 +680,9 @@ export function getPerformanceSummary(
     paperUnrealizedPnl: paperPnl.unrealized,
     liveWinRate: winRate(livePnl.closedLots),
     paperWinRate: winRate(paperPnl.closedLots),
+    // ST-4589 B10: per completed ROUND TRIP (a scaled-out position is one trade, not one per trim).
+    ...roundTripWinRateFields("live", livePnl.closedLots, liveFills),
+    ...roundTripWinRateFields("paper", paperPnl.closedLots, paperFills),
     liveAverageReturnPct: averageReturn(livePnl.closedLots),
     paperAverageReturnPct: averageReturn(paperPnl.closedLots),
     liveClosedLotCount: livePnl.closedLots.length,
@@ -774,11 +859,13 @@ export function getThesisScorecard(
   currentPrices: Record<string, number> = {},
   userId: string = "local",
   prefetched?: PrefetchedFills,
-  prefetchedPnl?: PrefetchedPnl
+  prefetchedPnl?: PrefetchedPnl,
+  /** Chronological benchmark (SPY) closes; when given, lots are alpha-stamped so avgAlphaPct fills. */
+  options: { benchBars?: Array<{ date: string; close: number }> } = {}
 ): ThesisStat[] {
   const { closedLots } = pnlForSource(accountNumber, source, currentPrices, userId, prefetched, prefetchedPnl);
   return aggregateClosedLots(
-    closedLots,
+    options.benchBars ? stampClosedLotAlpha(closedLots, options.benchBars) : closedLots,
     (lot) => (lot.thesisTag && lot.thesisTag.trim() ? lot.thesisTag.trim() : "Untagged"),
     userId
   ).map(({ key, ...rest }) => ({ thesisTag: key, ...rest }));
@@ -790,11 +877,13 @@ export function getRegimeScorecard(
   currentPrices: Record<string, number> = {},
   userId: string = "local",
   prefetched?: PrefetchedFills,
-  prefetchedPnl?: PrefetchedPnl
+  prefetchedPnl?: PrefetchedPnl,
+  /** Chronological benchmark (SPY) closes; when given, lots are alpha-stamped so avgAlphaPct fills. */
+  options: { benchBars?: Array<{ date: string; close: number }> } = {}
 ): RegimeStat[] {
   const { closedLots } = pnlForSource(accountNumber, source, currentPrices, userId, prefetched, prefetchedPnl);
   return aggregateClosedLots(
-    closedLots,
+    options.benchBars ? stampClosedLotAlpha(closedLots, options.benchBars) : closedLots,
     (lot) => (lot.regime && lot.regime.trim() ? lot.regime.trim() : "Unspecified"),
     userId
   ).map(({ key, ...rest }) => ({ regime: key, ...rest }));
@@ -1858,10 +1947,14 @@ export function getOpenLots(
  */
 const SHRINK_PRIOR = 5;
 
-/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default. */
+/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default.
+ *  Reads through `peekPolicy`, not `getPolicy`: this runs inside read-only scorecards (including the
+ *  token-gated ops performance GET), and `getPolicy` seeds an account_strategy_state row the first
+ *  time it touches an account that has none.  `peekPolicy` returns the same effective policy without
+ *  persisting it. */
 function resolveShrinkPrior(userId: string = "local"): number {
   try {
-    const v = getPolicy(userId).tuning?.shrinkPrior;
+    const v = peekPolicy(userId).tuning?.shrinkPrior;
     return typeof v === "number" && v >= 0 ? v : SHRINK_PRIOR;
   } catch {
     return SHRINK_PRIOR;
@@ -2072,6 +2165,20 @@ function combineAttribution(...groups: RunAttribution[][]): RunAttribution[] {
 function winRate(lots: ClosedLot[]): number {
   if (lots.length === 0) return 0;
   return (lots.filter((lot) => lot.pnl > 0).length / lots.length) * 100;
+}
+
+/** Round-trip win rate + count for one ledger. The rate is omitted (never a fabricated 0) when
+ *  no round trip has completed yet. */
+function roundTripWinRateFields(
+  side: "live" | "paper",
+  closedLots: ClosedLot[],
+  fills: FillEvent[]
+): Pick<PerformanceSummary, "liveRoundTripWinRate" | "liveRoundTripCount" | "paperRoundTripWinRate" | "paperRoundTripCount"> {
+  const trips = completedRoundTrips(closedLots, fills).trips.map(({ trip }) => trip);
+  const rate = trips.length > 0 ? winRate(trips) : undefined;
+  return side === "live"
+    ? { liveRoundTripCount: trips.length, ...(rate !== undefined ? { liveRoundTripWinRate: rate } : {}) }
+    : { paperRoundTripCount: trips.length, ...(rate !== undefined ? { paperRoundTripWinRate: rate } : {}) };
 }
 
 /**

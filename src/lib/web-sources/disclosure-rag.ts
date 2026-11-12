@@ -54,7 +54,11 @@ function tradeToDoc(trade: CongressTrade): ContextDocument {
       symbol: trade.symbol,
       source: "congress-disclosure",
       timestamp: acceptanceDatetime,
-      accession: `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
+      accession: trade.id
+        ? `id:${trade.id}`
+        : trade.docId && trade.rowKey
+          ? `doc:${trade.docId}|row:${trade.rowKey}`
+          : `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
       doc_type: "congress-trade",
       acceptance_datetime: acceptanceDatetime
     }

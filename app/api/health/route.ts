@@ -1,5 +1,12 @@
-import { getInternalSetting, getServiceHealthSummaries, databasePath, resolveApiKeyWithSource, alertStorageWarning, alertLivenessWarning } from "@/lib/db";
-import { isHardStoppedHealthSummary } from "@/lib/db-health";
+import {
+  databasePath,
+  resolveApiKeyWithSource,
+  alertStorageWarning,
+  alertLivenessWarning,
+  clearLivenessWarning
+} from "@/lib/db";
+import { reconcileLivenessAccountEpisodes } from "@/lib/db-health";
+import { connectionHealthFailureClass, isHardStoppedHealthSummary } from "@/lib/db-health";
 import { isIntentionalOffHealthService } from "@/lib/retired-direct-vendors";
 import { activeEmbeddingProvider } from "@/lib/vector-db";
 import type { RagEmbedRerankProvider } from "@/lib/rag-metering";
@@ -20,9 +27,24 @@ import {
   scanLitestreamRuntimeLogFile
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { getTradingLivenessSummary, toPublicTradingLiveness } from "@/lib/trading-liveness";
-import { getOpenRouterCreditStatus } from "@/lib/openrouter-credits";
+import {
+  toPublicTradingLiveness,
+  tradingLivenessSentryStateSignature,
+  TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY
+} from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
+import { yieldEventLoop } from "@/lib/slow-sync-guard";
+import { safeErrorMessage } from "@/lib/telemetry-sanitize";
+import {
+  admitAnonymousHeavyHealthProbe,
+  healthProbeDeps,
+  onceHeavyRecomputePermission,
+  readWarmHealthSnapshot,
+  runHeavyHealthSection,
+  storeHealthSnapshot,
+  type HealthPayload,
+  type HeavyRecomputePermission
+} from "@/lib/health-probe-cache";
 import { statSync, statfsSync } from "fs";
 import { dirname } from "path";
 
@@ -38,7 +60,61 @@ function leaseOwnerWithoutPid(owner: string): string {
   return owner.replace(/^\d+:/, "");
 }
 
-// Rich public/ops probe — NOT the Coolify/Traefik backend probe.  Docker HEALTHCHECK
+function projectHealthPayload(payload: HealthPayload, detailed: boolean): HealthPayload {
+  if (detailed) return payload;
+  const checks: Record<string, unknown> = { ...payload.checks };
+  const credits = checks.openrouterCredits;
+  if (credits && typeof credits === "object") {
+    const copy = { ...(credits as Record<string, unknown>) };
+    delete copy.remainingUsd;
+    delete copy.totalUsd;
+    delete copy.usedUsd;
+    delete copy.problemKeyLabels;
+    checks.openrouterCredits = copy;
+  }
+  const storage = checks.storage;
+  if (storage && typeof storage === "object") {
+    const copy = { ...(storage as Record<string, unknown>) };
+    delete copy.dbSizeBytes;
+    delete copy.walSizeBytes;
+    delete copy.freeBytes;
+    delete copy.totalBytes;
+    checks.storage = copy;
+  }
+  const lease = checks.schedulerLease;
+  if (lease && typeof lease === "object" && typeof (lease as { owner?: unknown }).owner === "string") {
+    checks.schedulerLease = {
+      ...(lease as Record<string, unknown>),
+      owner: leaseOwnerWithoutPid((lease as { owner: string }).owner)
+    };
+  }
+  const dependencies = checks.dependencies;
+  if (dependencies && typeof dependencies === "object") {
+    const stripped: Record<string, unknown> = {};
+    for (const [name, entry] of Object.entries(dependencies as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") {
+        stripped[name] = entry;
+        continue;
+      }
+      const copy = { ...(entry as Record<string, unknown>) };
+      delete copy.lastFailure;
+      delete copy.failureClass;
+      stripped[name] = copy;
+    }
+    checks.dependencies = stripped;
+  }
+  return { ok: payload.ok, checks };
+}
+
+function jsonHealth(payload: HealthPayload, detailed: boolean): Response {
+  const projected = projectHealthPayload(payload, detailed);
+  return Response.json(projected, { status: projected.ok ? 200 : 503 });
+}
+
+// Rich public/ops probe — NOT the Coolify/Traefik backend probe.  A warm process
+// serves a memory snapshot (HEALTH_SNAPSHOT_TTL_MS, default 2s) and refreshes
+// it after the response, so this GET does not wait on SQLite or the OpenRouter
+// credit fetch.  The first request after boot still assembles inline.  Docker HEALTHCHECK
 // and any Coolify HTTP health path must use GET /api/live.  A 503 here (critical
 // Pinecone/RAG/Alpaca hard-stop) or a >5s response used to mark the named container
 // running:unhealthy while Next was up; Traefik then had no healthy backend
@@ -75,17 +151,22 @@ function leaseOwnerWithoutPid(owner: string): string {
 // schedulerStale, tradingLiveness.degraded, and storage.litestreamTiersDegraded are JSON flags
 // that MUST stay 200 so a Coolify restart cannot "heal" them.  Page those with keyword/JSON
 // monitors — see docs/runbooks/uptime-health-json-monitors.md.
-export async function GET(request: Request) {
+type AssembleHealthOptions = {
+  recomputeHeavySections: HeavyRecomputePermission;
+};
+
+async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPayload> {
   const checks: Record<string, unknown> = {};
   let ok = true;
-  const detailed = authorizeOpsRequest(request);
+  // Always collect the operator fields.  GET projects them away for anonymous
+  // callers via projectHealthPayload so one snapshot serves both audiences.
 
   const release = runtimeReleaseIdentity();
   checks.release = release;
 
   let lastTick: string | undefined;
   try {
-    lastTick = getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
+    lastTick = healthProbeDeps.getInternalSetting<string>("scheduler:lastTick"); // also proves the DB is reachable
     checks.db = "ok";
   } catch (error) {
     ok = false;
@@ -118,8 +199,13 @@ export async function GET(request: Request) {
       "scheduler_stale",
       lastTick
         ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
-        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`
+        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`,
+      "scheduler_stale"
     );
+  } else {
+    // Recovery: reset the escalation episode clock so the next stale episode
+    // starts fresh instead of escalating immediately on old state.
+    void clearLivenessWarning("scheduler_stale");
   }
 
   // Scheduler lease state (additive; only meaningful when SCHEDULER_SINGLE_LEADER is on).
@@ -129,7 +215,7 @@ export async function GET(request: Request) {
     const lease = getLease();
     if (lease) {
       checks.schedulerLease = {
-        owner: detailed ? lease.owner : leaseOwnerWithoutPid(lease.owner),
+        owner: lease.owner,
         acquiredAt: lease.acquiredAt,
         expiresAt: lease.expiresAt,
         ageSeconds: Math.round(lease.ageMs / 1000),
@@ -141,6 +227,8 @@ export async function GET(request: Request) {
   } catch {
     // never let lease reporting break the liveness probe
   }
+
+  await yieldEventLoop();
 
   // Trading-liveness (handoff 6b.7): the heartbeat above proves the tick FUNCTION runs, not that
   // trading works — a scheduler that ticks while every run fails keeps this route green for hours.
@@ -157,18 +245,69 @@ export async function GET(request: Request) {
   // ops-snapshot.ts). Here we fold it down to counts + the oldest age, which is enough for an
   // external uptime probe without leaking account identity.
   try {
-    const liveness = getTradingLivenessSummary();
+    const liveness = await healthProbeDeps.getTradingLivenessSummary();
     const publicLiveness = toPublicTradingLiveness(liveness);
     // Always emit so `tradingLiveness.degraded` exists for JSON-path monitors even when
     // every account is halted.  The boolean sibling is the unique keyword substring.
     checks.tradingLiveness = publicLiveness;
     checks.tradingLivenessDegraded = publicLiveness.degraded > 0;
     
+    const degradedAccounts = (liveness?.accounts ?? []).filter((a) => a.degraded);
+    const fleetFullyDark =
+      publicLiveness.autonomyFullyDark &&
+      publicLiveness.autonomyActiveAccounts === 0 &&
+      publicLiveness.activeAccounts === 0;
+    const degradedAccountKeys = degradedAccounts.map(
+      (a) => `${a.userId}:${a.connectedAccountId}`
+    );
+    if (fleetFullyDark && checks.tradingLivenessDegraded && degradedAccountKeys.length === 0) {
+      degradedAccountKeys.push(TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY);
+    }
+    if (liveness) {
+      void reconcileLivenessAccountEpisodes("trading_liveness_degraded", degradedAccountKeys);
+    }
     if (checks.tradingLivenessDegraded) {
-      void alertLivenessWarning(
-        "trading_liveness_degraded",
-        `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.`
+      // A fully-dark fleet has no active accounts to count, so the generic message would page
+      // "1 active account(s)" while zero are active — say what is actually wrong instead.
+      // The alert/Sentry message carries the WHY (label, reasons, newest failed
+      // run summary) from the full summary. This never enters the public payload
+      // above, which stays identity-free.
+      const degradedDetail = degradedAccounts
+        .slice(0, 3)
+        .map((a) => {
+          const reasons = a.degradedReasons.join(", ") || "degraded";
+          const latest = a.latestFailedRunSummary
+            ? `; latest failed run${a.latestFailedRunAt ? ` at ${a.latestFailedRunAt}` : ""}: ${safeErrorMessage(a.latestFailedRunSummary).slice(0, 200)}`
+            : "";
+          return `${a.label} (${reasons}${latest})`;
+        })
+        .join("; ");
+      const livenessMessage = fleetFullyDark
+        ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
+        : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
+      const livenessSentrySignature = tradingLivenessSentryStateSignature(
+        liveness?.accounts,
+        fleetFullyDark,
+        publicLiveness.autonomyEligibleAccounts
       );
+      const alertAccounts =
+        degradedAccounts.length > 0
+          ? degradedAccounts.map((a) => ({
+              accountKey: `${a.userId}:${a.connectedAccountId}`,
+              accountLabel: a.label
+            }))
+          : fleetFullyDark
+            ? [{ accountKey: TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY, accountLabel: "Fleet fully dark" }]
+            : [];
+      void alertLivenessWarning("trading_liveness_degraded", livenessMessage, {
+        accounts: alertAccounts,
+        stateSignature: livenessSentrySignature
+      });
+    } else if (liveness) {
+      // Recovery: reset the escalation episode clock.  Only a real healthy
+      // result counts: null means no active accounts or an unreadable
+      // summary, which says nothing about whether the episode ended.
+      void clearLivenessWarning("trading_liveness_degraded");
     }
   } catch {
     checks.tradingLiveness = toPublicTradingLiveness(null);
@@ -198,14 +337,21 @@ export async function GET(request: Request) {
   // cutover, "RAG configured" means the ACTIVE read backend is reachable plus the
   // active embed provider's key — a leftover Pinecone key is not required when
   // Qdrant is serving (PD #116 leftover: public health still advertised pineconeConfigured
-  // and treated a missing Pinecone key as RAG-down).
+  // and treated a missing Pinecone key as RAG-down). A selected write backend that
+  // throws (Qdrant chosen but not usable) clears the same aggregate.
   let ragEmbedProvider: RagEmbedRerankProvider | null = null;
   try {
     const pineconeKey = resolveApiKeyWithSource("pinecone");
     checks.pineconeConfigured = pineconeKey.source !== "none";
     checks.qdrantConfigured = qdrantConfigured();
     checks.ragVectorReadBackend = vectorReadBackend();
-    checks.ragVectorWriteBackend = vectorWriteBackend();
+    try {
+      checks.ragVectorWriteBackend = vectorWriteBackend();
+    } catch (error) {
+      checks.ragVectorWriteBackend = "misconfigured";
+      checks.ragVectorWriteBackendError = error instanceof Error ? error.message : String(error);
+      checks.ragConfigured = false;
+    }
 
     try {
       ragEmbedProvider = activeEmbeddingProvider();
@@ -230,6 +376,8 @@ export async function GET(request: Request) {
     // do not break health check on key resolution
   }
 
+  await yieldEventLoop();
+
   // Surface every backend dependency from health summaries.
   //
   // PUBLIC route (no requireAdmin): expose ONLY boolean/degraded status — never the raw
@@ -237,8 +385,11 @@ export async function GET(request: Request) {
   // connections-health route). A `degraded` flag captures the soft/cold-start case without
   // failing liveness; the detailed reason text is deliberately omitted here.
   try {
-    const summaries = getServiceHealthSummaries();
-    const dependencies: Record<string, { ok: boolean; degraded?: boolean }> = {};
+    const summaries = healthProbeDeps.getServiceHealthSummaries();
+    const dependencies: Record<
+      string,
+      { ok: boolean; degraded?: boolean; lastFailure?: string | null; failureClass?: string | null }
+    > = {};
     // Critical liveness is Alpaca plus the ACTIVE vector store. After the Qdrant
     // cutover Pinecone is leftover telemetry, not a 503 (PD #116). A hard-stopped
     // rag-embed/rag-rerank lane used to 503 this probe (bge-m3-metering-gate, 2026-07-18),
@@ -292,14 +443,21 @@ export async function GET(request: Request) {
         (hardStopped && configuredLaneHealthy.has(summary.service)) ||
         (hardStopped && softDegradeServices.has(summary.service)) ||
         undefined;
+      const failureClass = connectionHealthFailureClass(summary.lastFailureError);
+      const laneDetail = {
+        lastFailure: summary.lastFailureError,
+        failureClass
+      };
       if (existing) {
         // Merge lanes for the same service: hard-stopped only wins when no configured lane is healthy.
         dependencies[summary.service] = {
           ok: (existing.ok && nextOk) || configuredLaneHealthy.has(summary.service),
-          degraded: existing.degraded || nextDegraded || undefined
+          degraded: existing.degraded || nextDegraded || undefined,
+          lastFailure: existing.lastFailure ?? laneDetail.lastFailure,
+          failureClass: existing.failureClass ?? laneDetail.failureClass
         };
       } else {
-        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined };
+        dependencies[summary.service] = { ok: nextOk, degraded: nextDegraded || undefined, ...laneDetail };
       }
 
       // Hard-liveness deps: only app-unsafe/unusable dependencies 503 the public probe. Paid
@@ -325,76 +483,126 @@ export async function GET(request: Request) {
     // never let connection health summaries break the health probe
   }
 
-  // OpenRouter prepaid-credit balance. Universal routing (#1703) makes OpenRouter the single point
-  // of failure for every LLM call AND all RAG embedding, so a drained balance = total decision-loop
-  // outage (see docs/rollouts/2026-07-18-worktree-cleanup-voyage-rca.md). We surface the low-balance
-  // SIGNAL on this PUBLIC probe so an EXTERNAL monitor (Uptime Robot) alerts when the money runs
-  // low — a low balance sets dependencies.openrouter.ok=false (DEGRADE only; never 503, since a
-  // restart can't refill credits and would just restart-loop). Cached + best-effort; a failed READ
-  // never flips ok=false (see openrouter-credits.ts). Omitted entirely when no OpenRouter key is set.
+  // OpenRouter prepaid-credit + per-key limit signal. Universal routing (#1703) makes OpenRouter
+  // the single point of failure for every LLM call AND all RAG embedding, so a drained account
+  // balance OR an exhausted per-key spend limit = decision-loop outage. We surface the SIGNAL on
+  // this PUBLIC probe so Uptime Robot alerts when money runs low for real (management key reads
+  // /credits + /keys; see openrouter-credits.ts). Low/exhausted DEGRADES the probe (never 503 —
+  // a restart can't refill credits). Cached + best-effort; a failed READ never flips ok=false.
   //
-  // The USD FIGURES are operator-only (see the header comment) — the boolean is the alert, the
-  // numbers are an attacker's countdown to a cheap total-outage window. `ok` MUST stay the first
-  // serialized key of this object: the Uptime Robot keyword monitor matches the literal substring
-  // `"openrouterCredits":{"ok":false` (docs/rollouts/2026-07-18-openrouter-credit-health-signal.md),
-  // which is unchanged by this projection.
+  // USD FIGURES and key labels are operator-only. `ok` MUST stay the first serialized key: the
+  // Uptime Robot keyword monitor matches `"openrouterCredits":{"ok":false`.
   try {
-    // Bound the public probe.  A cache-miss credits fetch used to wait the
-    // full 8s timeout and, stacked behind a busy scheduler tick, pushed
-    // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
-    // downtime with a false "OpenRouter credits low" on the same URL.
-    const credits = await getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
-    if (credits) {
+  // Bound the public probe.  A cache-miss credits fetch used to wait the
+  // full 8s timeout and, stacked behind a busy scheduler tick, pushed
+  // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
+  // downtime with a false "OpenRouter credits low" on the same URL.
+    const openrouterSection = await runHeavyHealthSection(
+      "openrouter",
+      async () => {
+        const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
+        if (!credits) return null;
+        // Cache only the credit read.  The live connection-health summary for openrouter is
+        // merged below on every request so a cache hit never replays a stale dependency state.
+        return {
+          openrouterCredits: {
+            ok: credits.ok,
+            remainingUsd: credits.remainingUsd,
+            totalUsd: credits.totalUsd,
+            usedUsd: credits.usedUsd,
+            ...(credits.problemKeyLabels?.length ? { problemKeyLabels: credits.problemKeyLabels } : {}),
+            thresholdUsd: credits.thresholdUsd,
+            keyLimitThresholdUsd: credits.keyLimitThresholdUsd,
+            source: credits.source,
+            keysChecked: credits.keysChecked,
+            keysWithLimit: credits.keysWithLimit,
+            keysLimitReached: credits.keysLimitReached,
+            keysLimitLow: credits.keysLimitLow,
+            reasons: credits.reasons,
+            checkedAt: credits.checkedAt,
+            ...(credits.error ? { error: credits.error } : {})
+          }
+        };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+    const creditsPayload = openrouterSection.value;
+    if (creditsPayload) {
       const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
       const existing = deps.openrouter;
+      const creditsOk = creditsPayload.openrouterCredits.ok;
       deps.openrouter = {
-        ok: (existing ? existing.ok : true) && credits.ok,
-        degraded: (existing?.degraded) || (credits.ok ? undefined : true)
+        ok: (existing ? existing.ok : true) && creditsOk,
+        degraded: (existing?.degraded) || (creditsOk ? undefined : true)
       };
       checks.dependencies = deps;
       checks.openrouterCredits = {
-        ok: credits.ok,
-        ...(detailed
-          ? { remainingUsd: credits.remainingUsd, totalUsd: credits.totalUsd, usedUsd: credits.usedUsd }
-          : {}),
-        thresholdUsd: credits.thresholdUsd,
-        checkedAt: credits.checkedAt,
-        ...(credits.error ? { error: credits.error } : {})
+        ...creditsPayload.openrouterCredits,
+        ...(openrouterSection.cachedAgeSeconds != null
+          ? { cachedAgeSeconds: openrouterSection.cachedAgeSeconds }
+          : {})
       };
     }
   } catch {
     // never let the credit check break the health probe
   }
 
+  await yieldEventLoop();
+
   // Disk and database headroom check (purely advisory, never fails the health probe)
   try {
     const dbPath = databasePath();
-    const walPath = `${dbPath}-wal`;
-    const dbDir = dirname(dbPath);
-    let latestLocalActivityAtMs = 0;
+    const diskSection = await runHeavyHealthSection(
+      "disk",
+      async () => {
+        const walPath = `${dbPath}-wal`;
+        const dbDir = dirname(dbPath);
+        let latestLocalActivityAtMs = 0;
 
-    let dbSizeBytes = 0;
-    try {
-      const dbStat = statSync(dbPath);
-      dbSizeBytes = dbStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, dbStat.mtimeMs);
-    } catch {}
+        let dbSizeBytes = 0;
+        try {
+          const dbStat = statSync(dbPath);
+          dbSizeBytes = dbStat.size;
+          latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, dbStat.mtimeMs);
+        } catch {}
 
-    let walSizeBytes = 0;
-    try {
-      const walStat = statSync(walPath);
-      walSizeBytes = walStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, walStat.mtimeMs);
-    } catch {}
+        let walSizeBytes = 0;
+        try {
+          const walStat = statSync(walPath);
+          walSizeBytes = walStat.size;
+          latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, walStat.mtimeMs);
+        } catch {}
 
-    let freeBytes = 0;
-    let totalBytes = 0;
-    try {
-      const stats = statfsSync(dbDir);
-      freeBytes = stats.bavail * stats.bsize;
-      totalBytes = stats.blocks * stats.bsize;
-    } catch {}
+        let freeBytes = 0;
+        let totalBytes = 0;
+        try {
+          const stats = statfsSync(dbDir);
+          freeBytes = stats.bavail * stats.bsize;
+          totalBytes = stats.blocks * stats.bsize;
+        } catch {}
 
+        const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
+        const walLarge = walSizeBytes > 500 * 1024 * 1024;
+        let diskDerivedStorageDegraded = false;
+        if (diskLow || walLarge) {
+          diskDerivedStorageDegraded = true;
+          if (diskLow) {
+            void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
+          }
+          if (walLarge) {
+            void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+          }
+        }
+        return { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+    const { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded } =
+      diskSection.value;
+
+    const litestreamSection = await runHeavyHealthSection(
+      "litestream",
+      async () => {
     const liveMode = process.env.DB_BOOTSTRAP === "live";
     const litestreamStatePath = process.env.LITESTREAM_STATE_PATH?.trim() || defaultLitestreamStatePath(dbPath);
     const freshness = await getLitestreamRuntimeHealth({
@@ -445,8 +653,7 @@ export async function GET(request: Request) {
     // field below stays public because the credential-less deploy-verify runbook reads exactly
     // those, and `storageDegraded` (computed from the raw numbers, not from this object) keeps the
     // disk/WAL thresholds visible to an anonymous monitor without publishing the capacity itself.
-    checks.storage = {
-      ...(detailed ? { dbSizeBytes, walSizeBytes, freeBytes, totalBytes } : {}),
+    const storageBody = {
       litestreamAgeSeconds,
       litestreamState,
       litestreamStatus: freshness.state === "known" ? freshness.status : null,
@@ -480,17 +687,9 @@ export async function GET(request: Request) {
       r2Weekly: getR2WeeklyHealthStatus(),
     };
 
-    // Thresholds:
-    // Disk free space < 1 GB or WAL size > 500 MB or Litestream last-sync age > 1 hour (3600s)
-    const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
-    const walLarge = walSizeBytes > 500 * 1024 * 1024;
-
-    if (diskLow || walLarge || litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
-      checks.storageDegraded = true;
-
-      // Send a one-shot needs-attention notification/alert via the notifier if not sent recently
-      if (diskLow) void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
-      if (walLarge) void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+    let litestreamDerivedStorageDegraded = false;
+    if (litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
+      litestreamDerivedStorageDegraded = true;
       for (const reason of litestreamAssessment.reasons) {
         if (reason === "stale") {
           void alertStorageWarning("litestream_replication_stale", `Litestream WAL replication has not synced in ${Math.round((litestreamAgeSeconds ?? 0) / 60)} minutes.`);
@@ -545,6 +744,26 @@ export async function GET(request: Request) {
         `Litestream per-level backup monitoring is blind to ${litestreamTiers.notObservableTiers} of ${litestreamTiers.tiers.length} compaction levels (replica inventory: ${litestreamTiers.remoteInventoryState}). A wedged compaction at those levels would not be detected.`
       );
     }
+
+        return { storageBody, litestreamDerivedStorageDegraded };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+
+    checks.storage = {
+      dbSizeBytes,
+      walSizeBytes,
+      freeBytes,
+      totalBytes,
+      ...litestreamSection.value.storageBody,
+      ...(diskSection.cachedAgeSeconds != null ? { diskCachedAgeSeconds: diskSection.cachedAgeSeconds } : {}),
+      ...(litestreamSection.cachedAgeSeconds != null
+        ? { litestreamCachedAgeSeconds: litestreamSection.cachedAgeSeconds }
+        : {})
+    };
+    if (diskDerivedStorageDegraded || litestreamSection.value.litestreamDerivedStorageDegraded) {
+      checks.storageDegraded = true;
+    }
   } catch {
     // never let storage monitoring break the health probe — still emit the monitor field
     if (!checks.storage || typeof checks.storage !== "object") {
@@ -554,5 +773,23 @@ export async function GET(request: Request) {
     }
   }
 
-  return Response.json({ ok, checks }, { status: ok ? 200 : 503 });
+  return { ok, checks };
+}
+
+export async function GET(request: Request) {
+  const detailed = authorizeOpsRequest(request);
+  // The background refresh is not this caller's work: it always recomputes heavy sections
+  // (still bounded by the section TTL and single-flight), so a throttled client cannot make
+  // the next snapshot reuse stale slots and skip their storage alerts.
+  const warm = readWarmHealthSnapshot(() => assembleHealth({ recomputeHeavySections: true }));
+  if (warm) return jsonHealth(warm, detailed);
+  // Cold path only.  Admission is charged lazily, the first time a heavy section actually
+  // needs to recompute, so warm-snapshot and heavy-cache hits never consume the budget.
+  const payload = await assembleHealth({
+    recomputeHeavySections: onceHeavyRecomputePermission(
+      () => admitAnonymousHeavyHealthProbe(request, detailed).recomputeHeavySections
+    )
+  });
+  storeHealthSnapshot(payload);
+  return jsonHealth(payload, detailed);
 }

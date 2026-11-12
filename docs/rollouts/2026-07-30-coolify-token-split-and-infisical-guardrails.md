@@ -20,7 +20,7 @@ Set on Socratic-Trade + Congress.Trade `prod` `/`:
 ## Agent rules
 - Never run bare `infisical secrets` (lists values).
 - Use `scripts/infisical-secrets-safe.sh` for set/has/names.
-- Canonical rules: `/Users/jay/apps/AGENT-SYNC.md` Secret handoff + Infisical section; `secret-safety` skill.
+- Canonical rules: `/Users/jay/apps/AG***-S**C.md` Secret handoff + Infisical section; `secret-safety` skill.
 
 ## Verification
 - Stats token cannot deploy (403 missing deploy permission); agents token can.

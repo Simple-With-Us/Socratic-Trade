@@ -42,10 +42,17 @@
 // RECEIPT (`rejected[]` / `ignored`), never thrown and never silently swallowed — and a refusal
 // degrades to the learned behavior, never to an empty rotation that starves the pool.
 import { isModelRotationSentinel } from "./llm-request";
+import { catalogEntryFor, displaySlugFor } from "./llm-model-catalog";
 // Canonical line identity, NOT string equality: a pin written with a wire-spelled id
 // (`openai/gpt-5.5`) must be recognized as the same model line as the catalog slug the pool holds,
 // or the same-model guarantee check would pass on a collision.
 import { isSameModelLine } from "./model-identity";
+
+/** A pin may name a display slug, alias or retired row — not only ids in the live rotation pool list. */
+function isCatalogRotationModelId(model: string, knownModels: readonly string[]): boolean {
+  if (knownModels.includes(model)) return true;
+  return displaySlugFor(model) !== "" || Boolean(catalogEntryFor(model));
+}
 
 /** Owner-set experiment lever, carried on the policy next to the "__rotate__" sentinel. */
 export interface ModelRotationPin {
@@ -158,7 +165,7 @@ export function resolveRotationSeatPin(input: {
       // not a model choice.  Refused, and the receipt says exactly that.
       rejected.push(`${seat}: ${model} is the rotation sentinel, not a pinnable model`);
       resolved.ignored ??= "sentinel_not_pinnable";
-    } else if (!knownModels.includes(model)) {
+    } else if (!isCatalogRotationModelId(model, knownModels)) {
       rejected.push(`${seat}: unknown model id "${model}" is not in the rotation catalog`);
       resolved.ignored ??= "malformed_pin";
     } else if (!pool.includes(model)) {
@@ -199,7 +206,7 @@ export function resolveRotationSeatPin(input: {
           rejected.push(`weights["${key}"]: ${weight} outside [0, ${ROTATION_PIN_MAX_WEIGHT}]`);
           continue;
         }
-        if (!knownModels.includes(key)) {
+        if (!isCatalogRotationModelId(key, knownModels)) {
           // A typo'd id must not read as a configured down-weight of nothing; say so and move on.
           rejected.push(`weights["${key}"]: unknown model id is not in the rotation catalog`);
           continue;

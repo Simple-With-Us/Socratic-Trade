@@ -2,14 +2,14 @@
 // DELETE /api/mobile/push/register — unregister it (sign-out)
 //
 // Session-authenticated exactly like every other /api/mobile route: identity comes from
-// resolveRequestUserId (middleware-verified), never from the body.
+// (middleware-verified), never from the body.
 //
 // Contract
 //   POST   body { token: string, environment: "sandbox" | "production", bundleId?: string }
 //          -> 200 { ok: true, device: { token: "<masked>", environment, bundleId, platform } }
-//          Idempotent: re-POSTing the same token refreshes it and returns 200 again. Registering a
-//          token that currently belongs to ANOTHER user REASSIGNS it to the caller — a shared phone
-//          that switches accounts must never keep receiving the previous user's alerts.
+//          Idempotent: re-POSTing the same token refreshes it and returns 200 again. A token that
+//          belongs to another user is refused (409) — the client must sign into that account and
+//          unregister first; silent reassignment would leak alerts across accounts.
 //          The FIRST registration of a device for a user also enables the "apns" delivery channel
 //          (the act of allowing notifications in the app IS the opt-in). A re-registration of a
 //          device the user already owns does NOT touch the channel prefs — the app re-registers on
@@ -34,7 +34,7 @@ import {
 } from "@/lib/db";
 import { isAcceptedApnsBundleId, loadApnsConfig } from "@/lib/apns";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -47,7 +47,8 @@ export async function POST(request: Request) {
     bundleId?: unknown;
     platform?: unknown;
   };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -86,6 +87,12 @@ export async function POST(request: Request) {
   // device was signed out or Apple retired the token, and coming back from either is a fresh
   // opt-in, not a launch-time re-assertion.
   const existing = getDeviceToken(token);
+  if (existing && existing.userId !== userId && existing.disabledAt === null) {
+    return NextResponse.json(
+      { ok: false, error: "This device token is registered to another account. Sign out on that account first." },
+      { status: 409 }
+    );
+  }
   const alreadyThisUsers = !!existing && existing.userId === userId && existing.disabledAt === null;
   const device = registerDeviceToken({ userId, token, environment: body.environment, bundleId, platform });
 
@@ -117,7 +124,8 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { token?: unknown };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 

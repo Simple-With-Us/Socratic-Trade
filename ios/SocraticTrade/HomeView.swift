@@ -197,7 +197,7 @@ private struct ReadyHomeHero: View {
 
     /// Console-shared run-state word — market-aware, so this pill can never claim
     /// "Running" while the console says "Paused · market closed".
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -319,10 +319,11 @@ private enum HomeSheet: String, Identifiable {
 }
 
 private struct AgentOverviewCard: View {
+    @EnvironmentObject private var store: MobileStore
     let snapshot: MobileSnapshot
     var showInlineReadiness: Bool = true
 
-    private var runState: RunStateWord { deriveRunStateWord(snapshot: snapshot) }
+    private var runState: RunStateWord { store.deriveRunState(for: snapshot) }
 
     var body: some View {
         AppCard {
@@ -378,7 +379,7 @@ private struct AgentOverviewCard: View {
     @ViewBuilder
     private var statusLabels: some View {
         Label(AppFormat.strategyAuthorityLabel(snapshot.readiness.strategyAuthority), systemImage: "person.badge.shield.checkmark")
-        Label(AppFormat.marketSessionBannerLabel(snapshot.marketSession), systemImage: "chart.line.uptrend.xyaxis")
+        Label(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot)), systemImage: "chart.line.uptrend.xyaxis")
     }
 }
 
@@ -399,7 +400,7 @@ private struct StrategyControlsCard: View {
     private var plan: AgentControlPlan {
         AgentControlPlan.from(
             systemState: snapshot.readiness.systemState,
-            runState: deriveRunStateWord(snapshot: snapshot),
+            runState: store.deriveRunState(for: snapshot),
             authority: snapshot.readiness.strategyAuthority,
             snapshotStale: store.isSnapshotStale(),
             ready: snapshot.readiness.hasAccount && snapshot.readiness.hasUniverse
@@ -736,7 +737,7 @@ private struct PerformanceOverviewCard: View {
                                 .font(.appCaption)
                                 .foregroundStyle(pnlColor(dollarExcess))
                             }
-                            Text("Same deposits and withdrawals as this account, applied at each day's cutoff.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
+                            Text("Same deposits and withdrawals as this account, counted from the start of the day they land.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
                                 .font(.appCaption2)
                                 .foregroundStyle(.secondary)
                             if let accountSeries = benchmark.accountEquitySeries,
@@ -751,6 +752,23 @@ private struct PerformanceOverviewCard: View {
                                 )
                                 .padding(.top, 4)
                             }
+                        }
+                    }
+                } else if let unavailable = performance.benchmarkUnavailable {
+                    AppCard {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("vs SPY")
+                                .font(.appCaption)
+                                .foregroundStyle(.secondary)
+                            Text(
+                                unavailable.reason == "insufficient-history" ||
+                                    unavailable.reason == "insufficient-overlap"
+                                    ? "Not enough history yet — this needs two days of equity history.  It fills in on its own."
+                                    : "Benchmark unavailable right now.  Nothing is estimated in the meantime."
+                            )
+                            .font(.appCaption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

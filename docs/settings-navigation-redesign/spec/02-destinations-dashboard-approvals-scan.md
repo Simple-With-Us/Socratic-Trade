@@ -1,7 +1,7 @@
 # Destination Specs — Dashboard, Approvals, Scan
 
 **Author:** Destination spec (Dashboard / Approvals / Scan) · **Date:** 2026-07-01 · **Status:** build-ready, gated behind `NAV_V2`
-**Canonical parent:** [`docs/settings-navigation-redesign.md`](./settings-navigation-redesign.md) (v2). This document does not restate the frame, principles, or migration plan — it goes deep on three of the six destinations. Wherever this doc says "see parent," it means the section of that file. **Wireframe references:** Dashboard = parent Screen 1/Fleet; Approvals = parent **Screen 2**; Scan = parent §"Scan resolved (D3)" + migration table row *Workspace tab: Market Scan*.
+**Canonical parent:** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2). This document does not restate the frame, principles, or migration plan — it goes deep on three of the six destinations. Wherever this doc says "see parent," it means the section of that file. **Wireframe references:** Dashboard = parent Screen 1/Fleet; Approvals = parent **Screen 2**; Scan = parent §"Scan resolved (D3)" + migration table row *Workspace tab: Market Scan*.
 
 All three destinations are **account-scoped** (parent Principle 1). The active-account chip, the money-reality badge (`PRACTICE`/`REAL MONEY`, word-class first — parent P5), and the authority chip (`Propose`/`Decide`) frame every screen below and are rendered by the global shell (`app/(shell)/layout.tsx`, Phase-5 P0), **not** re-implemented per destination. Each destination header re-echoes the chip so scope is never ambiguous (parent §Multi-account, mechanism #1).
 

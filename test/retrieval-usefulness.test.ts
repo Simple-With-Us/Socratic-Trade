@@ -388,8 +388,8 @@ describe("P1-3: the filings dossier path applies the usefulness weighting", () =
     // i.e. after BOTH retrieval shapes (proposer dossier and plain retrieveContextDetailed).
     expect(src).toContain('await import("./retrieval-usefulness")');
     expect(src).toContain("applyRetrievalUsefulnessWeighting(chunks, userId)");
-    const dossierIdx = src.indexOf("chunks = dossier.chunks;");
-    const plainIdx = src.indexOf("chunks = await retrieveContextDetailed(");
+    const dossierIdx = src.indexOf("return dossier.chunks;");
+    const plainIdx = src.indexOf("return retrieveContextDetailed(");
     const weightIdx = src.indexOf("applyRetrievalUsefulnessWeighting(chunks, userId)");
     expect(dossierIdx).toBeGreaterThan(-1);
     expect(plainIdx).toBeGreaterThan(-1);

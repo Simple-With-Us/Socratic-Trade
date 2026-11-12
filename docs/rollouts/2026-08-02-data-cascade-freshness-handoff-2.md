@@ -34,7 +34,7 @@ All pause-#1 decisions stand. New: (a) AG-context addendum baked into the workfl
 
 - Stage 1: `npx tsc --noEmit` clean + targeted vitest green (verify agent) → committed.
 - Stage 2 partial: `npx tsc --noEmit` clean (verified at pause). **No test run. No lint. No build. Full 4-gate suite has NOT run on this branch.**
-- Prod (no mutations made this session): healthy at main HEAD after peer-MONET's webhook restoration (~04:47Z receipt in #agent-sync); deploy queue rows 96-98 finished, 99/100 (dup commit b7d88e42) in flight at pause; row 101 failure = different app (compose buildpack). UptimeRobot incident ~04:11Z was transient CPU starvation under double build — app container never died.
+- Prod (no mutations made this session): healthy at main HEAD after peer-MONET's webhook restoration (~04:47Z receipt in #ag***-s**c); deploy queue rows 96-98 finished, 99/100 (dup commit b7d88e42) in flight at pause; row 101 failure = different app (compose buildpack). UptimeRobot incident ~04:11Z was transient CPU starvation under double build — app container never died.
 
 ## 5. Next Steps & Blockers (exact resume path)
 

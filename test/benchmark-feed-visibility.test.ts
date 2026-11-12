@@ -89,6 +89,22 @@ describe("SPY benchmark — a frozen feed can never read as a flat market", () =
   });
 });
 
+describe("SPY benchmark — imported-EOD stale fallback (perf-17)", () => {
+  it("also names the imported-eod-stale fallback as a stale-cache fallback", async () => {
+    // history.ts now falls back to the imported-EOD series (not only the SQLite cache) when every
+    // live provider fails, and tags the frozen series "imported-eod-stale".  The benchmark has to
+    // recognise that stamp too, or a frozen imported feed would read as a live one.
+    mockedFetch.mockResolvedValue(
+      bars("2026-07-01", "2026-07-24", { source: "imported-eod-stale", fetchedAt: "2026-09-25T12:00:00.000Z" })
+    );
+    const result = await computeSpyBenchmarkDetailed(curve("2026-07-01", "2026-09-24"), "local", NOW);
+
+    expect(result.comparison).toBeNull();
+    expect(result.feed?.fellBackToStaleCache).toBe(true);
+    expect(result.feed?.source).toBe("imported-eod-stale");
+  });
+});
+
 describe("SPY benchmark — feed facts on every outcome", () => {
   it("reports a healthy series as ok with its feed diagnostic attached", async () => {
     mockedFetch.mockResolvedValue(bars("2026-09-01", "2026-09-24"));

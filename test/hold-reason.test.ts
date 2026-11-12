@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { HOLD_REASON_LABELS, classifyHoldReasonFromCodes } from "../src/lib/hold-reason";
-import type { HumanReviewReasonCode } from "../src/lib/types";
+import { HOLD_REASON_LABELS, classifyHoldReasonFromCodes, formatAwaitingApprovalSummary } from "../src/lib/hold-reason";
+import type { HoldReasonCode, HumanReviewReasonCode } from "../src/lib/types";
 
 // Root cause (2026-09-25, board 687a5fb4, lane G3): the owner's performance report found Autopilot
 // ("decide") proposals landing "Awaiting approval" with no structured way to tell why. This suite
@@ -46,5 +46,53 @@ describe("classifyHoldReasonFromCodes", () => {
     expect(Object.keys(HOLD_REASON_LABELS).sort()).toEqual(
       ["funding_sell", "other", "policy_revert", "red_team_unavailable"].sort()
     );
+  });
+});
+
+// Audit of the merged G3 change (2026-09-29): an account demoted from Autopilot to Ask-first by a
+// cap breach (autoRevertOnCapBreach) sends every later proposal in the run through the "propose"
+// branch, which used to classify from the (usually empty) review codes and label the hold "other" —
+// the exact case the policy_revert bucket exists for.
+describe("classifyHoldReasonFromCodes — authority reverted in this run", () => {
+  it("labels a code-less propose-branch hold policy_revert when authority was reverted this run", () => {
+    expect(classifyHoldReasonFromCodes([], { authorityRevertedInRun: true })).toBe("policy_revert");
+  });
+
+  it("still prefers red_team_unavailable when the Red Team review is what needs a human", () => {
+    expect(classifyHoldReasonFromCodes(["initial_red_team"], { authorityRevertedInRun: true })).toBe("red_team_unavailable");
+  });
+
+  it("prefers policy_revert over a standalone rationale_collapse when authority was reverted", () => {
+    expect(classifyHoldReasonFromCodes(["rationale_collapse"], { authorityRevertedInRun: true })).toBe("policy_revert");
+  });
+
+  it("stays other when authority was NOT reverted", () => {
+    expect(classifyHoldReasonFromCodes([], { authorityRevertedInRun: false })).toBe("other");
+    expect(classifyHoldReasonFromCodes([])).toBe("other");
+  });
+});
+
+// The persisted strategy_runs.summary is what the owner and GET /api/ops/performance read; it used
+// to say only "Awaiting approval: N." so the structured holdReason never reached the run summary.
+describe("formatAwaitingApprovalSummary", () => {
+  const held = (holdReason?: HoldReasonCode) => ({ status: "proposed", proposal: { holdReason } });
+
+  it("returns an empty string when nothing is awaiting approval", () => {
+    expect(formatAwaitingApprovalSummary([{ status: "placed", proposal: {} }, { status: "blocked", proposal: {} }])).toBe("");
+  });
+
+  it("breaks the count down by cause, biggest first then by label", () => {
+    const summary = formatAwaitingApprovalSummary([
+      held("policy_revert"),
+      held("red_team_unavailable"),
+      held("red_team_unavailable"),
+      held("funding_sell"),
+      { status: "placed", proposal: {} }
+    ]);
+    expect(summary).toBe("Awaiting approval: 4 (Red Team review needed: 2, Funding sell: 1, Policy hold: 1).");
+  });
+
+  it("counts a held proposal that carries no holdReason as Other so the parts sum to the total", () => {
+    expect(formatAwaitingApprovalSummary([held(undefined), held("other")])).toBe("Awaiting approval: 2 (Other: 2).");
   });
 });

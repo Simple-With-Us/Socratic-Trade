@@ -201,6 +201,34 @@ describe("ops performance snapshot — shape and math", () => {
       status: "proposed"
     });
 
+    // Holds that are no longer pending still count: an Awaiting-approval card the owner never
+    // answered EXPIRES (policy.proposalExpiryMinutes), and one they answered is placed or
+    // rejected — the funnel must keep saying why each was held, or the diagnostic only ever
+    // describes the cards that happen to be open right now (audit 2026-09-29).
+    for (const [status, holdReason] of [
+      ["expired", "red_team_unavailable"],
+      ["withdrawn", "policy_revert"]
+    ] as const) {
+      db.insertProposal({
+        id: randomUUID(),
+        userId,
+        runId: randomUUID(),
+        accountNumber,
+        proposal: {
+          symbol: "AAPL",
+          side: "buy",
+          type: "market",
+          dollarAmount: 100,
+          timeInForce: "gfd",
+          marketHours: "regular_hours",
+          rationale: "test",
+          holdReason
+        },
+        decision: { approved: false, reasons: ["held then resolved"] },
+        status
+      });
+    }
+
     // Portfolio snapshots -> equity curve.
     db.insertPortfolioSnapshot({
       accountNumber,
@@ -234,7 +262,14 @@ describe("ops performance snapshot — shape and math", () => {
     expect(account.label).toBe("Ops Perf Test Account");
     expect(account.environment).toBe("paper");
     expect(account.systemState).toBe("active");
-    expect(account.pricesUnavailable).toBe(true);
+    expect(account.parked).toBe(false);
+    expect(account.parkedReason).toBeNull();
+    expect(account.parkedAt).toBeNull();
+    // Every round trip in this fixture is closed, so there is nothing to mark: "prices unavailable"
+    // would be a false statement about a book that needs no prices.
+    expect(account.pricesUnavailable).toBe(false);
+    expect(account.unrealizedUnpricedSymbols).toEqual([]);
+    expect(account.paperUnrealizedPnl).toBe(0);
 
     // Realized P&L: +200 (AAPL) - 150 (MSFT) + 20 (TSLA, outside window but still realized-to-date) = 70.
     expect(account.paperRealizedPnl).toBeCloseTo(70, 2);
@@ -265,15 +300,20 @@ describe("ops performance snapshot — shape and math", () => {
     expect(placedCount).toBe(2);
     const blockedCount = account.proposalFunnel.counts.find((c) => c.status === "blocked")?.count;
     expect(blockedCount).toBe(1);
-    expect(account.proposalFunnel.topBlockReasons[0]).toEqual({ reason: "Daily notional cap exceeded.", count: 1 });
+    expect(account.proposalFunnel.topBlockReasons[0]).toMatchObject({ reason: "Daily notional cap exceeded.", count: 1 });
+    // Each bucket says when it was first and last seen (the row's own created_at, i.e. "now").
+    const blockBucket = account.proposalFunnel.topBlockReasons[0];
+    expect(Date.parse(blockBucket.firstSeenAt)).not.toBeNaN();
+    expect(blockBucket.lastSeenAt >= blockBucket.firstSeenAt).toBe(true);
 
     // Held ("proposed") proposals' structured holdReason rolls up too, sorted by count then name.
     const proposedCount = account.proposalFunnel.counts.find((c) => c.status === "proposed")?.count;
     expect(proposedCount).toBe(2);
     expect(account.proposalFunnel.holdReasons).toEqual([
       { reason: "funding_sell", count: 1 },
-      { reason: "red_team_unavailable", count: 1 }
-    ]);
+      { reason: "policy_revert", count: 1 },
+      { reason: "red_team_unavailable", count: 2 }
+    ].sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)));
     expect(account.proposalFunnel.holdReasonRowsCapped).toBe(false);
 
     // Equity curve: both snapshots are inside the 30-day window, downsampled to one point/day.
@@ -307,9 +347,65 @@ describe("ops performance snapshot — shape and math", () => {
     expect(snapshot.accounts).toHaveLength(1);
     const account = snapshot.accounts[0];
     expect(account.accountNumber).toBeNull();
+    expect(account.parked).toBe(false);
+    expect(account.parkedReason).toBeNull();
+    expect(account.parkedAt).toBeNull();
     expect(account.tradeStats).toEqual({ windowDays: 90, tradeCount: 0, winRate: 0, expectancyUsd: 0 });
     expect(account.equityCurve).toEqual([]);
     expect(account.proposalFunnel.counts).toEqual([]);
+  });
+
+  it("reports a park on a synced book and on an account that has never synced, and clears it on un-park", async () => {
+    const db = await import("../src/lib/db");
+    const { runOpsAccountControl } = await import("../src/lib/ops-account-control");
+    const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
+    const userId = `ops-perf-park-${randomUUID()}`;
+    const syncedId = `acct-park-synced-${randomUUID()}`;
+    const emptyId = `acct-park-empty-${randomUUID()}`;
+    const reason = "dormant since Jul 6; parked pending owner review of the unknown balance";
+
+    db.upsertConnectedAccount({
+      id: syncedId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: `PARK-${randomUUID()}`,
+      label: "Parked Paper",
+      isActive: true
+    });
+    db.setPolicy({ ...db.getPolicy(userId, syncedId), systemState: "active", strategyAuthority: "decide" }, userId, syncedId);
+    db.upsertConnectedAccount({
+      id: emptyId,
+      userId,
+      broker: "public",
+      environment: "live",
+      label: "Parked unsynced",
+      isActive: false
+    });
+
+    expect((await runOpsAccountControl({ action: "park_account", connectedAccountId: syncedId, reason, dryRun: false })).status).toBe(200);
+    expect((await runOpsAccountControl({ action: "park_account", connectedAccountId: emptyId, reason, dryRun: false })).status).toBe(200);
+
+    const synced = (await buildOpsPerformanceSnapshot({ connectedAccountId: syncedId, days: 30 })).accounts[0];
+    expect(synced.parked).toBe(true);
+    expect(synced.parkedReason).toBe(reason);
+    expect(synced.parkedAt).toEqual(expect.any(String));
+    // Parking records a decision.  It does not halt, so an active book can still be parked.
+    expect(synced.systemState).toBe("active");
+
+    const empty = (await buildOpsPerformanceSnapshot({ connectedAccountId: emptyId })).accounts[0];
+    expect(empty.accountNumber).toBeNull();
+    expect(empty.parked).toBe(true);
+    expect(empty.parkedReason).toBe(reason);
+    expect(empty.parkedAt).toEqual(expect.any(String));
+    expect(empty.tradeStats.tradeCount).toBe(0);
+
+    expect((await runOpsAccountControl({ action: "unpark_account", connectedAccountId: syncedId, dryRun: false })).status).toBe(200);
+    const cleared = (await buildOpsPerformanceSnapshot({ connectedAccountId: syncedId, days: 30 })).accounts[0];
+    expect(cleared.parked).toBe(false);
+    expect(cleared.parkedReason).toBeNull();
+    expect(cleared.parkedAt).toBeNull();
+    expect(cleared.systemState).toBe("active");
   });
 
   it("survives a malformed Red Team audit payload for an account — falls back to an empty " +

@@ -1,10 +1,17 @@
 import { randomUUID } from "crypto";
-import { audit, finishStrategyRun, getDb, getInternalSetting, getPolicy, insertStrategyRun, setInternalSetting, setPolicy, deleteInternalSetting } from "./db";
+import { audit, finishStrategyRun, getAutoResumeOnBoot, getDb, getInternalSetting, getPolicy, insertStrategyRun, setInternalSetting, setPolicy, deleteInternalSetting } from "./db";
 import { countRecentAuditEvents } from "./db-learning";
 import { ExecutionAccount, HealthSignals } from "./execution-mode";
 import { accountEquity } from "./risk-breaker";
 import { sendNotification } from "./notifications";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
+import {
+  TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+  isTradierSandboxOpenDeferral,
+  isTradierSandboxOpenDeferralMessage,
+  isTradierTransientServerError,
+  tradierNow
+} from "./tradier-transient";
 import { isDeadlineTimeoutError } from "./inflight-deadline";
 import { startEventLoopLagSampler, stalledMsSince } from "./event-loop-lag";
 import { safeErrorMessage } from "./telemetry-sanitize";
@@ -90,13 +97,27 @@ export function healthSignalsFromProbeFailure(err: unknown): HealthSignals {
 export function brokerHealthRunSkip(health: HealthSignals): {
   status: "skipped" | "skipped_broker_unhealthy";
   summary: string;
-  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_unhealthy";
+  auditKind: "run_skipped_process_stalled" | "run_skipped_broker_transient" | "run_skipped_sandbox_open_deferral" | "run_skipped_broker_unhealthy";
 } {
   if (health.processStall) {
     return {
       status: "skipped",
       summary: `${health.reason ?? processStallReason(health.processStall.stalledMs, health.processStall.elapsedMs)}. Skipping this strategy run; the next one retries.`,
       auditKind: "run_skipped_process_stalled"
+    };
+  }
+  if (health.transientBrokerError) {
+    return {
+      status: "skipped",
+      summary: `${health.reason ?? "Tradier order path returned a transient server error"}. Skipping this strategy run; the next one retries. Autonomous trading stays armed.`,
+      auditKind: "run_skipped_broker_transient"
+    };
+  }
+  if (health.sandboxOpenDeferral || isTradierSandboxOpenDeferralMessage(health.reason ?? "")) {
+    return {
+      status: "skipped",
+      summary: `${health.reason ?? TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE}  Skipping this strategy run; the next one retries after 9:46am ET.  Autonomous trading stays armed.`,
+      auditKind: "run_skipped_sandbox_open_deferral"
     };
   }
   return {
@@ -124,6 +145,16 @@ export async function checkBrokerHealth(
   account: ExecutionAccount,
   brokerGateway?: BrokerGateway
 ): Promise<HealthSignals> {
+  // Sandbox quotes lag 15 minutes.  Skip the strategy run before any broker
+  // read or order probe.  Live Tradier and every other broker fall through.
+  if (account.broker === "tradier" && isTradierSandboxOpenDeferral(account.environment, tradierNow())) {
+    return {
+      isHealthy: false,
+      reason: TRADIER_SANDBOX_OPEN_DEFERRAL_MESSAGE,
+      sandboxOpenDeferral: true
+    };
+  }
+
   // If no gateway is provided, we can't check broker-side health.
   // This typically happens if the account isn't meant to submit orders (e.g. read-only mode).
   if (!brokerGateway) {
@@ -156,8 +187,9 @@ export async function checkBrokerHealth(
       };
     }
 
-    // Minimum notional check to prevent burning tokens when there's no money.
-    // E.g., Robinhood requires $1 minimum for fractional shares.
+    // Placeability floor (~$5): broker cannot meaningfully place fractional equity below this.
+    // Strategy proposal generation uses a separate floor (MIN_STRATEGY_ACCOUNT_EQUITY = $10 in
+    // strategy.ts).  Low equity skips this tick via isHealthy=false; it does not auto-halt.
     const equity = accountEquity(portfolio);
     if (equity < 5.0) {
       return {
@@ -195,9 +227,20 @@ export async function checkBrokerHealth(
     if (typeof brokerGateway.probeOrderCapability === "function" && account.accountNumber) {
       const probe = await brokerGateway.probeOrderCapability(account.accountNumber);
       if (!probe.ok) {
+        const reason = probe.reason ?? "Broker reports orders cannot be placed";
+        // This sentence is a wedged sandbox OMS, not "the account cannot trade".
+        // Leave the account active.  The caller skips this tick and retries.
+        if (isTradierTransientServerError(reason)) {
+          return {
+            isHealthy: false,
+            reason,
+            category: "connectivity",
+            transientBrokerError: true
+          };
+        }
         return {
           isHealthy: false,
-          reason: probe.reason ?? "Broker reports orders cannot be placed",
+          reason,
           category: "order_capability"
         };
       }
@@ -234,6 +277,11 @@ export type BrokerPlacementPauseMarker = {
   autoResume: true;
   /** systemState before we flipped it (should be "active"). */
   priorState: SystemState;
+  /** Lane h5 review round: the latest broker check that found the account still unhealthy while
+   *  this pause held it.  Lets the console and the ops snapshot tell a pause whose probes keep
+   *  failing apart from one whose probes stopped running.  Absent on markers written before. */
+  lastProbeAt?: string;
+  lastProbeReason?: string;
 };
 
 const pauseMarkerKey = (userId: string, accountScope: string) =>
@@ -267,16 +315,28 @@ export type ApplyBrokerPauseResult =
   | { action: "still_paused"; reason: string; autoOwned: boolean };
 
 /**
- * Persist a skipped strategy_runs row when the scheduler health gate auto-halts
- * an active account.  Journal-only skip left tradingLiveness with no row while
- * equity-0 accounts sat halted (board 06df80cf).  Do not call on already-halted
- * ticks — that would write a row every 15s.
+ * Persist a skipped strategy_runs row when the scheduler health gate suppresses an
+ * active account in a way liveness/ops should see in strategy_runs: auto-halt (once,
+ * while still active) or a new low-equity skip episode (once per cause, account stays
+ * active).  Do not call on already-halted ticks for halt — that would write every 15s.
  */
 export function shouldPersistBrokerHealthSkip(input: {
   wasActive: boolean;
   pauseAction: ApplyBrokerPauseResult["action"];
+  health?: HealthSignals;
+  /** True on first tick of a skip episode (new/changed cause); scheduler passes logHealthGateSkip's return. */
+  skipEpisodeStarted?: boolean;
 }): boolean {
-  return input.wasActive && input.pauseAction === "halted";
+  if (!input.wasActive) return false;
+  if (input.pauseAction === "halted") return true;
+  if (
+    input.skipEpisodeStarted &&
+    input.pauseAction === "none" &&
+    input.health?.category === "equity"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function persistBrokerHealthSkipRun(input: {
@@ -396,6 +456,20 @@ export async function applyBrokerOrderPlacementPause(input: {
       // manual owner pause (Codex PR #3189 P2).
       return { action: "still_paused", reason, autoOwned: false };
     }
+    // Record this failed check on our own marker (lane h5 review round).  Synchronous with the
+    // marker read above (no await in between), so it can never resurrect a marker an owner or
+    // operator cleared.  One small upsert per tick, only while an auto-pause holds the account.
+    // Diagnostics only: a failed write (SQLITE_BUSY under load) must never break the health gate,
+    // which used to do no write at all on this path.
+    try {
+      setInternalSetting(pauseMarkerKey(userId, accountScope), {
+        ...marker,
+        lastProbeAt: new Date().toISOString(),
+        lastProbeReason: reason
+      } satisfies BrokerPlacementPauseMarker);
+    } catch (err) {
+      console.error(`[broker-health] could not record the last failed probe for ${userId}/${accountScope}:`, safeErrorMessage(err));
+    }
     return { action: "still_paused", reason: marker.reason, autoOwned: true };
   }
 
@@ -407,6 +481,27 @@ export async function applyBrokerOrderPlacementPause(input: {
   // The app was frozen, not the broker: skip this tick (isHealthy=false upstream) but leave the
   // streak exactly where it was — neither evidence of a broker outage nor of broker recovery.
   if (health.processStall) {
+    return { action: "none" };
+  }
+
+  // Underfunded account: same as process stall — skip via the health gate, never flip halted or
+  // fire kill_switch (strategy already skips proposals below MIN_STRATEGY_ACCOUNT_EQUITY).
+  if (health.category === "equity") {
+    return { action: "none" };
+  }
+
+  // Tradier HTTP 400 "Unexpected server error" is a broker-side blip.  One hit,
+  // or a run of them through the open, must not flip systemState.  A later
+  // healthy probe then has nothing to auto-resume, which is the halt/resume
+  // churn from 2026-10-13 and 2026-10-14.  Do not touch the connectivity streak:
+  // this answer is not evidence the socket is dead, and it is not evidence the
+  // socket recovered.
+  if (
+    health.sandboxOpenDeferral ||
+    health.transientBrokerError ||
+    isTradierTransientServerError(reason) ||
+    isTradierSandboxOpenDeferralMessage(reason)
+  ) {
     return { action: "none" };
   }
 
@@ -460,12 +555,30 @@ export async function applyBrokerOrderPlacementPause(input: {
         reason,
         category: health.category,
         action: "auto_halt",
-        note: "Will auto-resume when the broker order path recovers. You can also re-arm Start manually after fixing the connection."
+        note: autoHaltNotificationNote(userId)
       }
     },
     { policy: current, userId, connectedAccountId }
   );
   return { action: "halted", reason };
+}
+
+/** The auto-halt notification's promise, made honest (lane h5 review round): with "Auto-resume on
+ *  boot" off (and no AUTONOMY_RESUME_ON_BOOT=1), a restart or deploy before the broker recovers
+ *  ends the auto-pause, so "will auto-resume" alone would be false.  Exported for tests. */
+export function autoHaltNotificationNote(userId: string): string {
+  const base = "Will auto-resume when the broker order path recovers.  You can also re-arm Start manually after fixing the connection.";
+  let survivesRestart = process.env.AUTONOMY_RESUME_ON_BOOT === "1";
+  if (!survivesRestart) {
+    try {
+      survivesRestart = getAutoResumeOnBoot(userId);
+    } catch {
+      survivesRestart = false;
+    }
+  }
+  return survivesRestart
+    ? base
+    : `${base}  Auto-resume on boot is off, so a restart or deploy before the broker recovers ends this auto-pause and leaves the account stopped.`;
 }
 
 /** Pause-marker scope for an account: the connected account id, else the legacy
@@ -515,6 +628,11 @@ export function releaseBrokerPlacementPauseToOwner(input: {
 export function isOrderPlacementInfrastructureFailure(message: string): boolean {
   const m = String(message ?? "");
   if (!m.trim()) return false;
+  // The sandbox 400 "Unexpected server error" and the open-window deferral are
+  // retryable.  Counting them here would halt after two audits in 30 minutes,
+  // which is the churn this classifier exists to avoid.  HTTP 5xx still matches
+  // below.
+  if (isTradierTransientServerError(m) || isTradierSandboxOpenDeferralMessage(m)) return false;
   // Explicit non-infra rejects first (avoid false positives on "HTTP 403 insufficient buying power")
   if (
     /buying power|insufficient|notional|wash.?sale|pdt|day.?trad|fractional|qty|quantity|validation|OrderValidation|not tradable|halted|universe|margin.?call/i.test(

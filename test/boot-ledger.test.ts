@@ -1,18 +1,20 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   BOOT_LEDGER_KEEP_LINES,
   BOOT_LEDGER_MAX_BYTES,
+  CLEAN_DEPLOY_MIN_UPTIME_SEC,
   assessRestartLoop,
   bootLedgerActive,
   bootLedgerPath,
   describeRestartLoop,
   noteExitReceipt,
   parseBootLedger,
+  readRecentWatchdogKill,
   recordBoot,
   reportRestartLoop,
   resetBootLedgerForTests,
@@ -27,8 +29,8 @@ vi.mock("../src/lib/db-health", () => ({ alertStorageWarning: alertMock.alertSto
 const MIN = 60_000;
 const T0 = Date.parse("2026-08-28T15:00:00.000Z");
 
-function boot(id: string, atMs: number): BootLedgerEntry {
-  return { v: 1, t: "boot", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, node: "v24" };
+function boot(id: string, atMs: number, release?: string): BootLedgerEntry {
+  return { v: 1, t: "boot", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, node: "v24", ...(release ? { release } : {}) };
 }
 function exit(id: string, atMs: number, code: number | null = 143, extra: Partial<BootLedgerEntry> = {}): BootLedgerEntry {
   return { v: 1, t: "exit", ts: new Date(atMs).toISOString(), bootId: id, pid: 1, code, uptimeSec: 10, ...extra } as BootLedgerEntry;
@@ -74,10 +76,95 @@ describe("assessRestartLoop (pure)", () => {
     expect(describeRestartLoop(a)).toMatch(/NO exit receipt/);
   });
 
+  it("does not call a burst of clean deploy stops a loop (ST-4559)", () => {
+    // Each stop is followed by a boot of a NEW release: that is what makes it
+    // a deploy stop rather than a same-image (e.g. watchdog) restart.
+    const entries = [
+      boot("a", T0 - 30 * MIN, "r1"), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN, "r2"), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN, "r3"), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0, "r4")
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(0);
+    expect(a.restartLoop).toBe(false);
+    expect(CLEAN_DEPLOY_MIN_UPTIME_SEC).toBe(120);
+  });
+
+  it("counts a same-release SIGTERM burst as a loop (watchdog kill, not a deploy)", () => {
+    // The liveness watchdog kills with SIGTERM past the uptime threshold and
+    // restarts the SAME image: without the release check this burst would be
+    // misclassified as clean deploy stops and the detector would stay silent.
+    const entries = [
+      boot("a", T0 - 30 * MIN, "r1"), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN, "r1"), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN, "r1"), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0, "r1")
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(3);
+    expect(a.restartLoop).toBe(true);
+  });
+
+  it("fails loud when releases are missing: an unattributed SIGTERM stop is not a clean deploy", () => {
+    const entries = [
+      boot("a", T0 - 30 * MIN), exit("a", T0 - 20 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("b", T0 - 20 * MIN), exit("b", T0 - 10 * MIN, 143, { signal: "SIGTERM", uptimeSec: 594 }),
+      boot("c", T0 - 10 * MIN), exit("c", T0 - 1 * MIN, 143, { signal: "SIGTERM", uptimeSec: 540 }),
+      boot("d", T0)
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.crashPredecessorsInWindow).toBe(3);
+    expect(a.restartLoop).toBe(true);
+  });
+
+  it("still calls rapid short-lived SIGTERM boots a loop", () => {
+    const entries = [
+      boot("a", T0 - 20 * MIN), exit("a", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("b", T0 - 10 * MIN), exit("b", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("c", T0)
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.crashPredecessorsInWindow).toBe(2);
+    expect(a.restartLoop).toBe(true);
+  });
+
   it("honours a custom window and threshold", () => {
     const entries = [boot("a", T0 - 5 * MIN), exit("a", T0 - 4 * MIN), boot("b", T0)];
     expect(assessRestartLoop(entries, T0, { threshold: 2, windowMinutes: 10 }).restartLoop).toBe(true);
     expect(assessRestartLoop(entries, T0, { threshold: 2, windowMinutes: 3 }).restartLoop).toBe(false);
+  });
+
+  it("does not count a crash predecessor that booted before the window", () => {
+    // Boot a crashed before the window opened; a burst of clean redeploys
+    // inside the window must not trip the loop trigger on its stale evidence.
+    // Four in-window boots meet the default threshold of 3, so restartLoop
+    // being false proves the trigger (not the count) excludes the stale crash.
+    const entries = [
+      boot("a", T0 - 50 * MIN, "r0"),
+      boot("b", T0 - 30 * MIN, "r1"), exit("b", T0 - 29 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("c", T0 - 20 * MIN, "r2"), exit("c", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("d", T0 - 10 * MIN, "r3"), exit("d", T0 - 9 * MIN, 143, { signal: "SIGTERM", uptimeSec: 600 }),
+      boot("e", T0, "r4")
+    ];
+    const a = assessRestartLoop(entries, T0);
+    expect(a.bootsInWindow).toBe(4);
+    expect(a.crashPredecessorsInWindow).toBe(0);
+    // Forensic only: the pre-window crash still shows in the unclean counter.
+    expect(a.uncleanPredecessorsInWindow).toBe(1);
+    expect(a.restartLoop).toBe(false);
+  });
+
+  it("names the crash-predecessor count in the alert text", () => {
+    const entries = [
+      boot("a", T0 - 20 * MIN), exit("a", T0 - 19 * MIN, 143, { signal: "SIGTERM", uptimeSec: 10 }),
+      boot("b", T0 - 10 * MIN),
+      boot("c", T0)
+    ];
+    const text = describeRestartLoop(assessRestartLoop(entries, T0));
+    expect(text).toMatch(/2 of those boots follow a crash/);
   });
 
   it("describes the previous exit code, signal and uptime when a receipt exists", () => {
@@ -278,5 +365,49 @@ describe("reportRestartLoop", () => {
     } finally {
       if (prev !== undefined) process.env["SENTRY_" + "DSN"] = prev;
     }
+  });
+});
+
+describe("readRecentWatchdogKill (liveness watchdog attribution)", () => {
+  function ledgerEnv(): Record<string, string | undefined> {
+    const dir = mkdtempSync(join(tmpdir(), "watchdog-kill-"));
+    return { DATABASE_URL: `file:${join(dir, "app.db")}` };
+  }
+  function logPathFor(env: Record<string, string | undefined>): string {
+    return join(dirname(bootLedgerPath(env)), "liveness-watchdog.log");
+  }
+
+  it("returns null when there is no watchdog log", () => {
+    expect(readRecentWatchdogKill(ledgerEnv(), T0)).toBeNull();
+  });
+
+  it("returns the last line of a recent watchdog log", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(
+      p,
+      "2026-09-30T15:58:29Z liveness-watchdog kill pid=32077 after 5 failed /api/live probes\n" +
+        "2026-09-30T16:20:00Z liveness-watchdog kill pid=32100 after 5 failed /api/live probes\n"
+    );
+    // File was just written: "now" is real wall-clock time, inside the recency window.
+    expect(readRecentWatchdogKill(env, Date.now())).toContain("pid=32100");
+  });
+
+  it("returns null when the watchdog log is older than the recency window", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(p, "2026-09-20T00:00:00Z liveness-watchdog kill pid=1 after 5 failed /api/live probes\n");
+    const tenDaysAgoSec = new Date("2026-09-20T00:00:00Z").getTime() / 1000;
+    utimesSync(p, tenDaysAgoSec, tenDaysAgoSec);
+    // "now" is ten days after the kill: well outside the 1h recency window.
+    expect(readRecentWatchdogKill(env, Date.parse("2026-09-30T00:00:00Z"))).toBeNull();
+  });
+
+  it("returns null for a whitespace-only log and never throws on garbage", () => {
+    const env = ledgerEnv();
+    const p = logPathFor(env);
+    writeFileSync(p, "\n   \n");
+    expect(readRecentWatchdogKill(env, T0)).toBeNull();
+    expect(readRecentWatchdogKill({}, T0)).toBeNull();
   });
 });

@@ -40,6 +40,10 @@ ENV_DIR="$HOME/.config/agentic-trading"
 ENV_FILE="$ENV_DIR/deploy.env"
 PROJECT_ID="${INFISICAL_PROJECT_ID:-39d93bb7-76f9-498c-8b50-a7def52e072f}" # Socratic-Trade (slug: socratic-trade)
 ENV_NAME="${INFISICAL_ENV:-prod}"
+if [ "$ENV_NAME" != "prod" ]; then
+  printf '\n[cutover] ERROR: INFISICAL_ENV must be prod (dev and staging are retired)\n' >&2
+  exit 1
+fi
 SECRETS_PATH="${INFISICAL_PATH:-/}"
 SHARED_PROJECT_ID="${INFISICAL_SHARED_PROJECT_ID:-18f563a3-9c88-454c-96eb-28fc9678f3ba}" # shared-at-ct
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:4000/api/health}"
@@ -77,6 +81,7 @@ looks_like_client_secret() { case "$1" in *[!0-9a-fA-F]*) return 1 ;; esac; [ "$
 # Read a single var's value out of a prior deploy.env (set -u-safe; never errors).
 read_envfile_var() {
   [ -f "$ENV_FILE" ] || return 0
+  # shellcheck disable=SC1090  # ENV_FILE path is chosen by operator
   ( set +u +e; . "$ENV_FILE" >/dev/null 2>&1; eval "printf '%s' \"\${$1-}\"" )
 }
 
@@ -268,8 +273,10 @@ if [ "$DO_RESTART" -eq 1 ]; then
   # managed process, but it never lands in the parent shell (so the health-check/scrub
   # commands below don't inherit the long-lived Client Secret).
   ( cd "$DIR"
-    # shellcheck disable=SC1090
-    set -a; . "$ENV_FILE"; set +a
+    set -a
+    # shellcheck disable=SC1090  # ENV_FILE path is operator-selected
+    . "$ENV_FILE"
+    set +a
     pm2 delete "$APP" >/dev/null 2>&1 || true
     pm2 start npm --name "$APP" --update-env --cwd "$DIR" -- run start:secrets
     pm2 save )

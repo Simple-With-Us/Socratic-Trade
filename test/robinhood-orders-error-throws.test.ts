@@ -76,7 +76,8 @@ describe("Robinhood getEquityOrders error-vs-empty discrimination", () => {
                 ref_id: "my-client-key",
                 cumulative_quantity: 3,
                 average_price: 200.25,
-                created_at: "2026-07-10T14:00:00.000Z"
+                // Default listings keep terminal orders inside the since-window.
+                created_at: new Date().toISOString()
               }
             ]
           },

@@ -4,7 +4,7 @@ import { getLlmUsageSummary } from "@/lib/llm-usage";
 import { CATALOG_DISPLAY_SLUGS } from "@/lib/llm-model-catalog";
 import { aggregateModelStats, normalizeBenchmarkSummaries, type ClosedLotLike } from "@/lib/model-stats";
 import { calculatePnl, getRedTeamEfficacy, RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT } from "@/lib/performance";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 // Static benchmark reference (2026-07-08 model benchmark run): bundled at build time so the
 // endpoint has cost/latency numbers for every catalog model even with zero live traffic.
 import benchmarkJson from "../../../../docs/benchmarks/2026-07-08-llm-model-benchmark.json";
@@ -17,6 +17,10 @@ import benchmarkJson from "../../../../docs/benchmarks/2026-07-08-llm-model-benc
 // numbers instead inform the advice text under the Mistral reasoning-effort control
 // (src/lib/model-reasoning-recommendations.ts).
 import mistralRebenchJson from "../../../../docs/benchmarks/2026-07-10-mistral-rebench.json";
+// GPT-5.6 sweep (2026-07-13): luna, sol and terra. Concatenated LAST so its rows win for a
+// (model, role) pair that an older run also covered (aggregateModelStats keeps the last one).
+import gpt56BenchmarkJson from "../../../../docs/benchmarks/2026-07-13-gpt-5-6-benchmark.json";
+import { attachServedModels, getLatestServedModels } from "@/lib/llm-served-model";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +47,8 @@ export const dynamic = "force-dynamic";
 // `stats` array already carries `role: "strategist"` rows via aggregateModelStats, so the drawer
 // filters on that role rather than this route needing a separate response field.
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const sinceDaysParam = url.searchParams.get("sinceDays");
   // Default to 0 (all time / lifetime) unless a specific bounded window is requested.
@@ -81,7 +86,11 @@ export async function GET(request: Request) {
     // Concatenation is safe: normalizeBenchmarkSummaries drops the 2026-07-08 Mistral rows for
     // lack of numbers (all-error), so the 2026-07-10 rows are the only ones that survive for
     // those (model, role) pairs — no overwrite ambiguity.
-    benchmarkSummaries: normalizeBenchmarkSummaries([...benchmarkJson.summaries, ...mistralRebenchJson.summaries]),
+    benchmarkSummaries: normalizeBenchmarkSummaries([
+      ...benchmarkJson.summaries,
+      ...mistralRebenchJson.summaries,
+      ...gpt56BenchmarkJson.summaries
+    ]),
     closedLots,
     reviewerPerfByModel,
     // Seed every catalog display slug so zero-sample new models (e.g. gpt-6-astra) still enter
@@ -91,12 +100,20 @@ export async function GET(request: Request) {
 
   // "Most recently updated" — the later of the two merged runs' timestamps, so the drawer's
   // disclaimer date is honest even though it only ever shows one date for a two-source blend.
-  const mostRecentRunAt =
-    new Date(mistralRebenchJson.runAt).getTime() > new Date(benchmarkJson.runAt).getTime() ? mistralRebenchJson.runAt : benchmarkJson.runAt;
+  const mostRecentRunAt = [benchmarkJson.runAt, mistralRebenchJson.runAt, gpt56BenchmarkJson.runAt].reduce((latest, runAt) =>
+    new Date(runAt).getTime() > new Date(latest).getTime() ? runAt : latest
+  );
+
+  // Alias rows (`*-latest`) say which concrete model they resolved to: the most recent
+  // llm_usage.served_model, else the catalog's expected native slug. Never fails the route.
+  const withServed = attachServedModels(stats, getLatestServedModels({ userId }));
 
   return NextResponse.json({
     sinceDays,
-    benchmark: { runAt: mostRecentRunAt, source: "2026-07-08-llm-model-benchmark+2026-07-10-mistral-rebench" },
-    stats
+    benchmark: {
+      runAt: mostRecentRunAt,
+      source: "2026-07-08-llm-model-benchmark+2026-07-10-mistral-rebench+2026-07-13-gpt-5-6-benchmark"
+    },
+    stats: withServed
   });
 }

@@ -1,3 +1,4 @@
+import { llmFetch } from "../llm-request";
 // Structured-output LLM salience extractor (item 7, 2026-07-01 RAG workstream).
 //
 // extractLearnedCandidates() in salience.ts is an admitted "deterministic rule-based stand-in"
@@ -162,7 +163,7 @@ export async function extractLearnedCandidatesLLM(message: string, userId: strin
       }
     );
 
-    const response = await fetch(endpoint.url, {
+    const response = await llmFetch(endpoint.url, {
       method: "POST",
       headers: llmAuthHeaders(endpoint),
       body: JSON.stringify(body),

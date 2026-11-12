@@ -14,6 +14,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * - Live regions are masked: equity/benchmark chart figures (SVG paths drawn
  *   from live data), countdown clocks ("Next …"), and the day-PnL baseline
  *   date label. Everything else asserts pixel-stable across runs.
+ * - A mask hides pixels but NOT layout, and `fullPage: true` compares image
+ *   dimensions before pixels — so the one region whose height tracks live
+ *   server-side data (the Market Analysis card) also has its box pinned. See
+ *   PINNED_LIVE_HEIGHT_PX.
  * - ConsentGate is accepted before screenshotting, exactly like the smoke spec.
  */
 
@@ -95,12 +99,92 @@ test.describe("visual regression", () => {
     ];
   }
 
+  /**
+   * Constant height for the masked live regions whose box also moves.
+   *
+   * A mask hides PIXELS; the element still lays out at its natural size. Under
+   * `fullPage: true` Playwright compares the full-page image dimensions BEFORE
+   * any pixel comparison, so a region whose height depends on data fails the
+   * whole assertion no matter how high `maxDiffPixelRatio` is set. Pinning the
+   * box removes that dependency; the element is masked, so its pixels are
+   * painted solid magenta at any height and nothing observable changes.
+   *
+   * Must be >= the tallest natural height so real content is never clipped.
+   */
+  const PINNED_LIVE_HEIGHT_PX = 176;
+
+  /**
+   * Freeze the layout of masked regions whose HEIGHT varies run to run.
+   *
+   * The Market Analysis card is the known one: `app/console/page.tsx` returns
+   * null when `!macroBoard`, renders "Regime" unconditionally, "Market Breadth"
+   * only when `latestScan?.breadthPct != null`, and "VIX" only when
+   * `macroBoard.macro?.vix`. That feed is fetched SERVER-side, so `page.route()`
+   * cannot pin it — the rollout doc says so explicitly ("mask, don't assume
+   * hermeticity"). Measured on the 2026-10-03 run: 171px populated vs 110px
+   * empty, a 61px swing that was exactly the fullPage height delta and failed
+   * 7 of 8 runs with no real pixel regression anywhere on the page.
+   *
+   * All three states must land on the same height: populated, partially
+   * populated, and absent. When the card is present we pin it; when it is
+   * absent there is nothing to pin, so we reserve the slot with a spacer in
+   * the same rail. The card is a direct child of the `<aside>` immediately
+   * after RiskUtilization (unconditional), so the reservation is stable — and
+   * since only the rail's total height is asserted, the exact insertion index
+   * does not matter.
+   *
+   * Only block-level regions belong here — pinning an inline element (the
+   * countdown spans, the date label) to a card-sized height would wreck the
+   * layout instead of stabilising it.
+   */
+  async function pinVariableHeightRegions(page: Page): Promise<void> {
+    const rail = page
+      .locator("aside")
+      .filter({ has: page.locator("section.con-card") })
+      .first();
+    if ((await rail.count()) === 0) return;
+
+    const card = rail.locator("section.con-card", {
+      has: page.locator("h2.con-card-title", { hasText: "Market Analysis" }),
+    });
+    const cardCount = await card.count();
+    if (cardCount > 0) {
+      for (let i = 0; i < cardCount; i++) {
+        await card
+          .nth(i)
+          .evaluate((el) => el.setAttribute("data-visual-height-pinned", "1"))
+          .catch(() => {});
+      }
+    } else {
+      await rail
+        .evaluate((el, h) => {
+          const spacer = document.createElement("div");
+          spacer.setAttribute("data-visual-height-pinned", "1");
+          spacer.style.height = `${h}px`;
+          el.insertBefore(spacer, el.children[1] ?? null);
+        }, PINNED_LIVE_HEIGHT_PX)
+        .catch(() => {});
+    }
+
+    await page.addStyleTag({
+      content: [
+        `[data-visual-height-pinned] {`,
+        `  height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  min-height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  max-height: ${PINNED_LIVE_HEIGHT_PX}px !important;`,
+        `  overflow: hidden !important;`,
+        `}`,
+      ].join("\n"),
+    });
+  }
+
   async function assertStableScreenshot(
     page: Page,
     name: string,
     masks: Locator[] = [],
   ): Promise<void> {
     await freezeMotion(page);
+    await pinVariableHeightRegions(page);
     // In dev the Next compile-status pill ("Compiling …") is a fixed overlay;
     // it never exists in the production build CI screenshots, so settle it
     // out before asserting. Resolves immediately when absent.
@@ -136,6 +220,113 @@ test.describe("visual regression", () => {
     await acceptConsentIfShown(page, 5_000);
 
     await assertStableScreenshot(page, "console-autonomy-desk.png", liveMasks(page));
+  });
+
+  test("console header account dropdown", async ({ page }) => {
+    await setupDeterministicPage(page);
+    await page.goto("/console", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Socratic Trade").first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await acceptConsentIfShown(page);
+    await expect(page.getByText("Portfolio").first()).toBeVisible();
+    await acceptConsentIfShown(page, 5_000);
+
+    // ST-4544: the panel used to be clipped to the header bar height by the
+    // bar's overflow-x guard. Screenshot the OPEN menu so a layout regression
+    // that re-clips it fails on pixels, not just hit-testing.
+    await page
+      .locator('button[title="Switch which account this console shows"]')
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: "Account scope" }),
+    ).toBeVisible();
+
+    await assertStableScreenshot(page, "header-account-dropdown.png", liveMasks(page));
+  });
+
+  test("console header notifications dropdown", async ({ page }) => {
+    await setupDeterministicPage(page);
+    await page.goto("/console", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Socratic Trade").first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await acceptConsentIfShown(page);
+    await expect(page.getByText("Portfolio").first()).toBeVisible();
+    await acceptConsentIfShown(page, 5_000);
+
+    await page.getByRole("button", { name: /^Notifications/ }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Notifications" }),
+    ).toBeVisible();
+
+    await assertStableScreenshot(page, "header-notifications-dropdown.png", [
+      ...liveMasks(page),
+      page.locator(".con-badge"),
+    ]);
+  });
+
+  test("console header profile menu", async ({ page }) => {
+    await setupDeterministicPage(page);
+    await page.goto("/console", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Socratic Trade").first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await acceptConsentIfShown(page);
+    await expect(page.getByText("Portfolio").first()).toBeVisible();
+    await acceptConsentIfShown(page, 5_000);
+
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    test.skip((await trigger.count()) === 0, "no signed-in identity in this environment");
+    await trigger.first().click();
+    await expect(page.locator(".con-menu-drop").last()).toBeVisible();
+
+    await assertStableScreenshot(page, "header-profile-menu.png", liveMasks(page));
+  });
+
+  test("api keys retired-provider delete confirmation", async ({ page }) => {
+    await setupDeterministicPage(page);
+    // ST-4580: a key stored for a retired provider stays deletable, and the confirm copy must say
+    // it cannot be re-added.  Status-only fixture data; the label is pinned, so nothing needs a mask.
+    await page.route("**/api/keys", (route) =>
+      route.fulfill({
+        json: {
+          keys: [
+            {
+              service: "fmp",
+              label: "Financial Modeling Prep (FMP)",
+              category: "Market data",
+              required: false,
+              docsUrl: "",
+              unlocks: "Retired on Socratic-Trade.\u00A0 This stored key is never used.",
+              configured: true,
+              source: "retired",
+              retired: true,
+              retiredNote: "Retired on Socratic-Trade.\u00A0 Delete this stored key; product code never uses it."
+            }
+          ]
+        }
+      })
+    );
+    await page.route("**/api/consent", (route) =>
+      route.fulfill({ json: { ok: true, accepted: true, needed: false } })
+    );
+    await page.goto("/console/connections", { waitUntil: "domcontentloaded" });
+    await acceptConsentIfShown(page, 10_000);
+    // Decorative animated candles, not the card.
+    await page.addStyleTag({ content: "canvas { visibility: hidden !important; }" });
+    const card = page
+      .locator("section.con-card")
+      .filter({ has: page.getByRole("heading", { name: "API keys", exact: true }) });
+    await card.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(card.getByText(/is retired on Socratic-Trade, so a key for it cannot be added again/)).toBeVisible();
+
+    await freezeMotion(page);
+    await expect(card).toHaveScreenshot("api-keys-retired-delete-confirm.png", {
+      animations: "disabled",
+      maxDiffPixelRatio: 0.01,
+      timeout: 30_000,
+    });
   });
 
   test("login page", async ({ page }) => {

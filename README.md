@@ -13,6 +13,7 @@ for development only; previews are retired.
 | **Alpaca** | API key + secret (REST) | Paper (`PA…` / `PK…`) and live brokerage |
 | **Tradier** | Access token | Sandbox (paper) and production (live) |
 | **Robinhood** | Official Trading MCP (OAuth) | Live brokerage |
+| **Kalshi** | Event contracts | Experimental — the live kill switch defaults off |
 
 An account is an account: paper vs live is only the broker account's
 `environment`. There is **no** local simulator, **no** "Test mode", and **no**
@@ -117,11 +118,6 @@ OPENAI_API_URL=...               # optional: override to use an OpenAI-compatibl
 ROBINHOOD_ADAPTER=mock           # "mock"/unset means Robinhood disconnected; "mcp" enables real Robinhood MCP
 DATABASE_URL=file:./data/app.db
 ENCRYPTION_KEY=...               # optional 64-char hex key; used for stored API keys
-# Optional, default-off Usage Monitor bridge for the fixed primary user's
-# Gemini/DeepSeek keys; requires its own exact-path Infisical writer identity.
-INFISICAL_ST_PRIMARY_WRITER_ENABLED=false
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_ID=...
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_SECRET=...
 MARKET_SCAN_LIMIT=30
 MARKET_SCAN_CACHE_TTL_MS=300000
 MARKET_SCAN_EVENT_RESERVE=8

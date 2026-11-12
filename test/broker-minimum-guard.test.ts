@@ -386,3 +386,31 @@ describe("shouldAlertBrokerMinimumOrderBlock cooldown", () => {
     expect(shouldAlertBrokerMinimumOrderBlock("cooldown-user-3", "RH-ACCOUNT", "AAPL")).toBe(true);
   });
 });
+
+// Review round on the h3 audit (2026-09-30): a sub-minimum order that slips past the pre-flight is
+// refused by Robinhood at placement with a non-HTTP "response had no order id" error.  That text is
+// deterministic, so it must classify as a below-minimum block, never as an uncertain placement.
+describe("detectBrokerMinimumPlacementError", () => {
+  it("matches the production placement errors for both minimum wordings", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    const fractional =
+      'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"Fractional orders must be at least $1.\\"]}"}';
+    const dollarBased = 'Robinhood MCP tool reported an error: Dollar-based orders must be at least $1.';
+
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Fractional orders must be at least $1");
+    expect(detectBrokerMinimumPlacementError(fractional)).toContain("Nothing was placed");
+    expect(detectBrokerMinimumPlacementError(dollarBased)).toContain("Dollar-based orders must be at least $1");
+  });
+
+  it("does not match the account questionnaire, generic failures, or an empty message", async () => {
+    const { detectBrokerMinimumPlacementError } = await import("../src/lib/broker-minimum-guard");
+    expect(
+      detectBrokerMinimumPlacementError(
+        'Robinhood place_equity_order response had no order id: {"text":"API error 400: {\\"non_field_errors\\":[\\"We\'re required to have you answer some questions about your account.\\"]}"}'
+      )
+    ).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("network timeout")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("Quantity must be at least 1 share")).toBeUndefined();
+    expect(detectBrokerMinimumPlacementError("")).toBeUndefined();
+  });
+});

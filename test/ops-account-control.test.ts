@@ -634,6 +634,44 @@ describe("set_system_state", () => {
     expect(getPolicy(seeded.userId, seeded.selectedId).systemState).toBe("active");
     expect(broker.reads).toEqual([]);
   });
+
+  // Lane h5 review round: the boot interlock's "stopped by the restart" receipt must go with any
+  // explicit operator state, or a later stop would still read "stopped by the restart".
+  it("clears a restart-halt receipt in the same write, reports it, and a dryRun keeps it", async () => {
+    const { recordBootHaltReceipt, getBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const receipt = { at: "2026-09-26T00:40:00.000Z", from: "broker_auto_pause" as const, autoPauseReason: "Broker health check timed out: checkBrokerHealth timeout" };
+    for (const systemState of ["active", "halted", "close_only"] as const) {
+      const seeded = await seed();
+      recordBootHaltReceipt(seeded.userId, seeded.namedId, receipt);
+
+      const dry = await call({ action: "set_system_state", connectedAccountId: seeded.namedId, systemState, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body.restartHalt).toEqual({ at: receipt.at, from: "broker_auto_pause" });
+      expect(dry.body.clearedRestartHalt).toBe(false);
+      expect(getBootHaltReceipt(seeded.userId, seeded.namedId)).toBeDefined();
+
+      const res = await call({ action: "set_system_state", connectedAccountId: seeded.namedId, systemState });
+      expect(res.status).toBe(200);
+      expect(res.body.restartHalt).toEqual({ at: receipt.at, from: "broker_auto_pause" });
+      expect(res.body.clearedRestartHalt).toBe(true);
+      expect(getBootHaltReceipt(seeded.userId, seeded.namedId)).toBeUndefined();
+      const opsRow = (await auditRows(seeded.userId)).find((row) => row.kind === "ops_account_control" && row.payload.dryRun === false);
+      expect(opsRow?.payload).toMatchObject({ action: "set_system_state", to: systemState, clearedRestartHalt: true });
+
+      // The operator now owns the state: a halted account no longer blames the restart.
+      if (systemState === "halted") {
+        const { describeAutonomyHaltCause } = await import("../src/lib/autonomy-halt-cause");
+        const { getPolicy } = await import("../src/lib/db");
+        const cause = describeAutonomyHaltCause({
+          userId: seeded.userId,
+          connectedAccountId: seeded.namedId,
+          accountNumber: seeded.namedAccountNumber,
+          systemState: getPolicy(seeded.userId, seeded.namedId).systemState
+        });
+        expect(cause?.kind).toBe("stopped");
+      }
+    }
+  });
 });
 
 describe("console paths are unchanged", () => {

@@ -6,7 +6,7 @@ The user previously reported that the logo on the Socratic Trade iOS app was ren
 ## Changes Made
 - **iOS Splash Wordmark**: Updated the iOS `CandleWordmarkView.swift` sampler logic to process multi-line (`\n`) strings and center them. Altered the static `CandleWordmarkModel.shared` to pass `"SOCRATIC\nTRADE"` instead of the one-liner, and updated `SocraticTradeApp.swift` to dynamically compute splash-screen bounds based on the new aspect ratio of the stacked wordmark.
 - **Personal Site Syncing**: Updated `Personal-Site/.github/workflows/mirror-site.yml` to preserve `static/app-icons` after mirroring the upstream SvelteKit site.
-- **Agent Workflow Instructions**: Diagnosed a GitHub token permissions issue blocking automated workflow pushes and updated `AGENTS.md` and `AGENT-SYNC.md` with instructions to use `~/.secrets/global-api-keys` for CI workflow edits.
+- **Agent Workflow Instructions**: Diagnosed a GitHub token permissions issue blocking automated workflow pushes and updated `AGENTS.md` and `AG***-S**C.md` with instructions to use `~/.secrets/global-api-keys` for CI workflow edits.
 - **Revert Orientation**: Restored `UIInterfaceOrientationPortraitUpsideDown` to iOS `Info.plist` and `project.yml` because the earlier removal was based on a misunderstanding of the user's report (the upside down bug was only the logo, not the entire app window).
 
 ## Decisions & Trade-offs

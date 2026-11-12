@@ -302,11 +302,11 @@ describe("seedSecIngestJobsFromManifest", () => {
 });
 
 describe("SEC ingest worker startup gate", () => {
-  it("is off by default and honors the SEC_INGEST_WORKER_ENABLED convention values", () => {
+  it("is on by default and honors the SEC_INGEST_WORKER_ENABLED convention values", () => {
     const prior = process.env.SEC_INGEST_WORKER_ENABLED;
     try {
       delete process.env.SEC_INGEST_WORKER_ENABLED;
-      expect(secIngestWorkerEnabled()).toBe(false);
+      expect(secIngestWorkerEnabled()).toBe(true);
       process.env.SEC_INGEST_WORKER_ENABLED = "off";
       expect(secIngestWorkerEnabled()).toBe(false);
       for (const value of ["1", "true", "on", "yes", " ON "]) {

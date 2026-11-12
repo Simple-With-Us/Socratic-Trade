@@ -3,7 +3,8 @@ import {
   getOrBuildOpsPerformanceSnapshot,
   OPS_PERFORMANCE_DEFAULT_DAYS,
   OPS_PERFORMANCE_MAX_DAYS,
-  OPS_PERFORMANCE_MIN_DAYS
+  OPS_PERFORMANCE_MIN_DAYS,
+  type OpsMarksMode
 } from "@/lib/ops-performance";
 import { NextResponse } from "next/server";
 
@@ -26,8 +27,14 @@ export const dynamic = "force-dynamic";
  * 1-3650 — the lookback window for trade-level stats, the proposal funnel, and the equity curve;
  * thesis/Red-Team/model attribution are lifetime, matching how the app's own scorecards work).
  *
- * Response cached in-process for 60s (single-flight per `account`+`days` key) — this runs inside
- * a production web process whose event loop is already known to stall under load.
+ * `marks=` picks how open positions are marked for unrealized P&L.  The default (`stored`) is one
+ * indexed read of the latest-price rows: no network, no policy read, cheap.  `marks=live` opts in to
+ * one bounded Alpaca market-data snapshot batch on top of the stored marks.  `marks=0` (or `false`
+ * / `off`) skips marking, so open positions are reported unpriced.  See the doc comment in
+ * `src/lib/ops-performance.ts` for why the trading quote cascade is NOT used here.
+ *
+ * Response cached in-process for 60s (single-flight per `account`+`days`+`marks` key) — this runs
+ * inside a production web process whose event loop is already known to stall under load.
  */
 export async function GET(request: Request) {
   if (!authorizeOpsRequest(request)) {
@@ -42,9 +49,14 @@ export async function GET(request: Request) {
   const daysParam = url.searchParams.get("days");
   const days = daysParam != null && daysParam.trim() !== "" ? Number(daysParam) : OPS_PERFORMANCE_DEFAULT_DAYS;
 
+  const marksParam = url.searchParams.get("marks")?.trim().toLowerCase();
+  const marks: OpsMarksMode =
+    marksParam === "0" || marksParam === "false" || marksParam === "off" ? "off" : marksParam === "live" ? "live" : "stored";
+
   const snapshot = await getOrBuildOpsPerformanceSnapshot({
     connectedAccountId: account,
-    days: Number.isFinite(days) ? days : OPS_PERFORMANCE_DEFAULT_DAYS
+    days: Number.isFinite(days) ? days : OPS_PERFORMANCE_DEFAULT_DAYS,
+    marks
   });
 
   return NextResponse.json({

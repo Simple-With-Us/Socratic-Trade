@@ -2,6 +2,7 @@ import { checkAutonomyArmingPolicyPreconditions, verifyAutonomyArmingPreconditio
 import { getBrokerGateway } from "./broker";
 import { isWorkingOrderState } from "./broker-held-orders";
 import { checkBrokerHealth, clearBrokerPlacementPauseMarker, getBrokerPlacementPauseMarker } from "./broker-health";
+import { clearBootHaltReceipt, describeAutonomyHaltCause, getBootHaltReceipt } from "./autonomy-halt-cause";
 import {
   audit,
   findConnectedAccountById,
@@ -336,6 +337,16 @@ export function describeNextEligibleRun(input: {
       }.`
     );
   }
+  if (policy.systemState === "halted") {
+    // Lane h5: say WHY it is halted and whether it lifts by itself (broker auto-pause) or not
+    // (a restart with autoResumeOnBoot off, or a manual stop).
+    try {
+      const cause = describeAutonomyHaltCause({ userId, connectedAccountId: account.id, accountNumber: policy.accountNumber, systemState: policy.systemState });
+      if (cause) notes.push(`Why halted: ${redactFor(account, cause.summary)}`);
+    } catch {
+      /* diagnostics only — never fail the ops call over the cause lookup */
+    }
+  }
   if (!lane.run) {
     blockers.push("Trigger mode is event-only with no fallback interval, so there is no interval run; the trigger engine launches runs on material events.");
   }
@@ -621,7 +632,9 @@ async function setSystemState(
       : { ...base, systemState: target };
   const next = withTargetState(policy);
   const autoPause = getBrokerPlacementPauseMarker(userId, account.id);
+  const restartHalt = getBootHaltReceipt(userId, account.id);
   let clearedBrokerAutoPause = false;
+  let clearedRestartHalt = false;
 
   if (!request.dryRun) {
     // The broker read above awaited.  Re-check and re-read inside one SQLite transaction so that
@@ -663,6 +676,12 @@ async function setSystemState(
         clearBrokerPlacementPauseMarker(userId, account.id);
         clearedBrokerAutoPause = true;
       }
+      // Same reasoning for the boot interlock's "stopped by the restart" receipt (lane h5): the
+      // operator's explicit state is now the reason this account is in it.
+      if (getBootHaltReceipt(userId, account.id)) {
+        clearBootHaltReceipt(userId, account.id);
+        clearedRestartHalt = true;
+      }
     })();
     if (refusal) return refuse(409, refusal);
     // Nudge any open console to refresh: this change did not come from that console.
@@ -689,6 +708,8 @@ async function setSystemState(
       ...(brokerHealth ? { brokerHealthNow: { isHealthy: brokerHealth.isHealthy, reason: brokerHealth.reason ?? null, category: brokerHealth.category ?? null } } : {}),
       brokerAutoPause: autoPause ? { reason: redactFor(account, autoPause.reason), since: autoPause.since } : null,
       clearedBrokerAutoPause,
+      restartHalt: restartHalt ? { at: restartHalt.at, from: restartHalt.from } : null,
+      clearedRestartHalt,
       nextEligibleRun
     }
   };
@@ -696,6 +717,7 @@ async function setSystemState(
     from,
     to: target,
     clearedBrokerAutoPause,
+    clearedRestartHalt,
     brokerHealthy: brokerHealth?.isHealthy,
     nextEligibleRun: { willRun: nextEligibleRun.willRun, at: nextEligibleRun.at, reason: nextEligibleRun.reason }
   });

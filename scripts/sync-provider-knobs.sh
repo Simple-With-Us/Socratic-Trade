@@ -9,7 +9,8 @@
 #
 # WHAT IT DOES
 #   1. GET https://usage.jays.services/api/subscriptions  (Bearer USAGE_READ_TOKEN
-#      from ~/.secrets/usage-monitor.env, falling back to USAGE_INGEST_TOKEN).
+#      from env, else Infisical /usage-monitor via fleet-secrets, falling back to
+#      USAGE_INGEST_TOKEN).
 #      Prod UM denies ingest-token reads (Wave C). Bare JSON array; each element has
 #      provider{id,name,displayName}, name, status, knobEnv (obj|null),
 #      freeTierKnobEnv (obj|null).
@@ -22,25 +23,26 @@
 #      else the payload asks for is refused (defense vs a buggy/compromised monitor).
 #   3. Read current values from Infisical prod (proven SSH + universal-auth CLI
 #      path on the Coolify box) and WRITE ONLY DIFFS.
-#   4. On any applied change, post ONE line to #agent-sync.
+#   4. On any applied change, post ONE line to #Work-In-Progress.
 #
 # Knob writes land in Infisical; the trading app reads them at boot, so a change
 # takes effect on the next prod deploy/restart ("rides next deploy").
 #
 # USAGE
 #   scripts/sync-provider-knobs.sh            # DRY RUN: print the diff, write nothing, exit 0
-#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to Slack
+#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #Work-In-Progress
 #
 # SAFETY
-#   - Monitor unreachable / empty payload -> exit 0, no writes, no Slack (launchd-safe).
-#   - Dry run never writes and never posts to Slack.
+#   - No token available -> exit 1 (fail loudly).  Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
+#   - Dry run never writes and never posts to #Work-In-Progress.
 #   - --apply refuses to write if it could not first read current Infisical state
 #     (never writes blind).
 #
 # ENV OVERRIDES (defaults in [brackets])
 #   USAGE_API            [https://usage.jays.services/api/subscriptions]
-#   USAGE_MONITOR_ENV    [~/.secrets/usage-monitor.env]   USAGE_READ_TOKEN (preferred)
-#                                                     or USAGE_INGEST_TOKEN (legacy)
+#   FLEET_SECRETS        [~/.local/bin/fleet-secrets]   reads USAGE_READ_TOKEN (preferred)
+#                                                     or USAGE_INGEST_TOKEN (legacy) from
+#                                                     Infisical /usage-monitor; env wins
 #   KNOB_SYNC_SSH_KEY    [~/.ssh/hetzner]
 #   KNOB_SYNC_SSH_HOST   [coolify]   (see private fleet-ops:ATTACK-MAP.md)
 #   KNOB_SYNC_BOX_ENV    [/data/coolify/applications/${COOLIFY_APP_UUID:-socratic-trade}/.env]
@@ -48,7 +50,7 @@
 set -u
 
 USAGE_API="${USAGE_API:-https://usage.jays.services/api/subscriptions}"
-USAGE_MONITOR_ENV="${USAGE_MONITOR_ENV:-$HOME/.secrets/usage-monitor.env}"
+FLEET_SECRETS_BIN="${FLEET_SECRETS:-$HOME/.local/bin/fleet-secrets}"
 SSH_KEY="${KNOB_SYNC_SSH_KEY:-$HOME/.ssh/hetzner}"
 SSH_HOST="${KNOB_SYNC_SSH_HOST:-coolify}"
 COOLIFY_APP_UUID="${COOLIFY_APP_UUID:-socratic-trade}"
@@ -56,7 +58,7 @@ BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/${COOLIFY_APP_UUID}/.en
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
-SLACK="$SCRIPT_DIR/slack-sync.sh"
+FLEET_POST="$SCRIPT_DIR/simple-tools-fleet-post.sh"
 
 APPLY=0
 for arg in "$@"; do
@@ -78,27 +80,26 @@ trap cleanup EXIT INT TERM
 
 # -- 1) read the usage-monitor token (never echoed) ----------------------------
 # Prod GET /api/subscriptions wants USAGE_READ_TOKEN. Ingest is write-only
-# there (Wave C) and 401s if used as a read bearer.
+# there (Wave C) and 401s if used as a read bearer.  Env first, then Infisical
+# /usage-monitor through fleet-secrets (AFC-359:  no handoff file is read).
 USAGE_TOKEN=""
 _load_tok() {
   _name="$1"
-  _line="$(grep -E "^(export )?${_name}=" "$USAGE_MONITOR_ENV" 2>/dev/null | tail -1 || true)"
-  _val="${_line#*${_name}=}"
-  case "$_val" in
-    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
-    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
-  esac
+  eval "_val=\"\${$_name:-}\""
+  _fs="$FLEET_SECRETS_BIN"
+  [ -x "$_fs" ] || _fs="$(command -v fleet-secrets 2>/dev/null || true)"
+  if [ -z "$_val" ] && [ -n "$_fs" ] && [ -x "$_fs" ]; then
+    _val="$("$_fs" get "$_name" --path /usage-monitor 2>/dev/null </dev/null || true)"
+  fi
   printf '%s' "$_val"
 }
-if [ -f "$USAGE_MONITOR_ENV" ]; then
-  USAGE_TOKEN="$(_load_tok USAGE_READ_TOKEN)"
-  if [ -z "$USAGE_TOKEN" ]; then
-    USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
-  fi
+USAGE_TOKEN="$(_load_tok USAGE_READ_TOKEN)"
+if [ -z "$USAGE_TOKEN" ]; then
+  USAGE_TOKEN="$(_load_tok USAGE_INGEST_TOKEN)"
 fi
 if [ -z "$USAGE_TOKEN" ]; then
-  log "no USAGE_READ_TOKEN or USAGE_INGEST_TOKEN in $USAGE_MONITOR_ENV - cannot reach the monitor; nothing to do."
-  exit 0
+  log "missing USAGE_READ_TOKEN / USAGE_INGEST_TOKEN: set it in env or add it to Infisical /usage-monitor (fleet-secrets get USAGE_READ_TOKEN --path /usage-monitor failed)."
+  exit 1
 fi
 
 # -- 2) fetch subscriptions (token via 0600 curl config, kept out of argv/ps) ---
@@ -136,6 +137,7 @@ CID="$(get_env INFISICAL_CLIENT_ID)"
 CSECRET="$(get_env INFISICAL_CLIENT_SECRET)"
 PID="$(get_env INFISICAL_PROJECT_ID)"
 ENVN="$(get_env INFISICAL_ENV)"; ENVN="${ENVN:-prod}"
+[ "$ENVN" = "prod" ] || { echo "INFISICAL_ENV in $ENVF is not prod (dev and staging are retired)" >&2; exit 15; }
 SPATH="$(get_env INFISICAL_PATH)"; SPATH="${SPATH:-/}"
 [ -n "$CID" ] && [ -n "$CSECRET" ] && [ -n "$PID" ] || { echo "missing Infisical creds in $ENVF" >&2; exit 12; }
 BIN="$(command -v infisical || true)"
@@ -190,7 +192,7 @@ if [ "$APPLY" -eq 0 ]; then
     st="$(printf '%s' "$rec" | cut -f6)"
     echo "  $k: $old -> $new (plan $plan $st)"
   done
-  echo "[knob-sync] re-run with --apply to write these and post to #agent-sync."
+  echo "[knob-sync] re-run with --apply to write these and post to #Work-In-Progress."
   exit 0
 fi
 
@@ -221,6 +223,7 @@ CID="$(get_env INFISICAL_CLIENT_ID)"
 CSECRET="$(get_env INFISICAL_CLIENT_SECRET)"
 PID="$(get_env INFISICAL_PROJECT_ID)"
 ENVN="$(get_env INFISICAL_ENV)"; ENVN="${ENVN:-prod}"
+[ "$ENVN" = "prod" ] || { echo "INFISICAL_ENV in $ENVF is not prod (dev and staging are retired)" >&2; exit 15; }
 SPATH="$(get_env INFISICAL_PATH)"; SPATH="${SPATH:-/}"
 [ -n "$CID" ] && [ -n "$CSECRET" ] && [ -n "$PID" ] || { echo "missing Infisical creds in $ENVF" >&2; exit 12; }
 BIN="$(command -v infisical || true)"
@@ -253,7 +256,7 @@ else
   log "apply session error: $(tr '\n' ' ' < "$WORK/apply.err" 2>/dev/null)"
 fi
 
-# -- 6) report + Slack one line per applied change -----------------------------
+# -- 6) report + Zulip one line per applied change ---------------------------
 FAILN=0
 while IFS= read -r out; do
   [ -z "$out" ] && continue
@@ -268,8 +271,11 @@ while IFS= read -r out; do
     st="$(printf '%s' "$rec" | cut -f6)"
     log "wrote $key: $old -> $new"
     MSG="repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: $key $old->$new (plan $plan $st); rides next deploy"
-    if [ -x "$SLACK" ]; then
-      "$SLACK" post "$MSG" >/dev/null 2>&1 || log "slack post failed for $key (write still succeeded)"
+    if [ -x "$FLEET_POST" ]; then
+      FLEET_POST_SEAT="${FLEET_POST_SEAT:-CLAUDE}" \
+      FLEET_POST_REPO="${FLEET_POST_REPO:-Socratic-Trade}" \
+      FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
+        bash "$FLEET_POST" "$MSG" >/dev/null 2>&1 || log "fleet post failed for $key (write still succeeded)"
     fi
   else
     msg="$(printf '%s' "$out" | cut -f3)"

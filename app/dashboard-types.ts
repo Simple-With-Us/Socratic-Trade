@@ -1,5 +1,6 @@
 import type { AuditFeedItem as DashboardAuditFeedItem, SymbolMeta as DashboardSymbolMeta, UnifiedActivityGroup } from "@/lib/dashboard-feed";
 import type { AccountReadiness } from "@/lib/dashboard";
+import type { AutonomyHaltCause } from "@/lib/autonomy-halt-cause";
 import type { PositionStopPlan } from "@/lib/db";
 import type { MacroData } from "@/lib/macro";
 import type { MacroDerivedMetrics } from "@/lib/macro-metrics";
@@ -53,6 +54,10 @@ export interface StrategyDecision {
 }
 
 export interface DashboardSnapshot {
+  /** True when a broker or dependency wait was cut so the snapshot could return inside 20s. */
+  partialData?: boolean;
+  /** Why `partialData` is set.  Absent on a complete snapshot. */
+  partialReason?: string;
   currentUser?: {
     userId: string;
     email?: string;
@@ -74,7 +79,12 @@ export interface DashboardSnapshot {
    *  skips the market-open/paused split rather than mislabeling an extended-hours account. */
   connectedAccountPolicies?: Record<
     string,
-    Pick<TradingPolicy, "systemState" | "strategyAuthority"> & Partial<Pick<TradingPolicy, "runDuringExtendedHours">>
+    Pick<TradingPolicy, "systemState" | "strategyAuthority"> &
+      Partial<Pick<TradingPolicy, "runDuringExtendedHours">> & {
+        /** Why this account is halted and whether it starts again by itself (lane h5 review round).
+         *  Present only for halted accounts with a known cause lookup. */
+        haltCause?: AutonomyHaltCause | null;
+      }
   >;
   /** Real pending-proposal count per connected account (not just the active one) — the
    *  scheduler runs every connected account independently of which is loaded, so a
@@ -126,7 +136,7 @@ export interface DashboardSnapshot {
     ark?: { enabled: boolean; fetchedAt?: string; recordCount: number; sources: string[]; due: boolean; ttlMs: number; asOf?: string };
   };
   smartMoney?: {
-    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
+    congress: Array<{ symbol: string; member: string; chamber: string; side: "buy" | "sell" | "exchange"; amountLow?: number; amountHigh?: number; tradedAt: string; disclosedAt?: string }>;
     insider: Array<{ symbol: string; owner: string; buyTx: number; sellTx: number; filedAt: string }>;
     thirteenF?: Array<{ ticker: string; filerName: string; periodEnd: string; shares: number; valueUsd: number }>;
     ark?: Array<{ ticker: string; fund: string; asOf: string; weightPct: number; shares: number }>;
@@ -182,6 +192,9 @@ export interface DashboardSnapshot {
   robinhoodMcpConnected: boolean;
   /** Per-user setting: when true, accounts left in "active" state auto-resume on server boot. */
   autoResumeOnBoot: boolean;
+  /** Why the viewed account is halted and whether it starts again by itself (lane h5).  null when
+   *  it is not halted; optional so older payloads and test fixtures stay valid. */
+  haltCause?: AutonomyHaltCause | null;
   socratic?: {
     decisions: SocraticDecisionCase[];
     frameworkProposals: SocraticFrameworkProposal[];

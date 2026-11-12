@@ -53,11 +53,29 @@ export default defineConfig({
       TMPDIR: runTmpRoot,
       TMP: runTmpRoot,
       TEMP: runTmpRoot,
+      // The residential-proxy default (http://10.99.0.2:8888) is only reachable
+      // over the Coolify host's WireGuard interface. In CI/local runs the default
+      // would send every dataSourceFetch call through a real undici ProxyAgent to
+      // an unroutable RFC1918 address - each attempt eats a full kernel TCP
+      // connect timeout (undici bypasses the global fetch mock), and across the
+      // suite that stalled verify-hosted past its 90-minute timeout (run
+      // 36511659673, npm test cancelled at 87m). Same failure class as the
+      // FILINGAPI blanking below: tests must not open real sockets. "off" is the
+      // module's own kill-switch sentinel; tests that exercise proxy resolution
+      // pass explicit env fixtures and are unaffected.
+      RESIDENTIAL_PROXY_URL: "off",
       // Optional FilingAPI key must not leak from the Cloud/CI shell into the
       // cascade (a dead 401 key would open real sockets and time out strategy tests).
       FILINGAPI: "",
       FILINGAPI_KEY: "",
-      FILING_API_KEY: ""
+      FILING_API_KEY: "",
+      // Non-production test credentials for route tests (never embed bearer/HMAC secrets in test source).
+      SECURITIES_IMPORT_TEST_TOKEN: "vitest-securities-import-token",
+      CONGRESS_WEBHOOK_TEST_SECRET: "vitest-congress-webhook-secret",
+      CONGRESS_TRADE_TEST_TOKEN: "vitest-congress-trade-token",
+      // Production defaults vector writes to Qdrant and fails closed when QDRANT_URL is unset.
+      // The suite mocks Pinecone paths and must opt into Pinecone explicitly (see vector-db.test.ts).
+      RAG_VECTOR_WRITE_BACKEND: "pinecone"
     },
     exclude: [
       "node_modules/**",

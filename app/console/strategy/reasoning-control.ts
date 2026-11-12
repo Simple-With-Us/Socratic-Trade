@@ -19,7 +19,7 @@ import {
   ROTATION_UI_REASONING_CAPABILITY,
   type LlmReasoningCapability,
   type LlmReasoningOption
-} from "@/lib/llm-request";
+} from "@/lib/llm-reasoning";
 
 function uniq<T>(items: T[]): T[] {
   return Array.from(new Set(items));

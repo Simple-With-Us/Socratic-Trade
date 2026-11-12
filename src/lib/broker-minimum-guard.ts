@@ -115,6 +115,31 @@ export function describeBrokerMinimumOrderBlock(
   return undefined;
 }
 
+/**
+ * The broker's own refusal wording for an order below its minimum size, matched tolerantly:
+ * "Fractional orders must be at least $1", "Dollar-based orders must be at least $1", and any
+ * sibling with the same shape.  The text arrives inside a placement error whose envelope varies
+ * ("... response had no order id: {"text":"API error 400: {...}"}", or an MCP isError string), so
+ * only the sentence itself is matched.
+ */
+const BROKER_MINIMUM_PLACEMENT_PATTERN = /\b((?:[a-z-]+\s+)?orders?\s+must\s+be\s+at\s+least\s+\$\s*\d+(?:\.\d+)?)/i;
+
+/**
+ * Placement-time BACKSTOP for the pre-flight guard above.  The pre-flight reads Robinhood's own
+ * `review_equity_order` verdict, but a price move between review and placement (or a review that
+ * carries no alert) can still let a sub-minimum order reach `place_equity_order`.  Robinhood's
+ * refusal then surfaces as a "response had no order id" error that is not an HTTP status, so the
+ * generic classifiers call it uncertain: the row sits in `placing` behind a protected
+ * "verify with broker" alert and is later swept to `placing_failed` (how the 22 production rows
+ * arose).  A refusal that NAMES the minimum is deterministic, so callers book it as a blocked
+ * below-minimum row, exactly like the pre-flight skip.  Returns undefined for any other error.
+ */
+export function detectBrokerMinimumPlacementError(message: string): string | undefined {
+  const match = BROKER_MINIMUM_PLACEMENT_PATTERN.exec(message);
+  if (!match) return undefined;
+  return `The broker rejected this order at placement for being below its minimum order size (${match[1].replace(/\s+/g, " ")}).  Nothing was placed.`;
+}
+
 const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -223,11 +248,14 @@ const MIN_TRUSTED_REVIEW_NOTIONAL = 0.05;
  *    the account's authority (autoRevertOnCapBreach), which the app must never self-inflict;
  *  - quantity scaling whose price oracle (the reviewed notional) is too small to trust;
  *  - SELL/COVER orders whose held position is unknown (no safe way to bound the bump).
- * A sell/cover bump is capped at the FULL held position: brokers permit liquidating an entire
- * fractional position regardless of its dollar value (see isFullPositionExit), so "needs more
- * than held" degrades to a whole-position exit rather than an unfillable order. Dollar-based
- * exits are CONVERTED to a quantity order priced off the position's market value (the production
- * AAPL trim case is a dollar-based sell — declining those would leave the motivating loop alive).
+ * A sell/cover bump is capped at the FULL held position, so "needs more than held" degrades to a
+ * whole-position exit rather than an unfillable order.  That exit is NOT exempt from the floor
+ * (describeBrokerMinimumOrderBlock has no full-exit exemption — see isFullPositionExit, corrected
+ * 2026-09-25), so the degrade happens only when the whole position itself clears the minimum; a
+ * position worth less than the floor declines here (audit 2026-09-29) instead of returning a plan
+ * the post-bump re-review is guaranteed to block.  Dollar-based exits are CONVERTED to a quantity
+ * order priced off the position's market value (the production AAPL trim case is a dollar-based
+ * sell — declining those would leave the motivating loop alive).
  * positionQuantity may be negative for short positions (cover): magnitudes are used throughout.
  */
 export function planBrokerMinimumBump(
@@ -286,6 +314,10 @@ export function planBrokerMinimumBump(
       const impliedPrice = from / order.quantity;
       const needed = (order.quantity * minNotional * BUMP_QTY_CUSHION) / from;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Degrade to a whole-position exit ONLY when the whole position itself clears the floor.
+        // There is no full-exit exemption (see describeBrokerMinimumOrderBlock), so a whole position
+        // under the floor is a guaranteed post-bump block: decline now and take the skip path.
+        if (heldQty * impliedPrice < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldQty * impliedPrice) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };
@@ -300,6 +332,8 @@ export function planBrokerMinimumBump(
       if (!(impliedPrice > 0) || heldValue < MIN_TRUSTED_REVIEW_NOTIONAL) return undefined;
       const needed = (minNotional * BUMP_QTY_CUSHION) / impliedPrice;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Same rule as the quantity branch: a whole position under the floor cannot be bumped over it.
+        if (heldValue < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldValue) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };

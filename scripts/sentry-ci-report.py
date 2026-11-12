@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 sentry-ci-report.py — reports CI workflow outcomes to the shared fleet-infra
-Sentry project (org jays-services), via raw envelope HTTP (no sentry-sdk
+Sentry project (org simple-with-us), via raw envelope HTTP (no sentry-sdk
 dependency, no GitHub Actions marketplace action).
 
 Invoked by .github/workflows/sentry-ci-report.yml, which listens for
@@ -64,7 +64,7 @@ The `app` tag + fingerprint component are required: fleet-infra is shared
 across repos, and this repo shares workflow names ("CI", "Security",
 "Effort Issues Sync") with Socratic-Trade / Congress.Trade, so without `app`
 a "CI" failure here would dedup into the same Sentry issue as one there.
-Per AGENT-SYNC.md "Observability", every event is tagged with `app:<repo>`.
+Per FLEET-PROTOCOL.md "Observability", every event is tagged with `app:<repo>`.
 
 Secrets: SENTRY_FLEET_DSN is read only from the environment (set by the
 workflow from the repo secret) and is NEVER printed or logged in any form,
@@ -88,6 +88,9 @@ from pathlib import Path
 # one Sentry issue.
 APP = "socratic-trade"
 
+# Keys MUST match this repo's workflow `name:` values that define `schedule:`.
+# refresh-rag-snapshot is Fleet-OPS / AI-Fleet-Coordinator (FLEET-INFRA-DN),
+# not a Socratic-Trade workflow -- do not add it here.
 CRON_SCHEDULES = {
     "CI": "47 7 * * *",
     "Cleanup Actions Caches": "5 3 * * *",
@@ -108,9 +111,13 @@ DEFAULT_CHECKIN_MARGIN = 15
 # #3387 (FLEET-INFRA-C3), #3389 (FLEET-INFRA-BY), and #3390 (FLEET-INFRA-C0).
 # CI's nightly canary (`47 7 * * *`) typically starts ~5-6.5h late (worst
 # retained 2026-09-14 14:24Z, ~6h 37m).  Main-push concurrency on the same
-# `ci-CI-refs/heads/main` group can also queue or drop that tick.  Do not
-# copy this onto 30-min macos ship crons (FLEET-INFRA-CC / DA / CX): those
-# drop ticks entirely, so a wider margin still misses.  Pre-#3302 slugs
+# `ci-CI-refs/heads/main` group can also queue or drop that tick.
+# iOS TestFlight ship (`*/30`) is FLEET-INFRA-DA.  Measured 2026-10-13 over
+# the last 200 workflow runs (188 schedule ticks, 430h): GitHub delivered
+# ~22% of the 30-minute slots.  Median gap 32.5 min, p90 368 min, max 5450
+# min.  A 15-minute margin marks 58/187 gaps missed.  600 minutes marks 1/187
+# (the multi-day hole still pages).  A real failed archive still sends
+# status=error and still opens the separate error event.  Pre-#3302 slugs
 # (`ci-effort-issues-sync`, `ci-cleanup-actions-caches`, `ci-rth-deploy-latch`)
 # stay orphaned; HEAD upserts `ci-socratic-trade-*`.
 CHECKIN_MARGIN_OVERRIDES = {
@@ -119,11 +126,16 @@ CHECKIN_MARGIN_OVERRIDES = {
     "Cleanup Actions Caches": 600,
     "Effort Issues Sync": 600,
     "CI": 600,
+    "iOS TestFlight ship": 600,
 }
 _CHECKIN_MARGINS_FOLDED = {name.casefold(): margin for name, margin in CHECKIN_MARGIN_OVERRIDES.items()}
 
 DEFAULT_MAX_RUNTIME = 60
-MAX_RUNTIME_OVERRIDES = {}
+# The ship job's timeout-minutes is 90.  A 60-minute Sentry max_runtime marks
+# a still-running archive as timed out.
+MAX_RUNTIME_OVERRIDES = {
+    "iOS TestFlight ship": 100,
+}
 _MAX_RUNTIMES_FOLDED = {name.casefold(): runtime for name, runtime in MAX_RUNTIME_OVERRIDES.items()}
 
 FLAP_DEBOUNCE_OVERRIDES = {}

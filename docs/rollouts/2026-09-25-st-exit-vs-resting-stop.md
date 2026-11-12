@@ -128,6 +128,8 @@ the build).
 
 ## Next Steps & Blockers
 
+- **Review round (2026-09-30):** the three post-merge review findings are closed in
+  `docs/rollouts/2026-09-30-st-exit-stop-release-review-round.md` (lane H1).
 - Review, then remove `do-not-automerge` and merge (a review stage owns that).
 - After deploy, watch `exit_stop_release_*` audits on Alpaca Paper and the blocked-proposal count
   (`GET /api/ops/performance`); the 62-exit class should move from `blocked` to placed.

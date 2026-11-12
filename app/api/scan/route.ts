@@ -2,25 +2,35 @@ import { NextResponse } from "next/server";
 import { audit, getPolicy, latestAuditByKind, newerAuditEntry } from "@/lib/db";
 import { dynamicIndexUniversesForPolicy } from "@/lib/index-universes";
 import { isScanQuotesUnavailableError, mergeGroupedBarData, mergeQuoteData, scanMarket } from "@/lib/market";
+import { newestPersistedMarketScan } from "@/lib/market-scan-freshness";
 import { allowedSymbolsForPolicy } from "@/lib/policy";
 import { getBrokerGateway } from "@/lib/broker";
 import { fetchRecentGroupedBarsRest } from "@/lib/market-signals/massive";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import type { EquityPosition } from "@/lib/types";
+import type { EquityPosition, MarketScan } from "@/lib/types";
 import {
   interactiveScanKey,
+  isUnusableEmptyMarketScan,
   marketScanQuotesFromAudit,
   runScanSingleFlight,
+  staleMarketScanResponse,
   withScanDeadline
 } from "@/lib/scan-singleflight";
 
 export const dynamic = "force-dynamic";
-// 15s Nasdaq timeout + one abort retry + last-good seed (or Yahoo whole-set
-// only when there is no seed) + rank.  The screener fetch does not take this
-// signal (see nasdaq-screener-fetch.ts); this budget caps ranking / Yahoo
-// after Nasdaq returns or exhausts.
+// 15s Nasdaq header budget + one abort retry + rank.  The screener fetch and
+// its JSON body honor this deadline signal.  On timeout the handler returns
+// the last good scan (stale) instead of 500/503 when one exists.
 const INTERACTIVE_SCAN_BUDGET_MS = 35_000;
+
+function lastGoodScanResponse(userId: string, connectedAccountId: string | undefined, staleReason: string) {
+  const persisted = newestPersistedMarketScan(userId, connectedAccountId);
+  if (!persisted || isUnusableEmptyMarketScan(persisted.scan)) return undefined;
+  return NextResponse.json(
+    staleMarketScanResponse(persisted.scan as MarketScan & { warnings?: string[] }, staleReason)
+  );
+}
 
 // Fresh, standalone market scan for the Market Scan tab. It returns current screener,
 // broker, and persisted web-signal data instead of waiting for the next strategy run.
@@ -28,14 +38,17 @@ const INTERACTIVE_SCAN_BUDGET_MS = 35_000;
 // stays on the scheduled strategy and on-demand ticker paths. Cheap on repeat calls:
 // scanMarket caches the screener (~5 min). Read-only; places nothing.
 export async function GET(request: Request) {
-  let userId = "local";
+  const userIdOrDenied = resolveRequestUserIdOrResponse(request);
+  if (userIdOrDenied instanceof Response) return userIdOrDenied;
+  const userId = userIdOrDenied;
+  let connectedAccountId: string | undefined;
   try {
-    userId = resolveRequestUserId(request);
     // Per-user rate limit: read-only, but each scan fans out to several data providers, so a
     // tight refresh loop can hammer upstreams. Returns 429 with Retry-After; fails open on limiter error.
     const limited = enforceRateLimit(userId, "scan", RATE_LIMITS.scan);
     if (limited) return limited;
     const policy = getPolicy(userId);
+    connectedAccountId = policy.connectedAccountId;
     // Seed from whichever kind is newer at each scope — a scheduled market_scan_freshness
     // audit (weekend/off-hours) can be fresher than the last strategy_run, and vice versa.
     const latestAccountAudit = newerAuditEntry(
@@ -90,7 +103,11 @@ export async function GET(request: Request) {
           universeFloor: policy.universeFloor,
           enrichmentMode: "skip",
           seedEnrichment,
-          signal
+          signal,
+          // Account-scoped market-data tape: bind the scan to the operating
+          // account (Alpaca PAPER `delayed_sip` + its cache identity) even
+          // when enrichment is skipped — same as strategy-gather.ts.
+          connectedAccountId: policy.connectedAccountId
         })
       )
     );
@@ -134,11 +151,14 @@ export async function GET(request: Request) {
               warnings: error.warnings
             }
           : { message },
-        userId
+        userId,
+        connectedAccountId
       );
     } catch {
       /* audit is diagnostic only */
     }
+    const stale = lastGoodScanResponse(userId, connectedAccountId, message);
+    if (stale) return stale;
     if (isScanQuotesUnavailableError(error)) {
       return NextResponse.json(
         {

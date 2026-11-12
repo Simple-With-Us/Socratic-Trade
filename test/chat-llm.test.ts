@@ -364,7 +364,7 @@ describe("chatProviderForModel — model name → provider", () => {
     expect(chatProviderForModel("deepseek-v4-flash")).toBe("deepseek");
     expect(chatProviderForModel("deepseek-v4-pro")).toBe("deepseek");
     expect(chatProviderForModel("gpt-5.4-mini")).toBe("openai");
-    expect(chatProviderForModel("o4-mini")).toBe("openai");
+    expect(chatProviderForModel("gpt-5.6-terra")).toBe("openai");
   });
 });
 

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { opsDiagnosticSecrets } from "../src/lib/ops-auth";
 import type { EquityOrder } from "../src/lib/types";
 
@@ -123,7 +123,7 @@ describe("ops diagnostic snapshot", () => {
     });
 
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    const snapshot = buildOpsSnapshot({ runsPerUser: 5, auditPerUser: 5 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 5, auditPerUser: 5 });
     const stateAfter = db.getDb()
       .prepare("SELECT COUNT(*) AS c FROM account_strategy_state WHERE user_id = ? AND connected_account_id = ?")
       .get(userId, rothId) as { c: number };
@@ -151,7 +151,86 @@ describe("ops diagnostic snapshot", () => {
     expect(body.users.some((u: { userId: string }) => u.userId === userId)).toBe(true);
     expect(body.roicArchive).toBeTruthy();
     expect(typeof body.roicArchive.transcriptsWithContent).toBe("number");
+    expect(user!.marketScan).toBeDefined();
+    expect(typeof user!.marketScan.stale).toBe("boolean");
 
+    delete process.env.OPS_DIAGNOSTIC_TOKEN;
+  });
+
+  it("exposes per-section timings and cache metadata from the route", async () => {
+    process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-token";
+    const { resetOpsSnapshotCacheForTests, getOrBuildOpsSnapshot } = await import("../src/lib/ops-snapshot");
+    resetOpsSnapshotCacheForTests();
+    const first = await getOrBuildOpsSnapshot({ runsPerUser: 3, auditPerUser: 3 });
+    expect(first.timingsMs?.total).toBeGreaterThanOrEqual(0);
+    expect(first.buildMeta?.cacheHit).toBe(false);
+    const second = await getOrBuildOpsSnapshot({ runsPerUser: 3, auditPerUser: 3 });
+    expect(second.buildMeta?.cacheHit).toBe(true);
+
+    const { GET } = await import("../app/api/ops/snapshot/route");
+    const response = await GET(
+      new Request("http://localhost/api/ops/snapshot?runs=3&audit=3", {
+        headers: { "x-ops-token": "test-ops-token" }
+      })
+    );
+    const body = await response.json();
+    expect(body.timingsMs.total).toBeGreaterThanOrEqual(0);
+    expect(body.buildMeta.cacheHit).toBe(true);
+    delete process.env.OPS_DIAGNOSTIC_TOKEN;
+  });
+
+  it("does not leak ?orders=1 summaries into the next cached snapshot", async () => {
+    process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-token-cache-orders";
+    const db = await import("../src/lib/db");
+    const userId = `ops-cache-orders-${randomUUID()}`;
+    const accountId = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({
+      id: accountId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: `CACHE-${randomUUID()}`,
+      label: "Cache Orders",
+      isActive: true
+    });
+    brokerMocks.getEquityOrders.mockResolvedValue([
+      {
+        id: "1",
+        symbol: "AAPL",
+        side: "buy",
+        type: "limit",
+        state: "new",
+        quantity: 1,
+        filledQuantity: 0,
+        createdAt: "2026-10-14T12:00:00.000Z"
+      }
+    ]);
+
+    const { resetOpsSnapshotCacheForTests } = await import("../src/lib/ops-snapshot");
+    resetOpsSnapshotCacheForTests();
+    const { GET } = await import("../app/api/ops/snapshot/route");
+    const withOrders = await GET(
+      new Request("http://localhost/api/ops/snapshot?runs=3&audit=3&orders=1", {
+        headers: { "x-ops-token": "test-ops-token-cache-orders" }
+      })
+    );
+    const withBody = await withOrders.json();
+    const attached = withBody.users
+      .find((u: { userId: string }) => u.userId === userId)
+      .accounts.find((a: { connectedAccountId: string }) => a.connectedAccountId === accountId);
+    expect(attached.orders.listedCount).toBe(1);
+
+    const plain = await GET(
+      new Request("http://localhost/api/ops/snapshot?runs=3&audit=3", {
+        headers: { "x-ops-token": "test-ops-token-cache-orders" }
+      })
+    );
+    const plainBody = await plain.json();
+    expect(plainBody.buildMeta.cacheHit).toBe(true);
+    const cached = plainBody.users
+      .find((u: { userId: string }) => u.userId === userId)
+      .accounts.find((a: { connectedAccountId: string }) => a.connectedAccountId === accountId);
+    expect(cached.orders).toBeUndefined();
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
   });
 
@@ -184,7 +263,7 @@ describe("ops diagnostic snapshot", () => {
     );
 
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    const snapshot = buildOpsSnapshot({ runsPerUser: 5, auditPerUser: 5 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 5, auditPerUser: 5 });
     const user = snapshot.users.find((row) => row.userId === userId);
     expect(user).toBeDefined();
     const rejection = user!.recentAudit.find((a) => a.kind === "order_rejected_by_broker");
@@ -193,7 +272,7 @@ describe("ops diagnostic snapshot", () => {
     expect(rejection!.detail).toContain("symbol=AAPL");
   });
 
-  it("treats FilingAPI 401s as ok (soft skip) and expected-limit lanes as ok", async () => {
+  it("excludes retired FilingAPI from deps (leftover 401s are muted OFF) and treats expected-limit lanes as ok", async () => {
     const { logApiHealth } = await import("../src/lib/db-health");
     for (let i = 0; i < 5; i++) {
       logApiHealth({ service: "filingapi", ok: false, errorText: "HTTP 401 Unauthorized", keySource: "env" });
@@ -204,9 +283,9 @@ describe("ops diagnostic snapshot", () => {
     logApiHealth({ service: "roic", ok: true, latencyMs: 12, keySource: "env" });
 
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     const deps = snapshot.dependencies ?? {};
-    expect(deps.filingapi?.ok).toBe(true);
+    expect(deps.filingapi).toBeUndefined();
     expect(deps["vix-yahoo"]?.ok).toBe(true);
     expect(deps.roic?.ok).toBe(true);
   });
@@ -246,7 +325,7 @@ describe("ops diagnostic snapshot", () => {
       soft: true
     });
     const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
-    const snapshot = buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
+    const snapshot = await buildOpsSnapshot({ runsPerUser: 1, auditPerUser: 1 });
     expect(snapshot.pineconeIngest).toBeDefined();
     expect(snapshot.pineconeIngest!.trial.active).toBe(true);
     expect(snapshot.pineconeIngest!.trial.effectiveDailyWriteUnits).toBeGreaterThanOrEqual(2_048);
@@ -258,6 +337,11 @@ describe("ops diagnostic snapshot", () => {
 });
 
 describe("GET /api/ops/snapshot — ordersDetail=1", () => {
+  beforeEach(async () => {
+    const { resetOpsSnapshotCacheForTests } = await import("../src/lib/ops-snapshot");
+    resetOpsSnapshotCacheForTests();
+  });
+
   it("attaches per-working-order role classification, without a bare open-order account number or client order id leaking into it", async () => {
     process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-token-order-detail";
     const db = await import("../src/lib/db");
@@ -373,5 +457,75 @@ describe("GET /api/ops/snapshot — ordersDetail=1", () => {
     expect(account).not.toHaveProperty("ordersDetail");
 
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
+  });
+
+  it("surfaces run-failure watchdog state and recent failure streak when autonomy is halted", async () => {
+    const originalToken = process.env.OPS_DIAGNOSTIC_TOKEN;
+    process.env.OPS_DIAGNOSTIC_TOKEN = "test-ops-run-fail-fields";
+    try {
+      const db = await import("../src/lib/db");
+      const { runFailureWatchStateKey } = await import("../src/lib/trading-liveness");
+      const userId = `ops-run-fail-${randomUUID()}`;
+      const accountId = `acct-${randomUUID()}`;
+      db.upsertConnectedAccount({
+        id: accountId,
+        userId,
+        broker: "alpaca",
+        environment: "paper",
+        accountNumber: "PAPER-WD",
+        label: "Autopilot Paper",
+        isActive: true
+      });
+      db.setPolicy({ ...db.getPolicy(userId, accountId), systemState: "halted", strategyAuthority: "decide" }, userId, accountId);
+      for (let i = 0; i < 4; i++) {
+        const runId = randomUUID();
+        db.insertStrategyRun(runId, userId, accountId, "PAPER-WD");
+        db.finishStrategyRun(runId, "failed", `broker timeout ${i}`, userId);
+      }
+      const now = new Date().toISOString();
+      db.setInternalSetting(runFailureWatchStateKey(userId, accountId), {
+        consecutiveFailures: 4,
+        firstSeenAt: now,
+        lastFailureAt: now,
+        lastAlertedStreak: 4,
+        backoffUntil: null,
+        halted: false
+      });
+
+      const { buildOpsSnapshot } = await import("../src/lib/ops-snapshot");
+      const snapshot = await buildOpsSnapshot({ runsPerUser: 10, auditPerUser: 5 });
+      const account = snapshot.users.find((u) => u.userId === userId)?.accounts[0];
+      expect(account?.systemState).toBe("halted");
+      expect(account?.consecutiveFailedRuns).toBeNull();
+      expect(account?.recentConsecutiveFailedRuns).toBe(4);
+      expect(account?.runFailureWatch).toMatchObject({
+        consecutiveFailures: 4,
+        lastAlertedStreak: 4,
+        watchdogHalted: false
+      });
+
+      // After an owner re-arm, the halted-account fallback counts only post-re-arm failures,
+      // matching liveness and /api/health.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      db.setInternalSetting(runFailureWatchStateKey(userId, accountId), {
+        consecutiveFailures: 0,
+        firstSeenAt: null,
+        lastFailureAt: null,
+        lastAlertedStreak: 0,
+        backoffUntil: null,
+        halted: false,
+        rearmedAt: new Date().toISOString()
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const postRearmRun = randomUUID();
+      db.insertStrategyRun(postRearmRun, userId, accountId, "PAPER-WD");
+      db.finishStrategyRun(postRearmRun, "failed", "broker timeout after re-arm", userId);
+      const afterRearm = await buildOpsSnapshot({ runsPerUser: 10, auditPerUser: 5 });
+      const rearmed = afterRearm.users.find((u) => u.userId === userId)?.accounts[0];
+      expect(rearmed?.recentConsecutiveFailedRuns).toBe(1);
+    } finally {
+      if (originalToken === undefined) delete process.env.OPS_DIAGNOSTIC_TOKEN;
+      else process.env.OPS_DIAGNOSTIC_TOKEN = originalToken;
+    }
   });
 });

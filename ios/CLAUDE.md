@@ -7,7 +7,7 @@
 **XcodeGen:** `ios/project.yml` — edit this, then `xcodegen generate` (runs `ios/xcodegen-post.py` via `postGenCommand` to rewrite objectVersion 77 → 100). Do not hand-edit `project.pbxproj`.
 **Ship:** GitHub-hosted `macos-latest` via `.github/workflows/ios-ship.yml` (`gh workflow run ios-ship.yml`). Wrapper: `scripts/ios-ship-testflight.sh` -> in-repo `scripts/ios-fleet/`. Do not run `xcodebuild` locally. Do not restart the retired Mac runner.
 
-Binding fleet rule: `/Users/jay/apps/AGENT-SYNC.md` § iOS agent build loop. Do not stand up or narrate Xcode MCP. Do not run local `xcodebuild` / `xcrun simctl`.
+Binding fleet rule: `/Users/jay/apps/FLEET-PROTOCOL.md` § iOS agent build loop. Do not stand up or narrate Xcode MCP. Do not run local `xcodebuild` / `xcrun simctl`.
 
 ## Build & test
 
@@ -56,4 +56,4 @@ New views go next to the sibling they belong with. New files created outside Xco
 - Light is the product default. Do not ship dark-first chrome.
 - Two spaces between sentences in user-visible copy.
 - Never hand-edit `.pbxproj`, `.entitlements`, `.xib`, `.storyboard`.
-- Secrets stay in `~/.secrets/` / Infisical. Never print them.
+- Secrets stay in Infisical (`fleet-secrets get`); nothing reads `~/.secrets`. Never print them.
