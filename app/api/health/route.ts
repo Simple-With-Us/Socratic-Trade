@@ -462,13 +462,9 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
       async () => {
         const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
         if (!credits) return null;
-        const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
-        const existing = deps.openrouter;
+        // Cache only the credit read.  The live connection-health summary for openrouter is
+        // merged below on every request so a cache hit never replays a stale dependency state.
         return {
-          dependency: {
-            ok: (existing ? existing.ok : true) && credits.ok,
-            degraded: (existing?.degraded) || (credits.ok ? undefined : true)
-          },
           openrouterCredits: {
             ok: credits.ok,
             remainingUsd: credits.remainingUsd,
@@ -493,7 +489,12 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
     const creditsPayload = openrouterSection.value;
     if (creditsPayload) {
       const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
-      deps.openrouter = creditsPayload.dependency;
+      const existing = deps.openrouter;
+      const creditsOk = creditsPayload.openrouterCredits.ok;
+      deps.openrouter = {
+        ok: (existing ? existing.ok : true) && creditsOk,
+        degraded: (existing?.degraded) || (creditsOk ? undefined : true)
+      };
       checks.dependencies = deps;
       checks.openrouterCredits = {
         ...creditsPayload.openrouterCredits,
