@@ -91,6 +91,41 @@ grep -qF -- "-${DEFAULT_BIN}}" "$UNDER_TEST" || {
   echo "error: default trim path not found in ${UNDER_TEST}" >&2
   exit 1
 }
+
+# The installer must put the trim binary exactly where the wrapper defaults
+# to, or every scheduled run exits 127.  Read both literals from the repo
+# files (no host access) and fail on any drift.
+INSTALLER="${SCRIPT_DIR}/install-litestream-l1-trim.sh"
+[ -f "$INSTALLER" ] || { echo "error: ${INSTALLER} not found." >&2; exit 1; }
+# paths_agree <installer> <wrapper>: 0 only when DST_PY, the wrapper's
+# LITESTREAM_L1_TRIM_BIN default, and DEFAULT_BIN are one identical path.
+paths_agree() {
+  local dst def
+  dst="$(sed -n 's/^DST_PY="\(.*\)"$/\1/p' "$1")"
+  # shellcheck disable=SC2016  # literal ${...} is the pattern, not an expansion
+  def="$(sed -n 's/^TRIM="\${LITESTREAM_L1_TRIM_BIN-\(.*\)}"$/\1/p' "$2")"
+  PATHS_SEEN="installer DST_PY='${dst}' wrapper default='${def}' DEFAULT_BIN='${DEFAULT_BIN}'"
+  [ -n "$dst" ] && [ -n "$def" ] \
+    && [ "$(printf '%s\n' "$dst" | wc -l)" -eq 1 ] \
+    && [ "$(printf '%s\n' "$def" | wc -l)" -eq 1 ] \
+    && [ "$dst" = "$def" ] && [ "$def" = "$DEFAULT_BIN" ]
+}
+if paths_agree "$INSTALLER" "$UNDER_TEST"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS installer_dst_matches_wrapper_default"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL installer_dst_matches_wrapper_default: ${PATHS_SEEN}" >&2
+fi
+# Control: a copy of the installer with DST_PY moved must be caught.
+sed 's#^DST_PY=".*"$#DST_PY="/opt/drifted/litestream-l1-boundary-trim"#' "$INSTALLER" > "${WORK}/installer-drifted.sh"
+if ! paths_agree "${WORK}/installer-drifted.sh" "$UNDER_TEST"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS installer_drift_detected"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL installer_drift_detected: ${PATHS_SEEN}" >&2
+fi
 HERMETIC="${WORK}/fleet-hermetic.sh"
 sed "s#-${DEFAULT_BIN}}#-${WORK}/no-default-trim}#" "$UNDER_TEST" > "$HERMETIC"
 REAL_UNDER_TEST="$UNDER_TEST"
