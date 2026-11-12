@@ -16,7 +16,14 @@ type SectionSlot<T> = {
   inflight: Promise<{ at: number; value: T }> | null;
 };
 
-const sectionSlots = new Map<HeavyHealthSectionKey, SectionSlot<unknown>>();
+const globalForHeavyHealth = globalThis as typeof globalThis & {
+  __socraticHealthHeavySectionSlots?: Map<HeavyHealthSectionKey, SectionSlot<unknown>>;
+};
+
+const sectionSlots =
+  globalForHeavyHealth.__socraticHealthHeavySectionSlots ??
+  (globalForHeavyHealth.__socraticHealthHeavySectionSlots =
+    new Map<HeavyHealthSectionKey, SectionSlot<unknown>>());
 
 function slotFor<T>(key: HeavyHealthSectionKey): SectionSlot<T> {
   const existing = sectionSlots.get(key);
