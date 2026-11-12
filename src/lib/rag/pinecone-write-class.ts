@@ -53,13 +53,6 @@ export function writesFullBodyToPinecone(
   return pineconeWriteClass(env) === "full-body";
 }
 
-export function writesProcessedToPinecone(
-  env: Record<string, string | undefined> = process.env
-): boolean {
-  const writeClass = pineconeWriteClass(env);
-  return writeClass === "highlight+signal" || writeClass === "highlight-only" || writeClass === "full-body";
-}
-
 export function normalizeFormHint(formHint: string | undefined): string {
   const raw = String(formHint ?? "").trim().toLowerCase();
   if (raw === "10k" || raw === "10-k" || raw === "10k-delta") return "10-k";
@@ -115,11 +108,6 @@ export function isDoNotTouchDocType(docType: string | undefined): boolean {
 
 export function isProcessedDocType(docType: string | undefined): boolean {
   return PROCESSED_DOC_TYPES.has(String(docType ?? "").trim().toLowerCase());
-}
-
-export function isTranscriptRoleCode(code: string): boolean {
-  const folded = code.trim().toLowerCase();
-  return folded === "management" || folded === "analyst" || folded === "operator" || folded === "qa" || folded === "transcript";
 }
 
 function codesMatch(parsed: string, wanted: readonly string[], prefix: boolean): boolean {
@@ -196,17 +184,6 @@ function capSignalChunks<T extends SignalChunkLike>(
     chars += text.length;
   }
   return out;
-}
-
-export function filingTextFromParsedSections(
-  sections: ReadonlyArray<{ text?: string }> | undefined,
-  fallback: string
-): string {
-  const joined = (sections ?? [])
-    .map((section) => String(section.text ?? "").trim())
-    .filter(Boolean)
-    .join("\n\n");
-  return joined.length >= 100 ? joined : fallback;
 }
 
 export function groupChunksByItemCode<T extends SignalChunkLike>(
