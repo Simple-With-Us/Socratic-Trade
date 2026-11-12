@@ -1,3 +1,9 @@
+## 2026-11-12 [gb-trader] ST-4630 — stale last-good screener profile
+
+**What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows and waits 30 seconds before the next live attempt.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
+
 ## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
 
 **What.** The app can reject traffic that did not come from Cloudflare.  The check stays off until `REQUIRE_CLOUDFLARE_ORIGIN` is set, so merging does not change production.  A Node hook reads the TCP peer and middleware repeats it.  `CF-Connecting-IP` and `X-Forwarded-For` stay as they are while the flag is off, and are removed while it is on unless the peer is Cloudflare or the origin secret matched.  `GET` and `HEAD /api/live`, loopback, and Tailscale `100.64.0.0/10` stay open and do not make those headers trusted.  Rollout: `docs/rollouts/2026-11-12-st-4595-cloudflare-origin-lock.md`.  Runbook: `docs/runbooks/cloudflare-origin-lock.md`.

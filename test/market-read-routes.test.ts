@@ -41,6 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   clearScreenerProfileCacheForTests();
   for (const [key, value] of Object.entries(savedEnv)) {
@@ -549,6 +550,146 @@ describe("GET /api/market/profile/{symbol}", () => {
       sector: "Healthcare"
     });
     expect(fetchCalls).toBeGreaterThan(callsAfterFailure);
+  });
+
+  // Past SCREENER_PROFILE_TTL_MS (5 min) so the next lookup must refresh, and
+  // past SCREENER_PROFILE_STALE_RETRY_MS (30s) so the refresh is allowed again.
+  const PROFILE_TTL_PAST_MS = 5 * 60_000 + 1_000;
+  const STALE_RETRY_PAST_MS = 60_000;
+
+  function screenerProfileResponse(symbol: string, name: string): Response {
+    return Response.json({
+      data: {
+        table: {
+          rows: [
+            {
+              symbol,
+              name,
+              sector: "Technology",
+              industry: "Software",
+              marketCap: "1000000000"
+            }
+          ]
+        }
+      }
+    });
+  }
+
+  async function withProfileClock(run: (advance: (ms: number) => void) => Promise<void>): Promise<void> {
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start);
+    let now = start;
+    try {
+      await run((ms) => {
+        now += ms;
+        vi.setSystemTime(now);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  async function seedThenBlip(
+    symbol: string,
+    fail: () => Response | Promise<Response>
+  ): Promise<void> {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let phase: "ok" | "fail" | "recovered" = "ok";
+    let fetchCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (phase === "fail") return fail();
+        const name = phase === "recovered" ? "Recovered Co" : "Stale Co";
+        return screenerProfileResponse(symbol, name);
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co",
+          sector: "Technology",
+          industry: "Software",
+          marketCap: 1_000_000_000,
+          assetClass: "equity"
+        });
+
+        advance(PROFILE_TTL_PAST_MS);
+        phase = "fail";
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co"
+        });
+        expect(await fetchCompanyProfile("ZZZZNOPE")).toBeNull();
+
+        const callsAfterFail = fetchCalls;
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co"
+        });
+        expect(fetchCalls).toBe(callsAfterFail);
+
+        advance(STALE_RETRY_PAST_MS);
+        phase = "recovered";
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Recovered Co"
+        });
+        expect(fetchCalls).toBeGreaterThan(callsAfterFail);
+      });
+    } finally {
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  }
+
+  it("serves the last successful screener map when a later fetch throws", async () => {
+    await seedThenBlip("STALETHROW", async () => {
+      throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+    });
+  });
+
+  it("serves the last successful screener map when a later screener response is non-OK", async () => {
+    await seedThenBlip("STALE503", async () => new Response("upstream unavailable", { status: 503 }));
+  });
+
+  it("returns 200 { ref } for a known ticker when the screener times out after a good map", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let fail = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (fail) throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+        return screenerProfileResponse("STALEROUTE", "Route Co");
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile("STALEROUTE")).toMatchObject({ ticker: "STALEROUTE" });
+        advance(PROFILE_TTL_PAST_MS);
+        fail = true;
+        const res = await profileRoute(authedRequest(profileUrl("STALEROUTE"), TEST_TOKEN), {
+          params: Promise.resolve({ symbol: "STALEROUTE" })
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { ref: { ticker?: string; companyName?: string } };
+        expect(body.ref).toMatchObject({
+          ticker: "STALEROUTE",
+          companyName: "Route Co",
+          assetClass: "equity"
+        });
+      });
+    } finally {
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
   });
 
   it("returns null from the helper for an empty symbol", async () => {

@@ -185,7 +185,11 @@ export type ProfileLookup = (symbol: string) => Promise<ProfileRef | null>;
 
 /** In-process screener map (ticker → ref), TTL-aligned with other peer caches. */
 let screenerProfileCache: { expiresAt: number; byTicker: Map<string, ProfileRef> } | null = null;
+/** Earliest time to hit Nasdaq again after a failed refresh that still has rows. */
+let screenerProfileRetryAt = 0;
 const SCREENER_PROFILE_TTL_MS = 5 * 60_000;
+/** Hold between live retries while a prior map is served. Short so a blip does not stick. */
+const SCREENER_PROFILE_STALE_RETRY_MS = 30_000;
 
 function parseScreenerMarketCap(raw: unknown): number | undefined {
   const marketCapStr = String(raw ?? "").replace(/[$,%\s,]/g, "");
@@ -193,8 +197,25 @@ function parseScreenerMarketCap(raw: unknown): number | undefined {
   return Number.isFinite(marketCap) && marketCap > 0 ? marketCap : undefined;
 }
 
+/**
+ * Timeout, non-OK, and throw keep the last successful map when it has rows.
+ * An empty map is not written into the 5-minute TTL. With no prior rows the
+ * next call retries immediately. With rows, the next live attempt waits
+ * SCREENER_PROFILE_STALE_RETRY_MS.
+ */
+function screenerProfileFailureMap(now: number): Map<string, ProfileRef> {
+  if (screenerProfileCache && screenerProfileCache.byTicker.size > 0) {
+    screenerProfileRetryAt = now + SCREENER_PROFILE_STALE_RETRY_MS;
+    return screenerProfileCache.byTicker;
+  }
+  return new Map();
+}
+
 async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, ProfileRef>> {
   if (screenerProfileCache && screenerProfileCache.expiresAt > now) {
+    return screenerProfileCache.byTicker;
+  }
+  if (screenerProfileCache && screenerProfileCache.byTicker.size > 0 && now < screenerProfileRetryAt) {
     return screenerProfileCache.byTicker;
   }
   try {
@@ -202,7 +223,7 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
     // Only cache successful HTTP responses. Transient failures / non-OK must not
     // poison the 5m TTL with an empty map (valid symbols would 404 until expiry).
     if (!response.ok) {
-      return new Map();
+      return screenerProfileFailureMap(now);
     }
     const payload = (await response.json()) as {
       data?: { table?: { rows?: Array<Record<string, unknown>> } };
@@ -220,19 +241,19 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
       if (ref) byTicker.set(ref.ticker, ref);
     }
     // Successful empty screener (legitimately zero rows) is still cacheable.
+    screenerProfileRetryAt = 0;
     screenerProfileCache = { expiresAt: now + SCREENER_PROFILE_TTL_MS, byTicker };
     return byTicker;
   } catch (err) {
     console.warn("[market-read] screener profile map failed:", err);
-    // Leave any prior (expired) cache alone; return empty without writing TTL
-    // so the next call retries immediately.
-    return new Map();
+    return screenerProfileFailureMap(now);
   }
 }
 
 /** Test seam: drop the screener profile cache. */
 export function clearScreenerProfileCacheForTests(): void {
   screenerProfileCache = null;
+  screenerProfileRetryAt = 0;
 }
 
 /**
