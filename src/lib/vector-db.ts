@@ -9361,10 +9361,11 @@ export async function retrieveContextDetailed(
       reportRetrievalStatus(options, "degraded");
       return finish([]);
     }
-    // Deadline text, AbortError, and TimeoutError. A query abort can surface as
+    // Our deadline marker, AbortError, or TimeoutError. A query abort can surface as
     // AbortError after acquireRetrievalSlot has already been taken, and that used
-    // to fall through to the error capture below. The pressure gate's null slot
-    // already skipped the provider; if a timeout still reaches here during backoff,
+    // to fall through to the error capture below. Provider text that only says
+    // "timeout" stays on the error path. The pressure gate's null slot already
+    // skipped the provider; if one of our signals still reaches here during backoff,
     // do not open another Sentry issue.
     if (isStrategyRagRetrievalTimeout(err) || countsTowardRetrievalBackoff(err)) {
       console.warn("[vector-db] RAG retrieval timed out:", err instanceof Error ? err.message : String(err));

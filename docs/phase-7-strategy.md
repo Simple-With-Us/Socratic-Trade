@@ -4,7 +4,7 @@ This document defines the comprehensive architecture for the AI Trading Strategy
 
 ## 2026-11-12 Retrieval timeouts do not page (ST-4629)
 
-The 15s strategy retrieval deadline stays.  A deadline, abort, or timeout on the retrieve path logs locally and returns no chunks.  It does not call captureMessage, because a warning capture was filed as error issue SOCRATIC-TRADE-3Q.  acquireRetrievalSlot still runs before the embed and the vector read.  A timeout that escapes the slot is classified in the retrieve catch and does not capture error-level "RAG retrieval failed".  A real lookup failure still can.  Ingest-embed classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+The 15s strategy retrieval deadline stays.  A deadline, abort, or timeout on the retrieve path logs locally and returns no chunks.  It does not call captureMessage, because a warning capture was filed as error issue SOCRATIC-TRADE-3Q.  acquireRetrievalSlot still runs before the embed and the vector read.  A timeout that escapes the slot is classified in the retrieve catch and does not capture error-level "RAG retrieval failed".  A real lookup failure still can.  Provider prose that only says timeout still can.  Ingest-embed classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
 
 ## 2026-11-11 Strategy RAG deadline is a timeout (ST-4601)
 

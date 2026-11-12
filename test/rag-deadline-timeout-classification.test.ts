@@ -303,4 +303,28 @@ describe("strategy RAG deadline classification (ST-4601)", () => {
       expect(capturedAt("error", "RAG retrieval failed")).toBe(true);
     });
   });
+
+  it("still pages an upstream provider timeout message as RAG retrieval failed", async () => {
+    process.env.QDRANT_URL = "http://127.0.0.1:6333";
+    process.env.QDRANT_API_KEY = "qdrant-test";
+    process.env.RAG_VECTOR_READ_BACKEND = "qdrant";
+    mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("/points/search")) throw new Error("HTTP 504 Gateway Timeout");
+      if (href.includes("/collections/")) {
+        return new Response(JSON.stringify({
+          result: { status: "green", config: { params: { vectors: { size: 1024, distance: "Cosine" } } } }
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    await seedLocalRagKeys();
+    const { retrieveContextDetailed } = await import("../src/lib/vector-db");
+    const chunks = await retrieveContextDetailed("AAPL catalysts", "AAPL", 2, "local");
+    expect(chunks).toEqual([]);
+    await vi.waitFor(() => {
+      expect(capturedAt("error", "RAG retrieval failed")).toBe(true);
+    });
+  });
 });
