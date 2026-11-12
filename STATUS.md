@@ -4,6 +4,9 @@
 
 **Next.**  Ready PR against `main`.  Do not merge, do not enable auto-merge, and do not install on the host from this lane.  `verify` is the merge gate.  Jay installs the repo copies when he wants the host behavior to change.
 
+## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
+
+**What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
 ## 2026-11-12 [gb-trader] ST-4624 — ops scripts CI workflow
 
 **What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
