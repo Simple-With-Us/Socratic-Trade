@@ -27,10 +27,35 @@ const SKIP_PATH_PREFIXES = [
   "docs/reviews/",
 ];
 
+/** Skip huge or binary blobs so the guard stays fast on full `npm test`. */
+const MAX_SCAN_BYTES = 512_000;
+
+const BINARY_SUFFIXES = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".ico",
+  ".pdf",
+  ".zip",
+  ".gz",
+  ".wasm",
+  ".sqlite",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  ".mp4",
+  ".webm",
+];
+
 const STALE_PATTERNS: RegExp[] = [
   /github\.com\/jaywedgeworth22\//i,
   /repos\/jaywedgeworth22\//i,
   /raw\.githubusercontent\.com\/jaywedgeworth22\//i,
+  /github:jaywedgeworth22\//i,
+  /git@github\.com:jaywedgeworth22\//i,
   /\bjaywedgeworth22\/Socratic[-.]Trade\b/i,
   /\bjaywedgeworth22\/Congress\.Trade\b/i,
   /\bjaywedgeworth22\/Usage-Monitor\b/i,
@@ -48,6 +73,12 @@ function shouldSkipFile(rel: string): boolean {
   return false;
 }
 
+function isScannableTextFile(rel: string, sizeBytes: number): boolean {
+  if (sizeBytes > MAX_SCAN_BYTES) return false;
+  const lower = rel.toLowerCase();
+  return !BINARY_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
 function walkFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (SKIP_DIR_NAMES.has(name)) continue;
@@ -61,6 +92,7 @@ function walkFiles(dir: string, out: string[] = []): string[] {
     const rel = relative(ROOT, abs).replace(/\\/g, "/");
     if (rel.endsWith(".tsbuildinfo")) continue;
     if (shouldSkipFile(rel)) continue;
+    if (!isScannableTextFile(rel, st.size)) continue;
     out.push(rel);
   }
   return out;
