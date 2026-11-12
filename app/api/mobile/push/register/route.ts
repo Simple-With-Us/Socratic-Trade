@@ -2,7 +2,7 @@
 // DELETE /api/mobile/push/register — unregister it (sign-out)
 //
 // Session-authenticated exactly like every other /api/mobile route: identity comes from
-// resolveRequestUserId (middleware-verified), never from the body.
+// (middleware-verified), never from the body.
 //
 // Contract
 //   POST   body { token: string, environment: "sandbox" | "production", bundleId?: string }
@@ -34,7 +34,7 @@ import {
 } from "@/lib/db";
 import { isAcceptedApnsBundleId, loadApnsConfig } from "@/lib/apns";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -47,7 +47,8 @@ export async function POST(request: Request) {
     bundleId?: unknown;
     platform?: unknown;
   };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -123,7 +124,8 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { token?: unknown };
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "mobile/push/register", { limit: 30, windowMs: 60_000 });
   if (limited) return limited;
 
