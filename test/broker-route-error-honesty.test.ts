@@ -92,8 +92,12 @@ describe("src/lib/api-error", () => {
   });
 
   it("parseRequestJson answers a body-read failure with the 400 JSON envelope", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const request = { json: async () => { throw new TypeError("Body is unusable"); } } as unknown as Request;
     const parsed = await parseRequestJson(request);
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(String(consoleError.mock.calls[0]?.[0])).toMatch(/Failed to read request body: .*Body is unusable/);
+    consoleError.mockRestore();
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.response.status).toBe(400);
@@ -129,14 +133,42 @@ describe("broker-backed GET routes", () => {
     expect(await res.json()).toEqual(positions);
   });
 
-  it("GET /api/positions rethrows non-broker adapter defects", async () => {
+  it("GET /api/positions answers a non-broker adapter defect with a logged 500 JSON envelope", async () => {
     await seedRobinhoodAccount(email);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     brokerStub.getEquityPositions.mockRejectedValue(new TypeError("Cannot read properties of null"));
     const { GET } = await import("../app/api/positions/route");
-    await expect(
-      GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }))
-    ).rejects.toThrow(TypeError);
+    const res = await GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: "internal_error", message: "The server could not complete the broker read." });
+    expect(body.message).not.toMatch(/Cannot read/);
     expect(brokerStub.getEquityPositions).toHaveBeenCalledOnce();
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(String(consoleError.mock.calls[0]?.[0])).toMatch(/Cannot read properties of null/);
+    consoleError.mockRestore();
+  });
+
+  it("GET /api/accounts, /api/orders and /api/portfolio answer adapter defects with the 500 JSON envelope", async () => {
+    await seedRobinhoodAccount(email);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    brokerStub.getAccounts.mockRejectedValue(new TypeError("accounts defect"));
+    brokerStub.getEquityOrders.mockRejectedValue(new TypeError("orders defect"));
+    brokerStub.getPortfolio.mockRejectedValue(new TypeError("portfolio defect"));
+    const routes = [
+      ["accounts", (await import("../app/api/accounts/route")).GET],
+      ["orders", (await import("../app/api/orders/route")).GET],
+      ["portfolio", (await import("../app/api/portfolio/route")).GET]
+    ] as const;
+    expect(routes).toHaveLength(3);
+    for (const [name, GET] of routes) {
+      const res = await GET(new Request(`http://localhost/api/${name}`, { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+      expect(res.status, name).toBe(500);
+      expect(await res.json(), name).toMatchObject({ ok: false, error: "internal_error" });
+    }
+    expect(consoleError).toHaveBeenCalledTimes(3);
+    consoleError.mockRestore();
   });
 
   it("GET /api/orders returns 504 on broker timeout", async () => {
@@ -221,9 +253,9 @@ describe("malformed JSON on broker-adjacent routes", () => {
   });
 
   // A body stream that errors mid-read (client hung up), and a body that was already consumed.
-  function unreadableRequests(url: string, headers: Record<string, string> = {}): Request[] {
+  function unreadableRequests(url: string, headers: Record<string, string> = {}, method = "POST"): Request[] {
     const errored = new Request(url, {
-      method: "POST",
+      method,
       headers: { "content-type": "application/json", ...headers },
       body: new ReadableStream({
         start(controller) {
@@ -233,7 +265,7 @@ describe("malformed JSON on broker-adjacent routes", () => {
       duplex: "half"
     } as RequestInit & { duplex: "half" });
     const consumed = new Request(url, {
-      method: "POST",
+      method,
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify({ orderId: "ord-unread" })
     });
@@ -243,24 +275,53 @@ describe("malformed JSON on broker-adjacent routes", () => {
 
   it("POST /api/orders/cancel answers an unreadable body with the 400 JSON envelope", async () => {
     const { POST } = await import("../app/api/orders/cancel/route");
-    for (const request of unreadableRequests("http://localhost/api/orders/cancel")) {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const requests = unreadableRequests("http://localhost/api/orders/cancel");
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
       const res = await POST(request);
       expect(res.status).toBe(400);
       expect(res.headers.get("content-type")).toContain("application/json");
       expect(await res.json()).toMatchObject({ ok: false, error: "unreadable_body" });
     }
+    expect(consoleError).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
+  });
+
+  it("PUT /api/policy answers an unreadable body with the 400 JSON envelope", async () => {
+    const { PUT } = await import("../app/api/policy/route");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const requests = unreadableRequests(
+      "http://localhost/api/policy",
+      { [AUTHENTICATED_EMAIL_HEADER]: "policy-unread@test.local" },
+      "PUT"
+    );
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      const res = await PUT(request);
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({ ok: false, error: "unreadable_body" });
+    }
+    expect(consoleError).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
   });
 
   it("POST /api/keys answers an unreadable body with the 400 JSON envelope", async () => {
     const { POST } = await import("../app/api/keys/route");
-    for (const request of unreadableRequests("http://localhost/api/keys", {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const requests = unreadableRequests("http://localhost/api/keys", {
       [AUTHENTICATED_EMAIL_HEADER]: "keys-unread@test.local"
-    })) {
+    });
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
       const res = await POST(request as import("next/server").NextRequest);
       expect(res.status).toBe(400);
       expect(res.headers.get("content-type")).toContain("application/json");
       expect(await res.json()).toMatchObject({ ok: false, error: "unreadable_body" });
     }
+    expect(consoleError).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
   });
 
   it("POST /api/keys returns 400 invalid_json", async () => {

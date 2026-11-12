@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
+import { logError } from "./sentry-metrics";
 import { safeErrorMessage } from "./telemetry-sanitize";
 
 export const API_ERROR_MESSAGE_MAX = 240;
@@ -98,17 +99,42 @@ export function isBrokerGatewayError(error: unknown): boolean {
   return BROKER_ADAPTER_MESSAGE.test(message);
 }
 
-/** Map broker-originated failures to the JSON envelope; rethrow adapter/server defects as 500. */
+/**
+ * Report a handled server-side fault to the server log and Sentry.  Only the sanitized message
+ * is recorded, never raw upstream bodies or credential material.
+ */
+function reportHandledError(context: string, error: unknown): void {
+  const message = safeErrorMessage(error);
+  console.error(`${context}: ${message}`);
+  logError(context, { error: message });
+}
+
+/**
+ * Map broker-originated failures to the JSON envelope; rethrow adapter/server defects as 500.
+ * Kept for POST /api/orders/cancel, whose non-broker faults (post-cancel bookkeeping) stay a
+ * thrown 500 so `onRequestError` records them unchanged.
+ */
 export function brokerReadOrRethrow(error: unknown): NextResponse<ApiErrorBody> {
   if (isBrokerGatewayError(error)) return brokerReadError(error);
   throw error;
 }
 
 /**
+ * Broker-backed GET routes: broker-originated failures keep their classified envelope; any other
+ * fault (adapter defect such as a TypeError) is logged and answered as a 500 `internal_error`
+ * envelope, so clients can always parse the body.
+ */
+export function brokerReadOrInternalError(error: unknown): NextResponse<ApiErrorBody> {
+  if (isBrokerGatewayError(error)) return brokerReadError(error);
+  reportHandledError("Broker read failed with an internal server error", error);
+  return jsonError(500, "internal_error", "The server could not complete the broker read.");
+}
+
+/**
  * Read a JSON request body without throwing.  Malformed JSON is 400 `invalid_json`.  A body that
  * cannot be read at all (client aborted the stream, body already consumed) is 400
- * `unreadable_body`, so callers that parse before their own `try` (POST /api/keys,
- * POST /api/orders/cancel) still answer with the JSON envelope instead of an unhandled 500.
+ * `unreadable_body` and is logged, so callers that parse before their own `try` (POST /api/keys,
+ * POST /api/orders/cancel, PUT /api/policy) still answer with the JSON envelope instead of an unhandled 500.
  */
 export async function parseRequestJson(
   request: Request
@@ -120,6 +146,7 @@ export async function parseRequestJson(
     if (error instanceof SyntaxError) {
       return { ok: false, response: jsonError(400, "invalid_json", "Request body must be valid JSON.") };
     }
+    reportHandledError("Failed to read request body", error);
     return { ok: false, response: jsonError(400, "unreadable_body", "Request body could not be read.") };
   }
 }

@@ -1,4 +1,4 @@
-import { brokerReadOrRethrow, jsonError } from "@/lib/api-error";
+import { brokerReadOrInternalError, jsonError } from "@/lib/api-error";
 import { getBrokerGateway } from "@/lib/broker";
 import { getPolicy } from "@/lib/db";
 import { resolveRequestUserId } from "@/lib/request-user";
@@ -25,6 +25,6 @@ export async function GET(request: Request) {
     }
     return NextResponse.json(parsed.data);
   } catch (error) {
-    return brokerReadOrRethrow(error);
+    return brokerReadOrInternalError(error);
   }
 }
