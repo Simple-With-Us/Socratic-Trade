@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { CONFIG, readIdentity, observeProduction, reportDeploy, skipReason } from './sentry-report-deploy.mjs';
 const old = '1'.repeat(40), expected = '2'.repeat(40), newer = '3'.repeat(40), foreign = '4'.repeat(40);
 const healthy = (revision) => ({ ok: true, status: 'live', environment: 'production', revision, build: { sha: revision }, checks: { release: { sha: revision } } });
@@ -11,16 +10,6 @@ const observe = (values, options = {}) => {
   return observeProduction({ expected, attempts: values.length, intervalMs: 0, sleep: async () => {}, refreshMain: () => {}, isAncestor,
     fetchImpl: async (url, init) => { assert.equal(url.origin, new URL(CONFIG.health).origin); assert.equal(init.headers.Authorization, undefined); assert.equal(init.redirect, 'error'); assert.equal(init.cache, 'no-store'); const value = values[i++]; return value instanceof Response ? value : json(healthy(value)); }, ...options });
 };
-test('production observation defaults use a 60-minute deadline and 180 attempts', () => {
-  const source = readFileSync(new URL('./sentry-report-deploy.mjs', import.meta.url), 'utf8');
-  assert.match(source, /attempts = 180,/);
-  assert.match(source, /intervalMs = 20000,/);
-  assert.match(source, /deadline = now\(\) \+ 60 \* 60 \* 1000;/);
-  const workflow = readFileSync(new URL('../.github/workflows/sentry-deploy.yml', import.meta.url), 'utf8');
-  const job = workflow.split('record-production-deploy:')[1]?.split(/\n {2}[a-z]/)[0] || '';
-  assert.match(job, /timeout-minutes: 65/);
-  assert.match(job, /assert-rth-deploy-latch\.ts/);
-});
 test('requires healthy, full source identity', () => {
   assert.equal(readIdentity(healthy(expected)), expected);
   for (const body of [null, {ok:false}, healthy('unknown'), healthy(expected.slice(0,12))]) assert.throws(() => readIdentity(body));
@@ -165,9 +154,13 @@ test('production observation window matches slow Coolify deploy cadence', async 
   const attempts = 180;
   const deadlineMs = 60 * 60 * 1000;
   assert.match(script, new RegExp(`attempts = ${attempts}`));
+  assert.match(script, /intervalMs = 20000/);
   assert.match(script, /deadline = now\(\) \+ 60 \* 60 \* 1000/);
+  assert.match(script, /observeProduction\(\{ expected: process\.env\.EXPECTED_SHA \}\)/);
   assert.ok((attempts - 1) * intervalMs <= deadlineMs);
-  assert.match(workflow, /timeout-minutes: 65/);
+  const job = workflow.split('record-production-deploy:')[1]?.split(/\n {2}\S/)[0] || '';
+  assert.match(job, /timeout-minutes: 65/);
+  assert.match(job, /assert-rth-deploy-latch\.ts/);
 });
 
 test('a null JSON release is invalid data, not a retryable 404',async()=>{

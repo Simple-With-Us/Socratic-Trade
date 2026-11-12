@@ -4,13 +4,13 @@
 
 Usage-Monitor PR #1977 fixed a too-short Sentry Deploy poll window on shared Coolify (45m/135 attempts → 60m/180). Socratic-Trade still used a shorter aligned cap (25m/75 attempts). Run 42750773027 on 2026-11-10 failed after about 25 minutes with `Deployment not confirmed within the bounded observation window` because Coolify had not yet published the merge SHA on `/api/health`.
 
-ST-4625 landed the window itself via #5202. ST-4628 records the same caps in `STATUS.md` and `PLAN.md` and keeps a contract test for the defaults.
+ST-4625 landed the window itself via #5202.  ST-4628 keeps those caps.  The existing cadence test now also pins the 20 second interval, the production call site, and the `record-production-deploy` job body.  It does not add a second contract test.
 
 ## 2. Changes Made
 
 - `observeProduction` default window: 75 attempts / 25-minute deadline → 180 attempts / 60-minute deadline (20s cadence).
 - `record-production-deploy` job timeout: 50 → 65 minutes so Actions does not cancel the job mid-poll.
-- Contract tests for attempt/deadline/workflow alignment.
+- One cadence test pins attempts, the 20 second interval, the deadline, the production call site, and the `record-production-deploy` timeout.
 
 Touched files:
 
@@ -25,7 +25,7 @@ RTH skip via `SENTRY_DEPLOY_SKIP_REASON` and `assert-rth-deploy-latch.ts` unchan
 
 ## 3. Decisions & Trade-offs
 
-The attempt cap stays aligned with the deadline. 180 times 20 seconds is 60 minutes, so raising only one cap would still stop the loop early. The job timeout is five minutes past that window for checkout, the reporter test, the latch check, and the Sentry write. Weekday RTH merges still exit 0 via skip, but off-hours slow builds need the longer poll. Numbers match Usage-Monitor #1977 and Congress.Trade #3097.
+The attempt cap stays aligned with the deadline.  180 times 20 seconds is 60 minutes, so raising only one cap would still stop the loop early.  The job timeout stays 65 minutes, the same number as Usage-Monitor #1977 and Congress.Trade #3097.  That is not a guaranteed five-minute margin: the deadline is checked at the start of each attempt, and the Sentry write happens after the window.  This change does not raise the timeout past 65.  Weekday RTH merges still exit 0 via skip, but off-hours slow builds need the longer poll.
 
 ## 4. Verification State
 
@@ -33,9 +33,11 @@ The attempt cap stays aligned with the deadline. 180 times 20 seconds is 60 minu
 node --test scripts/sentry-report-deploy.node-test.mjs
 ```
 
+Reporter suite: pass.  `npm run build` was not run.  This diff does not change the Next.js app.
+
 ## 5. Next Steps & Blockers
 
-`verify` and the Sentry Deploy `test-reporter` job are the CI gates. Do not dispatch a deploy.
+`test-reporter` in `.github/workflows/sentry-deploy.yml` is the job that runs `node --test scripts/sentry-report-deploy.node-test.mjs`.  `verify` does not run that file, because vitest excludes `scripts/**/*.test.mjs`.  Do not dispatch a deploy.  Do not merge from this lane.
 
 ## 6. Zero-Code Findings
 
