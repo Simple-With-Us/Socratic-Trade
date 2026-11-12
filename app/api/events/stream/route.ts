@@ -1,5 +1,5 @@
 import { subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 // Must run on the Node runtime so it shares the in-process event bus with the scheduler/strategy.
@@ -11,7 +11,8 @@ export async function GET(request: Request) {
   // Tenant isolation: only forward events belonging to this subscriber. The in-process bus is
   // shared across all connected clients, so without a server-side filter every EventSource would
   // receive other tenants' order/proposal/symbol metadata (relying on the client to ignore it).
-  const subscriberId = resolveRequestUserId(request);
+  const subscriberId = resolveRequestUserIdOrResponse(request);
+  if (subscriberId instanceof Response) return subscriberId;
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
