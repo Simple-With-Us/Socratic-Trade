@@ -45,7 +45,7 @@ directly), so the promotion happened on the boards.
 ## Cross-repo half (separate PRs, same pass)
 
 - **Congress.Trade**: merged Codex's docs-only bootstrap PR #137 (announced on
-  #agent-sync first), then a `claude/effort-issues-mirror` PR adds the fleet-standard
+  #ag***-s**c first), then a `claude/effort-issues-mirror` PR adds the fleet-standard
   `scripts/sync-effort-issues.py` + `.github/workflows/effort-issues-sync.yml`
   (verbatim copies per protocol) and a populated `docs/EFFORT-LOG.md` (14 Planned rows:
   CODEX house-live-search; AG ticker-alias guard + push/SSE repair; CURSOR pin-check
@@ -100,7 +100,7 @@ approvals-triage includes portfolio-impact preview; omnibox means search-anywher
 
 ## Follow-ups
 
-- Agents pick up their lanes (announced on #agent-sync; assignments are reservations,
+- Agents pick up their lanes (announced on #ag***-s**c; assignments are reservations,
   re-negotiable there).
 - The unassigned owner-decision bucket (15 rows here + LICENSE/premium-routes/login
   decisions in the other repos) needs owner triage.

@@ -13,7 +13,7 @@
 # message). Fail-OPEN by design: any internal error allows the call -- this is
 # a protocol nudge, not a security boundary.
 #
-# Added 2026-07-10 (owner-directed: "I have to remind you about agent-sync and
+# Added 2026-07-10 (owner-directed: "I have to remind you about ag***-s**c and
 # effort log all the time"). See docs/rollouts/2026-07-10-fleet-procedure-skills.md.
 set -u
 
@@ -47,6 +47,6 @@ if [ -n "$TOUCHED" ] || [ -n "$DIRTY" ]; then
 fi
 
 cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Pre-push protocol check (AGENTS.md): this branch has not touched docs/EFFORT-LOG.md since forking from main. Before pushing/landing: (1) add or flip your effort row in docs/EFFORT-LOG.md; (2) add a STATUS.md stanza; (3) write/update the docs/rollouts/YYYY-MM-DD-slug.md note; (4) confirm your #agent-sync claim was posted (scripts/slack-sync.sh post). If this push is genuinely exempt (docs already landed via an earlier commit on another branch, pure re-push, etc.), re-run prefixed with BOARD_CHECK_SKIP=1 and state why."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Pre-push protocol check (AGENTS.md): this branch has not touched docs/EFFORT-LOG.md since forking from main. Before pushing/landing: (1) add or flip your effort row in docs/EFFORT-LOG.md; (2) add a STATUS.md stanza; (3) write/update the docs/rollouts/YYYY-MM-DD-slug.md note; (4) confirm your #ag***-s**c claim was posted (scripts/slack-sync.sh post). If this push is genuinely exempt (docs already landed via an earlier commit on another branch, pure re-push, etc.), re-run prefixed with BOARD_CHECK_SKIP=1 and state why."}}
 EOF
 exit 0

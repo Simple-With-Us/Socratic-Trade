@@ -2374,7 +2374,7 @@ Branch `cursor/deploy-freshness-ocr-isolate-d4cf`.  PR #2796.  Rollout:
 P0 silent-freeze class from 2026-08-06: Coolify SSH exec died mid-build while
 webhooks stayed 200 and `/api/health` stayed green on the old sha.  This branch
 adds a 20-minute freshness cron (oldest undeployed main commit >1h pages
-Sentry / optional `#agent-sync`) and a dry-run-default `docker update` CPU cap
+Sentry / optional `#ag***-s**c`) and a dry-run-default `docker update` CPU cap
 for CT OCR/scan workers that never restarts and never touches ST.  Remaining
 host constraint: durable isolation is Coolify/CT-repo; this repo cannot set
 those or a Coolify retry-on-255.  Did not touch prod.
@@ -3235,7 +3235,7 @@ Fix on `grok/stop-ghost-native-keys`, issue #2728 / PR #2729: never remigrate a 
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -3667,7 +3667,7 @@ Branch `grok/fleet-alerts-aug13`.  Rollout: `docs/rollouts/2026-08-13-fleet-aler
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 

@@ -8,7 +8,7 @@ agent rules forbid the next seat from doing the same.
 
 ## Changes Made
 
-- Fleet canonical: `/Users/jay/apps/AGENT-SYNC.md` § Handoff-file grep trap.
+- Fleet canonical: `/Users/jay/apps/AG***-S**C.md` § Handoff-file grep trap.
 - `TEMPLATE-AGENTS.md` one-liner for new apps.
 - This repo `AGENTS.md` (Coolify stanza + Don't list).
 - Claude `secret-safety` skill: names-only requires `-o`.
@@ -21,7 +21,7 @@ agent rules forbid the next seat from doing the same.
 
 ## Verification State
 
-Docs-only.  `AGENTS.md` / AGENT-SYNC text review.
+Docs-only.  `AGENTS.md` / AG***-S**C text review.
 
 ## Next Steps & Blockers
 

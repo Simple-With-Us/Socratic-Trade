@@ -252,8 +252,8 @@ fi
 
 case "$LAST_CODE" in
   1) log "  this is an operational/reachability failure, not proof of drift." ;;
-  4) log "  escalate on #agent-sync before anything else touches production." ;;
-  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #agent-sync." ;;
+  4) log "  escalate on #ag***-s**c before anything else touches production." ;;
+  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #ag***-s**c." ;;
 esac
 
 log "  do NOT hand-trigger a deploy to 'fix' this - investigate the webhook and build queue."

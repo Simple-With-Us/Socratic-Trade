@@ -22,7 +22,7 @@
 #      else the payload asks for is refused (defense vs a buggy/compromised monitor).
 #   3. Read current values from Infisical prod (proven SSH + universal-auth CLI
 #      path on the Coolify box) and WRITE ONLY DIFFS.
-#   4. On any applied change, post ONE line to #agent-sync.
+#   4. On any applied change, post ONE line to #ag***-s**c.
 #
 # Knob writes land in Infisical; the trading app reads them at boot, so a change
 # takes effect on the next prod deploy/restart ("rides next deploy").
@@ -190,7 +190,7 @@ if [ "$APPLY" -eq 0 ]; then
     st="$(printf '%s' "$rec" | cut -f6)"
     echo "  $k: $old -> $new (plan $plan $st)"
   done
-  echo "[knob-sync] re-run with --apply to write these and post to #agent-sync."
+  echo "[knob-sync] re-run with --apply to write these and post to #ag***-s**c."
   exit 0
 fi
 

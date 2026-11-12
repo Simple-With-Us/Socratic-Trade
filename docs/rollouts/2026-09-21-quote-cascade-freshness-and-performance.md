@@ -66,4 +66,4 @@ Touched files:
 
 - Commit changes referencing updated handoff docs.
 - Push branch `ag/quote-cascade-freshness-performance`, open PR, and arm auto-merge.
-- Post completion closeout notice to Slack `#agent-sync`.
+- Post completion closeout notice to Slack `#ag***-s**c`.
