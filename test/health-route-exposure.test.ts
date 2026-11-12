@@ -112,6 +112,9 @@ describe("/api/health exposure", () => {
     delete process.env.OPENROUTER_MANAGEMENT_KEY;
     delete process.env.OPENROUTER_ADMIN_KEY;
     stubCredits(100, 40); // remaining $60, comfortably above the default $3 threshold
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     await seed();
   });
 
@@ -122,6 +125,9 @@ describe("/api/health exposure", () => {
     delete process.env.OPENROUTER_MANAGEMENT_KEY;
     delete process.env.OPENROUTER_ADMIN_KEY;
     const { db, credits } = await load();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     credits.__resetOpenRouterCreditCache();
     try {
       db.deleteUserApiKey("local", "openrouter");
@@ -235,6 +241,9 @@ describe("/api/health exposure", () => {
     stubCredits(10, 9.5); // remaining $0.50, below the default $3 threshold
     const { credits, healthRoute } = await load();
     credits.__resetOpenRouterCreditCache();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
 
     const response = await healthRoute.GET(new Request(HEALTH_URL));
     const raw = await response.text();
