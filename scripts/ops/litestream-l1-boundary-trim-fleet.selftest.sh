@@ -17,7 +17,19 @@ CALLS="${WORK}/calls"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${CALLS:?}"
-exit 0
+app=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--app" ]; then
+    app="$arg"
+  fi
+  prev="$arg"
+done
+key="TRIM_RC_${app//-/_}"
+if [ -n "${!key+x}" ]; then
+  exit "${!key}"
+fi
+exit "${TRIM_RC:-0}"
 STUB
 chmod +x "$STUB"
 
@@ -30,10 +42,10 @@ run_case() {
   rm -f "$CALLS"
   (
     unset LITESTREAM_L1_TRIM_APPLY LITESTREAM_L1_TRIM_BIN LITESTREAM_L1_TRIM_MAX_SNAPSHOT_AGE_HOURS
+    unset TRIM_RC TRIM_RC_socratic TRIM_RC_congress TRIM_RC_usage_monitor
     export CALLS
-    # shellcheck disable=SC2086
-    eval "$@"
-    bash "$UNDER_TEST" >"${WORK}/out" 2>"${WORK}/err"
+    # env applies the name=value arguments without eval or export "$@".
+    env "$@" bash "$UNDER_TEST" >"${WORK}/out" 2>"${WORK}/err"
     echo $? >"${WORK}/rc"
   )
   rc="$(cat "${WORK}/rc")"
@@ -47,8 +59,20 @@ run_case() {
   fi
 }
 
+expect_three_calls() {
+  local name="$1"
+  if [ -f "$CALLS" ] && [ "$(wc -l < "$CALLS")" -eq 3 ]; then
+    PASSES=$((PASSES + 1))
+    echo "PASS ${name}"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "FAIL ${name}" >&2
+    cat "$CALLS" >&2 || true
+  fi
+}
+
 # Default is dry-run: three apps, no --apply, age default 6.
-run_case dry_run_default 0 "export LITESTREAM_L1_TRIM_BIN='$STUB'"
+run_case dry_run_default 0 LITESTREAM_L1_TRIM_BIN="$STUB"
 if [ -f "$CALLS" ] && [ "$(wc -l < "$CALLS")" -eq 3 ] \
   && ! grep -q -- '--apply' "$CALLS" \
   && grep -q -- '--app socratic --max-snapshot-age-hours 6' "$CALLS" \
@@ -63,7 +87,7 @@ else
 fi
 
 # APPLY=0 is the same dry-run.
-run_case apply_zero_stays_dry 0 "export LITESTREAM_L1_TRIM_BIN='$STUB' LITESTREAM_L1_TRIM_APPLY=0"
+run_case apply_zero_stays_dry 0 LITESTREAM_L1_TRIM_BIN="$STUB" LITESTREAM_L1_TRIM_APPLY=0
 if [ -f "$CALLS" ] && ! grep -q -- '--apply' "$CALLS"; then
   PASSES=$((PASSES + 1))
   echo "PASS apply_zero_args"
@@ -73,7 +97,7 @@ else
 fi
 
 # The timer opts in with LITESTREAM_L1_TRIM_APPLY=1.
-run_case apply_env 0 "export LITESTREAM_L1_TRIM_BIN='$STUB' LITESTREAM_L1_TRIM_APPLY=1"
+run_case apply_env 0 LITESTREAM_L1_TRIM_BIN="$STUB" LITESTREAM_L1_TRIM_APPLY=1
 if [ -f "$CALLS" ] && [ "$(grep -c -- '--apply' "$CALLS")" -eq 3 ]; then
   PASSES=$((PASSES + 1))
   echo "PASS apply_env_args"
@@ -166,11 +190,11 @@ HERMETIC="${WORK}/fleet-hermetic.sh"
 sed "s#-${DEFAULT_BIN}}#-${WORK}/no-default-trim}#" "$UNDER_TEST" > "$HERMETIC"
 REAL_UNDER_TEST="$UNDER_TEST"
 UNDER_TEST="$HERMETIC"
-run_case missing_default_bin 127 "unset LITESTREAM_L1_TRIM_BIN"
+run_case missing_default_bin 127
 # An explicit empty override fails closed (127), even when the default
 # exists: put a stub at the default path and prove it is not run.
 cp "$STUB" "${WORK}/no-default-trim"
-run_case missing_empty_bin 127 "export LITESTREAM_L1_TRIM_BIN="
+run_case missing_empty_bin 127 LITESTREAM_L1_TRIM_BIN=
 if [ ! -f "$CALLS" ]; then
   PASSES=$((PASSES + 1))
   echo "PASS empty_bin_does_not_run_default"
@@ -179,7 +203,7 @@ else
   echo "FAIL empty_bin_does_not_run_default" >&2
 fi
 # Control: with the override unset, the same hermetic copy runs the default.
-run_case default_bin_runs 0 "unset LITESTREAM_L1_TRIM_BIN"
+run_case default_bin_runs 0
 if [ -f "$CALLS" ] && [ "$(wc -l < "$CALLS")" -eq 3 ]; then
   PASSES=$((PASSES + 1))
   echo "PASS default_bin_args"
@@ -189,10 +213,10 @@ else
 fi
 rm -f "${WORK}/no-default-trim"
 UNDER_TEST="$REAL_UNDER_TEST"
-run_case missing_path 127 "export LITESTREAM_L1_TRIM_BIN='${WORK}/no-such-trim'"
+run_case missing_path 127 LITESTREAM_L1_TRIM_BIN="${WORK}/no-such-trim"
 
 # A bad opt-in value fails before the trim binary is executed.
-run_case bad_apply_env 2 "export LITESTREAM_L1_TRIM_BIN='$STUB' LITESTREAM_L1_TRIM_APPLY=yes"
+run_case bad_apply_env 2 LITESTREAM_L1_TRIM_BIN="$STUB" LITESTREAM_L1_TRIM_APPLY=yes
 if [ ! -f "$CALLS" ]; then
   PASSES=$((PASSES + 1))
   echo "PASS bad_apply_does_not_run"
@@ -200,6 +224,31 @@ else
   FAILURES=$((FAILURES + 1))
   echo "FAIL bad_apply_does_not_run" >&2
 fi
+
+# Each trim guard (and trim exit 1, including APPLIED-UNVERIFIED) must pass
+# through the wrapper, and later apps still run.
+for code in 1 2 3 4 5 6; do
+  run_case "passthrough_${code}" "$code" LITESTREAM_L1_TRIM_BIN="$STUB" TRIM_RC="$code"
+  expect_three_calls "passthrough_${code}_runs_remaining"
+  if grep -q "app=socratic failed rc=${code}" "${WORK}/err"; then
+    PASSES=$((PASSES + 1))
+    echo "PASS passthrough_${code}_logs_rc"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "FAIL passthrough_${code}_logs_rc" >&2
+    sed -n '1,40p' "${WORK}/err" >&2 || true
+  fi
+done
+
+# First non-zero wins: a later different failure does not replace it.
+run_case first_nonzero_wins 3 \
+  LITESTREAM_L1_TRIM_BIN="$STUB" TRIM_RC_socratic=3 TRIM_RC_congress=5 TRIM_RC_usage_monitor=6
+expect_three_calls first_nonzero_wins_runs_remaining
+
+# A leading success does not hide a later guard abort.
+run_case later_nonzero_after_success 4 \
+  LITESTREAM_L1_TRIM_BIN="$STUB" TRIM_RC_socratic=0 TRIM_RC_congress=4 TRIM_RC_usage_monitor=6
+expect_three_calls later_nonzero_after_success_runs_remaining
 
 echo "litestream-l1-boundary-trim-fleet.selftest: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" -eq 0 ]

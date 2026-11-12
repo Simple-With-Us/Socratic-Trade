@@ -29,6 +29,12 @@ fi
 
 # Sequential on purpose: the tool has no lock, and concurrent rclone against
 # the same B2 account burns Class A/C and can collide on hide markers.
+# Keep running the remaining apps after a failure, and exit with the first
+# non-zero trim status so systemctl status shows that guard (1-6).  Wrapper
+# codes 2 (bad LITESTREAM_L1_TRIM_APPLY) and 127 (missing binary) are only
+# used above, before any trim runs.  Trim itself uses 2 for "no snapshot"
+# and never uses 127; see docs/litestream.md Exit codes to tell them apart.
+# APPLIED-UNVERIFIED from trim stays exit 1 and is passed through unchanged.
 apps=(socratic congress usage-monitor)
 rc=0
 for app in "${apps[@]}"; do
@@ -37,9 +43,13 @@ for app in "${apps[@]}"; do
   if [ "$want_apply" = "1" ]; then
     trim_args+=(--apply)
   fi
-  if ! "$TRIM" "${trim_args[@]}"; then
-    echo "litestream-l1-boundary-trim-fleet: app=$app failed" >&2
-    rc=1
+  trim_rc=0
+  "$TRIM" "${trim_args[@]}" || trim_rc=$?
+  if [ "$trim_rc" -ne 0 ]; then
+    echo "litestream-l1-boundary-trim-fleet: app=$app failed rc=$trim_rc" >&2
+    if [ "$rc" -eq 0 ]; then
+      rc=$trim_rc
+    fi
   fi
 done
 exit "$rc"

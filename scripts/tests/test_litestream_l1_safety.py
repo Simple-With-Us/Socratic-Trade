@@ -12,6 +12,7 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
@@ -677,6 +678,102 @@ class BoundaryExecuteTests(unittest.TestCase):
     def test_timer_opts_into_apply(self):
         service = (SCRIPTS / "ops" / "litestream-l1-boundary-trim.service").read_text()
         self.assertIn("Environment=LITESTREAM_L1_TRIM_APPLY=1\n", service)
+
+
+
+FLEET_WRAPPER = SCRIPTS / "ops" / "litestream-l1-boundary-trim-fleet.sh"
+STUB_TRIM = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${CALLS:?}"
+app=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--app" ]; then
+    app="$arg"
+  fi
+  prev="$arg"
+done
+key="TRIM_RC_${app//-/_}"
+if [ -n "${!key+x}" ]; then
+  exit "${!key}"
+fi
+exit "${TRIM_RC:-0}"
+"""
+
+
+class FleetWrapperTests(unittest.TestCase):
+    """The scheduled wrapper must surface each trim guard in systemctl status."""
+
+    def _run(self, extra_env):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        stub = Path(work.name) / "trim"
+        calls = Path(work.name) / "calls"
+        stub.write_text(STUB_TRIM)
+        stub.chmod(0o755)
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "CALLS": str(calls),
+            "LITESTREAM_L1_TRIM_BIN": str(stub),
+        }
+        env.update(extra_env)
+        proc = subprocess.run(
+            ["bash", str(FLEET_WRAPPER)],
+            cwd=work.name,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        call_lines = calls.read_text().splitlines() if calls.exists() else []
+        return proc.returncode, call_lines, proc.stderr
+
+    def test_passthrough_each_guard_code(self):
+        # Trim exit 1 (survivors / APPLIED-UNVERIFIED) and guards 2-6 must
+        # reach the wrapper's status. Remaining apps still run.
+        for code in (1, 2, 3, 4, 5, 6):
+            with self.subTest(code=code):
+                rc, calls, err = self._run({"TRIM_RC": str(code)})
+                self.assertEqual(rc, code)
+                self.assertEqual(len(calls), 3)
+                self.assertIn(f"app=socratic failed rc={code}", err)
+
+    def test_first_nonzero_wins_and_remaining_apps_run(self):
+        rc, calls, err = self._run({
+            "TRIM_RC_socratic": "3",
+            "TRIM_RC_congress": "5",
+            "TRIM_RC_usage_monitor": "6",
+        })
+        self.assertEqual(rc, 3)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("app=socratic failed rc=3", err)
+        self.assertIn("app=congress failed rc=5", err)
+        self.assertIn("app=usage-monitor failed rc=6", err)
+
+        rc, calls, err = self._run({
+            "TRIM_RC_socratic": "0",
+            "TRIM_RC_congress": "4",
+            "TRIM_RC_usage_monitor": "6",
+        })
+        self.assertEqual(rc, 4)
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("app=socratic failed", err)
+        self.assertIn("app=congress failed rc=4", err)
+
+    def test_wrapper_own_codes_stay_distinct(self):
+        rc, calls, err = self._run({
+            "LITESTREAM_L1_TRIM_APPLY": "yes",
+            "TRIM_RC": "5",
+        })
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("LITESTREAM_L1_TRIM_APPLY must be 0, 1, or unset", err)
+
+        rc, calls, err = self._run({
+            "LITESTREAM_L1_TRIM_BIN": "/tmp/no-such-l1-trim-binary",
+            "TRIM_RC": "4",
+        })
+        self.assertEqual(rc, 127)
+        self.assertEqual(calls, [])
+        self.assertIn("missing executable", err)
 
 
 if __name__ == "__main__":
