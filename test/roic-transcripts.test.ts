@@ -180,17 +180,17 @@ describe("roic-transcripts", () => {
     const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
     process.env.ROIC_API_KEY = "roic-transcript-test";
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-queue-${randomUUID()}.db`)}`;
-    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
-    delete process.env.ROIC_TRANSCRIPTS_DISABLED;
-    resetProviderQuotaState("roic");
-    resetProviderRateLimiterState("roic");
-    resetRoicTranscriptRateHold();
     let calls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       calls += 1;
       return new Response("no credit", { status: 402 });
     }));
     try {
+      delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      resetProviderQuotaState("roic");
+      resetProviderRateLimiterState("roic");
+      resetRoicTranscriptRateHold();
       const result = await refreshRoicTranscriptsIfDue({
         force: true,
         symbols: ["AAPL", "MSFT"],
@@ -220,20 +220,20 @@ describe("roic-transcripts", () => {
     const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
     process.env.ROIC_API_KEY = "roic-transcript-test";
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-quote-hold-${randomUUID()}.db`)}`;
-    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
-    delete process.env.ROIC_TRANSCRIPTS_DISABLED;
-    resetProviderQuotaState("roic");
-    resetProviderRateLimiterState("roic");
-    resetRoicTranscriptRateHold();
-    resetApiCircuitBreaker();
-    const credentialId = await apiKeyFingerprint("roic-transcript-test");
-    observePaidQuoteStatus("roic", "env", 402, undefined, Date.now(), credentialId);
     let calls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       calls += 1;
       return new Response(JSON.stringify({ data: [] }), { status: 200 });
     }));
     try {
+      delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      resetProviderQuotaState("roic");
+      resetProviderRateLimiterState("roic");
+      resetRoicTranscriptRateHold();
+      resetApiCircuitBreaker();
+      const credentialId = await apiKeyFingerprint("roic-transcript-test");
+      observePaidQuoteStatus("roic", "env", 402, undefined, Date.now(), credentialId);
       const result = await refreshRoicTranscriptsIfDue({
         force: true,
         symbols: ["AAPL", "MSFT"],
