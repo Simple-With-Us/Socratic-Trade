@@ -186,6 +186,33 @@ export interface ProxySlot {
   release(): void;
 }
 
+/**
+ * Hard cap on how long a proxied body may hold a gate slot after headers.
+ * Callers that never read or cancel (non-ok, 401/403, 429 retry) used to
+ * leak the slot for the life of the process.  Four leaks filled the cap.
+ */
+export const PROXY_SLOT_MAX_HOLD_MS = 20_000;
+
+/**
+ * Release a slot when the body has no in-flight read and no new bytes for
+ * this long.  An active `pull` (consumer waiting on the upstream) is not
+ * idle; the max-hold timer is the cap for that case.
+ */
+export const PROXY_SLOT_IDLE_MS = 20_000;
+
+/** `/api/proxy-use` asks Sentry to alert when the oldest hold exceeds this. */
+export const PROXY_GATE_HOLD_ALERT_MS = 60_000;
+
+export interface ProxyGateSnapshot {
+  inFlight: number;
+  queued: number;
+  oldestHoldMs: number;
+}
+
+interface ProxyHold {
+  grantedAt: number;
+}
+
 interface ProxyGateWaiter {
   enqueuedAt: number;
   signal?: AbortSignal;
@@ -213,6 +240,7 @@ function abortReason(signal: AbortSignal): unknown {
 export class ProxyConcurrencyGate {
   private inFlightCount = 0;
   private readonly queue: ProxyGateWaiter[] = [];
+  private readonly holds: ProxyHold[] = [];
 
   constructor(private readonly resolveMaxConcurrency: () => number) {}
 
@@ -224,6 +252,16 @@ export class ProxyConcurrencyGate {
   /** Callers currently waiting for a slot. */
   get queued(): number {
     return this.queue.length;
+  }
+
+  /** Age of the oldest granted slot, or 0 when nothing is in flight. */
+  get oldestHoldMs(): number {
+    if (this.holds.length === 0) return 0;
+    let oldest = this.holds[0].grantedAt;
+    for (const hold of this.holds) {
+      if (hold.grantedAt < oldest) oldest = hold.grantedAt;
+    }
+    return Math.max(0, Date.now() - oldest);
   }
 
   acquire(signal?: AbortSignal): Promise<ProxySlot> {
@@ -254,6 +292,7 @@ export class ProxyConcurrencyGate {
       waiter.reject(new Error("proxy concurrency gate reset"));
     }
     this.inFlightCount = 0;
+    this.holds.length = 0;
   }
 
   private pump(): void {
@@ -264,6 +303,8 @@ export class ProxyConcurrencyGate {
         waiter.signal.removeEventListener("abort", waiter.onAbort);
       }
       this.inFlightCount += 1;
+      const hold: ProxyHold = { grantedAt: Date.now() };
+      this.holds.push(hold);
       const enqueuedAt = waiter.enqueuedAt;
       let released = false;
       waiter.resolve({
@@ -271,6 +312,8 @@ export class ProxyConcurrencyGate {
         release: () => {
           if (released) return;
           released = true;
+          const idx = this.holds.indexOf(hold);
+          if (idx !== -1) this.holds.splice(idx, 1);
           this.inFlightCount = Math.max(0, this.inFlightCount - 1);
           this.pump();
         }
@@ -293,6 +336,15 @@ const gateHost = globalThis as ProxyGateHost;
  */
 export const sharedProxyConcurrencyGate: ProxyConcurrencyGate = (gateHost.__socraticProxyConcurrencyGate ??=
   new ProxyConcurrencyGate(() => resolveProxyMaxConcurrency()));
+
+/** Live gate counters for `/api/proxy-use`. Never throws. */
+export function proxyGateSnapshot(): ProxyGateSnapshot {
+  return {
+    inFlight: sharedProxyConcurrencyGate.inFlight,
+    queued: sharedProxyConcurrencyGate.queued,
+    oldestHoldMs: sharedProxyConcurrencyGate.oldestHoldMs
+  };
+}
 
 const agentCache = new Map<string, ProxyAgent>();
 
@@ -331,26 +383,49 @@ export function resolveProxyLegTimeoutMs(env?: ProxyEnvSource): number {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : PROXY_LEG_TIMEOUT_MS;
 }
 
+interface BodyHoldLimits {
+  maxHoldMs: number;
+  idleMs: number;
+}
+
+function holdMs(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+const bodyReleaseRegistry = new FinalizationRegistry<() => void>((release) => {
+  try {
+    release();
+  } catch {
+    // The GC backstop must not surface into the process.
+  }
+});
+
 /**
  * Wrap a response body so `onSettle` fires exactly once when the body
- * finishes, errors, is cancelled by the reader, or the settle signal
- * aborts.  fetch() resolves at headers while the body is still an open
- * stream through the proxy, so anything held for the life of the request
- * (the leg timer, a concurrency slot) must release here, not at headers —
- * releasing at headers left res.json() without cancellation and let a
- * header-then-stall proxy hang past the caller budget, including long-lived
- * cascade reads.
+ * finishes, errors, is cancelled by the reader, the settle signal aborts,
+ * the body goes idle, or the post-header max hold elapses.  fetch()
+ * resolves at headers while the body is still an open stream through the
+ * proxy, so anything held for the life of the request (the leg timer, a
+ * concurrency slot) must release here, not at headers — releasing at
+ * headers left res.json() without cancellation and let a header-then-stall
+ * proxy hang past the caller budget, including long-lived cascade reads.
  *
  * `settleSignal` is the signal whose abort settles the body wait even when
  * the upstream never delivers another chunk and never errors: the caller's
  * own signal on the untimed path, and the combined leg-timeout + caller
  * signal on the timed path, so a header-then-stall body cannot hold its
  * slot past the leg timeout just because the caller has budget left.
+ *
+ * Idle and max-hold do not depend on the caller reading or cancelling.
+ * An unread non-ok body used to pin its slot until process restart.
+ * FinalizationRegistry releases the slot if the response is collected
+ * first.
  */
 function wrapBodyUntilSettle(
   res: Response,
   settleSignal: AbortSignal | undefined,
-  onSettle: () => void
+  onSettle: () => void,
+  limits: BodyHoldLimits
 ): Response {
   if (!res.body) {
     onSettle();
@@ -358,9 +433,22 @@ function wrapBodyUntilSettle(
   }
   let settled = false;
   let onBodyAbort: (() => void) | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let maxTimer: ReturnType<typeof setTimeout> | undefined;
+  let pullActive = false;
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const unregisterToken = {};
+  const clearHoldTimers = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    if (maxTimer !== undefined) clearTimeout(maxTimer);
+    idleTimer = undefined;
+    maxTimer = undefined;
+  };
   const finish = () => {
     if (settled) return;
     settled = true;
+    clearHoldTimers();
+    bodyReleaseRegistry.unregister(unregisterToken);
     if (onBodyAbort && settleSignal) settleSignal.removeEventListener("abort", onBodyAbort);
     onBodyAbort = undefined;
     onSettle();
@@ -373,8 +461,35 @@ function wrapBodyUntilSettle(
   // it can never surface as an unhandled rejection.
   const cancelUpstream = (reason?: unknown): Promise<void> =>
     upstream.cancel(reason).catch(() => undefined);
+  const forceRelease = () => {
+    if (settled) return;
+    finish();
+    try {
+      streamController?.error(new DOMException("aborted", "AbortError"));
+    } catch {
+      // already errored or cancelled
+    }
+    void cancelUpstream(new DOMException("aborted", "AbortError"));
+  };
+  const armTimer = (ms: number, fn: () => void): ReturnType<typeof setTimeout> => {
+    const timer = setTimeout(fn, ms);
+    if (typeof timer === "object" && timer !== null && "unref" in timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+    return timer;
+  };
+  const armIdle = () => {
+    if (settled) return;
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = armTimer(limits.idleMs, () => {
+      idleTimer = undefined;
+      if (settled || pullActive) return;
+      forceRelease();
+    });
+  };
   const wrappedBody = new ReadableStream<Uint8Array>({
     start(controller) {
+      streamController = controller;
       if (settleSignal?.aborted) {
         finish();
         controller.error(new DOMException("aborted", "AbortError"));
@@ -395,9 +510,19 @@ function wrapBodyUntilSettle(
       }
     },
     async pull(controller) {
-      if (settleSignal?.aborted) {
+      pullActive = true;
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      if (settleSignal?.aborted || settled) {
+        pullActive = false;
         finish();
-        controller.error(new DOMException("aborted", "AbortError"));
+        try {
+          controller.error(new DOMException("aborted", "AbortError"));
+        } catch {
+          // already errored or cancelled
+        }
         await cancelUpstream();
         return;
       }
@@ -410,6 +535,7 @@ function wrapBodyUntilSettle(
         // else settles the body: without finish() here, onSettle never fires
         // and whatever the body holds — the gate slot, the leg timer —
         // leaks for the life of the process.
+        pullActive = false;
         finish();
         try {
           controller.error(err);
@@ -419,22 +545,35 @@ function wrapBodyUntilSettle(
         return;
       }
       if (chunk.done) {
+        pullActive = false;
         finish();
         controller.close();
         return;
       }
+      pullActive = false;
+      if (!settled) armIdle();
       controller.enqueue(chunk.value);
     },
     async cancel(reason) {
+      pullActive = false;
       finish();
       await cancelUpstream(reason);
     }
-  });
-  return new Response(wrappedBody, {
+  }, { highWaterMark: 0 });
+  const wrapped = new Response(wrappedBody, {
     status: res.status,
     statusText: res.statusText,
     headers: res.headers
   });
+  if (!settled) {
+    maxTimer = armTimer(limits.maxHoldMs, () => {
+      maxTimer = undefined;
+      forceRelease();
+    });
+    armIdle();
+    bodyReleaseRegistry.register(wrapped, forceRelease, unregisterToken);
+  }
+  return wrapped;
 }
 
 /**
@@ -445,8 +584,9 @@ function wrapBodyUntilSettle(
  * (PROXY_MAX_CONCURRENCY, default 4).  The slot is acquired BEFORE the
  * proxy-leg timer below is created, so time spent queued for a slot never
  * counts against the leg timeout.  The slot is held until the response body
- * settles — the proxy is busy for exactly that long — and released on error.
- * A caller abort while queued rejects before anything is dispatched.
+ * settles, the body goes idle, or the post-header max hold elapses, and it
+ * is released on error.  A caller abort while queued rejects before anything
+ * is dispatched.
  *
  * When `options.proxyTimeoutMs` is a positive number, the returned fetch
  * chains a fresh AbortController (the proxy-leg timeout) with the caller's
@@ -462,11 +602,22 @@ function wrapBodyUntilSettle(
 export function createProxiedFetch(
   proxyUrl: string | undefined,
   baseFetch: typeof fetch = undiciFetch as unknown as typeof fetch,
-  options?: { proxyTimeoutMs?: number; onQueueWait?: (waitMs: number) => void }
+  options?: {
+    proxyTimeoutMs?: number;
+    onQueueWait?: (waitMs: number) => void;
+    /** Test override. Production uses PROXY_SLOT_MAX_HOLD_MS. */
+    slotMaxHoldMs?: number;
+    /** Test override. Production uses PROXY_SLOT_IDLE_MS. */
+    slotIdleMs?: number;
+  }
 ): typeof fetch {
   if (!proxyUrl || !proxyUrl.trim()) return baseFetch;
   const agent = getProxyAgent(proxyUrl);
   const proxyTimeoutMs = options?.proxyTimeoutMs;
+  const holdLimits: BodyHoldLimits = {
+    maxHoldMs: holdMs(options?.slotMaxHoldMs, PROXY_SLOT_MAX_HOLD_MS),
+    idleMs: holdMs(options?.slotIdleMs, PROXY_SLOT_IDLE_MS)
+  };
   return (async function proxiedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const callerSignal = init?.signal ?? undefined;
     // Gate first: the leg timer is only created after a slot is granted, so
@@ -484,7 +635,7 @@ export function createProxiedFetch(
     if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
       try {
         const res = await baseFetch(input, withDispatcher);
-        return wrapBodyUntilSettle(res, callerSignal, () => slot.release());
+        return wrapBodyUntilSettle(res, callerSignal, () => slot.release(), holdLimits);
       } catch (err) {
         slot.release();
         throw err;
@@ -522,12 +673,39 @@ export function createProxiedFetch(
       // header-then-stall body that never errors on its own is still
       // released when the leg timeout fires, instead of holding its slot
       // until the (possibly much larger) caller budget runs out.
-      return wrapBodyUntilSettle(res, effectiveSignal, cleanup);
+      return wrapBodyUntilSettle(res, effectiveSignal, cleanup, holdLimits);
     } catch (err) {
       cleanup();
       throw err;
     }
   }) as typeof fetch;
+}
+
+export interface ProxiedFetchOptions {
+  /**
+   * Keep a status >= 400 body for the caller to read.  The default cancels
+   * that body so an unread proxied error cannot hold a gate slot.
+   */
+  readErrorBody?: boolean;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Fetch through `fetchImpl` (default global fetch) and cancel an unread
+ * error body.  Pass `readErrorBody` when the caller will consume a
+ * status >= 400 payload.  A 2xx/3xx body is left untouched.
+ */
+export async function proxiedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options?: ProxiedFetchOptions
+): Promise<Response> {
+  const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
+  const response = await fetchImpl(input, init);
+  if (response.status >= 400 && options?.readErrorBody !== true) {
+    await response.body?.cancel().catch(() => undefined);
+  }
+  return response;
 }
 
 /**

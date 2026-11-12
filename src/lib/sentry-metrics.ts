@@ -140,6 +140,46 @@ export function logWarn(message: string, attributes?: LogAttrs): void {
   });
 }
 
+const PROXY_GATE_ALERT_INTERVAL_MS = 10 * 60 * 1000;
+let lastProxyGateAlertAt = 0;
+
+type SentryGauge = (name: string, value: number, options?: { unit?: string }) => void;
+
+/**
+ * Publish proxy-gate counters.  A hold older than 60s files one warning per
+ * ten minutes so a leaked slot is visible without a new issue on every poll.
+ * Fail-soft: metrics must not break `/api/proxy-use`.
+ */
+export function recordProxyGateSnapshot(stats: {
+  inFlight: number;
+  queued: number;
+  oldestHoldMs: number;
+}): void {
+  void loadSentry().then((Sentry) => {
+    try {
+      const gauge = (Sentry?.metrics as { gauge?: SentryGauge } | undefined)?.gauge;
+      gauge?.("proxy.gate.in_flight", stats.inFlight);
+      gauge?.("proxy.gate.queued", stats.queued);
+      gauge?.("proxy.gate.oldest_hold_ms", stats.oldestHoldMs, { unit: "millisecond" });
+      const now = Date.now();
+      if (stats.oldestHoldMs > 60_000 && now - lastProxyGateAlertAt >= PROXY_GATE_ALERT_INTERVAL_MS) {
+        lastProxyGateAlertAt = now;
+        Sentry?.captureMessage("proxy concurrency gate oldest hold exceeds 60s", {
+          level: "warning",
+          tags: { area: "proxy-gate" },
+          extra: {
+            inFlight: stats.inFlight,
+            queued: stats.queued,
+            oldestHoldMs: stats.oldestHoldMs
+          }
+        });
+      }
+    } catch {
+      // Fail-soft
+    }
+  });
+}
+
 /** Sparse Sentry structured log. No-op when the SDK is absent or uninitialized. */
 export function logError(message: string, attributes?: LogAttrs): void {
   void loadSentry().then((Sentry) => {
