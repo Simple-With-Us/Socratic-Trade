@@ -32,6 +32,7 @@ describe("health probe isolation", () => {
     process.env.HEALTH_SNAPSHOT_TTL_MS = "60000";
     const { db, cache } = await load();
     cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     originals.summaries = cache.healthProbeDeps.getServiceHealthSummaries;
     originals.credits = cache.healthProbeDeps.getOpenRouterCreditStatus;
     db.getDb().prepare("DELETE FROM settings").run();
@@ -44,6 +45,7 @@ describe("health probe isolation", () => {
     if (originals.summaries) cache.healthProbeDeps.getServiceHealthSummaries = originals.summaries;
     if (originals.credits) cache.healthProbeDeps.getOpenRouterCreditStatus = originals.credits;
     cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     delete process.env.HEALTH_SNAPSHOT_TTL_MS;
     await new Promise((resolve) => setImmediate(resolve));
   });
