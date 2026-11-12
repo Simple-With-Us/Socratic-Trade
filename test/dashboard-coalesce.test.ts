@@ -178,6 +178,38 @@ describe("dashboard snapshot coalesce", () => {
       computes: 3
     });
   });
+
+  it("does not join a compute that started before an invalidation", async () => {
+    const { coalesceDashboardSnapshot, dashboardCoalesceKey, invalidateDashboardCoalesce } = await import(
+      "../src/lib/dashboard-coalesce"
+    );
+    const key = dashboardCoalesceKey("alice", "ACCT-1");
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let slow = 0;
+    const first = coalesceDashboardSnapshot(key, () => {
+      slow += 1;
+      return gate.then(() => ({ slow }));
+    });
+    invalidateDashboardCoalesce("alice", "ACCT-1");
+    let fast = 0;
+    const second = coalesceDashboardSnapshot(key, async () => {
+      fast += 1;
+      return { fast };
+    });
+    const raced = await Promise.race([
+      second.then((value) => ({ kind: "second" as const, value })),
+      new Promise<{ kind: "hung" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "hung" }), 50);
+      })
+    ]);
+    expect(raced).toEqual({ kind: "second", value: { fast: 1 } });
+    release();
+    expect(await first).toEqual({ slow: 1 });
+    expect(fast).toBe(1);
+  });
 });
 
 describe("GET /api/dashboard", () => {

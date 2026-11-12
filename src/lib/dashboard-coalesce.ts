@@ -9,8 +9,8 @@
  * finished snapshot, and the in-flight compute still fills the inner cache.
  *
  * Keys match dashboardSnapshotCacheKey (userId + selected account). A write that
- * already clears the inner cache clears this memo too, and an in-flight compute
- * does not get stored after that write.
+ * already clears the inner cache clears this memo too. An in-flight compute does
+ * not get stored after that write, and a later request does not join it.
  */
 
 import "server-only";
@@ -74,6 +74,9 @@ function bumpGeneration(key: string): void {
   const current = store();
   current.generation.set(key, (current.generation.get(key) ?? 0) + 1);
   current.memos.delete(key);
+  // Callers that already joined keep that promise. A request that arrives after
+  // the write must not join a compute that started before the write.
+  current.inflight.delete(key);
 }
 
 function keysFor(userId?: string, accountNumber?: string | null): string[] {
@@ -89,7 +92,7 @@ function keysFor(userId?: string, accountNumber?: string | null): string[] {
   return [...all].filter((key) => key.startsWith(prefix));
 }
 
-/** Drop memos. In-flight callers still share the compute that is already running. */
+/** Drop memos. Callers already waiting keep their promise. New callers recompute. */
 export function invalidateDashboardCoalesce(userId?: string, accountNumber?: string | null): void {
   if (userId == null) {
     for (const key of keysFor()) bumpGeneration(key);
