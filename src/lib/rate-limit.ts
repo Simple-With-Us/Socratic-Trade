@@ -160,6 +160,8 @@ export const RATE_LIMITS = {
   weeklyDigest: { limit: 30, windowMs: 60_000 },
   /** Weekly screens refresh: grouped daily + per-symbol OHLC.  Keep this tight. */
   weeklyDigestRefresh: { limit: 6, windowMs: 60_000 },
+  /** Whole-market grouped daily bars. One call is every ticker, so keep it with the grouped-daily cap. */
+  flatfile: { limit: 6, windowMs: 60_000 },
   /** Paid strategy tuning performs a full LLM review; contain retries and compromised-session spend. */
   strategyTuning: { limit: 10, windowMs: 60_000 },
   /** Peer reads from App A (congress.trade) */
