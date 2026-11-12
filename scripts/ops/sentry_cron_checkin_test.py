@@ -217,8 +217,13 @@ class InstallerHostCheckTest(unittest.TestCase):
     INSTALLERS = ("install-litestream-l1-trim.sh", "install-st-container-restart-monitor.sh")
 
     def setUp(self) -> None:
-        if os.geteuid() == 0:
-            self.skipTest("installer tests must not run as root; they would mutate the host")
+        # Refusal exits at the host check, before the root check or any writes.
+        # Acceptance tests pass the host check and would install units as root.
+        if os.geteuid() == 0 and self._testMethodName in {
+            "test_installers_accept_fqdn_expected_host_when_hostname_is_short",
+            "test_installers_accept_short_expected_host_when_hostname_is_fqdn",
+        }:
+            self.skipTest("installer acceptance tests must not run as root; they would mutate the host")
 
     def _env(self, bindir: Path | None = None) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
