@@ -27,7 +27,11 @@ import {
   scanLitestreamRuntimeLogFile
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { toPublicTradingLiveness, TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY } from "@/lib/trading-liveness";
+import {
+  toPublicTradingLiveness,
+  tradingLivenessSentryStateSignature,
+  TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY
+} from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { yieldEventLoop } from "@/lib/slow-sync-guard";
 import { safeErrorMessage } from "@/lib/telemetry-sanitize";
@@ -193,7 +197,8 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
       "scheduler_stale",
       lastTick
         ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
-        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`
+        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`,
+      "scheduler_stale"
     );
   } else {
     // Recovery: reset the escalation episode clock so the next stale episode
@@ -278,6 +283,11 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
       const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
         : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
+      const livenessSentrySignature = tradingLivenessSentryStateSignature(
+        liveness?.accounts,
+        fleetFullyDark,
+        publicLiveness.autonomyEligibleAccounts
+      );
       const alertAccounts =
         degradedAccounts.length > 0
           ? degradedAccounts.map((a) => ({
@@ -288,7 +298,8 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
             ? [{ accountKey: TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY, accountLabel: "Fleet fully dark" }]
             : [];
       void alertLivenessWarning("trading_liveness_degraded", livenessMessage, {
-        accounts: alertAccounts
+        accounts: alertAccounts,
+        stateSignature: livenessSentrySignature
       });
     } else if (liveness) {
       // Recovery: reset the escalation episode clock.  Only a real healthy
