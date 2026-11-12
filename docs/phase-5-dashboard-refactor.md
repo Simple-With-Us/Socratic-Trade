@@ -54,3 +54,7 @@ any user-visible number or trading behavior:
   (audit §6.1) — a larger `React.memo`/selector-split effort, not attempted here.
 
 See `docs/rollouts/2026-07-01-performance-efficiency.md`.
+
+## 2026-11-12 — dashboard request single-flight (ST-4620)
+
+`getDashboardSnapshot` is unchanged.  `coalesceUserDashboardSnapshot` in `src/lib/dashboard-coalesce.ts` wraps it from `app/api/dashboard/route.ts` and `app/api/mobile/snapshot/route.ts`.  The key is the user id plus the selected account.  Concurrent callers share one compute.  A finished snapshot is remembered for 8 seconds.  `invalidateDashboardSnapshotCache` drops that memo.  The console shares one `fetchDashboard` per tab and skips a poll tick while a request is in flight or while a slow response is backing off.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.

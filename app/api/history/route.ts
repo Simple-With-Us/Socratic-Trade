@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +26,9 @@ export async function GET(req: Request) {
   }
 
   try {
-    const bars = await fetchDailyOHLC(symbol, Date.now(), resolveRequestUserId(req));
+    const userId = resolveRequestUserIdOrResponse(req);
+    if (userId instanceof Response) return userId;
+    const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
     if (!bars || bars.length === 0) {
       return NextResponse.json({ symbol, bars: [], note: "no price history available" });
     }

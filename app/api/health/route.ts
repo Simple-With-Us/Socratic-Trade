@@ -27,15 +27,23 @@ import {
   scanLitestreamRuntimeLogFile
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
-import { toPublicTradingLiveness, TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY } from "@/lib/trading-liveness";
+import {
+  toPublicTradingLiveness,
+  tradingLivenessSentryStateSignature,
+  TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY
+} from "@/lib/trading-liveness";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { yieldEventLoop } from "@/lib/slow-sync-guard";
 import { safeErrorMessage } from "@/lib/telemetry-sanitize";
 import {
+  admitAnonymousHeavyHealthProbe,
   healthProbeDeps,
+  onceHeavyRecomputePermission,
   readWarmHealthSnapshot,
+  runHeavyHealthSection,
   storeHealthSnapshot,
-  type HealthPayload
+  type HealthPayload,
+  type HeavyRecomputePermission
 } from "@/lib/health-probe-cache";
 import { statSync, statfsSync } from "fs";
 import { dirname } from "path";
@@ -143,7 +151,11 @@ function jsonHealth(payload: HealthPayload, detailed: boolean): Response {
 // schedulerStale, tradingLiveness.degraded, and storage.litestreamTiersDegraded are JSON flags
 // that MUST stay 200 so a Coolify restart cannot "heal" them.  Page those with keyword/JSON
 // monitors — see docs/runbooks/uptime-health-json-monitors.md.
-async function assembleHealth(): Promise<HealthPayload> {
+type AssembleHealthOptions = {
+  recomputeHeavySections: HeavyRecomputePermission;
+};
+
+async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPayload> {
   const checks: Record<string, unknown> = {};
   let ok = true;
   // Always collect the operator fields.  GET projects them away for anonymous
@@ -187,7 +199,8 @@ async function assembleHealth(): Promise<HealthPayload> {
       "scheduler_stale",
       lastTick
         ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
-        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`
+        : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`,
+      "scheduler_stale"
     );
   } else {
     // Recovery: reset the escalation episode clock so the next stale episode
@@ -272,6 +285,11 @@ async function assembleHealth(): Promise<HealthPayload> {
       const livenessMessage = fleetFullyDark
         ? `Trading liveness is degraded: fleet is fully dark — ${publicLiveness.autonomyEligibleAccounts} account(s) eligible to trade, none active.`
         : `Trading liveness is degraded: ${publicLiveness.degraded} active account(s) have stalled or failed repeatedly.${degradedDetail ? ` ${degradedDetail}` : ""}`;
+      const livenessSentrySignature = tradingLivenessSentryStateSignature(
+        liveness?.accounts,
+        fleetFullyDark,
+        publicLiveness.autonomyEligibleAccounts
+      );
       const alertAccounts =
         degradedAccounts.length > 0
           ? degradedAccounts.map((a) => ({
@@ -282,7 +300,8 @@ async function assembleHealth(): Promise<HealthPayload> {
             ? [{ accountKey: TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY, accountLabel: "Fleet fully dark" }]
             : [];
       void alertLivenessWarning("trading_liveness_degraded", livenessMessage, {
-        accounts: alertAccounts
+        accounts: alertAccounts,
+        stateSignature: livenessSentrySignature
       });
     } else if (liveness) {
       // Recovery: reset the escalation episode clock.  Only a real healthy
@@ -474,35 +493,54 @@ async function assembleHealth(): Promise<HealthPayload> {
   // USD FIGURES and key labels are operator-only. `ok` MUST stay the first serialized key: the
   // Uptime Robot keyword monitor matches `"openrouterCredits":{"ok":false`.
   try {
-    // Bound the public probe.  A cache-miss credits fetch used to wait the
-    // full 8s timeout and, stacked behind a busy scheduler tick, pushed
-    // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
-    // downtime with a false "OpenRouter credits low" on the same URL.
-    const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
-    if (credits) {
+  // Bound the public probe.  A cache-miss credits fetch used to wait the
+  // full 8s timeout and, stacked behind a busy scheduler tick, pushed
+  // `/api/health` past UptimeRobot's 30s — pairing socratictrade.com
+  // downtime with a false "OpenRouter credits low" on the same URL.
+    const openrouterSection = await runHeavyHealthSection(
+      "openrouter",
+      async () => {
+        const credits = await healthProbeDeps.getOpenRouterCreditStatus(Date.now(), fetch, { maxWaitMs: 1_500 });
+        if (!credits) return null;
+        // Cache only the credit read.  The live connection-health summary for openrouter is
+        // merged below on every request so a cache hit never replays a stale dependency state.
+        return {
+          openrouterCredits: {
+            ok: credits.ok,
+            remainingUsd: credits.remainingUsd,
+            totalUsd: credits.totalUsd,
+            usedUsd: credits.usedUsd,
+            ...(credits.problemKeyLabels?.length ? { problemKeyLabels: credits.problemKeyLabels } : {}),
+            thresholdUsd: credits.thresholdUsd,
+            keyLimitThresholdUsd: credits.keyLimitThresholdUsd,
+            source: credits.source,
+            keysChecked: credits.keysChecked,
+            keysWithLimit: credits.keysWithLimit,
+            keysLimitReached: credits.keysLimitReached,
+            keysLimitLow: credits.keysLimitLow,
+            reasons: credits.reasons,
+            checkedAt: credits.checkedAt,
+            ...(credits.error ? { error: credits.error } : {})
+          }
+        };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+    const creditsPayload = openrouterSection.value;
+    if (creditsPayload) {
       const deps = (checks.dependencies ?? {}) as Record<string, { ok: boolean; degraded?: boolean }>;
       const existing = deps.openrouter;
+      const creditsOk = creditsPayload.openrouterCredits.ok;
       deps.openrouter = {
-        ok: (existing ? existing.ok : true) && credits.ok,
-        degraded: (existing?.degraded) || (credits.ok ? undefined : true)
+        ok: (existing ? existing.ok : true) && creditsOk,
+        degraded: (existing?.degraded) || (creditsOk ? undefined : true)
       };
       checks.dependencies = deps;
       checks.openrouterCredits = {
-        ok: credits.ok,
-        remainingUsd: credits.remainingUsd,
-        totalUsd: credits.totalUsd,
-        usedUsd: credits.usedUsd,
-        ...(credits.problemKeyLabels?.length ? { problemKeyLabels: credits.problemKeyLabels } : {}),
-        thresholdUsd: credits.thresholdUsd,
-        keyLimitThresholdUsd: credits.keyLimitThresholdUsd,
-        source: credits.source,
-        keysChecked: credits.keysChecked,
-        keysWithLimit: credits.keysWithLimit,
-        keysLimitReached: credits.keysLimitReached,
-        keysLimitLow: credits.keysLimitLow,
-        reasons: credits.reasons,
-        checkedAt: credits.checkedAt,
-        ...(credits.error ? { error: credits.error } : {})
+        ...creditsPayload.openrouterCredits,
+        ...(openrouterSection.cachedAgeSeconds != null
+          ? { cachedAgeSeconds: openrouterSection.cachedAgeSeconds }
+          : {})
       };
     }
   } catch {
@@ -514,32 +552,57 @@ async function assembleHealth(): Promise<HealthPayload> {
   // Disk and database headroom check (purely advisory, never fails the health probe)
   try {
     const dbPath = databasePath();
-    const walPath = `${dbPath}-wal`;
-    const dbDir = dirname(dbPath);
-    let latestLocalActivityAtMs = 0;
+    const diskSection = await runHeavyHealthSection(
+      "disk",
+      async () => {
+        const walPath = `${dbPath}-wal`;
+        const dbDir = dirname(dbPath);
+        let latestLocalActivityAtMs = 0;
 
-    let dbSizeBytes = 0;
-    try {
-      const dbStat = statSync(dbPath);
-      dbSizeBytes = dbStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, dbStat.mtimeMs);
-    } catch {}
+        let dbSizeBytes = 0;
+        try {
+          const dbStat = statSync(dbPath);
+          dbSizeBytes = dbStat.size;
+          latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, dbStat.mtimeMs);
+        } catch {}
 
-    let walSizeBytes = 0;
-    try {
-      const walStat = statSync(walPath);
-      walSizeBytes = walStat.size;
-      latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, walStat.mtimeMs);
-    } catch {}
+        let walSizeBytes = 0;
+        try {
+          const walStat = statSync(walPath);
+          walSizeBytes = walStat.size;
+          latestLocalActivityAtMs = Math.max(latestLocalActivityAtMs, walStat.mtimeMs);
+        } catch {}
 
-    let freeBytes = 0;
-    let totalBytes = 0;
-    try {
-      const stats = statfsSync(dbDir);
-      freeBytes = stats.bavail * stats.bsize;
-      totalBytes = stats.blocks * stats.bsize;
-    } catch {}
+        let freeBytes = 0;
+        let totalBytes = 0;
+        try {
+          const stats = statfsSync(dbDir);
+          freeBytes = stats.bavail * stats.bsize;
+          totalBytes = stats.blocks * stats.bsize;
+        } catch {}
 
+        const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
+        const walLarge = walSizeBytes > 500 * 1024 * 1024;
+        let diskDerivedStorageDegraded = false;
+        if (diskLow || walLarge) {
+          diskDerivedStorageDegraded = true;
+          if (diskLow) {
+            void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
+          }
+          if (walLarge) {
+            void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+          }
+        }
+        return { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+    const { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded } =
+      diskSection.value;
+
+    const litestreamSection = await runHeavyHealthSection(
+      "litestream",
+      async () => {
     const liveMode = process.env.DB_BOOTSTRAP === "live";
     const litestreamStatePath = process.env.LITESTREAM_STATE_PATH?.trim() || defaultLitestreamStatePath(dbPath);
     const freshness = await getLitestreamRuntimeHealth({
@@ -590,11 +653,7 @@ async function assembleHealth(): Promise<HealthPayload> {
     // field below stays public because the credential-less deploy-verify runbook reads exactly
     // those, and `storageDegraded` (computed from the raw numbers, not from this object) keeps the
     // disk/WAL thresholds visible to an anonymous monitor without publishing the capacity itself.
-    checks.storage = {
-      dbSizeBytes,
-      walSizeBytes,
-      freeBytes,
-      totalBytes,
+    const storageBody = {
       litestreamAgeSeconds,
       litestreamState,
       litestreamStatus: freshness.state === "known" ? freshness.status : null,
@@ -628,17 +687,9 @@ async function assembleHealth(): Promise<HealthPayload> {
       r2Weekly: getR2WeeklyHealthStatus(),
     };
 
-    // Thresholds:
-    // Disk free space < 1 GB or WAL size > 500 MB or Litestream last-sync age > 1 hour (3600s)
-    const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
-    const walLarge = walSizeBytes > 500 * 1024 * 1024;
-
-    if (diskLow || walLarge || litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
-      checks.storageDegraded = true;
-
-      // Send a one-shot needs-attention notification/alert via the notifier if not sent recently
-      if (diskLow) void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
-      if (walLarge) void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+    let litestreamDerivedStorageDegraded = false;
+    if (litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
+      litestreamDerivedStorageDegraded = true;
       for (const reason of litestreamAssessment.reasons) {
         if (reason === "stale") {
           void alertStorageWarning("litestream_replication_stale", `Litestream WAL replication has not synced in ${Math.round((litestreamAgeSeconds ?? 0) / 60)} minutes.`);
@@ -693,6 +744,26 @@ async function assembleHealth(): Promise<HealthPayload> {
         `Litestream per-level backup monitoring is blind to ${litestreamTiers.notObservableTiers} of ${litestreamTiers.tiers.length} compaction levels (replica inventory: ${litestreamTiers.remoteInventoryState}). A wedged compaction at those levels would not be detected.`
       );
     }
+
+        return { storageBody, litestreamDerivedStorageDegraded };
+      },
+      { recomputeHeavySections: options.recomputeHeavySections }
+    );
+
+    checks.storage = {
+      dbSizeBytes,
+      walSizeBytes,
+      freeBytes,
+      totalBytes,
+      ...litestreamSection.value.storageBody,
+      ...(diskSection.cachedAgeSeconds != null ? { diskCachedAgeSeconds: diskSection.cachedAgeSeconds } : {}),
+      ...(litestreamSection.cachedAgeSeconds != null
+        ? { litestreamCachedAgeSeconds: litestreamSection.cachedAgeSeconds }
+        : {})
+    };
+    if (diskDerivedStorageDegraded || litestreamSection.value.litestreamDerivedStorageDegraded) {
+      checks.storageDegraded = true;
+    }
   } catch {
     // never let storage monitoring break the health probe — still emit the monitor field
     if (!checks.storage || typeof checks.storage !== "object") {
@@ -707,9 +778,18 @@ async function assembleHealth(): Promise<HealthPayload> {
 
 export async function GET(request: Request) {
   const detailed = authorizeOpsRequest(request);
-  const warm = readWarmHealthSnapshot(assembleHealth);
+  // The background refresh is not this caller's work: it always recomputes heavy sections
+  // (still bounded by the section TTL and single-flight), so a throttled client cannot make
+  // the next snapshot reuse stale slots and skip their storage alerts.
+  const warm = readWarmHealthSnapshot(() => assembleHealth({ recomputeHeavySections: true }));
   if (warm) return jsonHealth(warm, detailed);
-  const payload = await assembleHealth();
+  // Cold path only.  Admission is charged lazily, the first time a heavy section actually
+  // needs to recompute, so warm-snapshot and heavy-cache hits never consume the budget.
+  const payload = await assembleHealth({
+    recomputeHeavySections: onceHeavyRecomputePermission(
+      () => admitAnonymousHeavyHealthProbe(request, detailed).recomputeHeavySections
+    )
+  });
   storeHealthSnapshot(payload);
   return jsonHealth(payload, detailed);
 }

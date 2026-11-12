@@ -1,12 +1,14 @@
 import { deleteStrategyProfile, getStrategyProfile, updateStrategyProfile } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const profile = getStrategyProfile(id, resolveRequestUserId(request));
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  const profile = getStrategyProfile(id, userId);
   if (!profile) return new NextResponse("Profile not found.", { status: 404 });
   return NextResponse.json(profile);
 }
@@ -14,7 +16,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 export async function PUT(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   const body = await request.json();
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   try {
     const profile = updateStrategyProfile(id, {
       name: typeof body.name === "string" ? body.name.trim() : undefined,
@@ -32,7 +35,8 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
 
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   try {
     deleteStrategyProfile(id, userId);
     return new NextResponse(null, { status: 204 });
