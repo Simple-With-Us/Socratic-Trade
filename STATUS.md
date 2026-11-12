@@ -3,6 +3,11 @@
 **What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
 
 **Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
