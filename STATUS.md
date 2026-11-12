@@ -2,7 +2,7 @@
 
 **What.**  Twelve Data, Tiingo, Marketstack, and ROIC open an in-memory per-credential hold on HTTP 429 (Retry-After, otherwise exponential backoff) and on HTTP 402 (six hours).  While that hold is cooling, the quote chain skips the lane before any network call, so the skip writes no health row and no failed span.  Open holds are listed on `GET /api/health` (`checks.quoteProviderBreakers`) and `GET /api/ops/snapshot` (`quoteProviderBreakers`) and do not change health `ok`.  Error response bodies are cancelled so a proxy gate slot can settle.  `src/lib/proxy-fetch.ts` and `src/lib/yahoo-finance.ts` are untouched.  Rollout: `docs/rollouts/2026-11-12-st-4606-quote-provider-breakers.md`.
 
-**Next.**  PR is against `main`.  Do not merge and do not enable auto-merge.  `verify` is the gate.
+**Next.**  PR is against `main`.  Do not merge and do not enable auto-merge.  `verify` is the gate.  PagerDuty #611 stays the existing Sentry HTTP trace sample.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 

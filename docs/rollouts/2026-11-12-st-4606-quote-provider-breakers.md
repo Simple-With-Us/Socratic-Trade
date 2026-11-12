@@ -52,6 +52,8 @@ NODE_OPTIONS=--max-old-space-size=4096 npm run build
 - Hermetic `npm test` (injected provider keys unset, matching CI): 902 files passed, 1 skipped, 10251 tests passed, 42 skipped.
 - `npm run build` exited 0 with a 4 GB Node heap.  The default heap aborted during webpack.
 
+PagerDuty #611 is the existing Sentry HTTP trace failure rate (`tracesSampleRate` in `sentry.server.config.ts`, default 0.2).  This change adds no new metric and no alert.  A cooling skip returns before `fetch`, so that call does not open a failed HTTP span.  After deploy, the same PagerDuty #611 signal is the check that the rate falls.  Open holds stay on `GET /api/health` and `GET /api/ops/snapshot`.
+
 ## Next steps & blockers
 
 - Open the PR against `main`.  Do not merge and do not enable auto-merge.
