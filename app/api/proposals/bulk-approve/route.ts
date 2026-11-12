@@ -6,7 +6,7 @@ import {
   liveBatchApprovalText
 } from "@/lib/strategy";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "@/lib/strategy-execution";
@@ -63,7 +63,8 @@ export async function POST(request: Request) {
       liveConfirmation?: { typedText?: unknown };
       userId?: unknown;
     };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const proposalIds = Array.isArray(body.proposalIds)
       ? Array.from(new Set(body.proposalIds.filter((id): id is string => typeof id === "string" && id.length > 0)))
       : [];
