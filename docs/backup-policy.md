@@ -136,7 +136,7 @@ about.  Three checks run at different depths:
 |---|---|---|---|
 | **Pre-upload artifact verification** | The file about to become the cold archive is a coherent SQLite database that still contains trading state | `src/lib/r2-cold-snapshot.ts` — `PRAGMA integrity_check` plus non-empty assertions on `audit_events`, `trade_proposals`, `portfolio_snapshots`, `connected_accounts`, `settings`, `llm_usage`, run in the snapshot child before a single byte is uploaded | every weekly run |
 | **Cold-archive restore drill** | The object *in R2* can be downloaded, decompressed, and opened as a working database | `scripts/ops/verify-cold-snapshot-restore.mjs` | monthly, and after any change to the cold-snapshot lane |
-| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` | quarterly, and after any Litestream version or config change |
+| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` (manual); host timer `st-litestream-restore-drill` (weekly) | weekly automated on host (Sunday off-hours) **plus** manual after any Litestream version or config change |
 
 Two design notes that are easy to get wrong:
 
@@ -151,6 +151,27 @@ Two design notes that are easy to get wrong:
 Record every drill result in `docs/rollouts/YYYY-MM-DD-<slug>.md` and on THE BOARD.  A drill
 that was run but not written down is a drill that will be run again next quarter by someone
 who cannot tell whether it ever passed.
+
+### Running the Litestream B2 restore drill
+
+Manual (any time, on **fleet-hetzner-nbg1** host shell — not in the container):
+
+```bash
+# Export AWS_* for the B2 replica from a trusted source first (never log values).
+bash scripts/litestream-restore-drill.sh
+```
+
+Scheduled (after owner install — see `docs/runbooks/st-litestream-restore-drill.md`):
+
+```bash
+bash scripts/ops/install-st-litestream-restore-drill.sh
+# Fill /etc/default/st-litestream-restore-drill (mode 0600) from an Infisical service token.
+systemctl list-timers st-litestream-restore-drill.timer
+```
+
+The wrapper requires **2.2x** live DB free space on the scratch filesystem; the manual script
+defaults to **1.0x** unless `RESTORE_DRILL_MIN_FREE_TENTHS` is set.  Status JSON:
+`/var/lib/st-ops/litestream-restore-drill-status.json`.
 
 ### Running the cold-archive drill
 
