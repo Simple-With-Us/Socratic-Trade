@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
