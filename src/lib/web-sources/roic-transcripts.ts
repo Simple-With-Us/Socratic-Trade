@@ -14,7 +14,10 @@
 // (free=2, individual=20, professional=40 app cap) unless ROIC_TRANSCRIPTS_QUARTERS_PER_SYMBOL
 // overrides. Per-run fetch budget follows the same tier (free-safe 8, Individual default 80).
 
-import { fetchWithRetry } from "../data-providers";
+import "server-only";
+import { z } from "zod";
+import { CircuitOpenError, apiCircuitBreakerDisabled, isPaidQuoteBreakerCooling, quoteProvider402HoldMs, quoteRetryAfterCapMs } from "../api-circuit-breaker";
+import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
 import {
@@ -41,8 +44,10 @@ import {
 import { hasIngestedAccession, insertIngestedAccession } from "../db-learning";
 import { getInternalSetting, setInternalSetting } from "../db-settings";
 import { normalizeSymbol } from "../money";
+import { retryAfterDelayMs } from "../network-errors";
 import { admitProviderRequests, withProviderLimit } from "../provider-rate-limit";
 import { lookupRegisteredPlanTier, roicTranscriptQuartersForPlan } from "../provider-tier-plan";
+import { cancelResponseBody } from "../response-body";
 import {
   ROIC_TRANSCRIPT_DOC_TYPE,
   ROIC_TRANSCRIPT_SOURCE,
@@ -351,6 +356,8 @@ export interface RoicTranscriptRefreshResult {
   phase: RoicIngestPhase;
   /** Walk paused so a Manual Run once / strategy run can reach Green. */
   pausedForStrategyRun?: boolean;
+  /** Walk paused because the ROIC credential is in a transcript hold. */
+  pausedForProviderHold?: boolean;
 }
 
 const roicRefreshHost = globalThis as unknown as {
@@ -498,18 +505,157 @@ export function publishedAtIso(date: string | undefined, year: number, quarter: 
   return new Date(Date.UTC(year, month - 1, 28, 16, 0, 0)).toISOString();
 }
 
-async function roicGetJson(
+const RoicCallListSchema = z.union([
+  z.array(z.unknown()),
+  z.object({ data: z.array(z.unknown()).optional() }).passthrough()
+]);
+const RoicTranscriptSchema = z.object({
+  transcript: z.unknown().optional(),
+  content: z.unknown().optional(),
+  text: z.unknown().optional(),
+  body: z.unknown().optional(),
+  date: z.unknown().optional(),
+  fiscal_year: z.unknown().optional(),
+  year: z.unknown().optional(),
+  fiscal_quarter: z.unknown().optional(),
+  quarter: z.unknown().optional()
+}).passthrough();
+
+type RoicFetchOpts = {
+  service: "roic";
+  keySource: "env" | "user" | "none";
+  credentialId?: string;
+  userId?: string;
+  suppressHealthStatuses: number[];
+};
+
+/** Same first step politeFetch uses before a 429 retry. */
+const ROIC_HEADERLESS_RETRY_MS = 600;
+/** The transcript walk has no time budget and tries up to three identifiers. */
+const ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS = 5_000;
+
+// A long transcript Retry-After must not sleep the walk and must not open the
+// shared quote lane. This map only skips later transcript calls for that key.
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticRoicTranscriptHoldUntil: Map<string, number> | undefined;
+}
+const roicTranscriptHoldUntil: Map<string, number> =
+  globalThis.__socraticRoicTranscriptHoldUntil ??
+  (globalThis.__socraticRoicTranscriptHoldUntil = new Map<string, number>());
+
+function roicTranscriptHoldKey(opts: RoicFetchOpts): string {
+  return `${opts.keySource}\0${opts.credentialId ?? ""}`;
+}
+
+function sweepExpiredRoicTranscriptHolds(now: number): void {
+  for (const [key, until] of roicTranscriptHoldUntil) {
+    if (until <= now) roicTranscriptHoldUntil.delete(key);
+  }
+}
+
+function roicTranscriptRateHoldCooling(opts: RoicFetchOpts, now = Date.now()): boolean {
+  if (apiCircuitBreakerDisabled()) return false;
+  const key = roicTranscriptHoldKey(opts);
+  const until = roicTranscriptHoldUntil.get(key);
+  if (until == null) return false;
+  if (until <= now) {
+    roicTranscriptHoldUntil.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function deferRoicTranscriptCredential(opts: RoicFetchOpts, holdMs: number, now = Date.now()): void {
+  if (apiCircuitBreakerDisabled() || holdMs <= 0) return;
+  sweepExpiredRoicTranscriptHolds(now);
+  const key = roicTranscriptHoldKey(opts);
+  const until = now + holdMs;
+  const existing = roicTranscriptHoldUntil.get(key) ?? 0;
+  if (until > existing) roicTranscriptHoldUntil.set(key, until);
+}
+
+/** Test-only: clear transcript Retry-After holds. */
+export function resetRoicTranscriptRateHold(): void {
+  roicTranscriptHoldUntil.clear();
+}
+
+async function roicTranscriptCredentialCooling(userId?: string): Promise<boolean> {
+  const keyInfo = resolveApiKeyWithSource("roic", userId);
+  if (!keyInfo.key) return false;
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
+  if (isPaidQuoteBreakerCooling("roic", keyInfo.source, Date.now(), credentialId)) return true;
+  return roicTranscriptRateHoldCooling({
+    service: "roic",
+    keySource: keyInfo.source,
+    credentialId,
+    suppressHealthStatuses: []
+  });
+}
+
+async function roicLimitedFetch(url: string, fetchOpts: RoicFetchOpts): Promise<Response | null> {
+  return withProviderLimit("roic", async () => {
+    try {
+      return await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
+    } catch (err) {
+      if (err instanceof CircuitOpenError) return null;
+      throw err;
+    }
+  });
+}
+
+async function roicGetJson<T>(
   url: string,
-  fetchOpts: { service: "roic"; keySource: "env" | "user" | "none"; userId?: string; suppressHealthStatuses: number[] }
-): Promise<unknown | null> {
+  fetchOpts: RoicFetchOpts,
+  schema: z.ZodType<T>
+): Promise<T | null> {
   const credKey = `${fetchOpts.keySource}:${fetchOpts.userId ?? ""}`;
+  if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource, Date.now(), fetchOpts.credentialId)) return null;
+  if (roicTranscriptRateHoldCooling(fetchOpts)) return null;
   const allowed = admitProviderRequests("roic", credKey, 1);
   if (!allowed) return null;
-  return withProviderLimit("roic", async () => {
-    const res = await fetchWithRetry(url, {}, fetchOpts);
-    if (!res || !res.ok) return null;
-    return await res.json();
-  });
+  const first = await roicLimitedFetch(url, fetchOpts);
+  if (!first) return null;
+  if (first.ok) {
+    const parsed = schema.safeParse(await first.json());
+    return parsed.success ? parsed.data : null;
+  }
+  // 429 is in suppressHealthStatuses, so this call does not open the quote lane.
+  // The second request is reserved on its own. The wait stays outside the limiter.
+  // A header longer than the transcript ceiling skips the retry so one 429 cannot
+  // park the identifier loop for an hour.
+  if (first.status === 402) {
+    await cancelResponseBody(first);
+    deferRoicTranscriptCredential(fetchOpts, quoteProvider402HoldMs());
+    return null;
+  }
+  if (first.status !== 429) {
+    await cancelResponseBody(first);
+    return null;
+  }
+  const headerWait = retryAfterDelayMs(first) ?? 0;
+  await cancelResponseBody(first);
+  if (headerWait > ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS) {
+    deferRoicTranscriptCredential(fetchOpts, Math.min(headerWait, quoteRetryAfterCapMs()));
+    return null;
+  }
+  if (admitProviderRequests("roic", credKey, 1) < 1) return null;
+  const waitMs = Math.max(headerWait, ROIC_HEADERLESS_RETRY_MS);
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  const second = await roicLimitedFetch(url, fetchOpts);
+  if (!second) return null;
+  if (!second.ok) {
+    if (second.status === 402) {
+      deferRoicTranscriptCredential(fetchOpts, quoteProvider402HoldMs());
+    } else if (second.status === 429) {
+      const again = retryAfterDelayMs(second) ?? 0;
+      if (again > 0) deferRoicTranscriptCredential(fetchOpts, Math.min(again, quoteRetryAfterCapMs()));
+    }
+    await cancelResponseBody(second);
+    return null;
+  }
+  const parsed = schema.safeParse(await second.json());
+  return parsed.success ? parsed.data : null;
 }
 
 export async function fetchRoicCallIndex(
@@ -521,11 +667,13 @@ export async function fetchRoicCallIndex(
   if (!normalized) return { rows: [] };
   const keyInfo = resolveApiKeyWithSource("roic", userId);
   if (!keyInfo.key) return { rows: [] };
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
   const fetchOpts = {
     service: "roic" as const,
     keySource: keyInfo.source,
+    credentialId,
     userId,
-    suppressHealthStatuses: [400, 404, 429] as number[]
+    suppressHealthStatuses: [400, 402, 404, 429] as number[]
   };
   for (const identifier of identifiersForRoicFetch(normalized, preferredIdentifier)) {
     const url =
@@ -533,7 +681,7 @@ export async function fetchRoicCallIndex(
       `?identifier=${encodeURIComponent(identifier)}` +
       `&limit=100&order=desc&apikey=${encodeURIComponent(keyInfo.key)}`;
     try {
-      const json = await roicGetJson(url, fetchOpts);
+      const json = await roicGetJson(url, fetchOpts, RoicCallListSchema);
       const rows = parseRoicEarningsCallList(json, normalized);
       if (rows.length > 0) return { rows, identifier };
     } catch (err) {
@@ -558,11 +706,13 @@ export async function fetchRoicTranscript(
   const keyInfo = resolveApiKeyWithSource("roic", userId);
   if (!keyInfo.key) return null;
 
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
   const fetchOpts = {
     service: "roic" as const,
     keySource: keyInfo.source,
+    credentialId,
     userId,
-    suppressHealthStatuses: [400, 404, 429] as number[]
+    suppressHealthStatuses: [400, 402, 404, 429] as number[]
   };
 
   const preferred = readRoicCallIndexArtifact(normalized)?.identifier;
@@ -571,7 +721,7 @@ export async function fetchRoicTranscript(
       `${ROIC_V3_BASE}/earnings-calls/${encodeURIComponent(identifier)}` +
       `?fiscal_year=${year}&fiscal_quarter=${quarter}&format=json&apikey=${encodeURIComponent(keyInfo.key)}`;
     try {
-      const json = await roicGetJson(url, fetchOpts);
+      const json = await roicGetJson(url, fetchOpts, RoicTranscriptSchema);
       const parsed = parseRoicTranscriptResponse(json, normalized, year, quarter);
       if (parsed) return parsed;
     } catch (err) {
@@ -586,7 +736,7 @@ export async function fetchRoicTranscript(
     const latestUrl =
       `${ROIC_V2_BASE}/company/earnings-calls/latest/${encodeURIComponent(normalized)}` +
       `?apikey=${encodeURIComponent(keyInfo.key)}`;
-    const json = await roicGetJson(latestUrl, fetchOpts);
+    const json = await roicGetJson(latestUrl, fetchOpts, RoicTranscriptSchema);
     const parsed = parseRoicTranscriptResponse(json, normalized, year, quarter);
     if (parsed) {
       const matchesPeriod =
@@ -1073,6 +1223,11 @@ async function runRoicTranscriptRefresh(
           writeRoicCursor(queue, nowIso, phase);
           continue;
         }
+        if (indexRows.length === 0 && await roicTranscriptCredentialCooling(options?.userId)) {
+          base.pausedForProviderHold = true;
+          writeRoicCursor(queue, nowIso, phase);
+          return;
+        }
       }
 
       const rawPeriods = indexRows.length > 0
@@ -1117,6 +1272,11 @@ async function runRoicTranscriptRefresh(
         try {
           const item = await fetchRoicTranscript(symbol, period.year, period.quarter, options?.userId);
           if (!item) {
+            if (await roicTranscriptCredentialCooling(options?.userId)) {
+              base.pausedForProviderHold = true;
+              symbolDone = false;
+              break;
+            }
             base.skippedNoContent += 1;
             continue;
           }
@@ -1159,7 +1319,8 @@ async function runRoicTranscriptRefresh(
     skippedAlreadyStored: base.skippedAlreadyStored,
     symbolsConsidered: base.symbolsConsidered,
     remaining: base.remaining,
-    phase
+    phase,
+    pausedForProviderHold: base.pausedForProviderHold === true
   });
   return { ...base, due: true };
 }

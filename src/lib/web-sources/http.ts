@@ -6,6 +6,7 @@
 // a single refresh can't burst dozens of parallel requests at a .gov host.
 
 import { resolveApiKey } from "../db";
+import { cancelResponseBody } from "../response-body";
 
 /** Browser-like UA for sites that block obvious bots (Senate eFD, Capitol Trades). */
 export const BROWSER_UA =
@@ -67,6 +68,7 @@ export async function politeFetch(url: string, options: FetchOptions = {}): Prom
         secLimiter.report403();
       }
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await cancelResponseBody(res);
         await sleep(600 * (attempt + 1));
         continue;
       }
@@ -85,13 +87,19 @@ export async function politeFetch(url: string, options: FetchOptions = {}): Prom
 
 export async function politeFetchText(url: string, options: FetchOptions = {}): Promise<string> {
   const res = await politeFetch(url, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  if (!res.ok) {
+    await cancelResponseBody(res);
+    throw new Error(`HTTP ${res.status} for ${url}`);
+  }
   return res.text();
 }
 
 export async function politeFetchJson<T = unknown>(url: string, options: FetchOptions = {}): Promise<T> {
   const res = await politeFetch(url, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  if (!res.ok) {
+    await cancelResponseBody(res);
+    throw new Error(`HTTP ${res.status} for ${url}`);
+  }
   return (await res.json()) as T;
 }
 
