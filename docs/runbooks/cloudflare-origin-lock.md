@@ -23,11 +23,11 @@ Anything else is HTTP 403 with a plain `Forbidden` body.  The same rule applies
 
 Do this only after the firewall step below is in place.  This repository does not set the flag and does not restart production.
 
-1. Confirm Traefik appends its immediate peer to `X-Forwarded-For`. On this host that peer is a Cloudflare edge address, so the rightmost non-proxy hop is in the published ranges. If Traefik forwards only the visitor address, every real user will get 403. Fix the proxy, or use the secret in the next step.
-2. Optional. Put `ORIGIN_LOCK_SECRET` in Infisical for this app. Use at least 16 characters. Add a Cloudflare Transform Rule that sets the request header `x-origin-lock` to that value. Do not commit the value. A short secret is ignored.
-3. Set `REQUIRE_CLOUDFLARE_ORIGIN=1` in the app environment. Accepted values are `1`, `true`, `yes`, and `on`. Restart the app so the process sees it.
-4. Keep the Coolify and Docker health path on `GET /api/live`. `GET /api/health` is not exempt.
-5. Override the proxy list with `ORIGIN_TRUSTED_PROXIES` only if the default private ranges are wrong. A comma-separated CIDR list replaces the default. `none` clears it.
+1. Confirm Traefik appends its immediate peer to `X-Forwarded-For`.  On this host that peer is a Cloudflare edge address, so the rightmost non-proxy hop is in the published ranges.  If Traefik forwards only the visitor address, every real user will get 403.  Fix the proxy, or use the secret in the next step.
+2. Optional.  Put `ORIGIN_LOCK_SECRET` in Infisical for this app.  Use at least 16 characters.  Add a Cloudflare Transform Rule that sets the request header `x-origin-lock` to that value.  Do not commit the value.  A short secret is ignored.
+3. Set `REQUIRE_CLOUDFLARE_ORIGIN=1` in the app environment.  Accepted values are `1`, `true`, `yes`, and `on`.  Restart the app so the process sees it.
+4. Keep the Coolify and Docker health path on `GET /api/live`.  `GET /api/health` is not exempt.
+5. Override the proxy list with `ORIGIN_TRUSTED_PROXIES` only if the default private ranges are wrong.  A comma-separated CIDR list replaces the default.  `none` clears it.
 
 Authenticated Origin Pulls are checked at the TLS terminator, not in this Node process.  The shared header is the in-app stand-in.  Enable Authenticated Origin Pulls on the zone and on Traefik later if you want that TLS check.  This change does not turn it on.
 
@@ -40,6 +40,6 @@ The lists live in `src/lib/cloudflare-ip-ranges.data.ts`.  They were retrieved 
 The app check is not a substitute for a host firewall.  A packet that never reaches Node is the control you want.  Applying it is an operator step on the Hetzner Cloud firewall for `fleet-hetzner-nbg1`.  This change does not call the Hetzner API and does not edit the live firewall.
 
 - Allow inbound TCP 80 and TCP 443 only from the Cloudflare IPv4 and IPv6 CIDRs in `src/lib/cloudflare-ip-ranges.data.ts`.
-- Keep the host's existing admin path (SSH and Tailscale). Do not open 80 or 443 to `0.0.0.0/0` or `::/0`.
+- Keep the host's existing admin path (SSH and Tailscale).  Do not open 80 or 443 to `0.0.0.0/0` or `::/0`.
 - When Cloudflare publishes new ranges, update the firewall and the data file together.
-- Tailscale `100.64.0.0/10` can stay if operators reach the box that way. The app allows that range while the lock is on, and it does not treat it as Cloudflare.
+- Tailscale `100.64.0.0/10` can stay if operators reach the box that way.  The app allows that range while the lock is on, and it does not treat it as Cloudflare.
