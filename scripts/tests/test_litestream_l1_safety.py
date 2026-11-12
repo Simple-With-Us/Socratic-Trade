@@ -245,6 +245,36 @@ class HealPlanTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             HEAL.list_file_versions(partial, "bucket", HEAL.REPLICA_PREFIX)
 
+    def test_list_file_names_pagination_sends_cursor_and_aggregates(self):
+        prefix = HEAL.REPLICA_PREFIX + "0000/"
+        pages = [
+            {"files": [{"fileName": prefix + "a", "fileId": "1"}],
+             "nextFileName": prefix + "b"},
+            {"files": [{"fileName": prefix + "b", "fileId": "2"}]},
+        ]
+        calls = []
+
+        def post(method, payload):
+            self.assertEqual(method, "b2_list_file_names")
+            calls.append(dict(payload))
+            if "startFileName" not in payload:
+                return pages[0]
+            self.assertEqual(payload["startFileName"], prefix + "b")
+            return pages[1]
+
+        rows = HEAL.list_file_names(post, "bucket", prefix)
+        self.assertEqual([row["fileId"] for row in rows], ["1", "2"])
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("startFileName", calls[0])
+
+    def test_list_file_names_repeated_cursor_fails_closed(self):
+        def repeat(method, payload):
+            del method, payload
+            return {"files": [], "nextFileName": "same"}
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            HEAL.list_file_names(repeat, "bucket", HEAL.REPLICA_PREFIX)
+
     def test_guards_refuse_l0_l9_traversal_and_lookalikes(self):
         prefix = HEAL.REPLICA_PREFIX
         allowed = ltx_name(prefix, "0001", 1, 2)

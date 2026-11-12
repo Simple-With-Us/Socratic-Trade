@@ -112,7 +112,8 @@ fi
 # host has the real binary installed (hermetic on the fleet host too).
 DEFAULT_BIN='/usr/local/sbin/litestream-l1-boundary-trim'
 grep -qF -- "-${DEFAULT_BIN}}" "$UNDER_TEST" || {
-  echo "error: default trim path not found in ${UNDER_TEST}" >&2
+  echo "error: default trim path ${DEFAULT_BIN} not found in ${UNDER_TEST}." >&2
+  echo "If the fleet wrapper's LITESTREAM_L1_TRIM_BIN default moved, update DEFAULT_BIN in ${BASH_SOURCE[0]} (and DST_PY in install-litestream-l1-trim.sh) to the same path." >&2
   exit 1
 }
 
