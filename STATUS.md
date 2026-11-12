@@ -2,7 +2,7 @@
 
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
 
-**Next.** Hosted `verify-ios` on the PR, including the lock window that covers an already-presented sheet.  No TestFlight and no deploy.
+**Next.** Hosted `verify-ios` on the review fixes: a canceled bootstrap reloads, overlapping resumes share one load, the stream stays up during that load, foreground return prompts again, and the switcher snapshot is covered while the setting is on.  No TestFlight and no deploy.
 ## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
 
 **What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.

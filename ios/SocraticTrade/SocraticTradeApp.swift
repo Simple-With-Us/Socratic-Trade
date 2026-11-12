@@ -72,6 +72,18 @@ struct ContentView: View {
         !SocraticTradeApp.isScreenshotMode && appLock.requiresLockScreen
     }
 
+    /// Blank cover while Require App Lock is on and the scene is not active, so the
+    /// app-switcher snapshot is not the open session. The prompt stays on `showsAppLock`.
+    private var showsSessionCover: Bool {
+        !SocraticTradeApp.isScreenshotMode && AppLockPolicy.shouldCoverSession(
+            isEnabled: appLock.isEnabled,
+            requiresLockScreen: appLock.requiresLockScreen,
+            sceneIsActive: scenePhase == .active
+        )
+    }
+
+    @State private var liveResumeGate = LiveResumeGate()
+
     /// Set by `onOpenURL` AND by a tapped push notification, consumed (and cleared) by the tab
     /// shell.  Held here rather than inside the shell so a link that arrives before sign-in
     /// still routes: the shell exists in this ZStack the whole time and applies the
@@ -131,7 +143,7 @@ struct ContentView: View {
                     .zIndex(1)
             }
 
-            if showsAppLock {
+            if showsSessionCover {
                 // Covers this stack while the lock window attaches. Presented sheets
                 // live above this stack, so AppLockCoverHost covers those.
                 AppPalette.background
@@ -140,11 +152,15 @@ struct ContentView: View {
                     .accessibilityHidden(true)
             }
         }
-        .accessibilityHidden(showsAppLock)
+        .accessibilityHidden(showsSessionCover)
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
         .background {
-            AppLockCoverHost(isPresented: showsAppLock, controller: appLock)
+            AppLockCoverHost(
+                isPresented: showsSessionCover,
+                requiresAuthentication: showsAppLock,
+                controller: appLock
+            )
         }
         .task {
             guard !didConfigurePush else { return }
@@ -177,8 +193,15 @@ struct ContentView: View {
     }
 
     private func bootstrapIfNeeded() async {
-        if SocraticTradeApp.isScreenshotMode { return }
-        if !store.hasInitialized {
+        let action = AppLockSessionBootstrap.action(
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+            hasInitialized: store.hasInitialized,
+            isAuthenticated: store.isAuthenticated
+        )
+        switch action {
+        case .skip:
+            return
+        case .loadSession:
             await store.load()
             if store.isAuthenticated {
                 store.startEvents()
@@ -187,37 +210,51 @@ struct ContentView: View {
                 // only way to notice.
                 await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
             }
-            return
+        case .resumeLiveSession:
+            await resumeLiveSessionIfNeeded()
         }
-        await resumeLiveSessionIfNeeded()
     }
 
     private func resumeLiveSessionIfNeeded() async {
-        let resumeID = appLock.beginForegroundResume()
-        await AppLiveSessionResume.resumeLiveSession(
-            store: store,
-            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
-            shouldStartEvents: {
-                appLock.isUnlocked && appLock.foregroundResumeID == resumeID
-            }
-        )
+        let outcome = await liveResumeGate.run { [appLock, store] in
+            let resumeID = appLock.beginForegroundResume()
+            return await AppLiveSessionResume.resumeLiveSession(
+                store: store,
+                isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+                shouldStartEvents: {
+                    appLock.sceneIsActive
+                        && appLock.isUnlocked
+                        && appLock.foregroundResumeID == resumeID
+                }
+            )
+        }
+        // The runner already applied its own gate. Only a waiter whose in-flight
+        // resume did not leave the stream up gets one more try, and only while
+        // the scene is still the unlocked foreground.
+        guard outcome.joinedInFlight, !outcome.startedEvents else { return }
+        guard appLock.sceneIsActive, appLock.isUnlocked, store.isAuthenticated else { return }
+        await resumeLiveSessionIfNeeded()
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {
         if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
         case .background:
+            appLock.noteSceneIsActive(false)
             appLock.invalidateForegroundResume()
             store.stopEvents()
             if appLock.isEnabled {
                 appLock.recordDidEnterBackground()
             }
+        case .inactive:
+            break
         case .active:
+            appLock.noteSceneIsActive(true)
             appLock.evaluateForegroundEntry()
             guard appLock.isUnlocked else { return }
             guard store.hasInitialized, store.isAuthenticated else { return }
             Task { await resumeLiveSessionIfNeeded() }
-        default:
+        @unknown default:
             break
         }
     }

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import LocalAuthentication
 import Observation
@@ -23,6 +24,40 @@ enum AppLockPolicy {
         if !isUnlocked { return true }
         guard let lastBackgroundedAt else { return false }
         return now.timeIntervalSince(lastBackgroundedAt) > gracePeriod
+    }
+
+    /// The app-switcher snapshot is taken while the scene is inactive, before
+    /// the grace decision runs on the next active phase. Cover an enabled lock
+    /// for that whole interval. Authentication still waits for `shouldRequireLock`.
+    static func shouldCoverSession(
+        isEnabled: Bool,
+        requiresLockScreen: Bool,
+        sceneIsActive: Bool
+    ) -> Bool {
+        guard isEnabled else { return false }
+        if requiresLockScreen { return true }
+        return !sceneIsActive
+    }
+}
+
+enum AppLockSessionBootstrap {
+    enum Action: Equatable {
+        case skip
+        case loadSession
+        case resumeLiveSession
+    }
+
+    /// A canceled first load sets `hasInitialized` and leaves `isAuthenticated`
+    /// false. That state has to load again. Resume is only for a session that
+    /// is already signed in.
+    static func action(
+        isScreenshotMode: Bool,
+        hasInitialized: Bool,
+        isAuthenticated: Bool
+    ) -> Action {
+        if isScreenshotMode { return .skip }
+        if !hasInitialized || !isAuthenticated { return .loadSession }
+        return .resumeLiveSession
     }
 }
 
@@ -64,6 +99,9 @@ final class AppLockController {
     private(set) var deviceAuthenticationAvailable: Bool
     /// Bumped when a foreground resume must not start the live stream (background, or a newer resume).
     @ObservationIgnored private(set) var foregroundResumeID = 0
+    /// Live scene signal for an in-flight resume. Defaults to active so the first
+    /// unlock can start the stream before SwiftUI delivers the first scene phase.
+    @ObservationIgnored private(set) var sceneIsActive = true
 
     var isEnabled: Bool {
         get { AppLockPreferences.isEnabled }
@@ -127,6 +165,10 @@ final class AppLockController {
 
     func invalidateForegroundResume() {
         foregroundResumeID &+= 1
+    }
+
+    func noteSceneIsActive(_ isActive: Bool) {
+        sceneIsActive = isActive
     }
 
     func evaluateForegroundEntry(at date: Date = Date()) {
@@ -212,12 +254,23 @@ struct AppLockView: View {
         }
         .preferredColorScheme(.light)
         .onAppear {
-            controller.refreshDeviceAuthenticationAvailability()
-            guard !didAttemptInitialUnlock else { return }
-            didAttemptInitialUnlock = true
-            authenticate()
+            attemptUnlockIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            // The cover window stays up, so onAppear will not run again.
+            didAttemptInitialUnlock = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            attemptUnlockIfNeeded()
         }
         .accessibilityAddTraits(.isModal)
+    }
+
+    private func attemptUnlockIfNeeded() {
+        controller.refreshDeviceAuthenticationAvailability()
+        guard !didAttemptInitialUnlock, controller.requiresLockScreen else { return }
+        didAttemptInitialUnlock = true
+        authenticate()
     }
 
     private func authenticate() {
@@ -282,6 +335,9 @@ enum AppLockCoverWindow {
 /// hosting controller. This host puts the lock in its own window instead.
 struct AppLockCoverHost: UIViewRepresentable {
     var isPresented: Bool
+    /// False while the cover is only hiding the app-switcher snapshot.
+    /// The Face ID prompt waits until the grace period has elapsed.
+    var requiresAuthentication: Bool
     var controller: AppLockController
 
     func makeUIView(context: Context) -> AnchorView {
@@ -295,6 +351,7 @@ struct AppLockCoverHost: UIViewRepresentable {
 
     func updateUIView(_ uiView: AnchorView, context: Context) {
         context.coordinator.isPresented = isPresented
+        context.coordinator.requiresAuthentication = requiresAuthentication
         context.coordinator.controller = controller
         context.coordinator.sync(anchor: uiView)
     }
@@ -311,18 +368,23 @@ struct AppLockCoverHost: UIViewRepresentable {
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            DispatchQueue.main.async { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.coordinator?.sync(anchor: self)
             }
         }
     }
 
+    @MainActor
     final class Coordinator {
         var isPresented = false
+        var requiresAuthentication = false
         var controller: AppLockController?
         private var coverWindow: UIWindow?
-        private weak var previousKeyWindow: UIWindow?
+        /// Strong on purpose. The passcode UI becomes key while the cover is up,
+        /// and a weak key-window pointer would follow that system window.
+        private var appWindow: UIWindow?
+        private var showingAuthentication = false
 
         func sync(anchor: UIView) {
             guard isPresented, let controller else {
@@ -331,41 +393,77 @@ struct AppLockCoverHost: UIViewRepresentable {
             }
             guard let scene = anchor.window?.windowScene else { return }
             if let coverWindow, coverWindow.windowScene === scene, !coverWindow.isHidden {
+                installContent(on: coverWindow, controller: controller)
                 if !coverWindow.isKeyWindow {
                     claimKey(coverWindow, in: scene)
                 }
                 return
             }
             dismiss()
-            let hosting = UIHostingController(rootView: AppLockView(controller: controller))
-            hosting.view.backgroundColor = .clear
-            hosting.overrideUserInterfaceStyle = .light
             let cover = UIWindow(windowScene: scene)
             cover.windowLevel = AppLockCoverWindow.level
             cover.backgroundColor = .clear
-            cover.rootViewController = hosting
+            installContent(on: cover, controller: controller)
             claimKey(cover, in: scene)
             coverWindow = cover
         }
 
         func dismiss() {
             guard let coverWindow else { return }
-            let previous = previousKeyWindow
             let scene = coverWindow.windowScene
+            let restored = appWindow
             coverWindow.isHidden = true
             coverWindow.rootViewController = nil
             self.coverWindow = nil
-            previousKeyWindow = nil
-            if previous?.isHidden == false {
-                previous?.makeKey()
+            appWindow = nil
+            showingAuthentication = false
+            if let restored,
+               restored !== coverWindow,
+               restored.isHidden == false,
+               restored.windowLevel == UIWindow.Level.normal {
+                restored.makeKey()
                 return
             }
-            scene?.windows.first { $0 !== coverWindow && $0.isHidden == false }?.makeKey()
+            scene?.windows.first { candidate in
+                candidate !== coverWindow
+                    && candidate.isHidden == false
+                    && candidate.windowLevel == UIWindow.Level.normal
+            }?.makeKey()
         }
 
         private func claimKey(_ cover: UIWindow, in scene: UIWindowScene) {
-            previousKeyWindow = scene.windows.first { $0.isKeyWindow && $0 !== cover }
+            if let appWindow, appWindow.windowScene === scene {
+                cover.makeKeyAndVisible()
+                return
+            }
+            self.appWindow = scene.windows.first { candidate in
+                candidate !== cover
+                    && candidate.isKeyWindow
+                    && candidate.windowLevel == UIWindow.Level.normal
+            } ?? scene.windows.first { candidate in
+                candidate !== cover
+                    && candidate.isHidden == false
+                    && candidate.windowLevel == UIWindow.Level.normal
+            }
             cover.makeKeyAndVisible()
+        }
+
+        private func installContent(on cover: UIWindow, controller: AppLockController) {
+            if requiresAuthentication {
+                if showingAuthentication, cover.rootViewController != nil { return }
+                let hosting = UIHostingController(rootView: AppLockView(controller: controller))
+                hosting.view.backgroundColor = UIColor.systemGroupedBackground
+                hosting.overrideUserInterfaceStyle = .light
+                cover.rootViewController = hosting
+                showingAuthentication = true
+                return
+            }
+            if !showingAuthentication, cover.rootViewController != nil { return }
+            let blank = UIViewController()
+            blank.view.backgroundColor = UIColor.systemGroupedBackground
+            blank.overrideUserInterfaceStyle = .light
+            cover.rootViewController = blank
+            showingAuthentication = false
         }
     }
 }

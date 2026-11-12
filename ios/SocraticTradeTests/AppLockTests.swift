@@ -62,6 +62,79 @@ final class AppLockPolicyTests: XCTestCase {
         )
     }
 
+    func testCoverStaysDownWhenLockIsOff() {
+        XCTAssertFalse(
+            AppLockPolicy.shouldCoverSession(
+                isEnabled: false,
+                requiresLockScreen: false,
+                sceneIsActive: false
+            )
+        )
+    }
+
+    func testEnabledInactiveSceneCoversWithoutRequiringAuth() {
+        XCTAssertTrue(
+            AppLockPolicy.shouldCoverSession(
+                isEnabled: true,
+                requiresLockScreen: false,
+                sceneIsActive: false
+            )
+        )
+    }
+
+    func testEnabledActiveSceneStaysUncoveredDuringGrace() {
+        XCTAssertFalse(
+            AppLockPolicy.shouldCoverSession(
+                isEnabled: true,
+                requiresLockScreen: false,
+                sceneIsActive: true
+            )
+        )
+    }
+
+    func testRequiredLockCoversWhileActive() {
+        XCTAssertTrue(
+            AppLockPolicy.shouldCoverSession(
+                isEnabled: true,
+                requiresLockScreen: true,
+                sceneIsActive: true
+            )
+        )
+    }
+
+    func testCanceledBootstrapLoadsAgainInsteadOfResuming() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: false,
+                hasInitialized: true,
+                isAuthenticated: false
+            ),
+            .loadSession
+        )
+    }
+
+    func testSignedInSessionResumes() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: false,
+                hasInitialized: true,
+                isAuthenticated: true
+            ),
+            .resumeLiveSession
+        )
+    }
+
+    func testScreenshotBootstrapSkips() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: true,
+                hasInitialized: false,
+                isAuthenticated: false
+            ),
+            .skip
+        )
+    }
+
     func testEnabledPastGraceRequiresUnlock() {
         let backgrounded = Date(timeIntervalSince1970: 1_700_000_000)
         let now = backgrounded.addingTimeInterval(AppLockPolicy.defaultGracePeriod + 1)
@@ -226,8 +299,11 @@ final class AppLockControllerTests: XCTestCase {
 
     func testBackgroundInvalidatesInFlightForegroundResume() {
         let controller = AppLockController()
+        XCTAssertTrue(controller.sceneIsActive)
         let resumeID = controller.beginForegroundResume()
+        controller.noteSceneIsActive(false)
         controller.invalidateForegroundResume()
+        XCTAssertFalse(controller.sceneIsActive)
         XCTAssertNotEqual(resumeID, controller.foregroundResumeID)
         XCTAssertTrue(controller.isUnlocked)
     }
