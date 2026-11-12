@@ -67,7 +67,8 @@ import {
 } from "./rag/embed-resilience";
 import { parseProviderEmbeddingResponse, SiliconFlowEmbedSchema } from "./rag/embedding-response-schema";
 import { recordRagOperation, shouldDegradeForBudget } from "./rag/run-budget";
-import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
+import { auditRagIngestPointsGateSkip, estimateRagDispatchCost, getRagUsageSummary, hasRagIngestPointsBudget, hashQuery, meterEmbed, meterPineconeQuery, meterPineconeUpsert, meterRerank, ragIngestPointsBudgetDeferUntil, ragIngestTextBudgetDeferUntil, ragMaxDailyIngestPoints, recordRetrievalQuality, retrievalTelemetryEnabled, usedIngestEmbedWindowsLast24h, usedRagUpsertPointsLast24h, type RagEmbedRerankProvider } from "./rag-metering";
+import { selectIngestBudgetTexts } from "./rag/ingest-budget";
 import {
   EMBED_REQUEST_BYTE_BUDGET,
   EMBED_REQUEST_TOKEN_BUDGET,
@@ -75,7 +76,6 @@ import {
   embedRequestFits,
   isEmbedContextLengthError,
   packInWindowTexts,
-  prefixCountWithinEmbedUnits,
   prepareEmbedInputPieces,
   truncateEmbedText
 } from "./rag/embed-request-pack";
@@ -766,15 +766,9 @@ function remainingIngestTexts(userId: string, requested: number): { allowed: num
   if (!ingestBudgetEnabled()) return { allowed: requested, used: 0, limit };
   try {
     const sinceIso = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
-    // Count embed texts across ANY embed provider, not just "voyage" — this budget caps embedding
-    // VOLUME regardless of which provider serves it. It used to hardcode "voyage" only because
-    // meterEmbed itself used to hardcode provider: "voyage" on every row (the very bug this PR
-    // fixes); now that rows carry the true provider (openrouter/siliconflow/voyage), a "voyage"-only
-    // filter would silently stop counting real usage the instant a non-Voyage provider goes active
-    // (e.g. prod's OPENROUTER_API_KEY), making RAG_INGEST_MAX_TEXTS_PER_DAY effectively unenforced.
-    const used = getRagUsageSummary({ sinceIso })
-      .filter((row) => row.userId === userId && row.operation === "embed")
-      .reduce((sum, row) => sum + row.batchCount, 0);
+    // Ingest windows across ANY embed provider. Retrieval and search-fusion embeds are stored
+    // with counts_toward_ingest = 0 and do not spend this cap. Legacy rows (NULL) still count.
+    const used = usedIngestEmbedWindowsLast24h(userId, sinceIso);
     return { allowed: Math.max(0, Math.min(requested, limit - used)), used, limit };
   } catch {
     // Tests mock db.ts without the usage table; fail open there instead of breaking vector mocks.
@@ -4025,7 +4019,10 @@ async function storeContextsImpl(
     };
   }
 
-  const reuseExactEmbeddings = options?.reuseExactEmbeddings === true;
+  // Exact-embedding reuse is unconditional. A text already in the document cache, the content
+  // cache, or the embed stage must not spend RAG_INGEST_MAX_TEXTS_PER_DAY, and it must not be
+  // sent to the provider again. `reuseExactEmbeddings` remains on the options type for callers
+  // (storeDocument still sets it) but no longer gates this lookup.
   // Durable embed stage (db-embed-stage.ts, embed-once directive 2026-08-09). Keyed exactly
   // like the L1 process cache: hashContent() of the EXACT embed-input text + model + embed
   // revision. Rows only exist between a paid embed and its successful Pinecone delivery, so a
@@ -4039,13 +4036,25 @@ async function storeContextsImpl(
   const cachedDocumentEmbeddings = new Map<ContextDocument, number[]>();
   const uniqueMissingEmbeddingInputs: string[] = [];
   const missingEmbeddingInputSet = new Set<string>();
-  if (reuseExactEmbeddings) {
+  const l1CachedInputs: string[] = [];
+  const l1CachedInputSeen = new Set<string>();
+  {
     const documentsByMissingInput = new Map<string, ContextDocument[]>();
     for (const document of documentsToStore) {
       const input = documentEmbeddingInput(document);
       const cached = getCachedDocumentEmbedding(input, userId);
-      if (cached) {
-        cachedDocumentEmbeddings.set(document, cached);
+      const contentCached = cached
+        ? undefined
+        : getCachedContentEmbedding(stageModel, stageRevision, "document", input);
+      const reusableVector = cached
+        ?? (contentCached && isValidEmbedding(contentCached) ? contentCached : undefined);
+      if (reusableVector) {
+        if (!cached) setCachedDocumentEmbedding(input, reusableVector, userId);
+        cachedDocumentEmbeddings.set(document, reusableVector);
+        if (!l1CachedInputSeen.has(input)) {
+          l1CachedInputSeen.add(input);
+          l1CachedInputs.push(input);
+        }
       } else {
         const siblings = documentsByMissingInput.get(input);
         if (siblings) siblings.push(document);
@@ -4093,16 +4102,39 @@ async function storeContextsImpl(
         );
       }
     }
+    // A same-process retry can hit the L1 cache while the stage row from the failed upsert is
+    // still durable. Delivery has to delete that row, and the replay count has to include it.
+    // This list is the L1/content-cache hits only. Stage hits were already counted above.
+    if (l1CachedInputs.length > 0) {
+      try {
+        const stagedByHash = getStagedEmbeddings(
+          l1CachedInputs.map(hashContent),
+          stageModel,
+          stageRevision
+        );
+        for (const input of l1CachedInputs) {
+          const hash = hashContent(input);
+          const staged = stagedByHash.get(hash);
+          if (!staged || !isValidEmbedding(staged)) continue;
+          embedsFromStage += 1;
+          for (const document of documentsToStore) {
+            if (cachedDocumentEmbeddings.has(document) && documentEmbeddingInput(document) === input) {
+              stageHashByDocument.set(document, hash);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[vector-db] embed-stage lookup failed (non-fatal; will embed normally):",
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
   }
 
   let budgetSkipped = 0;
   assertVectorStoreLease(options?.leaseGuard);
-  const budgetInputs = reuseExactEmbeddings
-    ? uniqueMissingEmbeddingInputs
-    : documentsToStore.map((document) => documentEmbeddingInput(document));
-  // Memoized per exact text: embedBudgetUnits is a char-walk plus binary-search truncation,
-  // and the over-budget prefix walk below re-reads the same strings.  budgetInputs can repeat a
-  // text (one entry per document), so keying by content collapses that work too.
+  // Memoized per exact text: embedBudgetUnits is a char-walk plus binary-search truncation.
   const budgetUnitsByText = new Map<string, number>();
   const budgetUnitsFor = (text: string): number => {
     const known = budgetUnitsByText.get(text);
@@ -4111,58 +4143,62 @@ async function storeContextsImpl(
     budgetUnitsByText.set(text, units);
     return units;
   };
-  const requestedEmbeddingTexts = budgetInputs.reduce((sum, text) => sum + budgetUnitsFor(text), 0);
+  const budgetItems = documentsToStore.map((document, index) => {
+    const input = documentEmbeddingInput(document);
+    return {
+      id: String(index),
+      units: budgetUnitsFor(input),
+      reusable: cachedDocumentEmbeddings.has(document),
+      chargeKey: input
+    };
+  });
+  const requestedPreview = selectIngestBudgetTexts(budgetItems, Number.POSITIVE_INFINITY);
+  const requestedEmbeddingTexts = requestedPreview.requestedUnits;
   const budget = remainingIngestTexts(userId, requestedEmbeddingTexts);
-  if (budget.allowed < requestedEmbeddingTexts) {
-    const providerTextsSkipped = requestedEmbeddingTexts - budget.allowed;
-    const allowedPrefix = prefixCountWithinEmbedUnits(
-      budgetInputs,
-      budget.allowed,
-      undefined,
-      budgetUnitsByText
-    );
+  const selection = selectIngestBudgetTexts(
+    budgetItems,
+    budget.allowed,
+    options?.managedCommit
+      ? { managedExpectedCount: options.managedCommit.expectedRecordCount }
+      : undefined
+  );
+  if (selection.withheldPartialCommit || selection.keepIds.length !== documentsToStore.length) {
+    const providerTextsSkipped = selection.requestedUnits - selection.chargedUnits;
     const beforeBudgetDocuments = documentsToStore;
     const beforeBudgetHashes = dedupHashes;
-    if (reuseExactEmbeddings) {
-      const allowedMissingInputs = new Set(uniqueMissingEmbeddingInputs.slice(0, allowedPrefix));
-      const keptIndexes: number[] = [];
-      for (let index = 0; index < beforeBudgetDocuments.length; index++) {
-        const document = beforeBudgetDocuments[index]!;
-        if (cachedDocumentEmbeddings.has(document) || allowedMissingInputs.has(documentEmbeddingInput(document))) {
-          keptIndexes.push(index);
-        }
-      }
-      documentsToStore = keptIndexes.map((index) => beforeBudgetDocuments[index]!);
-      if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
-      budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
-    } else {
-      budgetSkipped = beforeBudgetDocuments.length - allowedPrefix;
-      documentsToStore = beforeBudgetDocuments.slice(0, allowedPrefix);
-      if (beforeBudgetHashes) dedupHashes = beforeBudgetHashes.slice(0, allowedPrefix);
+    const kept = new Set(selection.keepIds);
+    const keptIndexes: number[] = [];
+    for (let index = 0; index < beforeBudgetDocuments.length; index++) {
+      if (kept.has(String(index))) keptIndexes.push(index);
     }
+    documentsToStore = keptIndexes.map((index) => beforeBudgetDocuments[index]!);
+    if (beforeBudgetHashes) dedupHashes = keptIndexes.map((index) => beforeBudgetHashes[index]!);
+    budgetSkipped = beforeBudgetDocuments.length - documentsToStore.length;
     const budgetPayload = {
-      requested: requestedEmbeddingTexts,
+      requested: selection.requestedUnits,
+      requestedTexts: selection.requestedTexts,
       allowed: budget.allowed,
       skipped: providerTextsSkipped,
       skippedOccurrences: budgetSkipped,
       usedLast24h: budget.used,
       limitPer24h: budget.limit,
-      tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
+      tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET,
+      unit: "embed windows",
+      withheldPartialCommit: selection.withheldPartialCommit
     };
     audit("vector_ingest_budget", budgetPayload, userId);
     await settleRagSideEffect(alertUsageLimitHit({
       userId,
-      // Was hardcoded "Voyage" — now that the ingest budget counts embeds from ANY provider (see
-      // remainingIngestTexts above), the alert must say which provider actually hit the cap.
+      // The cap counts embed windows from any provider. The alert names the provider that is active.
       provider: activeEmbeddingProvider(userId),
       operation: "embed-budget",
       limitName: "RAG ingest text daily cap",
       status: budget.allowed === 0 ? "exceeded" : "warning",
       used: budget.used,
       limit: budget.limit,
-      attempted: requestedEmbeddingTexts,
+      attempted: selection.requestedUnits,
       skipped: providerTextsSkipped,
-      unit: "texts",
+      unit: "embed windows",
       recommendation:
         "If this happened during a deliberate backfill, raise RAG_INGEST_MAX_TEXTS_PER_DAY temporarily. If it happened during normal use, inspect deduping and ingestion cadence first."
     }, {
@@ -4183,14 +4219,17 @@ async function storeContextsImpl(
         // groupKey selection.
         lane: "rag-ingest-budget",
         source: userId === "local" ? "operator" : "user",
-        requested: requestedEmbeddingTexts,
+        requested: selection.requestedUnits,
+        requestedTexts: selection.requestedTexts,
         allowed: budget.allowed,
         skipped: providerTextsSkipped,
         skippedOccurrences: budgetSkipped,
         usedLast24h: budget.used,
         limitPer24h: budget.limit,
-        tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET
-        // Already gated by the persisted 6h shouldEmitRagIngestBudgetSentry window.
+        tokenBudgetPerText: EMBED_REQUEST_TOKEN_BUDGET,
+        unit: "embed windows",
+        withheldPartialCommit: selection.withheldPartialCommit
+        // Already gated by the persisted shouldEmitRagIngestBudgetSentry window.
       }, options?.leaseGuard, { callerThrottled: true }), options?.leaseGuard);
     }
     if (documentsToStore.length === 0) {
@@ -4206,6 +4245,8 @@ async function storeContextsImpl(
       // When the budget is fully spent (allowed === 0), signal a clean deferral so producers
       // can park without re-attempting on the next tick.  Mirrors the ingestPointsBudgetExhausted
       // pattern used by the Qdrant daily-point fuse (StoreContextsResult type).
+      // A withheld managed partial also returns here with indexed 0, but allowed may still be
+      // above 0: the slots stay for a document that can commit. That case does not set exhausted.
       const fullyExhausted = budget.allowed === 0;
       const exhaustedUntil = fullyExhausted ? ragIngestTextBudgetDeferUntil() : undefined;
       return {
@@ -4369,7 +4410,6 @@ async function storeContextsImpl(
       let rejected = 0;
       let rejectionReason: ValidatedDocumentEmbeddingBatch["reason"];
 
-      if (reuseExactEmbeddings) {
         const missingInputs: string[] = [];
         const missingPositions = new Map<string, number[]>();
         for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
@@ -4440,81 +4480,6 @@ async function storeContextsImpl(
             }
           }
         }
-      } else {
-        // Durable embed stage (L2) first — a hit is a vector a prior FAILED attempt already
-        // paid for (rows only exist between a paid embed and a successful upsert), so consuming
-        // it is exactly the embed-once guarantee. The always-re-embed refresh semantics of this
-        // branch are otherwise unchanged: after a successful upsert the stage rows are deleted,
-        // so a routine refresh cycle never finds a hit here.
-        const inputHashes = embedInputs.map(hashContent);
-        let stagedByHash = new Map<string, number[]>();
-        try {
-          stagedByHash = getStagedEmbeddings(inputHashes, stageModel, stageRevision);
-        } catch (err) {
-          console.warn(
-            "[vector-db] embed-stage lookup failed (non-fatal; will embed normally):",
-            err instanceof Error ? err.message : String(err)
-          );
-        }
-        const toEmbedPositions: number[] = [];
-        for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
-          const staged = stagedByHash.get(inputHashes[indexInBatch]!);
-          if (staged && isValidEmbedding(staged)) {
-            resolved[indexInBatch] = [...staged];
-            stageHashByDocument.set(batch[indexInBatch]!, inputHashes[indexInBatch]!);
-            embedsFromStage += 1;
-          } else {
-            toEmbedPositions.push(indexInBatch);
-          }
-        }
-
-        if (toEmbedPositions.length > 0) {
-          const toEmbedInputs = toEmbedPositions.map((position) => embedInputs[position]!);
-          const packedResult = await embedPackedInputGroups(
-            voyage,
-            toEmbedInputs,
-            voyageSource,
-            userId,
-            options?.leaseGuard
-          );
-          rejected += packedResult.rejected;
-          if (packedResult.reason) rejectionReason = packedResult.reason;
-          if (packedResult.errorMessage) embedFailureMessage = packedResult.errorMessage;
-          const stagedDocs: Array<{ position: number; embedding: number[] }> = [];
-          for (let embedIndex = 0; embedIndex < toEmbedPositions.length; embedIndex++) {
-            const embedding = packedResult.embeddingsByInputIndex[embedIndex];
-            if (!embedding) continue;
-            const position = toEmbedPositions[embedIndex]!;
-            resolved[position] = embedding;
-            stagedDocs.push({ position, embedding });
-          }
-          if (stagedDocs.length > 0) {
-            try {
-              stageEmbeddedVectors(stagedDocs.map(({ position, embedding }) => {
-                const document = batch[position]!;
-                stageHashByDocument.set(document, inputHashes[position]!);
-                return {
-                  contentHash: inputHashes[position]!,
-                  model: stageModel,
-                  revision: stageRevision,
-                  vector: embedding,
-                  symbol: document.metadata?.symbol ?? "",
-                  source: document.metadata?.source ?? "",
-                  chunkId: typeof document.metadata?.chunk_id === "string"
-                    ? document.metadata.chunk_id
-                    : "",
-                  userScope: userId
-                };
-              }));
-            } catch (err) {
-              console.warn(
-                "[vector-db] embed-stage persist failed (non-fatal):",
-                err instanceof Error ? err.message : String(err)
-              );
-            }
-          }
-        }
-      }
 
       const records: PineconeRecord<RecordMetadata>[] = [];
       for (let indexInBatch = 0; indexInBatch < batch.length; indexInBatch++) {
@@ -4708,7 +4673,10 @@ async function storeContextsImpl(
     // R10: record newly-indexed content hashes so a repeat storeContexts call with the same
     // dedupKeyPrefix and byte-identical text skips re-embedding next time. Best-effort — a
     // failure here must not fail the store (the record was already upserted to Pinecone).
-    if (dedupPrefix && dedupHashes && indexedDocIdentities.size > 0 && rejectedInvalidEmbeddings === 0) {
+    // Record hashes for documents that were actually indexed even when a sibling embedding was
+    // rejected. Gating this on zero rejects left the successful hashes unrecorded, so the next
+    // tick paid for them again. A hash is written only for an indexed identity.
+    if (dedupPrefix && dedupHashes && indexedDocIdentities.size > 0) {
       assertVectorStoreLease(options?.leaseGuard);
       const toRecord = documentsToStore
         .map((doc, i) => (indexedDocIdentities.has(doc) ? dedupHashes![i] : undefined))
@@ -8493,7 +8461,8 @@ export async function retrieveContextDetailed(
           }
         }
         if (!response?.servedFromContentCache) {
-          meterEmbed([q], meterModel, userId, embedProvider); // count only on a cache MISS; book under the requesting userId
+          // Retrieval embeds are a cost, not an ingest. They must not spend RAG_INGEST_MAX_TEXTS_PER_DAY.
+          meterEmbed([q], meterModel, userId, embedProvider, undefined, undefined, false);
           recordRagOperation(Date.now(), userId); // R16: count this embed call against the per-run budget (no-op unless enabled).
         }
         embedding = response.data?.[0]?.embedding;
