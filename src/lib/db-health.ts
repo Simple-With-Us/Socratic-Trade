@@ -11,7 +11,7 @@ import {
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
-import { isRagEmbedProviderTimeoutText } from "./rag/embed-resilience";
+import { isRagEmbedProviderTimeoutText, RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE } from "./rag/embed-resilience";
 import { isStrategyRagRetrievalTimeoutText } from "./rag-retrieval-deadline";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
@@ -42,7 +42,9 @@ export const HEALTH_CALLER_TIMEOUT_PREFIX = "[caller-timeout] ";
  * lane that keeps timing out escalates after `HEALTH_TRANSIENT_ESCALATION_MS`, but a single
  * burst must not page. Named shapes only — a bare caller-budget abort ("This operation was
  * aborted") stays an expected limit, and an HTTP status stays hard even when the body
- * mentions a timeout. Strategy RAG deadlines are excluded; they keep the caller-timeout class.
+ * mentions a timeout. Strategy RAG deadlines keep the caller-timeout class. Ingest embed
+ * provider timeouts (ST-4607, message "embed provider timed out") keep the timeout class
+ * even when describeNetworkError also prefixes TimeoutError or AbortError.
  *
  * Deliberately not folded into `isTransientNetworkError` in network-errors.ts. That helper
  * also decides whether a fetch is retried, and widening it would change quote, scan, and
@@ -55,6 +57,9 @@ export function isProviderTimeoutHealthText(errorText: string | null | undefined
   if (!errorText) return false;
   if (isStrategyRagRetrievalTimeoutText(errorText)) return false;
   if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return false;
+  // ST-4607: ingest embed slowness is a timeout, not a transport blip. describeNetworkError
+  // flattens `TimeoutError embed provider timed out`, which would otherwise match below.
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return false;
   // The provider answered. 401/403/5xx stay hard even if the body says "timed out".
   if (/\bHTTP\s+[1-5]\d\d\b/i.test(errorText)) return false;
   return PROVIDER_TIMEOUT_HEALTH_TEXT.test(errorText);
@@ -69,6 +74,7 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
   if (!errorText) return false;
   if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return true;
   if (isStrategyRagRetrievalTimeoutText(errorText)) return true;
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return true;
   // A named provider timeout must stay on the transient streak so it can escalate.
   if (isProviderTimeoutHealthText(errorText)) return false;
   if (errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) return true;
@@ -117,7 +123,11 @@ export const HEALTH_TRANSIENT_FAILURE_PREFIX = "[transient-network] ";
 export function isTransientHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
   if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
-  if (isStrategyRagRetrievalTimeoutText(errorText) || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) {
+  if (
+    isStrategyRagRetrievalTimeoutText(errorText)
+    || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)
+    || errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)
+  ) {
     return false;
   }
   if (isProviderTimeoutHealthText(errorText)) return true;

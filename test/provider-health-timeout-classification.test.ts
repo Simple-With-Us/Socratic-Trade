@@ -130,6 +130,11 @@ describe("provider timeout classification (ST-4608)", () => {
     expect(isSoftHealthFailure("This operation was aborted")).toBe(true);
     expect(isTransientHealthFailure("This operation was aborted")).toBe(false);
     expect(connectionHealthFailureClass("strategy RAG retrieval timed out")).toBe("timeout");
+    // ST-4607: ingest embed timeouts stay timeout/soft after describeNetworkError prefixes TimeoutError.
+    const embedTimeout = "embed documents: TimeoutError embed provider timed out";
+    expect(isSoftHealthFailure(embedTimeout)).toBe(true);
+    expect(isTransientHealthFailure(embedTimeout)).toBe(false);
+    expect(connectionHealthFailureClass(embedTimeout)).toBe("timeout");
   });
 
   it("records a keyless timeout burst as warning with the short transient cooldown and no operator push", async () => {
