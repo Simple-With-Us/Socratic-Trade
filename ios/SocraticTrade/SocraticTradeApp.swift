@@ -218,15 +218,12 @@ struct ContentView: View {
     }
 
     private func resumeLiveSessionIfNeeded() async {
-        let outcome = await liveResumeGate.run { [appLock, store] in
-            await Self.performForegroundResume(appLock: appLock, store: store)
-        }
-        // One more resume, still inside the gate. A direct call would let every
-        // waiter of the failed handle start its own resume and stop the stream
-        // the newest one just opened. A finished handle is not rejoined.
-        guard outcome.joinedInFlight, !outcome.startedEvents else { return }
-        guard appLock.sceneIsActive, appLock.isUnlocked, store.isAuthenticated else { return }
-        _ = await liveResumeGate.run { [appLock, store] in
+        await AppLiveSessionResume.resumeThroughGate(
+            gate: liveResumeGate,
+            sceneIsActive: { appLock.sceneIsActive },
+            isUnlocked: { appLock.isUnlocked },
+            isAuthenticated: { store.isAuthenticated }
+        ) { [appLock, store] in
             await Self.performForegroundResume(appLock: appLock, store: store)
         }
     }

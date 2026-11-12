@@ -143,6 +143,72 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertEqual(store.loadCount, 2)
     }
 
+    func testJoinerRetriesWhileFinishedHandleIsStillCurrent() async {
+        let gate = LiveResumeGate()
+        gate.holdFinishedResumeForTest = true
+        let store = LiveSessionResumeTestDouble()
+        store.isAuthenticated = true
+        store.remainAuthenticatedAfterLoad = true
+        store.suspendLoad = true
+        let eventChecks = ResumeEventChecks()
+
+        let perform: @MainActor () async -> Bool = {
+            if store.loadCount >= 1 {
+                store.suspendLoad = false
+            }
+            return await AppLiveSessionResume.resumeLiveSession(
+                store: store,
+                isScreenshotMode: false,
+                shouldStartEvents: {
+                    eventChecks.checks += 1
+                    return eventChecks.checks != 2
+                }
+            )
+        }
+        let runner = Task {
+            await AppLiveSessionResume.resumeThroughGate(
+                gate: gate,
+                sceneIsActive: { true },
+                isUnlocked: { true },
+                isAuthenticated: { store.isAuthenticated },
+                perform: perform
+            )
+        }
+        var spins = 0
+        while store.loadCount == 0 && spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        let joiner = Task {
+            await AppLiveSessionResume.resumeThroughGate(
+                gate: gate,
+                sceneIsActive: { true },
+                isUnlocked: { true },
+                isAuthenticated: { store.isAuthenticated },
+                perform: perform
+            )
+        }
+        spins = 0
+        while gate.joinCount == 0 && spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        store.finishLoad()
+        spins = 0
+        while (gate.declinedFinishedHandleCount == 0 || store.loadCount < 2) && spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        XCTAssertEqual(gate.declinedFinishedHandleCount, 1)
+        XCTAssertTrue(gate.isHoldingFinishedResume)
+        XCTAssertEqual(store.loadCount, 2)
+        gate.releaseFinishedResumeForTest()
+        await runner.value
+        await joiner.value
+        XCTAssertEqual(store.loadCount, 2)
+        XCTAssertTrue(store.isAuthenticated)
+    }
+
     func testCancellingTheRunnerDoesNotAbortTheSharedLoad() async {
         let gate = LiveResumeGate()
         let store = LiveSessionResumeTestDouble()
@@ -170,6 +236,10 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertTrue(outcome.startedEvents)
         XCTAssertEqual(store.loadCount, 1)
     }
+}
+
+private final class ResumeEventChecks {
+    var checks = 0
 }
 
 @MainActor

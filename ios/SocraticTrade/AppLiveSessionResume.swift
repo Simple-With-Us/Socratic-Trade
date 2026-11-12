@@ -51,13 +51,31 @@ final class LiveResumeGate {
     }
 
     private var inFlight: Handle?
+    private var finishedResumeHold: CheckedContinuation<Void, Never>?
     private(set) var joinCount = 0
+    /// How many times `run` saw a finished handle and started a new resume
+    /// instead of rejoining it.
+    private(set) var declinedFinishedHandleCount = 0
+    /// Test seam. The first settled resume waits here, still current, so a
+    /// joiner can start the next one before this handle is dropped.
+    var holdFinishedResumeForTest = false
+    private(set) var isHoldingFinishedResume = false
+
+    func releaseFinishedResumeForTest() {
+        isHoldingFinishedResume = false
+        let hold = finishedResumeHold
+        finishedResumeHold = nil
+        hold?.resume()
+    }
 
     func run(_ body: @escaping @MainActor () async -> Bool) async -> LiveResumeOutcome {
-        if let inFlight, inFlight.outcome == nil {
-            joinCount += 1
-            let startedEvents = await inFlight.value()
-            return LiveResumeOutcome(startedEvents: startedEvents, joinedInFlight: true)
+        if let inFlight {
+            if inFlight.outcome == nil {
+                joinCount += 1
+                let startedEvents = await inFlight.value()
+                return LiveResumeOutcome(startedEvents: startedEvents, joinedInFlight: true)
+            }
+            declinedFinishedHandleCount += 1
         }
         let handle = Handle()
         inFlight = handle
@@ -65,6 +83,13 @@ final class LiveResumeGate {
             handle.finish(await body())
         }
         let startedEvents = await handle.value()
+        if holdFinishedResumeForTest {
+            holdFinishedResumeForTest = false
+            isHoldingFinishedResume = true
+            await withCheckedContinuation { continuation in
+                finishedResumeHold = continuation
+            }
+        }
         if inFlight === handle {
             inFlight = nil
         }
@@ -74,6 +99,23 @@ final class LiveResumeGate {
 
 @MainActor
 enum AppLiveSessionResume {
+    /// One resume through the gate. A joiner whose shared resume did not leave
+    /// the stream up runs one more resume through the same gate. A finished
+    /// handle is not rejoined, so the second call cannot spin or stop the
+    /// resume a peer just started.
+    static func resumeThroughGate(
+        gate: LiveResumeGate,
+        sceneIsActive: () -> Bool,
+        isUnlocked: () -> Bool,
+        isAuthenticated: () -> Bool,
+        perform: @escaping @MainActor () async -> Bool
+    ) async {
+        let outcome = await gate.run(perform)
+        guard outcome.joinedInFlight, !outcome.startedEvents else { return }
+        guard sceneIsActive(), isUnlocked(), isAuthenticated() else { return }
+        _ = await gate.run(perform)
+    }
+
     /// Start the live stream, then reload. Stop the stream if this resume no
     /// longer owns it when the reload finishes (signed out, or backgrounded).
     @discardableResult
