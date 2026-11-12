@@ -245,8 +245,8 @@ describe("proxy gate slot leak", () => {
       const second = reader.read();
       const aborted = expect(second).rejects.toThrow(/aborted/i);
       await vi.advanceTimersByTimeAsync(140);
-      await aborted;
       expect(cancelled).toBe(true);
+      await aborted;
     } finally {
       vi.useRealTimers();
     }
