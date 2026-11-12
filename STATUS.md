@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
+
+**What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
+
+**Next.**  PR open against `main`.  Do not merge and do not dispatch a deploy.
+
 ## 2026-11-12 CURSOR — ST-4617 flaky verify tests
 
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
