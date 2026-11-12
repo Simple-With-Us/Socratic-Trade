@@ -15,7 +15,7 @@ Fleet-wide `livenessDegradedSince:<type>` keys made a newly degraded account inh
 - `src/lib/db-health.ts`
 - `src/lib/run-failure-watchdog.ts`
 - `app/api/health/route.ts`
-- `test/liveness-warning-escalation.test.ts 
+- `test/liveness-warning-escalation.test.ts`
 - `test/run-failure-watchdog.test.ts`
 
 ## Decisions & Trade-offs
