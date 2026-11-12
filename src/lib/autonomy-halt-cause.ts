@@ -191,8 +191,10 @@ function chunkItems<T>(items: readonly T[], size: number): T[][] {
  * One indexed `LIMIT 1` per account, unioned into a single statement.
  * The handover check binds the same user and account again so both reads can
  * use `(user_id, connected_account_id, kind)` instead of scanning `audit_events`.
- * A missing account id uses `IS NULL`; a real id uses `=`.  ">=" plus the id
- * check keeps a row written in the same millisecond as the halt.
+ * A missing account id uses `IS NULL`; a real id uses `=`.  ">=" keeps a
+ * handover written in the same millisecond as the halt.  `rowid` is the
+ * tiebreaker, because an earlier row in that same millisecond is not a handover
+ * and UUID ids are not insertion order.
  */
 /** Exported for the ST-4561 query-plan test. */
 export function latestHaltBranch(account: AuditScope): { sql: string; params: string[] } {
@@ -220,7 +222,7 @@ export function latestHaltBranch(account: AuditScope): { sql: string; params: st
       SELECT 1 FROM audit_events e
       WHERE e.user_id = ? AND e.${accountSql}
         AND e.created_at >= h.created_at
-        AND e.id <> h.id
+        AND e.rowid > h.rowid
         AND ${handoverPredicate("e.kind", "e.payload")}
     ) AS handed_over
   FROM audit_events h
