@@ -4501,6 +4501,7 @@ function migrate(database: Database.Database): void {
       tokens_out INTEGER,
       batch_count INTEGER NOT NULL DEFAULT 1,
       cost_est_usd REAL,
+      counts_toward_ingest INTEGER,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rag_usage_user ON rag_usage (user_id, created_at);
@@ -4874,6 +4875,15 @@ function migrate(database: Database.Database): void {
   const counterfactualWatermarkColumns = database.prepare("PRAGMA table_info(counterfactual_learning_watermarks)").all() as Array<{ name: string }>;
   if (!counterfactualWatermarkColumns.some((column) => column.name === "last_audit_rowid")) {
     database.exec("ALTER TABLE counterfactual_learning_watermarks ADD COLUMN last_audit_rowid INTEGER");
+  }
+
+  // ST-4609: retrieval embeds stay in the cost ledger but do not spend the ingest text cap.
+  // NULL on rows written before this column still counts (no cap holiday).
+  {
+    const ragUsageCols = database.prepare("PRAGMA table_info(rag_usage)").all() as Array<{ name: string }>;
+    if (ragUsageCols.length > 0 && !ragUsageCols.some((column) => column.name === "counts_toward_ingest")) {
+      database.exec("ALTER TABLE rag_usage ADD COLUMN counts_toward_ingest INTEGER");
+    }
   }
 
   // ST-4540 (embed-stage no-data-loss): additive delivery/quarantine columns on embed_stage.
