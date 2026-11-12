@@ -12,6 +12,15 @@ import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provi
 import { apiKeyFingerprint } from "../src/lib/data-providers";
 
 const historyTestDb = `file:${join(tmpdir(), `agentic-history-cache-test-${randomUUID()}.db`)}`;
+const originalRoicApiKey = process.env.ROIC_API_KEY;
+const originalRoicHistoryEnabled = process.env.ROIC_HISTORY_ENABLED;
+
+function restoreRoicHistoryEnv(): void {
+  if (originalRoicApiKey === undefined) delete process.env.ROIC_API_KEY;
+  else process.env.ROIC_API_KEY = originalRoicApiKey;
+  if (originalRoicHistoryEnabled === undefined) delete process.env.ROIC_HISTORY_ENABLED;
+  else process.env.ROIC_HISTORY_ENABLED = originalRoicHistoryEnabled;
+}
 
 beforeEach(() => {
   process.env.DATABASE_URL = historyTestDb;
@@ -51,7 +60,10 @@ beforeEach(() => {
   // deleted env vars above, which reset per-test on their own).
   getDb().exec("DELETE FROM connected_accounts WHERE broker IN ('tradier', 'alpaca', 'alpaca-mcp')");
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  restoreRoicHistoryEnv();
+});
 
 // Tradier's price-history credential comes from the "local" (owner's) connected broker account, not
 // a stored API key — see resolveTradierHistoryCredential in src/lib/history.ts. Connects a fresh
@@ -255,6 +267,47 @@ describe("fetchDailyOHLC", () => {
     expect(roicCall).toBeTruthy();
     expect(String(roicCall![0])).toContain("adjustment=splits");
     expect(String(roicCall![0])).toContain("apikey=roic-test-key");
+  });
+
+  it("keeps ROIC bars when one row is not an object", async () => {
+    process.env.ROIC_API_KEY = "roic-test-key";
+    process.env.ROIC_HISTORY_ENABLED = "on";
+    const roicBody = JSON.stringify({
+      data: [
+        { date: "2026-06-16", open: 40, high: 41, low: 39, close: 40.5, volume: 5000 },
+        "not-a-row",
+        { date: "2026-06-17", open: 40.5, high: 42, low: 40, close: 41.2, volume: 6000 }
+      ],
+      next_page_url: 12
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("api.roic.ai/v3.0.0/stock-prices/")) {
+        return new Response(roicBody, { status: 200 });
+      }
+      return new Response("unexpected source", { status: 500 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL");
+    expect(bars).toHaveLength(2);
+    expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 40.5 });
+    expect(bars![1]).toMatchObject({ time: "2026-06-17", close: 41.2 });
+  });
+
+  it("rejects a ROIC page when data is not an array", async () => {
+    process.env.ROIC_API_KEY = "roic-test-key";
+    process.env.ROIC_HISTORY_ENABLED = "on";
+    let roicRequestCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("api.roic.ai/v3.0.0/stock-prices/")) {
+        roicRequestCount += 1;
+        return new Response(JSON.stringify({ data: { date: "2026-06-16", close: 40.5 } }), { status: 200 });
+      }
+      return new Response("unexpected source", { status: 500 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL");
+    expect(roicRequestCount).toBeGreaterThan(0);
+    expect(bars).toBeNull();
   });
 
   it("uses Tiingo ahead of Marketstack, applying adjClose-scaled O/H/L", async () => {
@@ -660,6 +713,34 @@ describe("fetchDailyOHLC", () => {
   it("returns null when no source has data (never fabricates)", async () => {
     vi.stubGlobal("fetch", async () => new Response("nope", { status: 404 }));
     expect(await fetchDailyOHLC("ZZZ")).toBeNull();
+  });
+
+  it("retries one paid-history 5xx and one 429 before opening the lane", async () => {
+    process.env.MARKETSTACK_API_KEY = "mstack-retry-key";
+    let marketstackCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).includes("api.marketstack.com")) return new Response("miss", { status: 404 });
+      marketstackCalls += 1;
+      if (marketstackCalls === 1) return new Response("unavailable", { status: 503 });
+      return new Response(marketstackBody, { status: 200 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18));
+    expect(marketstackCalls).toBe(2);
+    expect(bars).not.toBeNull();
+    expect(bars![0]?.close).toBe(20.5);
+
+    const { listOpenApiCircuitBreakers, resetApiCircuitBreaker } = await import("../src/lib/api-circuit-breaker");
+    resetApiCircuitBreaker();
+    marketstackCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).includes("api.marketstack.com")) return new Response("miss", { status: 404 });
+      marketstackCalls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "1" } });
+    }));
+    await expect(fetchDailyOHLC("MS429", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+    expect(marketstackCalls).toBe(2);
+    expect(listOpenApiCircuitBreakers().find((row) => row.service === "marketstack")?.reason).toBe("rate-limit");
   });
 
   it("uses Twelve Data after Yahoo and Tradier miss on a >2y request, and still skips Massive", async () => {

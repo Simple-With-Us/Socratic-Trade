@@ -28,12 +28,14 @@
 // unit-tested as a pure parser, and re-exported from web-sources/technical.ts for back-compat)
 // in case a future non-bot-walled CSV source needs the same shape.
 
+import "server-only";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import { z } from "zod";
 import type { OHLCBar } from "./indicators";
 export type { OHLCBar };
+import { CircuitOpenError, observePaidQuoteStatus, paidQuoteBreakerSkip, quoteRetryAfterCapMs } from "./api-circuit-breaker";
 import { dataSourceFetch } from "./data-source-fetch";
 import { normalizeSymbol, toAlpacaSymbol } from "./money";
 import { audit, deleteInternalSetting, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, getInternalSetting, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, setInternalSetting, upsertImportedPrices, type ApiKeySource } from "./db";
@@ -43,9 +45,11 @@ import { recordProviderCall } from "./usage-monitor-push";
 import { massiveApiBase, reserveMassiveRestCall } from "./market-signals/massive";
 import { fetchRobinhoodHistoricals } from "./robinhood";
 import { appAClosesToBars, congressReadsEnabled, getCongressTradeClient } from "./api-clients/congress";
-import { BROWSER_UA, politeFetchJson } from "./web-sources/http";
+import { retryAfterDelayMs } from "./network-errors";
+import { cancelResponseBody } from "./response-body";
+import { BROWSER_UA, politeFetch, politeFetchJson, sleep } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
-import { apiKeyFingerprint } from "./data-providers";
+import { apiKeyFingerprint, twelveDataBodyHold } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
 import { bestEffortSqliteWrite, isPeerReadUsageLabel, peerReadSqliteRetry } from "./sqlite-peer-read";
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
@@ -173,15 +177,19 @@ async function fetchYahooChartJson<T>(
       }
     });
     if (res.status === 429 && attempt < maxAttempts - 1) {
+      await cancelResponseBody(res);
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(4000, YAHOO_CHART_BASE_BACKOFF_MS * 2 ** attempt))
       );
       continue;
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    if (!res.ok) {
+      await cancelResponseBody(res);
+      throw new Error(`HTTP ${res.status} for yahoo chart`);
+    }
     return (await res.json()) as T;
   }
-  throw new Error(`HTTP 429 for ${url} (exhausted retries)`);
+  throw new Error("HTTP 429 for yahoo chart (exhausted retries)");
 }
 
 /**
@@ -394,7 +402,7 @@ export async function fetchDailyOHLC(
   const twelveSource = {
     scope: cacheScopeForKeySource(keySources.twelvedata.source, userId),
     sourceId: "twelvedata",
-    fetch: () => fetchTwelveData(symbol, startDate, keySources.twelvedata.key, opts?.usageLabel)
+    fetch: () => fetchTwelveData(symbol, startDate, keySources.twelvedata.key, opts?.usageLabel, keySources.twelvedata.source)
   };
   const alpacaSource = {
     scope: cacheScopeForKeySource(alpacaHistory.source, userId),
@@ -418,12 +426,12 @@ export async function fetchDailyOHLC(
   const roicSource = {
     scope: cacheScopeForKeySource(keySources.roic.source, userId),
     sourceId: "roic",
-    fetch: () => fetchRoic(symbol, startDate, keySources.roic.key, opts?.usageLabel)
+    fetch: () => fetchRoic(symbol, startDate, keySources.roic.key, opts?.usageLabel, keySources.roic.source)
   };
   const tiingoSource = {
     scope: cacheScopeForKeySource(keySources.tiingo.source, userId),
     sourceId: "tiingo",
-    fetch: () => fetchTiingo(symbol, startDate, keySources.tiingo.key, opts?.usageLabel)
+    fetch: () => fetchTiingo(symbol, startDate, keySources.tiingo.key, opts?.usageLabel, keySources.tiingo.source)
   };
   const yahooSource = (range: "max" | "1y") => ({
     scope: "shared" as const,
@@ -434,7 +442,7 @@ export async function fetchDailyOHLC(
   const marketstackSource = {
     scope: cacheScopeForKeySource(keySources.marketstack.source, userId),
     sourceId: "marketstack",
-    fetch: () => fetchMarketstack(symbol, keySources.marketstack.key, opts?.usageLabel)
+    fetch: () => fetchMarketstack(symbol, keySources.marketstack.key, opts?.usageLabel, keySources.marketstack.source)
   };
   // Deep (>2y): Yahoo range=max, Tradier, Twelve Data. Massive is omitted because
   // the free tier truncates at ~2y and would win the cascade with a short series.
@@ -666,6 +674,81 @@ export function parseRoicStockPrices(rows: unknown): OHLCBar[] {
   return bars;
 }
 
+type PaidHistoryService = "twelvedata" | "tiingo" | "marketstack" | "roic";
+
+const PAID_HISTORY_TRANSIENT_RETRY_MS = 600;
+const looseJsonRow = z.record(z.string(), z.unknown());
+const RoicStockPricesSchema = z.object({
+  // A bad row is skipped by parseRoicStockPrices. A non-array page fails the schema.
+  data: z.array(z.unknown()).optional(),
+  next_page_url: z.string().nullable().optional().catch(null)
+}).passthrough();
+const TiingoPricesSchema = z.array(looseJsonRow);
+const MarketstackEodSchema = z.object({
+  data: z.array(z.object({
+    date: z.string().optional(),
+    open: z.unknown().optional(),
+    high: z.unknown().optional(),
+    low: z.unknown().optional(),
+    close: z.unknown().optional(),
+    volume: z.unknown().optional()
+  }).passthrough()).optional()
+}).passthrough();
+
+/** One paid-quote history call. The breaker is checked by the caller before admit.
+ *  A 429 is retried once, waiting for Retry-After when that header is present.
+ *  The hold opens only after that retry, and only for a positive Retry-After.
+ *  A 402 opens the hours hold and is not retried. A 5xx or a thrown network
+ *  error gets the one 600ms retry politeFetchJson used to give. The error body
+ *  is cancelled before the throw or the retry. The payload must match `schema`. */
+async function readPaidQuoteJson<T>(
+  service: PaidHistoryService,
+  keySource: string | null,
+  url: string,
+  schema: z.ZodType<T>,
+  headers?: Record<string, string>,
+  credentialId?: string | null
+): Promise<T> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res: Response;
+    try {
+      res = await politeFetch(url, { headers, retries: 0 });
+    } catch {
+      if (attempt === 0) {
+        await sleep(PAID_HISTORY_TRANSIENT_RETRY_MS);
+        continue;
+      }
+      // The request URL carries the API key. Do not put it on the error.
+      throw new Error(`Request failed for paid quote provider ${service}`);
+    }
+    if ((res.status >= 500 || res.status === 429) && attempt === 0) {
+      const retryAfter = res.status === 429 ? retryAfterDelayMs(res) ?? 0 : 0;
+      await cancelResponseBody(res);
+      // The hold is already capped. The in-call wait uses the same ceiling so a
+      // day-long Retry-After cannot stall this fetch.
+      await sleep(Math.max(PAID_HISTORY_TRANSIENT_RETRY_MS, Math.min(retryAfter, quoteRetryAfterCapMs())));
+      continue;
+    }
+    if (res.ok) {
+      observePaidQuoteStatus(service, keySource, res.status, undefined, Date.now(), credentialId);
+      const parsed = schema.safeParse(await res.json());
+      if (!parsed.success) throw new Error(`Invalid paid quote payload for ${service}`);
+      return parsed.data;
+    }
+    if (res.status === 429) {
+      const retryAfter = retryAfterDelayMs(res);
+      if (retryAfter != null && retryAfter > 0) {
+        observePaidQuoteStatus(service, keySource, 429, retryAfter, Date.now(), credentialId);
+      }
+    } else if (res.status === 402) {
+      observePaidQuoteStatus(service, keySource, 402, undefined, Date.now(), credentialId);
+    }
+    await cancelResponseBody(res);
+    throw new Error(`HTTP ${res.status} for paid quote provider ${service}`);
+  }
+  throw new Error(`Request failed for paid quote provider ${service}`);
+}
+
 /**
  * ROIC.ai historical daily prices
  * (`GET https://api.roic.ai/v3.0.0/stock-prices/{identifier}`).
@@ -673,10 +756,12 @@ export function parseRoicStockPrices(rows: unknown): OHLCBar[] {
  * (limit ≤1000). Shares the "roic" admitProviderRequests bucket with
  * RoicAiEnrichmentProvider so enrichment + history cannot jointly over-burn.
  */
-async function fetchRoic(symbol: string, startDate: string, key?: string, usageLabel?: string): Promise<OHLCBar[] | null> {
+async function fetchRoic(symbol: string, startDate: string, key?: string, usageLabel?: string, keySource?: string | null): Promise<OHLCBar[] | null> {
   if (!key) return null;
   if ((process.env.ROIC_HISTORY_ENABLED ?? "on").toLowerCase() === "off") return null;
+  const lane = keySource ?? null;
   const credKey = await apiKeyFingerprint(key);
+  if (paidQuoteBreakerSkip("roic", lane, credKey)) return null;
   // Reserve one request for the first page; further pages re-admit.
   if (admitProviderRequests("roic", credKey, 1) < 1) return null;
 
@@ -695,11 +780,12 @@ async function fetchRoic(symbol: string, startDate: string, key?: string, usageL
   const MAX_PAGES = 8; // 8×1000 >> 5y of daily bars
   try {
     while (url && pages < MAX_PAGES) {
+      if (pages > 0 && paidQuoteBreakerSkip("roic", lane, credKey)) break;
       if (pages > 0 && admitProviderRequests("roic", credKey, 1) < 1) break;
       // Explicit types break TS7022 circular inference with `url` reassignment in the loop.
-      const json: RoicStockPricesResponse = await politeFetchJson<RoicStockPricesResponse>(url, {
-        headers: { Accept: "application/json" },
-      });
+      const json: z.infer<typeof RoicStockPricesSchema> = await readPaidQuoteJson("roic", lane, url, RoicStockPricesSchema, {
+        Accept: "application/json",
+      }, credKey);
       pages += 1;
       const pageBars = parseRoicStockPrices(json?.data);
       for (const b of pageBars) all.push(b);
@@ -722,7 +808,8 @@ async function fetchRoic(symbol: string, startDate: string, key?: string, usageL
     for (const b of all) byDate.set(String(b.time), b);
     const bars = [...byDate.values()].sort((a, b) => String(a.time).localeCompare(String(b.time)));
     return bars.length >= 2 ? bars : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof CircuitOpenError) return null;
     recordProviderCall("roic", { service: "market-data", ok: false, label: usageLabel });
     return null;
   }
@@ -941,23 +1028,28 @@ export type TwelveDataTimeSeries = z.infer<typeof TwelveDataTimeSeriesSchema>;
  * Twelve Data daily time series. Free tier is credit-capped (same `twelvedata`
  * quota as quote enrichment). Used on lookbacks Massive cannot cover.
  */
-async function fetchTwelveData(symbol: string, startDate: string, key?: string, usageLabel?: string): Promise<OHLCBar[] | null> {
+async function fetchTwelveData(symbol: string, startDate: string, key?: string, usageLabel?: string, keySource?: string | null): Promise<OHLCBar[] | null> {
   if (!key) return null;
+  const lane = keySource ?? null;
   const credKey = await apiKeyFingerprint(key);
+  if (paidQuoteBreakerSkip("twelvedata", lane, credKey)) return null;
   if (admitProviderRequests("twelvedata", credKey, 1) < 1) return null;
   try {
     const url =
       `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
       `&interval=1day&start_date=${startDate}&order=ASC&outputsize=5000&apikey=${encodeURIComponent(key)}`;
-    const parsed = TwelveDataTimeSeriesSchema.safeParse(
-      await politeFetchJson<unknown>(url, { headers: { Accept: "application/json" } })
-    );
-    if (!parsed.success || parsed.data.status === "error" || !Array.isArray(parsed.data.values)) {
+    const parsed = await readPaidQuoteJson("twelvedata", lane, url, TwelveDataTimeSeriesSchema, { Accept: "application/json" }, credKey);
+    if (parsed.status === "error" || !Array.isArray(parsed.values)) {
+      const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
+      const hold = twelveDataBodyHold(message);
+      if (hold?.status === 402) {
+        observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
+      }
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
       return null;
     }
     const bars: OHLCBar[] = [];
-    for (const row of parsed.data.values) {
+    for (const row of parsed.values) {
       const close = Number(row.close);
       if (!row.datetime || !Number.isFinite(close)) continue;
       bars.push({
@@ -971,7 +1063,8 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     }
     recordProviderCall("twelvedata", { service: "market-data", ok: bars.length >= 2, label: usageLabel });
     return bars.length >= 2 ? bars : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof CircuitOpenError) return null;
     recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
     return null;
   }
@@ -999,18 +1092,20 @@ interface TiingoPriceRow {
  * history call (or vice versa) blow the hourly cap. Prefers adjOpen/High/Low/Close over the raw OHLC
  * (same technique fetchYahoo uses: scale raw O/H/L by adjClose/close so all four stay on one basis).
  */
-async function fetchTiingo(symbol: string, startDate: string, key?: string, usageLabel?: string): Promise<OHLCBar[] | null> {
+async function fetchTiingo(symbol: string, startDate: string, key?: string, usageLabel?: string, keySource?: string | null): Promise<OHLCBar[] | null> {
   if (!key) return null;
+  const lane = keySource ?? null;
   const credKey = await apiKeyFingerprint(key);
+  if (paidQuoteBreakerSkip("tiingo", lane, credKey)) return null;
   if (admitProviderRequests("tiingo", credKey, 1) < 1) return null; // hourly/daily budget exhausted this pass
   try {
     const url = `https://api.tiingo.com/tiingo/daily/${symbol.toLowerCase()}/prices?startDate=${startDate}&token=${key}`;
-    const json = await politeFetchJson<TiingoPriceRow[]>(url, { headers: { Authorization: `Token ${key}`, Accept: "application/json" } });
+    const json = await readPaidQuoteJson("tiingo", lane, url, TiingoPricesSchema, { Authorization: `Token ${key}`, Accept: "application/json" }, credKey);
     recordProviderCall("tiingo", { service: "market-data", ok: true, label: usageLabel });
     const rows = Array.isArray(json) ? json : [];
     const bars: OHLCBar[] = [];
     for (const r of rows) {
-      if (!r.date) continue;
+      if (typeof r.date !== "string") continue;
       const rawClose = numOrUndef(r.close);
       const adjClose = numOrUndef(r.adjClose);
       const close = adjClose ?? rawClose;
@@ -1027,7 +1122,8 @@ async function fetchTiingo(symbol: string, startDate: string, key?: string, usag
       bars.push({ time: r.date.slice(0, 10), open: o, high: h, low: l, close, volume: numOrUndef(r.adjVolume ?? r.volume) });
     }
     return bars.length >= 2 ? bars : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof CircuitOpenError) return null;
     recordProviderCall("tiingo", { service: "market-data", ok: false, label: usageLabel });
     return null;
   }
@@ -1046,11 +1142,14 @@ interface MarketstackEodResponse {
 }
 
 /** Marketstack EOD — keyed fallback (free tier is monthly-capped, so secondary to Tradier). */
-async function fetchMarketstack(symbol: string, key?: string, usageLabel?: string): Promise<OHLCBar[] | null> {
+async function fetchMarketstack(symbol: string, key?: string, usageLabel?: string, keySource?: string | null): Promise<OHLCBar[] | null> {
   if (!key) return null;
+  const lane = keySource ?? null;
+  const credKey = await apiKeyFingerprint(key);
+  if (paidQuoteBreakerSkip("marketstack", lane, credKey)) return null;
   try {
     const url = `https://api.marketstack.com/v1/eod?access_key=${key}&symbols=${encodeURIComponent(symbol)}&limit=1500&sort=ASC`;
-    const json = await politeFetchJson<MarketstackEodResponse>(url, {});
+    const json = await readPaidQuoteJson("marketstack", lane, url, MarketstackEodSchema, {}, credKey);
     recordProviderCall("marketstack", { service: "market-data", ok: true, label: usageLabel });
     const rows = json?.data ?? [];
     const bars: OHLCBar[] = [];
@@ -1059,7 +1158,8 @@ async function fetchMarketstack(symbol: string, key?: string, usageLabel?: strin
       bars.push({ time: r.date, open: numOrUndef(r.open), high: numOrUndef(r.high), low: numOrUndef(r.low), close: r.close, volume: numOrUndef(r.volume) });
     }
     return bars.length >= 2 ? bars : null;
-  } catch {
+  } catch (err) {
+    if (err instanceof CircuitOpenError) return null;
     recordProviderCall("marketstack", { service: "market-data", ok: false, label: usageLabel });
     return null;
   }
