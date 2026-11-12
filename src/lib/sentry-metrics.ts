@@ -11,6 +11,7 @@
  */
 
 import type * as SentryNs from "@sentry/nextjs";
+import { safeErrorMessage } from "./telemetry-sanitize";
 
 type SentryMod = typeof SentryNs;
 type LogAttrs = Record<string, string | number | boolean | null | undefined>;
@@ -151,13 +152,29 @@ export function logError(message: string, attributes?: LogAttrs): void {
   });
 }
 
-/** Capture a handled exception with the original error object.  Tags/extra stay sanitized. */
+/** Build a Sentry-safe Error: sanitized message only, original name, no raw `cause`. */
+export function sanitizedCapturedError(error: unknown): Error {
+  const message = safeErrorMessage(error);
+  const captured = new Error(message);
+  if (error instanceof Error) {
+    captured.name = error.name;
+    if (error.stack) {
+      captured.stack = error.message ? error.stack.split(error.message).join(message) : error.stack;
+    }
+  }
+  return captured;
+}
+
+/** Capture a handled exception without sending the raw error object to Sentry. */
 export function captureHandledException(error: unknown, context: string, attributes?: LogAttrs): void {
-  const extra = compactAttrs({ context, ...attributes });
+  const message = safeErrorMessage(error);
+  const captured = sanitizedCapturedError(error);
+  const extra = compactAttrs({ context, ...attributes, error: message });
+  const errorName = captured.name || undefined;
   void loadSentry().then((Sentry) => {
     try {
-      Sentry?.captureException(error, {
-        tags: { handled: "true" },
+      Sentry?.captureException(captured, {
+        tags: { handled: "true", ...(errorName ? { error_name: errorName } : {}) },
         extra
       });
     } catch {

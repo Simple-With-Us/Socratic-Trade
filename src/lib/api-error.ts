@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
-import { captureHandledException } from "./sentry-metrics";
+import { captureHandledException, sanitizedCapturedError } from "./sentry-metrics";
 import { safeErrorMessage } from "./telemetry-sanitize";
 
 export const API_ERROR_MESSAGE_MAX = 240;
@@ -103,14 +103,16 @@ export function isBrokerGatewayError(error: unknown): boolean {
 }
 
 /**
- * Report a handled server-side fault to the server log and Sentry.  The original exception is
- * captured so the stack reaches Sentry even when `enableLogs` is off; tags and extra context use
- * only the sanitized message, never raw upstream bodies or credential material.
+ * Report a handled server-side fault to the server log and Sentry.  Sentry receives a new Error
+ * that carries only the sanitized message (original name is kept; the raw exception is not set as
+ * `cause`), so upstream bodies and credentials never leave the process.
  */
-function reportHandledError(context: string, error: unknown): void {
+export function reportHandledError(context: string, error: unknown): void {
   const message = safeErrorMessage(error);
   console.error(`${context}: ${message}`);
-  captureHandledException(error, context, { error: message });
+  // Pass a sanitized Error (message + name + rewritten stack, no raw `cause`) rather than
+  // the original exception, which may embed upstream bodies or credentials.
+  captureHandledException(sanitizedCapturedError(error), context, { error: message });
 }
 
 /**

@@ -89,15 +89,23 @@ describe("sentry-metrics helpers", () => {
     });
   });
 
-  it("captures the original exception with sanitized tags and context", async () => {
-    const failure = new TypeError("adapter exploded");
-    captureHandledException(failure, "Broker read failed with an internal server error", { error: "adapter exploded" });
+  it("captures a sanitized Error with tags and context, not the raw exception", async () => {
+    const failure = new TypeError("Tradier HTTP 401: invalid token sk-live-secret-value");
+    failure.stack = "TypeError: Tradier HTTP 401: invalid token sk-live-secret-value\n    at broker.ts:1:1";
+    captureHandledException(failure, "Broker read failed with an internal server error", { error: "ignored raw" });
     await vi.waitFor(() => {
       expect(sentryMock.captureException).toHaveBeenCalledOnce();
     });
-    expect(sentryMock.captureException).toHaveBeenCalledWith(failure, {
-      tags: { handled: "true" },
-      extra: { context: "Broker read failed with an internal server error", error: "adapter exploded" }
+    const [captured, ctx] = sentryMock.captureException.mock.calls[0];
+    expect(captured).toBeInstanceOf(Error);
+    expect(captured).not.toBe(failure);
+    expect(captured.name).toBe("TypeError");
+    expect(captured.message).not.toMatch(/sk-live/);
+    expect(captured.cause).toBeUndefined();
+    expect(String(captured.stack ?? "")).not.toMatch(/sk-live/);
+    expect(ctx).toEqual({
+      tags: { handled: "true", error_name: "TypeError" },
+      extra: { context: "Broker read failed with an internal server error", error: expect.not.stringMatching(/sk-live/) }
     });
   });
 

@@ -1,6 +1,6 @@
 ## 2026-11-12 [GB-TRADER] ST-2797 — broker route error honesty
 
-**What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` returns 502 `broker_unavailable` when the history provider fails, instead of 200 with empty bars.  PUT `/api/policy` rejects unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
+**What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` returns 502 `broker_unavailable` when the history provider fails, instead of 200 with empty bars.  Identity and other local faults on that route stay 401 or 500, not a broker outage.  PUT `/api/policy` rejects unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
 
 **Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
 ## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard

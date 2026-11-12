@@ -109,19 +109,24 @@ describe("src/lib/api-error", () => {
     });
   });
 
-  it("reportHandledError captures the original exception with sanitized context", async () => {
+  it("reportHandledError captures a sanitized Error, not the raw exception", async () => {
     const metrics = await import("../src/lib/sentry-metrics");
     const capture = vi.spyOn(metrics, "captureHandledException").mockImplementation(() => {});
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const failure = new TypeError("Body is unusable");
+    const failure = new TypeError("Tradier HTTP 401: invalid token sk-live-secret-value");
     try {
       const { parseRequestJson: parseJson } = await import("../src/lib/api-error");
       const parsed = await parseJson({ json: async () => { throw failure; } } as unknown as Request);
       expect(parsed.ok).toBe(false);
       expect(capture).toHaveBeenCalledOnce();
-      expect(capture.mock.calls[0]?.[0]).toBe(failure);
+      const captured = capture.mock.calls[0]?.[0];
+      expect(captured).toBeInstanceOf(Error);
+      expect(captured).not.toBe(failure);
+      expect((captured as Error).name).toBe("TypeError");
+      expect((captured as Error).message).not.toMatch(/sk-live/);
+      expect((captured as Error).cause).toBeUndefined();
       expect(capture.mock.calls[0]?.[1]).toBe("Failed to read request body");
-      expect(capture.mock.calls[0]?.[2]).toMatchObject({ error: expect.stringMatching(/Body is unusable/) });
+      expect(capture.mock.calls[0]?.[2]).toMatchObject({ error: expect.not.stringMatching(/sk-live/) });
     } finally {
       capture.mockRestore();
       consoleError.mockRestore();
@@ -350,6 +355,16 @@ describe("malformed JSON on broker-adjacent routes", () => {
   it("PUT /api/policy returns 400 invalid_payload for unknown keys and wrong field types", async () => {
     const { PUT } = await import("../app/api/policy/route");
     const headers = { "content-type": "application/json", [AUTHENTICATED_EMAIL_HEADER]: "policy-zod@test.local" };
+    const control = await PUT(
+      new Request("http://localhost/api/policy", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ maxDailyOrders: 7 })
+      })
+    );
+    expect(control.status).toBe(200);
+    expect((await control.json()).maxDailyOrders).toBe(7);
+
     const unknownKey = await PUT(
       new Request("http://localhost/api/policy", {
         method: "PUT",

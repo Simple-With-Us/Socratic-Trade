@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { jsonError } from "@/lib/api-error";
+import {
+  brokerReadError,
+  brokerReadOrInternalError,
+  isBrokerGatewayError,
+  reportHandledError
+} from "@/lib/api-error";
 import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
@@ -26,9 +31,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
+  // Resolve identity before the provider try so a local SQLite or auth failure is
+  // not mapped to a 502 broker outage.
+  let userId: string | Response;
   try {
-    const userId = resolveRequestUserIdOrResponse(req);
-    if (userId instanceof Response) return userId;
+    userId = resolveRequestUserIdOrResponse(req);
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
+  if (userId instanceof Response) return userId;
+
+  try {
     const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
     if (!bars || bars.length === 0) {
       return NextResponse.json({ symbol, bars: [], note: "no price history available" });
@@ -46,8 +59,12 @@ export async function GET(req: Request) {
     }
     const chartBars = [...byDay.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
     return NextResponse.json({ symbol, bars: chartBars });
-  } catch {
-    return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
+  } catch (error) {
+    if (isBrokerGatewayError(error)) {
+      reportHandledError("Price history fetch failed", error);
+      return brokerReadError(error);
+    }
+    return brokerReadOrInternalError(error);
   }
 }
 
