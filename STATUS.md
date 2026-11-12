@@ -3,6 +3,11 @@
 **What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, `fetchWithRetry` cancels before a 429 retry, and `proxiedFetch` cancels status >= 400 unless the caller opts in.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
 
 **Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
+## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
+
+**What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
+
+**Next.**  PR open; wait for `verify` green; do not merge from agent.
 ## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
 
 **What.** The app can reject traffic that did not come from Cloudflare.  The check stays off until `REQUIRE_CLOUDFLARE_ORIGIN` is set, so merging does not change production.  A Node hook reads the TCP peer and middleware repeats it.  `CF-Connecting-IP` and `X-Forwarded-For` stay as they are while the flag is off, and are removed while it is on unless the peer is Cloudflare or the origin secret matched.  `GET` and `HEAD /api/live`, loopback, and Tailscale `100.64.0.0/10` stay open and do not make those headers trusted.  Rollout: `docs/rollouts/2026-11-12-st-4595-cloudflare-origin-lock.md`.  Runbook: `docs/runbooks/cloudflare-origin-lock.md`.
