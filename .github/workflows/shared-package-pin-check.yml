@@ -1,6 +1,7 @@
 name: Shared package pin check
 
-# Guards @jaywedgeworth22/congress-trading-shared across the three consumers:
+# Guards congress-trading-shared across ST / UM / CT (npm scope
+# @jaywedgeworth22/congress-trading-shared; git source Simple-With-Us/congress-trading-shared):
 #   ST  = this repo (npm git tag in package.json + lock SHA)
 #   UM  = Usage-Monitor (public npm git tag)
 #   CT  = Congress.Trade vendor tree (VENDOR-PROVENANCE.md; no npm dep)
