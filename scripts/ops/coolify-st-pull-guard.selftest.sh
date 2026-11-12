@@ -27,6 +27,11 @@ for v in anchor_pull_old anchor_pull_new anchor_img_old anchor_img_new; do
 done
 echo "anchors extracted: OK"
 
+if [[ "${COOLIFY_SELFTEST_MODE:-}" == "anchors-only" ]]; then
+  echo "ANCHORS-ONLY TEST PASSED"
+  exit 0
+fi
+
 docker cp coolify:/var/www/html/app/Jobs/ApplicationDeploymentJob.php.mm-orig "$PRISTINE" || {
   echo "TEST FAIL: no pristine backup to test against"; exit 1; }
 chmod 644 "$PRISTINE"

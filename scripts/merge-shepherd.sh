@@ -162,8 +162,7 @@ for num in $nums; do
   # conclusion (SUCCESS/FAILURE/...) for a finished check; else status (IN_PROGRESS/QUEUED)
   # for a running one; else state (PENDING) for a commit-status; else NONE = no check at all.
   verify=$(jq -r '[.statusCheckRollup[]? | select((.name // .context)=="verify")][0] | (.conclusion // .status // .state // "NONE")' <<<"$d")
-  nchecks=$(jq -r '[.statusCheckRollup[]?] | length' <<<"$d")   # any checks at all yet?
-  # In-flight (not-yet-concluded) checks -- distinct from nchecks, which also counts
+  # In-flight (not-yet-concluded) checks -- distinct from total check count, which also counts
   # checks that already finished, possibly on a workflow other than "verify" itself.
   # Covers both check-run statuses (QUEUED/IN_PROGRESS/WAITING/REQUESTED/PENDING) and
   # commit-status states (PENDING/EXPECTED), so a verify-absent-but-other-checks-still-
