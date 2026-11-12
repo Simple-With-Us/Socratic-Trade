@@ -571,19 +571,6 @@ enum SessionCookiePersistence {
         return nil
     }
 
-    private static func isCookieBoundToHTTPSOrigin(_ cookie: HTTPCookie, host: String) -> Bool {
-        let normalizedHost = host
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        guard !normalizedHost.isEmpty else { return false }
-        guard let origin = originURL(from: cookie.properties?[.originURL]) else { return false }
-        guard origin.scheme?.lowercased() == "https" else { return false }
-        let originHost = origin.host?
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        return originHost == normalizedHost
-    }
-
     static func ownsDomain(_ cookieDomain: String, host: String, originURL: URL? = nil) -> Bool {
         let normalizedHost = host
             .trimmingCharacters(in: CharacterSet(charactersIn: "."))
