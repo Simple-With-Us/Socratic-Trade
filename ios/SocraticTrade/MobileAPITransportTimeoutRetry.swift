@@ -42,7 +42,7 @@ enum MobileAPITransportTimeoutRetry {
         error: Error,
         method: String?,
         attemptIndex: Int,
-        maxRetries: Int = maxRetries
+        maxRetries: Int = MobileAPITransportTimeoutRetry.maxRetries
     ) -> Bool {
         guard attemptIndex >= 0, attemptIndex < maxRetries else { return false }
         guard isIdempotentRead(method: method) else { return false }

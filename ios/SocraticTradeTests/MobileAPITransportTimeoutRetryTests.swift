@@ -209,10 +209,70 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         XCTAssertNil(policy.systemState)
     }
 
+    func testPolicyGetStopsAfterThreeTransportTimeouts() async throws {
+        install { [counter] request in
+            _ = counter.next()
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/policy")
+            throw URLError(.timedOut)
+        }
+        do {
+            _ = try await makeClient().fullPolicy()
+            XCTFail("expected the third timeout to surface")
+        } catch let error as MobileAPIError {
+            guard case .network(let underlying) = error else {
+                return XCTFail("expected a network error")
+            }
+            XCTAssertTrue(MobileAPITransportTimeoutRetry.isTransportTimeout(underlying))
+        }
+        XCTAssertEqual(counter.count, 3)
+    }
+
+    func testPolicyGetSharesTimeoutAndServerRetryBudget() async throws {
+        install { [counter] request in
+            let attempt = counter.next()
+            XCTAssertEqual(request.url?.path, "/api/policy")
+            if attempt == 1 {
+                throw URLError(.timedOut)
+            }
+            if attempt == 2 {
+                return (503, Data(#"{"error":"unavailable"}"#.utf8))
+            }
+            throw URLError(.timedOut)
+        }
+        do {
+            _ = try await makeClient().fullPolicy()
+            XCTFail("expected the shared budget to stop on the third attempt")
+        } catch let error as MobileAPIError {
+            guard case .network(let underlying) = error else {
+                return XCTFail("expected the third attempt to be a transport timeout")
+            }
+            XCTAssertTrue(MobileAPITransportTimeoutRetry.isTransportTimeout(underlying))
+        }
+        XCTAssertEqual(counter.count, 3)
+    }
+
     @MainActor
     func testLoadUsesOneTransportTimeoutBudget() async throws {
-        UserDefaults.standard.removeObject(forKey: "cached_mobile_snapshot_data")
-        UserDefaults.standard.removeObject(forKey: "cached_mobile_snapshot_saved_at")
+        let defaults = UserDefaults.standard
+        let dataKey = "cached_mobile_snapshot_data"
+        let savedAtKey = "cached_mobile_snapshot_saved_at"
+        let originalData = defaults.object(forKey: dataKey)
+        let originalSavedAt = defaults.object(forKey: savedAtKey)
+        defer {
+            if let originalData {
+                defaults.set(originalData, forKey: dataKey)
+            } else {
+                defaults.removeObject(forKey: dataKey)
+            }
+            if let originalSavedAt {
+                defaults.set(originalSavedAt, forKey: savedAtKey)
+            } else {
+                defaults.removeObject(forKey: savedAtKey)
+            }
+        }
+        defaults.removeObject(forKey: dataKey)
+        defaults.removeObject(forKey: savedAtKey)
         install { [counter] _ in
             _ = counter.next()
             throw URLError(.timedOut)
