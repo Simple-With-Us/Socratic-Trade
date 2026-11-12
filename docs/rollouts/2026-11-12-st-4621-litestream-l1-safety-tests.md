@@ -6,7 +6,7 @@ The L1 suffix-heal and boundary-trim scripts delete Backblaze B2 backup objects 
 
 ## Changes Made
 
-Planning functions load without authorizing or listing.  Suffix-heal keeps only the contiguous L1 suffix from the tip, including when the live count is under `--keep-l1`, and it lists every file version so a hide marker cannot unhide an older upload.  A delete error stops the run.  Name guards refuse L0, L9, traversal, and prefix lookalikes.  Boundary-trim returns exit 3 on a zero-byte previous snapshot and collapses same-max twins before the gap test.  The fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The systemd unit sets that variable so the nightly timer still applies after Jay installs it.
+Planning functions load without authorizing or listing.  Suffix-heal keeps only the contiguous L1 suffix from the tip, including when the live count is under `--keep-l1`, and it lists every file version so a hide marker cannot unhide an older upload.  A delete error stops the run.  An unfinished B2 large-file start is not a live object, so it cannot bridge a TXID gap or fill a keep slot.  Name guards refuse L0, L9, traversal, and prefix lookalikes.  Boundary-trim returns exit 3 on a zero-byte previous snapshot and collapses same-max twins before the gap test.  The fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The systemd unit sets that variable so the nightly timer still applies after Jay installs it.
 
 - `scripts/litestream-l1-suffix-heal.py`
 - `scripts/litestream-l1-boundary-trim.py`
@@ -32,7 +32,7 @@ bash -n scripts/ops/litestream-l1-boundary-trim-fleet.sh
 bash -n scripts/ops/litestream-l1-boundary-trim-fleet.selftest.sh
 ```
 
-The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch: 22 unittest cases and 11 selftest checks.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
+The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch: 23 unittest cases and 11 selftest checks.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
 
 ## Next Steps & Blockers
 

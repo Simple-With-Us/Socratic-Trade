@@ -243,6 +243,17 @@ def _stamp(row: dict[str, Any]) -> tuple[int, str]:
     return (int(row.get("uploadTimestamp") or 0), str(row.get("fileId") or ""))
 
 
+def _current_version(group: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Newest finished upload or hide. An unfinished large-file start is not a file."""
+    meaningful = [
+        row for row in group
+        if str(row.get("action") or "upload") in {"upload", "hide"}
+    ]
+    if not meaningful:
+        return None
+    return max(meaningful, key=_stamp)
+
+
 def live_rows(versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One visible upload per name. A newer hide marker means the name is not live."""
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -253,8 +264,8 @@ def live_rows(versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for name, group in grouped.items():
         if not visible_ltx(name) or parse_range(name) is None:
             continue
-        newest = max(group, key=_stamp)
-        if str(newest.get("action") or "upload") == "hide":
+        newest = _current_version(group)
+        if newest is None or str(newest.get("action") or "upload") == "hide":
             continue
         live.append(
             {
@@ -292,8 +303,8 @@ def plan_l1(files: list[dict[str, Any]], keep: int) -> tuple[list[dict[str, Any]
         grouped.setdefault(name, []).append(row)
     prepared = []
     for name, group in grouped.items():
-        newest = max(group, key=_stamp)
-        if str(newest.get("action") or "upload") == "hide":
+        newest = _current_version(group)
+        if newest is None or str(newest.get("action") or "upload") == "hide":
             continue
         prepared.append(newest)
     prepared.sort(key=_tx_key)

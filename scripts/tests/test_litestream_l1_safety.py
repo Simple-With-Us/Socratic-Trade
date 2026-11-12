@@ -177,6 +177,23 @@ class HealPlanTests(unittest.TestCase):
         self.assertEqual(delete_all, [])
         self.assertEqual([row["fileId"] for row in keep_all], ["a", "b", "c"])
 
+    def test_unfinished_large_file_does_not_occupy_a_keep_slot(self):
+        prefix = HEAL.REPLICA_PREFIX
+        files = [
+            version(prefix, "0001", 1, 2, "real", ts=1),
+            version(prefix, "0001", 3, 4, "start-only", action="start", ts=9),
+            version(prefix, "0001", 5, 6, "upload", ts=2),
+            version(prefix, "0001", 5, 6, "restart", action="start", ts=8),
+        ]
+        raw = {"0001": files, "0002": [], "0003": []}
+        delete, keep = HEAL.planned_deletes(raw, 8)
+        self.assertEqual([row["fileId"] for row in keep], ["upload"])
+        deleted_ids = {row["fileId"] for row in delete}
+        self.assertIn("real", deleted_ids)
+        self.assertIn("start-only", deleted_ids)
+        self.assertNotIn("restart", deleted_ids)
+        self.assertNotIn("upload", deleted_ids)
+
     def test_hidden_and_duplicate_versions_follow_the_live_name(self):
         prefix = HEAL.REPLICA_PREFIX
         live = version(prefix, "0001", 1, 2, "live", ts=5)
