@@ -363,8 +363,6 @@ describe("paid quote provider circuit breaker", () => {
   it("waits out a paid-quote Retry-After before the second attempt", async () => {
     const { apiCircuitBreakerShouldSkip, fetchWithRetry, resetApiCircuitBreaker } = await load();
     resetApiCircuitBreaker();
-    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
-    delete process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS;
     const fetchMock = vi.fn(async () => new Response("slow", {
       status: 429,
       headers: { "Retry-After": "2" }

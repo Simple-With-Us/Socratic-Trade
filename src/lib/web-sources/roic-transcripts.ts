@@ -519,36 +519,58 @@ const RoicTranscriptSchema = z.object({
   quarter: z.unknown().optional()
 }).passthrough();
 
+type RoicFetchOpts = {
+  service: "roic";
+  keySource: "env" | "user" | "none";
+  credentialId?: string;
+  userId?: string;
+  suppressHealthStatuses: number[];
+};
+
+/** Same first step politeFetch uses before a 429 retry. */
+const ROIC_HEADERLESS_RETRY_MS = 600;
+
+async function roicLimitedFetch(url: string, fetchOpts: RoicFetchOpts): Promise<Response | null> {
+  return withProviderLimit("roic", async () => {
+    try {
+      return await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
+    } catch (err) {
+      if (err instanceof CircuitOpenError) return null;
+      throw err;
+    }
+  });
+}
+
 async function roicGetJson<T>(
   url: string,
-  fetchOpts: { service: "roic"; keySource: "env" | "user" | "none"; credentialId?: string; userId?: string; suppressHealthStatuses: number[] },
+  fetchOpts: RoicFetchOpts,
   schema: z.ZodType<T>
 ): Promise<T | null> {
   const credKey = `${fetchOpts.keySource}:${fetchOpts.userId ?? ""}`;
   if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource, Date.now(), fetchOpts.credentialId)) return null;
   const allowed = admitProviderRequests("roic", credKey, 1);
   if (!allowed) return null;
-  return withProviderLimit("roic", async () => {
-    try {
-      let res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
-      // The first call spent the reserved request. A 429 gets one more reserved
-      // attempt, after Retry-After, and still does not hide a third call inside
-      // fetchWithRetry. Plan-gated 429s stay off the quote lane.
-      if (res?.status === 429 && admitProviderRequests("roic", credKey, 1) >= 1) {
-        const retryAfter = retryAfterDelayMs(res) ?? 0;
-        await cancelResponseBody(res);
-        const waitMs = Math.min(Math.max(0, retryAfter), quoteRetryAfterCapMs());
-        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-        res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
-      }
-      if (!res || !res.ok) return null;
-      const parsed = schema.safeParse(await res.json());
-      return parsed.success ? parsed.data : null;
-    } catch (err) {
-      if (err instanceof CircuitOpenError) return null;
-      throw err;
-    }
-  });
+  const first = await roicLimitedFetch(url, fetchOpts);
+  if (!first) return null;
+  if (first.ok) {
+    const parsed = schema.safeParse(await first.json());
+    return parsed.success ? parsed.data : null;
+  }
+  // 429 is in suppressHealthStatuses, so this call does not open the quote lane.
+  // The second request is reserved on its own. The wait stays outside the limiter
+  // so a long Retry-After does not hold the single ROIC slot.
+  if (first.status !== 429 || admitProviderRequests("roic", credKey, 1) < 1) {
+    await cancelResponseBody(first);
+    return null;
+  }
+  const headerWait = retryAfterDelayMs(first) ?? 0;
+  await cancelResponseBody(first);
+  const waitMs = Math.min(Math.max(headerWait, ROIC_HEADERLESS_RETRY_MS), quoteRetryAfterCapMs());
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  const second = await roicLimitedFetch(url, fetchOpts);
+  if (!second?.ok) return null;
+  const parsed = schema.safeParse(await second.json());
+  return parsed.success ? parsed.data : null;
 }
 
 export async function fetchRoicCallIndex(

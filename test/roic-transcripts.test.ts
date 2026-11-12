@@ -17,7 +17,7 @@ import {
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
-import { resetProviderQuotaState } from "../src/lib/provider-rate-limit";
+import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 
 describe("roic-transcripts", () => {
   afterEach(() => {
@@ -30,6 +30,7 @@ describe("roic-transcripts", () => {
     process.env.ROIC_API_KEY = "roic-transcript-test";
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-retry-${randomUUID()}.db`)}`;
     resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
     let calls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       calls += 1;
@@ -39,7 +40,9 @@ describe("roic-transcripts", () => {
       }), { status: 200 });
     }));
     try {
+      const started = Date.now();
       const result = await fetchRoicCallIndex("AAPL");
+      expect(Date.now() - started).toBeGreaterThanOrEqual(500);
       expect(result.rows).toHaveLength(1);
       expect(calls).toBe(2);
     } finally {

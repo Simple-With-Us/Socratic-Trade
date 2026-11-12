@@ -296,14 +296,17 @@ describe("fetchDailyOHLC", () => {
   it("rejects a ROIC page when data is not an array", async () => {
     process.env.ROIC_API_KEY = "roic-test-key";
     process.env.ROIC_HISTORY_ENABLED = "on";
+    let roicRequestCount = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
       if (String(url).includes("api.roic.ai/v3.0.0/stock-prices/")) {
+        roicRequestCount += 1;
         return new Response(JSON.stringify({ data: { date: "2026-06-16", close: 40.5 } }), { status: 200 });
       }
       return new Response("unexpected source", { status: 500 });
     }));
 
     const bars = await fetchDailyOHLC("AAPL");
+    expect(roicRequestCount).toBeGreaterThan(0);
     expect(bars).toBeNull();
   });
 
