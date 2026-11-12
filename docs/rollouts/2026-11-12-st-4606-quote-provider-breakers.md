@@ -48,6 +48,7 @@ env -i PATH="$PATH" HOME="$HOME" npm test
 NODE_OPTIONS=--max-old-space-size=4096 npm run build
 ```
 
+- GB-Fixer (2026-11-12): merged `origin/main`; resolved `app/api/health/route.ts` import conflict (`listOpenApiCircuitBreakers` + `TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY`).  Re-ran `npm run lint`, `npx tsc --noEmit`, and `npx vitest run test/quote-provider-circuit-breaker.test.ts test/history.test.ts` — all exited 0 (48 tests).
 - `npx tsc --noEmit` exited 0.
 - `npx eslint . --quiet` exited 0.
 - Hermetic `npm test` (injected provider keys unset, matching CI): 902 files passed, 1 skipped, 10256 tests passed, 42 skipped.

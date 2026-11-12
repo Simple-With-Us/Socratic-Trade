@@ -2,7 +2,7 @@
 
 **What.**  Twelve Data, Tiingo, Marketstack, and ROIC retry an HTTP 429 first, honoring the remaining retry budget and `Retry-After`.  Only after that budget is spent, and only when `Retry-After` is a positive duration, do they open a per-credential hold for that duration.  An HTTP 402 opens a six-hour hold.  The hold is the credential fingerprint, so one user's 402 does not park another user's key.  While a hold is cooling, the quote chain skips the lane before any network call, so the skip writes no health row and no failed span.  Open holds are listed on `GET /api/health` (`checks.quoteProviderBreakers`) and `GET /api/ops/snapshot` (`quoteProviderBreakers`) and do not change health `ok`.  A failed breaker read sets `checks.quoteProviderBreakersError` to `unavailable`.  Error response bodies are cancelled so a proxy gate slot can settle.  `src/lib/proxy-fetch.ts` and `src/lib/yahoo-finance.ts` are untouched.  Rollout: `docs/rollouts/2026-11-12-st-4606-quote-provider-breakers.md`.
 
-**Next.**  PR is against `main`.  Do not merge and do not enable auto-merge.  `verify` is the gate.  PagerDuty #611 stays the existing Sentry HTTP trace sample.
+**Next.**  PR #5149 merged `origin/main` (health route import conflict resolved).  Do not merge and do not enable auto-merge.  `verify` is the gate after push.  PagerDuty #611 stays the existing Sentry HTTP trace sample.
 
 ## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
 
