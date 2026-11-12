@@ -34,18 +34,25 @@ for src in "$SRC_PY" "$SRC_FLEET" "$SRC_CHECKIN" "$SRC_SERVICE" "$SRC_TIMER" "$E
   fi
 done
 
+if [ ! -f "$DST_ENV" ]; then
+  install -m 0600 "$ENV_EXAMPLE" "$DST_ENV"
+  echo "install-litestream-l1-trim: created ${DST_ENV} from example - set SENTRY_CRONS_DSN before the units can run."
+else
+  echo "install-litestream-l1-trim: kept existing ${DST_ENV}."
+fi
+
+# Crons preflight before any unit changes: the wrapper refuses to run the job
+# (exit 78) without a DSN unless SENTRY_CRONS_DISABLED=1.
+if ! python3 "$SRC_CHECKIN" --env-file "$DST_ENV" check; then
+  echo "install-litestream-l1-trim: set SENTRY_CRONS_DSN in ${DST_ENV} (or SENTRY_CRONS_DISABLED=1 after pausing the Sentry monitor), then re-run.  No units changed." >&2
+  exit 1
+fi
+
 install -m 0755 "$SRC_PY" "$DST_PY"
 install -m 0755 "$SRC_FLEET" "$DST_FLEET"
 install -m 0755 "$SRC_CHECKIN" "$DST_CHECKIN"
 install -m 0644 "$SRC_SERVICE" "$DST_SERVICE"
 install -m 0644 "$SRC_TIMER" "$DST_TIMER"
-
-if [ ! -f "$DST_ENV" ]; then
-  install -m 0600 "$ENV_EXAMPLE" "$DST_ENV"
-  echo "install-litestream-l1-trim: created ${DST_ENV} from example - set SENTRY_CRONS_DSN before Crons can page."
-else
-  echo "install-litestream-l1-trim: kept existing ${DST_ENV}."
-fi
 
 systemctl daemon-reload
 systemctl enable --now litestream-l1-boundary-trim.timer

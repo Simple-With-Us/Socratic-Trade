@@ -40,14 +40,6 @@ for src in "$SRC_SH" "$SRC_PY" "$SRC_CHECKIN" "$SRC_SERVICE" "$SRC_TIMER" "$ENV_
   fi
 done
 
-install -m 0755 "$SRC_SH" "$DST_SH"
-install -m 0755 "$SRC_PY" "$DST_PY"
-install -m 0755 "$SRC_CHECKIN" "$DST_CHECKIN"
-install -m 0644 "$SRC_SERVICE" "$DST_SERVICE"
-install -m 0644 "$SRC_TIMER" "$DST_TIMER"
-mkdir -p "$STATE_DIR"
-chmod 0750 "$STATE_DIR"
-
 if [ ! -f "$DST_ENV" ]; then
   install -m 0640 "$ENV_EXAMPLE" "$DST_ENV"
   echo "install-st-container-restart-monitor: created ${DST_ENV} from example - set ST_RESTART_MONITOR_COOLIFY_ID and fill secrets before the timer can page."
@@ -61,6 +53,22 @@ if [ ! -f "$DST_CRON_ENV" ]; then
 else
   echo "install-st-container-restart-monitor: kept existing ${DST_CRON_ENV}."
 fi
+
+# Crons preflight before any unit changes: the wrapper refuses to run the job
+# (exit 78) without a DSN unless SENTRY_CRONS_DISABLED=1, so do not install a
+# unit that would stop the monitor from running.
+if ! python3 "$SRC_CHECKIN" --env-file "$DST_CRON_ENV" --env-file "$DST_ENV" check; then
+  echo "install-st-container-restart-monitor: set SENTRY_CRONS_DSN in ${DST_CRON_ENV} (or SENTRY_CRONS_DISABLED=1 after pausing the Sentry monitor), then re-run.  No units changed." >&2
+  exit 1
+fi
+
+install -m 0755 "$SRC_SH" "$DST_SH"
+install -m 0755 "$SRC_PY" "$DST_PY"
+install -m 0755 "$SRC_CHECKIN" "$DST_CHECKIN"
+install -m 0644 "$SRC_SERVICE" "$DST_SERVICE"
+install -m 0644 "$SRC_TIMER" "$DST_TIMER"
+mkdir -p "$STATE_DIR"
+chmod 0750 "$STATE_DIR"
 
 systemctl daemon-reload
 systemctl enable --now st-container-restart-monitor.timer

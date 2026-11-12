@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Unittests for sentry-cron-checkin.py (stdlib only; stub Sentry on 127.0.0.1).
+
+Run: python3 -m unittest scripts/ops/sentry_cron_checkin_test.py
+"""
+from __future__ import annotations
+
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import ClassVar
+
+HERE = Path(__file__).resolve().parent
+WRAP = HERE / "sentry-cron-checkin.py"
+DSN_VARS = ("SENTRY_CRONS_DSN", "SENTRY_FLEET_DSN", "SENTRY_CRONS_DISABLED")
+
+
+class _Stub(BaseHTTPRequestHandler):
+    bodies: ClassVar[list[bytes]] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        _Stub.bodies.append(self.rfile.read(length))
+        self.send_response(202)
+        self.end_headers()
+
+    def log_message(self, *_args) -> None:
+        return
+
+
+def statuses() -> list[str]:
+    out: list[str] = []
+    for body in list(_Stub.bodies):
+        out += re.findall(r'"status"\s*:\s*"(in_progress|ok|error)"', body.decode("utf-8", "replace"))
+    return out
+
+
+class WrapTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.httpd = HTTPServer(("127.0.0.1", 0), _Stub)
+        cls.dsn = f"http://publickey@127.0.0.1:{cls.httpd.server_address[1]}/1"
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def setUp(self) -> None:
+        _Stub.bodies.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def env(self, **extra: str) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
+        env.update(extra)
+        return env
+
+    def argv(self, cmd: list[str], *, pre: list[str] = (), post: list[str] = ()) -> list[str]:
+        return [
+            sys.executable, str(WRAP), *pre, "wrap", *post,
+            "--monitor-slug", "st-host-unittest", "--schedule", "2,17,32,47 * * * *",
+            "--http-timeout", "3", "--", *cmd,
+        ]
+
+    def run_wrap(self, cmd: list[str], env: dict[str, str], **kw) -> subprocess.CompletedProcess:
+        return subprocess.run(self.argv(cmd, **kw), check=False, env=env, capture_output=True, text=True, timeout=30)
+
+    # Item 2: missing DSN is a configuration error, not an opt-out.
+    def test_missing_dsn_exits_78_without_running_job(self) -> None:
+        marker = Path(self.tmp.name) / "ran"
+        r = self.run_wrap(["touch", str(marker)], self.env())
+        self.assertEqual(r.returncode, 78, r.stderr)
+        self.assertFalse(marker.exists(), "job must not run without a DSN")
+        self.assertIn("SENTRY_CRONS_DSN", r.stderr)
+        self.assertIn("SENTRY_FLEET_DSN", r.stderr)
+        self.assertEqual(_Stub.bodies, [])
+
+    def test_malformed_dsn_exits_78(self) -> None:
+        r = self.run_wrap(["true"], self.env(SENTRY_CRONS_DSN="not-a-dsn"))
+        self.assertEqual(r.returncode, 78, r.stderr)
+
+    # Item 6: explicit bypass still runs the job and warns.
+    def test_disabled_runs_job_and_warns(self) -> None:
+        r = self.run_wrap(["sh", "-c", "exit 3"], self.env(SENTRY_CRONS_DISABLED="1"))
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("paused or deleted", r.stderr)
+        self.assertEqual(_Stub.bodies, [])
+
+    def test_check_mode(self) -> None:
+        base = [sys.executable, str(WRAP), "check"]
+        self.assertEqual(subprocess.run(base, check=False, env=self.env(), capture_output=True).returncode, 78)
+        self.assertEqual(subprocess.run(base, check=False, env=self.env(SENTRY_FLEET_DSN=self.dsn)).returncode, 0)
+        self.assertEqual(
+            subprocess.run(base, check=False, env=self.env(SENTRY_CRONS_DISABLED="1"), capture_output=True).returncode, 0
+        )
+
+    # Item 3: --env-file works after the subcommand as well as before it.
+    def test_env_file_after_wrap(self) -> None:
+        envf = Path(self.tmp.name) / "cron.env"
+        envf.write_text(f"SENTRY_CRONS_DSN={self.dsn}\n", encoding="utf-8")
+        r = self.run_wrap(["true"], self.env(), post=["--env-file", str(envf)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(statuses(), ["in_progress", "ok"])
+
+    def test_env_file_before_and_after_wrap_both_load(self) -> None:
+        a = Path(self.tmp.name) / "a.env"
+        b = Path(self.tmp.name) / "b.env"
+        a.write_text(f"SENTRY_CRONS_DSN={self.dsn}\n", encoding="utf-8")
+        b.write_text("ST_UNITTEST_MARK=from-b\n", encoding="utf-8")
+        r = self.run_wrap(
+            ["sh", "-c", 'test "$ST_UNITTEST_MARK" = from-b'],
+            self.env(),
+            pre=["--env-file", str(a)],
+            post=["--env-file", str(b)],
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(statuses(), ["in_progress", "ok"])
+
+    # Item 4: spawn failure closes the check-in and exits 127.
+    def test_spawn_oserror_sends_error_and_exits_127(self) -> None:
+        r = self.run_wrap(["/nonexistent/st-unittest-cmd"], self.env(SENTRY_CRONS_DSN=self.dsn))
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(statuses(), ["in_progress", "error"])
+
+    # Item 5: SIGTERM to the wrapper is forwarded and still closes the check-in.
+    def test_sigterm_forwarded_and_error_checkin_sent(self) -> None:
+        pidfile = Path(self.tmp.name) / "child.pid"
+        proc = subprocess.Popen(
+            self.argv(["sh", "-c", f'echo $$ > {pidfile}; exec sleep 30']),
+            env=self.env(SENTRY_CRONS_DSN=self.dsn),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(statuses(), ["in_progress"])
+        proc.send_signal(signal.SIGTERM)
+        rc = proc.wait(timeout=15)
+        proc.stderr.close()
+        self.assertEqual(rc, 128 + signal.SIGTERM)
+        self.assertEqual(statuses(), ["in_progress", "error"])
+        child = int(pidfile.read_text().strip())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+
+    # Item 7: signal death maps to 128+N, not 256-N.
+    def test_child_signal_death_exits_128_plus_n(self) -> None:
+        r = self.run_wrap(["sh", "-c", "kill -TERM $$"], self.env(SENTRY_CRONS_DSN=self.dsn))
+        self.assertEqual(r.returncode, 128 + signal.SIGTERM)
+        self.assertEqual(statuses(), ["in_progress", "error"])
+
+    # Item 9: exit 2 (incident found) is never reported as ok.
+    def test_exit_2_reports_error_and_flag_is_gone(self) -> None:
+        r = self.run_wrap(["sh", "-c", "exit 2"], self.env(SENTRY_CRONS_DSN=self.dsn))
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(statuses(), ["in_progress", "error"])
+        _Stub.bodies.clear()
+        r = self.run_wrap(["true"], self.env(SENTRY_CRONS_DSN=self.dsn), post=["--treat-exit-2-as-ok"])
+        self.assertEqual(r.returncode, 2, "argparse must reject the removed flag")
+        self.assertEqual(_Stub.bodies, [])
+        for unit in HERE.glob("*.service"):
+            self.assertNotIn("--treat-exit-2-as-ok", unit.read_text(encoding="utf-8"), unit.name)
+
+
+class UnitScheduleTest(unittest.TestCase):
+    """Item 8: every wrapped unit's UTC crontab matches a UTC-pinned OnCalendar."""
+
+    def test_wrapped_timers_pinned_to_utc_and_match_schedule(self) -> None:
+        wrapped = 0
+        for service in sorted(HERE.glob("*.service")):
+            m = re.search(r'sentry-cron-checkin\.py wrap .*--schedule "([^"]+)"', service.read_text("utf-8"))
+            if not m:
+                continue
+            wrapped += 1
+            timer = service.with_suffix(".timer")
+            cal = re.search(r"^OnCalendar=(.+)$", timer.read_text("utf-8"), re.MULTILINE).group(1).strip()
+            self.assertTrue(cal.endswith(" UTC"), f"{timer.name}: OnCalendar={cal} is host-local")
+            minute, hour = m.group(1).split()[:2]
+            cal_time = cal[: -len(" UTC")].split()[-1]
+            parts = cal_time.split(":")
+            if parts[0] == "*":
+                self.assertEqual(hour, "*", timer.name)
+                self.assertEqual(
+                    [int(x) for x in parts[1].split(",")], [int(x) for x in minute.split(",")], timer.name
+                )
+            else:
+                self.assertEqual(int(parts[0]), int(hour), timer.name)
+                self.assertEqual(int(parts[1]), int(minute), timer.name)
+        self.assertGreaterEqual(wrapped, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

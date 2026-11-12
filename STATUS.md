@@ -2,7 +2,7 @@
 
 **What.**  `scripts/ops/sentry-cron-checkin.py` wraps ST host oneshots (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) with Sentry Crons in_progress/ok/error, shared `/etc/default/st-host-cron-sentry`, and installer updates.  Rollout: `docs/rollouts/2026-11-12-st-4623-host-timer-deadman.md`.
 
-**Next.**  PR on `gb-trader/ST-4623-host-timer-deadman`; green `verify`; Jay re-installs on fleet-hetzner-nbg1 with DSN in place.  Do not merge or deploy from agent.
+**Next.**  PR on `gb-trader/ST-4623-host-timer-deadman`; green `verify`; Jay sets the DSN, then re-installs on `<host>` (the dedicated fleet host; the installers refuse without a DSN or `SENTRY_CRONS_DISABLED=1`).  Do not merge or deploy from agent.
 ## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
 
 **What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.

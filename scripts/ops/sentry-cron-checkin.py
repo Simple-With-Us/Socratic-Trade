@@ -5,9 +5,15 @@ Reusable Sentry Crons check-ins for host systemd oneshots (stdlib only).
 Wrap a timer-fired command: in_progress at start, ok or error at end, with an
 upserted monitor_config so a timer that stops firing pages via missed check-in.
 
-DSN: SENTRY_CRONS_DSN, else SENTRY_FLEET_DSN (never printed).  Opt-out:
-SENTRY_CRONS_DISABLED=1.  Sentry failures never change the wrapped command's exit
-code.
+DSN: SENTRY_CRONS_DSN, else SENTRY_FLEET_DSN (never printed).  A missing or
+malformed DSN is a configuration error: the wrapper exits 78 (EX_CONFIG) before
+starting the job, so a lost secret cannot pass for an opt-out.  The only bypass is
+SENTRY_CRONS_DISABLED=1, which runs the job without check-ins; pause or delete the
+matching Sentry monitors first or Sentry pages on missed check-ins.
+
+Sentry HTTP failures never change the wrapped command's exit code.  A child killed
+by signal N exits 128+N.  SIGTERM/SIGINT are forwarded to the child and still
+send the terminal error check-in.  A command that cannot be spawned exits 127.
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import uuid
@@ -29,6 +36,10 @@ CLIENT_NAME = "st-host-cron-checkin/1.0"
 ENV_DSN_PRIMARY = "SENTRY_CRONS_DSN"
 ENV_DSN_FALLBACK = "SENTRY_FLEET_DSN"
 ENV_DISABLE = "SENTRY_CRONS_DISABLED"
+DEFAULT_ENV_FILE = "/etc/default/st-host-cron-sentry"
+EXIT_CONFIG = 78  # sysexits EX_CONFIG
+EXIT_SPAWN_FAILED = 127
+FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
 def load_env_file(path: str | Path) -> None:
@@ -64,11 +75,45 @@ def crons_disabled() -> bool:
 
 
 def resolve_dsn() -> str:
+    """Return the Crons DSN or raise KeyError naming both supported variables."""
     for key in (ENV_DSN_PRIMARY, ENV_DSN_FALLBACK):
         value = os.environ.get(key, "").strip()
         if value:
             return value
-    return ""
+    raise KeyError(
+        f"neither {ENV_DSN_PRIMARY} nor {ENV_DSN_FALLBACK} is set; set one in "
+        f"{DEFAULT_ENV_FILE}, or set {ENV_DISABLE}=1 after pausing "
+        "the Sentry monitors"
+    )
+
+
+def check_config() -> int:
+    """0 when check-ins are configured or explicitly disabled, else EXIT_CONFIG."""
+    if crons_disabled():
+        warn_disabled()
+        return 0
+    try:
+        parse_dsn(resolve_dsn())
+    except KeyError as exc:
+        print(f"sentry-cron-checkin: {exc.args[0]}", file=sys.stderr)
+        return EXIT_CONFIG
+    except ValueError as exc:
+        print(f"sentry-cron-checkin: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    return 0
+
+
+def warn_disabled() -> None:
+    print(
+        f"sentry-cron-checkin: WARNING {ENV_DISABLE}=1, no check-ins sent; the Sentry "
+        "monitor must be paused or deleted or it pages on missed check-ins",
+        file=sys.stderr,
+    )
+
+
+def normalize_exit(rc: int) -> int:
+    """Map a Popen signal death (-N) to the shell convention 128+N."""
+    return 128 - rc if rc < 0 else rc
 
 
 def parse_dsn(dsn: str) -> tuple[str, str, str]:
@@ -155,12 +200,62 @@ def send_checkin(
     send_envelope(envelope_url, auth_header, "check_in", payload, timeout_sec=timeout_sec)
 
 
-def terminal_status_for_exit(rc: int, *, treat_exit_2_as_ok: bool) -> str:
-    if rc == 0:
-        return "ok"
-    if treat_exit_2_as_ok and rc == 2:
-        return "ok"
-    return "error"
+def terminal_status_for_exit(rc: int) -> str:
+    return "ok" if rc == 0 else "error"
+
+
+class StopSignals:
+    """Forward SIGTERM/SIGINT to the child while the wrapper is running.
+
+    Installed before the in_progress check-in so a systemd stop that lands at
+    any point still reaches the terminal error check-in.  SIGKILL and hard
+    reboots still rely on the monitor's max_runtime.
+    """
+
+    def __init__(self) -> None:
+        self.received: list[int] = []
+        self.proc: subprocess.Popen | None = None
+        self._previous: dict = {}
+
+    def _forward(self, signum: int, _frame: object) -> None:
+        self.received.append(signum)
+        self._send(signum)
+
+    def _send(self, signum: int) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.send_signal(signum)
+            except OSError:
+                pass
+
+    def __enter__(self) -> StopSignals:
+        self._previous = {sig: signal.signal(sig, self._forward) for sig in FORWARDED_SIGNALS}
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        for sig, handler in self._previous.items():
+            signal.signal(sig, handler)
+
+    def run(self, command: Sequence[str]) -> int:
+        """Run command and return its exit (128+N for signal N, 127 if unspawnable)."""
+        if self.received:
+            # Stop requested before the spawn: do not start the job.
+            return 128 + self.received[0]
+        try:
+            self.proc = subprocess.Popen(list(command))
+        except OSError as exc:
+            print(
+                f"sentry-cron-checkin: cannot start {command[0]}: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return EXIT_SPAWN_FAILED
+        if self.received:
+            # A stop request landed between the check above and the spawn.
+            self._send(self.received[0])
+        rc = normalize_exit(self.proc.wait())
+        if self.received and rc == 0:
+            rc = 128 + self.received[0]
+        return rc
 
 
 def wrap_command(
@@ -170,70 +265,74 @@ def wrap_command(
     schedule: str,
     checkin_margin: int,
     max_runtime: int,
-    treat_exit_2_as_ok: bool,
     timeout_sec: float,
 ) -> int:
     if not command:
         print("sentry-cron-checkin: wrap requires a command", file=sys.stderr)
         return 2
 
-    dsn = resolve_dsn()
-    if crons_disabled() or not dsn:
-        return subprocess.call(command)
+    if crons_disabled():
+        warn_disabled()
+        with StopSignals() as stop:
+            return stop.run(command)
 
-    try:
-        envelope_url, auth_header = envelope_url_for_dsn(dsn)
-    except ValueError as exc:
-        print(f"sentry-cron-checkin: {exc}", file=sys.stderr)
-        return subprocess.call(command)
+    if check_config() != 0:
+        return EXIT_CONFIG
+    envelope_url, auth_header = envelope_url_for_dsn(resolve_dsn())
 
     monitor_config = build_monitor_config(schedule, checkin_margin, max_runtime)
     check_in_id = uuid.uuid4().hex
-    send_checkin(
-        envelope_url,
-        auth_header,
-        monitor_slug=monitor_slug,
-        status="in_progress",
-        check_in_id=check_in_id,
-        monitor_config=monitor_config,
-        timeout_sec=timeout_sec,
-    )
+    with StopSignals() as stop:
+        send_checkin(
+            envelope_url,
+            auth_header,
+            monitor_slug=monitor_slug,
+            status="in_progress",
+            check_in_id=check_in_id,
+            monitor_config=monitor_config,
+            timeout_sec=timeout_sec,
+        )
 
-    rc = subprocess.call(command)
+        rc = stop.run(command)
 
-    terminal = terminal_status_for_exit(rc, treat_exit_2_as_ok=treat_exit_2_as_ok)
-    send_checkin(
-        envelope_url,
-        auth_header,
-        monitor_slug=monitor_slug,
-        status=terminal,
-        check_in_id=check_in_id,
-        monitor_config=monitor_config,
-        timeout_sec=timeout_sec,
-    )
+        terminal = "error" if stop.received else terminal_status_for_exit(rc)
+        send_checkin(
+            envelope_url,
+            auth_header,
+            monitor_slug=monitor_slug,
+            status=terminal,
+            check_in_id=check_in_id,
+            monitor_config=monitor_config,
+            timeout_sec=timeout_sec,
+        )
     return rc
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    env_help = "Optional env file (KEY=VALUE); may be repeated; does not override existing env"
     parser = argparse.ArgumentParser(description="Sentry Crons wrapper for host systemd jobs")
-    parser.add_argument(
-        "--env-file",
-        action="append",
-        default=[],
-        help="Optional env file (KEY=VALUE); may be repeated; does not override existing env",
-    )
+    parser.add_argument("--env-file", action="append", default=[], help=env_help)
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    wrap = sub.add_parser("wrap", help="Run COMMAND with in_progress and terminal check-ins")
+    # Separate dest: a subparser default would otherwise overwrite env files
+    # given before the subcommand.
+    sub_env = argparse.ArgumentParser(add_help=False)
+    sub_env.add_argument("--env-file", dest="sub_env_file", action="append", default=[], help=env_help)
+
+    sub.add_parser(
+        "check",
+        parents=[sub_env],
+        help="Exit 0 if a DSN is set or check-ins are disabled, else 78 (installer preflight)",
+    )
+    wrap = sub.add_parser(
+        "wrap",
+        parents=[sub_env],
+        help="Run COMMAND with in_progress and terminal check-ins",
+    )
     wrap.add_argument("--monitor-slug", required=True)
     wrap.add_argument("--schedule", required=True, help="Crontab expression (UTC), e.g. '4 0 * * *'")
     wrap.add_argument("--checkin-margin", type=int, default=15)
     wrap.add_argument("--max-runtime", type=int, default=60)
-    wrap.add_argument(
-        "--treat-exit-2-as-ok",
-        action="store_true",
-        help="Map wrapped exit 2 to Crons ok (st-container-restart-monitor alert path)",
-    )
     wrap.add_argument(
         "--http-timeout",
         type=float,
@@ -247,10 +346,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    for path in getattr(args, "env_file", []) or []:
+    for path in [*args.env_file, *getattr(args, "sub_env_file", [])]:
         load_env_file(path)
     # Also honor default host path when not passed (installer).
-    load_env_file("/etc/default/st-host-cron-sentry")
+    load_env_file(DEFAULT_ENV_FILE)
+
+    if args.mode == "check":
+        return check_config()
 
     if args.mode == "wrap":
         cmd = list(args.argv)
@@ -265,7 +367,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             schedule=args.schedule,
             checkin_margin=args.checkin_margin,
             max_runtime=args.max_runtime,
-            treat_exit_2_as_ok=args.treat_exit_2_as_ok,
             timeout_sec=args.http_timeout,
         )
 

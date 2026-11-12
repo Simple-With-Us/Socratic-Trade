@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Hermetic selftest for sentry-cron-checkin.py (stub HTTP server in Python).
+# Hermetic selftest for sentry-cron-checkin.py (stub HTTP server in Python),
+# then the sentry_cron_checkin_test.py unittests.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -119,3 +120,7 @@ def main() -> int:
 
 raise SystemExit(main())
 PY
+
+# Unittests: missing DSN, --env-file after wrap, spawn failure, SIGTERM,
+# signal exit codes, exit 2, timer UTC pin.
+PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/sentry_cron_checkin_test.py"
