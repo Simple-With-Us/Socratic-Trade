@@ -89,7 +89,8 @@ export type PositionInvariantRefusalCode =
   | "sell_without_long"
   | "sell_against_short"
   | "cover_without_short"
-  | "position_unverified";
+  | "position_unverified"
+  | "dollar_exit_unpriced";
 
 export type PositionInvariantReceiptKind =
   | "quantity_clamped_to_position"
@@ -189,14 +190,24 @@ export function proposalSidesForHeldPositions(sides: OrderSide[], positions: Equ
   return holdsShort ? [...sides, "cover"] : sides;
 }
 
+/**
+ * Share-class identity for a position match. Internal books are hyphenated (BRK-B, the form
+ * Alpaca and Tradier reads are canonicalized to). An order can still arrive as BRK.B. Treating
+ * those as different symbols makes a held long look flat, so the choke point refuses the exit
+ * as a short it would otherwise have clamped.
+ */
+function positionKey(symbol: string): string {
+  return normalizeSymbol(symbol).replace(/\./g, "-");
+}
+
 /** Signed held quantity for one symbol from a broker position list (short = negative). */
 export function heldPositionFor(positions: EquityPosition[], symbol: string): HeldPosition {
-  const target = normalizeSymbol(symbol);
+  const target = positionKey(symbol);
   let signedQuantity = 0;
   let marketValue = 0;
   let matched = 0;
   for (const position of positions) {
-    if (normalizeSymbol(position.symbol) !== target) continue;
+    if (positionKey(position.symbol) !== target) continue;
     const quantity = Number(position.quantity);
     if (!Number.isFinite(quantity)) continue;
     matched += 1;
@@ -213,10 +224,15 @@ export function heldPositionFor(positions: EquityPosition[], symbol: string): He
  * Pure: apply the position invariant to one order.  Returns the (possibly reshaped) order plus a
  * receipt per change, or throws OrderPositionInvariantError.  `position` undefined means the
  * position could not be verified.  Never mutates `order`; never forwards `verifiedPositionQuantity`.
+ *
+ * `resolvePartialDollarExits` is for brokers with no notional field (Tradier). A partial dollar
+ * exit left as dollars is sized from the limit price, and a limit below the position price sells
+ * more shares than are held. The position's own per-share value is the cap.
  */
 export function applyPositionInvariant(
   order: EquityOrderInput,
-  position: HeldPosition | undefined
+  position: HeldPosition | undefined,
+  options?: { resolvePartialDollarExits?: boolean }
 ): { input: EquityOrderInput; receipts: PositionInvariantReceipt[] } {
   const { verifiedPositionQuantity: _hint, ...rest } = order;
   void _hint;
@@ -309,9 +325,12 @@ export function applyPositionInvariant(
     closable = heldShort;
   }
 
-  // Full-exit dollar orders resolve to the exact held quantity.
-  if (input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0 && heldMarketValue > 0) {
-    if (input.dollarAmount >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE)) {
+  // Full-exit dollar orders resolve to the exact held quantity. A partial dollar exit on a broker
+  // with no notional field is resolved from the position's own per-share value, or refused: leaving
+  // the dollars for the adapter lets a cheap limit or quote turn them into more shares than are held.
+  if (input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0) {
+    const fullExit = heldMarketValue > 0 && input.dollarAmount >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE);
+    if (fullExit) {
       const dollars = input.dollarAmount;
       const next = { ...input, quantity: closable };
       delete next.dollarAmount;
@@ -321,6 +340,28 @@ export function applyPositionInvariant(
         detail: `$${dollars.toFixed(2)} ${closingSide} of a $${heldMarketValue.toFixed(2)} position is a full exit; placed as the exact held quantity ${formatQty(closable)}.`,
         changedFields: ["dollarAmount", "quantity"]
       });
+    } else if (options?.resolvePartialDollarExits) {
+      const resolved =
+        heldMarketValue > 0 ? resolveDollarsAgainstHeld(input.dollarAmount, closable, heldMarketValue) : undefined;
+      if (resolved?.kind === "partial") {
+        const dollars = input.dollarAmount;
+        const next = { ...input, quantity: resolved.quantity };
+        delete next.dollarAmount;
+        input = next;
+        receipts.push({
+          kind: "dollar_exit_resolved_to_quantity",
+          detail:
+            `$${dollars.toFixed(2)} ${closingSide} of a $${heldMarketValue.toFixed(2)} position is a partial exit; ` +
+            `placed as ${formatQty(resolved.quantity)} shares so dollar sizing cannot exceed the position.`,
+          changedFields: ["dollarAmount", "quantity"]
+        });
+      } else {
+        throw new OrderPositionInvariantError(
+          `${symbol} ${closingSide.toUpperCase()} not placed: a $${input.dollarAmount.toFixed(2)} exit could not be priced inside the held ` +
+            `${formatQty(closable)} shares, so the broker's dollar sizing could sell more than the position. Nothing was sent to the broker.`,
+          "dollar_exit_unpriced"
+        );
+      }
     }
   }
 
@@ -417,7 +458,9 @@ export function withPositionInvariant(gateway: BrokerGateway, policy: TradingPol
 
           let applied: ReturnType<typeof applyPositionInvariant>;
           try {
-            applied = applyPositionInvariant(rawInput, position);
+            applied = applyPositionInvariant(rawInput, position, {
+              resolvePartialDollarExits: policy.activeBroker === "tradier"
+            });
           } catch (error) {
             if (error instanceof OrderPositionInvariantError) {
               audit(

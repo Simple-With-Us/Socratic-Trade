@@ -1,0 +1,48 @@
+# ST-4616: money-path order invariant properties
+
+## Context & objective
+
+The placement choke point in `src/lib/order-position-invariant.ts` is what stops a sell from opening a short and a cover from opening a long.  This pass adds seeded property tests that place orders through `getBrokerGateway` and read the Alpaca and Tradier payloads.  Two of those cases were real bugs.  The design record stays `docs/rollouts/2026-09-24-st-order-correctness.md`.
+
+## Changes made
+
+- A seeded generator (mulberry32, seed `0x4616`, 1000 cases per broker) builds positions and orders and asserts the eight payload properties in `test/order-position-invariant-properties.test.ts`.  Shrunk examples cover the share-class miss, the Tradier partial dollar limit sell, and the quantity-only hint.
+- `heldPositionFor` matches `BRK.B` to a `BRK-B` position.  Global `normalizeSymbol` is unchanged.
+- Tradier partial dollar exits are resolved to a share quantity from the position's own per-share value, and capped at the shares held.  If that quantity cannot be priced, the exit is refused (`dollar_exit_unpriced`) and nothing is sent.  Alpaca partial dollar sells stay notional.
+
+Files:
+
+- `src/lib/order-position-invariant.ts`
+- `test/order-position-invariant-properties.test.ts`
+- `STATUS.md`
+- `PLAN.md`
+- `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`
+
+## Decisions & trade-offs
+
+- fast-check is not a dependency.  The generator is local and deterministic.
+- Explicit short entries still skip the invariant, and only when `allowedProposalSides` includes `short`.
+- Alpaca partial dollar sells stay dollar-sized.  Tradier has no notional field, so the same dollars were being sized from a limit or a quote and could exceed the position.
+- A quantity-only hint has no market value.  A Tradier dollar exit against that hint is refused instead of sized from a quote.
+- Tradier duration for an extended-hours limit follows the wall-clock pre/post windows in `tradierExtendedHoursDuration`.  The generator clock only freezes the sandbox open deferral.
+- An unverified Tradier read still fails open on an explicit close verb.  The property does not require that pass-through to be clamped.
+
+## Verification state
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+npx vitest run test/order-position-invariant-properties.test.ts
+```
+
+Node 26.13.1. `npm run lint` exited 0 (warnings only).  `npx tsc --noEmit` exited 0 after the dead `c.side !== "short"` comparison was removed.  `npx vitest run test/order-position-invariant-properties.test.ts test/order-position-invariant.test.ts` passed.  Full `npm test` was 18 failed, 10233 passed, 41 skipped.  The failures are in unrelated suites (provider keys, notify, host metadata) and none are in the order-invariant files.  `npm run build` exited 0 with `NODE_OPTIONS=--max-old-space-size=6144` after the default heap aborted.
+
+## Next steps & blockers
+
+Open the PR.  `verify` must be green.  Do not merge, do not enable auto-merge, and do not deploy.  Jay reviews the money-path behavior change: share-class matching, and Tradier dollar exits that become a capped share quantity or a refusal.
+
+## Zero-code findings
+
+None.  The two payload failures were product bugs and are fixed in this change.
