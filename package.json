@@ -2,6 +2,14 @@
   "name": "socratic-trade-dashboard",
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Simple-With-Us/Socratic-Trade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Simple-With-Us/Socratic-Trade/issues"
+  },
+  "homepage": "https://github.com/Simple-With-Us/Socratic-Trade#readme",
   "type": "module",
   "scripts": {
     "dev": "next dev",
