@@ -279,7 +279,7 @@ describe("admin ingest jobs", () => {
       method: "POST",
       body: JSON.stringify({ symbols: ["AAPL"] })
     }, tokenAuth));
-    expect(started.status).not.toBe(429);
+    expect(started.status).toBe(200);
     expect(mocks.refreshFilingBodies).toHaveBeenCalledOnce();
 
     const exhausted = await reindexTenKPost(adminRequest("/api/admin/reindex-10k", {
@@ -304,7 +304,7 @@ describe("admin ingest jobs", () => {
       method: "POST",
       body: JSON.stringify({ id: "congress" })
     }, tokenAuth));
-    expect(started.status).not.toBe(429);
+    expect(started.status).toBe(200);
     expect(mocks.refreshCongress).toHaveBeenCalledOnce();
 
     const exhausted = await refreshWebSourcePost(adminRequest("/api/admin/refresh-websource", {
@@ -361,8 +361,7 @@ describe("admin ingest jobs", () => {
       method: "POST",
       body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "0000320193", "1018724"] })
     }, tokenAuth));
-    expect(allowed.status).not.toBe(429);
-    expect(allowed.status).not.toBe(400);
+    expect(allowed.status).toBe(200);
     expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
     expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
       offset: 2,
@@ -384,8 +383,7 @@ describe("admin ingest jobs", () => {
       method: "POST",
       body: JSON.stringify({ action: "seed", offset: "2", limit: "3", ciks: ["320193", "0000320193"] })
     }, tokenAuth));
-    expect(response.status).not.toBe(400);
-    expect(response.status).not.toBe(429);
+    expect(response.status).toBe(200);
     expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
     expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
       offset: 2,

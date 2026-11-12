@@ -39,7 +39,7 @@ npm test
 npm run build
 ```
 
-Focused admin tests: 6 files, 74 tests passed, including the new over-limit 429 cases.  After the review follow-up, `npx vitest run test/admin-ingest-rate-limit.test.ts` passed 36 tests.  Before the route wiring, those over-limit cases returned HTTP 200 and started the job.  Full gate on Node 26: `npm run lint` passed, `npx tsc --noEmit` passed, and `npm test` passed (904 files, 10299 tests, 42 skipped).  `npm run build` passed with `NODE_OPTIONS=--max-old-space-size=4096`, the same heap CI uses for the Next 16 production build.
+Focused admin tests: 6 files, 74 tests passed, including the new over-limit 429 cases.  After the review follow-up, `npx vitest run test/admin-ingest-rate-limit.test.ts` passed 36 tests.  The quoted-offset test and the allowed starts in the budget-control tests now expect HTTP 200, so a later 500 does not pass.  Before the route wiring, those over-limit cases returned HTTP 200 and started the job.  Full gate on Node 26: `npm run lint` passed, `npx tsc --noEmit` passed, and `npm test` passed (904 files, 10299 tests, 42 skipped).  `npm run build` passed with `NODE_OPTIONS=--max-old-space-size=4096`, the same heap CI uses for the Next 16 production build.
 
 ## Next Steps & Blockers
 
