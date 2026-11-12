@@ -1376,6 +1376,51 @@ describe("money-path order invariant properties", () => {
     expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500 }, long, tradier).input).toMatchObject({ quantity: 5 });
   });
 
+  // Kody PRRT_kwDOS7mOVM62qML9: an explicit positive quantity is kept; only a stale zero/negative
+  // quantity is dropped so dollar resolution (or the Alpaca notional) can run. The clamp still
+  // bounds a requested count that exceeds the held position.
+  it("a dollar-sized exit keeps an explicit positive quantity and still clamps to the held position", () => {
+    const long = heldPositionFor([{ symbol: "MSFT", quantity: 10, averageCost: 20, marketValue: 1000, marketValueSource: "quote" }], "MSFT");
+    const short = heldPositionFor(pricedShort, "MSFT");
+    const base = { accountNumber: TRADIER_ACCOUNT, symbol: "MSFT", type: "market", timeInForce: "gfd", marketHours: "regular_hours" } as const;
+    const tradier = { resolvePartialDollarExits: true };
+    // $500 of a $1000 / 10-share long would resolve to 5 shares. A requested 3 is kept, not resized.
+    const partial = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 3 }, long, tradier).input;
+    expect(partial).toMatchObject({ side: "sell", quantity: 3, dollarAmount: 500 });
+    // Requested 8 is also kept (not resized down to 5).
+    expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 8 }, long, tradier).input).toMatchObject({
+      quantity: 8,
+      dollarAmount: 500
+    });
+    // Requested 15 exceeds the held 10 and is clamped; dollars are not used to resize.
+    const clamped = applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity: 15 }, long, tradier);
+    expect(clamped.input).toMatchObject({ quantity: 10, dollarAmount: 500 });
+    expect(clamped.receipts.some((receipt) => receipt.kind === "quantity_clamped_to_position")).toBe(true);
+    // Cover: requested 4 of a 10-share short; $500 would also be 5 shares, but 4 is kept.
+    expect(applyPositionInvariant({ ...base, side: "cover", dollarAmount: 500, quantity: 4 }, short, tradier).input).toMatchObject({
+      side: "cover",
+      quantity: 4,
+      dollarAmount: 500
+    });
+    // Alpaca: a positive quantity is kept, not stripped so the order goes out as dollars only.
+    const alpaca = applyPositionInvariant({ ...base, accountNumber: ALPACA_ACCOUNT, side: "sell", dollarAmount: 500, quantity: 3 }, long).input;
+    expect(alpaca).toMatchObject({ quantity: 3, dollarAmount: 500 });
+    // Stale qty<=0 is still dropped: Tradier resolves $500 to 5 shares; Alpaca keeps the $500 notional.
+    for (const quantity of [0, -3]) {
+      const label = `quantity ${quantity}`;
+      expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 500, quantity }, long, tradier).input, label).toMatchObject({
+        quantity: 5
+      });
+      const alpacaStale = applyPositionInvariant({ ...base, accountNumber: ALPACA_ACCOUNT, side: "sell", dollarAmount: 500, quantity }, long).input;
+      expect(alpacaStale, label).toMatchObject({ dollarAmount: 500 });
+      expect(alpacaStale.quantity, label).toBeUndefined();
+      // Oversized dollars still clamp to the exact held 10.
+      expect(applyPositionInvariant({ ...base, side: "sell", dollarAmount: 5000, quantity }, long, tradier).input, label).toMatchObject({
+        quantity: 10
+      });
+    }
+  });
+
   // Kody PRRT_kwDOS7mOVM62m-NZ: a non-positive dollar buy is invalid input, not a retryable position error.
   // Kody PRRT_kwDOS7mOVM62oBV6: the control proves the fixture reaches the unpriced branch.
   it("a zero or negative dollar buy against an unpriced short is not a retryable position refusal", () => {

@@ -296,9 +296,8 @@ export function applyPositionInvariant(
       const resolved = resolveDollarsAgainstHeld(input.dollarAmount, heldShort, heldMarketValue);
       if (!resolved || resolved.kind === "exceeds") return { input, receipts };
       const dollars = input.dollarAmount;
-      const next: EquityOrderInput = { ...input, quantity: resolved.quantity };
-      delete next.dollarAmount;
-      input = next;
+      const { dollarAmount: _resolvedDollars, ...withoutDollars } = input;
+      input = { ...withoutDollars, quantity: resolved.quantity };
       quantity = resolved.quantity;
       receipts.push({
         kind: "dollar_exit_resolved_to_quantity",
@@ -361,30 +360,30 @@ export function applyPositionInvariant(
   // it can under- or over-exit, and it can even misread a partial as a full exit, so a dollar
   // exit on an unpriced position is refused as retryable before either branch below. This does
   // not depend on `resolvePartialDollarExits`: the full-exit check also reads the value. A zero
-  // or negative quantity alongside the dollars is still a dollar order here.
-  if (isDollarSized(input) && position.marketValuePriced === false) {
-    throw new OrderPositionInvariantError(
-      `${symbol} ${closingSide.toUpperCase()} not placed: no live quote priced the held ${formatQty(closable)} ${symbol} shares ` +
-        `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} exit cannot be sized safely.  ` +
-        "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
-      "position_unverified"
-    );
-  }
-  if (isDollarSized(input)) {
-    const dollars = input.dollarAmount;
-    // A dollar exit carrying a stale zero/negative quantity is still a dollar exit: drop the
-    // quantity so it is resolved below (or left as dollars), never sent as a share count of 0 or
-    // less. Every resolution below is capped at the held quantity, and the clamp after it too.
-    if (input.quantity != null) {
-      const next = { ...input };
-      delete next.quantity;
-      input = next;
+  // or negative quantity alongside the dollars is still a dollar order here. An explicit positive
+  // quantity is left alone so the existing clamp (not dollar resolution) bounds it.
+  // Read dollars without isDollarSized() so input.dollarAmount stays optional (TS2790).
+  const dollars = input.dollarAmount;
+  if (dollars != null && dollars > 0 && !(input.quantity != null && input.quantity > 0)) {
+    if (position.marketValuePriced === false) {
+      throw new OrderPositionInvariantError(
+        `${symbol} ${closingSide.toUpperCase()} not placed: no live quote priced the held ${formatQty(closable)} ${symbol} shares ` +
+          `(the position value is cost basis), so a $${dollars.toFixed(2)} exit cannot be sized safely.  ` +
+          "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
+        "position_unverified"
+      );
+    }
+    // Drop only a stale zero/negative quantity so the exit is resolved below (or left as dollars)
+    // and never sent as a share count of 0 or less. Every resolution below is capped at the held
+    // quantity, and the clamp after it too.
+    if (input.quantity != null && input.quantity <= 0) {
+      const { quantity: _staleQuantity, ...withoutQuantity } = input;
+      input = withoutQuantity;
     }
     const fullExit = heldMarketValue > 0 && dollars >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE);
     if (fullExit) {
-      const next = { ...input, quantity: closable };
-      delete next.dollarAmount;
-      input = next;
+      const { dollarAmount: _fullExitDollars, ...withoutDollars } = input;
+      input = { ...withoutDollars, quantity: closable };
       receipts.push({
         kind: "dollar_exit_resolved_to_quantity",
         detail: `$${dollars.toFixed(2)} ${closingSide} of a $${heldMarketValue.toFixed(2)} position is a full exit; placed as the exact held quantity ${formatQty(closable)}.`,
@@ -394,9 +393,8 @@ export function applyPositionInvariant(
       const resolved =
         heldMarketValue > 0 ? resolveDollarsAgainstHeld(dollars, closable, heldMarketValue) : undefined;
       if (resolved?.kind === "partial") {
-        const next = { ...input, quantity: resolved.quantity };
-        delete next.dollarAmount;
-        input = next;
+        const { dollarAmount: _partialDollars, ...withoutDollars } = input;
+        input = { ...withoutDollars, quantity: resolved.quantity };
         receipts.push({
           kind: "dollar_exit_resolved_to_quantity",
           detail:
