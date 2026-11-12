@@ -34,10 +34,8 @@ elif [ -f "${SCRIPT_DIR}/litestream-restore-drill.sh" ]; then
 else
   DRILL_SCRIPT="${SCRIPT_DIR}/../litestream-restore-drill.sh"
 fi
-SENTRY_HELPER="${SCRIPT_DIR}/st-container-restart-monitor-sentry.py"
-if [ ! -f "$SENTRY_HELPER" ]; then
-  SENTRY_HELPER="${SCRIPT_DIR}/st-litestream-restore-drill-sentry.py"
-fi
+# Drill-specific helper (own logger/fingerprint); it reuses the container monitor's DSN parser.
+SENTRY_HELPER="${SCRIPT_DIR}/st-litestream-restore-drill-sentry.py"
 
 DEFAULT_ENV="/etc/default/st-litestream-restore-drill"
 if [ -n "${ST_RESTORE_DRILL_TEST_ENV:-}" ] && [ -f "${ST_RESTORE_DRILL_TEST_ENV}" ]; then
@@ -62,8 +60,22 @@ LITESTREAM_CONFIG="${LITESTREAM_CONFIG:-/app/litestream.coolify.yml}"
 
 log() { printf '[st-litestream-restore-drill] %s\n' "$*" >&2; }
 
+# Record an operational failure so a previous run's pass:true never survives a failed run.
+write_failure_status() {
+  local reason="$1"
+  [ -n "${STATUS_JSON:-}" ] || return 0
+  mkdir -p "$(dirname "$STATUS_JSON")" 2>/dev/null || return 0
+  local safe_reason
+  safe_reason="$(printf '%s' "$reason" | tr -d '"\\' | tr -c '[:print:]' ' ')"
+  {
+    printf '{"timestamp":"%s","durationSeconds":0,"restoredSizeBytes":0,"integrity":"","rowCountDeltas":{},"pass":false,"error":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$safe_reason"
+  } >"${STATUS_JSON}.tmp" 2>/dev/null && mv "${STATUS_JSON}.tmp" "$STATUS_JSON" 2>/dev/null || true
+}
+
 fail_op() {
   log "error: $*"
+  write_failure_status "$*"
   exit 1
 }
 
@@ -76,6 +88,8 @@ cleanup_scratch_dir() {
   fi
 }
 trap cleanup_scratch_dir EXIT
+# systemd stops the unit with SIGTERM; exit through the EXIT trap so scratch is still removed.
+trap 'log "terminated by signal"; write_failure_status "terminated by signal"; exit 143' TERM INT
 
 require_creds() {
   local missing=0

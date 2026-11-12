@@ -124,6 +124,18 @@ run_case() {
   fi
 }
 
+
+check_failure_status() {
+  local name="$1"
+  if [ -f "$STATUS_JSON" ] && grep -q '"pass":false' "$STATUS_JSON"; then
+    PASSES=$((PASSES + 1))
+    echo "PASS ${name}_status_pass_false"
+  else
+    FAILURES=$((FAILURES + 1))
+    echo "FAIL ${name}_status_pass_false (status json missing or not pass:false)" >&2
+  fi
+}
+
 write_env_creds
 
 run_case missing_creds 1 '
@@ -131,12 +143,14 @@ run_case missing_creds 1 '
   touch "$ENV_FILE"
   export ST_LITESTREAM_RESTORE_DRILL_SCRIPT="${WORK}/stub-drill.sh"
 '
+check_failure_status missing_creds
 
 write_env_creds
 run_case low_disk 1 '
   export STUB_DF_FREE_KB=1
   export ST_LITESTREAM_RESTORE_DRILL_SCRIPT="${WORK}/stub-drill.sh"
 '
+check_failure_status low_disk
 
 write_env_creds
 run_case pass 0 '
