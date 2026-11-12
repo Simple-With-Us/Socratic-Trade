@@ -30,6 +30,13 @@ describe("ragSentryCooldownKey", () => {
     );
     expect(deadline).not.toBe(laneWarning);
     expect(ragSentryCooldownKey("warning", "RAG retrieval timed out", { lane: "rag-embed" }, ["rag", "rag-embed"])).toBe(laneWarning);
+    const embedTimeout = ragSentryCooldownKey(
+      "warning",
+      "RAG embed timed out",
+      { lane: "rag-embed", provider: "openrouter", failureClass: "timeout" },
+      ["rag", "embed-timeout"]
+    );
+    expect(embedTimeout).not.toBe(laneWarning);
   });
 
   it("falls back to provider, then to the message (Sentry's own grouping) when no lane", () => {

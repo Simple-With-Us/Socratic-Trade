@@ -11,6 +11,7 @@ import {
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
+import { isRagEmbedProviderTimeoutText } from "./rag/embed-resilience";
 import { isStrategyRagRetrievalTimeoutText } from "./rag-retrieval-deadline";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
@@ -130,7 +131,13 @@ export function isTransientHealthFailure(errorText: string | null | undefined): 
  */
 export function connectionHealthFailureClass(errorText: string | null | undefined): string | null {
   if (!errorText) return null;
-  if (isStrategyRagRetrievalTimeoutText(errorText) || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return "timeout";
+  if (
+    isStrategyRagRetrievalTimeoutText(errorText)
+    || isRagEmbedProviderTimeoutText(errorText)
+    || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)
+  ) {
+    return "timeout";
+  }
   if (isDependencyDbContentionMessage(errorText)) return HEALTH_FAILURE_CLASS_DEPENDENCY_DB;
   if (isLocalDbFaultMessage(errorText)) return "local-db-contention";
   if (isTransientHealthFailure(errorText)) return "transient-network";
