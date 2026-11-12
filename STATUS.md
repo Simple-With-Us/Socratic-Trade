@@ -3,6 +3,11 @@
 **What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
 
 **Next.**  PR open; wait for `verify` green; do not merge from agent.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
