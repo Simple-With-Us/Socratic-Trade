@@ -61,8 +61,11 @@ on:
 # workflow can keep a 30-minute tick without spamming TestFlight.
 #
 # Hosted runners have an empty home directory each job, so ~/.cache/ios-fleet
-# is restored from actions/cache. Without that cache every scheduled tick
-# would look like "no prior ship" and re-archive.
+# is restored from actions/cache and saved again at the end of the job.
+# Without that cache every scheduled tick would look like "no prior ship"
+# and re-archive. The key includes github.run_attempt so a retry can replace
+# a stale save from the failed attempt (cache keys are immutable and a rerun
+# reuses github.run_id).
 
 permissions:
   contents: read
@@ -96,12 +99,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # BOTH gates (this workflow's scheduled gate, and ship-testflight.sh's
+      # min-interval / same-HEAD gate) key off ~/.cache/ios-fleet. macos-latest
+      # is a fresh VM every run, so without this restore both gates take the
+      # "no prior ship" branch and a tick can re-archive.
+      #
+      # The cache key MUST include github.run_attempt. Cache keys are
+      # immutable in GH Actions and run_id is reused on a workflow rerun, so
+      # without run_attempt a successful retry can never overwrite a stale
+      # save from the prior attempt. DealDex already splits restore/save this
+      # way. restore-keys is a prefix match: prefer the latest attempt of
+      # this run, then any previous run. The ios-fleet-socratic- prefix stays
+      # so entries saved before the split still restore.
       - name: Restore iOS ship state
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ios-fleet
-          key: ios-fleet-socratic-${{ github.run_id }}
+          key: ios-fleet-socratic-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ios-fleet-socratic-${{ github.run_id }}-
             ios-fleet-socratic-
 
       # Runs FIRST so a tick with nothing to ship costs seconds and cannot go
@@ -479,3 +495,16 @@ jobs:
           path: ${{ runner.temp }}/ios-ship-logs
           retention-days: 7
           if-no-files-found: ignore
+
+      # Always: a skipped tick still needs its (unchanged) state persisted,
+      # and a partial failure after record_successful_ship still ran should
+      # not lose that write. The run_id+run_attempt key is always fresh for
+      # this attempt, so this never hits "cache already exists". run_attempt
+      # is critical (see Restore comment): a rerun reuses run_id and would
+      # otherwise fail to overwrite a stale save.
+      - name: Save iOS ship state
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ios-fleet
+          key: ios-fleet-socratic-${{ github.run_id }}-${{ github.run_attempt }}
