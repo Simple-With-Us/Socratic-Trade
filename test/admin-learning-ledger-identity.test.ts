@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   AUTHENTICATED_EMAIL_HEADER,
   VERIFIED_IDENTITY_REQUIRED_ERROR
@@ -12,8 +12,16 @@ import {
 } from "../src/lib/auth/strip-identity";
 
 describe("admin learning-ledger identity handling (ST-4610)", () => {
+  let originalDatabaseUrl: string | undefined;
+
   beforeAll(() => {
+    originalDatabaseUrl = process.env.DATABASE_URL;
     process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-st-4610-ledger-${randomUUID()}.db`)}`;
+  });
+
+  afterAll(() => {
+    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
   afterEach(() => {
@@ -88,8 +96,16 @@ describe("admin learning-ledger identity handling (ST-4610)", () => {
 });
 
 describe("audit route identity handling (ST-4610)", () => {
+  let originalDatabaseUrl: string | undefined;
+
   beforeAll(() => {
+    originalDatabaseUrl = process.env.DATABASE_URL;
     process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-st-4610-audit-${randomUUID()}.db`)}`;
+  });
+
+  afterAll(() => {
+    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
   afterEach(() => {
