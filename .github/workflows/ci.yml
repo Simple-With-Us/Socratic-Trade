@@ -374,6 +374,7 @@ jobs:
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.stale-snapshot.test.mjs
           node --test scripts/ios-fleet/asc-api.credentials.test.mjs
+          node --test scripts/ios-fleet/asc-api.timestamp.test.mjs
           node --test scripts/ios-fleet/test-asc-key.test.mjs
           node --test scripts/ios-fleet/ship-tf-ready-labels.test.mjs
       # Deploy-freshness watchdog + shared-box OCR isolation are shell, so
