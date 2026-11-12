@@ -71,7 +71,7 @@ fail() { FAILURES=$((FAILURES + 1)); echo "FAIL $1" >&2; }
 # Control: a writable status path must actually produce a status file.
 export RESTORE_DRILL_STATUS_JSON="${WORK}/ok/status.json"
 set +e
-writable_out="$(bash "$UNDER_TEST" 2>&1)"
+bash "$UNDER_TEST" >/dev/null 2>&1
 writable_rc=$?
 set -e
 if [ "$writable_rc" -eq 0 ] && [ -f "${WORK}/ok/status.json" ] && grep -q '"pass":true' "${WORK}/ok/status.json" && grep -q 'selftest-run-writable' "${WORK}/ok/status.json"; then
