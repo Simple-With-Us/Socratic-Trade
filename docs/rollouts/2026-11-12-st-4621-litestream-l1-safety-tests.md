@@ -32,7 +32,7 @@ bash -n scripts/ops/litestream-l1-boundary-trim-fleet.sh
 bash -n scripts/ops/litestream-l1-boundary-trim-fleet.selftest.sh
 ```
 
-The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch: 28 unittest cases and 47 selftest checks.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
+The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch after the symlink, failed-exec 126, and `list_file_names` pagination cases were added: 32 unittest cases and 51 selftest checks.  The `npm` results below are from the earlier full-gate run; this follow-up touched only the two test suites and this doc.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
 
 ## Next Steps & Blockers
 
