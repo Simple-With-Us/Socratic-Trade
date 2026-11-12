@@ -48,19 +48,19 @@ The unit-test process did not inherit this seat's injected provider, Coolify, Re
 
 ## Merge with origin/main
 
-`origin/main` at `81f483dd` (pull requests #5134 and #5153) is merged into this branch with a merge commit.  GitHub had marked the pull request dirty.  `STATUS.md` and `PLAN.md` are the only paths both sides edited, and both files use the `merge=union` driver.  The merge produced no conflict markers.  Every heading from both parents remains, including the ST-4617 entry and the ST-4595 entry.
+`origin/main` is merged into this branch periodically with merge commits (no rebase), whenever GitHub marks the pull request dirty or behind.  The pull request's commit list is the record of which `main` commits are in.  `STATUS.md` and `PLAN.md` are the only paths both sides edit, and both files use the `merge=union` driver.  The first merge produced no conflict markers, and every heading from both parents remained, including the ST-4617 entry and the ST-4595 entry.
 
-Verification on that merged tree, Node 26.13.1:
+Verification on the first merged tree, Node 26.13.1:
 
 - `npx vitest run test/proxy-concurrency-gate.test.ts test/cloudflare-origin-lock.test.ts test/health-liveness-await.test.ts test/liveness-warning-escalation.test.ts test/run-failure-watchdog.test.ts` exited 0 (5 files, 67 tests).
 - `npx tsc --noEmit` exited 0.
 - `npm run lint` exited 0 (869 existing warnings, 0 errors).
 
-Pull request #5159 had no review threads to reply to or resolve.
+Review threads on pull request #5159 are answered and resolved on the pull request itself.
 
 ## Next Steps & Blockers
 
-The branch now contains `origin/main` at `81f483dd`.  Wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy.
+The branch tracks `origin/main` through those periodic merges.  Wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy.
 
 ## Zero-Code Findings
 

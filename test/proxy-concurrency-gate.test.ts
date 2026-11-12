@@ -31,6 +31,10 @@ function restoreClock(): void {
   vi.useRealTimers();
 }
 
+// The in-test `finally` is the first cleanup. Vitest still runs afterEach after a test
+// times out, which can skip that `finally`, so fake timers never leak into a later
+// case's real sleep or the local proxy server's setTimeout.
+
 describe("resolveProxyMaxConcurrency", () => {
   it("defaults to 4 and honors a valid env override", () => {
     expect(resolveProxyMaxConcurrency({})).toBe(4);
@@ -61,6 +65,10 @@ describe("resolveProxyLegTimeoutMs", () => {
 });
 
 describe("ProxyConcurrencyGate", () => {
+  afterEach(() => {
+    restoreClock();
+  });
+
   it("caps in-flight holders and admits waiters in FIFO order", async () => {
     const gate = new ProxyConcurrencyGate(() => 1);
     const order: string[] = [];
@@ -169,6 +177,7 @@ describe("createProxiedFetch concurrency gate", () => {
   });
 
   afterEach(() => {
+    restoreClock();
     if (savedCap === undefined) delete process.env.PROXY_MAX_CONCURRENCY;
     else process.env.PROXY_MAX_CONCURRENCY = savedCap;
     __resetProxyFetchForTests();
