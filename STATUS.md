@@ -3,6 +3,9 @@
 **What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
 
 **Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
+## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
+
+**What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
 ## 2026-11-12 [gb-trader] ST-4624 — ops scripts CI workflow
 
 **What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
