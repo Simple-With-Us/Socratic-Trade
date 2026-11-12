@@ -46,8 +46,9 @@ import {
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
-import { apiCircuitBreakerShouldSkip, CircuitOpenError, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
+import { apiCircuitBreakerDisabled, apiCircuitBreakerShouldSkip, CircuitOpenError, isPaidQuoteBreakerCooling, isPaidQuoteProvider, observePaidQuoteStatus, quoteRetryAfterCapMs, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
 import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs, retryAfterDelayMs } from "./network-errors";
+import { cancelResponseBody, detachErrorResponse } from "./response-body";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
@@ -728,6 +729,11 @@ export async function fetchWithRetry(
     healthService?: string;
     service?: string;
     keySource?: string;
+    /**
+     * Paid-quote hold identity. A SHA-256 of the API key, never the key itself.
+     * When set, a 429 or 402 parks this credential only.
+     */
+    credentialId?: string;
     userId?: string;
     deferSuccessLog?: boolean;
     /**
@@ -775,8 +781,9 @@ export async function fetchWithRetry(
   // currently backed off (recently stopped working). Thrown BEFORE the fetch so no health row is
   // written for the skip (which would self-perpetuate the trip); providers catch the rejection and
   // degrade to the next tier exactly like a real fetch failure.
+  const laneCredential = options.credentialId ?? null;
   if (healthService) {
-    const breaker = apiCircuitBreakerShouldSkip(healthService, options.keySource ?? null);
+    const breaker = apiCircuitBreakerShouldSkip(healthService, options.keySource ?? null, laneCredential);
     if (breaker.skip) throw new CircuitOpenError(healthService, options.keySource ?? null, breaker.reason);
   }
   const start = Date.now();
@@ -813,6 +820,16 @@ export async function fetchWithRetry(
       // A transport may settle after its caller's durable lease has moved. Fence the response before
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
+      const laneKeySource = options.keySource ?? null;
+      // Health classification stays on the provider. The kill switch only turns
+      // trips and skips off, so a 402 is still a soft quota row when it is set.
+      const paidQuoteProvider = isPaidQuoteProvider(healthService);
+      const paidQuote = paidQuoteProvider && !apiCircuitBreakerDisabled();
+      // Plan-gated paid-quote statuses must not park the rest of that provider.
+      // The same list on a non-quote lane only suppresses the health row. The
+      // older rate-limit hold still opens after retries, when Retry-After is set.
+      const suppressedStatus = (options.suppressHealthStatuses ?? []).includes(response.status);
+      const quoteStatusSuppressed = suppressedStatus && paidQuoteProvider;
       if (response.status === 429 && attempt < retries) {
         // The body is discarded on retry.  Cancel it before the backoff so a
         // proxied 429 cannot hold a concurrency slot while we wait.  5xx is
@@ -825,22 +842,36 @@ export async function fetchWithRetry(
         // so `attempt === retries - 1` is still a retry.  Default one-retry lanes (Finnhub,
         // Nasdaq quote) were opening a 60s hold before that retry, which skipped sibling
         // endpoints already waiting on the same pacer.
+        // Cancel before the wait so the proxy gate slot is not held across the backoff.
+        await cancelResponseBody(response);
         const retryAfterMs = retryAfterDelayMs(response);
-        const waitMs = Math.max(
-          jitteredBackoffMs(backoffMs, attempt),
-          retryAfterMs ?? 0
-        );
+        const cappedRetryAfter = retryAfterMs != null && retryAfterMs > 0
+          ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
+          : 0;
+        const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
         await guardedFetchBackoff(waitMs, options.guard);
         continue;
-      }
-      if (response.status === 429 && healthService) {
+      } else if (response.status === 429 && healthService && !quoteStatusSuppressed) {
         const retryAfterMs = retryAfterDelayMs(response);
         // Retries are exhausted.  A positive Retry-After is the lane hold.  A 429 with no
         // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
         // the rest of a multi-endpoint provider and the immediate cache-bypass refetch.
         if (retryAfterMs != null && retryAfterMs > 0) {
-          tripApiCircuitBreakerLane(healthService, options.keySource ?? null, retryAfterMs);
+          if (paidQuote) {
+            // Same one-hour cap as history. The raw header can be a day.
+            observePaidQuoteStatus(healthService, laneKeySource, 429, retryAfterMs, Date.now(), laneCredential);
+          } else {
+            tripApiCircuitBreakerLane(healthService, laneKeySource, retryAfterMs, Date.now(), {
+              reason: "rate-limit",
+              status: 429
+            });
+          }
         }
+      }
+      if (response.status === 402 && paidQuote && healthService && !suppressedStatus) {
+        observePaidQuoteStatus(healthService, laneKeySource, 402, undefined, Date.now(), laneCredential);
+      } else if (response.ok && paidQuote && healthService) {
+        observePaidQuoteStatus(healthService, laneKeySource, response.status, undefined, Date.now(), laneCredential);
       }
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
       // after validating the response body (e.g. providers that embed errors in HTTP 200).
@@ -851,6 +882,9 @@ export async function fetchWithRetry(
         // HTTP 429 (and any status the caller opts into via softHealthStatuses) is an expected
         // limit, not a broken integration — soft so consecutive-failure STOPPED / circuit stay off.
         const softStatuses = new Set([429, ...(options.softHealthStatuses ?? [])]);
+        // 402 on a paid quote provider is out of quota, same class as 429: the hours
+        // hold above is the backoff. It must not also paint a hard STOPPED streak.
+        if (paidQuoteProvider && response.status === 402) softStatuses.add(402);
         const soft = !response.ok && softStatuses.has(response.status);
         logApiHealth({
           service: healthService,
@@ -868,6 +902,7 @@ export async function fetchWithRetry(
         assertFetchWithRetryGuard(options.guard);
         recordProviderCall(options.service, { ok: response.ok, keySource: options.keySource, userId: options.userId });
       }
+      if (!response.ok) return detachErrorResponse(response);
       return response;
     }
   } catch (err) {
@@ -4041,6 +4076,10 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     const credKey = `${this.keySource}:${this.userId ?? ""}`;
+    const breakerKey = await apiKeyFingerprint(this.apiKey);
+    // An open 429/402 hold skips the whole batch before any credit is reserved.
+    // fetchWithRetry still owns the half-open probe once the hold has elapsed.
+    if (isPaidQuoteBreakerCooling("roic", this.keySource, Date.now(), breakerKey)) return result;
     // Profile is the reliable free-tier endpoint; ratios paths currently 404 — reserve 1/symbol
     // for the profile call (ratios are best-effort and do not block admission).
     const allowed = admitProviderRequests("roic", credKey, misses.length);
@@ -4073,14 +4112,14 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
                 ? fetchWithRetry(
                     `${this.base}/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
                     {},
-                    { service: "roic", keySource: this.keySource, userId: this.userId, suppressHealthStatuses: [404, 429] }
+                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, retries: 0, suppressHealthStatuses: [404] }
                   )
                 : Promise.resolve(undefined),
               needRatios
                 ? fetchWithRetry(
                     `${this.base}/financial-ratios/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
                     {},
-                    { service: "roic", keySource: this.keySource, userId: this.userId, retries: 0, suppressHealthStatuses: [404, 429] }
+                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, retries: 0, suppressHealthStatuses: [402, 404, 429] }
                   )
                 : Promise.resolve(undefined),
             ]);
@@ -5616,6 +5655,10 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     // -10/50 — an unpaced 30-symbol scan fires ~90 requests and 403s.)
     const perSymbol = callsPerSymbol("tiingo", { dropExtra: dropNews });
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling("tiingo", this.keySource, Date.now(), credKey)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const allowedRequests = admitProviderRequests("tiingo", credKey, misses.length * perSymbol);
     const symbolsAllowed = Math.floor(allowedRequests / perSymbol);
     // admit() budgets in REQUESTS but we only dispatch whole symbols — hand back the partial remainder
@@ -5637,10 +5680,10 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
           try {
             const ticker = symbol.toLowerCase();
             const tiingoCalls = [
-              this.getJson(`https://api.tiingo.com/iex/${ticker}?token=${this.apiKey}`, headers),
-              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers)
+              this.getJson(`https://api.tiingo.com/iex/${ticker}?token=${this.apiKey}`, headers, credKey),
+              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers, credKey)
             ];
-            if (!dropNews) tiingoCalls.push(this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers));
+            if (!dropNews) tiingoCalls.push(this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers, credKey));
             const [iexRaw, metaRaw, newsRaw = { status: "rejected" as const, reason: new Error("news skipped") }] = await Promise.allSettled(tiingoCalls);
 
             let price: number | undefined;
@@ -5760,13 +5803,13 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     return result;
   }
 
-  private async getJson(url: string, headers: Record<string, string>): Promise<unknown> {
+  private async getJson(url: string, headers: Record<string, string>, credentialId?: string): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
       // retries: 0 — the quota reserves exactly one request per endpoint, so a built-in 429 retry
       // would emit a second uncounted call and re-break the 50/hour cap this gate enforces.
-      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, userId: this.userId, retries: 0, suppressHealthStatuses: [404] });
+      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, credentialId, userId: this.userId, retries: 0, suppressHealthStatuses: [404] });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally {
@@ -5778,6 +5821,34 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
 // ── Twelve Data provider ──────────────────────────────────────────────────────
 // Rich /quote endpoint: price, % change, volume, company name, sector, industry,
 // P/E, EPS, beta, 52-week range — one batched call for all scan symbols.
+
+const TWELVE_DATA_MINUTE_WINDOW = /\b(?:current|per|this)\s+minutes?\b/i;
+
+/** Credit or quota exhaustion. This opens the six-hour hold. A minute window is a rate limit. */
+export function isTwelveDataCreditExhausted(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message)) return false;
+  return /\b(quota|credits?)\b/i.test(message);
+}
+
+/** A per-minute limit or a rate-limit phrase. The body does not open a 429 hold. */
+export function isTwelveDataRateLimitSignal(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message) && /\b(quota|credits?|limits?|requests?)\b/i.test(message)) {
+    return true;
+  }
+  return /\b(rate limit|too many requests|api limit)\b/i.test(message);
+}
+
+/** Map a Twelve Data error body. Only a 402 credit hold may open the lane. A 429 here is a signal, not a header. */
+export function twelveDataBodyHold(message: string): { status: 402 | 429; retryAfterMs?: number } | null {
+  if (isTwelveDataCreditExhausted(message)) return { status: 402 };
+  if (isTwelveDataRateLimitSignal(message)) return { status: 429, retryAfterMs: 60_000 };
+  return null;
+}
+
+/** Twelve Data reports quota exhaustion as HTTP 200 with status "error". */
+export function isTwelveDataQuotaSignal(message: string): boolean {
+  return isTwelveDataCreditExhausted(message) || isTwelveDataRateLimitSignal(message);
+}
 
 export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "twelvedata";
@@ -5827,6 +5898,10 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
     // (works for any number of tickers) and per-credential — and the rest defer best-effort (the cascade
     // + shared cache cover them; coverage accretes across scans). Never blocks/stalls the scan.
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling(this.name, this.keySource, Date.now(), credKey)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const symbolsAllowed = admitProviderRequests(this.name, credKey, misses.length);
     const toQuery = misses.slice(0, symbolsAllowed);
     const skipped = misses.length - toQuery.length;
@@ -5855,7 +5930,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             // (e.g. {"status":"error","message":"Invalid API key"}); log only after body validates.
             // retries: 0 — the quota reserved exactly one batch call; a 429 retry would spend a second,
             // uncounted round of credits and re-break the per-minute budget this gate enforces.
-            return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true, retries: 0 });
+            return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, credentialId: credKey, userId: this.userId, deferSuccessLog: true, retries: 0 });
           } finally {
             clearTimeout(timeout);
           }
@@ -5874,7 +5949,18 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
         // Check for a top-level API error (invalid key, quota exhausted, etc.)
         if (rawObj.status === "error" || (rawObj.message && !rawObj.symbol && !rawObj.data)) {
           const msg = typeof rawObj.message === "string" ? rawObj.message : "TwelveData API error";
-          logApiHealth({ service: this.name, ok: false, errorText: `TwelveData API error: ${msg}`, keySource: this.keySource, userId: this.userId });
+          const hold = twelveDataBodyHold(msg);
+          if (hold?.status === 402) {
+            observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
+          }
+          logApiHealth({
+            service: this.name,
+            ok: false,
+            errorText: `TwelveData API error: ${msg}`,
+            keySource: this.keySource,
+            userId: this.userId,
+            soft: hold != null
+          });
           continue;
         }
         if (typeof rawObj.symbol === "string") {
@@ -5916,6 +6002,11 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           // with no code) still rotate out via the negative cache so they don't starve the credit budget.
           if (q.code || q.status === "error" || q.message) {
             const code = Number(q.code);
+            const embedded = typeof q.message === "string" ? q.message : "";
+            const hold = twelveDataBodyHold(embedded);
+            if (hold?.status === 402) {
+              observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
+            }
             if (code === 429 || code >= 500) {
               result[symbol] = {}; // transient — retry next scan, no cache write
               anyEmbeddedTransientError = true;

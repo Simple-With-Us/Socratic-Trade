@@ -1,3 +1,4 @@
+import { listOpenApiCircuitBreakers, type OpenCircuitBreaker } from "./api-circuit-breaker";
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
@@ -309,6 +310,8 @@ export interface OpsSnapshot {
     };
   };
   users: OpsUserSnapshot[];
+  /** Open API circuit breakers (paid-quote 429/402 holds and consecutive-failure lanes). */
+  quoteProviderBreakers?: OpenCircuitBreaker[];
 }
 
 function accountLabelById(userId: string): Map<string, string> {
@@ -787,6 +790,7 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
     roicArchive,
     taskJournal,
     pineconeIngest,
+    quoteProviderBreakers: listOpenApiCircuitBreakers(),
     users
   };
 }
