@@ -111,16 +111,24 @@ export function paidQuoteHoldMs(
   service: string,
   keySource: string | null,
   status: 402 | 429,
-  retryAfterMs: number | undefined
+  retryAfterMs: number | undefined,
+  now = Date.now()
 ): number {
   if (status === 402) return quoteProvider402HoldMs();
   const key = laneKey(service, keySource);
-  const strikes = Math.min((quoteRateStrikes.get(key) ?? 0) + 1, 16);
-  quoteRateStrikes.set(key, strikes);
+  // One burst of in-flight 429s is one strike. The next strike waits until
+  // this hold has elapsed, so Promise.all cannot jump straight to the cap.
+  const cooling = isPaidQuoteBreakerCooling(service, keySource, now);
+  let strikes = quoteRateStrikes.get(key) ?? 0;
+  if (!cooling) {
+    strikes = Math.min(strikes + 1, 16);
+    quoteRateStrikes.set(key, strikes);
+  }
+  const strikeForExp = Math.max(strikes, 1);
   if (retryAfterMs != null && retryAfterMs > 0) {
     return Math.min(retryAfterMs, quoteRetryAfterCapMs());
   }
-  const exp = quote429BaseMs() * 2 ** Math.min(strikes - 1, 10);
+  const exp = quote429BaseMs() * 2 ** Math.min(strikeForExp - 1, 10);
   return Math.min(exp, quote429CapMs());
 }
 
@@ -164,7 +172,7 @@ export function observePaidQuoteStatus(
   }
   if (status !== 402 && status !== 429) return 0;
   const quota = status === 402;
-  const hold = paidQuoteHoldMs(service, keySource, quota ? 402 : 429, retryAfterMs);
+  const hold = paidQuoteHoldMs(service, keySource, quota ? 402 : 429, retryAfterMs, now);
   tripApiCircuitBreakerLane(service, keySource, hold, now, {
     reason: quota ? "quota" : "rate-limit",
     status
@@ -245,11 +253,20 @@ export function tripApiCircuitBreakerLane(
 ): void {
   if (breakerDisabled() || holdMs <= 0) return;
   const reason = meta?.reason ?? "consecutive-failures";
-  trippedUntil.set(laneKey(service, keySource), {
+  const status = meta?.status ?? null;
+  const key = laneKey(service, keySource);
+  const proposedUntil = now + holdMs;
+  const existing = trippedUntil.get(key);
+  // A late response must not shorten a hold that is already open. A longer
+  // Retry-After or a 402 still extends it.
+  if (existing && existing.until > now && proposedUntil <= existing.until) {
+    return;
+  }
+  trippedUntil.set(key, {
     service,
     keySource,
-    until: now + holdMs,
+    until: proposedUntil,
     reason,
-    status: meta?.status ?? null
+    status
   });
 }

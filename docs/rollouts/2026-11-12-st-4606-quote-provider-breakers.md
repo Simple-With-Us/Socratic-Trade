@@ -34,6 +34,8 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 - Holds are process-local.  A restart clears them, and the next 429 or 402 opens them again.
 - `API_CIRCUIT_BREAKER_DISABLED=1` still disables trips and skips.
 - Vitest uses one worker, so the test setup clears the in-memory hold after every test.  A 402 hold would otherwise leak into the next file.
+- A burst of in-flight 429s is one strike, and a later response cannot shorten a hold that is already open.  A longer Retry-After or a 402 still extends it.
+- Paid history still retries one 5xx or network error.  A 429 or 402 is not retried.  The lane stays per credential, because a 402 on these keys is account credit rather than one endpoint.
 - No trading account, policy, or order-path change.
 
 ## Verification state

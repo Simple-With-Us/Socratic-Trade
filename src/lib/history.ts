@@ -46,7 +46,7 @@ import { fetchRobinhoodHistoricals } from "./robinhood";
 import { appAClosesToBars, congressReadsEnabled, getCongressTradeClient } from "./api-clients/congress";
 import { retryAfterDelayMs } from "./network-errors";
 import { cancelResponseBody } from "./response-body";
-import { BROWSER_UA, politeFetch, politeFetchJson } from "./web-sources/http";
+import { BROWSER_UA, politeFetch, politeFetchJson, sleep } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
 import { apiKeyFingerprint } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
@@ -675,22 +675,44 @@ export function parseRoicStockPrices(rows: unknown): OHLCBar[] {
 
 type PaidHistoryService = "twelvedata" | "tiingo" | "marketstack" | "roic";
 
+const PAID_HISTORY_TRANSIENT_RETRY_MS = 600;
+
 /** One paid-quote history call. The breaker is checked by the caller before admit.
- *  retries is 0: a 429 or 402 opens the lane instead of a second immediate attempt.
- *  The error body is cancelled before the throw. */
+ *  A 429 or 402 opens the lane and is not retried. A 5xx or a thrown network
+ *  error gets the one 600ms retry politeFetchJson used to give. The error body
+ *  is cancelled before the throw or the retry. */
 async function readPaidQuoteJson<T>(
   service: PaidHistoryService,
   keySource: string | null,
   url: string,
   headers?: Record<string, string>
 ): Promise<T> {
-  const res = await politeFetch(url, { headers, retries: 0 });
-  observePaidQuoteStatus(service, keySource, res.status, retryAfterDelayMs(res));
-  if (!res.ok) {
-    await cancelResponseBody(res);
-    throw new Error(`HTTP ${res.status} for ${url}`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res: Response;
+    try {
+      res = await politeFetch(url, { headers, retries: 0 });
+    } catch (error) {
+      lastError = error;
+      if (attempt === 0) {
+        await sleep(PAID_HISTORY_TRANSIENT_RETRY_MS);
+        continue;
+      }
+      throw error;
+    }
+    if (res.status >= 500 && attempt === 0) {
+      await cancelResponseBody(res);
+      await sleep(PAID_HISTORY_TRANSIENT_RETRY_MS);
+      continue;
+    }
+    observePaidQuoteStatus(service, keySource, res.status, retryAfterDelayMs(res));
+    if (!res.ok) {
+      await cancelResponseBody(res);
+      throw new Error(`HTTP ${res.status} for ${url}`);
+    }
+    return (await res.json()) as T;
   }
-  return (await res.json()) as T;
+  throw lastError instanceof Error ? lastError : new Error(`Request failed: ${url}`);
 }
 
 /**

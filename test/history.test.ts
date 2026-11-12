@@ -662,6 +662,34 @@ describe("fetchDailyOHLC", () => {
     expect(await fetchDailyOHLC("ZZZ")).toBeNull();
   });
 
+  it("retries one paid-history 5xx and does not retry a 429", async () => {
+    process.env.MARKETSTACK_API_KEY = "mstack-retry-key";
+    let marketstackCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).includes("api.marketstack.com")) return new Response("miss", { status: 404 });
+      marketstackCalls += 1;
+      if (marketstackCalls === 1) return new Response("unavailable", { status: 503 });
+      return new Response(marketstackBody, { status: 200 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL", Date.UTC(2026, 5, 18));
+    expect(marketstackCalls).toBe(2);
+    expect(bars).not.toBeNull();
+    expect(bars![0]?.close).toBe(20.5);
+
+    const { listOpenApiCircuitBreakers, resetApiCircuitBreaker } = await import("../src/lib/api-circuit-breaker");
+    resetApiCircuitBreaker();
+    marketstackCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).includes("api.marketstack.com")) return new Response("miss", { status: 404 });
+      marketstackCalls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "30" } });
+    }));
+    await expect(fetchDailyOHLC("MS429", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+    expect(marketstackCalls).toBe(1);
+    expect(listOpenApiCircuitBreakers().find((row) => row.service === "marketstack")?.reason).toBe("rate-limit");
+  });
+
   it("uses Twelve Data after Yahoo and Tradier miss on a >2y request, and still skips Massive", async () => {
     connectTradier("tradier-tkey");
     process.env.MASSIVE_API_KEY = "massive-no-call";

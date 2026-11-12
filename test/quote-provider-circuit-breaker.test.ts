@@ -174,4 +174,31 @@ describe("paid quote provider circuit breaker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(apiCircuitBreakerShouldSkip("finnhub-quote-guard", null).skip).toBe(false);
   });
+
+  it("counts one strike for a burst and never shortens an open hold", async () => {
+    const { listOpenApiCircuitBreakers, observePaidQuoteStatus, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    const now = 1_700_000_000_000;
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now)).toBe(1_000);
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now + 10)).toBe(1_000);
+    expect(listOpenApiCircuitBreakers(now + 10)[0]?.openForMs).toBe(1_000);
+
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, 30_000, now + 20)).toBe(30_000);
+    expect(listOpenApiCircuitBreakers(now + 20)[0]?.openForMs).toBe(30_000);
+
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, 1_000, now + 30)).toBe(1_000);
+    const stillLong = listOpenApiCircuitBreakers(now + 30)[0];
+    expect(stillLong?.openForMs).toBe(29_990);
+    expect(stillLong?.reason).toBe("rate-limit");
+
+    expect(observePaidQuoteStatus("twelvedata", "env", 402, undefined, now + 40)).toBeGreaterThan(60 * 60 * 1000);
+    const quota = listOpenApiCircuitBreakers(now + 40)[0];
+    expect(quota?.reason).toBe("quota");
+    expect(quota?.openForMs).toBeGreaterThan(5 * 60 * 60 * 1000);
+
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, 1_000, now + 50)).toBe(1_000);
+    const kept = listOpenApiCircuitBreakers(now + 50)[0];
+    expect(kept?.reason).toBe("quota");
+    expect(kept?.openForMs).toBeGreaterThan(5 * 60 * 60 * 1000);
+  });
 });
