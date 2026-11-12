@@ -34,14 +34,16 @@ npm run lint
 npx tsc --noEmit
 npm test
 npm run build
-npx vitest run test/order-position-invariant-properties.test.ts
+npx vitest run test/order-position-invariant-properties.test.ts test/order-position-invariant.test.ts
 ```
 
 Node 26.13.1. `npm run lint` exited 0 (warnings only).  `npx tsc --noEmit` exited 0 after the dead `c.side !== "short"` comparison was removed.  `npx vitest run test/order-position-invariant-properties.test.ts test/order-position-invariant.test.ts` passed.  Full `npm test` was 18 failed, 10233 passed, 41 skipped.  The failures are in unrelated suites (provider keys, notify, host metadata) and none are in the order-invariant files.  `npm run build` exited 0 with `NODE_OPTIONS=--max-old-space-size=6144` after the default heap aborted.
 
+Merged `origin/main` `81f483dd` (ST-4595 origin lock, ST-4603 liveness clocks).  Git auto-merged `STATUS.md` and `PLAN.md` with no conflict markers.  Both sides' entries stayed.  After that merge, on Node 26.13.1: `npx vitest run test/order-position-invariant-properties.test.ts test/order-position-invariant.test.ts` passed (44 tests), `npx tsc --noEmit` exited 0, and `npm run lint` exited 0 (0 errors, warnings only).
+
 ## Next steps & blockers
 
-Open the PR.  `verify` must be green.  Do not merge, do not enable auto-merge, and do not deploy.  Jay reviews the money-path behavior change: share-class matching, and Tradier dollar exits that become a capped share quantity or a refusal.
+PR #5160 stays open.  `verify` must be green.  Do not merge, do not enable auto-merge, and do not deploy.  Jay reviews the money-path behavior change: share-class matching, and Tradier dollar exits that become a capped share quantity or a refusal.
 
 ## Zero-code findings
 

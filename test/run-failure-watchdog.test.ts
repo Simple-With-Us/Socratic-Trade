@@ -203,11 +203,11 @@ describe("runFailureWatchdogTick", () => {
     const w = await watchdog();
     const d = await db();
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak")).toBeDefined();
+    expect(d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak:${USER}:${ACCT}`)).toBeDefined();
     await addCompletedRun();
     await w.runFailureWatchdogTick();
     // The next episode must start its escalation clock fresh.
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak")).toBeUndefined();
+    expect(d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak:${USER}:${ACCT}`)).toBeUndefined();
   });
 
   it("ends the halted liveness episode when the owner re-arms the account", async () => {
@@ -215,10 +215,14 @@ describe("runFailureWatchdogTick", () => {
     const w = await watchdog();
     const d = await db();
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak_halted")).toBeDefined();
+    expect(
+      d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak_halted:${USER}:${ACCT}`)
+    ).toBeDefined();
     d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak_halted")).toBeUndefined();
+    expect(
+      d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak_halted:${USER}:${ACCT}`)
+    ).toBeUndefined();
   });
 
   it("clears the halt marker when the owner re-arms the account", async () => {
