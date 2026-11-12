@@ -154,9 +154,13 @@ test('production observation window matches slow Coolify deploy cadence', async 
   const attempts = 180;
   const deadlineMs = 60 * 60 * 1000;
   assert.match(script, new RegExp(`attempts = ${attempts}`));
+  assert.match(script, /intervalMs = 20000/);
   assert.match(script, /deadline = now\(\) \+ 60 \* 60 \* 1000/);
+  assert.match(script, /observeProduction\(\{ expected: process\.env\.EXPECTED_SHA \}\)/);
   assert.ok((attempts - 1) * intervalMs <= deadlineMs);
-  assert.match(workflow, /timeout-minutes: 65/);
+  const job = workflow.split('record-production-deploy:')[1]?.split(/\n {2}\S/)[0] || '';
+  assert.match(job, /timeout-minutes: 65/);
+  assert.match(job, /assert-rth-deploy-latch\.ts/);
 });
 
 test('a null JSON release is invalid data, not a retryable 404',async()=>{
