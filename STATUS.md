@@ -1,8 +1,3 @@
-## 2026-11-12 [gb-trader] ST-4611 — iOS 5xx Sentry capture and GET retry
-
-**What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
-
-**Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
 ## 2026-11-12 [gb-trader] ST-4616 — money-path order invariant properties
 
 **What.** Property tests place 1000 seeded Alpaca and Tradier orders through `getBrokerGateway` and check the final payload.  Two money-path bugs were real.  `BRK.B` now matches a `BRK-B` position.  A Tradier partial dollar exit becomes a share quantity from the position value, or is refused when that quantity cannot be priced.  Alpaca partial dollar sells stay notional.  Rollout: `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`.
