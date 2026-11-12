@@ -41,6 +41,8 @@ Node 26.13.1. `npm run lint` exited 0 (warnings only).  `npx tsc --noEmit` exit
 
 Merged `origin/main` `81f483dd` (ST-4595 origin lock, ST-4603 liveness clocks).  Git auto-merged `STATUS.md` and `PLAN.md` with no conflict markers.  Both sides' entries stayed.  After that merge, on Node 26.13.1: `npx vitest run test/order-position-invariant-properties.test.ts test/order-position-invariant.test.ts` passed (44 tests), `npx tsc --noEmit` exited 0, and `npm run lint` exited 0 (0 errors, warnings only).
 
+`origin/main` then moved to `878d8edf` (ST-4612 org slug).  A second merge commit kept the ST-4616 entry and main's STATUS history edits.  No conflict markers.  On Node 26.13.1 after that merge: the two order-invariant files plus `test/github-org-slug.test.ts` passed (45 tests), `npx tsc --noEmit` exited 0, and `npm run lint` exited 0 (0 errors, 869 warnings).
+
 ## Next steps & blockers
 
 PR #5160 stays open.  `verify` must be green.  Do not merge, do not enable auto-merge, and do not deploy.  Jay reviews the money-path behavior change: share-class matching, and Tradier dollar exits that become a capped share quantity or a refusal.
