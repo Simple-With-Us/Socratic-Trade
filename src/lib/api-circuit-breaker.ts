@@ -60,15 +60,10 @@ interface Trip {
 declare global {
   // eslint-disable-next-line no-var
   var __socraticApiCircuitTrippedUntil: Map<string, Trip> | undefined;
-  // eslint-disable-next-line no-var
-  var __socraticApiCircuitQuoteStrikes: Map<string, number> | undefined;
 }
 const trippedUntil: Map<string, Trip> =
   globalThis.__socraticApiCircuitTrippedUntil ??
   (globalThis.__socraticApiCircuitTrippedUntil = new Map<string, Trip>());
-const quoteRateStrikes: Map<string, number> =
-  globalThis.__socraticApiCircuitQuoteStrikes ??
-  (globalThis.__socraticApiCircuitQuoteStrikes = new Map<string, number>());
 
 function laneKey(service: string, keySource: string | null, credentialId?: string | null): string {
   const base = `${service}\0${keySource ?? ""}`;
@@ -109,41 +104,28 @@ export function quoteProvider402HoldMs(): number {
   return positiveEnvMs("QUOTE_PROVIDER_402_HOLD_MS", DEFAULT_402_HOLD_MS);
 }
 
-function quoteRetryAfterCapMs(): number {
+/** Upper bound for an in-call Retry-After wait and a paid-quote 429 hold. Default one hour. */
+export function quoteRetryAfterCapMs(): number {
   return positiveEnvMs("QUOTE_PROVIDER_RETRY_AFTER_CAP_MS", DEFAULT_RETRY_AFTER_CAP_MS);
 }
 
 /**
  * Hold length for one paid-quote 429 or 402. A 429 holds only for a positive
  * Retry-After, capped at one hour. A header-less 429 does not open a hold.
- * 402 parks the lane for hours. One burst shares one strike record so a late
- * shorter Retry-After cannot shrink a hold that is already open.
+ * 402 parks the lane for hours. A later shorter response cannot shrink an open
+ * hold; that check lives in tripApiCircuitBreakerLane.
  */
 export function paidQuoteHoldMs(
-  service: string,
-  keySource: string | null,
+  _service: string,
+  _keySource: string | null,
   status: 402 | 429,
   retryAfterMs: number | undefined,
-  now = Date.now(),
-  credentialId?: string | null
+  _now = Date.now(),
+  _credentialId?: string | null
 ): number {
   if (status === 402) return quoteProvider402HoldMs();
   if (retryAfterMs == null || retryAfterMs <= 0) return 0;
-  const key = laneKey(service, keySource, credentialId);
-  const cooling = isPaidQuoteBreakerCooling(service, keySource, now, credentialId);
-  if (!cooling) {
-    const strikes = quoteRateStrikes.get(key) ?? 0;
-    quoteRateStrikes.set(key, Math.min(strikes + 1, 16));
-  }
   return Math.min(retryAfterMs, quoteRetryAfterCapMs());
-}
-
-export function clearPaidQuoteStrikes(
-  service: string,
-  keySource: string | null,
-  credentialId?: string | null
-): void {
-  quoteRateStrikes.delete(laneKey(service, keySource, credentialId));
 }
 
 /**
@@ -159,8 +141,17 @@ export function isPaidQuoteBreakerCooling(
   credentialId?: string | null
 ): boolean {
   if (!isPaidQuoteProvider(service) || breakerDisabled()) return false;
-  const trip = trippedUntil.get(laneKey(service, keySource, credentialId));
-  return trip != null && now < trip.until;
+  // The credential fingerprint carries a 402/429 hold. The plain keySource lane
+  // still carries the consecutive-failure hold. A skip must see both, or the
+  // caller reserves local quota for a fetch that CircuitOpenError then blocks.
+  const keys = credentialId
+    ? [laneKey(service, keySource, credentialId), laneKey(service, keySource)]
+    : [laneKey(service, keySource)];
+  for (const key of keys) {
+    const trip = trippedUntil.get(key);
+    if (trip != null && now < trip.until) return true;
+  }
+  return false;
 }
 
 /** True when this paid-quote lane is in an open hold. Does not consult other services. */
@@ -174,8 +165,8 @@ export function paidQuoteBreakerSkip(
 }
 
 /**
- * Record the outcome of a paid-quote response. 2xx clears the 429 strike count.
- * 429 and 402 open the lane. Other statuses are ignored. Returns the hold in ms.
+ * Record the outcome of a paid-quote response. 429 and 402 open the lane.
+ * Other statuses, including 2xx, are ignored. Returns the hold in ms.
  */
 export function observePaidQuoteStatus(
   service: string,
@@ -186,10 +177,6 @@ export function observePaidQuoteStatus(
   credentialId?: string | null
 ): number {
   if (!isPaidQuoteProvider(service)) return 0;
-  if (status >= 200 && status < 300) {
-    clearPaidQuoteStrikes(service, keySource, credentialId);
-    return 0;
-  }
   if (status !== 402 && status !== 429) return 0;
   const quota = status === 402;
   const hold = paidQuoteHoldMs(service, keySource, quota ? 402 : 429, retryAfterMs, now, credentialId);
@@ -267,7 +254,6 @@ export function listOpenApiCircuitBreakers(now = Date.now()): OpenCircuitBreaker
 /** Test-only: clear all tripped lanes so state doesn't leak across cases. */
 export function resetApiCircuitBreaker(): void {
   trippedUntil.clear();
-  quoteRateStrikes.clear();
 }
 
 /** Hold a lane for an explicit cool-down. HTTP 429 uses this only after retries are

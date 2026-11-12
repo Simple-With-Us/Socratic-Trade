@@ -257,6 +257,30 @@ describe("fetchDailyOHLC", () => {
     expect(String(roicCall![0])).toContain("apikey=roic-test-key");
   });
 
+  it("keeps ROIC bars when one row is not an object", async () => {
+    process.env.ROIC_API_KEY = "roic-test-key";
+    process.env.ROIC_HISTORY_ENABLED = "on";
+    const roicBody = JSON.stringify({
+      data: [
+        { date: "2026-06-16", open: 40, high: 41, low: 39, close: 40.5, volume: 5000 },
+        "not-a-row",
+        { date: "2026-06-17", open: 40.5, high: 42, low: 40, close: 41.2, volume: 6000 }
+      ],
+      next_page_url: 12
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("api.roic.ai/v3.0.0/stock-prices/")) {
+        return new Response(roicBody, { status: 200 });
+      }
+      return new Response("unexpected source", { status: 500 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL");
+    expect(bars).toHaveLength(2);
+    expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 40.5 });
+    expect(bars![1]).toMatchObject({ time: "2026-06-17", close: 41.2 });
+  });
+
   it("uses Tiingo ahead of Marketstack, applying adjClose-scaled O/H/L", async () => {
     // Tiingo is a "per-user-only" credential tier (db-api-keys.ts) — TIINGO_API_KEY only reaches
     // resolveApiKeyWithSource via the one-time env→DB migration at startup, not a live per-call env

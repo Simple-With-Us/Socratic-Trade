@@ -14,6 +14,7 @@
 // (free=2, individual=20, professional=40 app cap) unless ROIC_TRANSCRIPTS_QUARTERS_PER_SYMBOL
 // overrides. Per-run fetch budget follows the same tier (free-safe 8, Individual default 80).
 
+import "server-only";
 import { z } from "zod";
 import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
@@ -527,7 +528,7 @@ async function roicGetJson<T>(
   if (!allowed) return null;
   return withProviderLimit("roic", async () => {
     try {
-      const res = await fetchWithRetry(url, {}, fetchOpts);
+      const res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
       if (!res || !res.ok) return null;
       const parsed = schema.safeParse(await res.json());
       return parsed.success ? parsed.data : null;

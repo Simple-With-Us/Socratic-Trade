@@ -28,6 +28,7 @@ describe("paid quote provider circuit breaker", () => {
     delete process.env.QUOTE_PROVIDER_402_HOLD_MS;
     delete process.env.QUOTE_PROVIDER_429_BASE_MS;
     delete process.env.QUOTE_PROVIDER_429_CAP_MS;
+    delete process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS;
     if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = originalEncryptionKey;
   });
@@ -236,12 +237,116 @@ describe("paid quote provider circuit breaker", () => {
   });
 
   it("treats a Twelve Data credit message as a quota signal and ignores a bad key", async () => {
-    const { isTwelveDataCreditExhausted, isTwelveDataQuotaSignal, isTwelveDataRateLimitSignal } = await load();
-    expect(isTwelveDataQuotaSignal("You have run out of API credits for the current minute")).toBe(true);
-    expect(isTwelveDataCreditExhausted("You have run out of API credits for the current minute")).toBe(true);
+    const {
+      isTwelveDataCreditExhausted,
+      isTwelveDataQuotaSignal,
+      isTwelveDataRateLimitSignal,
+      listOpenApiCircuitBreakers,
+      observePaidQuoteStatus,
+      resetApiCircuitBreaker,
+      twelveDataBodyHold
+    } = await load();
+    resetApiCircuitBreaker();
+    const minute = "You have run out of API credits for the current minute";
+    const day = "You have run out of API credits for the day";
+    expect(isTwelveDataQuotaSignal(minute)).toBe(true);
+    expect(isTwelveDataCreditExhausted(minute)).toBe(false);
+    expect(isTwelveDataRateLimitSignal(minute)).toBe(true);
+    expect(isTwelveDataCreditExhausted(day)).toBe(true);
+    expect(isTwelveDataRateLimitSignal(day)).toBe(false);
     expect(isTwelveDataCreditExhausted("too many requests")).toBe(false);
     expect(isTwelveDataRateLimitSignal("too many requests")).toBe(true);
     expect(isTwelveDataQuotaSignal("Invalid API key")).toBe(false);
+
+    const now = 1_700_000_000_000;
+    const minuteHold = twelveDataBodyHold(minute);
+    expect(minuteHold).toEqual({ status: 429, retryAfterMs: 60_000 });
+    expect(observePaidQuoteStatus("twelvedata", "env", minuteHold!.status, minuteHold!.retryAfterMs, now, "finger-minute")).toBe(60_000);
+    const dayHold = twelveDataBodyHold(day);
+    expect(dayHold).toEqual({ status: 402 });
+    expect(observePaidQuoteStatus("twelvedata", "user", dayHold!.status, dayHold!.retryAfterMs, now, "finger-day")).toBeGreaterThan(5 * 60 * 60 * 1000);
+    const open = listOpenApiCircuitBreakers(now + 1);
+    expect(open.find((row) => row.status === 429)?.openForMs).toBe(59_999);
+    expect(open.find((row) => row.status === 402)?.openForMs).toBeGreaterThan(5 * 60 * 60 * 1000);
+  });
+
+  it("sees a plain-lane hold when the caller has a credential fingerprint", async () => {
+    const { isPaidQuoteBreakerCooling, resetApiCircuitBreaker, tripApiCircuitBreakerLane } = await load();
+    resetApiCircuitBreaker();
+    const now = 1_700_000_000_000;
+    tripApiCircuitBreakerLane("tiingo", "env", 60_000, now, { reason: "consecutive-failures" });
+    expect(isPaidQuoteBreakerCooling("tiingo", "env", now + 1, "finger-a")).toBe(true);
+    expect(isPaidQuoteBreakerCooling("tiingo", "user", now + 1, "finger-a")).toBe(false);
+  });
+
+  it("keeps a paid-provider 402 soft when the breaker is disabled", async () => {
+    const { fetchWithRetry, getDb, listOpenApiCircuitBreakers, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no credit", { status: 402 })));
+    const res = await fetchWithRetry("https://example.test/roic-disabled", { cache: "no-store" }, {
+      service: "roic",
+      keySource: "env",
+      retries: 1,
+      backoffMs: 1
+    });
+    expect(res.status).toBe(402);
+    expect(listOpenApiCircuitBreakers()).toEqual([]);
+    const row = getDb()
+      .prepare(`SELECT error_text FROM api_health_log WHERE service = ? ORDER BY rowid DESC LIMIT 1`)
+      .get("roic") as { error_text: string } | undefined;
+    expect(row?.error_text.startsWith("[expected-limit] ")).toBe(true);
+  });
+
+  it("still opens a non-quote rate-limit hold when 429 is suppressed from health", async () => {
+    const { apiCircuitBreakerShouldSkip, fetchWithRetry, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow", {
+      status: 429,
+      headers: { "Retry-After": "30" }
+    })));
+    const massive = await fetchWithRetry("https://example.test/massive", { cache: "no-store" }, {
+      service: "massive",
+      retries: 0,
+      backoffMs: 1,
+      suppressHealthStatuses: [404, 429]
+    });
+    expect(massive.status).toBe(429);
+    expect(apiCircuitBreakerShouldSkip("massive", null).skip).toBe(true);
+
+    resetApiCircuitBreaker();
+    const roic = await fetchWithRetry("https://example.test/roic-plan", { cache: "no-store" }, {
+      service: "roic",
+      keySource: "env",
+      retries: 0,
+      backoffMs: 1,
+      suppressHealthStatuses: [402, 404, 429]
+    });
+    expect(roic.status).toBe(429);
+    expect(apiCircuitBreakerShouldSkip("roic", "env").skip).toBe(false);
+  });
+
+  it("caps the in-call 429 wait at the quote Retry-After ceiling", async () => {
+    const { fetchWithRetry, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS = "30";
+    const fetchMock = vi.fn(async () => new Response("slow", {
+      status: 429,
+      headers: { "Retry-After": "86400" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const started = Date.now();
+    const res = await fetchWithRetry("https://example.test/tiingo-wait", { cache: "no-store" }, {
+      service: "tiingo",
+      keySource: "env",
+      retries: 1,
+      backoffMs: 1
+    });
+    expect(res.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it("caps a paid-quote Retry-After at one hour", async () => {

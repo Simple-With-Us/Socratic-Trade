@@ -35,7 +35,7 @@ import zlib from "zlib";
 import { z } from "zod";
 import type { OHLCBar } from "./indicators";
 export type { OHLCBar };
-import { CircuitOpenError, observePaidQuoteStatus, paidQuoteBreakerSkip } from "./api-circuit-breaker";
+import { CircuitOpenError, observePaidQuoteStatus, paidQuoteBreakerSkip, quoteRetryAfterCapMs } from "./api-circuit-breaker";
 import { dataSourceFetch } from "./data-source-fetch";
 import { normalizeSymbol, toAlpacaSymbol } from "./money";
 import { audit, deleteInternalSetting, fulfillMarketDataDemand, getConnectedAccountByBroker, getImportedPriceCloses, getImportedSpxCloses, getInternalSetting, hasDataPoolConsent, recordMarketDataDemand, resolveApiKeyWithSource, setInternalSetting, upsertImportedPrices, type ApiKeySource } from "./db";
@@ -49,7 +49,7 @@ import { retryAfterDelayMs } from "./network-errors";
 import { cancelResponseBody } from "./response-body";
 import { BROWSER_UA, politeFetch, politeFetchJson, sleep } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
-import { apiKeyFingerprint, isTwelveDataCreditExhausted, isTwelveDataRateLimitSignal } from "./data-providers";
+import { apiKeyFingerprint, twelveDataBodyHold } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
 import { bestEffortSqliteWrite, isPeerReadUsageLabel, peerReadSqliteRetry } from "./sqlite-peer-read";
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
@@ -679,8 +679,9 @@ type PaidHistoryService = "twelvedata" | "tiingo" | "marketstack" | "roic";
 const PAID_HISTORY_TRANSIENT_RETRY_MS = 600;
 const looseJsonRow = z.record(z.string(), z.unknown());
 const RoicStockPricesSchema = z.object({
-  data: z.array(looseJsonRow).optional(),
-  next_page_url: z.string().nullable().optional()
+  // One bad row must not fail the page. parseRoicStockPrices skips non-objects.
+  data: z.array(z.unknown()).optional().catch([]),
+  next_page_url: z.string().nullable().optional().catch(null)
 }).passthrough();
 const TiingoPricesSchema = z.array(looseJsonRow);
 const MarketstackEodSchema = z.object({
@@ -723,7 +724,9 @@ async function readPaidQuoteJson<T>(
     if ((res.status >= 500 || res.status === 429) && attempt === 0) {
       const retryAfter = res.status === 429 ? retryAfterDelayMs(res) ?? 0 : 0;
       await cancelResponseBody(res);
-      await sleep(Math.max(PAID_HISTORY_TRANSIENT_RETRY_MS, retryAfter));
+      // The hold is already capped. The in-call wait uses the same ceiling so a
+      // day-long Retry-After cannot stall this fetch.
+      await sleep(Math.max(PAID_HISTORY_TRANSIENT_RETRY_MS, Math.min(retryAfter, quoteRetryAfterCapMs())));
       continue;
     }
     if (res.ok) {
@@ -1038,10 +1041,9 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     const parsed = await readPaidQuoteJson("twelvedata", lane, url, TwelveDataTimeSeriesSchema, { Accept: "application/json" }, credKey);
     if (parsed.status === "error" || !Array.isArray(parsed.values)) {
       const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
-      if (isTwelveDataCreditExhausted(message)) {
-        observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
-      } else if (isTwelveDataRateLimitSignal(message)) {
-        observePaidQuoteStatus("twelvedata", lane, 429, 60_000, Date.now(), credKey);
+      const hold = twelveDataBodyHold(message);
+      if (hold) {
+        observePaidQuoteStatus("twelvedata", lane, hold.status, hold.retryAfterMs, Date.now(), credKey);
       }
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
       return null;

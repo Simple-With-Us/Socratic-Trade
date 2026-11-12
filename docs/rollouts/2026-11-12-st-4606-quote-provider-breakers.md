@@ -35,7 +35,15 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 - Holds are process-local.  A restart clears them, and the next 429 or 402 opens them again.
 - `API_CIRCUIT_BREAKER_DISABLED=1` still disables trips and skips.
 - Vitest uses one worker, so the test setup clears the in-memory hold after every test.  A 402 hold would otherwise leak into the next file.
-- A burst of in-flight 429s is one strike, and a later response cannot shorten a hold that is already open.  A longer Retry-After or a 402 still extends it.
+- A later response cannot shorten a hold that is already open.  A longer Retry-After or a 402 still extends it.  The old per-credential strike map is gone, because the hold length comes from Retry-After and nothing read the count.
+- The cooling check looks at the credential fingerprint first, then the plain key-source lane, matching the skip check.  A consecutive-failure hold on the plain lane therefore skips before `admitProviderRequests`.
+- `API_CIRCUIT_BREAKER_DISABLED=1` still disables trips and skips.  A paid-provider 402 stays a soft health row while the switch is on.
+- A Twelve Data message that names the current minute opens the one-minute 429 hold.  A day or unscoped credit message still opens the six-hour 402 hold.
+- Suppressing 429 on a paid-quote caller still skips that lane's hold.  The same suppression on a non-quote provider only drops the health row.  The older rate-limit hold still opens when Retry-After is present.
+- The in-call Retry-After wait, in `fetchWithRetry` and paid history, uses the same one-hour cap as the hold.
+- A ROIC history page with one non-object row keeps the other bars.  `next_page_url` of an unexpected type stops pagination instead of throwing away the bars already collected.
+- ROIC profile enrichment and transcript fetches pass `retries: 0` because they reserve one provider request.  Ratios already did.
+- `src/lib/web-sources/roic-transcripts.ts` and `src/lib/web-sources/roic-financials.ts` import `server-only`.
 - Paid history retries one 5xx, one network error, and one 429.  A 402 is not retried.  The lane stays per credential, because a 402 on these keys is account credit rather than one endpoint.  Plan-gated ROIC transcripts, financials, and ratios do not open the quote lane on 402 or 429.
 - No trading account, policy, or order-path change.
 
@@ -49,6 +57,7 @@ NODE_OPTIONS=--max-old-space-size=4096 npm run build
 ```
 
 - GB-Fixer (2026-11-12): merged `origin/main`; resolved `app/api/health/route.ts` import conflict (`listOpenApiCircuitBreakers` + `TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY`).  Re-ran `npm run lint`, `npx tsc --noEmit`, and `npx vitest run test/quote-provider-circuit-breaker.test.ts test/history.test.ts` — all exited 0 (48 tests).
+- Follow-up review (2026-11-12): `npx tsc --noEmit` and `npm run lint` exited 0.  `npx vitest run test/quote-provider-circuit-breaker.test.ts test/history.test.ts test/roic-transcripts.test.ts test/roic-financials.test.ts test/roic-archive-resume.test.ts test/pinecone-write-class.test.ts` exited 0.  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exited 0.
 - `npx tsc --noEmit` exited 0.
 - `npx eslint . --quiet` exited 0.
 - Hermetic `npm test` (injected provider keys unset, matching CI): 902 files passed, 1 skipped, 10256 tests passed, 42 skipped.

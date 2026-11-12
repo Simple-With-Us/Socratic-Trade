@@ -46,7 +46,7 @@ import {
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
-import { apiCircuitBreakerDisabled, apiCircuitBreakerShouldSkip, CircuitOpenError, isPaidQuoteBreakerCooling, isPaidQuoteProvider, observePaidQuoteStatus, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
+import { apiCircuitBreakerDisabled, apiCircuitBreakerShouldSkip, CircuitOpenError, isPaidQuoteBreakerCooling, isPaidQuoteProvider, observePaidQuoteStatus, quoteRetryAfterCapMs, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
 import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs, retryAfterDelayMs } from "./network-errors";
 import { cancelResponseBody, detachErrorResponse } from "./response-body";
 import { expiresAtRespectingMarketClose } from "./market-hours";
@@ -815,10 +815,15 @@ export async function fetchWithRetry(
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
       const laneKeySource = options.keySource ?? null;
-      const paidQuote = isPaidQuoteProvider(healthService) && !apiCircuitBreakerDisabled();
-      // A status the caller marked expected (plan-gated 402/429) must not park
-      // the rest of that provider.
+      // Health classification stays on the provider. The kill switch only turns
+      // trips and skips off, so a 402 is still a soft quota row when it is set.
+      const paidQuoteProvider = isPaidQuoteProvider(healthService);
+      const paidQuote = paidQuoteProvider && !apiCircuitBreakerDisabled();
+      // Plan-gated paid-quote statuses must not park the rest of that provider.
+      // The same list on a non-quote lane only suppresses the health row. The
+      // older rate-limit hold still opens after retries, when Retry-After is set.
       const suppressedStatus = (options.suppressHealthStatuses ?? []).includes(response.status);
+      const quoteStatusSuppressed = suppressedStatus && paidQuoteProvider;
       if (response.status === 429 && attempt < retries) {
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
@@ -830,13 +835,13 @@ export async function fetchWithRetry(
         // Cancel before the wait so the proxy gate slot is not held across the backoff.
         await cancelResponseBody(response);
         const retryAfterMs = retryAfterDelayMs(response);
-        const waitMs = Math.max(
-          jitteredBackoffMs(backoffMs, attempt),
-          retryAfterMs ?? 0
-        );
+        const cappedRetryAfter = retryAfterMs != null && retryAfterMs > 0
+          ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
+          : 0;
+        const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
         await guardedFetchBackoff(waitMs, options.guard);
         continue;
-      } else if (response.status === 429 && healthService && !suppressedStatus) {
+      } else if (response.status === 429 && healthService && !quoteStatusSuppressed) {
         const retryAfterMs = retryAfterDelayMs(response);
         // Retries are exhausted.  A positive Retry-After is the lane hold.  A 429 with no
         // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
@@ -869,7 +874,7 @@ export async function fetchWithRetry(
         const softStatuses = new Set([429, ...(options.softHealthStatuses ?? [])]);
         // 402 on a paid quote provider is out of quota, same class as 429: the hours
         // hold above is the backoff. It must not also paint a hard STOPPED streak.
-        if (paidQuote && response.status === 402) softStatuses.add(402);
+        if (paidQuoteProvider && response.status === 402) softStatuses.add(402);
         const soft = !response.ok && softStatuses.has(response.status);
         logApiHealth({
           service: healthService,
@@ -4097,7 +4102,7 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
                 ? fetchWithRetry(
                     `${this.base}/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
                     {},
-                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, suppressHealthStatuses: [404] }
+                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, retries: 0, suppressHealthStatuses: [404] }
                   )
                 : Promise.resolve(undefined),
               needRatios
@@ -5807,14 +5812,27 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
 // Rich /quote endpoint: price, % change, volume, company name, sector, industry,
 // P/E, EPS, beta, 52-week range — one batched call for all scan symbols.
 
-/** Credit or quota exhaustion. This opens the six-hour hold. */
+const TWELVE_DATA_MINUTE_WINDOW = /\b(?:current|per|this)\s+minutes?\b/i;
+
+/** Credit or quota exhaustion. This opens the six-hour hold. A minute window is a rate limit. */
 export function isTwelveDataCreditExhausted(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message)) return false;
   return /\b(quota|credits?)\b/i.test(message);
 }
 
 /** A per-minute rate limit. This opens a one-minute hold, not the six-hour park. */
 export function isTwelveDataRateLimitSignal(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message) && /\b(quota|credits?|limits?|requests?)\b/i.test(message)) {
+    return true;
+  }
   return /\b(rate limit|too many requests|api limit)\b/i.test(message);
+}
+
+/** Map a Twelve Data error body onto the 402 or 429 hold. Null when the text is neither. */
+export function twelveDataBodyHold(message: string): { status: 402 | 429; retryAfterMs?: number } | null {
+  if (isTwelveDataCreditExhausted(message)) return { status: 402 };
+  if (isTwelveDataRateLimitSignal(message)) return { status: 429, retryAfterMs: 60_000 };
+  return null;
 }
 
 /** Twelve Data reports quota exhaustion as HTTP 200 with status "error". */
@@ -5921,12 +5939,9 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
         // Check for a top-level API error (invalid key, quota exhausted, etc.)
         if (rawObj.status === "error" || (rawObj.message && !rawObj.symbol && !rawObj.data)) {
           const msg = typeof rawObj.message === "string" ? rawObj.message : "TwelveData API error";
-          const credit = isTwelveDataCreditExhausted(msg);
-          const rateLimited = !credit && isTwelveDataRateLimitSignal(msg);
-          if (credit) {
-            observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
-          } else if (rateLimited) {
-            observePaidQuoteStatus(this.name, this.keySource, 429, 60_000, Date.now(), credKey);
+          const hold = twelveDataBodyHold(msg);
+          if (hold) {
+            observePaidQuoteStatus(this.name, this.keySource, hold.status, hold.retryAfterMs, Date.now(), credKey);
           }
           logApiHealth({
             service: this.name,
@@ -5934,7 +5949,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             errorText: `TwelveData API error: ${msg}`,
             keySource: this.keySource,
             userId: this.userId,
-            soft: credit || rateLimited
+            soft: hold != null
           });
           continue;
         }
@@ -5978,13 +5993,13 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           if (q.code || q.status === "error" || q.message) {
             const code = Number(q.code);
             const embedded = typeof q.message === "string" ? q.message : "";
-            if (code === 429 || isTwelveDataCreditExhausted(embedded) || isTwelveDataRateLimitSignal(embedded)) {
-              const credit = isTwelveDataCreditExhausted(embedded);
+            const hold = twelveDataBodyHold(embedded);
+            if (code === 429 || hold) {
               observePaidQuoteStatus(
                 this.name,
                 this.keySource,
-                credit ? 402 : 429,
-                credit ? undefined : 60_000,
+                hold?.status ?? 429,
+                hold?.status === 402 ? undefined : 60_000,
                 Date.now(),
                 credKey
               );

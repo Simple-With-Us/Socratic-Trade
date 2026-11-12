@@ -4,6 +4,7 @@
 // computes multi-year financial trends (3-year revenue CAGR, margin trajectories, ROIC, FCF conversion),
 // and formats structured financial summaries for strategy reasoning and RAG vector store ingestion.
 
+import "server-only";
 import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { resolveApiKeyWithSource } from "../db-api-keys";
