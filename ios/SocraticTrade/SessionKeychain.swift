@@ -416,8 +416,10 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
     }
 
     override func setCookies(_ cookies: [HTTPCookie], for url: URL?, mainDocumentURL: URL?) {
-        guard url != nil else { return }
-        for cookie in cookies {
+        // Each HTTPCookie carries its own domain, so a nil URL only means there is
+        // no request host to default a missing domain from; keep every cookie
+        // that names its domain instead of dropping the whole batch.
+        for cookie in cookies where url != nil || !cookie.domain.isEmpty {
             setCookie(cookie)
         }
     }
@@ -429,12 +431,10 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
     }
 
     override func getCookies(for task: URLSessionTask, completionHandler: @escaping ([HTTPCookie]?) -> Void) {
-        let url = task.currentRequest?.url ?? task.response?.url
-        if let url {
-            completionHandler(cookies(for: url))
-        } else {
-            completionHandler(cookies)
-        }
+        // Never fall back to the whole jar: with no URL to match, return nothing
+        // rather than cookies for unrelated hosts.
+        let url = task.currentRequest?.url ?? task.originalRequest?.url ?? task.response?.url
+        completionHandler(url.map { cookies(for: $0) ?? [] } ?? [])
     }
 
     override func cookies(for url: URL?) -> [HTTPCookie]? {
