@@ -58,12 +58,17 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testInMemoryCookieStorageURLSessionTaskRoundTrip() async throws {
+        // Build the session through the app's own factory so the jar wiring
+        // (cookie storage, accept policy, httpShouldSetCookies) is covered.
         // A custom URLProtocol bypasses the loading system's own Set-Cookie
-        // handling, so exercise the task-based storage APIs that URLSession
-        // calls on the jar directly.
+        // handling and CI has no network, so the round trip then exercises
+        // the task-based storage APIs that URLSession calls on the jar.
         let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
-        let session = URLSession(configuration: .ephemeral)
+        let session = MobileAPIClient.makeURLSession(cookieJar: jar)
         defer { session.invalidateAndCancel() }
+        XCTAssertTrue(session.configuration.httpShouldSetCookies)
+        XCTAssertEqual(session.configuration.httpCookieAcceptPolicy, .always)
+        XCTAssertNotNil(session.configuration.httpCookieStorage)
         let url = URL(string: "https://cookie-roundtrip.test/session")!
         let task = session.dataTask(with: url)
         defer { task.cancel() }
