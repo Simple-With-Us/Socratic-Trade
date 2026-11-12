@@ -29,7 +29,7 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 
 - The hold reuses the existing in-memory lane map, keyed by service and key source, so one user's 402 does not close the env lane.
 - A paid-quote 429 or 402 is stored on the credential fingerprint when the caller has one.  The public list still shows `env` or `user`, not the fingerprint.  `API_CIRCUIT_BREAKER_DISABLED=1` also restores the in-call 429 retry for these four providers.  Twelve Data's HTTP 200 credit message opens the six-hour 402 hold.  `GET /api/health` sets `checks.quoteProviderBreakersError` to `unavailable` when the list cannot be read, and that field does not change `ok`.
-- A header-less 429 does not open a hold.  The in-call retry spends the remaining budget, and the next symbol is blocked only when a positive Retry-After or an HTTP 402 opened the lane.
+- A header-less 429 does not open a hold.  The in-call retry spends the remaining budget, and the next symbol is blocked only when a positive Retry-After or an HTTP 402 opened the lane.  The quote path and the history path both cap that Retry-After at one hour.  A Twelve Data credit or quota body opens the six-hour hold and is a soft health row.  A rate-limit phrase opens a one-minute hold instead.
 - A 402 still performs one network call, then later calls skip until the hold elapses.
 - History paid providers stay on `politeFetch` (not the residential proxy) and share the same hold.  Yahoo chart retries in `history.ts` only cancel the body.  `src/lib/yahoo-finance.ts` is not edited.  `src/lib/proxy-fetch.ts` is not edited (ST-3999).
 - Holds are process-local.  A restart clears them, and the next 429 or 402 opens them again.

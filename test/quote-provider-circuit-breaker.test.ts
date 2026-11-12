@@ -236,8 +236,28 @@ describe("paid quote provider circuit breaker", () => {
   });
 
   it("treats a Twelve Data credit message as a quota signal and ignores a bad key", async () => {
-    const { isTwelveDataQuotaSignal } = await load();
+    const { isTwelveDataCreditExhausted, isTwelveDataQuotaSignal, isTwelveDataRateLimitSignal } = await load();
     expect(isTwelveDataQuotaSignal("You have run out of API credits for the current minute")).toBe(true);
+    expect(isTwelveDataCreditExhausted("You have run out of API credits for the current minute")).toBe(true);
+    expect(isTwelveDataCreditExhausted("too many requests")).toBe(false);
+    expect(isTwelveDataRateLimitSignal("too many requests")).toBe(true);
     expect(isTwelveDataQuotaSignal("Invalid API key")).toBe(false);
+  });
+
+  it("caps a paid-quote Retry-After at one hour", async () => {
+    const { fetchWithRetry, listOpenApiCircuitBreakers, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow", { status: 429, headers: { "Retry-After": "86400" } })));
+    const res = await fetchWithRetry("https://example.test/tiingo", { cache: "no-store" }, {
+      service: "tiingo",
+      keySource: "env",
+      retries: 0,
+      backoffMs: 1
+    });
+    expect(res.status).toBe(429);
+    const open = listOpenApiCircuitBreakers().find((row) => row.service === "tiingo");
+    expect(open?.openForMs).toBeLessThanOrEqual(60 * 60 * 1000);
+    expect(open?.openForMs).toBeGreaterThan(50 * 60 * 1000);
   });
 });

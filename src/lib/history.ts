@@ -49,7 +49,7 @@ import { retryAfterDelayMs } from "./network-errors";
 import { cancelResponseBody } from "./response-body";
 import { BROWSER_UA, politeFetch, politeFetchJson, sleep } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
-import { apiKeyFingerprint, isTwelveDataQuotaSignal } from "./data-providers";
+import { apiKeyFingerprint, isTwelveDataCreditExhausted, isTwelveDataRateLimitSignal } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
 import { bestEffortSqliteWrite, isPeerReadUsageLabel, peerReadSqliteRetry } from "./sqlite-peer-read";
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
@@ -1038,8 +1038,10 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     const parsed = await readPaidQuoteJson("twelvedata", lane, url, TwelveDataTimeSeriesSchema, { Accept: "application/json" }, credKey);
     if (parsed.status === "error" || !Array.isArray(parsed.values)) {
       const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
-      if (isTwelveDataQuotaSignal(message)) {
+      if (isTwelveDataCreditExhausted(message)) {
         observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
+      } else if (isTwelveDataRateLimitSignal(message)) {
+        observePaidQuoteStatus("twelvedata", lane, 429, 60_000, Date.now(), credKey);
       }
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
       return null;

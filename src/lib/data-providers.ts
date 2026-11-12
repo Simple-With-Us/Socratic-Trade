@@ -842,11 +842,15 @@ export async function fetchWithRetry(
         // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
         // the rest of a multi-endpoint provider and the immediate cache-bypass refetch.
         if (retryAfterMs != null && retryAfterMs > 0) {
-          tripApiCircuitBreakerLane(healthService, laneKeySource, retryAfterMs, Date.now(), {
-            reason: "rate-limit",
-            status: 429,
-            credentialId: paidQuote ? laneCredential : undefined
-          });
+          if (paidQuote) {
+            // Same one-hour cap as history. The raw header can be a day.
+            observePaidQuoteStatus(healthService, laneKeySource, 429, retryAfterMs, Date.now(), laneCredential);
+          } else {
+            tripApiCircuitBreakerLane(healthService, laneKeySource, retryAfterMs, Date.now(), {
+              reason: "rate-limit",
+              status: 429
+            });
+          }
         }
       }
       if (response.status === 402 && paidQuote && healthService && !suppressedStatus) {
@@ -5803,9 +5807,19 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
 // Rich /quote endpoint: price, % change, volume, company name, sector, industry,
 // P/E, EPS, beta, 52-week range — one batched call for all scan symbols.
 
+/** Credit or quota exhaustion. This opens the six-hour hold. */
+export function isTwelveDataCreditExhausted(message: string): boolean {
+  return /\b(quota|credits?)\b/i.test(message);
+}
+
+/** A per-minute rate limit. This opens a one-minute hold, not the six-hour park. */
+export function isTwelveDataRateLimitSignal(message: string): boolean {
+  return /\b(rate limit|too many requests|api limit)\b/i.test(message);
+}
+
 /** Twelve Data reports quota exhaustion as HTTP 200 with status "error". */
 export function isTwelveDataQuotaSignal(message: string): boolean {
-  return /\b(quota|credits?|rate limit|too many requests|api limit)\b/i.test(message);
+  return isTwelveDataCreditExhausted(message) || isTwelveDataRateLimitSignal(message);
 }
 
 export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
@@ -5907,10 +5921,21 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
         // Check for a top-level API error (invalid key, quota exhausted, etc.)
         if (rawObj.status === "error" || (rawObj.message && !rawObj.symbol && !rawObj.data)) {
           const msg = typeof rawObj.message === "string" ? rawObj.message : "TwelveData API error";
-          if (isTwelveDataQuotaSignal(msg)) {
+          const credit = isTwelveDataCreditExhausted(msg);
+          const rateLimited = !credit && isTwelveDataRateLimitSignal(msg);
+          if (credit) {
             observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
+          } else if (rateLimited) {
+            observePaidQuoteStatus(this.name, this.keySource, 429, 60_000, Date.now(), credKey);
           }
-          logApiHealth({ service: this.name, ok: false, errorText: `TwelveData API error: ${msg}`, keySource: this.keySource, userId: this.userId });
+          logApiHealth({
+            service: this.name,
+            ok: false,
+            errorText: `TwelveData API error: ${msg}`,
+            keySource: this.keySource,
+            userId: this.userId,
+            soft: credit || rateLimited
+          });
           continue;
         }
         if (typeof rawObj.symbol === "string") {
@@ -5953,13 +5978,13 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           if (q.code || q.status === "error" || q.message) {
             const code = Number(q.code);
             const embedded = typeof q.message === "string" ? q.message : "";
-            if (code === 429 || isTwelveDataQuotaSignal(embedded)) {
-              const quota = isTwelveDataQuotaSignal(embedded);
+            if (code === 429 || isTwelveDataCreditExhausted(embedded) || isTwelveDataRateLimitSignal(embedded)) {
+              const credit = isTwelveDataCreditExhausted(embedded);
               observePaidQuoteStatus(
                 this.name,
                 this.keySource,
-                quota ? 402 : 429,
-                quota ? undefined : 60_000,
+                credit ? 402 : 429,
+                credit ? undefined : 60_000,
                 Date.now(),
                 credKey
               );
