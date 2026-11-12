@@ -1,3 +1,18 @@
+## 2026-11-12 [gb-trader] ST-4611 — iOS 5xx Sentry capture and GET retry
+
+**What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
+
+**Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4618 — iOS Dynamic Type chrome + 44pt tap targets
+
+**What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
+
+**Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
+## 2026-11-12 CURSOR — ST-4633 iOS GET transport-timeout retry
+
+**What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once, so a persistent timeout cannot hold refresh for about 136s.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
 ## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
 
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
