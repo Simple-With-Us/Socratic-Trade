@@ -80,7 +80,7 @@ intend can be placed. Broker/account/regulatory/accounting hard gates are untouc
 - `src/lib/policy.ts` — added `HARD_GATE_REASON_PATTERNS` + `isHardGateReason` (exported source of truth).
 - `src/lib/socratic-runtime.ts` — `overrideableReason` → denylist delegating to `isHardGateReason`;
   removed the allowlist/HARD_PATTERNS/reasonMatches. (Claude's lane — minimal touch, coordinated on
-  `#agent-sync`.)
+  `#ag***-s**c`.)
 - `test/hard-gate-classification.test.ts` — **new**: pins `isHardGateReason` over the full matrix of real
   reason strings, incl. the reclassified gates, the short broker-vs-policy discrimination, and the
   denylist default.
@@ -97,5 +97,5 @@ intend can be placed. Broker/account/regulatory/accounting hard gates are untouc
 
 ## Coordination
 
-Posted a claim on `#agent-sync` before touching `socratic-runtime.ts` (Claude's lane) noting the
+Posted a claim on `#ag***-s**c` before touching `socratic-runtime.ts` (Claude's lane) noting the
 owner-directed cross-lane change is limited to the `overrideableReason` region.

@@ -14,7 +14,7 @@ dormant items can be enabled safely — not a blind flip of rights/cost gates:
 - `src/lib/dormant-features.ts` + `GET /api/admin/rag-coverage` → `dormantFeatures` checklist
   (`readyToEnable` vs blocked).
 - Marketing pages: `LANDING_PAGE_ENABLED` unset = **ON**; explicit off → 404.
-- CSP: `CSP_ENABLED=on` is report-only by default; reports → `POST /api/csp-report`.
+- CSP: `CSP_ENABLED=on` is report-only by default.  Dynamic routes use a per-request nonce plus `strict-dynamic`.  Welcome and the legal pages use a hash policy stamped at build time and keep hourly ISR.  Reports → `POST /api/csp-report`.
 - `VECTOR_EMBED_CLEAN_TEXT=on` stamps `embed_rev=2` (vs 1) so mixed populations stay detectable.
 
 Update this file when you add a new default-off switch. Pair enablement with a rollout note +
@@ -31,8 +31,8 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 
 | Flag / gate | Default | Ready? | How to enable safely |
 |-------------|---------|--------|----------------------|
-| `LANDING_PAGE_ENABLED` | **ON** (unset) | Live | Set `off` only for private deploys. Pages: `/welcome`, `/how-it-works`, `/strategy`. |
-| `CSP_ENABLED` | off (prod Infisical **on** 2026-08-13, report-only) | **Live** (report-only) | `CSP_REPORT_ONLY=on`. Watch `[csp-report]` logs. **Do not** set `CSP_REPORT_ONLY=off` until clean. |
+| `LANDING_PAGE_ENABLED` | **ON** (unset) | Live | Set `off` only for private deploys.  Pages: `/welcome`, `/framework`, `/how-it-works`, `/strategy`. |
+| `CSP_ENABLED` | off (prod Infisical **on** 2026-08-13, report-only) | **Live** (report-only) | Nonce + `strict-dynamic` on dynamic routes.  Welcome and legal pages keep hourly ISR under a build-stamped hash policy (ST-2789).  Leave `CSP_REPORT_ONLY` unset.  Watch `[csp-report]` logs.  Set `CSP_REPORT_ONLY=0` only after reports are clean. |
 | `USAGE_BUDGET_ENFORCE` | off | **Yes** | Set `on` when usage-monitor budget-status is trusted. Fail-open on monitor outage. |
 | `CONGRESS_SHARE_ENABLED` | off (prod Infisical **on** 2026-08-13) | **Live** | Requires `CONGRESS_TRADE_TOKEN` (CT INGEST_TOKEN). Nightly batch + after-scan refs. Keep `CONGRESS_SHARE_FUNDAMENTALS_ENABLED` off unless App A #46 is confirmed. |
 | `WEB_SOURCE_SEC8K_FULL_BODY` | off (prod Infisical **on** 2026-08-13) | **Live** (bounded) | Limit 5/cycle + `WEB_SOURCE_SEC8K_FULL_BODY_BUDGET_MS=12000` (cap 60s). Adaptive FTS-mirror batching. Watch `[slow-sync]` / backlog. |
@@ -95,14 +95,13 @@ Code and collectors are ready. Flip in Infisical/env when desired; watch receipt
 | Capability | Gate | Notes |
 |------------|------|--------|
 | Usage-budget hard enforce | `USAGE_BUDGET_ENFORCE=off` | Ready — see table above |
-| Infisical primary bridge writer | `INFISICAL_ST_PRIMARY_WRITER_ENABLED=false` | Usage-monitor primary credentials |
 | Landing / welcome / strategy | `LANDING_PAGE_ENABLED` unset → **ON** | Explicit off → 404 |
-| CSP headers | `CSP_ENABLED=on` + `CSP_REPORT_ONLY=on` (2026-08-13) | Live report-only; `/api/csp-report`. Do not enforce-block. |
+| CSP headers | `CSP_ENABLED=on`, `CSP_REPORT_ONLY` unset (2026-08-13, nonce policy ST-2789) | Live report-only; `/api/csp-report`.  ISR pages use stamped script hashes.  Do not set `CSP_REPORT_ONLY=0` until reports are clean. |
 | Sentry session replay | `NEXT_PUBLIC_SENTRY_REPLAY_ENABLED=false` | Privacy/cost |
 | Dev background workers | `DEV_BACKGROUND_WORKERS=off` | **Keep off** in local UI QA |
 | Robinhood broker-held stops | `policy.robinhoodBrokerStops` default off | Per-account policy |
 | Apple Sign-In (web) | `AUTH_APPLE_ID` / `AUTH_APPLE_SECRET` | **Waiting on secrets.** Code path live. Infisical keys (no values here): `AUTH_APPLE_ID`, `AUTH_APPLE_SECRET` — or mint from `AUTH_APPLE_TEAM_ID` + `AUTH_APPLE_KEY_ID` + `AUTH_APPLE_PRIVATE_KEY` (SIWA .p8 PEM, not ASC/APNs). |
-| Native iOS push (APNs) | `APNS_KEY_ID` + `APNS_TEAM_ID` + `APNS_BUNDLE_ID` + `APNS_P8` (or `APNS_PRIVATE_KEY` / `APNS_PRIVATE_KEY_B64`) | **Waiting on Apple portal secret.** Client + server code live (#2681). Channel reports "not configured" until all four values are in ST prod Infisical. Team `CC8UTF7ATG`, topic `trade.socratic.app`. Do not invent or commit a `.p8`. |
+| Native iOS push (APNs) | `APNS_KEY_ID` + `APNS_TEAM_ID` + `APNS_BUNDLE_ID` + `APNS_P8` (or `APNS_PRIVATE_KEY` / `APNS_PRIVATE_KEY_B64`) | **Waiting on Apple portal secret.** Client + server code live (#2681). Channel reports "not configured" until all four values are in ST prod Infisical. Team `CC8UTF7ATG`, topic `com.socratictrade.ios`. Do not invent or commit a `.p8`. |
 | Kalshi / options / short-sell capability | dormant per-account double gates | Phase 1 design landed |
 | Kalshi macro prompt context | `KALSHI_CONTEXT` (default on) + `KALSHI_ENV` | Public data; inert without `KALSHI_ENV` |
 | Kalshi live event orders | `KALSHI_LIVE_ORDERS` + `kalshiLiveOrdersEnabled` both off | Dry-run until both on |

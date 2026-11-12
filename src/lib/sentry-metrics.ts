@@ -1,5 +1,5 @@
 /**
- * Sentry Application Metrics + sparse structured logs for Socratic.Trade.
+ * Sentry Application Metrics + sparse structured logs for Socratic-Trade.
  *
  * Operational telemetry only: scheduler ticks, broker calls, RAG rejections,
  * embedding failures. Dynamic-imports `@sentry/nextjs` so importing this
@@ -11,6 +11,7 @@
  */
 
 import type * as SentryNs from "@sentry/nextjs";
+import { PROXY_GATE_HOLD_ALERT_MS } from "./proxy-gate-alert";
 
 type SentryMod = typeof SentryNs;
 type LogAttrs = Record<string, string | number | boolean | null | undefined>;
@@ -115,11 +116,75 @@ export function recordEmbedFailure(provider: string, errorType: string): void {
   });
 }
 
+/** Count of EOD series withheld because the newest close is behind the latest completed session. */
+export function recordCongressStalePriceWithheld(stream: "push" | "pull", count: number): void {
+  if (!Number.isFinite(count) || count <= 0) return;
+  void loadSentry().then((Sentry) => {
+    try {
+      Sentry?.metrics.count("congress_share.stale_price_withheld", count, {
+        attributes: { stream }
+      });
+    } catch {
+      // Fail-soft
+    }
+  });
+}
+
 /** Sparse Sentry structured log. No-op when the SDK is absent or uninitialized. */
 export function logWarn(message: string, attributes?: LogAttrs): void {
   void loadSentry().then((Sentry) => {
     try {
       Sentry?.logger.warn(message, compactAttrs(attributes));
+    } catch {
+      // Fail-soft
+    }
+  });
+}
+
+const PROXY_GATE_ALERT_INTERVAL_MS = 10 * 60 * 1000;
+
+type ProxyGateAlertState = { lastAlertAt: number };
+type ProxyGateAlertHost = typeof globalThis & {
+  __socraticProxyGateAlertState?: ProxyGateAlertState;
+};
+const proxyGateAlertHost = globalThis as ProxyGateAlertHost;
+const proxyGateAlertState = (proxyGateAlertHost.__socraticProxyGateAlertState ??= { lastAlertAt: 0 });
+
+type SentryGauge = (name: string, value: number, options?: { unit?: string }) => void;
+
+/**
+ * Publish proxy-gate counters.  A hold older than PROXY_GATE_HOLD_ALERT_MS
+ * files one warning per ten minutes.  The timestamp is on globalThis so
+ * separate Next.js bundles share one throttle.
+ * Fail-soft: metrics must not break `/api/proxy-use`.
+ */
+export function recordProxyGateSnapshot(stats: {
+  inFlight: number;
+  queued: number;
+  oldestHoldMs: number;
+}): void {
+  void loadSentry().then((Sentry) => {
+    try {
+      const gauge = (Sentry?.metrics as { gauge?: SentryGauge } | undefined)?.gauge;
+      gauge?.("proxy.gate.in_flight", stats.inFlight);
+      gauge?.("proxy.gate.queued", stats.queued);
+      gauge?.("proxy.gate.oldest_hold_ms", stats.oldestHoldMs, { unit: "millisecond" });
+      const now = Date.now();
+      if (
+        stats.oldestHoldMs > PROXY_GATE_HOLD_ALERT_MS &&
+        now - proxyGateAlertState.lastAlertAt >= PROXY_GATE_ALERT_INTERVAL_MS
+      ) {
+        proxyGateAlertState.lastAlertAt = now;
+        Sentry?.captureMessage(`proxy concurrency gate oldest hold exceeds ${PROXY_GATE_HOLD_ALERT_MS / 1000}s`, {
+          level: "warning",
+          tags: { area: "proxy-gate" },
+          extra: {
+            inFlight: stats.inFlight,
+            queued: stats.queued,
+            oldestHoldMs: stats.oldestHoldMs
+          }
+        });
+      }
     } catch {
       // Fail-soft
     }

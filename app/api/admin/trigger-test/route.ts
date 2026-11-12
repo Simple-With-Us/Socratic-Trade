@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { admitRun, submitMaterialEvent, triggerEngineEnabled, triggerMode } from "@/lib/triggers";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,8 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json({
     ok: true,
     engineEnabled: triggerEngineEnabled(),
@@ -25,7 +26,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   let symbol = "AAPL";
   try {
     const body = (await request.json()) as { symbol?: string };

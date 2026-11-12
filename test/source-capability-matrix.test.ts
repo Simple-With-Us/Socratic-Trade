@@ -43,6 +43,13 @@ describe("source-capability-matrix", () => {
     expect(isStAllowedSource("yahoo-finance")).toBe(true);
   });
 
+  it("prefers cboe-options for near-the-money IV", () => {
+    const rows = sourcesFor("nearTheMoneyIv");
+    expect(rows[0]?.sourceId).toBe("cboe-options");
+    expect(rows.some((r) => r.sourceId === "alpaca-options")).toBe(true);
+    expect(rows.some((r) => r.sourceId === "tradier-options")).toBe(true);
+  });
+
   it("maps yahoo-finance to many scan fields", () => {
     const pts = dataPointsForSource("yahoo-finance");
     expect(pts).toContain("price");

@@ -20,8 +20,11 @@ import { clearMcpOAuthTokens, getMcpAccessToken } from "./mcp-oauth";
 import { logApiHealth } from "./db-health";
 import { normalizeSymbol } from "./money";
 import { mergeAccountCapabilities } from "./venue-contract";
-import { isShortIntent } from "./broker-side";
+import { normalizeVenueOrder } from "./venue-normalization";
+import { isLiveOrderState, isShortIntent } from "./broker-side";
+import { brokerAbortSignal, scopeBrokerOrders } from "./inflight-deadline";
 import { getOpenLots, getPerformanceSummary } from "./performance";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
@@ -82,15 +85,35 @@ export function parseRobinhoodQuotes(raw: Record<string, unknown> | unknown): Re
     (entries as Array<Record<string, unknown>>).map((item) => {
       const q = (item.quote ?? item) as Record<string, unknown>;
       const symbol = normalizeSymbol(String(q.symbol ?? item.symbol));
+      const prevClose = optionalNumber(q.previous_close ?? q.adjusted_previous_close);
+      const bidSize = optionalNumber(q.bid_size);
+      const askSize = optionalNumber(q.ask_size);
+      const volume = optionalNumber(q.volume);
+      const selected = selectObservedQuotePrice({
+        last: q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price,
+        bid: q.bid_price ?? q.bid,
+        ask: q.ask_price ?? q.ask
+      });
+      const asOf = providerObservationIso(
+        selected.basis === "last"
+          ? q.venue_last_trade_time ?? q.as_of ?? item.as_of
+          : selected.basis === "mid"
+            ? q.venue_quote_time ?? q.as_of ?? item.as_of
+            : undefined
+      );
       return [
         symbol,
         {
           symbol,
-          price: optionalNumber(q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price),
+          ...(selected.price !== undefined ? { price: selected.price } : {}),
           bid: optionalNumber(q.bid_price ?? q.bid),
           ask: optionalNumber(q.ask_price ?? q.ask),
-          asOf: optionalString(q.venue_last_trade_time ?? q.as_of ?? item.as_of),
-          provider: "robinhood"
+          ...(asOf ? { asOf } : {}),
+          provider: "robinhood",
+          ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
+          ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
+          ...(askSize !== undefined && askSize > 0 ? { askSize } : {}),
+          ...(volume !== undefined && volume > 0 ? { volume } : {})
         } satisfies BrokerQuote
       ];
     })
@@ -420,10 +443,10 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     }).filter((p) => p.underlyingSymbol && p.expirationDate && p.quantity !== 0);
   }
 
-  async getEquityOrders(accountNumber: string, _options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
     const orders = extractRobinhoodOrderCollection(raw);
-    return orders.map((item: Record<string, unknown>) => ({
+    const mapped = orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
       side: item.side as OrderSide,
@@ -442,6 +465,7 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
       clientOrderId: optionalString(item.ref_id ?? item.client_order_id ?? item.clientOrderId),
       placedAgent: optionalString(item.placed_agent ?? item.placedAgent)
     }));
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
@@ -480,7 +504,12 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
   }
 
   async reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder> {
-    const raw = await this.callTool("review_equity_order", toMcpOrder(input)) as Record<string, unknown>;
+    // Review the SAME order placeEquityOrder will send.  The fractional/extended-hours limit ->
+    // regular-hours market coercion lives in normalizeVenueOrder (not toMcpOrder), so without this
+    // a fractional limit buy is reviewed as a limit (cost estimate and order checks) but placed as
+    // a market order.  audit:false -- placement writes the single normalization receipt.
+    const reviewInput = normalizeVenueOrder(input, "robinhood", this.userId, { audit: false });
+    const raw = await this.callTool("review_equity_order", toMcpOrder(reviewInput)) as Record<string, unknown>;
     // Robinhood's own pre-flight review already tells us when an order is a guaranteed reject (e.g.
     // the sub-$1 minimum) via `order_checks`, not the top-level `alerts` array read below — surface
     // it as a structured signal so callers can skip a doomed order instead of placing (and
@@ -504,7 +533,8 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const raw = await this.callTool("place_equity_order", { ...toMcpOrder(input), ref_id: input.refId }) as Record<string, unknown>;
     const orderId = raw.id ?? raw.order_id;
     // A response with no order id can't be tracked or reconciled against Robinhood's real order
@@ -633,7 +663,7 @@ export async function callRobinhoodMcpMethod(userId: string, method: string, par
     method: "POST",
     // Bound every Robinhood MCP call (incl. place_equity_order) so a hung connection can't block
     // the order path / strategy run indefinitely.
-    signal: AbortSignal.timeout(30_000),
+    signal: brokerAbortSignal(),
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -901,7 +931,7 @@ class TestBrokerGateway implements BrokerGateway {
               bid: yf.bid,
               ask: yf.ask,
               volume: yf.volume > 0 ? yf.volume : undefined,
-              asOf: yf.asOf || new Date().toISOString(),
+              ...(yf.asOf ? { asOf: yf.asOf } : {}),
               provider: "yahoo-finance",
               ...(yf.syntheticBid ? { syntheticBid: true } : {}),
               ...(yf.syntheticAsk ? { syntheticAsk: true } : {}),
@@ -965,15 +995,23 @@ class TestBrokerGateway implements BrokerGateway {
     return { estimatedNotional: input.dollarAmount ?? (input.quantity ?? 0) * estPrice, alerts: [], raw: { test: true } };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const quotes = await this.getEquityQuotes(input.accountNumber, [input.symbol]);
     const price = quotes[normalizeSymbol(input.symbol)]?.price ?? 100;
     const estPrice = input.limitPrice ?? input.stopPrice ?? price;
-    const quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let state = "filled";
+    if (input.symbol === "REJECT") {
+      throw new Error("Simulated rejection for REJECT symbol");
+    } else if (input.symbol === "PARTIAL") {
+      state = "partially_filled";
+      quantity = quantity ? quantity / 2 : undefined;
+    }
     return {
       orderId: `test-${input.refId}`,
       refId: input.refId,
-      state: "filled",
+      state,
       filledQuantity: quantity,
       averagePrice: estPrice,
       raw: { test: true }
@@ -1044,6 +1082,13 @@ export function toMcpOrder(input: EquityOrderInput): Record<string, unknown> {
   //   - EXITS (sell): a limit/take-profit exit must rest at its requested price or be rejected upstream;
   //     silently turning it into market would liquidate immediately.
   //   - Whole-share orders (integer quantity >= 1): preserved as-is so marketable-limit entries work.
+  //
+  // This is the same coercion `normalizeVenueOrder()` performs for the audited
+  // entry-point call in `placeEquityOrder()`; we keep it inline here too so direct
+  // callers (tests, the `reviewEquityOrder()` pre-flight, anything that bypasses
+  // the gateway) get the same shape the broker will eventually receive. The two
+  // paths are idempotent — calling normalizeVenueOrder first and then toMcpOrder
+  // is a no-op the second time.
   const wholeShare = input.quantity != null && Number.isInteger(input.quantity) && input.quantity >= 1;
   const fractional =
     !wholeShare && ((input.dollarAmount != null && input.dollarAmount > 0) || (input.quantity != null && input.quantity > 0));

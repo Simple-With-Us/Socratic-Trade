@@ -79,9 +79,72 @@ function extractStructuredProviderError(
   return undefined;
 }
 
+const DETAIL_MESSAGE_MAX = 300;
+const DETAIL_RAW_MAX = 300;
+
+/** Strip credentials from provider text before it is persisted. PURE.  Covers bearer tokens, sk-*
+ *  style keys (incl. sk-or-v1-), api_key/key/token query or JSON values, authorization/cookie
+ *  headers, and any long opaque token-looking run. */
+export function redactProviderText(text: string): string {
+  return text
+    .replace(/\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\b\s*[:=]\s*[^\n,;}"']+/gi, "$1: [redacted]")
+    .replace(/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-[redacted]")
+    .replace(/\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|key)(["']?\s*[:=]\s*["']?)[A-Za-z0-9._~+/=-]{8,}/gi, "$1$2[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+}
+
+function oneLine(text: string, max: number): string {
+  const flat = redactProviderText(text).replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max)}...` : flat;
+}
+
+/**
+ * Sanitized, bounded provider diagnostic that rides alongside the friendly sentence, so the real
+ * cause (status, provider code/type, upstream provider, wire model, provider message) survives
+ * persistence and re-wrapping instead of being flattened into "key doesn't have access".
+ * Returns "" when there is nothing to add.
+ */
+export function describeProviderErrorDetail(
+  raw: string | undefined | null,
+  opts: { status?: number; model?: string } = {}
+): string {
+  const text = (raw ?? "").toString().trim();
+  const parts: string[] = [];
+  if (opts.status !== undefined) parts.push(`HTTP ${opts.status}`);
+  if (opts.model) parts.push(`model ${oneLine(opts.model, 120)}`);
+  const structured = extractStructuredProviderError(text);
+  if (structured) {
+    if (structured.code !== undefined) parts.push(`code ${oneLine(String(structured.code), 60)}`);
+    if (structured.status) parts.push(`type ${oneLine(structured.status, 60)}`);
+    // OpenRouter nests the upstream provider and its raw body under error.metadata.
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      const first = (Array.isArray(parsed) ? parsed[0] : parsed) as { error?: { metadata?: { provider_name?: unknown; raw?: unknown; reasons?: unknown } } } | undefined;
+      const meta = first?.error?.metadata;
+      if (meta && typeof meta.provider_name === "string") parts.push(`upstream ${oneLine(meta.provider_name, 60)}`);
+      if (meta && Array.isArray(meta.reasons) && meta.reasons.length > 0) parts.push(`reasons ${oneLine(meta.reasons.map(String).join(","), 120)}`);
+      if (meta && meta.raw !== undefined && meta.raw !== null) {
+        const rawMeta = typeof meta.raw === "string" ? meta.raw : JSON.stringify(meta.raw);
+        parts.push(`upstream raw "${oneLine(rawMeta, 200)}"`);
+      }
+    } catch {
+      // extractStructuredProviderError already proved the body parses; ignore anyway.
+    }
+    parts.push(`message "${oneLine(structured.message, DETAIL_MESSAGE_MAX)}"`);
+  } else if (text) {
+    parts.push(`body "${oneLine(text, DETAIL_RAW_MAX)}"`);
+  }
+  return parts.length > 0 ? `[provider detail: ${parts.join("; ")}]` : "";
+}
+
 /** Matches text that is ALREADY a humanizeLlmError output ("<Provider label> error ...: ...") so a
  *  second pass (e.g. humanizeLlmTransportError re-wrapping an Error whose message was humanized at
  *  the throw site) returns it unchanged instead of stuttering "Gemini error: Gemini error: ...". */
+/** A humanized message ends with the appended detail block; an unrelated raw body that merely mentions
+ *  the marker does not match. */
+const PROVIDER_DETAIL_SUFFIX = /\[provider detail: .*\]\s*$/s;
+
 const ALREADY_HUMANIZED =
   /^(?:OpenAI|Anthropic \(Claude\)|xAI \(Grok\)|Google \(Gemini\)|Mistral|DeepSeek|Moonshot AI \(Kimi\)|MiniMax|OpenRouter|the LLM) error\b|^(?:That model id isn't valid on |That model isn't available on your |Couldn't complete this model request\.|.+ had no compatible endpoint for this request\.)/;
 
@@ -90,11 +153,14 @@ const ALREADY_HUMANIZED =
  * Pass `status` explicitly when you have it (avoids mis-reading numbers in the body); pass `provider`
  * (internal id, e.g. "gemini") when the caller already knows it (more reliable than text sniffing).
  */
-export function humanizeLlmError(raw: string | undefined | null, opts: { provider?: string; status?: number } = {}): string {
+export function humanizeLlmError(raw: string | undefined | null, opts: { provider?: string; status?: number; model?: string } = {}): string {
   const text = (raw ?? "").toString().trim();
   const provider = opts.provider ? providerLabel(opts.provider) : text ? providerFromText(text) : "the LLM";
   if (!text && opts.status === undefined) return `${provider} request failed for an unknown reason. Try again.`;
-  if (ALREADY_HUMANIZED.test(text)) return text;
+  if (ALREADY_HUMANIZED.test(text) || PROVIDER_DETAIL_SUFFIX.test(text)) return text;
+  // Appended to the status-driven sentences below; two spaces between sentences.
+  const detailText = describeProviderErrorDetail(text, { status: opts.status, model: opts.model });
+  const withDetail = (message: string): string => (detailText ? `${message}  ${detailText}` : message);
   const s = text.toLowerCase();
   const has = (...needles: string[]) => needles.some((n) => s.includes(n));
   // Trust an explicit status; otherwise read a leading 3-digit HTTP code from the text.
@@ -104,10 +170,10 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
   })();
 
   if (status === 401 || has("incorrect api key", "invalid_api_key", "invalid api key", "api key not valid", "unauthorized", "no auth credential", "authentication_error", "x-api-key"))
-    return `${provider} rejected the API key. Add or update the ${provider} key in Connections.`;
+    return withDetail(`${provider} rejected the API key. Add or update the ${provider} key in Connections.`);
 
   if (status === 403 || has("permission", "do not have access", "does not have access", "not allowed", "forbidden", "unsupported_country", "region"))
-    return `Your ${provider} key doesn't have access to this model or region.  Pick a different model, or check your ${provider} plan.`;
+    return withDetail(`Your ${provider} key doesn't have access to this model or region.  Pick a different model, or check your ${provider} plan.`);
 
   // OpenRouter require_parameters 404 — the model exists; no endpoint advertised
   // every request field.  Never call that an account allowlist miss.
@@ -119,7 +185,7 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
     "no provider available"
   );
   if (status === 404 && noEndpointRouting)
-    return `${provider} had no compatible endpoint for this request.  Try again, or choose a different model.`;
+    return withDetail(`${provider} had no compatible endpoint for this request.  Try again, or choose a different model.`);
 
   // A true model_not_found is a bad slug, not an account-privacy miss.
   // A bare 404 is "couldn't complete", never "isn't available on your account".
@@ -135,12 +201,12 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
     "no access to the model"
   );
   if ((status === 404 || status === 403) && modelMissingBody)
-    return `That model id isn't valid on ${provider}.  Choose a different model in the picker.`;
+    return withDetail(`That model id isn't valid on ${provider}.  Choose a different model in the picker.`);
   if (status === 404)
-    return `Couldn't complete this model request.  Try again, or choose a different model.`;
+    return withDetail(`Couldn't complete this model request.  Try again, or choose a different model.`);
 
   if (status === 402 || status === 429 || has("rate limit", "rate_limit", "too many requests", "quota", "insufficient_quota", "billing", "credit balance", "out of credit", "payment required"))
-    return `Your ${provider} account hit a rate limit or is out of quota/credits. Wait and retry, or check ${provider} billing.`;
+    return withDetail(`Your ${provider} account hit a rate limit or is out of quota/credits. Wait and retry, or check ${provider} billing.`);
 
   // Anthropic's org/workspace-level "specified API usage limit" (distinct from a 429 rate limit —
   // this is an admin-configured spend cap) comes back as a 400 invalid_request_error, so it doesn't
@@ -152,7 +218,7 @@ export function humanizeLlmError(raw: string | undefined | null, opts: { provide
   }
 
   if ((status !== undefined && status >= 500) || has("overloaded", "service unavailable", "internal server error", "bad gateway", "gateway timeout"))
-    return `${provider} is temporarily unavailable (server error). Try again in a moment.`;
+    return withDetail(`${provider} is temporarily unavailable (server error). Try again in a moment.`);
 
   if (has("timed out", "timeout", "aborted", "network error", "fetch failed", "econnreset", "enotfound", "socket hang up"))
     return `Couldn't reach ${provider} (network or timeout). Check connectivity and try again.`;
@@ -221,5 +287,5 @@ export function humanizeLlmTransportError(
     return `${step} timed out${timeoutPart} using ${provider}${modelPart}. Lower reasoning effort, choose a faster model, or retry.`;
   }
 
-  return `${step} failed using ${provider}${modelPart}: ${humanizeLlmError(raw, { provider: opts.provider })}`;
+  return `${step} failed using ${provider}${modelPart}: ${humanizeLlmError(raw, { provider: opts.provider, model: opts.model })}`;
 }

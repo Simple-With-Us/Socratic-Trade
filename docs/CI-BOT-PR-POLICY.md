@@ -1,0 +1,33 @@
+# Bot-authored pull requests
+
+Same-repository PRs triggered by `cursor[bot]`, `dependabot[bot]`, `renovate[bot]`,
+`sentry[bot]`, `codex[bot]`, `chatgpt-codex-connector[bot]`, `kody-ai[bot]`,
+`claude[bot]`, `github-actions[bot]`, or any fleet seat app in the `swu-*` family
+(`swu-*[bot]`) may run CI, Playwright Smoke,
+and gitleaks. They remain subject
+to ordinary required checks and reviews; no bot work is automatically trusted
+as correct. The gate reads the event `github.actor`, not a permanent PR-author
+identity. Unknown `[bot]` actors outside that set are held until the owner updates the
+allowlist. The owner set the current set fleet-wide on 2026-11-02: fleet seats
+are admitted as the `swu-*` family instead of being named one by one.
+Fork PRs remain blocked before checkout.
+
+The hosted CI installation is tokenless (`npm ci` over public HTTPS). No
+private-repo deploy key is used by `verify-hosted` or Playwright Smoke; older
+error messages claiming otherwise were stale. If a future workflow introduces
+secrets or privileged writes, review that workflow's admission boundary before
+expanding its allowlist.
+
+The same bot-actor policy is reflected in `.github/workflows/ci.yml`,
+`.github/workflows/e2e.yml`, `.github/workflows/security.yml`, and the parked
+copy `ci-pending/e2e.yml`. Keep those lists in sync when the owner changes
+the approved set.
+
+`github-actions[bot]` covers autofix pushes made by workflow runs, and
+`swu-echo[bot]` and `swu-wise[bot]` are the fleet's Echo and Wise GitHub App
+seats; the `swu-*` arm covers them and every other seat app, current and future.
+
+`chatgpt-codex-connector[bot]` is the observed Codex GitHub reviewer account;
+`codex[bot]` remains for compatibility with the earlier requested name.
+GitHub uses the event initiator as `github.actor`, so review authorship by itself
+does not prove that every Codex-generated PR run uses this actor.

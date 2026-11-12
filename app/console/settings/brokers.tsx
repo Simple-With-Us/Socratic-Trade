@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ConnectedAccount, TaxationType } from "@/lib/types";
 import { mergeAccountCapabilities } from "@/lib/venue-contract-pure";
 import { activateAccount, ConsoleApiError } from "../lib/api";
-import { deriveStateInfo, realityForAccount } from "../lib/derive";
+import { deriveStateInfo, realityForAccount, stateChipTitle, withHaltCause } from "../lib/derive";
 import {
   accountFractionalSharesLabel,
   accountOptionsTradingLabel,
@@ -22,6 +22,14 @@ import { useToast } from "../ui/toast";
 import { Sheet } from "../ui/sheet";
 import { Btn, Card, Chip, Field, LiveTag, Select, TextInput } from "../ui/primitives";
 import { Briefcase, ArrowDown, Zap, Scale, AlertTriangle, Pencil, Check, X, Info } from "lucide-react";
+import {
+  ALPACA_CONNECTED_TOAST_BROKERAGE,
+  ALPACA_CONNECTED_TOAST_PAPER,
+  ALPACA_BROKERAGE_LABEL,
+  ALPACA_PAPER_LABEL,
+  TRADIER_PRODUCTION_LABEL,
+  TRADIER_SANDBOX_LABEL
+} from "@/lib/guardrail-copy";
 import {
   connectAlpacaAccount,
   connectKalshiAccount,
@@ -196,7 +204,8 @@ export function BrokerAccountsCard() {
     // a non-active account (e.g. a live Roth IRA) can genuinely be running Autopilot right now —
     // this used to unconditionally chip every "Other Accounts" row "Inactive" regardless.
     const policyForAccount = snapshot.connectedAccountPolicies?.[account.id];
-    const stateInfo = policyForAccount ? deriveStateInfo(policyForAccount) : null;
+    // Lane h5 review round: fold in why a halted account is halted (and whether it lifts by itself).
+    const stateInfo = policyForAccount ? withHaltCause(deriveStateInfo(policyForAccount), policyForAccount.haltCause) : null;
 
     // A real per-account pending-proposal count. snapshot.pendingProposals is scoped
     // server-side to the ACTIVE account only (dashboard.ts), so filtering it for another
@@ -280,7 +289,7 @@ export function BrokerAccountsCard() {
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)]">
               {stateInfo ? (
-                <Chip tone={stateInfo.tone} title={stateInfo.detail}>
+                <Chip tone={stateInfo.tone} title={stateChipTitle(stateInfo)}>
                   {stateInfo.label}
                 </Chip>
               ) : (
@@ -633,7 +642,7 @@ function AlpacaConnectSheet({
         apiSecret: apiSecret.trim() || undefined,
         taxationType: taxationType || undefined
       });
-      toast.push("pos", "Alpaca account connected", inferredPaper ? "Connected as Alpaca PAPER Account (NOT Real Money)." : "Connected as a brokerage account.");
+      toast.push("pos", "Alpaca account connected", inferredPaper ? ALPACA_CONNECTED_TOAST_PAPER : ALPACA_CONNECTED_TOAST_BROKERAGE);
       setLabel("");
       setAccountNumber("");
       setApiKey("");
@@ -654,7 +663,7 @@ function AlpacaConnectSheet({
           Paste the API key pair from your Alpaca dashboard. Paper accounts are inferred from the credentials
           (&quot;PA…&quot; account numbers and &quot;PK…&quot; keys are paper) — currently reading as{" "}
           <span className={inferredPaper ? "font-bold text-[color:var(--con-paper)]" : "font-bold text-[color:var(--con-accent)]"}>
-            {inferredPaper ? "Alpaca PAPER Account (NOT Real Money)" : "Brokerage Account"}
+            {inferredPaper ? ALPACA_PAPER_LABEL : ALPACA_BROKERAGE_LABEL}
           </span>
           .  Credentials are stored server-side and never shown again.
         </p>
@@ -799,7 +808,7 @@ function TradierConnectSheet({
           against Tradier&apos;s sandbox and a production token only against the live API, so you
           choose the environment explicitly — currently reading as{" "}
           <span className={isLive ? "font-bold text-[color:var(--con-accent)]" : "font-bold text-[color:var(--con-paper)]"}>
-            {isLive ? "Tradier Production (LIVE — Real Money)" : "Tradier Sandbox (Paper — NOT Real Money)"}
+            {isLive ? TRADIER_PRODUCTION_LABEL : TRADIER_SANDBOX_LABEL}
           </span>
           .  The token is stored server-side and never shown again.
         </p>

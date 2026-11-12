@@ -1,0 +1,5 @@
+{
+  "name": "Socratic-Trade",
+  "install": "bash scripts/cursor-cloud-install.sh",
+  "start": "bash scripts/cursor-cloud-start.sh"
+}

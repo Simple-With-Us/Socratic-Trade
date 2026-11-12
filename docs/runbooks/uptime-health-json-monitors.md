@@ -3,10 +3,28 @@
 ## Why
 
 `GET /api/health` returns **HTTP 200** whenever the process can serve and the
-**critical** dependencies are not hard-stopped.  That is the Coolify / deploy
-liveness probe.  A 503 here restarts the container, which re-halts autonomy and
+**critical** dependencies are not hard-stopped.  **Container liveness** (Docker
+`HEALTHCHECK`, Coolify HTTP health paths, Traefik backend selection) must use
+`GET /api/live` instead — see `Dockerfile` and `AGENTS.md`.  A 503 on
+`/api/health` must not be wired to container restart; it restarts autonomy and
 cannot heal a stale scheduler, a silent trading loop, or a wedged Litestream
 tier.
+
+A warm process answers this URL from a memory snapshot (default 2 seconds,
+`HEALTH_SNAPSHOT_TTL_MS`) and refreshes lightweight checks (SQLite reachability,
+scheduler age, connection-health summaries) after the response.  OpenRouter
+credits, disk `statfs`, and Litestream IPC/log subsections are memoized
+separately for 20 seconds (`HEALTH_HEAVY_SECTION_TTL_MS`, single-flight per
+process).  A fresh snapshot can still carry heavy fields up to one heavy-section
+window old; served-from-cache subsections expose their age in
+`openrouterCredits.cachedAgeSeconds`, `storage.diskCachedAgeSeconds`, and
+`storage.litestreamCachedAgeSeconds`.  Critical hard-stops still update `ok` on
+the snapshot refresh, but `openrouterCredits.ok` and
+`storage.litestreamTiersDegraded` can lag by about one heavy-section window
+rather than one 2s snapshot tick.  `/api/live` does not open
+`app.db`.  Docker and the entrypoint watchdog stay on `/api/live`.  A single
+main-thread native call longer than the probe timeout can still delay the
+handler from starting; the snapshot stops the probe from adding its own wait.
 
 UptimeRobot (or equivalent) plus Pushover must therefore treat HTTP 200 as
 **up**, and page on these JSON fields instead:
@@ -80,6 +98,10 @@ liveness check.  Do not convert it into a keyword monitor.
 - `tradingLiveness` is always present.  `degraded` is a **count** of
   active-autonomy accounts that are stale (market open) or over the consecutive
   failure cap.  Halted accounts do not count.  `degraded: 0` is healthy.
+  `maxConsecutiveFailedRuns` is the worst post-re-arm streak: after the owner
+  sets the account active again, only runs whose `started_at` is after that
+  re-arm count.  A run that was already in flight does not keep the public
+  streak at the old halt-time number.  `stale_last_completed_run` is unchanged.
 - `storage.litestreamTiersDegraded` is always a boolean.  `true` when a
   compaction level is wedged or empty-wedged (see `assessLitestreamTierFreshness`).
 
@@ -103,12 +125,13 @@ bash scripts/fetch-prod-ops-snapshot.sh
 
 ## R2 weekly retain
 
-Weekly retain is **already verified at 1**.  Code default is
-`R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 1` and `R2_COLD_SNAPSHOT_RETAIN` is unset.
+Weekly retain is **2** (Jay 2026-10-29; it was 1 until 2026-09-09, then 4).  Code default is
+`R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 2` and `R2_COLD_SNAPSHOT_RETAIN` should stay unset.
+The 2026-08-18 notes below are historical.
 The historic bucket's `cold-snapshots/` prefix has exactly one object
 (`app-2026-08-16.db`).  `R2_ARCHIVE_KEEP_GENERATIONS=2` is unused leftover
 (empty `weekly/` prefix) and does not drive weekly retain.  Do not delete
-live R2 objects.  `R2_COLD_SNAPSHOT_RETAIN` values above 1 stay ignored.
+live R2 objects.  `R2_COLD_SNAPSHOT_RETAIN` overrides the default (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
 
 ## Owner dashboard steps (UptimeRobot)
 

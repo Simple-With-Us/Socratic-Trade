@@ -1,6 +1,6 @@
 {
   "name": "agentic-trading",
-  "image": "mcr.microsoft.com/devcontainers/javascript-node:24",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:26",
   "postCreateCommand": "bash scripts/cloud-setup.sh",
   "forwardPorts": [3000],
   "remoteEnv": {

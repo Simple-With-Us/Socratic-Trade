@@ -66,7 +66,7 @@ fail_usage() {
 command -v curl >/dev/null 2>&1 || fail_usage "curl is required."
 command -v git >/dev/null 2>&1 || fail_usage "git is required."
 command -v jq >/dev/null 2>&1 || fail_usage "jq is required (brew install jq / apt-get install jq)."
-git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic.Trade git repo."
+git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic-Trade git repo."
 
 FETCH_ATTEMPTS=0
 try_fetch() {
@@ -252,8 +252,8 @@ fi
 
 case "$LAST_CODE" in
   1) log "  this is an operational/reachability failure, not proof of drift." ;;
-  4) log "  escalate on #agent-sync before anything else touches production." ;;
-  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #agent-sync." ;;
+  4) log "  escalate on #Work-In-Progress before anything else touches production." ;;
+  5) log "  run 'git fetch origin' and re-run; if it persists, escalate on #Work-In-Progress." ;;
 esac
 
 log "  do NOT hand-trigger a deploy to 'fix' this - investigate the webhook and build queue."

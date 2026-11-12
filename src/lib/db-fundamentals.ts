@@ -415,12 +415,12 @@ export function recordsFromEnrichmentMap(
   merged: Record<string, object>,
   fallbackFetchedAt: string = new Date().toISOString()
 ): SymbolFieldLatestRecord[] {
+  // analystBySource is intentionally NOT in META — persist as JSON for nightly congress-share counts.
   const META = new Set([
     "sources",
     "fieldObservations",
     "providerFailures",
     "fieldDates",
-    "analystBySource",
     "shortPercentOfFloatSecondary",
     "shortInterestDisagreement",
     // Raw PIT revision facts (see fundamental_revisions / recordFundamentalRevision) — persisted
