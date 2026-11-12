@@ -19,6 +19,7 @@ A dedicated admin-ingest limiter now runs after the existing admin check and bef
 - `app/api/admin/earningscalls/route.ts`
 - `app/api/admin/transcript/route.ts`
 - `test/admin-ingest-rate-limit.test.ts`
+- `test/admin-operation-route-behavior.test.ts`
 - `docs/ops-observability-security.md`
 - `STATUS.md`
 - `PLAN.md`
@@ -39,7 +40,7 @@ npm test
 npm run build
 ```
 
-Focused admin tests: 6 files, 74 tests passed, including the new over-limit 429 cases.  After the review follow-ups, `npx vitest run test/admin-ingest-rate-limit.test.ts` passes on the current head, including the quoted-offset and 409-duplicate cases.  Guarded routes peek the job budget before the lease and record the hit only after the claim succeeds.  An already-full budget returns 429 without taking the lease, and a 409 duplicate does not spend a slot.  The earnings-call entitlement reset uses its own bucket.  The quoted-offset test and the allowed starts in the budget-control tests now expect HTTP 200, so a later 500 does not pass.  Before the route wiring, those over-limit cases returned HTTP 200 and started the job.  Full gate on Node 26: `npm run lint` passed, `npx tsc --noEmit` passed, and `npm test` passed (904 files, 10299 tests, 42 skipped).  `npm run build` passed with `NODE_OPTIONS=--max-old-space-size=4096`, the same heap CI uses for the Next 16 production build.
+Focused admin tests: the six files above pass, including the new over-limit 429 cases.  After the review follow-ups, `npx vitest run test/admin-ingest-rate-limit.test.ts` passes on the current head, including the quoted-offset and 409-duplicate cases.  Guarded routes peek the job budget before the lease and record the hit only after the claim succeeds.  An already-full budget returns 429 without taking the lease.  If the budget fills between that check and the claim, the in-lease charge returns 429 and the lease is released on the way out.  A 409 duplicate does not spend a slot.  The earnings-call entitlement reset uses its own bucket.  The quoted-offset test and the allowed starts in the budget-control tests now expect HTTP 200, so a later 500 does not pass.  Before the route wiring, those over-limit cases returned HTTP 200 and started the job.  Full gate on Node 26: `npm run lint` passed, `npx tsc --noEmit` passed, and `npm test` passed.  `npm run build` passed with `NODE_OPTIONS=--max-old-space-size=4096`, the same heap CI uses for the Next 16 production build.
 
 ## Next Steps & Blockers
 

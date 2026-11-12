@@ -437,23 +437,54 @@ describe("admin ingest jobs", () => {
 
   it("an already-full sec-ingest budget returns 429 without taking the seed lease", async () => {
     const spy = vi.spyOn(operationLease, "runWithOperationLease");
-    const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
-      method: "POST",
-      body: JSON.stringify({ action: "seed" })
-    }, tokenAuth));
-    expect(allowed.status).toBe(200);
-    expect(spy).toHaveBeenCalled();
-    spy.mockClear();
+    try {
+      const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      expect(allowed.status).toBe(200);
+      expect(spy).toHaveBeenCalled();
+      spy.mockClear();
+      resetRateLimiter();
+      saturate(tokenAuth, "sec-ingest", "job");
+      const blocked = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      expect(blocked.status).toBe(429);
+      expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a budget that fills after the pre-lease check returns 429 and releases the seed lease", async () => {
+    const original = operationLease.runWithOperationLease;
+    const spy = vi.spyOn(operationLease, "runWithOperationLease").mockImplementationOnce((options, run) => {
+      // Another request spends the last slots between the pre-lease peek and the in-lease charge.
+      saturate(tokenAuth, "sec-ingest", "job");
+      return original(options, run);
+    });
+    try {
+      const raced = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify({ action: "seed" })
+      }, tokenAuth));
+      await expectLimited(raced, mocks.seedSecIngestJobsFromManifest);
+      expect(spy).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The lease was released on the 429 path: once the budget resets, the next seed claims it.
     resetRateLimiter();
-    saturate(tokenAuth, "sec-ingest", "job");
-    const blocked = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+    const next = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
       method: "POST",
       body: JSON.stringify({ action: "seed" })
     }, tokenAuth));
-    expect(blocked.status).toBe(429);
+    expect(next.status).toBe(200);
     expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
-    expect(spy).not.toHaveBeenCalled();
-    spy.mockRestore();
   });
 
   it("earningscalls clear-block over its own limit does not write entitlement state", async () => {
