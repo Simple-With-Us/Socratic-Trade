@@ -436,6 +436,9 @@ final class MobileStore: ObservableObject {
     @Published private(set) var sessionEpoch = 0
     @Published private(set) var isAuthenticated = false
     @Published private(set) var hasInitialized = false
+    /// The first snapshot load was cancelled before it could sign the session in.
+    /// A finished signed-out load does not set this.
+    private(set) var initializationCancelled = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var isStreamConnected = false
@@ -753,6 +756,7 @@ final class MobileStore: ObservableObject {
         loadGeneration &+= 1
         let generation = loadGeneration
         let shouldReportSessionExpiry = hasInitialized || isAuthenticated
+        initializationCancelled = false
         isRefreshing = true
         defer {
             if generation == loadGeneration {
@@ -780,6 +784,9 @@ final class MobileStore: ObservableObject {
             }
             reconcileTrackedCommands(loadedSnapshot.recentCommands)
         } catch is CancellationError {
+            if generation == loadGeneration, !isAuthenticated {
+                initializationCancelled = true
+            }
             return
         } catch let caught {
             guard generation == loadGeneration else { return }

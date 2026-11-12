@@ -107,9 +107,22 @@ final class AppLockPolicyTests: XCTestCase {
             AppLockSessionBootstrap.action(
                 isScreenshotMode: false,
                 hasInitialized: true,
-                isAuthenticated: false
+                isAuthenticated: false,
+                initializationCancelled: true
             ),
             .loadSession
+        )
+    }
+
+    func testSignedOutUnlockSkipsTheSnapshot() {
+        XCTAssertEqual(
+            AppLockSessionBootstrap.action(
+                isScreenshotMode: false,
+                hasInitialized: true,
+                isAuthenticated: false,
+                initializationCancelled: false
+            ),
+            .skip
         )
     }
 
@@ -118,7 +131,8 @@ final class AppLockPolicyTests: XCTestCase {
             AppLockSessionBootstrap.action(
                 isScreenshotMode: false,
                 hasInitialized: true,
-                isAuthenticated: true
+                isAuthenticated: true,
+                initializationCancelled: false
             ),
             .resumeLiveSession
         )
@@ -129,7 +143,8 @@ final class AppLockPolicyTests: XCTestCase {
             AppLockSessionBootstrap.action(
                 isScreenshotMode: true,
                 hasInitialized: false,
-                isAuthenticated: false
+                isAuthenticated: false,
+                initializationCancelled: false
             ),
             .skip
         )

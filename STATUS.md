@@ -2,7 +2,7 @@
 
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
 
-**Next.** Hosted `verify-ios` on the review fixes: a canceled bootstrap reloads, overlapping resumes share one load, the stream stays up during that load, foreground return prompts again, and the switcher snapshot is covered while the setting is on.  No TestFlight and no deploy.
+**Next.** Hosted `verify-ios` on the review fixes.  A canceled bootstrap reloads, a finished signed-out unlock does not, and a cancelled resume waiter cannot abort the shared load or retry it forever.  No TestFlight and no deploy.
 ## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
 
 **What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  SOCRATIC-TRADE-2E on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.

@@ -196,7 +196,8 @@ struct ContentView: View {
         let action = AppLockSessionBootstrap.action(
             isScreenshotMode: SocraticTradeApp.isScreenshotMode,
             hasInitialized: store.hasInitialized,
-            isAuthenticated: store.isAuthenticated
+            isAuthenticated: store.isAuthenticated,
+            initializationCancelled: store.initializationCancelled
         )
         switch action {
         case .skip:
@@ -217,23 +218,31 @@ struct ContentView: View {
 
     private func resumeLiveSessionIfNeeded() async {
         let outcome = await liveResumeGate.run { [appLock, store] in
-            let resumeID = appLock.beginForegroundResume()
-            return await AppLiveSessionResume.resumeLiveSession(
-                store: store,
-                isScreenshotMode: SocraticTradeApp.isScreenshotMode,
-                shouldStartEvents: {
-                    appLock.sceneIsActive
-                        && appLock.isUnlocked
-                        && appLock.foregroundResumeID == resumeID
-                }
-            )
+            await Self.performForegroundResume(appLock: appLock, store: store)
         }
-        // The runner already applied its own gate. Only a waiter whose in-flight
-        // resume did not leave the stream up gets one more try, and only while
-        // the scene is still the unlocked foreground.
+        // One fresh resume, not another trip through the gate. A waiter can
+        // wake before the runner clears a finished handle, and rejoining that
+        // handle would see the same failure and spin.
         guard outcome.joinedInFlight, !outcome.startedEvents else { return }
         guard appLock.sceneIsActive, appLock.isUnlocked, store.isAuthenticated else { return }
-        await resumeLiveSessionIfNeeded()
+        _ = await Self.performForegroundResume(appLock: appLock, store: store)
+    }
+
+    @MainActor
+    private static func performForegroundResume(
+        appLock: AppLockController,
+        store: MobileStore
+    ) async -> Bool {
+        let resumeID = appLock.beginForegroundResume()
+        return await AppLiveSessionResume.resumeLiveSession(
+            store: store,
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+            shouldStartEvents: {
+                appLock.sceneIsActive
+                    && appLock.isUnlocked
+                    && appLock.foregroundResumeID == resumeID
+            }
+        )
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {

@@ -48,15 +48,19 @@ enum AppLockSessionBootstrap {
     }
 
     /// A canceled first load sets `hasInitialized` and leaves `isAuthenticated`
-    /// false. That state has to load again. Resume is only for a session that
-    /// is already signed in.
+    /// false, and `initializationCancelled` marks that case. An initialized
+    /// signed-out session is not that case, so unlocking it does not fetch.
     static func action(
         isScreenshotMode: Bool,
         hasInitialized: Bool,
-        isAuthenticated: Bool
+        isAuthenticated: Bool,
+        initializationCancelled: Bool
     ) -> Action {
         if isScreenshotMode { return .skip }
-        if !hasInitialized || !isAuthenticated { return .loadSession }
+        if !hasInitialized || (initializationCancelled && !isAuthenticated) {
+            return .loadSession
+        }
+        if !isAuthenticated { return .skip }
         return .resumeLiveSession
     }
 }

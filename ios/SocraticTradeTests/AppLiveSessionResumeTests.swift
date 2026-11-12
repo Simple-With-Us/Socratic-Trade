@@ -45,6 +45,18 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertEqual(store.callOrder, ["startEvents", "load", "stopEvents"])
     }
 
+    func testResumeLeavesAConnectedStreamAlone() async {
+        let store = LiveSessionResumeTestDouble()
+        store.isAuthenticated = true
+        store.remainAuthenticatedAfterLoad = true
+        store.isLiveStreamConnected = true
+
+        let started = await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
+
+        XCTAssertTrue(started)
+        XCTAssertEqual(store.callOrder, ["load"])
+    }
+
     func testResumeKeepsEventsUpDuringLoad() async {
         let store = LiveSessionResumeTestDouble()
         store.isAuthenticated = true
@@ -108,15 +120,45 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertTrue(secondOutcome.joinedInFlight)
         XCTAssertTrue(secondOutcome.startedEvents)
     }
+
+    func testCancellingTheRunnerDoesNotAbortTheSharedLoad() async {
+        let gate = LiveResumeGate()
+        let store = LiveSessionResumeTestDouble()
+        store.isAuthenticated = true
+        store.remainAuthenticatedAfterLoad = true
+        store.suspendLoad = true
+
+        let runner = Task {
+            await gate.run {
+                await AppLiveSessionResume.resumeLiveSession(store: store, isScreenshotMode: false)
+            }
+        }
+        var spins = 0
+        while store.loadCount == 0 && spins < 50 {
+            spins += 1
+            await Task.yield()
+        }
+        XCTAssertEqual(store.loadCount, 1)
+        runner.cancel()
+        await Task.yield()
+        store.finishLoad()
+
+        let outcome = await runner.value
+        XCTAssertFalse(store.sawCancellationDuringLoad)
+        XCTAssertTrue(outcome.startedEvents)
+        XCTAssertEqual(store.loadCount, 1)
+    }
 }
 
 @MainActor
 private final class LiveSessionResumeTestDouble: LiveSessionResuming {
     var isAuthenticated = false
+    var isLiveStreamConnected = false
     var remainAuthenticatedAfterLoad = false
     var suspendLoad = false
     var callOrder: [String] = []
     var loadCount = 0
+    var sawCancellationDuringLoad = false
     var onLoad: (() -> Void)?
     private var loadWait: CheckedContinuation<Void, Never>?
 
@@ -129,6 +171,7 @@ private final class LiveSessionResumeTestDouble: LiveSessionResuming {
                 loadWait = continuation
             }
         }
+        sawCancellationDuringLoad = Task.isCancelled
         isAuthenticated = remainAuthenticatedAfterLoad
     }
 

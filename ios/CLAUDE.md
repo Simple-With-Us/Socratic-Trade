@@ -39,7 +39,7 @@ ios/
     ├── PushNotifications.swift         # APNs register / tap
     ├── OrderCancel.swift               # Working-order cancel helpers
     ├── PolicyTightening.swift          # Ask-First ↔ Autopilot + raise/lower caps
-    ├── AppLiveSessionResume.swift      # Foreground resume: start events, then reload
+    ├── AppLiveSessionResume.swift      # Foreground resume: keep a connected stream, then reload
     ├── AppLock.swift                   # Optional Face ID / Touch ID / passcode gate (own window, above sheets)
     ├── AppComponents.swift             # Shared rows / chrome (bell, gear, wide sheets)
     ├── AppTypography.swift             # Type ramp
