@@ -4,6 +4,11 @@
 
 **Next.**  Draft PR against `main`.  Do not merge or deploy.  `verify` is the merge gate.  Visual baselines were not regenerated against the dev server.
 
+## 2026-11-12 [gb-trader] ST-4616 — money-path order invariant properties
+
+**What.** Property tests place 1000 seeded Alpaca and Tradier orders through `getBrokerGateway` and check the final payload.  Two money-path bugs were real.  `BRK.B` now matches a `BRK-B` position.  A Tradier partial dollar exit becomes a share quantity from the position value, or is refused when that quantity cannot be priced.  Alpaca partial dollar sells stay notional.  Rollout: `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`.
+
+**Next.** PR #5160 stays open against `main`.  `verify` is the gate.  Do not merge or deploy from this lane.  Jay reviews the money-path behavior change.  Merged `origin/main` through `878d8edf` and kept every STATUS entry.
 ## 2026-11-12 CURSOR — ST-4606 paid quote provider circuit breakers
 
 **What.**  Twelve Data, Tiingo, Marketstack, and ROIC retry an HTTP 429 first, honoring the remaining retry budget and `Retry-After`.  Only after that budget is spent, and only when `Retry-After` is a positive duration, do they open a per-credential hold for that duration.  An HTTP 402 opens a six-hour hold.  The hold is the credential fingerprint, so one user's 402 does not park another user's key.  While a hold is cooling, the quote chain skips the lane before any network call, so the skip writes no health row and no failed span.  Open holds are listed on `GET /api/health` (`checks.quoteProviderBreakers`) and `GET /api/ops/snapshot` (`quoteProviderBreakers`) and do not change health `ok`.  A failed breaker read sets `checks.quoteProviderBreakersError` to `unavailable`.  Error response bodies are cancelled so a proxy gate slot can settle.  `src/lib/proxy-fetch.ts` and `src/lib/yahoo-finance.ts` are untouched.  A later review removed the unused 429 strike map, made the cooling check see the plain-lane hold, kept a disabled breaker's 402 row soft, capped the in-call Retry-After wait at one hour, and stopped a minute-scoped Twelve Data credit message from opening the six-hour hold.  Rollout: `docs/rollouts/2026-11-12-st-4606-quote-provider-breakers.md`.
