@@ -17,7 +17,7 @@ import {
   speakerTurnsFromRoicPayload,
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
-import { listOpenApiCircuitBreakers, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
+import { listOpenApiCircuitBreakers, quoteProvider402HoldMs, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
 import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 
@@ -81,11 +81,91 @@ describe("roic-transcripts", () => {
       expect(again.rows).toEqual([]);
       expect(calls).toBe(1);
       expect(listOpenApiCircuitBreakers()).toEqual([]);
+      const currentTime = Date.now();
+      const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(currentTime + 120_001);
+      try {
+        const afterHold = await fetchRoicCallIndex("MSFT");
+        expect(afterHold.rows).toEqual([]);
+        expect(calls).toBe(2);
+      } finally {
+        dateNowSpy.mockRestore();
+      }
     } finally {
       if (originalKey === undefined) delete process.env.ROIC_API_KEY;
       else process.env.ROIC_API_KEY = originalKey;
       if (originalDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("holds later ROIC transcript calls after a 402 without opening the quote lane", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-402-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("no credit", { status: 402 });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBe(1);
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBe(1);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
+      const currentTime = Date.now();
+      const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(currentTime + quoteProvider402HoldMs() + 1);
+      try {
+        const afterHold = await fetchRoicCallIndex("MSFT");
+        expect(afterHold.rows).toEqual([]);
+        expect(calls).toBe(2);
+      } finally {
+        dateNowSpy.mockRestore();
+      }
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("does not hold ROIC transcripts when the circuit breaker is disabled", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-breaker-off-${randomUUID()}.db`)}`;
+    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "120" } });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBe(3);
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBe(5);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
     }
   });
 
