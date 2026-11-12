@@ -7,11 +7,38 @@
 //
 // The cache stores only the vector.  Pinecone/Qdrant filters still run on every retrieval.
 
-import { isTransientNetworkError } from "../network-errors";
-import { isStrategyRagRetrievalTimeout } from "../rag-retrieval-deadline";
+import { describeNetworkError, isAbortOrTimeoutError, isTransientNetworkError } from "../network-errors";
+import { isStrategyRagRetrievalTimeout, isStrategyRagRetrievalTimeoutText } from "../rag-retrieval-deadline";
 import { hashContent } from "./chunk";
 
 export const DEFAULT_EMBED_CALL_TIMEOUT_MS = 8_000;
+
+/** Per-attempt embed HTTP timer (`createEmbedAttemptAbort`). Distinct from the strategy retrieval deadline. */
+export const RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE = "embed provider timed out";
+
+const RAG_EMBED_UNDICI_TIMEOUT = /\bUND_ERR_CONNECT_TIMEOUT\b/i;
+
+/** Classify an already-stringified failure (health rows, alert reasons). */
+export function isRagEmbedProviderTimeoutText(text: string | null | undefined): boolean {
+  if (!text || isStrategyRagRetrievalTimeoutText(text)) return false;
+  if (text.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return true;
+  if (RAG_EMBED_UNDICI_TIMEOUT.test(text)) return true;
+  return false;
+}
+
+/**
+ * Provider-side embed slowness (per-attempt timer, undici connect budget, or caller abort during
+ * ingest). Not a broken integration — distinct from the strategy-run retrieval deadline.
+ */
+export function isRagEmbedProviderTimeout(error: unknown): boolean {
+  if (isStrategyRagRetrievalTimeout(error)) return false;
+  const flattened = describeNetworkError(error);
+  if (isRagEmbedProviderTimeoutText(flattened)) return true;
+  if (!isAbortOrTimeoutError(error)) return false;
+  if (error instanceof Error && error.message.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return true;
+  const name = (error as { name?: string }).name;
+  return name === "TimeoutError" || name === "AbortError";
+}
 export const DEFAULT_EMBED_BREAKER_FAILURES = 3;
 export const DEFAULT_EMBED_BREAKER_COOLDOWN_MS = 60_000;
 const DEFAULT_CACHE_MAX = 1024;
