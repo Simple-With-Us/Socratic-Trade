@@ -59,6 +59,14 @@ async function clearLivenessKeys() {
   getDb().prepare("DELETE FROM settings WHERE key LIKE 'liveness%'").run();
 }
 
+type NotificationCall = [{ title: string }, { directBody: string }];
+function lastNotificationTitle(): string {
+  const calls = notifyMock.sendNotification.mock.calls as unknown as NotificationCall[];
+  const last = calls[calls.length - 1];
+  expect(last).toBeDefined();
+  return last![0].title;
+}
+
 describe("evaluateLivenessSentryCapture", () => {
   it("captures on first sight and on signature change", async () => {
     const { evaluateLivenessSentryCapture } = await lib();
@@ -186,8 +194,7 @@ describe("alertLivenessWarning Sentry dedupe", () => {
     setInternalSetting(`livenessSentrySentAt:${TYPE}`, new Date().toISOString());
     await alertLivenessWarning(TYPE, "still degraded", "same:sig");
     expect(notifyMock.sendNotification).toHaveBeenCalledTimes(1);
-    const lastCall = notifyMock.sendNotification.mock.calls[0];
-    expect((lastCall[0] as { title: string }).title).toMatch(/ESCALATED/);
+    expect(lastNotificationTitle()).toMatch(/ESCALATED/);
   });
 
   it("fires admin again when the admin cooldown timestamp is corrupt", async () => {
