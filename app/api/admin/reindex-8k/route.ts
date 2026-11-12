@@ -34,8 +34,6 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
-  const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "job");
-  if (limited) return limited;
   const userId = resolveRequestUserIdOrResponse(request);
   if (userId instanceof Response) return userId;
   let limit = Number.POSITIVE_INFINITY;
@@ -46,6 +44,9 @@ export async function POST(request: Request) {
     // no body / not JSON -> reindex the whole dataset
   }
   return withAdminOperationGuard(request, "reindex-8k", async (operationLeaseClaim) => {
+    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "job");
+    if (limited) return limited;
     const before = await getVectorStoreStats(userId);
     const result = await reindexEightKDataset(userId, limit, operationLeaseClaim);
     const busy = getOperationLeaseBusy(result);

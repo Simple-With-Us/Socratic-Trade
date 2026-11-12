@@ -68,10 +68,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "Provide { symbols: string[], limit?: number, clearCache?: boolean } or { all: true } in the request body." }, { status: 400 });
   }
 
-  const limited = enforceAdminIngestRateLimit(request, "reindex-10k", "job");
-  if (limited) return limited;
-
   return withAdminOperationGuard(request, "reindex-10k", async (operationLeaseClaim) => {
+    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "reindex-10k", "job");
+    if (limited) return limited;
     if (clearCache) {
       const { getDb } = await import("@/lib/db");
 

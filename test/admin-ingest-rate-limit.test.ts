@@ -392,6 +392,34 @@ describe("admin ingest jobs", () => {
     });
   });
 
+  it("a 409 duplicate seed does not spend the job budget", async () => {
+    prime(tokenAuth, "sec-ingest", "job", RATE_LIMITS.adminIngest.limit - 2);
+    let release: () => void = () => {};
+    mocks.seedSecIngestJobsFromManifest.mockImplementationOnce(
+      () => new Promise((resolve) => { release = () => resolve({ seeded: 0 }); })
+    );
+    const seed = () => secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, tokenAuth));
+
+    const first = seed();
+    await vi.waitFor(() => expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce());
+    const duplicate = await seed();
+    expect(duplicate.status).toBe(409);
+    release();
+    expect((await first).status).toBe(200);
+
+    // One slot is left only if the 409 did not spend one.
+    const next = await seed();
+    expect(next.status).toBe(200);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledTimes(2);
+
+    const exhausted = await seed();
+    expect(exhausted.status).toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledTimes(2);
+  });
+
   it("sec-ingest requeue over the limit does not requeue dead letters", async () => {
     saturate(tokenAuth, "sec-ingest", "job");
     const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {

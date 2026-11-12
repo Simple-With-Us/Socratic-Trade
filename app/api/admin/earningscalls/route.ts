@@ -74,16 +74,18 @@ export async function POST(request: Request) {
     );
   }
 
-  const limited = enforceAdminIngestRateLimit(request, "earningscalls", "job");
-  if (limited) return limited;
-
   if (action === "clear-entitlement-block") {
+    const limited = enforceAdminIngestRateLimit(request, "earningscalls", "job");
+    if (limited) return limited;
     // No provider spend, no lease contention risk — a plain settings write.
     const state = clearEarningsCallsEntitlementBlock();
     return NextResponse.json({ ok: true, entitlement: state });
   }
 
   return withAdminOperationGuard(request, "earningscalls", async (claim) => {
+    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "earningscalls", "job");
+    if (limited) return limited;
     try {
       if (action === "burst") {
         const armed = armEarningsCallsBurst(maxTranscripts ?? earningsCallsBurstMaxTranscripts());

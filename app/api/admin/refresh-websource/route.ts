@@ -27,13 +27,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: `Unknown web-source id: ${id} (supported: congress, sec8k)` }, { status: 400 });
   }
 
-  const limited = enforceAdminIngestRateLimit(request, "refresh-websource", "job");
-  if (limited) return limited;
-
   const durableGroup = id === "congress"
     ? OPERATION_LEASE_GROUPS.CONGRESS_WEB_SOURCE
     : OPERATION_LEASE_GROUPS.SEC8K_WEB_SOURCE;
   return withAdminOperationGuard(request, "refresh-websource", async (operationLeaseClaim) => {
+    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "refresh-websource", "job");
+    if (limited) return limited;
     if (id === "congress") {
       const result = await refreshCongress(Date.now(), true, operationLeaseClaim);
       const busy = getOperationLeaseBusy(result);
