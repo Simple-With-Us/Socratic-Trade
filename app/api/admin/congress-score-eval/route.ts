@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { buildCongressScoreObservations, evaluateCongressScore } from "@/lib/congress-score-eval";
 import { storeCongressScoreVerdict, readCongressScoreVerdict } from "@/lib/congress-score-gate";
 import { getPolicy } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -24,7 +24,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const verdict = readCongressScoreVerdict(userId);
   return NextResponse.json({ ok: true, verdict: verdict ?? null });
 }
@@ -32,7 +33,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const horizonDays = Number(url.searchParams.get("horizonDays")) || 63;
   const auditLimit = Number(url.searchParams.get("auditLimit")) || 1000;
