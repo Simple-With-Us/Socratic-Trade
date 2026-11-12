@@ -183,10 +183,22 @@ export type ProfileRef = CongressRef;
 
 export type ProfileLookup = (symbol: string) => Promise<ProfileRef | null>;
 
-/** In-process screener map (ticker → ref), TTL-aligned with other peer caches. */
-let screenerProfileCache: { expiresAt: number; byTicker: Map<string, ProfileRef> } | null = null;
-/** Earliest time to hit Nasdaq again after a failed refresh that still has rows. */
-let screenerProfileRetryAt = 0;
+type ScreenerProfileCache = { expiresAt: number; byTicker: Map<string, ProfileRef> };
+/** Last-good map plus the next live attempt. One object so the hold and the rows stay together. */
+type ScreenerProfileState = { cache: ScreenerProfileCache | null; retryAt: number };
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __marketReadScreenerProfileState: ScreenerProfileState | undefined;
+}
+
+/**
+ * Pinned on globalThis. Next.js can bundle this module once per route, and a
+ * module-level let would give each copy its own map and its own retry hold.
+ */
+const screenerProfileState: ScreenerProfileState =
+  globalThis.__marketReadScreenerProfileState ??
+  (globalThis.__marketReadScreenerProfileState = { cache: null, retryAt: 0 });
 const SCREENER_PROFILE_TTL_MS = 5 * 60_000;
 /** Hold between live retries while a prior map is served. Short so a blip does not stick. */
 const SCREENER_PROFILE_STALE_RETRY_MS = 30_000;
@@ -205,19 +217,21 @@ function parseScreenerMarketCap(raw: unknown): number | undefined {
  * Nasdaq timeout is about 30s, so measuring from fetch start would skip the hold.
  */
 function screenerProfileFailureMap(): Map<string, ProfileRef> {
-  if (screenerProfileCache && screenerProfileCache.byTicker.size > 0) {
-    screenerProfileRetryAt = Date.now() + SCREENER_PROFILE_STALE_RETRY_MS;
-    return screenerProfileCache.byTicker;
+  const cache = screenerProfileState.cache;
+  if (cache && cache.byTicker.size > 0) {
+    screenerProfileState.retryAt = Date.now() + SCREENER_PROFILE_STALE_RETRY_MS;
+    return cache.byTicker;
   }
   return new Map();
 }
 
 async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, ProfileRef>> {
-  if (screenerProfileCache && screenerProfileCache.expiresAt > now) {
-    return screenerProfileCache.byTicker;
+  const cache = screenerProfileState.cache;
+  if (cache && cache.expiresAt > now) {
+    return cache.byTicker;
   }
-  if (screenerProfileCache && screenerProfileCache.byTicker.size > 0 && now < screenerProfileRetryAt) {
-    return screenerProfileCache.byTicker;
+  if (cache && cache.byTicker.size > 0 && now < screenerProfileState.retryAt) {
+    return cache.byTicker;
   }
   try {
     const response = await fetchNasdaqScreenerResponse("congress-nasdaq-screener");
@@ -242,8 +256,8 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
       if (ref) byTicker.set(ref.ticker, ref);
     }
     // Successful empty screener (legitimately zero rows) is still cacheable.
-    screenerProfileRetryAt = 0;
-    screenerProfileCache = { expiresAt: now + SCREENER_PROFILE_TTL_MS, byTicker };
+    screenerProfileState.retryAt = 0;
+    screenerProfileState.cache = { expiresAt: now + SCREENER_PROFILE_TTL_MS, byTicker };
     return byTicker;
   } catch (err) {
     console.warn("[market-read] screener profile map failed:", err);
@@ -253,8 +267,8 @@ async function loadScreenerProfileMap(now = Date.now()): Promise<Map<string, Pro
 
 /** Test seam: drop the screener profile cache. */
 export function clearScreenerProfileCacheForTests(): void {
-  screenerProfileCache = null;
-  screenerProfileRetryAt = 0;
+  screenerProfileState.cache = null;
+  screenerProfileState.retryAt = 0;
 }
 
 /**

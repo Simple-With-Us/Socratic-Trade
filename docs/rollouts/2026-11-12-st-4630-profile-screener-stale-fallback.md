@@ -15,7 +15,7 @@ A failed refresh now returns the last successful map when that map has rows, and
 
 ## Decisions & Trade-offs
 
-The stale hold is 30 seconds (`SCREENER_PROFILE_STALE_RETRY_MS`) measured from when the failure returns, short of the 5-minute success TTL.  A two-attempt Nasdaq timeout is about 30 seconds, so a hold measured from fetch start would already be over.  A successful empty screener (HTTP OK, zero rows) still replaces the map and is cached.  The response body stays `{ ref }` with no stale label.  No phase doc describes this profile cache.  No dependency was added.
+The stale hold is 30 seconds (`SCREENER_PROFILE_STALE_RETRY_MS`) measured from when the failure returns, short of the 5-minute success TTL.  A two-attempt Nasdaq timeout is about 30 seconds, so a hold measured from fetch start would already be over.  A successful empty screener (HTTP OK, zero rows) still replaces the map and is cached.  The map and the hold live on `globalThis.__marketReadScreenerProfileState`, because Next.js can load this module once per route.  The response body stays `{ ref }` with no stale label.  The last-good map has no age ceiling: the ticket asks for the last successful rows even after the 5-minute TTL.  The request that discovers a failure still waits for that fetch, then the next lookup uses the hold.  No phase doc describes this profile cache.  No dependency was added.
 
 ## Verification State
 
