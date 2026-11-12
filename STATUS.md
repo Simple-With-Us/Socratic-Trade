@@ -3,6 +3,12 @@
 **What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
 
 **Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
+
 ## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
 
 **What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
