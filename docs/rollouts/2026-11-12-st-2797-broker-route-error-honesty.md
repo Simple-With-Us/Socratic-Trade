@@ -9,6 +9,7 @@ Broker-backed GET routes threw uncaught gateway errors into Next's generic 500 p
 - Added `src/lib/api-error.ts` with `jsonError`, `brokerReadError`, and `parseRequestJson`.
 - Wrapped broker reads on `app/api/positions`, `app/api/orders`, `app/api/portfolio`, and `app/api/accounts`.
 - Standardized malformed JSON handling on `app/api/policy` PUT, `app/api/keys` POST, and `app/api/orders/cancel` POST; cancel maps unexpected broker failures to `brokerReadError` without changing cancel preconditions.
+- `parseRequestJson` answers a body that cannot be read at all (stream error, body already consumed) with 400 `unreadable_body` instead of rethrowing, so `app/api/keys` POST and `app/api/orders/cancel` POST, which parse before their `try`, never fall through to an unhandled 500.
 - Added `test/broker-route-error-honesty.test.ts`; updated `test/api-security-hardening.test.ts` for the cancel envelope.
 
 ## Decisions & Trade-offs

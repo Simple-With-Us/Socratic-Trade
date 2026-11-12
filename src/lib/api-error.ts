@@ -104,6 +104,12 @@ export function brokerReadOrRethrow(error: unknown): NextResponse<ApiErrorBody> 
   throw error;
 }
 
+/**
+ * Read a JSON request body without throwing.  Malformed JSON is 400 `invalid_json`.  A body that
+ * cannot be read at all (client aborted the stream, body already consumed) is 400
+ * `unreadable_body`, so callers that parse before their own `try` (POST /api/keys,
+ * POST /api/orders/cancel) still answer with the JSON envelope instead of an unhandled 500.
+ */
 export async function parseRequestJson(
   request: Request
 ): Promise<{ ok: true; body: unknown } | { ok: false; response: NextResponse<ApiErrorBody> }> {
@@ -114,6 +120,6 @@ export async function parseRequestJson(
     if (error instanceof SyntaxError) {
       return { ok: false, response: jsonError(400, "invalid_json", "Request body must be valid JSON.") };
     }
-    throw error;
+    return { ok: false, response: jsonError(400, "unreadable_body", "Request body could not be read.") };
   }
 }

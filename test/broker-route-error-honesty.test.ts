@@ -91,9 +91,17 @@ describe("src/lib/api-error", () => {
     expect(await res.json()).toMatchObject({ ok: false, error: "broker_auth_failed" });
   });
 
-  it("parseRequestJson rethrows non-syntax body errors", async () => {
+  it("parseRequestJson answers a body-read failure with the 400 JSON envelope", async () => {
     const request = { json: async () => { throw new TypeError("Body is unusable"); } } as unknown as Request;
-    await expect(parseRequestJson(request)).rejects.toThrow(TypeError);
+    const parsed = await parseRequestJson(request);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.response.status).toBe(400);
+    expect(await parsed.response.json()).toEqual({
+      ok: false,
+      error: "unreadable_body",
+      message: "Request body could not be read."
+    });
   });
 });
 
@@ -210,6 +218,49 @@ describe("malformed JSON on broker-adjacent routes", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+
+  // A body stream that errors mid-read (client hung up), and a body that was already consumed.
+  function unreadableRequests(url: string, headers: Record<string, string> = {}): Request[] {
+    const errored = new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: new ReadableStream({
+        start(controller) {
+          controller.error(new TypeError("socket closed mid-body"));
+        }
+      }),
+      duplex: "half"
+    } as RequestInit & { duplex: "half" });
+    const consumed = new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ orderId: "ord-unread" })
+    });
+    void consumed.text();
+    return [errored, consumed];
+  }
+
+  it("POST /api/orders/cancel answers an unreadable body with the 400 JSON envelope", async () => {
+    const { POST } = await import("../app/api/orders/cancel/route");
+    for (const request of unreadableRequests("http://localhost/api/orders/cancel")) {
+      const res = await POST(request);
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({ ok: false, error: "unreadable_body" });
+    }
+  });
+
+  it("POST /api/keys answers an unreadable body with the 400 JSON envelope", async () => {
+    const { POST } = await import("../app/api/keys/route");
+    for (const request of unreadableRequests("http://localhost/api/keys", {
+      [AUTHENTICATED_EMAIL_HEADER]: "keys-unread@test.local"
+    })) {
+      const res = await POST(request as import("next/server").NextRequest);
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({ ok: false, error: "unreadable_body" });
+    }
   });
 
   it("POST /api/keys returns 400 invalid_json", async () => {
