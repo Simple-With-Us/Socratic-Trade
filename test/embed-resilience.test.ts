@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markDeadlineTimeout } from "../src/lib/inflight-deadline";
+import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE } from "../src/lib/rag-retrieval-deadline";
 import {
   beginEmbedProviderAttempt,
   countsTowardEmbedProviderFailure,
@@ -152,6 +154,8 @@ describe("embed circuit breaker", () => {
     const timeout = new Error("embed provider timed out");
     timeout.name = "TimeoutError";
     expect(countsTowardEmbedProviderFailure(timeout)).toBe(true);
+    const deadline = markDeadlineTimeout(new Error(STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE));
+    expect(countsTowardEmbedProviderFailure(deadline)).toBe(false);
   });
 
   it("drops poisoned cache entries instead of serving them", () => {

@@ -1,7 +1,7 @@
 import { getBrokerGateway } from "@/lib/broker";
 import { getPolicy } from "@/lib/db";
 import { normalizeSymbol } from "@/lib/money";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { addToWatchlist, listWatchlist, removeFromWatchlist } from "@/lib/watchlist";
 import { cascadeFreshMaxAgeMs, fetchFreshQuotesCascade, isQuoteFresh } from "@/lib/quotes-cascade";
 import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
@@ -12,7 +12,8 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const items = listWatchlist(userId);
   if (items.length === 0) {
     return NextResponse.json({ items, quotes: {} });
@@ -72,7 +73,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { symbol?: unknown; userId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   if (typeof body.symbol !== "string" || body.symbol.trim().length === 0) {
     return NextResponse.json({ error: "symbol is required" }, { status: 400 });
   }
@@ -87,7 +89,8 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const url = new URL(request.url);
   const body = (await request.json().catch(() => ({}))) as { symbol?: unknown; userId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const symbol = typeof body.symbol === "string" ? body.symbol : url.searchParams.get("symbol");
   if (!symbol) return NextResponse.json({ error: "symbol is required" }, { status: 400 });
   const removed = removeFromWatchlist(userId, normalizeSymbol(symbol));

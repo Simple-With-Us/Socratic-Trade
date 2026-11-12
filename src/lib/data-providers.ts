@@ -814,6 +814,10 @@ export async function fetchWithRetry(
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
       if (response.status === 429 && attempt < retries) {
+        // The body is discarded on retry.  Cancel it before the backoff so a
+        // proxied 429 cannot hold a concurrency slot while we wait.  5xx is
+        // not an internal continue here; it is returned to the caller.
+        await response.body?.cancel().catch(() => undefined);
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
@@ -1286,12 +1290,8 @@ export function getEnrichmentProvider(
   // Positioned after FMP (paid key wins) but before Yahoo (keyless fallback) so SEC authoritative
   // data supersedes Yahoo's scraped values. Set SEC_XBRL_ENRICHMENT_ENABLED=0 to disable.
   if (secXbrlEnrichmentEnabled()) providers.push(new SecXbrlEnrichmentProvider());
-  // FilingAPI.dev (FILINGAPI / FILINGAPI_KEY): optional. Missing / known-401 keys skip
-  // the lane; ROIC + SEC EDGAR cover the same fields. A later valid key registers again.
-  const filingApi = resolveApiKeyWithSource("filingapi", userId);
-  if (shouldUseFilingApiKey(filingApi.key)) {
-    providers.push(withHealthLane(new FilingApiEnrichmentProvider(filingApi.key, filingApi.source, userId), filingApi.source));
-  }
+  // FilingAPI.dev is retired (owner 2026-08-17). Earnings/transcripts are ROIC.ai only.
+  // Do not register even if a dead FILINGAPI key is still in Infisical.
   // Wisesheets + SimFin: two new (2026-08-02) free/keyed fundamentals "second opinions" layered
   // on top of FMP/roic/SEC-XBRL above, both key-gated on their own env var (process.env only,
   // mirror QuiverEnrichmentProvider) and both self-contained (no shared provider-rate-limit.ts

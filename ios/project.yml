@@ -110,6 +110,7 @@ targets:
         SENTRY_DSN: $(SENTRY_DSN)
         CFBundleDisplayName: Socratic Trade
         LSApplicationCategoryType: public.app-category.finance
+        LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
         # Lato (SIL OFL 1.1) — the shared web/native typeface, sources in SocraticTrade/Fonts/.
         # BARE FILENAMES, no "Fonts/" prefix: XcodeGen emits Fonts/ as a PBXGroup (not a folder

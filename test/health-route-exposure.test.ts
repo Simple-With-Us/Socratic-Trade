@@ -70,12 +70,25 @@ function dependenciesWithoutOpsDetail(dependencies: HealthDependencies | undefin
 function stubCredits(totalCredits: number, totalUsage: number) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () =>
-      new Response(JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }), {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      })
-    )
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/key") && !url.includes("/keys")) {
+        return new Response(JSON.stringify({ data: { is_management_key: false } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.includes("/api/v1/keys")) {
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(
+        JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    })
   );
 }
 
@@ -94,7 +107,14 @@ describe("/api/health exposure", () => {
   beforeEach(async () => {
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    // Host shells may export OPENROUTER_ADMIN_KEY; force the inference path so these
+    // exposure tests stay hermetic and do not hit real OpenRouter or /keys pagination.
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     stubCredits(100, 40); // remaining $60, comfortably above the default $3 threshold
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     await seed();
   });
 
@@ -102,7 +122,12 @@ describe("/api/health exposure", () => {
     vi.unstubAllGlobals();
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     const { db, credits } = await load();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     credits.__resetOpenRouterCreditCache();
     try {
       db.deleteUserApiKey("local", "openrouter");
@@ -216,6 +241,9 @@ describe("/api/health exposure", () => {
     stubCredits(10, 9.5); // remaining $0.50, below the default $3 threshold
     const { credits, healthRoute } = await load();
     credits.__resetOpenRouterCreditCache();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
 
     const response = await healthRoute.GET(new Request(HEALTH_URL));
     const raw = await response.text();

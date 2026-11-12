@@ -4,7 +4,7 @@ import { isMarketOpen } from "@/lib/market-calendar";
 import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
 import { choosePaperPrice } from "@/lib/paper-delayed-price-policy";
 import { fetchFreshQuotesCascade } from "@/lib/quotes-cascade";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +30,8 @@ export async function GET(req: Request) {
   }
 
   try {
-    const userId = resolveRequestUserId(req);
+    const userId = resolveRequestUserIdOrResponse(req);
+    if (userId instanceof Response) return userId;
     const paperPolicy = paperPricePolicyForUser(userId);
     const priceDelay = paperPolicy.active && paperPolicy.asOf
       ? { label: paperPolicy.label, asOf: paperPolicy.asOf }

@@ -47,6 +47,7 @@ import { BROWSER_UA, politeFetchJson } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
 import { apiKeyFingerprint } from "./data-providers";
 import { fetchHistoryCacheEod, upsertHistoryCacheEod } from "./history-cache";
+import { bestEffortSqliteWrite, isPeerReadUsageLabel, peerReadSqliteRetry } from "./sqlite-peer-read";
 const DEFAULT_TTL_MS = 30 * 60_000; // daily bars only move intraday on the last candle
 const cache = new Map<string, { expiresAt: number; bars: OHLCBar[] }>();
 const KEYED_HISTORY_SERVICES = ["massive", "roic", "marketstack", "tiingo", "twelvedata"] as const;
@@ -309,6 +310,7 @@ export async function fetchDailyOHLC(
   const alpacaHistory = resolveAlpacaHistoryCredential(userId);
   const lookbackDays = clampLookbackDays(opts?.lookbackDays);
   const deepHistory = lookbackDays > MASSIVE_FREE_LOOKBACK_DAYS;
+  const peerRead = isPeerReadUsageLabel(opts?.usageLabel);
   const startDate = new Date(now - lookbackDays * 24 * 60 * 60_000).toISOString().slice(0, 10);
   // The in-memory key must carry the lookback: a short series cached by a 1y
   // call must not satisfy a later 5y/deep call (Cluster B H1).
@@ -332,12 +334,14 @@ export async function fetchDailyOHLC(
   //    short-circuits the network only when it covers the requested start, or when
   //    Yahoo range=max already confirmed this symbol lists later than that start.
   //    A 2-year cache with no marker cannot hide Yahoo range=max on a deep request.
-  const localBars = await fetchHistoryCacheEod(symbol);
+  const localBars = peerRead
+    ? await peerReadSqliteRetry(() => fetchHistoryCacheEod(symbol, { rethrowBusy: true }))
+    : fetchHistoryCacheEod(symbol);
   const localCovers = localSeriesCovers(symbol, localBars, startDate, deepHistory);
   if (localBars && localBars.length >= 2 && isBarSeriesFresh(localBars, now) && localCovers) {
     const stampedLocal = stampOhlcBarProvenance(localBars, "history-cache-eod", new Date(now).toISOString());
     cache.set(sharedCacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: stampedLocal });
-    emitHistoryDemandFilled(symbol, now);
+    emitHistoryDemandFilled(symbol, now, peerRead);
     return stampedLocal;
   }
 
@@ -351,7 +355,9 @@ export async function fetchDailyOHLC(
   // stale series is instead a merge base for a live fetch and the all-sources-failed fallback.
   // Tagged "imported-eod" now so bars it contributes keep that provenance after a live merge
   // instead of inheriting whichever live source's tag stamps the merged result.
-  const importedBars = fetchImportedHistory(symbol);
+  const importedBars = peerRead
+    ? await peerReadSqliteRetry(() => fetchImportedHistory(symbol))
+    : fetchImportedHistory(symbol);
   const importedIsFresh = importedBars != null && isBarSeriesFresh(importedBars, now);
   const staleImportedBars =
     importedBars != null && !importedIsFresh
@@ -480,7 +486,7 @@ export async function fetchDailyOHLC(
     persistEodBarsToCache(symbol, finalBars);
     const cacheKey = source.scope === "private" ? privateCacheKey : source.scope === "pool" ? poolCacheKey : sharedCacheKey;
     cache.set(cacheKey, { expiresAt: expiresAtRespectingMarketClose(new Date(now), historyTtlMs()), bars: finalBars });
-    if (source.scope === "shared") emitHistoryDemandFilled(symbol, now);
+    if (source.scope === "shared") emitHistoryDemandFilled(symbol, now, peerRead);
     // Persist permanently (no row TTL) so a later deep request can serve history
     // without re-downloading bars that already reach startDate.
     if (source.fetch.name !== "fetchHistoryCacheEod") {
@@ -528,14 +534,16 @@ export async function fetchDailyOHLC(
   if (staleFallbackBars && staleFallbackBars.length >= 2) {
     const lastBar = staleFallbackBars[staleFallbackBars.length - 1];
     const staleSourceId = staleLocalBars ? "history-cache-eod-stale" : "imported-eod-stale";
-    audit(
-      "eod_cache_stale",
-      {
-        symbol,
-        lastBarTime: lastBar?.time,
-        note: `All active EOD price history providers failed or expired; falling back to stale ${staleLocalBars ? "local" : "imported-EOD"} bars.`
-      },
-      userId ?? "local"
+    bestEffortSqliteWrite(() =>
+      audit(
+        "eod_cache_stale",
+        {
+          symbol,
+          lastBarTime: lastBar?.time,
+          note: `All active EOD price history providers failed or expired; falling back to stale ${staleLocalBars ? "local" : "imported-EOD"} bars.`
+        },
+        userId ?? "local"
+      )
     );
     // Import bars were pre-tagged "imported-eod" (so a live merge keeps per-bar provenance) and
     // stampOhlcBarProvenance never overwrites an existing tag.  As the FINAL fallback the whole
@@ -550,7 +558,7 @@ export async function fetchDailyOHLC(
     return stampedStale;
   }
 
-  recordMarketDataDemand({ kind: "history", symbol, userId, now });
+  bestEffortSqliteWrite(() => recordMarketDataDemand({ kind: "history", symbol, userId, now }));
   return null;
 }
 
@@ -593,20 +601,27 @@ function shareUserKeyedHistory(): boolean {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
-function emitHistoryDemandFilled(symbol: string, now: number): void {
-  const fill = fulfillMarketDataDemand({ kind: "history", symbol, now });
-  if (!fill) return;
-  emitDashboardEvent({
-    type: "market-data",
-    at: new Date(now).toISOString(),
-    detail: {
-      kind: fill.kind,
-      cacheScope: "shared",
-      pendingUserCount: fill.pendingUserCount,
-      oldestRequestedAt: fill.oldestRequestedAt,
-      latestRequestedAt: fill.latestRequestedAt
-    }
-  });
+function emitHistoryDemandFilled(symbol: string, now: number, peerRead = false): void {
+  const publish = () => {
+    const fill = fulfillMarketDataDemand({ kind: "history", symbol, now });
+    if (!fill) return;
+    emitDashboardEvent({
+      type: "market-data",
+      at: new Date(now).toISOString(),
+      detail: {
+        kind: fill.kind,
+        cacheScope: "shared",
+        pendingUserCount: fill.pendingUserCount,
+        oldestRequestedAt: fill.oldestRequestedAt,
+        latestRequestedAt: fill.latestRequestedAt
+      }
+    });
+  };
+  if (peerRead) {
+    bestEffortSqliteWrite(publish);
+    return;
+  }
+  publish();
 }
 
 interface MassiveAggBar { t?: number; o?: number; h?: number; l?: number; c?: number; v?: number; vw?: number }

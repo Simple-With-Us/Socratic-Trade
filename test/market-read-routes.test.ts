@@ -41,6 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   clearScreenerProfileCacheForTests();
   for (const [key, value] of Object.entries(savedEnv)) {
@@ -338,6 +339,20 @@ describe("GET /api/market/prices/[symbol]", () => {
     });
   });
 
+  it("503 only for coded sqlite busy, not message-only provider lock text", async () => {
+    const codedBusy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY_SNAPSHOT" });
+    mockFetchDailyOHLC.mockRejectedValue(codedBusy);
+    const busyRes = await pricesRoute(authedRequest(url, TEST_TOKEN), ctx);
+    expect(busyRes.status).toBe(503);
+    expect(busyRes.headers.get("retry-after")).toBe("2");
+    expect(await busyRes.json()).toEqual({ ok: false, error: "database temporarily unavailable" });
+
+    mockFetchDailyOHLC.mockRejectedValue(new Error("provider said database is locked"));
+    await expect(pricesRoute(authedRequest(url, TEST_TOKEN), ctx)).rejects.toThrow(
+      "provider said database is locked"
+    );
+  });
+
   it("200 with empty closes for an unknown symbol (not an error status)", async () => {
     mockFetchDailyOHLC.mockResolvedValue(null);
     const res = await pricesRoute(authedRequest("http://localhost/api/market/prices/NOTREAL", TEST_TOKEN), {
@@ -535,6 +550,287 @@ describe("GET /api/market/profile/{symbol}", () => {
       sector: "Healthcare"
     });
     expect(fetchCalls).toBeGreaterThan(callsAfterFailure);
+  });
+
+  // Past SCREENER_PROFILE_TTL_MS (5 min) so the next lookup must refresh, and
+  // past SCREENER_PROFILE_STALE_RETRY_MS (30s) so the refresh is allowed again.
+  const PROFILE_TTL_PAST_MS = 5 * 60_000 + 1_000;
+  const STALE_RETRY_PAST_MS = 60_000;
+
+  function screenerProfileResponse(symbol: string, name: string): Response {
+    return Response.json({
+      data: {
+        table: {
+          rows: [
+            {
+              symbol,
+              name,
+              sector: "Technology",
+              industry: "Software",
+              marketCap: "1000000000"
+            }
+          ]
+        }
+      }
+    });
+  }
+
+  async function withProfileClock(run: (advance: (ms: number) => void) => Promise<void>): Promise<void> {
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start);
+    let now = start;
+    try {
+      await run((ms) => {
+        now += ms;
+        vi.setSystemTime(now);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  async function seedThenBlip(
+    symbol: string,
+    fail: () => Response | Promise<Response>
+  ): Promise<void> {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let phase: "ok" | "fail" | "recovered" = "ok";
+    let fetchCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (phase === "fail") return fail();
+        const name = phase === "recovered" ? "Recovered Co" : "Stale Co";
+        return screenerProfileResponse(symbol, name);
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co",
+          sector: "Technology",
+          industry: "Software",
+          marketCap: 1_000_000_000,
+          assetClass: "equity"
+        });
+
+        advance(PROFILE_TTL_PAST_MS);
+        phase = "fail";
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co"
+        });
+        expect(await fetchCompanyProfile("ZZZZNOPE")).toBeNull();
+
+        const callsAfterFail = fetchCalls;
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Stale Co"
+        });
+        expect(fetchCalls).toBe(callsAfterFail);
+
+        advance(STALE_RETRY_PAST_MS);
+        phase = "recovered";
+        expect(await fetchCompanyProfile(symbol)).toMatchObject({
+          ticker: symbol,
+          companyName: "Recovered Co"
+        });
+        expect(fetchCalls).toBeGreaterThan(callsAfterFail);
+      });
+    } finally {
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  }
+
+  it("serves the last successful screener map when a later fetch throws", async () => {
+    await seedThenBlip("STALETHROW", async () => {
+      throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+    });
+  });
+
+  it("serves the last successful screener map when a later screener response is non-OK", async () => {
+    await seedThenBlip("STALE503", async () => new Response("upstream unavailable", { status: 503 }));
+  });
+
+  it("returns 200 { ref } for a known ticker when the screener times out after a good map", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let fail = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (fail) throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+        return screenerProfileResponse("STALEROUTE", "Route Co");
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile("STALEROUTE")).toMatchObject({ ticker: "STALEROUTE" });
+        advance(PROFILE_TTL_PAST_MS);
+        fail = true;
+        const res = await profileRoute(authedRequest(profileUrl("STALEROUTE"), TEST_TOKEN), {
+          params: Promise.resolve({ symbol: "STALEROUTE" })
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { ref: { ticker?: string; companyName?: string } };
+        expect(body.ref).toMatchObject({
+          ticker: "STALEROUTE",
+          companyName: "Route Co",
+          assetClass: "equity"
+        });
+      });
+    } finally {
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  });
+
+  it("keeps the 30s hold after a timeout that lasts as long as the hold", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let now = start;
+    vi.setSystemTime(now);
+    let phase: "ok" | "fail" | "recovered" = "ok";
+    let burnedTimeout = false;
+    let fetchCalls = 0;
+    const advance = (ms: number) => {
+      now += ms;
+      vi.setSystemTime(now);
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        fetchCalls += 1;
+        if (phase === "fail") {
+          // Two 15s screener attempts. The hold must start when they finish.
+          if (!burnedTimeout) {
+            burnedTimeout = true;
+            advance(30_000);
+          }
+          throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+        }
+        const name = phase === "recovered" ? "Recovered Co" : "Slow Co";
+        return screenerProfileResponse("SLOWTICK", name);
+      }) as unknown as typeof fetch
+    );
+    try {
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({
+        ticker: "SLOWTICK",
+        companyName: "Slow Co"
+      });
+      advance(PROFILE_TTL_PAST_MS);
+      phase = "fail";
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({
+        ticker: "SLOWTICK",
+        companyName: "Slow Co"
+      });
+      const callsAfterFail = fetchCalls;
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Slow Co" });
+      expect(fetchCalls).toBe(callsAfterFail);
+      advance(29_000);
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Slow Co" });
+      expect(fetchCalls).toBe(callsAfterFail);
+      advance(1_000);
+      phase = "recovered";
+      expect(await fetchCompanyProfile("SLOWTICK")).toMatchObject({ companyName: "Recovered Co" });
+      expect(fetchCalls).toBeGreaterThan(callsAfterFail);
+    } finally {
+      vi.useRealTimers();
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  });
+
+  it("serves the last-good map before a slow live refresh finishes", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let hangReject: (err: unknown) => void = () => {};
+    const hang = new Promise<Response>((_resolve, reject) => {
+      hangReject = reject;
+    });
+    let phase: "ok" | "hang" = "ok";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (phase === "hang") return hang;
+        return screenerProfileResponse("PROMPTSTALE", "Prompt Co");
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile("PROMPTSTALE")).toMatchObject({
+          ticker: "PROMPTSTALE",
+          companyName: "Prompt Co"
+        });
+        advance(PROFILE_TTL_PAST_MS);
+        phase = "hang";
+        const pending = fetchCompanyProfile("PROMPTSTALE");
+        const STALE_SERVE_BUDGET_MS = 1_000;
+        const raced = await Promise.race([
+          pending.then((ref) => ({ kind: "done" as const, ref })),
+          new Promise<{ kind: "timeout" }>((resolve) =>
+            setTimeout(() => resolve({ kind: "timeout" }), STALE_SERVE_BUDGET_MS + 1_500)
+          )
+        ]);
+        expect(raced.kind).toBe("done");
+        if (raced.kind === "done") {
+          expect(raced.ref).toMatchObject({
+            ticker: "PROMPTSTALE",
+            companyName: "Prompt Co"
+          });
+        }
+      });
+    } finally {
+      hangReject(new Error("test cleanup: release hung screener fetch"));
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
+  });
+
+  it("does not serve a last-good map older than 24 hours", async () => {
+    clearScreenerProfileCacheForTests();
+    const previousRateLimit = process.env.PROVIDER_RATE_LIMIT_DISABLED;
+    process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+    let phase: "ok" | "fail" = "ok";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (phase === "fail") {
+          throw new Error("Nasdaq delayed screener timed out waiting for api.nasdaq.com.");
+        }
+        return screenerProfileResponse("OLDSTALE", "Old Co");
+      }) as unknown as typeof fetch
+    );
+    try {
+      await withProfileClock(async (advance) => {
+        expect(await fetchCompanyProfile("OLDSTALE")).toMatchObject({
+          ticker: "OLDSTALE",
+          companyName: "Old Co"
+        });
+        advance(24 * 60 * 60_000 + 1);
+        phase = "fail";
+        expect(await fetchCompanyProfile("OLDSTALE")).toBeNull();
+        const res = await profileRoute(authedRequest(profileUrl("OLDSTALE"), TEST_TOKEN), {
+          params: Promise.resolve({ symbol: "OLDSTALE" })
+        });
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ ref: null });
+      });
+    } finally {
+      if (previousRateLimit === undefined) delete process.env.PROVIDER_RATE_LIMIT_DISABLED;
+      else process.env.PROVIDER_RATE_LIMIT_DISABLED = previousRateLimit;
+    }
   });
 
   it("returns null from the helper for an empty symbol", async () => {

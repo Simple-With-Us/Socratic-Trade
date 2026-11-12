@@ -7,7 +7,7 @@ import {
   loadDurableQuoteSeed,
   persistOnDemandQuote
 } from "@/lib/on-demand-quote";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { runQuoteEnrichmentSingleFlight } from "@/lib/quote-singleflight";
 import {
@@ -59,7 +59,9 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
-  const { userId } = resolveRequestUser(request);
+  const __resolvedUser = resolveRequestUserOrResponse(request);
+  if (__resolvedUser instanceof Response) return __resolvedUser;
+  const { userId } = __resolvedUser;
   // Generous per-user cap: read-only and single-symbol, but still fans out to several
   // data providers, so guard against a tight refresh loop hammering upstreams.
   const limited = enforceRateLimit(userId, "quote", { limit: 60, windowMs: 60_000 });

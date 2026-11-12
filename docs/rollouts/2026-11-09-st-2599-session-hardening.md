@@ -43,8 +43,8 @@ Build passes. Full `npm test` in this VM reported 33 failures in unrelated suite
 
 ## Next Steps & Blockers
 
-- Follow-ups (out of scope ST-2599): Cloudflare origin IP restriction, CSP enforcement, iOS Keychain/app lock.
-- iOS clients must call `handoff-prepare` before OAuth and `GET /api/mobile/auth/apple/nonce` before native Apple sign-in.
+- Follow-ups (out of scope ST-2599): Cloudflare origin IP restriction, CSP enforcement, iOS Keychain/app lock (ST-4596).
+- iOS clients must call `handoff-prepare` before OAuth and `GET /api/mobile/auth/apple/nonce` before native Apple sign-in.  ST-4594 does that in the app.  The server `__legacy_compat__` nonce and the optional Apple-nonce fallback stay in this tree until that build is on TestFlight and the App Store.  Do not remove them for older shipped builds.
 
 ## Zero-Code Findings
 
