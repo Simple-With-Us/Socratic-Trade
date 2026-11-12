@@ -3,6 +3,11 @@
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
 
 **Next.** Open the PR against main.  Do not merge and do not enable auto-merge.
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
 
 ## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
 
