@@ -33,7 +33,8 @@ function isSafeOverrideValue(value: string): boolean {
   if (semver.intersects(overrideRange, VULNERABLE_MINIMATCH_RANGE)) return false;
   const minimumOverride = semver.minVersion(overrideRange);
   if (!minimumOverride) return false;
-  return semver.gte(minimumOverride, MINIMATCH_PATCH_FLOOR);
+  if (!semver.gte(minimumOverride, MINIMATCH_PATCH_FLOOR)) return false;
+  return semver.subset(overrideRange, `>=${MINIMATCH_PATCH_FLOOR} <12`);
 }
 
 function isAllowedMinimatch(version: string): boolean {
@@ -83,13 +84,15 @@ describe("minimatch advisory override", () => {
     expect(isAllowedMinimatch("not-a-version")).toBe(false);
   });
 
-  it("accepts an exact or range override whose minimum is 11.0.7+, and rejects a range that includes a vulnerable version", () => {
+  it("accepts an 11.x override range and rejects a vulnerable or unbounded range", () => {
     expect(isSafeOverrideValue("11.0.8")).toBe(true);
     expect(isSafeOverrideValue("^11.0.8")).toBe(true);
     expect(isSafeOverrideValue(">=11.0.7 <12")).toBe(true);
     expect(isSafeOverrideValue("^11.0.6")).toBe(false);
     expect(isSafeOverrideValue(">=7 <11.0.7")).toBe(false);
     expect(isSafeOverrideValue(">=11.0.6")).toBe(false);
+    expect(isSafeOverrideValue(">=11.0.7")).toBe(false);
+    expect(isSafeOverrideValue(">=11.0.8")).toBe(false);
     expect(isSafeOverrideValue("*")).toBe(false);
     expect(isSafeOverrideValue("not-a-version")).toBe(false);
   });
