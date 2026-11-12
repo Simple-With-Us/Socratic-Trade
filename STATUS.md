@@ -3,6 +3,11 @@
 **What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows no older than 24 hours (`SCREENER_PROFILE_MAX_STALE_MS`) and waits 30 seconds from when the failure returns before the next live attempt.  A refresh that is still running races a 1-second budget and returns the last-good map so the first request does not wait out two 15-second Nasdaq timeouts.  The map, the hold, and the in-flight refresh are one `globalThis` object so route bundles share them.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
 
 **Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
 ## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
 
 **What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
