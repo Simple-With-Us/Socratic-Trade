@@ -3,6 +3,11 @@
 **What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
 
 **Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
+## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
+
+**What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+
+**Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
 ## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
 
 **What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
