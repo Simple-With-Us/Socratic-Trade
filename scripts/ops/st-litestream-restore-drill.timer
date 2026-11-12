@@ -3,7 +3,7 @@ Description=Weekly off-hours Litestream B2 restore drill for Socratic-Trade
 Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/runbooks/st-litestream-restore-drill.md
 
 [Timer]
-OnCalendar=Sun 04:00
+OnCalendar=Sun 04:00 UTC
 RandomizedDelaySec=3600
 Persistent=true
 AccuracySec=15min

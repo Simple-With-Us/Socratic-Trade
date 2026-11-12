@@ -77,6 +77,9 @@ fi
 if [[ -n "${STUB_CREATE_SCRATCH_FILE:-}" ]]; then
   touch "${SCRATCH_DIR}/app.db.restore-drill-stub"
 fi
+if [[ -n "${STUB_ASSERT_BUCKET:-}" ]]; then
+  printf '%s' "${AWS_S3_BUCKET_NAME:-}" >"${STUB_ASSERT_BUCKET}"
+fi
 exit "${STUB_DRILL_RC:-0}"
 STUB
 chmod +x "${WORK}/stub-drill.sh"
@@ -93,17 +96,23 @@ run_case() {
   find "${WORK}/scratch" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do rm -rf "$d"; done
   export STUB_DB_BYTES=1000 STUB_DF_FREE_KB=10000000
   export STUB_DRILL_RC=0 STUB_INTEGRITY=ok STUB_DRILL_PASS=true STUB_CREATE_SCRATCH_FILE=
+  export CASE_AWS_S3_BUCKET_NAME= CASE_AWS_ACCESS_KEY_ID= CASE_AWS_SECRET_ACCESS_KEY=
+  export STUB_ASSERT_BUCKET=
   eval "$@"
   export ST_LITESTREAM_RESTORE_DRILL_SCRIPT="${WORK}/stub-drill.sh"
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-/tmp}" \
+    AWS_S3_BUCKET_NAME="${CASE_AWS_S3_BUCKET_NAME:-}" \
+    AWS_ACCESS_KEY_ID="${CASE_AWS_ACCESS_KEY_ID:-}" \
+    AWS_SECRET_ACCESS_KEY="${CASE_AWS_SECRET_ACCESS_KEY:-}" \
     ST_RESTORE_DRILL_TEST_ENV="$ST_RESTORE_DRILL_TEST_ENV" \
     ST_RESTORE_DRILL_NOTIFY="$ST_RESTORE_DRILL_NOTIFY" \
     ST_RESTORE_DRILL_USE_TIMEOUT="$ST_RESTORE_DRILL_USE_TIMEOUT" \
     ST_RESTORE_DRILL_SCRATCH_PARENT="$ST_RESTORE_DRILL_SCRATCH_PARENT" \
     ST_RESTORE_DRILL_STATUS_JSON="$ST_RESTORE_DRILL_STATUS_JSON" \
     ST_RESTORE_DRILL_STATE_DIR="$ST_RESTORE_DRILL_STATE_DIR" \
+    ST_RESTORE_DRILL_MIN_FREE_TENTHS="${ST_RESTORE_DRILL_MIN_FREE_TENTHS:-22}" \
     ST_LITESTREAM_RESTORE_DRILL_SCRIPT="$ST_LITESTREAM_RESTORE_DRILL_SCRIPT" \
     STUB_DB_BYTES="$STUB_DB_BYTES" \
     STUB_DF_FREE_KB="$STUB_DF_FREE_KB" \
@@ -111,6 +120,7 @@ run_case() {
     STUB_INTEGRITY="${STUB_INTEGRITY:-ok}" \
     STUB_DRILL_PASS="${STUB_DRILL_PASS:-true}" \
     STUB_CREATE_SCRATCH_FILE="${STUB_CREATE_SCRATCH_FILE:-}" \
+    STUB_ASSERT_BUCKET="${STUB_ASSERT_BUCKET:-}" \
     bash "$UNDER_TEST" >/dev/null 2>&1
   rc=$?
   local left
@@ -181,6 +191,28 @@ else
   FAILURES=$((FAILURES + 1))
   echo "FAIL scratch_file_removed (stub files=${after_left})" >&2
 fi
+
+write_env_creds
+run_case env_first_credentials 0 '
+  export CASE_AWS_S3_BUCKET_NAME=env-bucket
+  export CASE_AWS_ACCESS_KEY_ID=env-key
+  export CASE_AWS_SECRET_ACCESS_KEY=env-secret
+  export STUB_ASSERT_BUCKET="${WORK}/bucket.out"
+  export ST_LITESTREAM_RESTORE_DRILL_SCRIPT="${WORK}/stub-drill.sh"
+'
+if [ -f "${WORK}/bucket.out" ] && [ "$(cat "${WORK}/bucket.out")" = "env-bucket" ]; then
+  PASSES=$((PASSES + 1))
+  echo "PASS env_first_credentials_bucket"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL env_first_credentials_bucket" >&2
+fi
+
+write_env_creds
+run_case invalid_min_free_tenths 1 '
+  export ST_RESTORE_DRILL_MIN_FREE_TENTHS=abc
+  export ST_LITESTREAM_RESTORE_DRILL_SCRIPT="${WORK}/stub-drill.sh"
+'
 
 echo "selftest: ${PASSES} passed, ${FAILURES} failed."
 [ "$FAILURES" -eq 0 ]

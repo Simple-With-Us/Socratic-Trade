@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # st-litestream-restore-drill.sh - scheduled host wrapper for scripts/litestream-restore-drill.sh
 #
-# Runs on fleet-hetzner-nbg1 (not in the app container).  Loads B2 credentials from a
+# Runs on the production restore-drill host (not in the app container).  Loads B2 credentials from a
 # root-only env file, preflights disk (2.2x live DB), uses an ephemeral scratch dir, times
 # the drill, writes /var/lib/st-ops/litestream-restore-drill-status.json, and posts one
 # Sentry event on failure (no secret material in the message).
@@ -38,16 +38,38 @@ fi
 SENTRY_HELPER="${SCRIPT_DIR}/st-litestream-restore-drill-sentry.py"
 
 DEFAULT_ENV="/etc/default/st-litestream-restore-drill"
+
+# Assign only keys not already in the environment (env-first; files do not override).
+load_env_file_respecting_env_first() {
+  local file="$1"
+  local line key val
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      *=*)
+        key="${line%%=*}"
+        key="${key%"${key##*[![:space:]]}"}"
+        val="${line#*=}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%\"}"
+        val="${val#\"}"
+        val="${val%\'}"
+        val="${val#\'}"
+        if [ -n "$key" ] && [ -z "${!key:-}" ]; then
+          export "$key=$val"
+        fi
+        ;;
+    esac
+  done <"$file"
+}
+
 if [ -n "${ST_RESTORE_DRILL_TEST_ENV:-}" ] && [ -f "${ST_RESTORE_DRILL_TEST_ENV}" ]; then
-  # shellcheck disable=SC1090
-  set -a
-  source "${ST_RESTORE_DRILL_TEST_ENV}"
-  set +a
+  load_env_file_respecting_env_first "${ST_RESTORE_DRILL_TEST_ENV}"
 elif [ -f "$DEFAULT_ENV" ]; then
-  # shellcheck disable=SC1090
-  set -a
-  source "$DEFAULT_ENV"
-  set +a
+  load_env_file_respecting_env_first "$DEFAULT_ENV"
 fi
 
 NOTIFY="${ST_RESTORE_DRILL_NOTIFY:-1}"
@@ -129,6 +151,7 @@ notify_sentry() {
 
 [ -f "$DRILL_SCRIPT" ] || fail_op "drill script not found: ${DRILL_SCRIPT}"
 printf '%s' "$TIMEOUT_SECONDS" | grep -Eq '^[0-9]+$' || fail_op "ST_RESTORE_DRILL_TIMEOUT_SECONDS must be an integer."
+printf '%s' "$MIN_FREE_TENTHS" | grep -Eq '^[0-9]+$' || fail_op "ST_RESTORE_DRILL_MIN_FREE_TENTHS must be an integer."
 
 require_creds
 mkdir -p "$STATE_DIR"

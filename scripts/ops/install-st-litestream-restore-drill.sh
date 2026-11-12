@@ -85,7 +85,9 @@ if [ ! -f "$DST_ENV" ]; then
   run install -m 0600 "$ENV_EXAMPLE" "$DST_ENV"
   echo "install-st-litestream-restore-drill: created ${DST_ENV} from example (mode 0600) - fill B2 credentials before the timer can run."
 else
-  echo "install-st-litestream-restore-drill: kept existing ${DST_ENV}."
+  run chown root:root "$DST_ENV"
+  run chmod 0600 "$DST_ENV"
+  echo "install-st-litestream-restore-drill: kept existing ${DST_ENV} (owner root:root, mode 0600)."
 fi
 
 run systemctl daemon-reload

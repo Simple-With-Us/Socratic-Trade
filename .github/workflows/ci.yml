@@ -397,6 +397,8 @@ jobs:
       - name: ST Litestream restore drill wrapper (bash)
         run: |
           bash -n scripts/litestream-restore-drill.sh
+          bash -n scripts/litestream-restore-drill.selftest.sh
+          bash scripts/litestream-restore-drill.selftest.sh
           bash -n scripts/ops/st-litestream-restore-drill.sh
           bash -n scripts/ops/install-st-litestream-restore-drill.sh
           bash -n scripts/ops/st-litestream-restore-drill.selftest.sh
