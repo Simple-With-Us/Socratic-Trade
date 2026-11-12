@@ -96,6 +96,7 @@ describe("Sentry CI workflow coverage", () => {
       "Effort Issues Sync": 600,
       "CI": 600,
       "iOS TestFlight ship": 600,
+      "Vercel production catch-up": 75,
     });
   });
 });

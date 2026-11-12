@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4615 Vercel catch-up Sentry check-ins (FLEET-INFRA-F1)
+
+**What.**  Orphan Sentry monitor `ci-socratic-trade-vercel-production-catch-up` had no matching workflow (Coolify prod).  Added schedule-only `vercel-catch-up.yml` plus `sentry-ci-report` wiring (`41 * * * *`, 75m margin).  Rollout: `docs/rollouts/2026-11-12-st-4615-vercel-catch-up-sentry.md`.
+
+**Next.**  PR open; green `verify`; do not auto-merge.  Confirm Crons ok on next `:41` UTC after merge.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.

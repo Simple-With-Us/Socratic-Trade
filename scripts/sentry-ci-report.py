@@ -101,6 +101,8 @@ CRON_SCHEDULES = {
     "Shared package pin check": "0 13 * * 1",
     "Deploy freshness": "13,33,53 * * * *",
     "RTH Deploy Latch": "20 21 * * 1-5",
+    # ST production is Coolify; workflow is a schedule heartbeat only (FLEET-INFRA-F1).
+    "Vercel production catch-up": "41 * * * *",
 }
 _CRON_SCHEDULES_FOLDED = {name.casefold(): expr for name, expr in CRON_SCHEDULES.items()}
 
@@ -127,6 +129,8 @@ CHECKIN_MARGIN_OVERRIDES = {
     "Effort Issues Sync": 600,
     "CI": 600,
     "iOS TestFlight ship": 600,
+    # Hourly; GitHub schedule delivery can slip past 15m (DealDex/ContactLogo use 75).
+    "Vercel production catch-up": 75,
 }
 _CHECKIN_MARGINS_FOLDED = {name.casefold(): margin for name, margin in CHECKIN_MARGIN_OVERRIDES.items()}
 

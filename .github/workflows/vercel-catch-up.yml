@@ -1,0 +1,30 @@
+# Fleet Crons monitor ci-socratic-trade-vercel-production-catch-up (FLEET-INFRA-F1).
+# Socratic Trade production ships on Coolify (socratictrade.com), not Vercel.
+# This workflow exists only so sentry-ci-report.yml can send hourly in_progress/ok
+# check-ins on every schedule tick, including when deploy is disabled.
+#
+# Do not set repository variable VERCEL_CATCH_UP_ENABLED=true on this repo unless
+# production hosting moves back to Vercel.
+name: Vercel production catch-up
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-production-catch-up
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Coolify is production (Vercel catch-up disabled)
+        run: |
+          echo "Production deploys via Coolify; VERCEL_CATCH_UP_ENABLED is not true."
+          echo "This scheduled run satisfies the fleet Crons monitor only."
