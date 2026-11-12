@@ -3,6 +3,11 @@
 **What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
 
 **Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge (service token file + confirmed secret names).  Do not run against live B2 from the agent.
+## 2026-11-12 CURSOR — ST-3999 proxy gate slot leak
+
+**What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, and `fetchWithRetry` cancels before a 429 retry.  `fetchCancelingErrorBody` is opt-in and is not on the `dataSourceFetch` path, so an unread 5xx there is bounded by the gate.  A max hold that has already delivered a chunk releases the slot without aborting the stream.  The idle timer and the proxy-leg timer stay armed until that stream closes.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
+
+**Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
 ## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
 
 **What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
@@ -52,6 +57,7 @@
 **What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
 
 **Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
+
 ## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
 
 **What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
