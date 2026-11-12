@@ -191,7 +191,8 @@ describe("storeContexts embed window (ingest)", () => {
   it("embeds a 32-count batch as in-window POSTs, not one 8193-token 400", async () => {
     const { storeContexts } = await import("../src/lib/vector-db");
     const documents = Array.from({ length: 32 }, (_, i) => ({
-      text: textOfTokens(256, "C"),
+      // Distinct texts. Identical copies are one embed window and one POST.
+      text: `${textOfTokens(256, "C")}${i}`,
       metadata: { symbol: "AAPL", source: "sec-8k", timestamp: "2026-08-18", accession: `batch-${i}` }
     }));
 
