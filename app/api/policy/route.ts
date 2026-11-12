@@ -1,4 +1,4 @@
-import { jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
+import { brokerReadOrInternalError, jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
 import { PolicyUpdateSchema } from "@/lib/policy-update-schema";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
@@ -43,7 +43,11 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
-  return NextResponse.json(getPolicy(userId));
+  try {
+    return NextResponse.json(getPolicy(userId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 export async function PUT(request: Request) {
@@ -56,6 +60,7 @@ export async function PUT(request: Request) {
   const body = validation.data as Record<string, unknown>;
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
+  try {
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {
     return new NextResponse("targetConnectedAccountId must be a non-empty string.", { status: 400 });
@@ -239,6 +244,9 @@ export async function PUT(request: Request) {
     return new NextResponse("The target connected account changed before this update could be saved.", { status: 409 });
   }
   return NextResponse.json(getPolicy(userId, targetConnectedAccountId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 async function validatePolicy(

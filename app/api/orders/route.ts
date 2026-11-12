@@ -13,10 +13,10 @@ const equityOrdersResponseSchema = z.array(z.record(z.string(), z.unknown()));
 export async function GET(request: Request) {
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
-  const policy = getPolicy(userId);
-  const accountNumber = policy.accountNumber;
-  if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
   try {
+    const policy = getPolicy(userId);
+    const accountNumber = policy.accountNumber;
+    if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
     const parsed = equityOrdersResponseSchema.safeParse(
       await getBrokerGateway(policy, userId).getEquityOrders(accountNumber)
     );

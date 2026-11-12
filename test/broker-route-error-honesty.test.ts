@@ -150,9 +150,12 @@ describe("resolveRequestUserIdOrApiError", () => {
     try {
       const { resolveRequestUserIdOrApiError } = await import("../src/lib/api-error");
       const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(spy).toHaveBeenCalledOnce();
       expect(response).toBeInstanceOf(Response);
       expect((response as Response).status).toBe(500);
-      expect(await (response as Response).json()).toMatchObject({ ok: false, error: "internal_error" });
+      const body = await (response as Response).json();
+      expect(body).toMatchObject({ ok: false, error: "internal_error" });
+      expect(body.error).not.toMatch(/^broker_/);
     } finally {
       spy.mockRestore();
     }
@@ -165,7 +168,25 @@ describe("resolveRequestUserIdOrApiError", () => {
     try {
       const { resolveRequestUserIdOrApiError } = await import("../src/lib/api-error");
       const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(spy).toHaveBeenCalledOnce();
       expect(response).toBe(denied);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("returns 500 internal_error, not broker_*, when the identity error message looks like a gateway fault", async () => {
+    const requestUser = await import("../src/lib/request-user");
+    const spy = vi.spyOn(requestUser, "resolveRequestUserIdOrResponse").mockImplementation(() => {
+      throw new Error("Yahoo HTTP 503");
+    });
+    try {
+      const { resolveRequestUserIdOrApiError } = await import("../src/lib/api-error");
+      const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(spy).toHaveBeenCalledOnce();
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(500);
+      expect(await (response as Response).json()).toMatchObject({ ok: false, error: "internal_error" });
     } finally {
       spy.mockRestore();
     }
@@ -184,6 +205,23 @@ describe("broker-backed GET routes", () => {
     const body = await res.json();
     expect(body).toMatchObject({ ok: false, error: "broker_unavailable" });
     expect(body.message).toMatch(/503/);
+  });
+
+  it("GET /api/positions returns JSON 500 when getPolicy throws a local database fault", async () => {
+    await seedRobinhoodAccount(email);
+    const db = await import("../src/lib/db");
+    const spy = vi.spyOn(db, "getPolicy").mockImplementation(() => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    });
+    try {
+      const { GET } = await import("../app/api/positions/route");
+      const res = await GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+      expect(spy).toHaveBeenCalledOnce();
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ ok: false, error: "internal_error" });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("GET /api/positions success shape unchanged", async () => {

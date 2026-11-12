@@ -503,6 +503,21 @@ describe("fetchDailyOHLC", () => {
     expect(yahooCalls).toHaveLength(4); // 1 initial attempt + 3 retries, all 429 — then gives up honestly
   });
 
+  it("returns an empty array, not null, when Yahoo confirms there is no usable series", async () => {
+    const emptyYahoo = JSON.stringify({
+      chart: { result: [{ timestamp: [], indicators: { quote: [{ close: [] }] } }] }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(emptyYahoo, { status: 200 })
+        : new Response("unexpected source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("NOSUCH", Date.UTC(2026, 5, 18));
+    expect(bars).toEqual([]);
+  });
+
   it("does not expire a Saturday-written cache entry before Monday's open (LANE A weekend-stable TTL)", async () => {
     const fetchMock = vi.fn(async (url: string) =>
       String(url).includes("query1.finance.yahoo.com") ? new Response(yahooBody(60), { status: 200 }) : new Response("nope", { status: 404 })
@@ -652,7 +667,8 @@ describe("fetchDailyOHLC", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const bars = await fetchDailyOHLC("BBB");
-    expect(bars).toBeNull();
+    // Yahoo answered with an empty chart: confirmed no usable series, not a provider outage.
+    expect(bars).toEqual([]);
     // Stooq must never even be called — its endpoint sits behind a proof-of-work bot wall.
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("stooq.com"))).toBe(false);
   });

@@ -278,7 +278,8 @@ function persistEodBarsToCache(symbol: string, bars: OHLCBar[]): void {
  * served with no network only when it reaches `startDate`, or when a prior Yahoo
  * `range=max` response confirmed the listing starts later.  A 2y cache with no
  * such marker cannot block a deep Yahoo fetch. Returns the first source that yields ≥2 bars,
- * or null (never fabricated).
+ * an empty array when a live provider confirmed there is no usable series, or null when
+ * providers failed or were unavailable (never fabricated).
  * ROIC is operator-key only (ROIC_API_KEY); CT (App A) never holds a ROIC key — it
  * pulls via ST market-read peer routes after ST has cached the series.
  */
@@ -297,7 +298,7 @@ export async function fetchDailyOHLC(
   },
 ): Promise<OHLCBar[] | null> {
   const symbol = normalizeSymbol(rawSymbol);
-  if (!symbol) return null;
+  if (!symbol) return [];
 
   const keySources: Record<(typeof KEYED_HISTORY_SERVICES)[number], { key?: string; source: ApiKeySource }> = {
     massive: resolveApiKeyWithSource("massive", userId),
@@ -499,6 +500,8 @@ export async function fetchDailyOHLC(
   // (Cluster B H2): hold the first short series as a candidate and keep
   // cascading. It is returned only when no tier covers the requested start.
   let deepShortCandidate: { source: LiveSource; bars: OHLCBar[] } | undefined;
+  let sawConfirmedEmpty = false;
+  let sawProviderFailure = false;
   for (const source of sources) {
     let liveBars: OHLCBar[] | null;
     try {
@@ -507,7 +510,13 @@ export async function fetchDailyOHLC(
       // A pre-flight throw in one tier must not abort the whole cascade (H6), but a
       // failed provider must be distinguishable from genuinely unavailable history.
       console.error(`[history] ${source.sourceId} failed for ${symbol}:`, error);
+      sawProviderFailure = true;
       continue;
+    }
+    // A live provider that answered with 0–1 bars confirmed there is no usable series.
+    // null means the tier was skipped (no key, disabled, rate-limited, or a cache miss).
+    if (Array.isArray(liveBars) && liveBars.length < 2) {
+      sawConfirmedEmpty = true;
     }
     if (liveBars && liveBars.length >= 2) {
       if (
@@ -559,6 +568,9 @@ export async function fetchDailyOHLC(
   }
 
   bestEffortSqliteWrite(() => recordMarketDataDemand({ kind: "history", symbol, userId, now }));
+  // A confirmed empty/short live response is "no history", not an outage.  If every attempted
+  // provider failed or was skipped, return null so callers can surface an unavailable error.
+  if (sawConfirmedEmpty && !sawProviderFailure) return [];
   return null;
 }
 
@@ -721,10 +733,10 @@ async function fetchRoic(symbol: string, startDate: string, key?: string, usageL
     const byDate = new Map<string, OHLCBar>();
     for (const b of all) byDate.set(String(b.time), b);
     const bars = [...byDate.values()].sort((a, b) => String(a.time).localeCompare(String(b.time)));
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("roic", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw error;
   }
 }
 
@@ -745,10 +757,10 @@ async function fetchMassive(symbol: string, startDate: string, key?: string, usa
       if (typeof r.c !== "number" || !Number.isFinite(r.c) || typeof r.t !== "number") continue;
       bars.push({ time: r.t, open: numOrUndef(r.o), high: numOrUndef(r.h), low: numOrUndef(r.l), close: r.c, volume: numOrUndef(r.v), vwap: numOrUndef(r.vw) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("massive", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw error;
   }
 }
 
@@ -866,10 +878,10 @@ async function fetchAlpacaDaily(
       if (!pageToken) break;
     }
     recordProviderCall("alpaca", { service: "market-data", ok: true });
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("alpaca", { service: "market-data", ok: false });
-    return null;
+    throw error;
   }
 }
 
@@ -887,10 +899,10 @@ async function fetchTradier(symbol: string, startDate: string, key: string | und
       if (typeof d.close !== "number" || !Number.isFinite(d.close) || !d.date) continue;
       bars.push({ time: d.date, open: numOrUndef(d.open), high: numOrUndef(d.high), low: numOrUndef(d.low), close: d.close, volume: numOrUndef(d.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("tradier", { service: "market-data", ok: false });
-    return null;
+    throw error;
   }
 }
 
@@ -952,9 +964,13 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     const parsed = TwelveDataTimeSeriesSchema.safeParse(
       await politeFetchJson<unknown>(url, { headers: { Accept: "application/json" } })
     );
-    if (!parsed.success || parsed.data.status === "error" || !Array.isArray(parsed.data.values)) {
+    if (!parsed.success || parsed.data.status === "error") {
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
-      return null;
+      throw new Error("Twelve Data history request failed");
+    }
+    if (!Array.isArray(parsed.data.values)) {
+      recordProviderCall("twelvedata", { service: "market-data", ok: true, label: usageLabel });
+      return [];
     }
     const bars: OHLCBar[] = [];
     for (const row of parsed.data.values) {
@@ -970,10 +986,10 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
       });
     }
     recordProviderCall("twelvedata", { service: "market-data", ok: bars.length >= 2, label: usageLabel });
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw error;
   }
 }
 
@@ -1026,10 +1042,10 @@ async function fetchTiingo(symbol: string, startDate: string, key?: string, usag
       }
       bars.push({ time: r.date.slice(0, 10), open: o, high: h, low: l, close, volume: numOrUndef(r.adjVolume ?? r.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("tiingo", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw error;
   }
 }
 
@@ -1058,10 +1074,10 @@ async function fetchMarketstack(symbol: string, key?: string, usageLabel?: strin
       if (typeof r.close !== "number" || !Number.isFinite(r.close) || !r.date) continue;
       bars.push({ time: r.date, open: numOrUndef(r.open), high: numOrUndef(r.high), low: numOrUndef(r.low), close: r.close, volume: numOrUndef(r.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("marketstack", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw error;
   }
 }
 
@@ -1081,7 +1097,7 @@ async function fetchYahoo(
     // Fall back to raw close if adjclose is absent or length-mismatched.
     const adjCloseArr = result?.indicators?.adjclose?.[0]?.adjclose ?? [];
     const useAdjusted = adjCloseArr.length === ts.length;
-    if (ts.length === 0 || rawClose.length === 0) return null;
+    if (ts.length === 0 || rawClose.length === 0) return [];
     const bars: OHLCBar[] = [];
     for (let i = 0; i < ts.length; i++) {
       const rawC = rawClose[i] ?? null;
@@ -1109,9 +1125,9 @@ async function fetchYahoo(
         volume: numOrUndef(q?.volume?.[i])
       });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
-    return null;
+    return bars;
+  } catch (error) {
+    throw error;
   }
 }
 
@@ -1182,7 +1198,7 @@ async function fetchAppAHistory(symbol: string): Promise<OHLCBar[] | null> {
       closes = resp?.closes ?? [];
     }
   } catch (err) {
-    // Ignore error, fallback logic kicks in
+    throw err;
   }
   const bars = appAClosesToBars(closes);
   return bars.length >= 2 ? bars : null;

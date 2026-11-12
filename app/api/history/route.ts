@@ -4,7 +4,7 @@ import {
   brokerReadOrInternalError,
   isBrokerGatewayError,
   jsonError,
-  reportHandledError,
+  reportHandledErrorThrottled,
   resolveRequestUserIdOrApiError
 } from "@/lib/api-error";
 import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
@@ -25,6 +25,8 @@ interface ChartBar {
   vwap?: number; // only present when the source supplies it (e.g. Massive `vw`)
 }
 
+const HISTORY_PROVIDER_ERROR_KEY = "history-provider";
+
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("symbol") ?? "";
   const symbol = raw.trim().toUpperCase();
@@ -37,10 +39,13 @@ export async function GET(req: Request) {
 
   try {
     const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
-    // fetchDailyOHLC catches provider failures and resolves null; a genuine empty
-    // series is an array (possibly length 0).  Only null is a total provider failure.
+    // null is a provider outage; an empty array is a confirmed "no usable series".
     if (bars == null) {
-      reportHandledError("Price history fetch failed", new Error("History provider returned no series"));
+      reportHandledErrorThrottled(
+        HISTORY_PROVIDER_ERROR_KEY,
+        "Price history fetch failed",
+        new Error("History provider returned no series")
+      );
       return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
     }
     if (bars.length === 0) {
@@ -61,7 +66,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ symbol, bars: chartBars });
   } catch (error) {
     if (isBrokerGatewayError(error)) {
-      reportHandledError("Price history fetch failed", error);
+      reportHandledErrorThrottled(HISTORY_PROVIDER_ERROR_KEY, "Price history fetch failed", error);
       return brokerReadError(error);
     }
     return brokerReadOrInternalError(error);

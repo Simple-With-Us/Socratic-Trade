@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { HANDLED_ERROR_THROTTLE_MS, resetHandledErrorThrottleForTests } from "@/lib/api-error";
 
 vi.mock("@/lib/history", async (importActual) => {
   const actual = await importActual<typeof import("../src/lib/history")>();
@@ -19,6 +20,7 @@ async function getHistory(symbol = "BAC") {
 
 describe("/api/history", () => {
   afterEach(() => {
+    resetHandledErrorThrottleForTests();
     vi.mocked(fetchDailyOHLC).mockReset();
     vi.restoreAllMocks();
   });
@@ -69,6 +71,24 @@ describe("/api/history", () => {
       expect(capture.mock.calls[0]?.[1]).toBe("Price history fetch failed");
     } finally {
       capture.mockRestore();
+    }
+  });
+
+  it("throttles provider-failure telemetry to once per ten minutes", async () => {
+    vi.useFakeTimers({ now: 1_700_000_000_000 });
+    const metrics = await import("../src/lib/sentry-metrics");
+    const capture = vi.spyOn(metrics, "captureHandledException").mockImplementation(() => {});
+    vi.mocked(fetchDailyOHLC).mockResolvedValue(null);
+    try {
+      expect((await getHistory()).status).toBe(502);
+      expect((await getHistory("AAPL")).status).toBe(502);
+      expect(capture).toHaveBeenCalledOnce();
+      vi.setSystemTime(1_700_000_000_000 + HANDLED_ERROR_THROTTLE_MS);
+      expect((await getHistory()).status).toBe(502);
+      expect(capture).toHaveBeenCalledTimes(2);
+    } finally {
+      capture.mockRestore();
+      vi.useRealTimers();
     }
   });
 

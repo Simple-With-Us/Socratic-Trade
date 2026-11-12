@@ -6,6 +6,7 @@
  * Lives here, not in `app/api/keys/route.ts`, because Next.js route modules may only export
  * HTTP handlers and a fixed set of config keys.
  */
+import "server-only";
 import { z } from "zod";
 
 export const KeyUpsertSchema = z

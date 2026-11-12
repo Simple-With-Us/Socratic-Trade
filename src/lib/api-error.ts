@@ -116,6 +116,36 @@ export function reportHandledError(context: string, error: unknown): void {
   captureHandledException(sanitized, context, { error: sanitized.message });
 }
 
+/** Process-wide telemetry window, same cadence as `recordProxyGateSnapshot`. */
+export const HANDLED_ERROR_THROTTLE_MS = 10 * 60 * 1000;
+
+type HandledErrorThrottleHost = typeof globalThis & {
+  __socraticHandledErrorThrottleAt?: Map<string, number>;
+};
+
+function handledErrorThrottleState(): Map<string, number> {
+  const host = globalThis as HandledErrorThrottleHost;
+  return (host.__socraticHandledErrorThrottleAt ??= new Map());
+}
+
+/** Test-only: clear the process-wide handled-error throttle. */
+export function resetHandledErrorThrottleForTests(): void {
+  handledErrorThrottleState().clear();
+}
+
+/**
+ * Report a handled fault at most once per `key` per {@link HANDLED_ERROR_THROTTLE_MS}.
+ * The caller still decides the HTTP response; this only gates `console.error` and Sentry.
+ */
+export function reportHandledErrorThrottled(key: string, context: string, error: unknown): void {
+  const state = handledErrorThrottleState();
+  const now = Date.now();
+  const last = state.get(key) ?? 0;
+  if (now - last < HANDLED_ERROR_THROTTLE_MS) return;
+  state.set(key, now);
+  reportHandledError(context, error);
+}
+
 /**
  * Resolve the request user id.  Auth/session denials stay the 401/409 Response from
  * `resolveRequestUserIdOrResponse`.  Local faults (e.g. SQLITE_BUSY) return the JSON 500
@@ -127,7 +157,9 @@ export function resolveRequestUserIdOrApiError(request: Request): string | Respo
     if (userId instanceof Response) return userId;
     return userId;
   } catch (error) {
-    return brokerReadOrInternalError(error);
+    // Never classify identity/SQLite faults as broker_* even if the message looks gateway-shaped.
+    reportHandledError("Request identity resolution failed", error);
+    return jsonError(500, "internal_error", "The server could not resolve the request identity.");
   }
 }
 

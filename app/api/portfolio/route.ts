@@ -8,10 +8,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
-  const policy = getPolicy(userId);
-  const accountNumber = policy.accountNumber;
-  if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
   try {
+    const policy = getPolicy(userId);
+    const accountNumber = policy.accountNumber;
+    if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
     return NextResponse.json(await getBrokerGateway(policy, userId).getPortfolio(accountNumber));
   } catch (error) {
     return brokerReadOrInternalError(error);
