@@ -5,7 +5,10 @@ const mocks = vi.hoisted(() => ({
   isOverLlmBudget: vi.fn(() => true)
 }));
 
-vi.mock("@/lib/request-user", () => ({ resolveRequestUserId: () => "tenant-chat" }));
+vi.mock("@/lib/request-user", () => ({
+  resolveRequestUserId: () => "tenant-chat",
+  resolveRequestUserIdOrResponse: () => "tenant-chat"
+}));
 vi.mock("@/lib/db", () => ({
   resolveLlmCredential: mocks.resolveLlmCredential,
   getPolicy: () => ({})

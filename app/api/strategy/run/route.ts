@@ -1,4 +1,4 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getPolicy } from "@/lib/db";
 import { isUnavailableModelResolutionError, resolveLlmEndpoint } from "@/lib/llm-provider";
 import {
@@ -18,7 +18,8 @@ import { after, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const policy = getPolicy(userId);
   if (isModelRotationSentinel(policy.llmModel)) {
     // Green is "__rotate__": this precheck resolves the PERSISTED policy, where resolveOpenAiModel
@@ -108,7 +109,8 @@ export async function POST(request: Request) {
 
 /** Read the durable request receipt. */
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const runId = new URL(request.url).searchParams.get("runId");
   if (!runId) return NextResponse.json({ error: "runId is required." }, { status: 400 });
   const result = getStrategyRunRequest(runId, userId);
