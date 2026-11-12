@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useLayoutEffect, useState } from "react";
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState } from "react";
 
 export type ThemeChoice = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
@@ -76,20 +76,30 @@ export function syncDocumentTheme(
  */
 export const themeInitScript = `(function(){function paint(r){var root=document.documentElement;root.classList.toggle('dark',r==='dark');root.dataset.theme=r;var nodes=document.querySelectorAll('.console-root');for(var i=0;i<nodes.length;i++){nodes[i].setAttribute('data-theme',r);}var color=r==='dark'?'#0a0a0a':'#f1f4f6';var metas=document.querySelectorAll('meta[name="theme-color"]');for(var j=0;j<metas.length;j++){metas[j].setAttribute('content',color);metas[j].removeAttribute('media');}}try{var t=localStorage.getItem('theme');if(t!=='dark'&&t!=='light'&&t!=='system'){t='light';}var r=t==='system'?(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;paint(r);}catch(e){paint('light');}})();`;
 
+/**
+ * `remembered` is the choice made this session.  It stands in when storage
+ * is blocked, so a system change does not undo a pick that could not be saved.
+ */
 export function bindDocumentTheme(
   doc: Document,
-  onChange: (next: { choice: ThemeChoice; resolved: ResolvedTheme }) => void
+  onChange: (next: { choice: ThemeChoice; resolved: ResolvedTheme }) => void,
+  remembered: () => ThemeChoice | null = () => null
 ): () => void {
   const view = doc.defaultView;
   const apply = () => {
+    let stored: string | null;
     try {
-      const stored = view?.localStorage.getItem(THEME_STORAGE_KEY) ?? null;
-      const systemDark = view?.matchMedia(COLOR_SCHEME_QUERY).matches ?? false;
-      onChange(syncDocumentTheme(doc, () => stored, systemDark));
+      stored = view?.localStorage.getItem(THEME_STORAGE_KEY) ?? null;
     } catch {
-      applyDocumentTheme(doc, "light");
-      onChange({ choice: "light", resolved: "light" });
+      stored = remembered();
     }
+    let systemDark = false;
+    try {
+      systemDark = view?.matchMedia(COLOR_SCHEME_QUERY).matches ?? false;
+    } catch {
+      systemDark = false;
+    }
+    onChange(syncDocumentTheme(doc, () => stored, systemDark));
   };
   apply();
   let media: MediaQueryList | undefined;
@@ -106,15 +116,21 @@ export function bindDocumentTheme(
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemeChoice>("light");
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>("light");
+  const pickedRef = useRef<ThemeChoice | null>(null);
 
   useLayoutEffect(() => {
-    return bindDocumentTheme(document, (next) => {
-      setThemeState(next.choice);
-      setResolvedTheme(next.resolved);
-    });
+    return bindDocumentTheme(
+      document,
+      (next) => {
+        setThemeState(next.choice);
+        setResolvedTheme(next.resolved);
+      },
+      () => pickedRef.current
+    );
   }, []);
 
   const set = useCallback((next: ThemeChoice) => {
+    pickedRef.current = next;
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
     } catch {

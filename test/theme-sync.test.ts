@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyDocumentTheme,
+  bindDocumentTheme,
   readThemeChoice,
   resolveTheme,
   syncDocumentTheme,
@@ -187,5 +188,44 @@ describe("themeInitScript", () => {
         expect(booted.root.classList.contains("dark")).toBe(booted.root.dataset.theme === "dark");
       }
     }
+  });
+});
+
+describe("bindDocumentTheme", () => {
+  it("keeps this session's pick on a system change when storage is blocked", () => {
+    const { doc, root } = fakeDocument();
+    const listeners: Array<() => void> = [];
+    let systemDark = false;
+    const view = {
+      localStorage: {
+        getItem() {
+          throw new Error("denied");
+        }
+      },
+      matchMedia() {
+        return {
+          get matches() {
+            return systemDark;
+          },
+          addEventListener: (_type: string, listener: () => void) => listeners.push(listener),
+          removeEventListener: () => {}
+        };
+      }
+    };
+    let picked: ThemeChoice | null = null;
+    const seen: ResolvedTheme[] = [];
+    const unbind = bindDocumentTheme(
+      { ...doc, defaultView: view } as unknown as Document,
+      (next) => seen.push(next.resolved),
+      () => picked
+    );
+    expect(seen.at(-1)).toBe("light");
+
+    picked = "dark";
+    systemDark = true;
+    for (const listener of listeners) listener();
+    expect(seen.at(-1)).toBe("dark");
+    expectSignalsMatch(root, "dark");
+    unbind();
   });
 });
