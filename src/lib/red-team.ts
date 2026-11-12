@@ -40,7 +40,7 @@ import {
   isRetryableLlmError,
   strategyLlmTimeoutMs
 } from "./llm-request";
-import { resolveLlmEndpoint } from "./llm-provider";
+import { isUnavailableModelResolutionError, resolveLlmEndpoint } from "./llm-provider";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { humanizeLlmError } from "./llm-errors";
 import { planLlmProviderAttempts, recordLlmProviderFailure } from "./llm-provider-cooldown";
@@ -390,14 +390,23 @@ export async function debateProposal(
   // rotation pool degenerates to it by design) — only a silent failover onto the proposer is refused.
   const proposerModel = typeof proposal.proposedByModel === "string" ? proposal.proposedByModel.trim() : "";
   const skippedSelfReviewers: string[] = [];
-  const fallbackModelList = Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(policy.redTeamFallbackModels) ? policy.redTeamFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
     if (proposerModel && isSameModelLine(fallbackModel, proposerModel)) {
       skippedSelfReviewers.push(fallbackModel);
       console.warn(`[RedTeam] skipping fallback reviewer ${fallbackModel}: it proposed this trade (${proposerModel}).`);
       continue;
     }
-    const ep = resolveLlmEndpoint({ ...policy, redTeamLlmModel: fallbackModel }, userId, "https://api.openai.com/v1/chat/completions", "red");
+    let ep: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      ep = resolveLlmEndpoint({ ...policy, redTeamLlmModel: fallbackModel }, userId, "https://api.openai.com/v1/chat/completions", "red");
+    } catch (error) {
+      // An unavailable model (Code CLI route not ready, or a Code CLI-only model off that route)
+      // is skipped like a model with no credential.  Any other error still propagates.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      console.warn(`[RedTeam] skipping unavailable fallback reviewer ${fallbackModel}`);
+      continue;
+    }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
     redAttempts.push({
       url: ep.url,
@@ -545,7 +554,7 @@ export async function debateProposal(
               if (attempt.provider === "openrouter" && (response.status === 404 || response.status === 403)) {
                 recordOpenRouterModelNotFound(attempt.model, { status: response.status, userId, detail: rawDetail });
               }
-              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status });
+              const why = humanizeLlmError(rawDetail, { provider: attempt.provider, status: response.status, model: attempt.model });
               if (!isLast && isFailoverLlmStatus(response.status)) {
                 lastError = new Error(why);
                 console.warn(`[RedTeam] ${attempt.model}/${attempt.provider} failed (HTTP ${response.status}); failing over to ${next.model}/${next.provider}.`);

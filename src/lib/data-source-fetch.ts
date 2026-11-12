@@ -39,6 +39,7 @@ import {
   createProxiedFetch,
   isProxyLegError,
   resolveProxyFailureMode,
+  resolveProxyLegTimeoutMs,
   resolveResidentialProxyUrl,
   safeProxyHostForLog,
   warnProxyFallback,
@@ -46,11 +47,18 @@ import {
   type ResidentialProxyEnv
 } from "./proxy-fetch";
 import { resolveUserProxy } from "./user-proxy-settings";
+import { recordProxyUse } from "./proxy-use-log";
 
-/** Services that call fetchWithRetry but are NOT third-party market data —
- *  they keep direct egress even when a proxy is configured. */
+/** Services that always use direct egress (no proxy, no fallback). Two reasons qualify:
+ *   - "usage-monitor" → our own infra, not a third-party data source
+ *   - "fred"          → api.stlouisfed.org does NOT block datacenter IPs (direct
+ *                       egress succeeds in ~0.24s vs ~10s through the residential
+ *                       proxy); the residential proxy exists for Senate/House
+ *                       scraping (Imperva anti-bot), not for FRED. See
+ *                       `fetchFredSeries` for the full reasoning. */
 export const PROXY_EXCLUDED_SERVICES: ReadonlySet<string> = new Set([
-  "usage-monitor" // pushes to usage.jays.services — our own infra, not a data source
+  "usage-monitor",
+  "fred"
 ]);
 
 export type DataSourceProxySource = "user" | "env" | "default" | "none";
@@ -119,6 +127,48 @@ export function isInternalFetchTarget(url: string | URL): boolean {
 }
 
 /**
+ * Hostname of the data-source request target. Never the full URL: query
+ * strings can carry credentials or tokens, and bodies are never logged.
+ */
+function safeDestinationHostForLog(input: RequestInfo | URL): string {
+  try {
+    const raw =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url;
+    const host = new URL(raw).hostname;
+    return host || "(unparseable)";
+  } catch {
+    return "(unparseable)";
+  }
+}
+
+/**
+ * Short error class for the log: the error's `code` (ECONNREFUSED,
+ * UND_ERR_CONNECT_TIMEOUT, ...), walking the cause chain the same way
+ * isProxyLegError does, else its `name` (AbortError, ...). Never the message —
+ * messages can embed request URLs carrying credentials or tokens.
+ */
+function errorClassForLog(error: unknown): string {
+  if (error instanceof Error) {
+    let current: unknown = error;
+    const visited = new Set<Error>();
+    for (let depth = 0; depth <= 4 && current instanceof Error && !visited.has(current); depth++) {
+      visited.add(current);
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === "string" && code.length > 0) return code;
+      current = current.cause;
+    }
+    if (error.name && error.name.length > 0) return error.name;
+    return "Error";
+  }
+  if (typeof error === "string" && error.length > 0) return "thrown-string";
+  return "unknown";
+}
+
+/**
  * Fetch a data-source URL with per-user/operator residential-proxy egress
  * applied. Drop-in for `fetch` at data-source call sites.
  */
@@ -131,23 +181,67 @@ export async function dataSourceFetch(
   const directFetch = deps.directFetch ?? globalThis.fetch;
 
   if (opts?.service && PROXY_EXCLUDED_SERVICES.has(opts.service)) {
+    // Additive telemetry only — fetch behavior unchanged.
+    recordProxyUse({ usedProxy: false, source: "none", host: null, fallback: false, service: opts.service });
     return directFetch(url, init);
   }
   if (isInternalFetchTarget(url)) {
+    recordProxyUse({ usedProxy: false, source: "none", host: null, fallback: false, service: opts?.service });
     return directFetch(url, init);
   }
 
   const resolution = resolveDataSourceProxy(opts?.userId, deps);
   if (!resolution.proxyUrl) {
+    recordProxyUse({ usedProxy: false, source: resolution.source, host: null, fallback: false, service: opts?.service });
     return directFetch(url, init);
   }
 
-  const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) => createProxiedFetch(proxyUrl)))(
+  // A caller signal is the deadline.  A fixed 3s cap truncated lanes that
+  // need 4-5s to headers through a slow but working residential proxy, then
+  // duplicated the request on direct egress, which anti-bot sources reject.
+  // The cap (default 15s, RESIDENTIAL_PROXY_LEG_TIMEOUT_MS) remains only
+  // when nothing else bounds the leg.
+  const perLegTimeoutMs = init?.signal ? undefined : resolveProxyLegTimeoutMs(deps.env);
+  const proxyHost = safeProxyHostForLog(resolution.proxyUrl); // host:port only, never credentials
+  const destination = safeDestinationHostForLog(url);
+  // Milliseconds this request spends queued for a proxy concurrency slot,
+  // reported by createProxiedFetch once a slot is granted.  Queue wait is not
+  // leg time: the watchdog needs the distinction when the Mango is busy.
+  let queueWaitMs = 0;
+  // The single log line for this proxied request: timestamp, destination
+  // host, and outcome (HTTP status on response, error class on throw).
+  // Recorded once the outcome is known, so each proxied request has exactly
+  // one entry. Logging stays additive — fetch behavior is unchanged.
+  const proxyUseLine = () => ({
+    usedProxy: true as const,
+    source: resolution.source,
+    host: proxyHost,
+    fallback: false,
+    service: opts?.service,
+    destination,
+    ...(queueWaitMs > 0 ? { queueWaitMs } : {})
+  });
+  const proxiedFetch = (deps.proxiedFetchFactory ?? ((proxyUrl: string) =>
+    createProxiedFetch(proxyUrl, undefined, {
+      proxyTimeoutMs: perLegTimeoutMs,
+      onQueueWait: (ms) => {
+        queueWaitMs = ms;
+      }
+    })))(
     resolution.proxyUrl
   );
   try {
-    return await proxiedFetch(url, init);
+    const res = await proxiedFetch(url, init);
+    recordProxyUse({ ...proxyUseLine(), statusCode: res.status });
+    return res;
   } catch (error) {
+    // Caller cancellation is an outcome, not evidence of a broken proxy.
+    // Keep its one entry without inflating the watchdog's proxyErrors count.
+    if (init?.signal?.aborted) {
+      recordProxyUse({ ...proxyUseLine(), cancelled: true });
+      throw error;
+    }
+    recordProxyUse({ ...proxyUseLine(), errorClass: errorClassForLog(error) });
     if (!isProxyLegError(error)) throw error;
     if (resolution.failureMode === "fail_closed") {
       throw new Error(
@@ -157,6 +251,17 @@ export async function dataSourceFetch(
       );
     }
     warnProxyFallback(resolution.proxyUrl, error);
+    // Visible fail_soft fallback: a second entry, not a silent one. This is
+    // the direct-egress retry — not routed through the proxy — so it keeps
+    // usedProxy:false; it carries the destination for watchdog correlation.
+    recordProxyUse({
+      usedProxy: false,
+      source: resolution.source,
+      host: proxyHost,
+      fallback: true,
+      service: opts?.service,
+      destination
+    });
     return directFetch(url, init);
   }
 }

@@ -1,6 +1,6 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getPolicy } from "@/lib/db";
-import { resolveLlmEndpoint } from "@/lib/llm-provider";
+import { isUnavailableModelResolutionError, resolveLlmEndpoint } from "@/lib/llm-provider";
 import {
   getStrategyRunRequest,
   processPendingStrategyRunRequests,
@@ -18,7 +18,8 @@ import { after, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const policy = getPolicy(userId);
   if (isModelRotationSentinel(policy.llmModel)) {
     // Green is "__rotate__": this precheck resolves the PERSISTED policy, where resolveOpenAiModel
@@ -51,7 +52,15 @@ export async function POST(request: Request) {
     // proposeTrades uses — not "any provider". This makes the early 412 match the deep fail-loud throw,
     // so a user whose selected strategy model's provider has no key is blocked here instead of running a
     // loop that only errors deep inside proposeTrades. `summary` keeps the client's existing error rendering.
-    const greenEndpoint = resolveLlmEndpoint(policy, userId);
+    let greenEndpoint: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      greenEndpoint = resolveLlmEndpoint(policy, userId);
+    } catch (error) {
+      // The chosen model cannot run on this user's route (e.g. a Code CLI-only model while Meta is
+      // not on Code CLI, or Code CLI not configured): a legible 412, not a 500.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      return NextResponse.json({ status: "failed", summary: (error as Error).message, proposals: [] }, { status: 412 });
+    }
     if (!greenEndpoint.key) {
       return NextResponse.json({ status: "failed", summary: LLM_REQUIRED_STRATEGY_MESSAGE, proposals: [] }, { status: 412 });
     }
@@ -100,7 +109,8 @@ export async function POST(request: Request) {
 
 /** Read the durable request receipt. */
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const runId = new URL(request.url).searchParams.get("runId");
   if (!runId) return NextResponse.json({ error: "runId is required." }, { status: 400 });
   const result = getStrategyRunRequest(runId, userId);

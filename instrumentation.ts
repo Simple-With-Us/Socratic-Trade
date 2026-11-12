@@ -40,6 +40,14 @@ export async function register() {
   const dns = await import(/* webpackIgnore: true */ "node:dns");
   dns.setDefaultResultOrder("ipv4first");
 
+  // ST-4595. Stamps the TCP peer and, when REQUIRE_CLOUDFLARE_ORIGIN is on,
+  // rejects ingress that did not come from Cloudflare. Default off, so this
+  // install changes nothing until the flag is set. webpackIgnore: instrumentation
+  // is also compiled for the edge runtime, which has no node:http.
+  const http = await import(/* webpackIgnore: true */ "node:http");
+  const { installOriginLock } = await import("./src/lib/cloudflare-origin-lock");
+  installOriginLock(http);
+
   // Process-exit receipts + the "no spontaneous exit 0" tripwire (production-gated;
   // no-op in dev/tests). Installed before anything below can exit or receive a stop
   // signal. See src/lib/exit-guard.ts and docs/rollouts/2026-08-02-exit0-outage-audit.md.
@@ -65,6 +73,14 @@ export async function register() {
   const { assertSecretsManagerIfRequired } = await import("./src/lib/secrets-source");
   assertSecretsManagerIfRequired();
 
+  // Infisical sole-source-of-truth settings cache (fleet directive 2026-10-03): load the
+  // app-level settings set into memory at startup; background refresh + SIGHUP reload;
+  // write-through on admin saves.  Fail-soft by design — the runner already injected the
+  // Infisical-sourced values into process.env, so a failed settings init must never take
+  // the trading box down.  See INFISICAL.md and src/lib/infisical-settings.ts.
+  const { initInfisicalSettings } = await import("./src/lib/infisical-settings");
+  await initInfisicalSettings();
+
   // Fail fast in PRODUCTION if ENCRYPTION_KEY is missing/malformed — a trading app must never
   // silently mint a per-process ephemeral encryption key (stored credentials would become
   // unreadable after every restart). No effect in dev/test (a deterministic warning fires there
@@ -77,6 +93,58 @@ export async function register() {
 
   if (process.env.SENTRY_DSN) {
     await import("./sentry.server.config");
+    try {
+      // Same webpackIgnore shape as profiling below.  A static @sentry/node
+      // import is traced into the Edge compile of this file and fails the build.
+      const sentryNodePkg = "@sentry/node";
+      const loaded = (await import(/* webpackIgnore: true */ sentryNodePkg)) as typeof import("@sentry/node") & {
+        default?: typeof import("@sentry/node");
+      };
+      const sentryNode =
+        typeof loaded.nodeRuntimeMetricsIntegration === "function" ? loaded : loaded.default;
+      const sentryNext = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
+        default?: typeof import("@sentry/nextjs");
+      };
+      // Raw Node ESM can put CJS exports on `.default` (same interop as scheduler.ts).
+      const addIntegration = sentryNext.addIntegration ?? sentryNext.default?.addIntegration;
+      if (!sentryNode || typeof addIntegration !== "function") {
+        console.warn("[sentry] node AI integrations not attached", {
+          module: Boolean(sentryNode),
+          addIntegration: typeof addIntegration
+        });
+      } else {
+        const attach = (name: string, register: () => void) => {
+          try {
+            register();
+          } catch (err) {
+            // One failing factory must not drop the other five, and a silent
+            // catch would look the same as "instrumentation is on".
+            console.warn(`[sentry] failed to attach integration ${name}`, err);
+          }
+        };
+        attach("nodeRuntimeMetricsIntegration", () => {
+          addIntegration(sentryNode.nodeRuntimeMetricsIntegration());
+        });
+        attach("openAIIntegration", () => {
+          addIntegration(sentryNode.openAIIntegration());
+        });
+        attach("anthropicAIIntegration", () => {
+          addIntegration(sentryNode.anthropicAIIntegration());
+        });
+        attach("googleGenAIIntegration", () => {
+          addIntegration(sentryNode.googleGenAIIntegration());
+        });
+        attach("vercelAIIntegration", () => {
+          addIntegration(sentryNode.vercelAIIntegration());
+        });
+        attach("langChainIntegration", () => {
+          addIntegration(sentryNode.langChainIntegration());
+        });
+      }
+    } catch (err) {
+      // Node-only SDK.  A missing module must not take down Sentry.init.
+      console.warn("[sentry] @sentry/node not loadable on this runtime", err);
+    }
     try {
       const profilingPkg = "@sentry/profiling-node";
       const { nodeProfilingIntegration } = (await import(

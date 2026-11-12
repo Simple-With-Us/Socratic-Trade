@@ -21,7 +21,7 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
     ...actual,
     loadApprovalQuoteScan: async () =>
       actual.buildApprovalQuoteScan(
-        { T: { symbol: "T", price: 25.1, bid: 25.09, ask: 25.11, provider: "test-scan" } },
+        { T: { symbol: "T", price: 25.1, bid: 25.09, ask: 25.11, provider: "test-scan", asOf: new Date().toISOString() } },
         []
       )
   };

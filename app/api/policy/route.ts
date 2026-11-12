@@ -8,13 +8,14 @@ import {
   setPolicy,
   setStrategyPrompt
 } from "@/lib/db";
-import { llmModelFamily, modelCredentialService } from "@/lib/llm-provider";
+import { codeCliOnlyModelServable, llmModelFamily, modelCredentialService } from "@/lib/llm-provider";
 import { isModelRotationSentinel } from "@/lib/llm-request";
+import { normalizeRotationModelSelection } from "@/lib/model-rotation-selection";
 import { isIndexUniverse, normalizeIncludedIndices } from "@/lib/index-universes";
 import { getBrokerGateway } from "@/lib/broker";
 import { stripNullsDeep } from "@/lib/policy-null-stripping";
 import { normalizeExclusivePolicyCaps } from "@/lib/policy-normalization";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   invalidSymbolMessage,
   newlyAddedInvalidSymbols,
@@ -39,7 +40,9 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  return NextResponse.json(getPolicy(resolveRequestUserId(request)));
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  return NextResponse.json(getPolicy(userId));
 }
 
 export async function PUT(request: Request) {
@@ -48,7 +51,8 @@ export async function PUT(request: Request) {
     return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
   }
   const body = rawBody as Record<string, unknown>;
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {
     return new NextResponse("targetConnectedAccountId must be a non-empty string.", { status: 400 });
@@ -157,6 +161,14 @@ export async function PUT(request: Request) {
   // no hidden model default). Reject the null clear explicitly, mirroring the blank-string path.
   if (body.learningReviewModel === null) {
     return new NextResponse("learningReviewModel must be a non-empty model id.", { status: 400 });
+  }
+  // ST-4589 rotation sets: validate + canonicalise only what THIS request sends (a `null` clears
+  // via stripNullsDeep below, exactly like the fallback lists).
+  for (const field of ["llmRotationModels", "redTeamRotationModels"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(body, field) || body[field] === null) continue;
+    const normalized = normalizeRotationModelSelection(field, body[field]);
+    if (!normalized.ok) return new NextResponse(normalized.error, { status: 400 });
+    policy[field] = normalized.value;
   }
   stripNullsDeep(policy as unknown as Record<string, unknown>);
   const capFields = ["maxOrderNotional", "maxOrderPctOfNav", "maxDailyNotional", "maxDailyPctOfNav"] as const;
@@ -273,6 +285,9 @@ async function validatePolicy(
   // from credential-resolvable models (src/lib/model-rotation.ts), so the keyed guarantee is upheld
   // at serve time, not save time.
   if ((options.enforceKeyedGreenModelRule ?? true) && typeof policy.llmModel === "string" && policy.llmModel.trim() && !isModelRotationSentinel(policy.llmModel)) {
+    if (!codeCliOnlyModelServable(policy.llmModel, userId)) {
+      return `${policy.llmModel.trim()} runs only through the Code CLI route; choose Code CLI for Meta in Settings before selecting it as your strategist (green team) model.`;
+    }
     // Match the user's actual OpenRouter-first/native-fallback execution path.
     const provider = modelCredentialService(policy.llmModel, userId);
     if (!resolveLlmCredential(provider, userId).key) {
@@ -282,6 +297,9 @@ async function validatePolicy(
     }
   }
   if ((options.enforceKeyedRedModelRule ?? true) && typeof policy.redTeamLlmModel === "string" && policy.redTeamLlmModel.trim() && !isModelRotationSentinel(policy.redTeamLlmModel)) {
+    if (!codeCliOnlyModelServable(policy.redTeamLlmModel, userId)) {
+      return `${policy.redTeamLlmModel.trim()} runs only through the Code CLI route; choose Code CLI for Meta in Settings before selecting it as your reviewer (red team) model.`;
+    }
     const provider = modelCredentialService(policy.redTeamLlmModel, userId);
     if (!resolveLlmCredential(provider, userId).key) {
       return provider === "openrouter"

@@ -34,11 +34,18 @@ describe("G4: withSecurityHeaders", () => {
 
   it("emits a REPORT-ONLY CSP when CSP_ENABLED is on (default report-only)", () => {
     vi.stubEnv("CSP_ENABLED", "1");
+    vi.stubEnv("NODE_ENV", "production");
     const res = withSecurityHeaders(NextResponse.next());
-    const policy = res.headers.get("Content-Security-Policy-Report-Only");
+    const policy = res.headers.get("Content-Security-Policy-Report-Only") ?? "";
     expect(policy).toContain("default-src 'self'");
     expect(policy).toContain("report-uri /api/csp-report");
+    expect(policy).toContain("report-to csp-endpoint");
+    expect(policy).toContain("'strict-dynamic'");
+    expect(policy).not.toMatch(/script-src[^;]*unsafe-inline/);
+    expect(policy).not.toMatch(/script-src[^;]*unsafe-eval/);
+    expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(res.headers.get("Content-Security-Policy")).toBeNull();
+    expect(res.headers.get("Reporting-Endpoints")).toBe('csp-endpoint="/api/csp-report"');
   });
 
   it("emits an ENFORCING CSP only when CSP_REPORT_ONLY is explicitly off", () => {

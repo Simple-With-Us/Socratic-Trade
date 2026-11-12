@@ -6,7 +6,7 @@
 
 import crypto from "crypto";
 import { NextResponse } from "next/server";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   audit,
   dailyExecutionStats,
@@ -40,7 +40,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { draft?: ChatDraft; dryRun?: boolean; userId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "proposals/from-draft", RATE_LIMITS.orders);
   if (limited) return limited;
 
@@ -213,14 +214,16 @@ export async function POST(request: Request) {
     estimatedNotional = undefined;
   }
 
-  // The commit-time preview runs WITHOUT a market scan, so the staleness gate (which treats a missing
-  // quote/scan timestamp as stale) would fail closed on EVERY draft when maxQuoteAgeSec/
-  // maxFundamentalsAgeSec are enabled. The authoritative gate re-runs at approve time against fresh
-  // data, so a draft blocked ONLY by staleness is effectively stageable. Compute one effective decision
-  // shared by BOTH the dry-run preview (which drives the assistant's Stage button) and the commit path,
-  // so they agree — otherwise dry-run returns approved:false and the UI hides Stage even though the
-  // commit path below would accept it. (Review: PR #278.)
-  const blockingReasons = decision.reasons.filter((r) => !r.startsWith("staleness_gate:"));
+  // The commit-time preview runs WITHOUT a market scan, so a missing provider observation
+  // (quote_age_unknown / the older staleness_gate prefix) would fail closed on EVERY draft when
+  // maxQuoteAgeSec is enabled. The authoritative gate re-runs at approve time against a fresh
+  // scan and blocks the order there when that scan still has no observation time. A draft blocked
+  // ONLY by that preview miss is stageable. Compute one effective decision shared by BOTH the
+  // dry-run preview (which drives the assistant's Stage button) and the commit path, so they
+  // agree. (Review: PR #278.)
+  const blockingReasons = decision.reasons.filter(
+    (r) => !r.startsWith("staleness_gate:") && !r.startsWith("quote_age_unknown:")
+  );
   const stalenessOnly = !decision.approved && blockingReasons.length === 0;
   const effectiveDecision = stalenessOnly ? { ...decision, approved: true } : decision;
 

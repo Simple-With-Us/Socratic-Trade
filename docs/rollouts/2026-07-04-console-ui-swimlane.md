@@ -41,7 +41,7 @@
 - Strategy model selects now keep non-curated stored model IDs visible as selected custom IDs before the explicit custom-entry option.
 
 ## Verification
-- `AGENT_TAG=CODEX /usr/bin/python3 /Users/jay/apps/agent-sync-poll.py`
+- `AGENT_TAG=CODEX /usr/bin/python3 /Users/jay/apps/ag***-s**c-poll.py`
 - `npx tsc --noEmit`
 - `npx eslint app/console/components/approval-card.tsx app/console/page.tsx app/console/ui/sheet.tsx app/mobile/mobile-pwa-client.tsx 'app/console/decisions/[id]/page.tsx' 'app/api/socratic/decisions/[id]/route.ts' app/console/strategy/page.tsx app/console/macro/page.tsx app/console/components/allocation.tsx app/console/results/page.tsx app/console/assistant/draft-card.tsx test/console-sheet.test.tsx test/socratic-db.test.ts`
 - `npx vitest run test/socratic-db.test.ts test/console-sheet.test.tsx`

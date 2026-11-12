@@ -1,5 +1,7 @@
 # 2026-09-30 - Self-healing watchdogs (liveness, OOM, run-failure)
 
+> Re-arm correction (2026-10-06): the halt-time `lastHaltStreak` floor re-halted an account when a run that had already started failed after re-arm.  The window is now `rearmedAt`.  See `docs/rollouts/2026-10-06-rearm-failure-streak.md`.
+
 ## Context & Objective
 
 On 2026-09-30 ~10:33-10:44 AM CT, every route on socratictrade.com returned
@@ -103,6 +105,13 @@ failures beyond the halt-time streak (mirrors the broker-health auto-pause
 re-arm rule). The scheduler's due-run loop now consults
 `isRunBackedOff(userId, accountId)` and skips backed-off accounts (rolling
 back cadence state, same pattern as monthly-ceiling suppression).
+App-stall and mid-run-restart failures stay on the alert and backoff streak
+and are omitted from auto-halt (`consecutiveHaltEligibleFailures`).  Broker
+HTTP and LLM failures still count toward `ST_RUN_FAILURE_HALT_AFTER`.
+`isRunBackedOff` is false once `backoffUntil` passes (cap
+`ST_RUN_FAILURE_BACKOFF_CAP_MIN`, default 240m), so a pure-stall episode
+retries instead of writing a halt marker.  Rollout:
+`docs/rollouts/2026-10-05-stall-failures-exempt-halt-streak.md` (PR #4210).
 
 **7. Halt-cause honesty — `src/lib/autonomy-halt-cause.ts`**
 New `run_failure_halt` kind; `describeAutonomyHaltCause` surfaces the watchdog

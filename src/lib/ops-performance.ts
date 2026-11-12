@@ -1,8 +1,8 @@
 import { getDb, getSymbolLatestPrices, listConnectedAccounts, listUsers, peekPolicy, listFillEvents, resolveAlpacaMarketData } from "./db";
 import { AlpacaSnapshotEnrichmentProvider } from "./data-providers";
 import {
-  aggregateRoundTrip,
   calculatePnl,
+  completedRoundTrips,
   getPerformanceSummary,
   getThesisScorecard,
   getRedTeamEfficacy,
@@ -233,6 +233,14 @@ export interface OpsPerformanceAccount {
   environment: FillSource;
   systemState: string;
   accountNumber: string | null;
+  /** True when an operator recorded this account as deliberately parked (review rank 8).  Distinct
+   *  from `systemState: "halted"`: a halt can be a symptom, and a park is a decision with a reason.
+   *  This endpoint only reports the flag.  It does not park or un-park. */
+  parked: boolean;
+  /** Why the account was parked, or null when `parked` is false or no reason was stored. */
+  parkedReason: string | null;
+  /** ISO time the park was recorded, or null when `parked` is false or no time was stored. */
+  parkedAt: string | null;
   /** True only when the book HAS open positions and NONE of them could be marked (or marking was
    *  turned off with `marks=off`).  False when there is nothing to price, or at least one open symbol
    *  got a mark - in which case `unrealizedUnpricedSymbols` says which ones are still missing and
@@ -361,16 +369,6 @@ function computeTradeStats(closedLots: ClosedLot[], sinceIso: string, windowDays
   };
 }
 
-/** Round-trip identity of one OPENING fill: symbol + the timestamp `calculatePnl` stamps onto
- *  every exit it books against that lot. Deliberately the same pair, so grouping exits here lines
- *  up with the FIFO match `calculatePnl` already performed — this never re-derives lot matching. */
-function roundTripKey(symbol: string | undefined, entryAt: string | undefined): string {
-  // A legacy lot with no symbol and no entryAt cannot be attributed to an opening fill at all;
-  // give it a stable singleton key so it forms its own group and is reported as incomplete
-  // rather than silently merged into some other position's round trip.
-  return `${symbol ? normalizeSymbol(symbol) : "?"}|${entryAt ?? ""}`;
-}
-
 /** Grade the window on ROUND TRIPS rather than on individual FIFO lots.
  *
  * `computeTradeStats` above counts one entry per `ClosedLot`, and a scaled-out position produces
@@ -393,33 +391,12 @@ function buildRoundTripStats(
   sinceIso: string,
   windowDays: number
 ): OpsRoundTripStats {
-  const entrySize = new Map<string, number>();
-  for (const fill of fills) {
-    if (fill.side !== "buy" && fill.side !== "short") continue; // closing side
-    const key = roundTripKey(fill.symbol, fill.filledAt);
-    entrySize.set(key, (entrySize.get(key) ?? 0) + Number(fill.quantity));
-  }
-
-  const groups = new Map<string, ClosedLot[]>();
-  for (const lot of closedLots) {
-    const key = roundTripKey(lot.symbol, lot.entryAt);
-    const bucket = groups.get(key);
-    if (bucket) bucket.push(lot);
-    else groups.set(key, [lot]);
-  }
-
+  // Grouping + completeness grading is shared with the console win rate (performance.ts).
+  const grouped = completedRoundTrips(closedLots, fills);
+  const incompleteRoundTrips = grouped.incompleteRoundTrips;
   const trips: ClosedLot[] = [];
   let lotsGraded = 0;
-  let incompleteRoundTrips = 0;
-  for (const [key, lots] of groups) {
-    // Terminal ordering matters: `aggregateRoundTrip` takes exitAt/mae/mfe from the LAST exit,
-    // so a group read out of order would stamp the wrong holding period.
-    lots.sort((a, b) => String(a.exitAt ?? "").localeCompare(String(b.exitAt ?? "")));
-    const trip = aggregateRoundTrip(lots, entrySize.get(key) ?? 0);
-    if (!trip) {
-      incompleteRoundTrips += 1;
-      continue;
-    }
+  for (const { trip, lots } of grouped.trips) {
     trips.push(trip);
     // Count the lots only when the trip they belong to is actually IN the window. `computeTradeStats`
     // windows on `exitAt >= sinceIso`, so counting unconditionally here would let a 200-day-old
@@ -905,6 +882,20 @@ export interface BuildOpsPerformanceInput {
   marks?: OpsMarksMode;
 }
 
+/** The park decision, in the same shape `ops-account-control` already puts on its account summary.
+ *  Absent or false is "never parked", and a missing reason or time stays null rather than a blank
+ *  string, so a report can tell "not parked" from "parked, reason not recorded". */
+function parkedAccountFacts(account: { parked?: boolean; parkedReason?: string; parkedAt?: string }): Pick<
+  OpsPerformanceAccount,
+  "parked" | "parkedReason" | "parkedAt"
+> {
+  return {
+    parked: account.parked === true,
+    parkedReason: account.parkedReason ?? null,
+    parkedAt: account.parkedAt ?? null
+  };
+}
+
 export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInput = {}): Promise<OpsPerformanceSnapshot> {
   const windowDays = clampDays(input.days);
   const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
@@ -927,7 +918,11 @@ export async function buildOpsPerformanceSnapshot(input: BuildOpsPerformanceInpu
         label: account.label || account.broker,
         broker: account.broker,
         environment: account.environment,
-        accountNumber: account.accountNumber ?? null
+        accountNumber: account.accountNumber ?? null,
+        // On `base` so the never-synced branch, the priced book, and the per-account error branch
+        // all carry the same park facts.  A quiet account with no broker number is exactly the row
+        // a report used to show as an unexplained zero.
+        ...parkedAccountFacts(account)
       };
 
       if (!account.accountNumber) {

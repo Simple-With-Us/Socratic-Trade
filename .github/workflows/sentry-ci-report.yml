@@ -23,8 +23,8 @@ name: Sentry CI Report
 #
 # workflows observed (from `ls .github/workflows/`; see each file's `name:`):
 #   Auto-merge PRs, Auto-merge congress-trading-shared PRs, CI, Cleanup Actions Caches,
-#   Codex Autofix, Effort Issues Sync, iOS build,
-#   iOS TestFlight ship, merge-shepherd,
+#   Claude Code Autofix, PR Autofix, Effort Issues Sync, iOS build,
+#   iOS TestFlight ship, Kody MiniMax M3.1 Flash Fix Proposals, merge-shepherd,
 #   Shared package pin check, Playwright Smoke, Security, Deploy freshness,
 #   RTH Deploy Latch, Sentry Deploy
 # Reusable-only `_merge-shepherd-impl` executes inside `merge-shepherd` and has no independent
@@ -41,6 +41,8 @@ name: Sentry CI Report
 #   Deploy freshness         -> "13,33,53 * * * *"  (deploy-freshness.yml)
 #   RTH Deploy Latch         -> "20 21 * * 1-5" (rth-deploy-latch.yml weekday after-close drain)
 #   iOS TestFlight ship      -> "*/30 * * * *" (ios-ship.yml hosted macos-latest)
+# refresh-rag-snapshot is not a Socratic-Trade workflow (FLEET-INFRA-DN lives
+# on Fleet-OPS / AI-Fleet-Coordinator).  Do not add it to CRON_SCHEDULES here.
 
 on:
   workflow_run:
@@ -49,11 +51,14 @@ on:
       - Auto-merge PRs
       - CI
       - Cleanup Actions Caches
-      - Codex Autofix
+      - Claude Code Autofix
       - Effort Issues Sync
       - iOS build
       - iOS TestFlight ship
+      - Kody MiniMax M3.1 Flash Fix Proposals
       - merge-shepherd
+      - Ops scripts
+      - PR Autofix
       - Shared package pin check
       - Playwright Smoke
       - Security

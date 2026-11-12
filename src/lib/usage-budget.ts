@@ -362,30 +362,33 @@ export async function checkBudgetAndAlert(
 
 // ── Phase 2: enforcement (model downgrade / cycle skip) ─────────────────────────
 
-const CHEAPER_MODEL: Record<string, string> = {
-  // OpenAI — 2026-09-18 cleanup: gpt-5.6-terra / gpt-5.4-mini / gpt-5.4-nano / gpt-mini-latest /
-  // gpt-4o / gpt-4.1 / o1 / o1-preview were removed from the curated catalog. Downgrade chain
-  // for the four remaining OpenAI rows:
-  //   gpt-6-astra-pro -> gpt-5.6-sol -> gpt-5.6-luna (no further OpenAI downgrade)
+/** Every arrow must land on a strictly cheaper list price than the row the key is actually served
+ *  as (test/usage-budget.test.ts checks this against MODEL_PRICE_PER_M).  Exported for that test. */
+export const CHEAPER_MODEL: Record<string, string> = {
+  // OpenAI — 2026-11-04: four classes (Astra, Sol, Terra, Luna).  Downgrade chain:
+  //   gpt-6-astra -> gpt-6.1-sol -> gpt-6.1-terra -> gpt-6-luna (no further OpenAI downgrade)
   // The chain stops at luna: there is no cheaper OpenAI tier left in the catalog, so any further
-  // downgrade attempt falls out to a skip/cycle-skip rather than a bogus tier. The historical
-  // entries below are kept so persisted pre-cleanup policies (which may still carry the older
-  // slug names) downgrade to a valid catalog row instead of failing closed.
-  "gpt-6-astra-pro": "gpt-5.6-sol",
-  "gpt-6-astra": "gpt-5.6-sol",
-  "gpt-5.6": "gpt-5.6-luna",
-  "gpt-5.6-sol": "gpt-5.6-luna",
-  "gpt-5.6-terra": "gpt-5.6-luna",
-  "gpt-5.6-luna": "gpt-5.6-luna", // already at the bottom of the curated OpenAI chain
-  "gpt-5.5": "gpt-5.6-luna",
-  "gpt-5.4": "gpt-5.6-luna",
-  "gpt-mini-latest": "gpt-5.6-luna",
-  "gpt-5.4-mini": "gpt-5.6-luna",
-  "gpt-5.4-nano": "gpt-5.6-luna",
-  "gpt-4o": "gpt-5.6-luna",
-  "gpt-4.1": "gpt-5.6-luna",
-  "o1": "gpt-5.6-luna",
-  "o1-preview": "gpt-5.6-luna",
+  // downgrade attempt falls out to a skip/cycle-skip rather than a bogus tier.  Retired and
+  // historical ids (gpt-6-astra-pro, gpt-5.6-sol/luna, and the 2026-09-18 removals) stay keyed so
+  // a persisted older selection downgrades to a valid, cheaper catalog row instead of failing closed.
+  "gpt-6-astra": "gpt-6.1-sol",
+  "gpt-6.1-sol": "gpt-6.1-terra",
+  "gpt-6.1-terra": "gpt-6-luna",
+  "gpt-6-luna": "gpt-6-luna", // already at the bottom of the curated OpenAI chain
+  "gpt-6-astra-pro": "gpt-6.1-sol",
+  "gpt-5.6": "gpt-6.1-terra",
+  "gpt-5.6-sol": "gpt-6.1-terra",
+  "gpt-5.6-terra": "gpt-6-luna",
+  "gpt-5.6-luna": "gpt-6-luna",
+  "gpt-5.5": "gpt-6-luna",
+  "gpt-5.4": "gpt-6-luna",
+  "gpt-mini-latest": "gpt-6-luna",
+  "gpt-5.4-mini": "gpt-6-luna",
+  "gpt-5.4-nano": "gpt-6-luna",
+  "gpt-4o": "gpt-6-luna",
+  "gpt-4.1": "gpt-6-luna",
+  "o1": "gpt-6-luna",
+  "o1-preview": "gpt-6-luna",
   // Anthropic
   "claude-fable-latest": "claude-sonnet-latest",
   "claude-opus-latest": "claude-sonnet-latest",
@@ -395,13 +398,18 @@ const CHEAPER_MODEL: Record<string, string> = {
   "claude-sonnet-5": "claude-haiku-latest",
   "claude-opus-4-8": "claude-sonnet-latest",
   "claude-sonnet-4-6": "claude-haiku-latest",
-  // xAI
-  "grok-latest": "grok-build-0.1",
-  "grok-4.6": "grok-build-0.1",
-  "grok-4.5": "grok-build-0.1",
-  "grok-4.3": "grok-build-0.1",
-  // Meta / Muse (OpenRouter)
-  "muse-spark-1.3": "muse-glimmer-30b",
+  // xAI: no entry.  grok-latest is the only xAI catalog row; the old target grok-build-0.1 left the
+  // catalog 2026-09-18, so an over-budget Grok run skips rather than "downgrading" to a removed id.
+  // Meta / Muse (OpenRouter).  The Code CLI-only Wonder contributor ids have no downgrade: their
+  // cost is unknown and their route is not the API route a cheaper model would use.
+  // muse-spark-1.3-contributor ($0.10/$0.20) has no entry either: it is the cheapest Muse row.
+  // PRIVACY RULE: an automatic downgrade never lands on a -contributor row (Meta trains on those
+  // prompts and completions) unless the source is itself a contributor row — no owner consent is
+  // asked here.  The retired non-contributor Muse rows (muse-spark-1.3, muse-glimmer-30b,
+  // muse-wonder-1.0) therefore have NO entry: no non-contributor Muse row is offered, so over
+  // budget means skip, as for Grok.  test/usage-budget.test.ts enforces the rule over the map.
+  // MiniMax
+  "minimax-m3": "minimax-m3.1-flash",
   // Gemini
   "gemini-pro-latest": "gemini-flash-latest",
   "gemini-flash-latest": "gemini-flash-lite-latest",
@@ -411,12 +419,13 @@ const CHEAPER_MODEL: Record<string, string> = {
   "gemini-3.5-flash": "gemini-flash-lite-latest",
   "gemini-2.5-pro": "gemini-flash-latest",
   "gemini-2.5-flash": "gemini-flash-lite-latest",
-  // Mistral
-  "mistral-large-latest": "mistral-medium-latest",
+  // Mistral.  Large 4 ($0.70/$2.10) is CHEAPER than Medium 3.5 ($1.50/$7.50), so Large goes
+  // straight to Small ($0.15/$0.60); Medium also goes to Small.
+  "mistral-large-latest": "mistral-small-latest",
   "mistral-medium-latest": "mistral-small-latest",
-  "mistral-large-2512": "mistral-medium-latest",
+  "mistral-large-2512": "mistral-small-latest",
   "mistral-medium-3-5": "mistral-small-latest",
-  "mistral-large": "mistral-medium-latest",
+  "mistral-large": "mistral-small-latest",
   "mistral-medium": "mistral-small-latest",
   // DeepSeek
   "deepseek-pro-latest": "deepseek-flash-latest",

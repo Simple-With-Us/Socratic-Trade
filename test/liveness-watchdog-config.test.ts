@@ -31,4 +31,11 @@ describe.skipIf(process.platform === "win32")("liveness watchdog numeric guards"
     expect(run("LIVENESS_WATCHDOG_INTERVAL", "45")).toBe("45");
     expect(run("LIVENESS_WATCHDOG_BOOT_GRACE_S", "0")).toBe("0");
   });
+
+  it("decays the failure count on success instead of resetting it (flap resistance)", () => {
+    // Repeated pins separated by single brief successes must still accumulate
+    // toward a kill; a full reset let 40-140s stalls flap the watchdog forever.
+    expect(script).toContain('if [ "$failures" -gt 0 ]; then failures=$((failures - 1)); fi');
+    expect(script).not.toMatch(/api\/live[\s\S]{0,200}failures=0/);
+  });
 });

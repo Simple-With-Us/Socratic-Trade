@@ -39,10 +39,9 @@ import type {
 } from "./types";
 import { retryProposalRedTeam } from "./retry-red-team";
 import {
-  mobileCommandStatusForPlacement,
   placementCommandErrorMessage,
   resolvePlacementOutcome,
-  type ExecuteProposalResult
+  type PlacementOutcome
 } from "./placement-outcome";
 import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "./strategy-execution";
 import { releaseBrokerPlacementPauseToOwner } from "./broker-health";
@@ -122,6 +121,111 @@ export interface MobileClientInfo {
   deviceIdHash?: string;
 }
 
+
+export interface MobileBriefItem {
+  label: string;
+  value: string;
+  tone?: "ok" | "warn" | "danger" | "neutral";
+}
+
+export interface MobileBrief {
+  headline: string;
+  summary: string;
+  items: MobileBriefItem[];
+  nextActions: string[];
+  generatedAt: string;
+}
+
+function formatBriefMoney(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "n/a";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+
+const MARKET_SESSION_WORDS: Record<string, string> = {
+  regular: "Open",
+  pre: "Pre-market",
+  post: "After-hours",
+  closed: "Closed"
+};
+
+function briefMarketLabel(session: { label?: string; isOpen?: boolean } | string | null | undefined): string {
+  if (typeof session === "string") {
+    const known = MARKET_SESSION_WORDS[session];
+    if (known) return known;
+    return session ? session.charAt(0).toUpperCase() + session.slice(1) : "-";
+  }
+  if (!session) return "-";
+  if (session.label) return session.label;
+  if (typeof session.isOpen === "boolean") return session.isOpen ? "Open" : "Closed";
+  return "-";
+}
+
+function countByStatus(rows: Array<{ status?: string }> | undefined, status: string): number {
+  return rows?.filter((row) => row.status === status).length ?? 0;
+}
+
+export function buildMobileBrief(input: {
+  readiness: ReturnType<typeof mobileReadiness>;
+  portfolio?: { totalMarketValue?: unknown; buyingPower?: unknown } | null;
+  pendingProposals?: Array<{ executionMode?: string | null }>;
+  positions?: unknown[];
+  alerts?: Array<{ status?: string }>;
+  recentCommands?: Array<{ status?: string }>;
+  marketSession?: { label?: string; isOpen?: boolean } | string | null;
+  /** The connected account's mode; a pending row with no executionMode stamp runs in it. */
+  currentMode?: "broker/paper" | "broker/live";
+  /** True when the snapshot is degraded and its lists may be defaulted. */
+  partialData?: boolean;
+  generatedAt?: string;
+}): MobileBrief {
+  const pending = input.pendingProposals?.length ?? 0;
+  const livePending = input.pendingProposals?.filter((proposal) => (proposal.executionMode ?? input.currentMode) === "broker/live").length ?? 0;
+  const queued = input.readiness.commandBacklog.queued;
+  const running = input.readiness.commandBacklog.running;
+  const failedRecent = countByStatus(input.recentCommands, "failed");
+  // PriceAlertStatus is "armed" | "triggered";  an armed alert is the live one.
+  const activeAlerts = countByStatus(input.alerts, "armed");
+  const hasAccount = input.readiness.hasAccount;
+  const hasUniverse = input.readiness.hasUniverse;
+  const market = briefMarketLabel(input.marketSession);
+  const partialNote = input.partialData === true ? " Some account data did not load, so counts may be incomplete." : "";
+
+  const blockers: string[] = [];
+  if (!hasAccount) blockers.push("connect an account");
+  if (!hasUniverse) blockers.push("choose a universe/watchlist");
+
+  const headline = blockers.length > 0
+    ? `Setup needed: ${blockers.join(" + ")}`
+    : pending > 0
+      ? `${pending} proposal${pending === 1 ? "" : "s"} waiting${livePending > 0 ? ` (${livePending} live)` : ""}`
+      : queued + running > 0
+        ? `${queued + running} mobile command${queued + running === 1 ? "" : "s"} in flight`
+        : `${input.readiness.systemState.replace(/_/g, " ")} / ${input.readiness.strategyAuthority.replace(/_/g, " ")}`;
+
+  const nextActions = blockers.length > 0
+    ? blockers.map((blocker) => `Finish setup: ${blocker}.`)
+    : pending > 0
+      ? ["Review pending proposals before they age.", livePending > 0 ? "Live approvals may require typed confirmation." : "Paper-account approvals still route through the broker account environment."]
+      : queued + running > 0
+        ? ["Watch command status until the queue drains."]
+        : ["Use Run once for a fresh scan or Start to resume autonomy."];
+
+  return {
+    headline,
+    summary: `${market} market; ${input.positions?.length ?? 0} position${(input.positions?.length ?? 0) === 1 ? "" : "s"}; ${activeAlerts} active alert${activeAlerts === 1 ? "" : "s"}.${partialNote}`,
+    items: [
+      { label: "Equity", value: formatBriefMoney(input.portfolio?.totalMarketValue), tone: "neutral" },
+      { label: "Buying power", value: formatBriefMoney(input.portfolio?.buyingPower), tone: "neutral" },
+      { label: "Pending", value: String(pending), tone: pending > 0 ? "warn" : "ok" },
+      { label: "Queue", value: `${queued} queued / ${running} running`, tone: queued + running > 0 ? "warn" : "ok" },
+      { label: "Recent failures", value: String(failedRecent), tone: failedRecent > 0 ? "danger" : "ok" }
+    ],
+    nextActions,
+    generatedAt: input.generatedAt ?? new Date().toISOString()
+  };
+}
+
 interface MobileCommandRecord {
   id: string;
   userId: string;
@@ -173,6 +277,25 @@ const mobileListeners =
 
 export class MobileCommandValidationError extends Error {
   status = 400;
+}
+
+/** Statuses that mean the broker accepted the order. Anything else is not a success. */
+const PLACED_APPROVAL_STATUSES = new Set(["placed", "filled", "paper"]);
+
+/**
+ * Thrown only from mobile `proposal.approve` when `executeProposal` returns a
+ * status outside placed/filled/paper.  The command is failed with the structured
+ * placement result.  `executeProposal` itself still returns busy/blocked and
+ * throws its existing non-placement errors — this class does not change that.
+ */
+export class ProposalNotPlacedError extends Error {
+  readonly result: PlacementOutcome;
+
+  constructor(result: PlacementOutcome) {
+    super(placementCommandErrorMessage(result) ?? "Order was not placed.");
+    this.name = "ProposalNotPlacedError";
+    this.result = result;
+  }
 }
 
 /**
@@ -982,10 +1105,16 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
       return setStrategyState(command.userId, "close_only");
     case "strategy.liquidating":
       return setStrategyState(command.userId, "liquidating");
-    case "proposal.approve":
-      return executeProposal(String(payload.proposalId), command.userId, {
+    case "proposal.approve": {
+      const result = await executeProposal(String(payload.proposalId), command.userId, {
         liveConfirmation: payload.liveConfirmation as LiveApprovalConfirmation | undefined
       });
+      const placement = resolvePlacementOutcome(result);
+      if (!PLACED_APPROVAL_STATUSES.has(result.status)) {
+        throw new ProposalNotPlacedError(placement);
+      }
+      return placement;
+    }
     case "proposal.reject": {
       const proposalId = String(payload.proposalId);
       if (!getProposal(proposalId, command.userId)) throw new Error("Proposal not found.");
@@ -1074,6 +1203,9 @@ async function runCommand(command: MobileCommandRecord): Promise<unknown> {
 }
 
 function errorPayload(error: unknown): { message: string; result?: unknown } {
+  if (error instanceof ProposalNotPlacedError) {
+    return { message: error.message, result: error.result };
+  }
   if (error instanceof PolicyPatchPreconditionError) {
     return {
       message: error.message,
@@ -1097,12 +1229,6 @@ function errorPayload(error: unknown): { message: string; result?: unknown } {
 export async function executeMobileCommand(command: MobileCommandRecord): Promise<PublicMobileCommand> {
   try {
     const result = await runCommand(command);
-    if (command.commandType === "proposal.approve") {
-      const placement = resolvePlacementOutcome(result as ExecuteProposalResult);
-      const commandStatus = mobileCommandStatusForPlacement(placement.outcome);
-      const error = placementCommandErrorMessage(placement);
-      return toPublicMobileCommand(finishCommand(command, commandStatus, placement, error));
-    }
     return toPublicMobileCommand(finishCommand(command, "succeeded", result));
   } catch (error) {
     const payload = errorPayload(error);

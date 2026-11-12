@@ -1,7 +1,7 @@
 /**
  * STAGE-2 Qdrant write backend (src/lib/vector-store/qdrant-write.ts):
- *   - backend knob resolution: default qdrant when QDRANT_URL is set; DB override > env boolean >
- *     env string; unconfigured stays on pinecone
+ *   - backend knob resolution: default qdrant when QDRANT_URL is set; missing QDRANT_URL with
+ *     Qdrant selected fails closed (no silent Pinecone); DB override > env boolean > env string
  *   - uuid5 point-id scheme matching scripts/qdrant/pinecone-to-qdrant-copy.py
  *   - upsert payload keeps pc_id + ns
  *   - delete-by-ids uses ns + pc_id filter (never Pinecone health wrap)
@@ -30,7 +30,9 @@ import {
   qdrantProviderAuthority,
   qdrantSetPayload,
   qdrantUpsertPoints,
-  vectorWriteBackend
+  VectorInventoryOverCeilingError,
+  vectorWriteBackend,
+  vectorWriteBackendOrNull
 } from "../src/lib/vector-store/qdrant-write";
 import { qdrantConfigured } from "../src/lib/vector-store/qdrant-read";
 import { invalidateServerKnobCache, serverKnobById, setServerKnobOverride } from "../src/lib/server-knobs";
@@ -67,10 +69,16 @@ describe("backend knob resolution", () => {
     expect(spec?.defaultValue).toBe(true);
   });
 
-  it("defaults to qdrant when QDRANT_URL is set, falls back to pinecone when unconfigured", () => {
+  it("defaults to qdrant when QDRANT_URL is set; missing QDRANT_URL fails closed (no silent Pinecone)", () => {
+    expect(() => vectorWriteBackend()).toThrow(/QDRANT_URL is unset/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
+    process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
     expect(vectorWriteBackend()).toBe("pinecone");
+    expect(vectorWriteBackendOrNull()).toBe("pinecone");
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
     process.env.QDRANT_URL = "http://qdrant.example:6333";
     expect(vectorWriteBackend()).toBe("qdrant");
+    expect(vectorWriteBackendOrNull()).toBe("qdrant");
   });
 
   it("boolean env turns qdrant on (with QDRANT_URL) and explicit falsy keeps pinecone", () => {
@@ -103,10 +111,28 @@ describe("backend knob resolution", () => {
     expect(vectorWriteBackend()).toBe("qdrant");
   });
 
-  it("qdrant selection requires QDRANT_URL — knob on without it stays on pinecone", () => {
+  it("qdrant selection requires QDRANT_URL — missing URL throws instead of silent Pinecone", () => {
     process.env[QDRANT_WRITE_KNOB_ID] = "true";
     expect(qdrantConfigured()).toBe(false);
-    expect(vectorWriteBackend()).toBe("pinecone");
+    expect(() => vectorWriteBackend()).toThrow(/must not silently fall back to Pinecone/);
+    expect(vectorWriteBackendOrNull()).toBeNull();
+  });
+
+  it("names a remote URL with no API key, which qdrantConfigured rejects outside test mode", () => {
+    const env = process.env as Record<string, string | undefined>;
+    const previousNodeEnv = env.NODE_ENV;
+    env.NODE_ENV = "production";
+    process.env.QDRANT_URL = "https://qdrant.example:6333";
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.QDRANT_ALLOW_ANONYMOUS;
+    try {
+      expect(qdrantConfigured()).toBe(false);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_API_KEY/);
+      expect(() => vectorWriteBackend()).toThrow(/QDRANT_ALLOW_ANONYMOUS/);
+      expect(vectorWriteBackendOrNull()).toBeNull();
+    } finally {
+      env.NODE_ENV = previousNodeEnv;
+    }
   });
 });
 
@@ -143,14 +169,18 @@ describe("payload pc_id/ns", () => {
   });
 });
 
-function stubFetch(response: { ok?: boolean; status?: number; json?: unknown; text?: string }) {
+function stubFetch(response: { ok?: boolean; status?: number; json?: unknown; text?: string; inventoryCount?: number }) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
     calls.push({ url: String(url), init: init ?? {} });
+    const urlStr = String(url);
+    const json = urlStr.includes("/points/count")
+      ? { result: { count: response.inventoryCount ?? 0 } }
+      : (response.json ?? { result: {} });
     return {
       ok: response.ok ?? true,
       status: response.status ?? 200,
-      json: async () => response.json ?? { result: {} },
+      json: async () => json,
       text: async () => response.text ?? ""
     } as unknown as Response;
   });
@@ -247,20 +277,25 @@ describe("qdrant inventory / payload / collection info", () => {
       }
     });
     const rows = await qdrantInventoryByMetadata({ namespace: "socratic-abc", prefix: "occ:v3:" });
-    expect(calls[0].url).toContain("/points/scroll");
+    expect(calls.some((call) => call.url.includes("/points/count"))).toBe(true);
+    expect(calls.some((call) => call.url.includes("/points/scroll"))).toBe(true);
     expect(rows).toEqual([{ id: "occ:v3:abc", metadata: { symbol: "AAPL" } }]);
   });
 
   it("aborts a paged inventory before fetching the next page", async () => {
     const controller = new AbortController();
-    const calls = vi.fn(async () => {
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 2 } }), { status: 200 });
+      }
       controller.abort(new Error("inventory cancelled"));
       return new Response(JSON.stringify({ result: { points: [{ payload: { pc_id: "one" } }], next_page_offset: 1 } }), { status: 200 });
     });
     vi.stubGlobal("fetch", calls);
     await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", signal: controller.signal }))
       .rejects.toThrow("inventory cancelled");
-    expect(calls).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a caller signal disable the per-request timeout", async () => {
@@ -278,16 +313,61 @@ describe("qdrant inventory / payload / collection info", () => {
     }
   });
 
-  it("keeps the Qdrant inventory at a 50k hard ceiling even if env or caller requests more", async () => {
+  it("skips scroll when Qdrant count exceeds the 50k hard ceiling", async () => {
     process.env.VECTOR_INVENTORY_MAX_SCANNED = "250000";
-    const calls = vi.fn(async () => new Response(JSON.stringify({
-      result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
-    }), { status: 200 }));
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 80_000 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        result: { points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${i}` } })), next_page_offset: 1 }
+      }), { status: 200 });
+    });
     vi.stubGlobal("fetch", calls);
     await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 250000 }))
-      .rejects.toThrow("Vector inventory scan limit exceeded (50000 records)");
-    expect(calls).toHaveBeenCalledTimes(51);
+      .rejects.toBeInstanceOf(VectorInventoryOverCeilingError);
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
     delete process.env.VECTOR_INVENTORY_MAX_SCANNED;
+  });
+
+  it("still throws mid-scroll if count was under ceiling but pagination exceeds it", async () => {
+    let scrollCalls = 0;
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: 1000 } }), { status: 200 });
+      }
+      scrollCalls += 1;
+      return new Response(JSON.stringify({
+        result: {
+          points: Array.from({ length: 1000 }, (_, i) => ({ payload: { pc_id: `id-${scrollCalls}-${i}` } })),
+          next_page_offset: scrollCalls < 51 ? scrollCalls : null
+        }
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc", batchSize: 1000, maxScanned: 50_000 }))
+      .rejects.toMatchObject({
+        name: "VectorInventoryOverCeilingError",
+        count: 51_000,
+        maxScanned: 50_000
+      });
+    expect(scrollCalls).toBe(51);
+  });
+
+  it("rejects a malformed Qdrant count instead of treating it as zero and scrolling", async () => {
+    const calls = vi.fn(async (url: string | URL) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/points/count")) {
+        return new Response(JSON.stringify({ result: { count: "80000" } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ result: { points: [], next_page_offset: null } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", calls);
+    await expect(qdrantInventoryByMetadata({ namespace: "socratic-abc" }))
+      .rejects.toThrow("Invalid Qdrant count response");
+    expect(calls.mock.calls.some((call) => String(call[0]).includes("/points/scroll"))).toBe(false);
   });
 
   it("sets payload on uuid5 point ids", async () => {

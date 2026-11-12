@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// Candlestick "SOCRATIC TRADE" wordmark — Swift port of `app/console/ui/candle-ticker.ts`
+/// Candlestick "SOCRATIC TRADE" wordmark — Swift port of `app/ui/brand/candle-ticker.ts`
 /// so native login matches the website `HeaderLogo` (same letter sampling + green-biased ticker).
 
 // MARK: - Model
@@ -26,7 +26,7 @@ struct Wordmark {
     let hshort: [Bool]
 }
 
-/// Must match `WORDMARK_AR` in `app/console/ui/candle-ticker.ts`.
+/// Must match `WORDMARK_AR` in `app/ui/brand/candle-ticker.ts`.
 private let wordmarkAR: CGFloat = 13.081
 
 private let tickerGreens: [Color] = [
@@ -143,7 +143,7 @@ enum CandleWordmarkModel {
             // upside down: every candle column got its letter's rows in reverse, so the mark
             // rendered vertically mirrored — S read as 2, R as K, A as Y, T as ⊥. It was subtle
             // enough to survive review because the mirrored form is still roughly wordmark-shaped
-            // at a glance, and the web original (app/console/ui/candle-ticker.ts, which samples a
+            // at a glance, and the web original (app/ui/brand/candle-ticker.ts, which samples a
             // top-origin canvas with no flip at all) was correct the whole time.
             guard xx >= 0, xx < W, yy >= 0, yy < H else { return 0 }
             return pixelData[(yy * W + xx) * 4 + 3]

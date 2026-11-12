@@ -74,6 +74,35 @@ describe("Tradier getEquityOrder", () => {
     await expect(gateway.getEquityOrder!(ACCT, "500500")).rejects.toThrow(/502/);
   });
 
+  it("returns undefined on Tradier's 422 errors-envelope order not-found and does not treat unrelated bodies as absence", async () => {
+    await seedTradierSandbox();
+    stubFetch((u) => {
+      if (u.includes("/orders/422422")) {
+        return { status: 200, body: { errors: { error: "order 422422 not found" } } };
+      }
+      if (u.includes("/orders/bare422")) {
+        return { status: 200, body: { errors: { error: "not found" } } };
+      }
+      if (u.includes("/orders/502prose")) {
+        return { status: 502, body: "upstream said order 502prose not found in cache" };
+      }
+      if (u.includes("/orders/502echo422")) {
+        return { status: 502, body: { errors: { error: "upstream replay: Tradier HTTP 422: not found" } } };
+      }
+      if (u.includes("/orders/400prose")) {
+        return { status: 400, body: { errors: { error: "order 400prose not found in validation context" } } };
+      }
+      return undefined;
+    });
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const gateway = getTradierGateway("local");
+    await expect(gateway.getEquityOrder!(ACCT, "422422")).resolves.toBeUndefined();
+    await expect(gateway.getEquityOrder!(ACCT, "bare422")).resolves.toBeUndefined();
+    await expect(gateway.getEquityOrder!(ACCT, "502prose")).rejects.toThrow(/502/);
+    await expect(gateway.getEquityOrder!(ACCT, "502echo422")).rejects.toThrow(/502/);
+    await expect(gateway.getEquityOrder!(ACCT, "400prose")).rejects.toThrow(/400/);
+  });
+
   // Post-merge audit of #3798 (lane h2): a definitive not-found is the broker ANSWERING, not a broker
   // failure.  Logged as a tradier-broker hard failure, five in a row (one budgeted backfill pass over
   // old sandbox receipts Tradier no longer serves) trip getLaneHealth's consecutive-failure streak and

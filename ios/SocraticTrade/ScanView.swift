@@ -7,6 +7,7 @@ struct ScanView: View {
     @State private var scan: MarketScanResponse?
     @State private var isLoading = true
     @State private var loadError: String?
+    @State private var staleScanNote: String?
     @State private var didAttemptLiveRefresh = false
     @State private var query = ""
     @State private var presentedSymbol: PresentedSymbol?
@@ -80,6 +81,12 @@ struct ScanView: View {
                 )
                     .font(.appCaption)
                     .foregroundStyle(.secondary)
+                if let staleScanNote {
+                    Text(staleScanNote)
+                        .font(.appCaption)
+                        .foregroundStyle(AppPalette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(scan?.warnings ?? [], id: \.self) { warning in
                     Text(warning)
                         .font(.appCaption)
@@ -214,10 +221,21 @@ struct ScanView: View {
         isLoading = true
         defer { isLoading = false }
         do {
-            scan = try await store.fetchMarketScan()
-            loadError = nil
+            let response = try await store.fetchMarketScan()
+            scan = response
+            if response.stale == true {
+                loadError = nil
+                staleScanNote = DeskCopy.scanShowingStaleNote(
+                    generatedAt: response.generatedAt ?? response.asOf,
+                    staleReason: response.staleReason
+                )
+            } else {
+                staleScanNote = nil
+                loadError = nil
+            }
             didAttemptLiveRefresh = true
         } catch let error as MobileAPIError {
+            staleScanNote = nil
             if case .scanQuotesUnavailable(let failed) = error {
                 scan = failed.keepingLastGood(from: scan)
             }
@@ -227,6 +245,7 @@ struct ScanView: View {
             )
             didAttemptLiveRefresh = true
         } catch {
+            staleScanNote = nil
             loadError = DeskCopy.scanRefreshFailedBanner(
                 reason: error.localizedDescription,
                 lastGoodAt: scan?.lastGoodStamp

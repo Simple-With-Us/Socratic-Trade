@@ -72,8 +72,8 @@ import {
   StrategyLockOwnershipLostError
 } from "./strategy-lock-guard";
 import {
-  isRetryableBrokerHttpError,
-  isTerminalBrokerHttpError,
+  classifyPlaceOrderError,
+  mustReconcileRetryablePlaceError,
   type ExecuteProposalResult
 } from "./placement-outcome";
 import { appendDecisionStep, assertLiveApprovalConfirmation, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
@@ -225,10 +225,17 @@ async function commitRecoveredOpeningStopPlan(input: {
     let basis = input.price;
     try {
       const positions = await input.gateway.getEquityPositions(input.accountNumber);
-      basis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost ?? basis;
+      // Only a positive broker averageCost replaces the fill-price basis: a position
+      // reporting 0 (e.g. just-opened, not yet priced) must not discard a usable basis.
+      const brokerBasis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost;
+      if (brokerBasis != null && brokerBasis > 0) basis = brokerBasis;
     } catch {
       // The broker fill price remains a valid fallback for a fresh position.
     }
+    // No positive anchor (broker omitted averagePrice, proposal had no referencePrice, and no
+    // live position basis): a stop plan recorded at avg_cost 0 prices every derived stop at $0.
+    // Skip the plan rather than persist a zero-basis plan; the fill receipt itself stays booked.
+    if (!(basis > 0)) return;
     const openingOrderId = (proposal.bracketStopLoss != null || proposal.bracketTakeProfit != null) ? input.orderId : undefined;
     const contract = deriveExitContractFromOpening({
       side: proposal.side === "short" ? "short" : "buy",
@@ -1418,9 +1425,15 @@ export async function executeProposal(
           // (strategy.ts) and the protective-state block above: honest terminal "blocked".
           // P2.6 / #1319: pre-flight validation and definitive broker HTTP 4xx are never
           // "uncertain". OrderValidationError → blocked; terminal 4xx → rejected_by_broker;
-          // HTTP 429/408 → not_placed (retryable). HTTP 409 (duplicate client_order_id) is
-          // not a rejection — fall through to reconcilePlacementError. Reserve uncertain
-          // for timeouts / 5xx.
+          // HTTP 429 → not_placed (retryable, the request was refused). HTTP 408,
+          // other timeouts, and HTTP 5xx fall through to reconcilePlacementError
+          // with HTTP 409 (duplicate client_order_id): executeProposal mints a new
+          // refId per call, so booking those as not_placed can duplicate a live order.
+          // Tradier's HTTP 400 "Unexpected server error" falls through the same way.
+          // The adapter already returns a tag hit as success; an escaped sentence
+          // means the POST may still be live.  A 5xx is retryable here and can
+          // still halt: it is not the #4668 sandbox-400 retry.
+          // Reserve uncertain for an unreachable broker list.
           // The one transient OrderValidationError: the placement-time position read failed and
           // the sell/cover failed closed.  Nothing reached the broker — retryable not_placed.
           if (isRetryablePositionInvariantError(placeError)) {
@@ -1485,7 +1498,10 @@ export async function executeProposal(
             );
             throw new Error([message].join(" "));
           }
-          if (isRetryableBrokerHttpError(message)) {
+          const placeClass = classifyPlaceOrderError(message);
+          // 408, other timeouts, HTTP 5xx, and Tradier's transient sentence stay
+          // classified retryable but must not book not_placed before reconcile.
+          if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
             const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
             updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
             audit(
@@ -1504,7 +1520,7 @@ export async function executeProposal(
             );
             throw new Error([note].join(" "));
           }
-          if (isTerminalBrokerHttpError(message)) {
+          if (placeClass === "rejected_terminal") {
             updateProposalStatus(proposalId, "rejected_by_broker", undefined, review, review.estimatedNotional, userId, undefined, message);
             audit(
               "order_rejected_by_broker",
@@ -1878,7 +1894,12 @@ async function reconcilePendingReceipts(ctx: BrokerTruthContext): Promise<void> 
             if (openingProposal.stopPlan.style === "default") {
               clearStopPlans(accountNumber, [fill.symbol], userId);
             } else {
-              const basis = (await liveBasisFor(fill.symbol)) ?? price;
+              // Same guard as recordFillFromProposal: only a positive broker averageCost
+              // replaces the fill-price basis, and with no positive anchor at all we skip
+              // the plan rather than persist a zero-basis one (the fill stays booked).
+              const liveBasis = await liveBasisFor(fill.symbol);
+              const basis = liveBasis != null && liveBasis > 0 ? liveBasis : price;
+              if (!(basis > 0)) return;
               // See performance.ts's identical reasoning: bracket fields survive on the proposal
               // only when a broker-native bracket was (or was meant to be) attached, so this
               // naturally scopes to fixed/atr plans.
@@ -2465,7 +2486,10 @@ export async function flagStalePlacingIntents(gateway: BrokerGateway, accountNum
         if (!alreadyBooked) {
           const recoveredExecutionMode = row.executionMode ?? "broker/live";
           const recoveredSource: FillSource = recoveredExecutionMode === "broker/live" ? "live" : "paper";
-          const existingAvgCost = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          const recoveredLiveBasis = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          // Only a positive broker averageCost overrides the fill-price basis: a 0 (position
+          // not priced yet) must fall back to the recovered fill price, not write a 0 basis.
+          const existingAvgCost = recoveredLiveBasis != null && recoveredLiveBasis > 0 ? recoveredLiveBasis : undefined;
           recordFillFromProposal({
             userId,
             connectedAccountId,

@@ -29,7 +29,7 @@ Vendored the fleet ship tooling in-repo (CT pattern).  Hosted `ios-ship.yml` now
 - `actions/cache` for `~/.cache/ios-fleet` so hosted cron ticks still see last-ship state.  Without it every 30-minute tick looks like "no prior ship" and would re-archive.
 - Pin now hashes the in-repo copy, not `/Users/jay/apps/ios-fleet`.  Hosted runners have no Mac path.  `check-drift.sh` stays advisory when the Mac dir is absent.
 - `apps.json` `socratic.marketingVersionDefault` set to `1.0.68` as the fallback train.  Live numbering still comes from App Store Connect `latest-build-seq` when ASC auth works.
-- Posted `#agent-sync` so peer seats stop restarting local `xcodebuild` / the Mac runner.
+- Posted `#ag***-s**c` so peer seats stop restarting local `xcodebuild` / the Mac runner.
 
 ## Verification State
 

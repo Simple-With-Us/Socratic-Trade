@@ -43,7 +43,7 @@ SSHing into, monitoring, or referencing dead boxes.
   `ubuntu-latest`.
 - DNS: `host.jays.services` / `jays.services` are Cloudflare-proxied to the
   current infrastructure; no records point at the deleted IPs.
-- `/Users/jay/apps/AGENT-SYNC.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
+- `/Users/jay/apps/AG***-S**C.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
   references — no edits needed there.
 
 ## Verification State

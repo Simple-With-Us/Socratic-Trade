@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 // Exposure surface of the PUBLIC /api/health probe (middleware PUBLIC_PREFIXES). The route emits a
 // full operator view only to a caller presenting the ops token; everyone else gets the same payload
-// minus three operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's
-// pid). These tests pin BOTH halves: that the sensitive values are absent anonymously, and that they
-// are still there behind the token — i.e. that this is a projection, not a deletion.
+// minus operator-only items (OpenRouter USD figures, host/DB byte counts, the lease owner's pid,
+// and per-dependency `lastFailure` / `failureClass` from ST-3988). These tests pin BOTH halves:
+// that the sensitive values are absent anonymously, and that they are still there behind the token
+// — i.e. that this is a projection, not a deletion.
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-health-exposure-${randomUUID()}.db`)}`;
@@ -29,16 +31,64 @@ async function load() {
   return { db, lease, credits, healthRoute };
 }
 
+// `checks.dependencies` arrives from the route via `Response.json()`, so it is untrusted boundary
+// data. Validate it at the boundary instead of casting (Kody Rules 19 / 31).
+const healthDependencyEntrySchema = z
+  .object({
+    ok: z.boolean(),
+    degraded: z.boolean().optional(),
+    lastFailure: z.string().nullable().optional(),
+    failureClass: z.string().nullable().optional()
+  })
+  .passthrough();
+
+const healthDependenciesSchema = z.record(z.string(), healthDependencyEntrySchema).optional();
+
+type HealthDependencyEntry = z.infer<typeof healthDependencyEntrySchema>;
+type HealthDependencies = Record<string, HealthDependencyEntry>;
+
+/** Untrusted JSON from `Response.json()` — parse before any dependency comparison. */
+function parseHealthDependenciesFromJson(raw: unknown): HealthDependencies {
+  const parsed = healthDependenciesSchema.parse(raw);
+  return parsed ?? {};
+}
+
+/** Mirrors `projectHealthPayload` dependency stripping for anonymous /api/health. */
+function dependenciesWithoutOpsDetail(dependencies: HealthDependencies | undefined): HealthDependencies {
+  if (!dependencies) return {};
+  const stripped: HealthDependencies = {};
+  for (const [name, entry] of Object.entries(dependencies)) {
+    const copy = { ...entry };
+    delete copy.lastFailure;
+    delete copy.failureClass;
+    stripped[name] = copy;
+  }
+  return stripped;
+}
+
 /** Stub the OpenRouter /credits fetch so the balance block is populated deterministically. */
 function stubCredits(totalCredits: number, totalUsage: number) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () =>
-      new Response(JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }), {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      })
-    )
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/key") && !url.includes("/keys")) {
+        return new Response(JSON.stringify({ data: { is_management_key: false } }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (url.includes("/api/v1/keys")) {
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(
+        JSON.stringify({ data: { total_credits: totalCredits, total_usage: totalUsage } }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    })
   );
 }
 
@@ -57,7 +107,14 @@ describe("/api/health exposure", () => {
   beforeEach(async () => {
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    // Host shells may export OPENROUTER_ADMIN_KEY; force the inference path so these
+    // exposure tests stay hermetic and do not hit real OpenRouter or /keys pagination.
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     stubCredits(100, 40); // remaining $60, comfortably above the default $3 threshold
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     await seed();
   });
 
@@ -65,7 +122,12 @@ describe("/api/health exposure", () => {
     vi.unstubAllGlobals();
     delete process.env.OPS_DIAGNOSTIC_TOKEN;
     delete process.env.ADMIN_REINDEX_TOKEN;
+    delete process.env.OPENROUTER_MANAGEMENT_KEY;
+    delete process.env.OPENROUTER_ADMIN_KEY;
     const { db, credits } = await load();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
     credits.__resetOpenRouterCreditCache();
     try {
       db.deleteUserApiKey("local", "openrouter");
@@ -179,6 +241,9 @@ describe("/api/health exposure", () => {
     stubCredits(10, 9.5); // remaining $0.50, below the default $3 threshold
     const { credits, healthRoute } = await load();
     credits.__resetOpenRouterCreditCache();
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
 
     const response = await healthRoute.GET(new Request(HEALTH_URL));
     const raw = await response.text();
@@ -206,7 +271,15 @@ describe("/api/health exposure", () => {
     const [anonBody, detailBody] = [await anonymous.json(), await detailed.json()];
     expect(anonBody.ok).toBe(false);
     expect(detailBody.ok).toBe(false);
-    expect(anonBody.checks.dependencies).toEqual(detailBody.checks.dependencies);
+    const detailDeps = parseHealthDependenciesFromJson(detailBody.checks.dependencies);
+    const anonDeps = parseHealthDependenciesFromJson(anonBody.checks.dependencies);
+    expect(anonDeps).toEqual(dependenciesWithoutOpsDetail(detailDeps));
+    expect(detailDeps.pinecone).toMatchObject({
+      ok: false,
+      lastFailure: "Global Error",
+      failureClass: null
+    });
+    expect(anonDeps.pinecone).toEqual({ ok: false });
     expect(anonBody.checks.storageDegraded).toEqual(detailBody.checks.storageDegraded);
   });
 });

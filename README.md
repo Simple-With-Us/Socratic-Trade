@@ -118,11 +118,6 @@ OPENAI_API_URL=...               # optional: override to use an OpenAI-compatibl
 ROBINHOOD_ADAPTER=mock           # "mock"/unset means Robinhood disconnected; "mcp" enables real Robinhood MCP
 DATABASE_URL=file:./data/app.db
 ENCRYPTION_KEY=...               # optional 64-char hex key; used for stored API keys
-# Optional, default-off Usage Monitor bridge for the fixed primary user's
-# Gemini/DeepSeek keys; requires its own exact-path Infisical writer identity.
-INFISICAL_ST_PRIMARY_WRITER_ENABLED=false
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_ID=...
-INFISICAL_ST_PRIMARY_WRITER_CLIENT_SECRET=...
 MARKET_SCAN_LIMIT=30
 MARKET_SCAN_CACHE_TTL_MS=300000
 MARKET_SCAN_EVENT_RESERVE=8

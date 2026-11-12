@@ -1,6 +1,6 @@
 import { listSocraticFrameworkProposals } from "@/lib/db";
 import { reviewPendingFrameworkProposals } from "@/lib/framework-review";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,8 @@ export const dynamic = "force-dynamic";
  *  summary plus the refreshed proposal list so the client can re-render in place. */
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limit = typeof body.limit === "number" ? body.limit : undefined;
   const result = await reviewPendingFrameworkProposals(userId, limit ? { limit } : {});
   const proposals = listSocraticFrameworkProposals(userId, { limit: 25 });
