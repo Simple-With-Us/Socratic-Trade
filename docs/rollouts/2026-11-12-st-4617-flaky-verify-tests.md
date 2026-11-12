@@ -46,9 +46,21 @@ Full gate on this branch, after the clock freeze:
 
 The unit-test process did not inherit this seat's injected provider, Coolify, Resend, or Usage Monitor credentials.  Those variables make fetch-counting and "not configured" tests fail locally while CI, which does not set them, stays green.
 
+## Merge with origin/main
+
+`origin/main` at `81f483dd` (pull requests #5134 and #5153) is merged into this branch with a merge commit.  GitHub had marked the pull request dirty.  `STATUS.md` and `PLAN.md` are the only paths both sides edited, and both files use the `merge=union` driver.  The merge produced no conflict markers.  Every heading from both parents remains, including the ST-4617 entry and the ST-4595 entry.
+
+Verification on that merged tree, Node 26.13.1:
+
+- `npx vitest run test/proxy-concurrency-gate.test.ts test/cloudflare-origin-lock.test.ts test/health-liveness-await.test.ts test/liveness-warning-escalation.test.ts test/run-failure-watchdog.test.ts` exited 0 (5 files, 67 tests).
+- `npx tsc --noEmit` exited 0.
+- `npm run lint` exited 0 (869 existing warnings, 0 errors).
+
+Pull request #5159 had no review threads to reply to or resolve.
+
 ## Next Steps & Blockers
 
-Open the PR against `main` and wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy.
+The branch now contains `origin/main` at `81f483dd`.  Wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy.
 
 ## Zero-Code Findings
 
