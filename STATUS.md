@@ -1,3 +1,9 @@
+## 2026-11-12 [gb-trader] ST-4621 — Litestream L1 trim/heal safety tests
+
+**What.**  Offline tests and backup-tier guards for the L1 suffix-heal and boundary-trim scripts.  Planning is importable, a TXID gap drops the pre-gap L1 even when the count is under the keep window, listings use every B2 version, a delete error stops the run, and the fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The systemd unit opts in so a later install still applies.  Nothing was run against production B2, R2, or the Hetzner host.  Rollout: `docs/rollouts/2026-11-12-st-4621-litestream-l1-safety-tests.md`.
+
+**Next.**  Ready PR against `main`.  Do not merge, do not enable auto-merge, and do not install on the host from this lane.  `verify` is the merge gate.  Jay installs the repo copies when he wants the host behavior to change.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.

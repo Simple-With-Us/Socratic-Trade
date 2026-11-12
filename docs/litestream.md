@@ -80,8 +80,8 @@ Class B download cap daily since 8/29.  Healed 2026-08-31 with the L1 suffix hea
 in its keep-above-snapshot-boundary variant: `scripts/litestream-l1-suffix-heal.py`
 keeps the newest contiguous L1 suffix, deletes older L1 plus all L2/L3 so Compact
 rebuilds small files, and never touches L0, L9, `cold-snapshots/`, or any other
-bucket (dry-run by default; `--apply` to delete).  Use that script — not ad-hoc
-deletes — if the pattern recurs.
+bucket (dry-run by default; `--apply` to delete).  A TXID gap drops every L1 file before that gap even when the live count is under `--keep-l1`.  The CLI still refuses `--keep-l1` below 8 before any network call.  Use that script, not ad-hoc
+deletes, if the pattern recurs.
 
 Local Mac notes below (`litestream.yml` + `scripts/run-litestream.sh`) are optional
 dev/sidecar history; production does **not** use Mac PM2 litestream.
@@ -299,9 +299,7 @@ Do **not** add `verify-compaction: true` (ListObjects after every compact; tcp_m
 
 ### The heal: `scripts/litestream-l1-boundary-trim.py`
 
-Installed on `fleet-hetzner-nbg1` as `/usr/local/sbin/litestream-l1-boundary-trim`; the
-repo copy is the source of truth for review and re-installation, and the two are kept
-byte-identical (verify with `sha256sum` on both sides).  It lists the newest L9 snapshot,
+Installed on `fleet-hetzner-nbg1` as `/usr/local/sbin/litestream-l1-boundary-trim`.  The repo copy is the source of truth for review and re-installation.  As of ST-4621 (2026-11-12) that copy is no longer byte-identical to the host file.  Do not copy `/usr/local/sbin/litestream-l1-boundary-trim` back over the repo, or the safety fixes below are wiped.  Jay installs the repo copy when ready.  Until then the host keeps the previous behavior.  It lists the newest L9 snapshot,
 reads its `maxTXID` as a boundary, and deletes every L1 object whose `maxTXID` is at or
 below that boundary.  This is safe by construction: a full snapshot already contains those
 transactions, so a restore is snapshot + the remaining L1/L0 chain.
@@ -437,11 +435,9 @@ that reported clean progress the whole way through while deleting nothing - exit
 lying, and the only honest source was the bucket itself.  A non-empty `survived` returns
 exit 1.
 
-### Known defects in the current build - read before arming anything
+### Known defects
 
-These are confirmed by reproduction, not suspected.  All need a **paired repo + host** change
-(the repo copy is kept byte-identical to the installed tool), so none is fixed in the build
-documented here.
+These are confirmed by reproduction, not suspected.  ST-4621 (2026-11-12) fixes items 2 and 3 in the repo copies of both tools.  The installed host copies stay on the old behavior until Jay reinstalls them.  Do not resync the repo from `/usr/local/sbin`.
 
 0. **The truncation guard is a heuristic, not an integrity check.**  It compares byte sizes -
    a 100 MB floor, and 50% of the previous snapshot.  A snapshot truncated to 3 GB from 4.5 GB
@@ -461,19 +457,8 @@ documented here.
    magnitude and so made a collision far less likely than it was at ~12 s per object, but
    16-20 minute retry spacing is not a guarantee for a level with thousands of objects.  Add
    single-flight locking, or space retries beyond the maximum expected runtime.
-2. **A zero-byte previous snapshot crashes the run.**  The relative-size guard short-circuits
-   on `prev_size > 0`, but the log line immediately after it computes `size / prev_size`
-   unconditionally, so a 0-byte predecessor raises an uncaught `ZeroDivisionError` and exits
-   with a traceback instead of a documented code.  Fail-safe (it happens before any delete),
-   but undiagnosable from the exit status.
-3. **Legal twin shapes can be misreported as gaps.**  The contiguity walk sorts by
-   `(min, max)` and only recognises a twin when the *adjacent* pair shares a `max`.  For the
-   retained set `(1,99), (1,200), (100,200)` the sort yields that order, so `(1,99)` is
-   compared against `(1,200)`, the twin test fails, and a gap `63->1` is reported even though
-   `(100,200)` supplies the exact continuation.  The result is a spurious exit 5 that blocks
-   a trim which should have proceeded.  Fail-safe (it refuses rather than deleting), but it
-   will stall a real recovery until a human overrides it.  Collapse same-max twins before
-   testing adjacency.
+2. **Fixed in the repo (ST-4621).**  A zero-byte previous snapshot now returns exit 3 before any division or delete.  The host copy still raises `ZeroDivisionError` until it is reinstalled.
+3. **Fixed in the repo (ST-4621).**  Same-max groups collapse, and the walk keeps the file whose min continues the previous max, before the adjacency test.  The set `(1,99), (1,200), (100,200)` is one chain.  A real internal gap still returns exit 5 with an empty delete list.  Suffix-heal uses the same collapse, and it keeps only the contiguous suffix from the tip even when the L1 count is under `--keep-l1`.  The printed hole count uses that collapse too, so a legal twin is not reported as a hole.  The host copy still false-gaps that set until it is reinstalled.
 
 ### The deliberate trade-off
 
@@ -495,6 +480,17 @@ scripts/ops/litestream-l1-boundary-trim.service
 scripts/ops/litestream-l1-boundary-trim-fleet.sh   # socratic, then congress, then usage-monitor
 scripts/ops/install-litestream-l1-trim.sh          # root, idempotent, does not fire the oneshot
 ```
+
+`litestream-l1-boundary-trim-fleet.sh` dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  Unset and `0` stay dry-run.  Any other value exits 2 before the trim binary runs.  `litestream-l1-boundary-trim.service` sets `Environment=LITESTREAM_L1_TRIM_APPLY=1`, so the 00:04 UTC timer still applies after Jay installs this unit.  A hand run of the shell script does not delete.
+
+Offline tests, with no B2, rclone, or host:
+
+```bash
+bash scripts/test-litestream-l1-safety.sh
+```
+
+That runs `python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v` and `bash scripts/ops/litestream-l1-boundary-trim-fleet.selftest.sh`.  There is no CI workflow for these checks.  ST-4624 wires ops checks into CI.
+
 
 Transient 00:04 / 00:20 / 00:40 UTC oneshots already armed for 2026-09-02 must not be
 fought.  The persistent timer is the same 00:04 UTC minute so the next deploy does not

@@ -8,5 +8,7 @@ Wants=network-online.target
 Type=oneshot
 Nice=10
 # Repo source of truth.  Host copy is installed next to this unit.
+# The fleet script dry-runs unless this is 1. The timer is the opt-in.
+Environment=LITESTREAM_L1_TRIM_APPLY=1
 ExecStart=/usr/local/sbin/litestream-l1-boundary-trim-fleet
 SyslogIdentifier=litestream-l1-trim
