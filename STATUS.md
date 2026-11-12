@@ -3,6 +3,11 @@
 **What.**  The expensive admin ingest and backfill routes now call `enforceRateLimit` after the existing admin check.  A caller who already passed that check is still allowed the same way.  Starting a job is capped at 6 calls per 10 minutes per admin per route, and the next call returns 429 without starting OpenRouter, Qdrant, or SEC work.  Status reads on those routes, including the chat transcript, are capped at 30 per minute.  Hourly operation budgets that already covered some of these posts stay in place.  Empty 10-K lists and unknown web-source ids still return 400 and do not spend the new budget.  Rollout: `docs/rollouts/2026-11-12-st-4632-admin-ingest-rate-limits.md`.
 
 **Next.**  The PR is the delivery.  Do not merge, do not enable auto-merge, and do not deploy from this lane.
+## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
+
+**What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
+
+**Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
 ## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
 
 **What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
