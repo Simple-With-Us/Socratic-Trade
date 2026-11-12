@@ -819,6 +819,8 @@ struct NotificationHistorySection: View {
                     Task { await markAllVisibleUnread() }
                 }
                 .font(.appCaption.weight(.semibold))
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
                 .disabled(!ackingIds.isEmpty)
             }
         }

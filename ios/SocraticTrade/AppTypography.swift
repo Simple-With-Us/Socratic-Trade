@@ -180,11 +180,16 @@ enum AppAppearance {
         titleFont: UIFont,
         largeTitleFont: UIFont
     ) -> UINavigationBarAppearance {
-        let copy = (appearance.copy() as? UINavigationBarAppearance) ?? appearance
-        var titleAttributes = copy.titleTextAttributes
+        // copy() returns Any; unwrap that optional cast before subscripting attributes.
+        // UINavigationBarAppearance titleTextAttributes and largeTitleTextAttributes
+        // are non-optional dictionaries.
+        guard let copy = appearance.copy() as? UINavigationBarAppearance else {
+            return appearance
+        }
+        var titleAttributes: [NSAttributedString.Key: Any] = copy.titleTextAttributes
         titleAttributes[.font] = titleFont
         copy.titleTextAttributes = titleAttributes
-        var largeTitleAttributes = copy.largeTitleTextAttributes
+        var largeTitleAttributes: [NSAttributedString.Key: Any] = copy.largeTitleTextAttributes
         largeTitleAttributes[.font] = largeTitleFont
         copy.largeTitleTextAttributes = largeTitleAttributes
         return copy
@@ -198,9 +203,10 @@ enum AppAppearance {
     ) {
         let states: [UIControl.State] = [.normal, .selected, .highlighted, .disabled]
         if let bar = view as? UINavigationBar {
-            let titleFont = (nav.titleTextAttributes[.font] as? UIFont)
+            // Subscript the non-optional dictionaries; as? unwraps the Any font value.
+            let titleFont = nav.titleTextAttributes[.font] as? UIFont
                 ?? AppChromeFontScaling.scaledUIFont(.navigationTitle)
-            let largeTitleFont = (nav.largeTitleTextAttributes[.font] as? UIFont)
+            let largeTitleFont = nav.largeTitleTextAttributes[.font] as? UIFont
                 ?? AppChromeFontScaling.scaledUIFont(.navigationLargeTitle)
             bar.standardAppearance = appearanceByUpdatingFonts(
                 bar.standardAppearance,
