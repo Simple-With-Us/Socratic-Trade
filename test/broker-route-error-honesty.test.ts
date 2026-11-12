@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { brokerReadError, jsonError } from "../src/lib/api-error";
+import { brokerReadError, isBrokerGatewayError, jsonError } from "../src/lib/api-error";
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
 
 const brokerStub = vi.hoisted(() => ({
@@ -168,5 +168,20 @@ describe("malformed JSON on broker-adjacent routes", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+});
+
+describe("isBrokerGatewayError (ST-2797 cancel bookkeeping)", () => {
+  it("treats timeouts, transport failures, HTTP statuses and missing accounts as broker errors", () => {
+    expect(isBrokerGatewayError(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(true);
+    expect(isBrokerGatewayError(Object.assign(new Error("upstream"), { status: 503 }))).toBe(true);
+    expect(isBrokerGatewayError(new Error("Broker HTTP 500 Internal"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("No connected broker account"))).toBe(true);
+    expect(isBrokerGatewayError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("leaves local bookkeeping faults (DB, notifications) as non-broker errors", () => {
+    expect(isBrokerGatewayError(new Error("SQLITE_BUSY: database is locked"))).toBe(false);
+    expect(isBrokerGatewayError(new Error("notification dispatch failed"))).toBe(false);
   });
 });
