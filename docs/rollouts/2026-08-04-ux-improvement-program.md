@@ -31,7 +31,7 @@ Owner asked for a thorough top-to-bottom review of the web and iOS products, the
 1. Any agent claims **PR-A4** (Guardrails defaultOpen — S) or **PR-A5** (noun pass — S) as quick wins.
 2. **PR-A2** (approval card density) and **PR-A1** (honest skips) are the high-impact P0 code slices.
 3. Owner optional: answer D1–D4 in program doc to unblock B1 / B5 / E2.
-4. Do not claim overlapping keepouts (approval-card, strategy run status, dashboard snapshot) without #agent-sync.
+4. Do not claim overlapping keepouts (approval-card, strategy run status, dashboard snapshot) without #ag***-s**c.
 
 ## Zero-Code Findings
 

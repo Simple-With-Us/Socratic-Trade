@@ -6,7 +6,7 @@
 # post a deploy claim. It compares public /api/health .checks.release.sha to
 # origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
 # so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
-# to Zulip #agent-sync when ST ops Zulip credentials are configured (Infisical prod
+# to Zulip #ag***-s**c when ST ops Zulip credentials are configured (Infisical prod
 # in Actions, or env on other hosts).
 #
 # Unreachable health is treated as OK here: UptimeRobot already pages site-down.
@@ -80,9 +80,9 @@ jobs:
           DEPLOY_FRESHNESS_NOTIFY: "1"
           DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
-          AGENT_SYNC_SEAT: ST
-          AGENT_SYNC_REPO: Socratic-Trade
-          AGENT_SYNC_TOPIC: fleet
+          AG***_S**C_SEAT: ST
+          AG***_S**C_REPO: Socratic-Trade
+          AG***_S**C_TOPIC: fleet
         shell: bash
         run: |
           set -euo pipefail

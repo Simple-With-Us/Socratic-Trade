@@ -15,7 +15,7 @@ New files:
   scope, so it is fully testable.
 - `scripts/sync-provider-knobs.sh` - ASCII-only (bash 3.2-safe) orchestrator:
   fetch subscriptions, compute desired, read current from Infisical over the proven
-  SSH + universal-auth CLI path, write only diffs, post one `#agent-sync` line per
+  SSH + universal-auth CLI path, write only diffs, post one `#ag***-s**c` line per
   applied change.
 - `scripts/com.jay.provider-knob-sync.plist` - launchd template (30-min interval,
   `--apply`). **NOT installed** by this change; install command below.
@@ -62,7 +62,7 @@ Per subscription element (`provider{id,name,displayName}`, `name`, `status`,
   key is dropped (not guessed) and recorded. Same key + same value is fine.
 - **Dry run by default:** with no flag the script prints the diff and exits 0,
   writing nothing and posting nothing. `--apply` performs the writes.
-- **On each applied change**, one line to `#agent-sync`:
+- **On each applied change**, one line to `#ag***-s**c`:
   `repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: KEY old->new (plan <name> <status>); rides next deploy`
 
 ## Infisical write path (mirrors the proven universal-auth flow)

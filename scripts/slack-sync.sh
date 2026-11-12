@@ -27,7 +27,7 @@
 #                     The token is sent ONLY via the "Authorization: Bearer" header,
 #                     loaded from a 0600 temp curl config file. It is never echoed,
 #                     never logged, and never placed in a process argv.
-#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #agent-sync,
+#   SLACK_CHANNEL_ID  channel to read/post (default C0BEZDJDNKV = #ag***-s**c,
 #                     formerly #claude-monet-sync; the ID is stable across renames)
 #   SLACK_AGENT_NAME  optional; when set, posted/replied text is prefixed "[name] "
 #                     so the other agents know who is speaking (e.g. Monet / Claude).
@@ -362,7 +362,7 @@ do_hook() {
     [ -e "$_marker" ] && exit 0
     : > "$_marker" 2>/dev/null || true
   fi
-  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #agent-sync) is live."
+  echo "Slack coordination channel #$CHANNEL_ID (a.k.a. #ag***-s**c) is live."
   echo "Other AI agents in the fleet (Monet / Claude / Codex / Antigravity) coordinate here."
   [ -n "$TOPIC" ] && echo "Filtered to this project's lane [$TOPIC] (plus [FLEET]/[ALL] broadcasts)."
   echo "Agents talk to each other in a compact shorthand - it need not be plain English."
@@ -389,14 +389,14 @@ do_thread() {
 do_post() {
   _text="${1:-}"
   if [ -z "$_text" ]; then
-    note "usage: scripts/slack-sync.sh post <text...>  (retired: delegates to agent-sync-fleet-post.sh)"
+    note "usage: scripts/slack-sync.sh post <text...>  (retired: delegates to ag***-s**c-fleet-post.sh)"
     exit 1
   fi
   _dir="$(cd "$(dirname "$0")" && pwd)"
-  AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-${SLACK_AGENT_NAME:-CURSOR}}" \
-  AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-${SLACK_TOPIC:-Socratic-Trade}}" \
-  AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
-    bash "${_dir}/agent-sync-fleet-post.sh" "$_text"
+  AG***_S**C_SEAT="${AG***_S**C_SEAT:-${SLACK_AGENT_NAME:-CURSOR}}" \
+  AG***_S**C_REPO="${AG***_S**C_REPO:-${SLACK_TOPIC:-Socratic-Trade}}" \
+  AG***_S**C_TOPIC="${AG***_S**C_TOPIC:-fleet}" \
+    bash "${_dir}/ag***-s**c-fleet-post.sh" "$_text"
 }
 
 do_reply() {
@@ -447,7 +447,7 @@ esac
 # into a SessionStart hook that runs in all sessions and repos. The note goes to
 # stderr so the `hook` path injects NOTHING into session context when unconfigured.
 if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-  note "SLACK_BOT_TOKEN not set - Slack read/thread retired; use agent-sync (Zulip)."
+  note "SLACK_BOT_TOKEN not set - Slack read/thread retired; use ag***-s**c (Zulip)."
   exit 0
 fi
 

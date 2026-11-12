@@ -19,7 +19,7 @@
 //   - `curl -i https://backend.simfin.com/api/v3/companies/general/compact?ticker=AAPL` (no key)
 //     -> HTTP 401 `{"error":"Full authentication is required to access this resource"}`. This
 //     confirms the base host/path are live and real (not a stale/renamed endpoint) without
-//     needing a key — creating one is against fleet policy (see AGENT-SYNC.md "NEVER create a
+//     needing a key — creating one is against fleet policy (see AG***-S**C.md "NEVER create a
 //     new provider API key").
 //   - The official `SimFin/simfin` Python client on GitHub (raw.githubusercontent.com), whose
 //     `simfin/names.py` is "auto-generated from the SimFin database" per its own header comment

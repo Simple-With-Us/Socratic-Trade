@@ -53,10 +53,10 @@ echo "==> Checking Infisical bootstrap identity (values stay private)"
 # expected; do not fail the whole session setup for a keyless checkout.
 node scripts/infisical-bootstrap-env.mjs || echo "==> Infisical bootstrap skipped (ok in keyless cloud)"
 
-# Bootstrap the fleet coordination CLIs (board for Linear, agent-sync for Zulip)
+# Bootstrap the fleet coordination CLIs (board for Linear, ag***-s**c for Zulip)
 # into ~/.local/bin. Product setup may continue offline; fleet work must wait
 # until the installed protocol and both CLI identity checks are available.
-echo "==> Installing fleet coordination CLIs (board, agent-sync)"
+echo "==> Installing fleet coordination CLIs (board, ag***-s**c)"
 bash scripts/install-fleet-coordination.sh || echo "==> Fleet coordination unavailable; stop fleet work until setup and identity checks pass"
 
 echo "==> Setup complete. Start the app with: npm run dev:secrets   (Infisical runner on :3000)"

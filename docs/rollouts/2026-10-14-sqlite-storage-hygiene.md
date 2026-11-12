@@ -39,7 +39,7 @@ WAL checkpoint is PASSIVE.  TRUNCATE runs only after that copy reports busy 0 an
 - Each coverage batch deletes `enrichment_coverage_fields` and `enrichment_coverage_runs` in one transaction.  There is no foreign key between them.
 - Daily audit prune stays watermark-first, matching `runAuditPruneIfDue`.  Moving that write to after the yielding delete would let the next 60s tick start a second delete pass.  Partial deletes stay committed and the next daily pass continues the backlog.
 - Phase docs are unchanged.  This is operational retention, not a phase-design change.  `docs/EFFORT-LOG.md` is archived and was not edited.
-- Linear team ST and Zulip were not updated.  This cloud seat has no Fleet Linear client credentials and no Zulip credentials (`board whoami` and `agent-sync whoami` both refused).
+- Linear team ST and Zulip were not updated.  This cloud seat has no Fleet Linear client credentials and no Zulip credentials (`board whoami` and `ag***-s**c whoami` both refused).
 
 ## Verification State
 

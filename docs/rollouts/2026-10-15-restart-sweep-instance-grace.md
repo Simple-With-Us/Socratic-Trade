@@ -70,7 +70,7 @@ Superseded 2026-10-17 (see § Merge-main round 5): owner ruling, merge unless th
 
 ## Zero-Code Findings
 
-Agent-Sync MCP Linear tools are not enabled for the CURSOR seat (`LINEAR_SEATS`).  The claim went through the fleet `board` CLI as CURSOR, which `board whoami` verified against `LINEAR_CURSOR_CLIENT_ID`.  Zulip `agent-sync whoami` has no key on this seat.
+Ag***-S**c MCP Linear tools are not enabled for the CURSOR seat (`LINEAR_SEATS`).  The claim went through the fleet `board` CLI as CURSOR, which `board whoami` verified against `LINEAR_CURSOR_CLIENT_ID`.  Zulip `ag***-s**c whoami` has no key on this seat.
 
 ## Merge-main (MM takeover, 2026-10-16)
 

@@ -11,7 +11,7 @@ AFC_SHA="${AFC_SHA:-1c39b0dcaeb846c68648c2b34764a1a7a0268c37}"
 CACHE_DIR="${FLEET_COORD_CACHE:-$HOME/.cache/ai-fleet-coordinator}"
 BIN_DIR="${FLEET_COORD_BIN:-$HOME/.local/bin}"
 LINK_BOARD="$BIN_DIR/board"
-LINK_AGENT_SYNC="$BIN_DIR/agent-sync"
+LINK_AG***_S**C="$BIN_DIR/ag***-s**c"
 SHA_FILE="$CACHE_DIR/.pinned-sha"
 
 log()  { printf '[fleet-coordination] %s\n' "$*"; }
@@ -44,7 +44,7 @@ have_link() {
   local target; target="$(readlink "$link" 2>/dev/null)" || return 1
   [[ "$target" == "$expected" ]] && [[ -f "$target" ]]
 }
-if [[ "$existing_sha" == "$AFC_SHA" ]] && have_link "$LINK_BOARD" "$CACHE_DIR/scripts/linear-board/board" && have_link "$LINK_AGENT_SYNC" "$CACHE_DIR/scripts/agent-sync" && [[ -f "$CACHE_DIR/AGENT-SYNC.md" && -f "$CACHE_DIR/fleet-apps.json" && -f "$CACHE_DIR/docs/protocols/zulip-fleet-guide.md" ]]; then
+if [[ "$existing_sha" == "$AFC_SHA" ]] && have_link "$LINK_BOARD" "$CACHE_DIR/scripts/linear-board/board" && have_link "$LINK_AG***_S**C" "$CACHE_DIR/scripts/ag***-s**c" && [[ -f "$CACHE_DIR/AG***-S**C.md" && -f "$CACHE_DIR/fleet-apps.json" && -f "$CACHE_DIR/docs/protocols/zulip-fleet-guide.md" ]]; then
   log "already installed at pinned SHA ${AFC_SHA:0:7}; nothing to do."
   exit 0
 fi
@@ -52,7 +52,7 @@ fi
 # Need curl to fetch from GitHub's archive endpoint.  tar with --strip-components is
 # in GNU tar and BSD tar since Leopard; both Linux and macOS hosts have one.
 if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
-  warn "curl or tar missing; cannot install board/agent-sync."
+  warn "curl or tar missing; cannot install board/ag***-s**c."
   warn "Do not perform fleet work until installation and identity checks succeed."
   exit 1
 fi
@@ -88,7 +88,7 @@ fi
 tmp_extract="$(mktemp -d "${CACHE_DIR}.stage.XXXXXX")"
 trap 'rm -rf "$tmp_extract"' EXIT
 if ! tar -xz -C "$tmp_extract" --strip-components=1 \
-       -f "$tmp_tar" "$afc_prefix/scripts" "$afc_prefix/AGENT-SYNC.md" \
+       -f "$tmp_tar" "$afc_prefix/scripts" "$afc_prefix/AG***-S**C.md" \
        "$afc_prefix/fleet-apps.json" "$afc_prefix/docs/protocols"; then
   rm -rf "$tmp_extract" "$tmp_tar"
   warn "AFC archive extract failed (path mismatch or corrupt tar)."
@@ -96,7 +96,7 @@ if ! tar -xz -C "$tmp_extract" --strip-components=1 \
 fi
 rm -f "$tmp_tar"
 
-for required in scripts/linear-board/board scripts/agent-sync AGENT-SYNC.md fleet-apps.json docs/protocols/zulip-fleet-guide.md; do
+for required in scripts/linear-board/board scripts/ag***-s**c AG***-S**C.md fleet-apps.json docs/protocols/zulip-fleet-guide.md; do
   if [[ ! -e "$tmp_extract/$required" ]]; then
     rm -rf "$tmp_extract"
     warn "AFC archive missing required path: $required"
@@ -106,7 +106,7 @@ done
 
 # Validate the new tree before replacing a working installation.  These offline
 # argument-parser checks exercise imports without reading runtime credentials.
-for cli in scripts/linear-board/board scripts/agent-sync; do
+for cli in scripts/linear-board/board scripts/ag***-s**c; do
   chmod +x "$tmp_extract/$cli"
   if ! "$tmp_extract/$cli" --help >/dev/null; then
     warn "AFC CLI validation failed; the previous cache remains unchanged."
@@ -163,7 +163,7 @@ install_link() {
 }
 
 install_link "$CACHE_DIR/scripts/linear-board/board" "$LINK_BOARD"
-install_link "$CACHE_DIR/scripts/agent-sync"         "$LINK_AGENT_SYNC"
+install_link "$CACHE_DIR/scripts/ag***-s**c"         "$LINK_AG***_S**C"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -171,10 +171,10 @@ case ":$PATH:" in
 esac
 
 # Import and argument-parser checks are offline and never read credentials.
-"$LINK_AGENT_SYNC" --help >/dev/null
+"$LINK_AG***_S**C" --help >/dev/null
 "$LINK_BOARD" --help >/dev/null
 printf '%s\n' "$AFC_SHA" > "$SHA_FILE"
-log "Installed.  Read $CACHE_DIR/AGENT-SYNC.md and verify both CLI identities before fleet work."
+log "Installed.  Read $CACHE_DIR/AG***-S**C.md and verify both CLI identities before fleet work."
 log "Cloud runtime needs the Fleet Linear app credentials and this seat's Zulip credentials."
 log "Enable authorized Linear writes with LINEAR_BOARD_WRITES=1; never use an owner token."
 exit 0

@@ -28,7 +28,7 @@ class CloudCoordinationTests(unittest.TestCase):
                               env=self.env, capture_output=True, text=True)
 
     def test_retired_single_file_bootstrap_cannot_reinstall_slack(self):
-        result = subprocess.run(["bash", str(ROOT / "scripts/agent-sync-bootstrap.sh")],
+        result = subprocess.run(["bash", str(ROOT / "scripts/ag***-s**c-bootstrap.sh")],
                                 env={**self.env, "HOME": str(self.root)},
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -73,7 +73,7 @@ class CloudCoordinationTests(unittest.TestCase):
         mock_bin.mkdir()
         archive = self.root / "fixture.tar.gz"
         with tarfile.open(archive, "w:gz") as bundle:
-            for name in ["scripts/agent-sync", "scripts/linear-board/board", "AGENT-SYNC.md",
+            for name in ["scripts/ag***-s**c", "scripts/linear-board/board", "AG***-S**C.md",
                          "fleet-apps.json", "docs/protocols/zulip-fleet-guide.md"]:
                 data = b"#!/usr/bin/env python3\nimport sys\nassert sys.argv[1:] == ['--help']\n" if name.startswith("scripts/") else b"fixture"
                 item = tarfile.TarInfo("AFC-fixture/" + name)
@@ -101,9 +101,9 @@ class CloudCoordinationTests(unittest.TestCase):
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         cache = Path(self.env["FLEET_COORD_CACHE"])
-        for name in ["AGENT-SYNC.md", "fleet-apps.json", "docs/protocols/zulip-fleet-guide.md"]:
+        for name in ["AG***-S**C.md", "fleet-apps.json", "docs/protocols/zulip-fleet-guide.md"]:
             self.assertTrue((cache / name).is_file())
-        for name in ["board", "agent-sync"]:
+        for name in ["board", "ag***-s**c"]:
             self.assertTrue((Path(self.env["FLEET_COORD_BIN"]) / name).is_file())
         self.legacy.write_text("stale copy after first install")
         self.assertEqual(self.install().returncode, 0)
@@ -139,14 +139,14 @@ class CloudCoordinationTests(unittest.TestCase):
             entries = [(item, source.extractfile(item).read()) for item in source]
         with tarfile.open(archive, "w:gz") as target:
             for item, data in entries:
-                if item.name.endswith("scripts/agent-sync"):
+                if item.name.endswith("scripts/ag***-s**c"):
                     data = b"#!/bin/sh\nexit 1\n"
                     item.size = len(data)
                 target.addfile(item, io.BytesIO(data))
         self.env["AFC_SHA"] = "broken-pin"
         self.assertNotEqual(self.install().returncode, 0)
         self.assertEqual((cache / ".pinned-sha").read_bytes(), old_pin)
-        self.assertEqual(subprocess.run([str(cache / "scripts/agent-sync"), "--help"]).returncode, 0)
+        self.assertEqual(subprocess.run([str(cache / "scripts/ag***-s**c"), "--help"]).returncode, 0)
         self.assertFalse(list(cache.parent.glob("cache.stage.*")))
 
     def test_failed_fetch_never_reports_success_or_stamps_cache(self):

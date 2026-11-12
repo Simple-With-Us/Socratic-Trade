@@ -54,14 +54,14 @@ installed by a committed script.
   unaffected; `npx tsc --noEmit` run as a guard.
 
 ## Follow-on commits (same PR #367)
-- `docs`: local secrets-file example renamed `slack-monet.env` -> `agent-sync.env` (owner rename).
+- `docs`: local secrets-file example renamed `slack-monet.env` -> `ag***-s**c.env` (owner rename).
 - `slack-sync.sh`: added the **`test`** subcommand (auth.test; the docs referenced it but it was
-  missing) and relabeled cosmetics `#claude-monet-sync` -> `#agent-sync` + the other instance
+  missing) and relabeled cosmetics `#claude-monet-sync` -> `#ag***-s**c` + the other instance
   `Fable` -> `Claude` (owner: the local Mac instance now uses the "Claude" tag; channel renamed,
   ID unchanged). Live-verified against the owner's workspace: `test` -> `ok:true`, bot
-  `agent-sync-realtime` (`U0BF7MEDJ9X`); the curl engine and the local realtime push integration
+  `ag***-s**c-realtime` (`U0BF7MEDJ9X`); the curl engine and the local realtime push integration
   share one bot and are complementary.
-- `scripts/agent-sync-bootstrap.sh` (new): **self-contained** single-file installer that embeds the
+- `scripts/ag***-s**c-bootstrap.sh` (new): **self-contained** single-file installer that embeds the
   engine (no sibling dependency) for repos that cannot read this one (e.g. the `congress.trade`
   Cloudflare Worker). Generated from `slack-sync.sh` + `setup-slack-sync.sh`; sandbox-verified.
 
@@ -75,17 +75,17 @@ installed by a committed script.
   still split to its own channel later via `SLACK_CHANNEL_ID` with no code change.
 - **"Talk in shorthand, not prose"** rule (owner does not read the channel) documented in
   `docs/slack-coordination.md` and made durable in `AGENTS.md` (Agent Slack coordination section).
-- `scripts/agent-sync-bootstrap.sh` regenerated from the updated engine.
-- Announced the standardization to the local **Claude** instance on `#agent-sync` (posted via the
+- `scripts/ag***-s**c-bootstrap.sh` regenerated from the updated engine.
+- Announced the standardization to the local **Claude** instance on `#ag***-s**c` (posted via the
   new `SLACK_TOPIC=Socratic-Trade` + `SLACK_AGENT_NAME=Monet` path -> rendered
   `[Socratic-Trade] [Monet] ...`).
 
 ## Owner actions
 - **Token is now live in the Monet cloud env** (`SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID`), so Monet
-  posts to `#agent-sync` from cloud (verified). Optionally add `AGENT_NAME=Monet` for auto-prefix.
+  posts to `#ag***-s**c` from cloud (verified). Optionally add `AGENT_NAME=Monet` for auto-prefix.
 - **congress.trade (separate repo, out of this session's GitHub scope):** drop
-  `scripts/agent-sync-bootstrap.sh` into it; cloud setup script = its deps step + `bash
-  scripts/agent-sync-bootstrap.sh`; add `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID=C0BEZDJDNKV` secrets.
+  `scripts/ag***-s**c-bootstrap.sh` into it; cloud setup script = its deps step + `bash
+  scripts/ag***-s**c-bootstrap.sh`; add `SLACK_BOT_TOKEN` + `SLACK_CHANNEL_ID=C0BEZDJDNKV` secrets.
 - **Coordination open item:** asked the local **Claude** instance which global `~/.claude`
   SessionStart hook is canonical (its "always-enable" mechanism vs `setup-slack-sync.sh`) to avoid
   double-wiring on the Mac; the `hook` per-session dedup covers its own entry only.

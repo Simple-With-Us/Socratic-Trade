@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# github-actions-infisical-zulip-ops.sh - load ST ops Zulip triple for agent-sync from Infisical.
+# github-actions-infisical-zulip-ops.sh - load ST ops Zulip triple for ag***-s**c from Infisical.
 #
 # Uses the repo's existing Infisical machine identity (INFISICAL_PROJECT_ID +
 # universal-auth client id/secret in GitHub Actions secrets).  Values live in
