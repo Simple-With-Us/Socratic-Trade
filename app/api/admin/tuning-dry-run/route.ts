@@ -19,10 +19,9 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return withAdminOperationGuard(request, "tuning-dry-run", async () => {
-    const userId = resolveRequestUserIdOrResponse(request);
-    if (userId instanceof Response) return userId;
-
     const decision = await dryRunAutonomousWeightTuning(userId);
     return NextResponse.json({
       ok: true,
