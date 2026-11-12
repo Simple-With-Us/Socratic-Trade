@@ -1,8 +1,8 @@
-# 2026-11-12 Dependabot minimatch override (ST-4619)
+# 2026-11-12 minimatch advisory override (ST-4619)
 
 ## Context & Objective
 
-Dependabot Updates on `main` failed three times in the last seven days, all on the same minimatch security job, and no run succeeded.  The updater can see a patched minimatch, but the install still requests 10.x, so the security update cannot be applied and the workflow stays red.
+The automated dependency security-update lane on `main` failed three times in the last seven days, all on the same minimatch advisory, and no run succeeded.  The updater can see a patched minimatch, but the install still requests 10.x, so the security update cannot be applied and the workflow stays red.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates (`renovate.json`).
 
 ## Changes Made
 
@@ -31,7 +31,7 @@ The override is scoped to the vulnerable request range instead of every minimatc
 
 ## Next Steps & Blockers
 
-Wait for `verify`.  Do not merge from this lane and do not hand-run Dependabot or a deploy.  The next Dependabot security run should find the vulnerable 10.2.x and 11.0.4 copies gone.
+Wait for `verify`.  Do not merge from this lane and do not hand-run the dependency updater or a deploy.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates (`renovate.json`), so the next Renovate vulnerability-alert pass is the run that should find the vulnerable 10.2.x and 11.0.4 copies gone.  The repo-local confirmation is `npm audit` (0 vulnerabilities, no minimatch finding) plus `test/minimatch-advisory-override.test.ts`, which fails if a resolved minimatch copy is below 3.0.5 or in the unpatched 7 through 11.0.6 advisory range.
 
 ## Zero-Code Findings
 
