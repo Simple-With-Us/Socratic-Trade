@@ -143,4 +143,23 @@ final class MobileAPIHTTPRetryPolicyTests: XCTestCase {
         DispatchQueue.concurrentPerform(iterations: 200) { _ in _ = latch.shouldReport() }
         XCTAssertEqual(latch.grantedCount, 1)
     }
+    func testSnapshotAndEventsLatchesAreIndependent() {
+        XCTAssertFalse(OutageReportLatch.snapshot === OutageReportLatch.events)
+        let snapshot = OutageReportLatch()
+        let events = OutageReportLatch()
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 503, latch: snapshot))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 503, latch: snapshot))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 503, latch: events))
+        snapshot.reset()
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 502, latch: snapshot))
+    }
+
+    func testGatewayReportGateLeavesLatchOpenForOtherStatuses() {
+        let latch = OutageReportLatch()
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 500, latch: latch))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 404, latch: latch))
+        XCTAssertEqual(latch.grantedCount, 0)
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 504, latch: latch))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(statusCode: 504, latch: nil))
+    }
 }

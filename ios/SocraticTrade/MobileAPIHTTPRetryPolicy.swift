@@ -81,6 +81,13 @@ enum MobileAPIHTTPRetryPolicy {
     static func shouldCaptureExhaustedServerError(statusCode: Int) -> Bool {
         transientGatewayStatusCodes.contains(statusCode)
     }
+
+    /// `shouldCaptureExhaustedServerError`, deduped per outage when a latch is given.
+    /// The latch is consumed only for 502–504, so other statuses never close it.
+    static func shouldReportGatewayFailure(statusCode: Int, latch: OutageReportLatch?) -> Bool {
+        guard shouldCaptureExhaustedServerError(statusCode: statusCode) else { return false }
+        return latch?.shouldReport() ?? true
+    }
 }
 
 /// Per-outage dedup for a manual Sentry report on a path that reconnects on its own (the SSE
@@ -90,6 +97,8 @@ enum MobileAPIHTTPRetryPolicy {
 final class OutageReportLatch: @unchecked Sendable {
     /// Shared by every MobileAPIClient copy so `MobileStore`'s reconnect loop sees one outage.
     static let events = OutageReportLatch()
+    /// Separate latch for /api/mobile/snapshot (every SSE failure schedules a snapshot reload).
+    static let snapshot = OutageReportLatch()
 
     private let lock = NSLock()
     private var latched = false

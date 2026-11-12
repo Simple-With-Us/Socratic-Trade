@@ -119,6 +119,8 @@ struct MobileAPIClient {
     var isolatedProtocolClasses: [AnyClass]? = nil
     /// Dedups the manual 502-504 Sentry report on the SSE stream to one per outage.
     var eventsOutageLatch: OutageReportLatch = .events
+    /// Dedups the manual 502-504 Sentry report on /api/mobile/snapshot to one per outage.
+    var snapshotOutageLatch: OutageReportLatch = .snapshot
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
@@ -147,7 +149,8 @@ struct MobileAPIClient {
             for: req,
             captureFailures: captureFailures,
             maxTransientRetries: maxGatewayRetries,
-            maxNetworkRetries: 0
+            maxNetworkRetries: 0,
+            outageLatch: snapshotOutageLatch
         )
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
@@ -526,8 +529,10 @@ struct MobileAPIClient {
             try Self.requireSuccess(response, body: nil)
         } catch let error as MobileAPIError {
             if case .serverError(let statusCode, _) = error,
-               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode),
-               eventsOutageLatch.shouldReport() {
+               MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(
+                   statusCode: statusCode,
+                   latch: eventsOutageLatch
+               ) {
                 SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: "/api/mobile/events")
             }
             throw error
@@ -651,7 +656,8 @@ struct MobileAPIClient {
         deviceTokenConflictPath: Bool = false,
         transport: URLSession? = nil,
         maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
-        maxNetworkRetries: Int? = nil
+        maxNetworkRetries: Int? = nil,
+        outageLatch: OutageReportLatch? = nil
     ) async throws -> Data {
         let (data, _) = try await transientAwareData(
             for: request,
@@ -659,7 +665,8 @@ struct MobileAPIClient {
             deviceTokenConflictPath: deviceTokenConflictPath,
             transport: transport,
             maxTransientRetries: maxTransientRetries,
-            maxNetworkRetries: maxNetworkRetries
+            maxNetworkRetries: maxNetworkRetries,
+            outageLatch: outageLatch
         )
         return data
     }
@@ -672,7 +679,9 @@ struct MobileAPIClient {
         pathForTelemetry: String? = nil,
         maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
         /// Transport-error retry budget; nil means the same as `maxTransientRetries`.
-        maxNetworkRetries: Int? = nil
+        maxNetworkRetries: Int? = nil,
+        /// When set, the manual 502-504 report fires once per outage; a 2xx resets it.
+        outageLatch: OutageReportLatch? = nil
     ) async throws -> (Data, URLResponse) {
         let endpoint = pathForTelemetry ?? request.url?.absoluteString ?? ""
         var attemptIndex = 0
@@ -734,11 +743,15 @@ struct MobileAPIClient {
                 try Self.requireSuccess(response, body: data)
             } catch let error as MobileAPIError {
                 if case .serverError(let statusCode, _) = error,
-                   MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
+                   MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(
+                       statusCode: statusCode,
+                       latch: outageLatch
+                   ) {
                     SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
                 }
                 throw error
             }
+            outageLatch?.reset()
             return (data, response)
         }
     }

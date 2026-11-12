@@ -66,6 +66,38 @@ final class MobileAPIClientRetryTests: XCTestCase {
         XCTAssertEqual(RetryStubURLProtocol.paths, ["/api/scan", "/api/scan"])
     }
 
+    func testSnapshotGatewayFailureReportedOncePerOutage() async {
+        // Outage 1: two refreshes, each 503 + one transport retry.  Then a clean snapshot,
+        // then outage 2: one refresh of 503 + retry.
+        RetryStubURLProtocol.script = [
+            .status(503), .status(503),
+            .status(503), .status(503),
+            .status(200, Self.minimalSnapshotJSON),
+            .status(503), .status(503),
+        ]
+        let latch = OutageReportLatch()
+        var client = MobileAPIClient(baseURL: base, session: Self.stubbedSession())
+        client.snapshotOutageLatch = latch
+        for _ in 0..<2 {
+            do {
+                _ = try await client.snapshotData(timeout: 5, captureFailures: false)
+                XCTFail("expected serverError")
+            } catch {}
+        }
+        XCTAssertEqual(latch.grantedCount, 1)
+        do {
+            _ = try await client.snapshotData(timeout: 5, captureFailures: false)
+        } catch {
+            XCTFail("expected a clean snapshot, got \(error)")
+        }
+        do {
+            _ = try await client.snapshotData(timeout: 5, captureFailures: false)
+            XCTFail("expected serverError")
+        } catch {}
+        XCTAssertEqual(latch.grantedCount, 2)
+        XCTAssertEqual(RetryStubURLProtocol.paths.count, 7)
+    }
+
     func testEventsGatewayFailureReportedOncePerOutage() async {
         // Two 503s in one outage, a successful connect, then a 503 in a new outage.
         RetryStubURLProtocol.script = [.status(503), .status(503), .status(200, ""), .status(503)]
