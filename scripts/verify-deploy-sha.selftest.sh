@@ -65,6 +65,7 @@ mkcommit() { echo "$1" > "${REPO}/file.txt"; gitc add file.txt; gitc commit -q -
 C1="$(mkcommit c1)"
 C2="$(mkcommit c2)"
 C3="$(mkcommit c3)"
+: "${C2:?need middle commit for sidebranch history}"
 gitc checkout -q -b sidebranch "$C1"
 D="$(mkcommit d)"
 gitc checkout -q "$C3"
