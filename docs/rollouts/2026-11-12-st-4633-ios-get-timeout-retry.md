@@ -6,7 +6,7 @@ Sentry SOCRATIC-TRADE-2W is `NSURLErrorDomain` code -1001 on `GET /api/mobile/sn
 
 ## Changes Made
 
-Idempotent GET and HEAD calls through `MobileAPIClient` try the request again twice after `URLError.timedOut` or `NSURLErrorTimedOut` (-1001), with a 300ms then 600ms backoff.  POST, PUT, PATCH, and DELETE return the first timeout.  `get` still retries other network errors and HTTP status codes at or above 500.  Snapshot load no longer starts a second timeout budget after the client budget is spent.  The long-lived events stream is left to its existing reconnect loop.
+Idempotent GET and HEAD calls through `MobileAPIClient` retry after `URLError.timedOut` or `NSURLErrorTimedOut` (-1001), with a 300ms then 600ms backoff.  A per-attempt timeout under 45s gets two extra tries.  Snapshot load is 45s and market scan is 50s, so those get one extra try.  Three full snapshot waits were about 136s with `isRefreshing` left on.  Two waits plus the 300ms backoff stay near the store loop that already existed for other network errors.  POST, PUT, PATCH, and DELETE return the first timeout.  `get` still retries other network errors and HTTP status codes at or above 500.  Snapshot load no longer starts a second timeout budget after the client budget is spent.  The long-lived events stream is left to its existing reconnect loop.
 
 - `ios/SocraticTrade/MobileAPITransportTimeoutRetry.swift`
 - `ios/SocraticTrade/MobileAPIClient.swift`
@@ -17,7 +17,7 @@ Idempotent GET and HEAD calls through `MobileAPIClient` try the request again tw
 
 ## Decisions & Trade-offs
 
-The retry lives next to `URLSession.data` so snapshot, scan, quote, and the other idempotent reads share one rule.  HEAD is included because it is safe to repeat.  OPTIONS is unused.  The events stream stays out: its idle timeout is 120s and `MobileStore.startEvents` already reconnects.  `AppUpdatePrompt` talks to the App Store lookup host on `URLSession.shared`, not this client.  Sentry still records the timeout after the budget is spent.  Per-attempt timeouts are not captured.  No phase doc owns this helper.  ST-4611's `MobileAPIHTTPRetryPolicy` is a separate open branch.  If that branch lands first, keep a single network-retry loop so a timeout is not retried by both helpers.
+The retry lives next to `URLSession.data` so snapshot, scan, quote, and the other idempotent reads share one rule.  HEAD is included because it is safe to repeat.  OPTIONS is unused.  `maxRetries(forTimeout:)` caps a 45s-or-longer request at one extra try.  Short GETs still retry twice.  The events stream stays out: its idle timeout is 120s and `MobileStore.startEvents` already reconnects.  `AppUpdatePrompt` talks to the App Store lookup host on `URLSession.shared`, not this client.  Sentry still records the timeout after the budget is spent.  Per-attempt timeouts are not captured.  No phase doc owns this helper.  ST-4611's `MobileAPIHTTPRetryPolicy` is a separate open branch.  If that branch lands first, keep a single network-retry loop so a timeout is not retried by both helpers.
 
 ## Verification State
 
@@ -28,11 +28,11 @@ npm test
 NODE_OPTIONS=--max-old-space-size=4096 npm run build
 ```
 
-`npm run lint` exited 0 (869 existing warnings, 0 errors).  `npx tsc --noEmit` exited 0.  `npm run build` exited 0 after the default V8 heap aborted the first attempt.  `npm test` exited 1: 18 failed, 10248 passed, 41 skipped, across 12 files (`chat-llm`, `red-team`, `lesson-vectors`, `data-providers`, `alpha-vantage-key-pool`, `openrouter-credits`, `framework-review`, `notify-user-creds`, `notify-body-tiers`, `persistence-notification`, `server-metrics`, `automerge-reusable-pin`).  None of those files are in this diff.  Swift compile and `MobileAPITransportTimeoutRetryTests` run on hosted `ios-build` (`.github/workflows/ios-build.yml`).  This seat cannot run `xcodebuild`.  The new tests fail on the old client: a snapshot GET that times out twice then returns 200 used to stop on the first timeout, and a load that only times out used to stop after two attempts instead of the three-attempt budget.
+`npm run lint` exited 0 (869 existing warnings, 0 errors).  `npx tsc --noEmit` exited 0.  `npm run build` exited 0 after the default V8 heap aborted the first attempt.  `npm test` exited 1: 18 failed, 10248 passed, 41 skipped, across 12 files (`chat-llm`, `red-team`, `lesson-vectors`, `data-providers`, `alpha-vantage-key-pool`, `openrouter-credits`, `framework-review`, `notify-user-creds`, `notify-body-tiers`, `persistence-notification`, `server-metrics`, `automerge-reusable-pin`).  None of those files are in this diff.  Swift compile and `MobileAPITransportTimeoutRetryTests` run on hosted `ios-build` (`.github/workflows/ios-build.yml`).  This seat cannot run `xcodebuild`.  The new tests fail on the old client: a short snapshot GET that times out twice then returns 200 used to stop on the first timeout.  `load()` uses the 45s timeout, so a persistent timeout stops after two attempts and `isRefreshing` is false.  Market scan stops after two attempts as well.  This follow-up is Swift only.  The earlier Node gate on this branch still stands: lint and `tsc --noEmit` exited 0, `npm run build` exited 0 with a 4GB heap, and `npm test` had 18 failures in unrelated files.
 
 ## Next Steps & Blockers
 
-Open a ready PR against `main`.  Do not merge, do not enable auto-merge, and do not deploy.  Wait for `verify` and `ios-build`.
+PR #5175 is open.  Do not merge, do not enable auto-merge, and do not deploy.  Wait for `verify` and `ios-build` on the timeout-cap commit.  Seer Code Review flagged the 136s snapshot budget.  This commit is that fix.
 
 ## Zero-Code Findings
 

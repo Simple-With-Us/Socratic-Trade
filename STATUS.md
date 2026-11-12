@@ -1,6 +1,6 @@
 ## 2026-11-12 CURSOR — ST-4633 iOS GET transport-timeout retry
 
-**What.** Idempotent iOS GETs and HEADs retry twice after NSURLError -1001 (`URLError.timedOut`).  POST, PUT, PATCH, and DELETE stay single-shot.  The existing GET retry for HTTP 5xx is unchanged, and Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
+**What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once, so a persistent timeout cannot hold refresh for about 136s.  POST, PUT, PATCH, and DELETE stay single-shot.  The existing GET retry for HTTP 5xx is unchanged, and Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
 **Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
 

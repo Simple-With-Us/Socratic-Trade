@@ -3,8 +3,12 @@ import Foundation
 /// Retry rule for NSURLError -1001 (`URLError.timedOut`) on idempotent reads.
 /// HTTP 5xx stays on its own path.  This type does not decide gateway retries.
 enum MobileAPITransportTimeoutRetry {
-    /// Extra tries after the first attempt (three tries total).
+    /// Extra tries after the first attempt (three tries total) for a short request.
     static let maxRetries = 2
+
+    /// A per-attempt wait this long gets one extra try, not two.
+    /// Snapshot load is 45s.  Two extra tries held refresh for about 136s.
+    static let singleRetryTimeout: TimeInterval = 45
 
     static func isIdempotentRead(method: String?) -> Bool {
         let normalized = (method ?? "GET")
@@ -43,6 +47,15 @@ enum MobileAPITransportTimeoutRetry {
         guard attemptIndex >= 0, attemptIndex < maxRetries else { return false }
         guard isIdempotentRead(method: method) else { return false }
         return isTransportTimeout(error)
+    }
+
+    /// Short GETs retry twice.  A 45s snapshot or a 50s scan retries once, so a
+    /// persistent timeout cannot stack three full waits.
+    static func maxRetries(forTimeout timeout: TimeInterval) -> Int {
+        if timeout >= singleRetryTimeout {
+            return 1
+        }
+        return maxRetries
     }
 
     /// 300ms, then 600ms.  Matches the existing GET backoff and stays under one second.

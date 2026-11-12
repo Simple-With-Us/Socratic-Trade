@@ -602,12 +602,15 @@ struct MobileAPIClient {
     }
 
     /// One or two extra attempts when an idempotent read hits NSURLError -1001.
-    /// POST, PATCH, PUT, and DELETE return the first timeout.  HTTP status retries
-    /// stay in `get`.
+    /// A timeout of 45s or longer gets one extra attempt.  POST, PATCH, PUT, and
+    /// DELETE return the first timeout.  HTTP status retries stay in `get`.
     private func dataRetryingTransportTimeout(
         for request: URLRequest,
         transport: URLSession
     ) async throws -> (Data, URLResponse) {
+        let retryLimit = MobileAPITransportTimeoutRetry.maxRetries(
+            forTimeout: request.timeoutInterval
+        )
         var attemptIndex = 0
         while true {
             do {
@@ -618,7 +621,8 @@ struct MobileAPIClient {
                 guard MobileAPITransportTimeoutRetry.shouldRetry(
                     error: error,
                     method: request.httpMethod,
-                    attemptIndex: attemptIndex
+                    attemptIndex: attemptIndex,
+                    maxRetries: retryLimit
                 ) else {
                     throw error
                 }
