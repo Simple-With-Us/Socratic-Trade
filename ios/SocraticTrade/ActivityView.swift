@@ -798,14 +798,17 @@ struct NotificationHistorySection: View {
                     }
                     .font(.appCaption.weight(filter == option ? .bold : .semibold))
                     .padding(.horizontal, 12)
-                    .frame(minHeight: 36)
+                    .padding(.vertical, 8)
                     .background(
                         filter == option ? AppPalette.accent.opacity(0.14) : Color.clear,
                         in: Capsule()
                     )
                     .foregroundStyle(filter == option ? AppPalette.accent : .secondary)
                 }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Capsule())
                 .buttonStyle(.plain)
+                .accessibilityLabel(option.rawValue)
                 .accessibilityAddTraits(filter == option ? .isSelected : [])
             }
             Spacer()

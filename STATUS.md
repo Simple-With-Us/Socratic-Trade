@@ -1,3 +1,9 @@
+## 2026-11-12 [gb-trader] ST-4618 — iOS Dynamic Type chrome + 44pt tap targets
+
+**What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
+
+**Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.

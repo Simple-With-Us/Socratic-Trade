@@ -41,6 +41,55 @@ enum AppFont {
     }
 }
 
+/// UIKit chrome fonts scaled for Dynamic Type with a ceiling so nav/tab chrome stays usable.
+enum AppChromeFontScaling {
+    struct ChromeFontSpec {
+        let basePointSize: CGFloat
+        let textStyle: UIFont.TextStyle
+        let weight: UIFont.Weight
+        let maximumPointSize: CGFloat
+    }
+
+    static let navigationTitle = ChromeFontSpec(
+        basePointSize: 17,
+        textStyle: .headline,
+        weight: .bold,
+        maximumPointSize: 23
+    )
+    static let navigationLargeTitle = ChromeFontSpec(
+        basePointSize: 34,
+        textStyle: .largeTitle,
+        weight: .bold,
+        maximumPointSize: 41
+    )
+    static let tabBarItem = ChromeFontSpec(
+        basePointSize: 10,
+        textStyle: .caption2,
+        weight: .regular,
+        maximumPointSize: 13
+    )
+    static let segmentedControl = ChromeFontSpec(
+        basePointSize: 13,
+        textStyle: .footnote,
+        weight: .regular,
+        maximumPointSize: 17
+    )
+
+    static func scaledUIFont(
+        _ spec: ChromeFontSpec,
+        contentSizeCategory: UIContentSizeCategory = UIApplication.shared.preferredContentSizeCategory
+    ) -> UIFont {
+        let base = AppFont.uiFont(spec.basePointSize, weight: spec.weight)
+        let metrics = UIFontMetrics(forTextStyle: spec.textStyle)
+        let traits = UITraitCollection(preferredContentSizeCategory: contentSizeCategory)
+        return metrics.scaledFont(
+            for: base,
+            maximumPointSize: spec.maximumPointSize,
+            compatibleWith: traits
+        )
+    }
+}
+
 extension Font {
     static let appLargeTitle = Font.custom(AppFont.regular, size: 34, relativeTo: .largeTitle)
     static let appTitle = Font.custom(AppFont.regular, size: 28, relativeTo: .title)
@@ -64,18 +113,40 @@ extension Font {
 /// Only the title/label fonts are touched; colours, materials, and scroll-edge behaviour are
 /// left to the system so this cannot regress the glass tab bar.
 enum AppAppearance {
+    private static var contentSizeObserver: NSObjectProtocol?
+    private static var didInstallContentSizeObserver = false
+
     static func applyFonts() {
+        applyChromeFonts()
+        installContentSizeObserverIfNeeded()
+    }
+
+    private static func installContentSizeObserverIfNeeded() {
+        guard !didInstallContentSizeObserver else { return }
+        didInstallContentSizeObserver = true
+        contentSizeObserver = NotificationCenter.default.addObserver(
+            forName: UIContentSizeCategory.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            applyChromeFonts()
+        }
+    }
+
+    private static func applyChromeFonts() {
         let nav = UINavigationBarAppearance()
         nav.configureWithDefaultBackground()
-        nav.titleTextAttributes = [.font: AppFont.uiFont(17, weight: .bold)]
-        nav.largeTitleTextAttributes = [.font: AppFont.uiFont(34, weight: .bold)]
+        nav.titleTextAttributes = [.font: AppChromeFontScaling.scaledUIFont(.navigationTitle)]
+        nav.largeTitleTextAttributes = [.font: AppChromeFontScaling.scaledUIFont(.navigationLargeTitle)]
         UINavigationBar.appearance().standardAppearance = nav
         UINavigationBar.appearance().compactAppearance = nav
         UINavigationBar.appearance().scrollEdgeAppearance = nav
 
+        let tabFont = AppChromeFontScaling.scaledUIFont(.tabBarItem)
+        let segmentedFont = AppChromeFontScaling.scaledUIFont(.segmentedControl)
         for state in [UIControl.State.normal, .selected, .highlighted, .disabled] {
-            UITabBarItem.appearance().setTitleTextAttributes([.font: AppFont.uiFont(10)], for: state)
-            UISegmentedControl.appearance().setTitleTextAttributes([.font: AppFont.uiFont(13)], for: state)
+            UITabBarItem.appearance().setTitleTextAttributes([.font: tabFont], for: state)
+            UISegmentedControl.appearance().setTitleTextAttributes([.font: segmentedFont], for: state)
         }
     }
 }
