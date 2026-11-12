@@ -142,6 +142,7 @@ describe("proxy gate slot leak", () => {
       { slotIdleMs: 30_000, slotMaxHoldMs: 80 }
     );
     const res = await proxied("https://example.test/slow");
+    expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
     const reader = res.body!.getReader();
     try {
       const first = await reader.read();
@@ -162,6 +163,85 @@ describe("proxy gate slot leak", () => {
     } finally {
       await reader.cancel();
     }
+  });
+
+  it("abandons a stalled body after max hold has released the slot", async () => {
+    process.env.PROXY_MAX_CONCURRENCY = "1";
+    let cancelled = false;
+    let pulls = 0;
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      (async () => new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new Uint8Array([1]));
+              return;
+            }
+            return new Promise<void>(() => undefined);
+          },
+          cancel() {
+            cancelled = true;
+          }
+        }),
+        { status: 200 }
+      )) as typeof fetch,
+      { slotIdleMs: 90, slotMaxHoldMs: 40, proxyTimeoutMs: 5_000 }
+    );
+    const res = await proxied("https://example.test/stall");
+    expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
+    const reader = res.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    await sleep(70);
+    expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+    expect(cancelled).toBe(false);
+    await sleep(160);
+    expect(cancelled).toBe(true);
+    await expect(reader.read()).rejects.toThrow(/aborted/i);
+  });
+
+  it("keeps the proxy-leg timer armed after max hold releases the slot", async () => {
+    process.env.PROXY_MAX_CONCURRENCY = "1";
+    let cancelled = false;
+    let pulls = 0;
+    const proxied = createProxiedFetch(
+      "http://proxy.test:8888",
+      (async () => new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            pulls += 1;
+            if (pulls === 1) {
+              controller.enqueue(new Uint8Array([1]));
+              return;
+            }
+            return new Promise<void>(() => undefined);
+          },
+          cancel() {
+            cancelled = true;
+          }
+        }),
+        { status: 200 }
+      )) as typeof fetch,
+      { slotIdleMs: 30_000, slotMaxHoldMs: 40, proxyTimeoutMs: 180 }
+    );
+    const res = await proxied("https://example.test/leg");
+    expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
+    const reader = res.body!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    await sleep(80);
+    expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
+    expect(cancelled).toBe(false);
+    const second = reader.read();
+    await expect(Promise.race([
+      second,
+      sleep(400).then(() => {
+        throw new Error("leg timer did not abort after slot release");
+      })
+    ])).rejects.toThrow(/aborted/i);
+    expect(cancelled).toBe(true);
   });
 
   it("cancels a status >= 400 body unless the caller opts in", async () => {

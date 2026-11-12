@@ -420,19 +420,28 @@ const bodyReleaseRegistry = new FinalizationRegistry<() => void>((release) => {
  * FinalizationRegistry releases the slot if the response is collected
  * first. It does not error a stream that still has a reader.
  *
- * A max hold that has already delivered a chunk releases the slot and
- * leaves the stream up, so a slow download is not aborted at 20s. A max
- * hold that has delivered nothing, and an idle body, cancel the upstream
- * and error the stream. That is the unread or stalled leak.
+ * A max hold that has already delivered a chunk releases the gate slot
+ * and leaves the stream up, so a slow download is not aborted at 20s.
+ * That release does not clear the idle timer, and on the timed path it
+ * does not clear the proxy-leg timer. Both stay armed until the stream
+ * closes, so a later stall is still abandoned. A max hold that has
+ * delivered nothing, and an idle body with no read in progress, cancel
+ * the upstream and error the stream. That is the unread or stalled leak.
+ *
+ * `onBodySettled` runs once when the stream finishes, errors, is
+ * cancelled, or is collected with no read in progress. It clears the
+ * leg timer and releases the slot. `onSlotRelease` runs earlier when a
+ * progressing body hits max hold. It releases only the gate slot.
  */
 function wrapBodyUntilSettle(
   res: Response,
   settleSignal: AbortSignal | undefined,
-  onSettle: () => void,
-  limits: BodyHoldLimits
+  onBodySettled: () => void,
+  limits: BodyHoldLimits,
+  onSlotRelease: () => void = onBodySettled
 ): Response {
   if (!res.body) {
-    onSettle();
+    onBodySettled();
     return res;
   }
   let slotReleased = false;
@@ -454,17 +463,24 @@ function wrapBodyUntilSettle(
     if (onBodyAbort && settleSignal) settleSignal.removeEventListener("abort", onBodyAbort);
     onBodyAbort = undefined;
   };
-  const releaseSlot = () => {
-    if (slotReleased) return;
+  const clearMaxTimer = () => {
+    if (maxTimer !== undefined) clearTimeout(maxTimer);
+    maxTimer = undefined;
+  };
+  const releaseGateSlot = () => {
+    if (slotReleased || streamClosed) return;
     slotReleased = true;
-    clearHoldTimers();
-    bodyReleaseRegistry.unregister(unregisterToken);
-    onSettle();
+    clearMaxTimer();
+    onSlotRelease();
   };
   const endStream = () => {
+    if (streamClosed) return;
     streamClosed = true;
+    slotReleased = true;
     detachAbort();
-    releaseSlot();
+    clearHoldTimers();
+    bodyReleaseRegistry.unregister(unregisterToken);
+    onBodySettled();
   };
   const upstream = res.body.getReader();
   // Cancelling an already-errored upstream rejects with the stored error
@@ -495,11 +511,11 @@ function wrapBodyUntilSettle(
     return timer;
   };
   const armIdle = () => {
-    if (slotReleased || streamClosed) return;
+    if (streamClosed) return;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = armTimer(limits.idleMs, () => {
       idleTimer = undefined;
-      if (slotReleased || streamClosed || pullActive) return;
+      if (streamClosed || pullActive) return;
       abandon();
     });
   };
@@ -541,7 +557,7 @@ function wrapBodyUntilSettle(
       } catch (err) {
         // A rejected read (mid-body socket reset, the leg timer disturbing
         // the body) errors the wrapped stream for the consumer, but nothing
-        // else settles the body: without releaseSlot() here, onSettle never
+        // else settles the body: without endStream() here, onBodySettled never
         // fires and whatever the body holds — the gate slot, the leg timer —
         // leaks for the life of the process.
         pullActive = false;
@@ -557,7 +573,7 @@ function wrapBodyUntilSettle(
       }
       pullActive = false;
       bytesSeen = true;
-      if (!slotReleased && !streamClosed) armIdle();
+      if (!streamClosed) armIdle();
       controller.enqueue(chunk.value);
     },
     async cancel(reason) {
@@ -576,7 +592,8 @@ function wrapBodyUntilSettle(
       maxTimer = undefined;
       if (slotReleased || streamClosed) return;
       if (bytesSeen) {
-        releaseSlot();
+        releaseGateSlot();
+        armIdle();
         return;
       }
       abandon();
@@ -584,8 +601,12 @@ function wrapBodyUntilSettle(
     armIdle();
     bodyReleaseRegistry.register(wrapped, () => {
       const reading = pullActive;
-      releaseSlot();
-      if (!reading && !streamClosed) void cancelUpstream(new DOMException("aborted", "AbortError"));
+      if (!reading && !streamClosed) {
+        endStream();
+        void cancelUpstream(new DOMException("aborted", "AbortError"));
+        return;
+      }
+      releaseGateSlot();
     }, unregisterToken);
   }
   return wrapped;
@@ -650,7 +671,7 @@ export function createProxiedFetch(
     if (!proxyTimeoutMs || proxyTimeoutMs <= 0) {
       try {
         const res = await baseFetch(input, withDispatcher);
-        return wrapBodyUntilSettle(res, callerSignal, () => slot.release(), holdLimits);
+        return wrapBodyUntilSettle(res, callerSignal, () => slot.release(), holdLimits, () => slot.release());
       } catch (err) {
         slot.release();
         throw err;
@@ -681,14 +702,14 @@ export function createProxiedFetch(
           ? AbortSignal.any([proxyController.signal, callerSignal])
           : proxyController.signal;
       const res = await baseFetch(input, { ...withDispatcher, signal: effectiveSignal });
-      // The leg timer and the gate slot stay held until the body settles —
-      // wrapBodyUntilSettle calls cleanup exactly once at that point (and
-      // immediately, via the same path, when there is no body).  The body
+      // The leg timer stays armed until the body settles. A max hold that
+      // has already delivered a chunk releases only the gate slot, via the
+      // last argument, and leaves this cleanup for stream close. The body
       // wait settles on the EFFECTIVE signal, not just the caller's: a
       // header-then-stall body that never errors on its own is still
       // released when the leg timeout fires, instead of holding its slot
       // until the (possibly much larger) caller budget runs out.
-      return wrapBodyUntilSettle(res, effectiveSignal, cleanup, holdLimits);
+      return wrapBodyUntilSettle(res, effectiveSignal, cleanup, holdLimits, () => slot.release());
     } catch (err) {
       cleanup();
       throw err;
