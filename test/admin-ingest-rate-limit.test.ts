@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { adminIngestBucketKey, type AdminIngestLimitKind } from "../src/lib/admin-ingest-rate-limit";
 import { resetAdminOperationInFlight } from "../src/lib/admin-operation-guard";
 import {
@@ -13,6 +13,7 @@ import { AUTHENTICATED_EMAIL_HEADER } from "../src/lib/request-user";
 import * as chatHistory from "../src/lib/chat-history";
 
 const TOKEN = "ingest-rate-limit-test-token";
+const TEST_DATABASE_URL = `file:${join(tmpdir(), `agentic-admin-ingest-rl-${randomUUID()}.db`)}`;
 
 const mocks = vi.hoisted(() => ({
   startCorpusReembedRun: vi.fn(),
@@ -128,11 +129,8 @@ async function expectLimited(response: Response, spy: { mock: { calls: unknown[]
   expect(spy.mock.calls).toHaveLength(0);
 }
 
-beforeAll(() => {
-  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-admin-ingest-rl-${randomUUID()}.db`)}`;
-});
-
 beforeEach(() => {
+  vi.stubEnv("DATABASE_URL", TEST_DATABASE_URL);
   resetRateLimiter();
   resetAdminOperationInFlight();
   listAllTurns.mockClear();

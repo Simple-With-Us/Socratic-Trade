@@ -24,7 +24,7 @@ A dedicated admin-ingest limiter now runs after the existing admin check and bef
 
 ## Decisions & Trade-offs
 
-The new cap is in addition to the hourly operation budgets.  Those budgets stay the tighter control where they already exist (2 reindexes per hour, 6 SEC seeds per hour).  The new cap is what stops paths the operation guard does not wrap: corpus reembed, SEC dead-letter requeue, vector-store status reads, and the chat transcript.  Empty 10-K symbol lists and unknown web-source ids still return 400 before the new budget is spent.  Reads and job starts use separate buckets so a transcript refresh does not consume a reindex start.  Learning-ledger and the ST-4610 identity handling were not edited.
+The new cap is in addition to the hourly operation budgets.  Those budgets stay the tighter control where they already exist (2 reindexes per hour, 6 SEC seeds per hour).  The new cap is what stops paths the operation guard does not wrap: corpus reembed, SEC dead-letter requeue, vector-store status reads, and the chat transcript.  Empty 10-K symbol lists and unknown web-source ids still return 400 before the new budget is spent.  Reads and job starts use separate buckets so a transcript refresh does not consume a reindex start.  Learning-ledger and the ST-4610 identity handling were not edited.  The SEC ingest 400 body stays the existing action message.  The production-notes bullets stay under the admission section, and the test database URL is restored after each test.
 
 ## Verification State
 
