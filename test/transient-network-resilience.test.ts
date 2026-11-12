@@ -27,7 +27,8 @@ describe("transient network classifiers", () => {
   it("classifies budget aborts as soft health and socket deaths as hard", async () => {
     const { isSoftHealthFailure } = await import("../src/lib/db-health");
     expect(isSoftHealthFailure("This operation was aborted")).toBe(true);
-    expect(isSoftHealthFailure("AbortError: The operation was aborted")).toBe(true);
+    // A named AbortError is a provider timeout (transient), not a caller-budget abort.
+    expect(isSoftHealthFailure("AbortError: The operation was aborted")).toBe(false);
     expect(isSoftHealthFailure("fetch failed")).toBe(false);
     expect(isSoftHealthFailure("other side closed")).toBe(false);
   });
