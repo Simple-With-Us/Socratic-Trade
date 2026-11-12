@@ -32,10 +32,13 @@ struct SocraticTradeApp: App {
         AppAppearance.applyFonts()
     }
 
+    @State private var appLock = AppLockController()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environment(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
                 // picker on this app yet — do not follow OS dark by default).
@@ -51,6 +54,7 @@ struct SocraticTradeApp: App {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: MobileStore
+    @Environment(AppLockController.self) private var appLock
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The splash's own floor, independent of the network. Without it a warm launch (cached
@@ -58,8 +62,18 @@ struct ContentView: View {
     /// a flicker rather than a brand moment. With it, a fast launch still gets the full
     /// animation and a slow one is never held back — the splash leaves when BOTH are done.
     @State private var minimumSplashElapsed = false
+    @State private var didConfigurePush = false
+    /// fullScreenCover misses a binding that is already true on the first frame.
+    /// Arming it on appear turns the lock into a false-to-true presentation.
+    @State private var lockCoverArmed = false
 
     private var showSplash: Bool { !store.hasInitialized || !minimumSplashElapsed }
+
+    /// Screenshot runs stay unlocked. Otherwise the lock covers the session until Face ID,
+    /// Touch ID, or the device passcode succeeds.
+    private var showsAppLock: Bool {
+        !SocraticTradeApp.isScreenshotMode && appLock.requiresLockScreen
+    }
 
     /// Set by `onOpenURL` AND by a tapped push notification, consumed (and cleared) by the tab
     /// shell.  Held here rather than inside the shell so a link that arrives before sign-in
@@ -119,11 +133,39 @@ struct ContentView: View {
                     // the content fading up through it.
                     .zIndex(1)
             }
+
+            if showsAppLock {
+                // Covers the session until the full-screen lock is up, including the
+                // frame before that cover presents. The cover itself is outside this
+                // stack so it still receives taps.
+                AppPalette.background
+                    .ignoresSafeArea()
+                    .zIndex(2)
+                    .accessibilityHidden(true)
+            }
         }
+        .accessibilityHidden(showsAppLock)
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
+        .fullScreenCover(isPresented: Binding(
+            get: { lockCoverArmed && showsAppLock },
+            set: { _ in }
+        )) {
+            AppLockView(controller: appLock)
+                .interactiveDismissDisabled(true)
+        }
+        .onAppear { lockCoverArmed = true }
         .task {
-            await bootstrap()
+            guard !didConfigurePush else { return }
+            didConfigurePush = true
+            PushNotificationCoordinator.shared.configure(
+                route: { destination in pendingDeepLink = destination },
+                isLiveStreamConnected: { store.isStreamConnected }
+            )
+        }
+        .task(id: appLock.isUnlocked) {
+            guard SocraticTradeApp.isScreenshotMode || appLock.isUnlocked else { return }
+            await bootstrapIfNeeded()
         }
         .task {
             try? await Task.sleep(for: .seconds(1.2))
@@ -143,31 +185,47 @@ struct ContentView: View {
         }
     }
 
-    private func bootstrap() async {
-        PushNotificationCoordinator.shared.configure(
-            route: { destination in pendingDeepLink = destination },
-            isLiveStreamConnected: { store.isStreamConnected }
-        )
+    private func bootstrapIfNeeded() async {
         if SocraticTradeApp.isScreenshotMode { return }
-        guard !store.hasInitialized else { return }
-        await store.load()
-        if store.isAuthenticated {
-            store.startEvents()
-            // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
-            // new device token after a restore or reinstall, and asking each launch is the
-            // only way to notice.
-            await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+        if !store.hasInitialized {
+            await store.load()
+            if store.isAuthenticated {
+                store.startEvents()
+                // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
+                // new device token after a restore or reinstall, and asking each launch is the
+                // only way to notice.
+                await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+            }
+            return
         }
+        await resumeLiveSessionIfNeeded()
+    }
+
+    private func resumeLiveSessionIfNeeded() async {
+        let resumeID = appLock.beginForegroundResume()
+        await AppLiveSessionResume.resumeLiveSession(
+            store: store,
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+            shouldStartEvents: {
+                appLock.isUnlocked && appLock.foregroundResumeID == resumeID
+            }
+        )
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {
         if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
-        case .active where store.isAuthenticated:
-            store.startEvents()
-            Task { await store.load() }
         case .background:
+            appLock.invalidateForegroundResume()
             store.stopEvents()
+            if appLock.isEnabled {
+                appLock.recordDidEnterBackground()
+            }
+        case .active:
+            appLock.evaluateForegroundEntry()
+            guard appLock.isUnlocked else { return }
+            guard store.hasInitialized, store.isAuthenticated else { return }
+            Task { await resumeLiveSessionIfNeeded() }
         default:
             break
         }
