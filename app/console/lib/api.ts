@@ -4,6 +4,7 @@
  *  non-blocking notice. The live-approval typed-confirmation contract mirrors
  *  app/api/proposals/[id]/approve/route.ts exactly. */
 
+import { loadSharedDashboard } from "./dashboard-request";
 import { beginConsoleMutation, endConsoleMutation, isConsoleMutationMethod } from "./mutation-busy";
 import type { LookaheadAuditFindingRow } from "@/lib/db-lookahead-audit";
 import type { SignalHealthSnapshotRow } from "@/lib/db-signal-health";
@@ -172,7 +173,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
 
-export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
+async function readDashboard<T>(signal: AbortSignal): Promise<T> {
   let res: Response;
   try {
     res = await fetch("/api/dashboard", { cache: "no-store", signal });
@@ -186,6 +187,10 @@ export async function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
     throw buildResponseError(res, payload, `Snapshot failed (${res.status}).`);
   }
   return (await res.json()) as T;
+}
+
+export function fetchDashboard<T>(signal?: AbortSignal): Promise<T> {
+  return loadSharedDashboard((sharedSignal) => readDashboard<T>(sharedSignal), signal);
 }
 
 // ── Strategy run-state ───────────────────────────────────────────────────────

@@ -146,6 +146,19 @@ test('Sentry Deploy defers during weekday RTH and re-runs after the evening drai
   assert.match(workflow, /github.event.workflow_run.name == 'RTH Deploy Latch'/);
 });
 
+test('production observation window matches slow Coolify deploy cadence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const script = readFileSync(new URL('./sentry-report-deploy.mjs', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/sentry-deploy.yml', import.meta.url), 'utf8');
+  const intervalMs = 20_000;
+  const attempts = 180;
+  const deadlineMs = 60 * 60 * 1000;
+  assert.match(script, new RegExp(`attempts = ${attempts}`));
+  assert.match(script, /deadline = now\(\) \+ 60 \* 60 \* 1000/);
+  assert.ok((attempts - 1) * intervalMs <= deadlineMs);
+  assert.match(workflow, /timeout-minutes: 65/);
+});
+
 test('a null JSON release is invalid data, not a retryable 404',async()=>{
  const s=service();let reads=0;let pauses=0;
  const fetchImpl=async(url,init)=>{
