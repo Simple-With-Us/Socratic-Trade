@@ -1,0 +1,172 @@
+/**
+ * ST-2797 — broker-backed GET routes return JSON 502/504 envelopes; JSON POST routes return 400 invalid_json.
+ */
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { brokerReadError, jsonError } from "../src/lib/api-error";
+import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
+
+const brokerStub = vi.hoisted(() => ({
+  getAccounts: vi.fn(),
+  getEquityPositions: vi.fn(),
+  getEquityOrders: vi.fn(),
+  getPortfolio: vi.fn()
+}));
+
+vi.mock("../src/lib/broker", () => ({
+  getBrokerGateway: () => brokerStub
+}));
+
+beforeEach(() => {
+  vi.resetModules();
+  brokerStub.getAccounts.mockReset();
+  brokerStub.getEquityPositions.mockReset();
+  brokerStub.getEquityOrders.mockReset();
+  brokerStub.getPortfolio.mockReset();
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-broker-route-err-${randomUUID()}.db`)}`;
+});
+
+async function seedRobinhoodAccount(email: string, accountNumber = "RH-ERR-TEST") {
+  const { upsertConnectedAccount, setPolicy } = await import("../src/lib/db");
+  const { DEFAULT_POLICY } = await import("../src/lib/defaults");
+  const { userId } = resolveRequestUserFromEmail(email);
+  const accountId = randomUUID();
+  upsertConnectedAccount({
+    id: accountId,
+    userId,
+    broker: "robinhood",
+    environment: "paper",
+    accountNumber,
+    isActive: true,
+    label: "Broker error test"
+  });
+  setPolicy(
+    { ...DEFAULT_POLICY, activeBroker: "robinhood", accountNumber, connectedAccountId: accountId },
+    userId
+  );
+  return { userId, accountNumber };
+}
+
+describe("src/lib/api-error", () => {
+  it("jsonError uses the shared envelope", async () => {
+    const res = jsonError(400, "invalid_json", "bad");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: "invalid_json", message: "bad" });
+  });
+
+  it("brokerReadError maps broker 401 to broker_auth_failed", async () => {
+    const res = brokerReadError(new Error("Tradier HTTP 401: invalid token sk-live-secret"));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("broker_auth_failed");
+    expect(body.message).not.toMatch(/sk-live/);
+  });
+
+  it("brokerReadError maps timeouts to 504", async () => {
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    const res = brokerReadError(err);
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toBe("broker_timeout");
+  });
+});
+
+describe("broker-backed GET routes", () => {
+  const email = "broker-err@test.local";
+
+  it("GET /api/positions returns 502 JSON when the broker throws", async () => {
+    await seedRobinhoodAccount(email);
+    brokerStub.getEquityPositions.mockRejectedValue(new Error("Tradier HTTP 503: gateway timeout"));
+    const { GET } = await import("../app/api/positions/route");
+    const res = await GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, error: "broker_unavailable" });
+    expect(body.message).toMatch(/503/);
+  });
+
+  it("GET /api/positions success shape unchanged", async () => {
+    await seedRobinhoodAccount(email);
+    const positions = [{ symbol: "AAPL", quantity: 1, marketValue: 100, averagePrice: 100, side: "long" as const }];
+    brokerStub.getEquityPositions.mockResolvedValue(positions);
+    const { GET } = await import("../app/api/positions/route");
+    const res = await GET(new Request("http://localhost/api/positions", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(positions);
+  });
+
+  it("GET /api/orders returns 504 on broker timeout", async () => {
+    await seedRobinhoodAccount(email);
+    const err = new Error("aborted");
+    err.name = "AbortError";
+    brokerStub.getEquityOrders.mockRejectedValue(err);
+    const { GET } = await import("../app/api/orders/route");
+    const res = await GET(new Request("http://localhost/api/orders", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.error).toBe("broker_timeout");
+  });
+
+  it("GET /api/portfolio returns 502 JSON when the broker throws", async () => {
+    await seedRobinhoodAccount(email);
+    brokerStub.getPortfolio.mockRejectedValue(new Error("HTTP 502"));
+    const { GET } = await import("../app/api/portfolio/route");
+    const res = await GET(new Request("http://localhost/api/portfolio", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, error: "broker_unavailable" });
+  });
+
+  it("GET /api/accounts returns 502 on broker auth failure", async () => {
+    await seedRobinhoodAccount(email);
+    brokerStub.getAccounts.mockRejectedValue(new Error("Alpaca HTTP 403: forbidden"));
+    const { GET } = await import("../app/api/accounts/route");
+    const res = await GET(new Request("http://localhost/api/accounts", { headers: { [AUTHENTICATED_EMAIL_HEADER]: email } }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, error: "broker_auth_failed" });
+  });
+});
+
+describe("malformed JSON on broker-adjacent routes", () => {
+  it("PUT /api/policy returns 400 invalid_json", async () => {
+    const { PUT } = await import("../app/api/policy/route");
+    const res = await PUT(
+      new Request("http://localhost/api/policy", {
+        method: "PUT",
+        headers: { "content-type": "application/json", [AUTHENTICATED_EMAIL_HEADER]: "policy-json@test.local" },
+        body: "{not-json"
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+
+  it("POST /api/orders/cancel returns 400 invalid_json", async () => {
+    const { POST } = await import("../app/api/orders/cancel/route");
+    const res = await POST(
+      new Request("http://localhost/api/orders/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "bad-json{"
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+
+  it("POST /api/keys returns 400 invalid_json", async () => {
+    const { POST } = await import("../app/api/keys/route");
+    const res = await POST(
+      new Request("http://localhost/api/keys", {
+        method: "POST",
+        headers: { "content-type": "application/json", [AUTHENTICATED_EMAIL_HEADER]: "keys-json@test.local" },
+        body: "}{"
+      }) as import("next/server").NextRequest
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+});

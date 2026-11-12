@@ -1,3 +1,4 @@
+import { jsonError } from "@/lib/api-error";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
   getActiveConnectedAccount,
@@ -44,7 +45,15 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const rawBody: unknown = await request.json();
+  let rawBody: unknown;
+  try {
+    rawBody = await request.json();
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return jsonError(400, "invalid_json", "Request body must be valid JSON.");
+    }
+    throw error;
+  }
   if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
     return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
   }

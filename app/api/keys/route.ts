@@ -1,5 +1,6 @@
 import "server-only";
 import { z } from "zod";
+import { jsonError, parseRequestJson } from "@/lib/api-error";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
@@ -405,8 +406,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const parsed = await parseRequestJson(request);
+  if (!parsed.ok) return parsed.response;
   try {
-    const body = (await request.json()) as {
+    const body = parsed.body as {
       userId?: string;
       service?: string;
       apiKey?: string;

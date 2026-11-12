@@ -1,3 +1,4 @@
+import { brokerReadError, jsonError, parseRequestJson } from "@/lib/api-error";
 import { cancelWorkingOrder, OrderCancelPreconditionError } from "@/lib/order-cancel";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
@@ -17,9 +18,11 @@ export const dynamic = "force-dynamic";
  * system is stopped. Typed confirmation is the ceremony for opening live risk, not closing it.
  */
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => null)) as { orderId?: unknown } | null;
-  if (!body || typeof body !== "object") {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  const parsed = await parseRequestJson(request);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.body as { orderId?: unknown } | null;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return jsonError(400, "invalid_json", "Request body must be a JSON object.");
   }
   const { orderId } = body;
   const userId = resolveRequestUserId(request);
@@ -32,6 +35,6 @@ export async function POST(request: Request) {
     if (error instanceof OrderCancelPreconditionError) {
       return new NextResponse(error.message, { status: error.status });
     }
-    throw error;
+    return brokerReadError(error);
   }
 }
