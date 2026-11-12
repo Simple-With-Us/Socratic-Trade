@@ -241,6 +241,13 @@ else
   cat "$CALLS" >&2 || true
 fi
 
+
+# A symlink to a regular executable still counts (the -f check follows it).
+# Pin this so a later guard that rejects symlinks cannot stay green.
+ln -s "$STUB" "${WORK}/trim-link"
+run_case trim_bin_is_symlink 0 LITESTREAM_L1_TRIM_BIN="${WORK}/trim-link"
+expect_three_calls trim_bin_is_symlink_runs
+
 # A bad opt-in value fails before the trim binary is executed.
 run_case bad_apply_env 2 LITESTREAM_L1_TRIM_BIN="$STUB" LITESTREAM_L1_TRIM_APPLY=yes
 if [ ! -f "$CALLS" ]; then
@@ -265,6 +272,26 @@ for code in 1 2 3 4 5 6 126; do
     sed -n '1,40p' "${WORK}/err" >&2 || true
   fi
 done
+
+
+# Voluntary TRIM_RC=126 is still covered above.  A real failed exec needs a
+# second stub: executable shebang whose interpreter is mode 0644, so the
+# kernel returns EACCES and bash surfaces 126.
+INTERP="${WORK}/noexec-interp"
+printf '%s\n' 'not-an-interpreter' > "$INTERP"
+chmod 0644 "$INTERP"
+FAIL_EXEC="${WORK}/trim-failexec"
+printf '%s\n' "#!${INTERP}" > "$FAIL_EXEC"
+chmod 0755 "$FAIL_EXEC"
+run_case failed_exec_126 126 LITESTREAM_L1_TRIM_BIN="$FAIL_EXEC"
+if grep -qF "app=socratic failed rc=126" "${WORK}/err"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS failed_exec_126_logs"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL failed_exec_126_logs" >&2
+  sed -n '1,40p' "${WORK}/err" >&2 || true
+fi
 
 # First non-zero wins: a later different failure does not replace it.
 run_case first_nonzero_wins 3 \

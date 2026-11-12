@@ -807,5 +807,36 @@ class FleetWrapperTests(unittest.TestCase):
         self.assertIn("not a regular file", err)
 
 
+    def test_symlink_to_stub_is_accepted(self):
+        # A symlink to a regular executable must still pass the -f/-x guard
+        # and run all three apps.  Without this, a later "[ -L "$TRIM" ]"
+        # reject would fail closed at 127 while both suites stayed green.
+        def as_symlink(root, env):
+            link = root / "trim-link"
+            link.symlink_to(root / "trim")
+            env["LITESTREAM_L1_TRIM_BIN"] = str(link)
+
+        rc, calls, err = self._run(prepare=as_symlink)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 3)
+
+    def test_failed_exec_is_126(self):
+        # The TRIM_RC=126 case above is a voluntary exit.  A real failed exec
+        # is an executable shebang whose interpreter is mode 0644 (EACCES).
+        def fail_exec(root, env):
+            interp = root / "noexec-interp"
+            interp.write_text("not-an-interpreter\n")
+            interp.chmod(0o644)
+            stub = root / "trim-failexec"
+            stub.write_text(f"#!{interp}\n")
+            stub.chmod(0o755)
+            env["LITESTREAM_L1_TRIM_BIN"] = str(stub)
+
+        rc, calls, err = self._run(prepare=fail_exec)
+        self.assertEqual(rc, 126)
+        self.assertIn("app=socratic failed rc=126", err)
+
+
+
 if __name__ == "__main__":
     unittest.main()
