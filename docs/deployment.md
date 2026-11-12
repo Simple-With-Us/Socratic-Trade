@@ -4,7 +4,7 @@ Production is **[socratictrade.com](https://socratictrade.com)** on Coolify app
 **uuid `socratic-app`** (name "Socratic-Trade", branch `main`, dockerfile build pack).
 
 **Host (current):** Coolify on the production fleet box (see private
-`jaywedgeworth22/fleet-ops:ATTACK-MAP.md`; dashboard/API `https://host.jays.services`).
+`Simple-With-Us/fleet-ops:ATTACK-MAP.md`; dashboard/API `https://host.jays.services`).
 
 **Auto-deploy:** every push to `main` triggers Coolify via the repo webhook to
 Coolify's **manual** GitHub webhook endpoint
