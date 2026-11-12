@@ -25,6 +25,16 @@ const PackageLockSchema = z.object({
 const MINIMATCH_OVERRIDE_KEY = "minimatch@>=7 <11.0.7";
 const MINIMATCH_PATCH_FLOOR = "11.0.7";
 const MINIMATCH_V3_FLOOR = "3.0.5";
+const VULNERABLE_MINIMATCH_RANGE = ">=7 <11.0.7";
+
+function isSafeOverrideValue(value: string): boolean {
+  const overrideRange = semver.validRange(value);
+  if (!overrideRange) return false;
+  if (semver.intersects(overrideRange, VULNERABLE_MINIMATCH_RANGE)) return false;
+  const minimumOverride = semver.minVersion(overrideRange);
+  if (!minimumOverride) return false;
+  return semver.gte(minimumOverride, MINIMATCH_PATCH_FLOOR);
+}
 
 function isAllowedMinimatch(version: string): boolean {
   const parsed = semver.parse(version);
@@ -41,7 +51,7 @@ describe("minimatch advisory override", () => {
     );
     const override = packageJson.overrides?.[MINIMATCH_OVERRIDE_KEY];
     expect(typeof override).toBe("string");
-    expect(semver.gte(String(override), MINIMATCH_PATCH_FLOOR)).toBe(true);
+    expect(isSafeOverrideValue(String(override))).toBe(true);
   });
 
   it("locks every minimatch copy on a safe 3.x, 4.x-6.x, or 11.0.7+ line", () => {
@@ -71,5 +81,16 @@ describe("minimatch advisory override", () => {
     expect(isAllowedMinimatch("11.0.9-rc.1")).toBe(true);
     expect(isAllowedMinimatch("11.0.7-rc.1")).toBe(false);
     expect(isAllowedMinimatch("not-a-version")).toBe(false);
+  });
+
+  it("accepts an exact or range override whose minimum is 11.0.7+, and rejects a range that includes a vulnerable version", () => {
+    expect(isSafeOverrideValue("11.0.8")).toBe(true);
+    expect(isSafeOverrideValue("^11.0.8")).toBe(true);
+    expect(isSafeOverrideValue(">=11.0.7 <12")).toBe(true);
+    expect(isSafeOverrideValue("^11.0.6")).toBe(false);
+    expect(isSafeOverrideValue(">=7 <11.0.7")).toBe(false);
+    expect(isSafeOverrideValue(">=11.0.6")).toBe(false);
+    expect(isSafeOverrideValue("*")).toBe(false);
+    expect(isSafeOverrideValue("not-a-version")).toBe(false);
   });
 });
