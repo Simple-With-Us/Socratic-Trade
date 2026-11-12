@@ -421,13 +421,15 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
         }
     }
 
-    override func setCookies(_ cookies: [HTTPCookie], for url: URL, mainDocumentURL: URL?) {
+    override func setCookies(_ cookies: [HTTPCookie], for url: URL?, mainDocumentURL: URL?) {
+        guard url != nil else { return }
         for cookie in cookies {
             setCookie(cookie)
         }
     }
 
-    override func cookies(for url: URL) -> [HTTPCookie]? {
+    override func cookies(for url: URL?) -> [HTTPCookie]? {
+        guard let url else { return [] }
         lock.lock()
         let snapshot = stored
         lock.unlock()
