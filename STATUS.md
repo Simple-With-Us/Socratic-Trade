@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-2793 deploy-freshness RTH latch
+
+**What.**  Deploy-freshness now ages undeployed `main` from session close (shared `evaluateRthDeployLatch` / `isMarketOpen` calendar), not raw commit time during weekday RTH.  `DEPLOY_FRESHNESS_STALE_SECONDS` is the post-close grace.  Rollout: `docs/rollouts/2026-11-12-st-2793-deploy-freshness-rth-latch.md`.
+
+**Next.**  PR open; wait for `verify` green; do not merge from agent.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
