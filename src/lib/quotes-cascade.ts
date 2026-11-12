@@ -15,6 +15,7 @@ import {
 } from "./db";
 import { getBrokerGateway } from "./broker";
 import { DEFAULT_POLICY } from "./defaults";
+import { CircuitOpenError, isPaidQuoteBreakerCooling } from "./api-circuit-breaker";
 import { AlpacaSnapshotEnrichmentProvider, apiKeyFingerprint, fetchWithRetry } from "./data-providers";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
 import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
@@ -341,6 +342,7 @@ export async function fetchTiingoQuote(
   // upstream attempt must be independently reserved and metered instead of hiding
   // an uncounted retry inside one logical call (Codex P1 review on #3449).
   const credKey = await apiKeyFingerprint(apiKey);
+  if (isPaidQuoteBreakerCooling("tiingo", keySource)) return undefined;
   if (admitProviderRequests("tiingo", credKey, 1) < 1) return undefined;
   const res = await fetchWithRetry(
     `https://api.tiingo.com/iex/${encodeURIComponent(ticker)}?token=${encodeURIComponent(apiKey)}`,
@@ -1139,6 +1141,7 @@ export async function fetchFreshQuotesCascade(
                 acceptIfComplete(symbol, q);
               }
             } catch (err) {
+              if (err instanceof CircuitOpenError) return;
               console.warn(`[quotes-cascade] Level 4 (Tiingo) fetch failed for ${symbol}:`, err);
             }
           })
@@ -1258,6 +1261,7 @@ export async function fetchFreshQuotesCascade(
                 }
               }
             } catch (err) {
+              if (err instanceof CircuitOpenError) return;
               console.warn(`[quotes-cascade] Level 7 (ROIC) fetch failed for ${symbol}:`, err);
             }
           })

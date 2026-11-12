@@ -4,6 +4,7 @@
 // computes multi-year financial trends (3-year revenue CAGR, margin trajectories, ROIC, FCF conversion),
 // and formats structured financial summaries for strategy reasoning and RAG vector store ingestion.
 
+import { CircuitOpenError } from "../api-circuit-breaker";
 import { fetchWithRetry } from "../data-providers";
 import { resolveApiKeyWithSource } from "../db-api-keys";
 import { normalizeSymbol } from "../money";
@@ -169,6 +170,7 @@ export async function fetchRoicFinancials(symbol: string, userId?: string): Prom
     const json = await res.json();
     return parseRoicFinancialStatements(json, normSymbol);
   } catch (err) {
+    if (err instanceof CircuitOpenError) return null;
     console.warn(`[roic-financials] failed to fetch financials for ${normSymbol}:`, err);
     return null;
   }

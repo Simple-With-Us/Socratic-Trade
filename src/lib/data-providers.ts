@@ -46,8 +46,9 @@ import {
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
-import { apiCircuitBreakerShouldSkip, CircuitOpenError, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
+import { apiCircuitBreakerShouldSkip, CircuitOpenError, isPaidQuoteBreakerCooling, isPaidQuoteProvider, observePaidQuoteStatus, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
 import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs, retryAfterDelayMs } from "./network-errors";
+import { cancelResponseBody, detachErrorResponse } from "./response-body";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
@@ -807,7 +808,14 @@ export async function fetchWithRetry(
       // A transport may settle after its caller's durable lease has moved. Fence the response before
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
-      if (response.status === 429 && attempt < retries) {
+      const laneKeySource = options.keySource ?? null;
+      const paidQuote = isPaidQuoteProvider(healthService);
+      if (response.status === 429 && paidQuote && healthService) {
+        // Paid quote 429 opens the lane immediately. Retry-After wins; otherwise the
+        // hold grows exponentially. This call does not retry: sibling symbols must
+        // fall through instead of spending another proxied attempt.
+        observePaidQuoteStatus(healthService, laneKeySource, 429, retryAfterDelayMs(response));
+      } else if (response.status === 429 && attempt < retries) {
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
@@ -815,6 +823,8 @@ export async function fetchWithRetry(
         // so `attempt === retries - 1` is still a retry.  Default one-retry lanes (Finnhub,
         // Nasdaq quote) were opening a 60s hold before that retry, which skipped sibling
         // endpoints already waiting on the same pacer.
+        // Cancel before the wait so the proxy gate slot is not held across the backoff.
+        await cancelResponseBody(response);
         const retryAfterMs = retryAfterDelayMs(response);
         const waitMs = Math.max(
           jitteredBackoffMs(backoffMs, attempt),
@@ -822,15 +832,22 @@ export async function fetchWithRetry(
         );
         await guardedFetchBackoff(waitMs, options.guard);
         continue;
-      }
-      if (response.status === 429 && healthService) {
+      } else if (response.status === 429 && healthService) {
         const retryAfterMs = retryAfterDelayMs(response);
         // Retries are exhausted.  A positive Retry-After is the lane hold.  A 429 with no
         // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
         // the rest of a multi-endpoint provider and the immediate cache-bypass refetch.
         if (retryAfterMs != null && retryAfterMs > 0) {
-          tripApiCircuitBreakerLane(healthService, options.keySource ?? null, retryAfterMs);
+          tripApiCircuitBreakerLane(healthService, laneKeySource, retryAfterMs, Date.now(), {
+            reason: "rate-limit",
+            status: 429
+          });
         }
+      }
+      if (response.status === 402 && paidQuote && healthService) {
+        observePaidQuoteStatus(healthService, laneKeySource, 402, undefined);
+      } else if (response.ok && paidQuote && healthService) {
+        observePaidQuoteStatus(healthService, laneKeySource, response.status, undefined);
       }
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
       // after validating the response body (e.g. providers that embed errors in HTTP 200).
@@ -841,6 +858,9 @@ export async function fetchWithRetry(
         // HTTP 429 (and any status the caller opts into via softHealthStatuses) is an expected
         // limit, not a broken integration — soft so consecutive-failure STOPPED / circuit stay off.
         const softStatuses = new Set([429, ...(options.softHealthStatuses ?? [])]);
+        // 402 on a paid quote provider is out of quota, same class as 429: the hours
+        // hold above is the backoff. It must not also paint a hard STOPPED streak.
+        if (paidQuote && response.status === 402) softStatuses.add(402);
         const soft = !response.ok && softStatuses.has(response.status);
         logApiHealth({
           service: healthService,
@@ -858,6 +878,7 @@ export async function fetchWithRetry(
         assertFetchWithRetryGuard(options.guard);
         recordProviderCall(options.service, { ok: response.ok, keySource: options.keySource, userId: options.userId });
       }
+      if (!response.ok) return detachErrorResponse(response);
       return response;
     }
   } catch (err) {
@@ -4031,6 +4052,9 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     const credKey = `${this.keySource}:${this.userId ?? ""}`;
+    // An open 429/402 hold skips the whole batch before any credit is reserved.
+    // fetchWithRetry still owns the half-open probe once the hold has elapsed.
+    if (isPaidQuoteBreakerCooling("roic", this.keySource)) return result;
     // Profile is the reliable free-tier endpoint; ratios paths currently 404 — reserve 1/symbol
     // for the profile call (ratios are best-effort and do not block admission).
     const allowed = admitProviderRequests("roic", credKey, misses.length);
@@ -5606,6 +5630,10 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     // -10/50 — an unpaced 30-symbol scan fires ~90 requests and 403s.)
     const perSymbol = callsPerSymbol("tiingo", { dropExtra: dropNews });
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling("tiingo", this.keySource)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const allowedRequests = admitProviderRequests("tiingo", credKey, misses.length * perSymbol);
     const symbolsAllowed = Math.floor(allowedRequests / perSymbol);
     // admit() budgets in REQUESTS but we only dispatch whole symbols — hand back the partial remainder
@@ -5817,6 +5845,10 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
     // (works for any number of tickers) and per-credential — and the rest defer best-effort (the cascade
     // + shared cache cover them; coverage accretes across scans). Never blocks/stalls the scan.
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling(this.name, this.keySource)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const symbolsAllowed = admitProviderRequests(this.name, credKey, misses.length);
     const toQuery = misses.slice(0, symbolsAllowed);
     const skipped = misses.length - toQuery.length;

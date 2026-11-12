@@ -21,6 +21,7 @@ import {
 } from "@/lib/runtime-health";
 import { getLease } from "@/lib/scheduler-lease";
 import { toPublicTradingLiveness } from "@/lib/trading-liveness";
+import { listOpenApiCircuitBreakers } from "@/lib/api-circuit-breaker";
 import { authorizeOpsRequest } from "@/lib/ops-auth";
 import { yieldEventLoop } from "@/lib/slow-sync-guard";
 import { safeErrorMessage } from "@/lib/telemetry-sanitize";
@@ -285,6 +286,14 @@ async function assembleHealth(): Promise<HealthPayload> {
     }
   } catch {
     // never let provider-tier reporting break the health probe
+  }
+
+  // In-memory paid-quote and lane holds. Never affects `ok`: an open breaker is
+  // a skip, not a liveness failure. Anonymous callers may see provider names.
+  try {
+    checks.quoteProviderBreakers = listOpenApiCircuitBreakers();
+  } catch {
+    checks.quoteProviderBreakers = [];
   }
 
   // Surface vector-store and embed-provider configuration status. After the Qdrant

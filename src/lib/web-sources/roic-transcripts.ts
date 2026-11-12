@@ -14,6 +14,7 @@
 // (free=2, individual=20, professional=40 app cap) unless ROIC_TRANSCRIPTS_QUARTERS_PER_SYMBOL
 // overrides. Per-run fetch budget follows the same tier (free-safe 8, Individual default 80).
 
+import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
 import { fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
@@ -503,12 +504,18 @@ async function roicGetJson(
   fetchOpts: { service: "roic"; keySource: "env" | "user" | "none"; userId?: string; suppressHealthStatuses: number[] }
 ): Promise<unknown | null> {
   const credKey = `${fetchOpts.keySource}:${fetchOpts.userId ?? ""}`;
+  if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource)) return null;
   const allowed = admitProviderRequests("roic", credKey, 1);
   if (!allowed) return null;
   return withProviderLimit("roic", async () => {
-    const res = await fetchWithRetry(url, {}, fetchOpts);
-    if (!res || !res.ok) return null;
-    return await res.json();
+    try {
+      const res = await fetchWithRetry(url, {}, fetchOpts);
+      if (!res || !res.ok) return null;
+      return await res.json();
+    } catch (err) {
+      if (err instanceof CircuitOpenError) return null;
+      throw err;
+    }
   });
 }
 
