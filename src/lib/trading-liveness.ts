@@ -1,7 +1,11 @@
+import { createHash } from "node:crypto";
 import { batchedHaltCauseKinds, haltCauseReadStatus } from "./autonomy-halt-cause";
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
 import type { SystemState } from "./types";
+
+/** Synthetic per-account episode key when `autonomy_fully_dark` pages with no degraded rows. */
+export const TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY = "fleet:autonomy_fully_dark";
 
 // Handoff 6b.7: the scheduler heartbeat (/api/health's schedulerAgeSeconds) only proves the tick
 // FUNCTION is running — it goes green the instant a DB write succeeds, even if every strategy run
@@ -334,6 +338,45 @@ export interface PublicTradingLiveness {
   /** Failed off-loop halt-cause reads since the process started.  Non-zero means the read is
    *  degraded and the halt-cause answers may be stale or missing. */
   autonomyHaltCauseReadFailures: number;
+}
+
+/** Opaque token for dedupe signatures — never send raw account ids to Sentry. */
+export function livenessDedupeToken(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+}
+
+/**
+ * Stable signature for trading-liveness Sentry dedupe — hashed account ids and
+ * degraded reason codes only (no labels, timestamps, or run summaries).
+ */
+export function tradingLivenessSentryStateSignature(
+  accounts: AccountTradingLiveness[] | undefined,
+  fleetFullyDark: boolean,
+  autonomyEligibleAccounts: number
+): string {
+  if (fleetFullyDark) {
+    return `fully_dark:${autonomyEligibleAccounts}`;
+  }
+  const parts = (accounts ?? [])
+    .filter((a) => a.degraded)
+    .map((a) => `${livenessDedupeToken(a.connectedAccountId)}:${[...a.degradedReasons].sort().join(",")}`)
+    .sort();
+  return parts.length > 0 ? parts.join(";") : "degraded:none";
+}
+
+/** Per-account watchdog dedupe so streak and halt episodes do not collapse. */
+export function runFailureLivenessSentrySignature(
+  userId: string,
+  accountId: string,
+  kind: "streak" | "halted",
+  streak?: number
+): string {
+  const u = livenessDedupeToken(userId);
+  const a = livenessDedupeToken(accountId);
+  if (kind === "halted") {
+    return `${u}:${a}:halted`;
+  }
+  return `${u}:${a}:streak:${streak ?? 0}`;
 }
 
 export function toPublicTradingLiveness(

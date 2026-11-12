@@ -11,6 +11,7 @@
 //     itself threw. `rateLimit()` swallows its own errors and allows the request.
 
 import { z } from "zod";
+import { clientIpTrustMarkerMatches, originLockEnabled, ORIGIN_CLIENT_IP_TRUST_HEADER } from "./cloudflare-origin-lock";
 
 export interface RateLimitOptions {
   /** Max number of allowed requests within the window. */
@@ -124,15 +125,23 @@ export const TrustedCloudflareClientIpSchema = z.union([z.ipv4(), z.ipv6()]);
 export type TrustedCloudflareClientIp = z.infer<typeof TrustedCloudflareClientIpSchema>;
 
 /**
- * Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted
- * client address. Returns null when the header is missing or fails Zod IP validation so
- * callers can answer HTTP 400 rather than keying the limiter on a forged / fallback string.
+ * Client address from CF-Connecting-IP.
+ * With REQUIRE_CLOUDFLARE_ORIGIN off (the default), a parseable header is returned.
+ * With the lock on, the header counts only when the Node hook has marked this
+ * request as Cloudflare-fronted. A direct caller cannot forge that mark, and
+ * health, loopback, and Tailscale admissions do not set it.
+ * Returns null when the header is missing, fails validation, or is untrusted,
+ * so callers can answer HTTP 400 rather than keying a limiter on a forged string.
  */
 export function trustedCloudflareClientIp(req: Request): TrustedCloudflareClientIp | null {
   const parsed = TrustedCloudflareClientIpSchema.safeParse(
     req.headers.get("cf-connecting-ip")?.trim()
   );
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  if (originLockEnabled() && !clientIpTrustMarkerMatches(req.headers.get(ORIGIN_CLIENT_IP_TRUST_HEADER))) {
+    return null;
+  }
+  return parsed.data;
 }
 
 /** Sensible defaults for the route classes we guard. Override per-route as needed. */

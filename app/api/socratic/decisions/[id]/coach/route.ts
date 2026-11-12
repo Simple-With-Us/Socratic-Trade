@@ -1,6 +1,6 @@
 import { attachSocraticDecisionCoachPrimitives } from "@/lib/db";
 import type { SocraticFrameworkProposal } from "@/lib/types";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const subsystem = framework?.subsystem;
   const priority = framework?.priority;
   const { id } = await context.params;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const result = await attachSocraticDecisionCoachPrimitives(
     id,
     {
