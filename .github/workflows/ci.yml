@@ -402,6 +402,7 @@ jobs:
           bash -n scripts/ops/st-litestream-restore-drill.sh
           bash -n scripts/ops/install-st-litestream-restore-drill.sh
           bash -n scripts/ops/st-litestream-restore-drill.selftest.sh
+          bash -n scripts/ops/st-litestream-restore-drill-start-notify-off.sh
           bash scripts/ops/st-litestream-restore-drill.selftest.sh
       # Merge shepherd:  stub-gh contract tests (ST-4553 tracking issue, ST-2874 in-flight CI).
       - name: Merge shepherd selftests (bash)

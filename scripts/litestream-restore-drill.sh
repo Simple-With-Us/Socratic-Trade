@@ -47,6 +47,8 @@
 #   RESTORE_PITR_TIMESTAMP        ISO 8601 point-in-time target, inside the 72h retention window
 #   RESTORE_DRILL_MIN_FREE_TENTHS default 10 (1.0x live DB size); scheduled wrapper uses 22 (2.2x)
 #   RESTORE_DRILL_STATUS_JSON     when set, write machine-readable status on exit (pass or fail)
+#   RESTORE_DRILL_RUN_ID          when set, included in the status JSON so the wrapper can
+#                                 confirm the file was refreshed for this run
 set -euo pipefail
 
 LIVE_DB="${LIVE_DB:-/app/data/app.db}"
@@ -82,13 +84,23 @@ write_status_json() {
   local duration=$(( $(date +%s) - START_EPOCH ))
   local pass_literal="false"
   [[ "$DRILL_PASS" == "true" ]] && pass_literal="true"
-  mkdir -p "$(dirname "$status_path")" 2>/dev/null || true
+  local run_json=""
+  if [[ -n "${RESTORE_DRILL_RUN_ID:-}" ]]; then
+    run_json="$(printf ',"runId":"%s"' "$(printf '%s' "$RESTORE_DRILL_RUN_ID" | tr -d '"\\')")"
+  fi
+  if ! mkdir -p "$(dirname "$status_path")" 2>/dev/null; then
+    echo "ERROR: status JSON not written: ${status_path} (cannot create parent directory)" >&2
+    return 1
+  fi
   if ! command -v python3 >/dev/null 2>&1; then
-    {
-      printf '{"timestamp":"%s","durationSeconds":%s,"restoredSizeBytes":%s,"integrity":"%s","pass":%s,"rowCountDeltas":{}}\n' \
-        "$START_ISO" "$duration" "$RESTORED_BYTES" "${INTEGRITY_RESULT:-}" "$pass_literal"
-    } >"${status_path}.tmp" && mv "${status_path}.tmp" "$status_path"
-    return 0
+    if {
+      printf '{"timestamp":"%s","durationSeconds":%s,"restoredSizeBytes":%s,"integrity":"%s","pass":%s,"rowCountDeltas":{}%s}\n' \
+        "$START_ISO" "$duration" "$RESTORED_BYTES" "${INTEGRITY_RESULT:-}" "$pass_literal" "$run_json"
+    } >"${status_path}.tmp" && mv "${status_path}.tmp" "$status_path"; then
+      return 0
+    fi
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
   fi
   ROW_JSON_FILE="${ROW_JSON_FILE:-$(mktemp "${TMPDIR:-/tmp}/restore-drill-rows.XXXXXX")}"
   : >"$ROW_JSON_FILE"
@@ -105,6 +117,7 @@ write_status_json() {
   RESTORE_DRILL_INTEGRITY="${INTEGRITY_RESULT:-}" \
   RESTORE_DRILL_PASS="$pass_literal" \
   RESTORE_DRILL_ROWS_FILE="$ROW_JSON_FILE" \
+  RESTORE_DRILL_RUN_ID="${RESTORE_DRILL_RUN_ID:-}" \
   python3 - <<'PY'
 import json
 import os
@@ -127,22 +140,47 @@ payload = {
     "rowCountDeltas": rows,
     "pass": os.environ.get("RESTORE_DRILL_PASS") == "true",
 }
+run_id = os.environ.get("RESTORE_DRILL_RUN_ID") or ""
+if run_id:
+    payload["runId"] = run_id
 out = os.environ["RESTORE_DRILL_STATUS_JSON"]
 tmp = out + ".tmp"
 Path(tmp).write_text(json.dumps(payload, separators=(",", ":")) + "\n")
 Path(tmp).replace(out)
 PY
+  local py_rc=$?
+  if [ "$py_rc" -ne 0 ]; then
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
+  fi
+  if [ ! -f "$status_path" ]; then
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
+  fi
+  return 0
 }
 
 finalize_exit() {
   local rc="${1:-1}"
-  write_status_json || true
+  local status_rc=0
+  write_status_json || status_rc=$?
   cleanup_scratch
   trap - EXIT
+  if [ "$status_rc" -ne 0 ]; then
+    exit 1
+  fi
   exit "$rc"
 }
 
-trap 'write_status_json || true; cleanup_scratch' EXIT
+on_exit_write_status() {
+  local status_rc=0
+  write_status_json || status_rc=$?
+  cleanup_scratch
+  if [ "$status_rc" -ne 0 ]; then
+    exit 1
+  fi
+}
+trap on_exit_write_status EXIT
 
 if [[ -n "${RESTORE_PITR_TIMESTAMP:-}" ]]; then
   TIMESTAMP_FLAG="-timestamp ${RESTORE_PITR_TIMESTAMP}"

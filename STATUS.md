@@ -1,8 +1,8 @@
 ## 2026-11-12 gb-trader — ST-4622 scheduled Litestream B2 restore drill
 
-**What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
+**What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
 
-**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge.  Do not run against live B2 from the agent.
+**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge (service token file + confirmed secret names).  Do not run against live B2 from the agent.
 ## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
 
 **What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.

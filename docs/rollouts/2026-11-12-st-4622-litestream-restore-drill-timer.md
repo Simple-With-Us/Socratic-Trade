@@ -21,6 +21,7 @@ weekly off-hours with disk preflight, bounded timeout, JSON status, and Sentry o
 - `scripts/ops/st-litestream-restore-drill.service`
 - `scripts/ops/st-litestream-restore-drill.timer`
 - `scripts/ops/st-litestream-restore-drill.env.example`
+- `scripts/ops/st-litestream-restore-drill-start-notify-off.sh`
 - `scripts/ops/install-st-litestream-restore-drill.sh`
 - `scripts/ops/st-litestream-restore-drill.selftest.sh`
 - `scripts/ops/st-litestream-restore-drill-sentry.py`
@@ -36,6 +37,12 @@ weekly off-hours with disk preflight, bounded timeout, JSON status, and Sentry o
 - Reused `st-container-restart-monitor-sentry.py` rather than a second DSN client.
 - Installer places drill script in `/usr/local/sbin/` next to the wrapper (same pattern as restart monitor).
 - Did not wire Pushover for drill failure (Sentry only; matches brief).
+- Scheduled B2 credentials come from Infisical via a service token file
+  (`INFISICAL_TOKEN_FILE`), not from plaintext keys in the env file, and not
+  via machine identities or universal auth.  Project id, path, and secret names
+  are config that must be confirmed on the host.
+- A notify-disabled `systemctl start` uses a non-persistent `/run` drop-in so an
+  interrupted dry-run cannot leave weekly alerts off.
 
 ## Verification State
 
@@ -43,8 +50,10 @@ weekly off-hours with disk preflight, bounded timeout, JSON status, and Sentry o
 bash -n scripts/ops/st-litestream-restore-drill.sh
 bash -n scripts/ops/install-st-litestream-restore-drill.sh
 bash -n scripts/ops/st-litestream-restore-drill.selftest.sh
+bash -n scripts/ops/st-litestream-restore-drill-start-notify-off.sh
 bash -n scripts/litestream-restore-drill.sh
 bash scripts/ops/st-litestream-restore-drill.selftest.sh
+bash scripts/litestream-restore-drill.selftest.sh
 python3 -m py_compile scripts/ops/st-litestream-restore-drill-sentry.py
 npm run lint
 npx tsc --noEmit
@@ -54,7 +63,14 @@ npm run build
 
 ## Next Steps & Blockers
 
-1. **Owner:** install on the production restore-drill host, fill `/etc/default/st-litestream-restore-drill` from Infisical service token, run one notify-disabled manual start via the env-file pattern in the runbook.
+1. **Owner:** install on the production restore-drill host.  Fill
+   `/etc/default/st-litestream-restore-drill` with non-secret config, put an
+   Infisical **service token** in the file named by `INFISICAL_TOKEN_FILE`
+   (mode 0600), set `INFISICAL_PROJECT_ID`, and confirm domain/env/path and
+   secret names (defaults `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+   optional `SENTRY_FLEET_DSN`).  Run one notify-disabled start with
+   `st-litestream-restore-drill-start-notify-off.sh` (runtime drop-in; do not
+   patch the env file).
 2. After first green scheduled run, add rollout receipt to THE BOARD.
 
 ## Zero-Code Findings

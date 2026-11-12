@@ -165,7 +165,8 @@ Scheduled (after owner install — see `docs/runbooks/st-litestream-restore-dril
 
 ```bash
 bash scripts/ops/install-st-litestream-restore-drill.sh
-# Fill /etc/default/st-litestream-restore-drill (mode 0600) from an Infisical service token.
+# Fill /etc/default/st-litestream-restore-drill with non-secret config (mode 0600).
+# Put an Infisical service token in the file named by INFISICAL_TOKEN_FILE (mode 0600).
 systemctl list-timers st-litestream-restore-drill.timer
 ```
 
@@ -175,9 +176,19 @@ defaults to **1.0x** unless `RESTORE_DRILL_MIN_FREE_TENTHS` is set.  Status JSON
 
 **Credentials (manual vs scheduled):** manual tier-1 drills still follow the rule in section 9
 below — export B2 `AWS_*` into the shell for that run only, never into a file that outlives the
-drill.  The **scheduled** lane is the sanctioned exception: a root-owned
-`/etc/default/st-litestream-restore-drill` at mode **0600**, populated from an Infisical service
-token by the operator (see runbook).  Values already in the process environment win over the file.
+drill.  The **scheduled** lane reads B2 credentials at run time from Infisical, using a mode-0600
+**service token file** named by `INFISICAL_TOKEN_FILE` in the root-owned env file
+`/etc/default/st-litestream-restore-drill` (mode **0600**).  That env file holds non-secret
+config only (bucket, paths, Infisical project/path/secret *names*).  Never put
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_FLEET_DSN`, or the Infisical token
+itself in the env file.  Use a service token only — never a machine identity or universal
+auth.  Project id, secret path, and secret names are configurable and must be confirmed on
+the host (documented defaults are a starting point, not proof the secrets already exist).
+
+Under systemd, `EnvironmentFile` **is** the process environment and always wins; a shell
+`export` is ignored by the scheduled unit.  Process-environment values win over the env
+file only for **manual** wrapper invocations.  The scheduled timer always uses the env
+file for config and Infisical for secrets (see runbook).
 
 ### Running the cold-archive drill
 
@@ -354,7 +365,9 @@ later `docker exec` does not inherit.  Credentials come from Infisical via the r
 Litestream process and are **not** inherited by a fresh shell: for **manual** drills, export
 them into the drill shell from a trusted source for that run only, never into a file that
 outlives the drill.  The **scheduled** weekly lane uses the root-only env file documented in
-section 5 (mode 0600, Infisical service token on the host).
+section 5 for non-secret config, and reads B2 credentials from Infisical with a service
+token file (`INFISICAL_TOKEN_FILE`, mode 0600) — never from that env file, and never with
+a machine identity.
 
 The R2 cold-archive drill is the opposite — `verify-cold-snapshot-restore.mjs` uses the
 bundled `better-sqlite3`, needs no `sqlite3` CLI, and does run inside the container —

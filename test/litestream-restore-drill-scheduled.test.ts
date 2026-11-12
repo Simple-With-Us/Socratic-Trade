@@ -13,6 +13,7 @@ describe("ST-4622 litestream restore drill ops scripts", () => {
       "scripts/ops/st-litestream-restore-drill.timer",
       "scripts/ops/install-st-litestream-restore-drill.sh",
       "scripts/ops/st-litestream-restore-drill.selftest.sh",
+      "scripts/ops/st-litestream-restore-drill-start-notify-off.sh",
     ];
     for (const rel of paths) {
       expect(existsSync(join(repoRoot, rel))).toBe(true);
@@ -40,7 +41,9 @@ describe("ST-4622 litestream restore drill ops scripts", () => {
   it("records row deltas with n/a when unset", () => {
     const drill = readFileSync(join(repoRoot, "scripts/litestream-restore-drill.sh"), "utf8");
     expect(drill).toContain('ROW_DELTA[$table]:-n/a');
-    expect(drill).toMatch(/write_status_json \|\| true/);
+    expect(drill).not.toMatch(/write_status_json \|\| true/);
+    expect(drill).toContain("status JSON not written");
+    expect(drill).toContain("runId");
   });
 
   it("gives systemd more headroom than the wrapper timeout so the wrapper can alert first", () => {
