@@ -459,7 +459,7 @@ echo "9. the counter stays put; the version comes from App Store Connect"
 rm -f "$SEQ_FILE" "$SHIP_FILE"
 printf '5' >"$SEQ_FILE"
 seen=""
-for i in 1 2 3; do
+for _i in 1 2 3; do
   run_ship congress --repo-root "$REPO" --dry-run
   seen="${seen} $(seq_now)"
 done
