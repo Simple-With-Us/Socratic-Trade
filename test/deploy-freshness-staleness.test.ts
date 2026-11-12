@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { isMarketOpen, regularSessionCloseUtcMs } from "../src/lib/market-calendar";
-import { decideDeployFreshnessStaleness } from "../src/lib/deploy-freshness-staleness";
+import {
+  decideDeployFreshnessStaleness,
+  decideDeployFreshnessStalenessFromEnv,
+  rthDrainUtcMs
+} from "../src/lib/deploy-freshness-staleness";
 
 function etDateEdt(isoDate: string, etHour: number, etMinute = 0): Date {
   const utcHour = etHour + 4;
@@ -41,7 +45,7 @@ describe("decideDeployFreshnessStaleness", () => {
     expect(decision.rawCommitAgeSeconds).toBeGreaterThan(3600);
   });
 
-  it("ages from session close after latch lifts (Nov 11 false-positive class)", () => {
+  it("ages from the after-close drain once the latch lifts (Nov 11 false-positive class)", () => {
     const commitAt = new Date("2026-11-11T16:55:32Z");
     const now = new Date("2026-11-11T21:36:20Z");
     expect(isMarketOpen(commitAt)).toBe(true);
@@ -53,13 +57,27 @@ describe("decideDeployFreshnessStaleness", () => {
     });
     expect(decision.verdict).toBe("in-flight");
     expect(decision.effectiveAgeSeconds).toBeLessThan(3600);
-    expect(decision.deployDueAnchorMs).toBe(regularSessionCloseUtcMs(commitAt));
+    // EST close is 21:00 UTC; the 21:20 UTC drain is later, so it anchors the grace.
+    expect(decision.deployDueAnchorMs).toBe(rthDrainUtcMs(commitAt));
   });
 
-  it("alerts when still undeployed after grace from close", () => {
+  it("stays in flight between an EDT close and the 21:20 UTC drain", () => {
     const commitAt = etDateEdt("2026-06-10", 10, 0);
     const closeMs = regularSessionCloseUtcMs(commitAt)!;
-    const now = new Date(closeMs + 4000 * 1000);
+    // 21:13 UTC: one hour after the 20:00 UTC EDT close, before the drain.
+    const now = new Date(closeMs + 3600 * 1000 + 13 * 60 * 1000);
+    const decision = decideDeployFreshnessStaleness({
+      now,
+      oldestCommitEpochSec: Math.floor(commitAt.getTime() / 1000),
+      staleSeconds: 3600
+    });
+    expect(decision.verdict).toBe("in-flight");
+    expect(decision.deployDueAnchorMs).toBe(rthDrainUtcMs(commitAt));
+  });
+
+  it("alerts when still undeployed after grace from the drain", () => {
+    const commitAt = etDateEdt("2026-06-10", 10, 0);
+    const now = new Date(rthDrainUtcMs(commitAt) + 4000 * 1000);
     const decision = decideDeployFreshnessStaleness({
       now,
       oldestCommitEpochSec: Math.floor(commitAt.getTime() / 1000),
@@ -93,5 +111,31 @@ describe("decideDeployFreshnessStaleness", () => {
     });
     expect(decision.verdict).toBe("stale");
     expect(decision.deployDueAnchorMs).toBe(commitAt.getTime());
+  });
+
+  it("does not latch when only the expected tip carries HOTFIX=1", () => {
+    const commitAt = etDateEdt("2026-06-10", 10, 0);
+    const now = new Date(commitAt.getTime() + 5000 * 1000);
+    const decision = decideDeployFreshnessStaleness({
+      now,
+      oldestCommitEpochSec: Math.floor(commitAt.getTime() / 1000),
+      oldestCommitMessage: "ordinary change",
+      tipCommitMessage: "HOTFIX=1 prod broker patch",
+      staleSeconds: 3600
+    });
+    expect(decision.verdict).toBe("stale");
+    expect(decision.deployDueAnchorMs).toBe(commitAt.getTime());
+  });
+
+  it("ignores an empty RTH_DEPLOY_LATCH_NOW and keeps the DEPLOY_FRESHNESS_LATCH_NOW pin", () => {
+    const commitAt = etDateEdt("2026-06-10", 17, 0);
+    const decision = decideDeployFreshnessStalenessFromEnv({
+      DEPLOY_FRESHNESS_OLDEST_EPOCH: String(Math.floor(commitAt.getTime() / 1000)),
+      DEPLOY_FRESHNESS_STALE_SECONDS: "3600",
+      RTH_DEPLOY_LATCH_NOW: "",
+      DEPLOY_FRESHNESS_LATCH_NOW: new Date(commitAt.getTime() + 1800 * 1000).toISOString()
+    });
+    expect(decision.rawCommitAgeSeconds).toBe(1800);
+    expect(decision.verdict).toBe("in-flight");
   });
 });

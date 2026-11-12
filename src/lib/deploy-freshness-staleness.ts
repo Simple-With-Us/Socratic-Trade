@@ -15,6 +15,9 @@ export type DeployFreshnessStalenessInput = {
   now?: Date;
   oldestCommitEpochSec: number;
   oldestCommitMessage?: string | null;
+  /** Message of the expected ref tip.  The deployed latch reads HOTFIX from the
+   * built HEAD, so a tip-only HOTFIX=1 ships at once and must age from commit. */
+  tipCommitMessage?: string | null;
   staleSeconds: number;
   hotfixEnv?: string | null;
   overrideEnv?: string | null;
@@ -33,13 +36,30 @@ export type DeployFreshnessStalenessDecision = {
 };
 
 function latchNowFromEnv(env: Record<string, string | undefined>): Date {
-  const raw = env.RTH_DEPLOY_LATCH_NOW?.trim() ?? env.DEPLOY_FRESHNESS_LATCH_NOW?.trim();
+  // `||`, not `??`: a set-but-empty RTH_DEPLOY_LATCH_NOW must not shadow the
+  // DEPLOY_FRESHNESS_LATCH_NOW pin and fall back to the wall clock.
+  const raw = env.RTH_DEPLOY_LATCH_NOW?.trim() || env.DEPLOY_FRESHNESS_LATCH_NOW?.trim();
   if (!raw) return new Date();
   const parsed = new Date(raw);
   if (!Number.isFinite(parsed.getTime())) {
     throw new Error(`DEPLOY_FRESHNESS_LATCH_NOW is not a valid date: ${raw}`);
   }
   return parsed;
+}
+
+/** Hour and minute (UTC) of the scheduled RTH deploy drain cron. */
+export const RTH_DRAIN_UTC_HOUR = 21;
+export const RTH_DRAIN_UTC_MINUTE = 20;
+
+/** The scheduled drain on the commit's UTC day (epoch ms). */
+export function rthDrainUtcMs(at: Date): number {
+  return Date.UTC(
+    at.getUTCFullYear(),
+    at.getUTCMonth(),
+    at.getUTCDate(),
+    RTH_DRAIN_UTC_HOUR,
+    RTH_DRAIN_UTC_MINUTE
+  );
 }
 
 export function decideDeployFreshnessStaleness(
@@ -61,6 +81,7 @@ export function decideDeployFreshnessStaleness(
   const hotfix =
     envFlagEnabled(input.hotfixEnv) ||
     commitMessageRequestsHotfix(input.oldestCommitMessage) ||
+    commitMessageRequestsHotfix(input.tipCommitMessage) ||
     envFlagEnabled(input.overrideEnv);
 
   let deployDueAnchorMs = commitMs;
@@ -70,7 +91,11 @@ export function decideDeployFreshnessStaleness(
   if (latchAtCommit.reason === "rth-blocked" && !hotfix) {
     const closeMs = regularSessionCloseUtcMs(commitAt);
     if (closeMs != null) {
-      deployDueAnchorMs = closeMs;
+      // The latch lifts at close, but the after-close drain
+      // (.github/workflows/rth-deploy-latch.yml, 21:20 UTC weekdays) is what
+      // ships the gap.  Start the grace at whichever comes later so an EDT or
+      // early-close day does not page before the drain has run.
+      deployDueAnchorMs = Math.max(closeMs, rthDrainUtcMs(commitAt));
       insideLatchWindow = nowMs < closeMs;
     }
   }
@@ -87,9 +112,9 @@ export function decideDeployFreshnessStaleness(
       detail =
         "Undeployed commit landed during weekday RTH; Coolify build latch still active until session close.";
     } else if (verdict === "in-flight") {
-      detail = `RTH latch lifted; within ${input.staleSeconds}s deploy grace after session close.`;
+      detail = `RTH latch lifted; within ${input.staleSeconds}s deploy grace after the after-close drain.`;
     } else {
-      detail = `RTH latch lifted; undeployed longer than ${input.staleSeconds}s after session close.`;
+      detail = `RTH latch lifted; undeployed longer than ${input.staleSeconds}s after the after-close drain.`;
     }
   } else if (verdict === "in-flight") {
     detail = `Within ${input.staleSeconds}s since commit (no RTH latch on this gap).`;
@@ -122,10 +147,12 @@ export function decideDeployFreshnessStalenessFromEnv(
   }
 
   const message = env.DEPLOY_FRESHNESS_OLDEST_MESSAGE?.trim();
+  const tipMessage = env.DEPLOY_FRESHNESS_TIP_MESSAGE?.trim();
   return decideDeployFreshnessStaleness({
     now: latchNowFromEnv(env),
     oldestCommitEpochSec,
     oldestCommitMessage: message || undefined,
+    tipCommitMessage: tipMessage || undefined,
     staleSeconds,
     hotfixEnv: env.HOTFIX,
     overrideEnv: env.RTH_DEPLOY_OVERRIDE

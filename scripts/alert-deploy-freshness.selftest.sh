@@ -80,7 +80,9 @@ C2="$(mkcommit c2 "$MID_DATE")"
 C3="$(mkcommit c3)"
 RECENT_GAP="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-9000)))')"
 C2_RECENT="$(mkcommit c2r "$RECENT_GAP")"
-C3_RECENT="$(mkcommit c3r)"
+# Pinned off-hours gap head (17:00 ET, after the EDT close): 6h old at
+# PINNED_LATCH_NOW, so only the threshold decides the verdict.
+C3_RECENT="$(mkcommit c3r "2026-06-10T21:00:00Z")"
 gitc checkout -q -b sidebranch "$C1"
 D="$(mkcommit d)"
 gitc checkout -q "$C3"
@@ -95,6 +97,9 @@ N1="$(mkcommit n1 "$NOOP_DATE" ".github/workflows/ci.yml")"
 C4="$(mkcommit c4 "$FRESH_DATE")"
 RTH_LAT="$(mkcommit rthlat "2026-06-10T14:00:00Z")"
 RTH_AFTER="$(mkcommit rthat "2026-06-10T15:30:00Z")"
+# Pre-market (09:00 ET) watched commit: off-hours, so it ages from its own
+# timestamp (14h at PINNED_LATCH_NOW), not from the close or the drain.
+OFF_HOURS="$(mkcommit offh "2026-06-10T13:00:00Z")"
 
 # A subdirectory of the fixture repo.  The watchdog resolves a pathspec against
 # its working directory, so a run started here would resolve every watched
@@ -291,8 +296,12 @@ run_case "in-flight: behind but newest gap is fresh" 0 "$C3" 200 "$(payload "\"$
 run_case "stale: oldest undeployed is past RTH latch grace" 3 "$C3" 200 "$(payload "\"${C1}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
   DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+run_case "pinned 6h gap is stale at the default threshold" 3 "$C3_RECENT" 200 "$(payload "\"${C2_RECENT}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 run_case "stale suppressed when threshold is huge" 0 "$C3_RECENT" 200 "$(payload "\"${C2_RECENT}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=864000
+  DEPLOY_FRESHNESS_STALE_SECONDS=864000 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 run_case "divergent commit" 4 "$D" 200 "$(payload "\"${C3}\"" 10)"
 run_case "release sha null" 2 "$C3" 200 "$(payload null 9000)"
 run_case "unreachable treated as OK" 0 "$C3" 200 '<html>502 Bad Gateway</html>'
@@ -383,9 +392,13 @@ run_case "still stale after RTH latch grace from session close" 3 "$RTH_AFTER" 2
   DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 EXPECT_OUTPUT=""
 
-run_case "off-hours stale unchanged" 3 "$C3" 200 "$(payload "\"${C1}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+# 14h since the commit is past 12h, while a latch-anchored clock (close or the
+# 21:20 UTC drain) would still read under 12h, so this exercises commit aging.
+EXPECT_OUTPUT="staleness decision: stale"
+run_case "off-hours stale unchanged" 3 "$OFF_HOURS" 200 "$(payload "\"${RTH_AFTER}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=43200 \
   DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+EXPECT_OUTPUT=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

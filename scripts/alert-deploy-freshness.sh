@@ -8,7 +8,10 @@
 # decide whether the lag is still a legitimate in-flight build or a freeze.
 #
 # Predicate: the OLDEST commit on expected that is not an ancestor of live AND
-# that can change the running image is older than STALE_SECONDS (default 3600).
+# that can change the running image is more than STALE_SECONDS (default 3600)
+# past its deploy-due time.  That is the commit time, except that a weekday RTH
+# merge without HOTFIX=1 / RTH_DEPLOY_OVERRIDE=1 is due at the later of the
+# session close and the 21:20 UTC after-close drain (rth-deploy-latch.yml).
 # Tip-age alone is wrong - a second merge 10 min ago would hide a first merge
 # that has been stuck for hours.  Ageing a commit that cannot change the image
 # is just as wrong, and it was the false positive behind ST-4575: this script
@@ -49,6 +52,7 @@ HOST="${DEPLOY_VERIFY_HOST:-https://socratictrade.com}"
 EXPECTED_REF="${1:-${DEPLOY_VERIFY_EXPECTED_SHA:-origin/main}}"
 STALE_SECONDS="${DEPLOY_FRESHNESS_STALE_SECONDS:-3600}"
 STALENESS_CLI="${SCRIPT_DIR}/deploy-freshness-staleness-cli.ts"
+STALENESS_TSX_VERSION="${DEPLOY_FRESHNESS_TSX_VERSION:-4.23.15}"
 NOTIFY="${DEPLOY_FRESHNESS_NOTIFY:-0}"
 # success|failure|none - previous cron tick, used to de-dupe optional Zulip pages.
 PREVIOUS="${DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION:-none}"
@@ -309,6 +313,9 @@ fi
 
 OLDEST_ISO="$(git log -1 --format=%cI "$OLDEST_UNDEPLOYED")"
 OLDEST_MSG="$(git log -1 --format=%B "$OLDEST_UNDEPLOYED" 2>/dev/null || true)"
+# The deployed latch reads HOTFIX=1 from the built HEAD, so pass the expected
+# tip's message too: a tip-only HOTFIX ships at once and ages from commit.
+TIP_MSG="$(git log -1 --format=%B "$EXPECTED_SHA" 2>/dev/null || true)"
 log "oldest image-affecting undeployed ${OLDEST_UNDEPLOYED} (${OLDEST_ISO}) raw age ${OLDEST_AGE}s (threshold ${STALE_SECONDS}s after latch)"
 log "  live ${LIVE_FULL}  expected ${EXPECTED_SHA}"
 
@@ -321,19 +328,35 @@ STALENESS_JSON="$(
   export DEPLOY_FRESHNESS_OLDEST_EPOCH="${OLDEST_CT}"
   export DEPLOY_FRESHNESS_STALE_SECONDS="${STALE_SECONDS}"
   export DEPLOY_FRESHNESS_OLDEST_MESSAGE="${OLDEST_MSG}"
+  export DEPLOY_FRESHNESS_TIP_MESSAGE="${TIP_MSG}"
   if [ -n "${DEPLOY_FRESHNESS_LATCH_NOW:-}" ]; then
     export DEPLOY_FRESHNESS_LATCH_NOW="${DEPLOY_FRESHNESS_LATCH_NOW}"
   fi
-  cd "${STALENESS_REPO_ROOT}" && npx --yes tsx "$STALENESS_CLI" 2>/dev/null
+  # Pinned to the lockfile's tsx so the job never runs whatever is latest.
+  cd "${STALENESS_REPO_ROOT}" && npx --yes "tsx@${STALENESS_TSX_VERSION}" "$STALENESS_CLI" 2>/dev/null
 )"
 STALENESS_RC=$?
 set -e
-[ "$STALENESS_RC" -eq 0 ] || fail_usage "deploy freshness staleness CLI failed (exit ${STALENESS_RC})."
-
-EFFECTIVE_VERDICT="$(printf '%s' "$STALENESS_JSON" | jq -r '.verdict // empty' 2>/dev/null || true)"
-EFFECTIVE_AGE="$(printf '%s' "$STALENESS_JSON" | jq -r '.effectiveAgeSeconds // empty' 2>/dev/null || true)"
-STALENESS_DETAIL="$(printf '%s' "$STALENESS_JSON" | jq -r '.detail // empty' 2>/dev/null || true)"
-[ -n "$EFFECTIVE_VERDICT" ] && [ -n "$EFFECTIVE_AGE" ] || fail_usage "deploy freshness staleness CLI returned malformed JSON."
+EFFECTIVE_VERDICT=""
+EFFECTIVE_AGE=""
+STALENESS_DETAIL=""
+if [ "$STALENESS_RC" -eq 0 ]; then
+  EFFECTIVE_VERDICT="$(printf '%s' "$STALENESS_JSON" | jq -r '.verdict // empty' 2>/dev/null || true)"
+  EFFECTIVE_AGE="$(printf '%s' "$STALENESS_JSON" | jq -r '.effectiveAgeSeconds // empty' 2>/dev/null || true)"
+  STALENESS_DETAIL="$(printf '%s' "$STALENESS_JSON" | jq -r '.detail // empty' 2>/dev/null || true)"
+fi
+if [ -z "$EFFECTIVE_VERDICT" ] || [ -z "$EFFECTIVE_AGE" ]; then
+  # A registry outage or a broken CLI must not mute a genuinely stale deploy.
+  # Fall back to plain commit-timestamp aging (the pre-latch rule).
+  log "WARN: deploy freshness staleness CLI unavailable (exit ${STALENESS_RC}); falling back to raw commit aging."
+  EFFECTIVE_AGE="$OLDEST_AGE"
+  if [ "$OLDEST_AGE" -ge "$STALE_SECONDS" ]; then
+    EFFECTIVE_VERDICT="stale"
+  else
+    EFFECTIVE_VERDICT="in-flight"
+  fi
+  STALENESS_DETAIL="staleness CLI unavailable; aged from the commit timestamp."
+fi
 
 log "staleness decision: ${EFFECTIVE_VERDICT} (effective ${EFFECTIVE_AGE}s, raw ${OLDEST_AGE}s). ${STALENESS_DETAIL}"
 
@@ -346,10 +369,12 @@ fi
 VERDICT="stale"
 HOURS=$((EFFECTIVE_AGE / 3600))
 MINS=$(((EFFECTIVE_AGE % 3600) / 60))
+RAW_HOURS=$((OLDEST_AGE / 3600))
+RAW_MINS=$(((OLDEST_AGE % 3600) / 60))
 log "FAIL: production is STALE - deploy gap is ${HOURS}h${MINS}m past the latch-adjusted due anchor (raw commit age ${OLDEST_AGE}s)."
 log "  this is the silent-freeze class (webhook 200s, health green on an old sha)."
 log "  do NOT hand-trigger a deploy - investigate the webhook and Coolify build queue."
 
-maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest image-affecting undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${HOURS}h${MINS}m old.  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
+maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest image-affecting undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${RAW_HOURS}h${RAW_MINS}m old (${HOURS}h${MINS}m past its latch-adjusted deploy-due time).  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
 
 exit 3
