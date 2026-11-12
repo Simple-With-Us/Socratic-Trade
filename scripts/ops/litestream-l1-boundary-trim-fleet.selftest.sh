@@ -215,6 +215,32 @@ rm -f "${WORK}/no-default-trim"
 UNDER_TEST="$REAL_UNDER_TEST"
 run_case missing_path 127 LITESTREAM_L1_TRIM_BIN="${WORK}/no-such-trim"
 
+# A searchable directory (and any other non-regular file) must not reach
+# bash's exec-126 path; treat it as the same missing-executable 127.
+mkdir -m 755 "${WORK}/trim-dir"
+run_case trim_bin_is_directory 127 LITESTREAM_L1_TRIM_BIN="${WORK}/trim-dir"
+if [ ! -f "$CALLS" ] && grep -qF "missing executable ${WORK}/trim-dir (not a regular file)" "${WORK}/err"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS trim_bin_is_directory_logs"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL trim_bin_is_directory_logs" >&2
+  sed -n '1,40p' "${WORK}/err" >&2 || true
+  cat "$CALLS" >&2 || true
+fi
+mkfifo "${WORK}/trim-fifo"
+chmod 755 "${WORK}/trim-fifo"
+run_case trim_bin_is_fifo 127 LITESTREAM_L1_TRIM_BIN="${WORK}/trim-fifo"
+if [ ! -f "$CALLS" ] && grep -qF "missing executable ${WORK}/trim-fifo (not a regular file)" "${WORK}/err"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS trim_bin_is_fifo_logs"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL trim_bin_is_fifo_logs" >&2
+  sed -n '1,40p' "${WORK}/err" >&2 || true
+  cat "$CALLS" >&2 || true
+fi
+
 # A bad opt-in value fails before the trim binary is executed.
 run_case bad_apply_env 2 LITESTREAM_L1_TRIM_BIN="$STUB" LITESTREAM_L1_TRIM_APPLY=yes
 if [ ! -f "$CALLS" ]; then
@@ -227,7 +253,7 @@ fi
 
 # Each trim guard (and trim exit 1, including APPLIED-UNVERIFIED) must pass
 # through the wrapper, and later apps still run.
-for code in 1 2 3 4 5 6; do
+for code in 1 2 3 4 5 6 126; do
   run_case "passthrough_${code}" "$code" LITESTREAM_L1_TRIM_BIN="$STUB" TRIM_RC="$code"
   expect_three_calls "passthrough_${code}_runs_remaining"
   if grep -q "app=socratic failed rc=${code}" "${WORK}/err"; then

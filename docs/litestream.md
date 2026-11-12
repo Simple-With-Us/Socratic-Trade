@@ -330,8 +330,8 @@ L2 still has to carry.
 
 ### Guards
 
-Every guard aborts rather than proceeding, and each one has its own exit code so a scheduled
-unit's failure is diagnosable from `systemctl status` alone.  The timer starts `litestream-l1-boundary-trim-fleet`, which runs the three apps in order, keeps going after a failure, and exits with the first non-zero code the trim binary returned.
+Every guard aborts rather than proceeding, and each trim guard has its own exit code so a scheduled
+unit's failure is usually diagnosable from `systemctl status`.  The timer starts `litestream-l1-boundary-trim-fleet`, which runs the three apps in order, keeps going after a failure, and exits with the first non-zero code the trim binary returned.  Exit 2 and 127 are not unique: the wrapper also uses those codes for its own pre-trim failures, so tell those causes apart from the journal lines in Exit codes below, not from `systemctl status` alone.
 
 - **No usable snapshot.**  No L9 object parses as `<min>-<max>.ltx` (exit 2).
 - **Absolute size floor.**  The newest snapshot is under 100 MB - a truncated or
@@ -376,12 +376,13 @@ Unparseable object names are warned about and skipped, never deleted.
 
 These codes are from the trim binary.  The scheduled unit does not start that binary directly: `litestream-l1-boundary-trim.service` runs `litestream-l1-boundary-trim-fleet`.  The wrapper walks socratic, congress, and usage-monitor in that order and keeps going after a failure.  It exits with the first non-zero code the trim binary returned, so `systemctl status` shows that guard (2-6) or a trim failure (1).  `APPLIED-UNVERIFIED` is still exit 1, same as a direct trim run, and is passed through unchanged.
 
-The wrapper also has two codes of its own, used only when the trim binary never runs:
+The wrapper also emits 2 and 127 of its own, and those same numbers can be passed through after a trim run has started.  They are not unique.  `systemctl status` alone cannot tell those causes apart; use the log lines in the table below.
 
 | Code | Meaning |
 |---|---|
-| 2 | `LITESTREAM_L1_TRIM_APPLY` is set to something other than `0`, `1`, or unset.  The tell is `LITESTREAM_L1_TRIM_APPLY must be 0, 1, or unset`, and there is no `starting app=` line.  Trim's own exit 2 (no usable snapshot) also becomes the wrapper's exit 2 when a trim run failed that way; that tell is `ABORT: no parseable L9 snapshot` and `app=... failed rc=2`.  The wrapper's own 2 is kept so a bad opt-in still fails closed before any delete. |
-| 127 | The trim path is missing or not executable.  The tell is `missing executable`, and no app is started.  The trim script does not use 127.  A passed-through 127 would only happen if the kernel could not exec a path the wrapper already treated as executable (for example a missing `python3` on the shebang); that tell includes `starting app=` and `app=... failed rc=127`. |
+| 2 | Two causes, so the code is not unique.  The wrapper's own: `LITESTREAM_L1_TRIM_APPLY` is set to something other than `0`, `1`, or unset.  The tell is `LITESTREAM_L1_TRIM_APPLY must be 0, 1, or unset`, and there is no `starting app=` line.  Passed through: trim found no usable L9 snapshot.  The tell is `ABORT: no parseable L9 snapshot` and `app=... failed rc=2`.  The wrapper's own 2 is kept so a bad opt-in still fails closed before any delete. |
+| 126 | Passed through when a regular, executable trim path could not be executed (for example permission denied at exec).  The tell is `starting app=` and `app=... failed rc=126`.  The wrapper does not emit 126 of its own.  A directory or other non-regular path is rejected before exec as 127, so that case no longer surfaces as 126. |
+| 127 | Two causes, so the code is not unique.  The wrapper's own: the trim path is missing, not executable, or not a regular file (a directory, fifo, or other special file).  The tell is `missing executable`, and no app is started.  When the path exists but is not a regular file, the line also says `(not a regular file)`.  The trim script does not use 127.  A passed-through 127 would only happen if the kernel could not exec a regular executable path the wrapper already accepted (for example a missing `python3` on the shebang); that tell includes `starting app=` and `app=... failed rc=127`. |
 
 **Exit 0 means "the run completed without hitting a guard" - not "objects were deleted", and
 certainly not "compaction recovered".**  A dry run exits 0, and so does a legitimate no-op
@@ -490,7 +491,7 @@ scripts/ops/litestream-l1-boundary-trim-fleet.sh   # socratic, then congress, th
 scripts/ops/install-litestream-l1-trim.sh          # root, idempotent, does not fire the oneshot
 ```
 
-`litestream-l1-boundary-trim-fleet.sh` dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  Unset and `0` stay dry-run.  Any other value exits 2 before the trim binary runs.  Once a trim run starts, the wrapper keeps going through the three apps and exits with the first non-zero trim code, so guard exits 2-6 and trim exit 1 (including `APPLIED-UNVERIFIED`) show up in `systemctl status`.  How to tell the wrapper's own exit 2 or 127 from a passed-through trim code is in Exit codes above.  `litestream-l1-boundary-trim.service` sets `Environment=LITESTREAM_L1_TRIM_APPLY=1`, so the 00:04 UTC timer still applies after Jay installs this unit.  A hand run of the shell script does not delete.
+`litestream-l1-boundary-trim-fleet.sh` dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  Unset and `0` stay dry-run.  Any other value exits 2 before the trim binary runs.  Once a trim run starts, the wrapper keeps going through the three apps and exits with the first non-zero trim code, so guard exits 2-6 and trim exit 1 (including `APPLIED-UNVERIFIED`) show up in `systemctl status`.  A directory or other non-regular `LITESTREAM_L1_TRIM_BIN` is refused as exit 127 before any trim runs, with a `missing executable` line that says `(not a regular file)`.  Exit 126 is only a passed-through exec failure of a regular executable path.  Exit 2 and 127 are not unique; the log lines that tell the wrapper's own causes apart from a passed-through trim or exec failure are in Exit codes above.  `litestream-l1-boundary-trim.service` sets `Environment=LITESTREAM_L1_TRIM_APPLY=1`, so the 00:04 UTC timer still applies after Jay installs this unit.  A hand run of the shell script does not delete.
 
 Offline tests, with no B2, rclone, or host:
 

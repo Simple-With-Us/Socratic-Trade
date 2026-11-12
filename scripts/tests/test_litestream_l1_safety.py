@@ -703,11 +703,12 @@ exit "${TRIM_RC:-0}"
 class FleetWrapperTests(unittest.TestCase):
     """The scheduled wrapper must surface each trim guard in systemctl status."""
 
-    def _run(self, extra_env):
+    def _run(self, extra_env=None, *, prepare=None):
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
-        stub = Path(work.name) / "trim"
-        calls = Path(work.name) / "calls"
+        root = Path(work.name)
+        stub = root / "trim"
+        calls = root / "calls"
         stub.write_text(STUB_TRIM)
         stub.chmod(0o755)
         env = {
@@ -715,7 +716,9 @@ class FleetWrapperTests(unittest.TestCase):
             "CALLS": str(calls),
             "LITESTREAM_L1_TRIM_BIN": str(stub),
         }
-        env.update(extra_env)
+        env.update(extra_env or {})
+        if prepare is not None:
+            prepare(root, env)
         proc = subprocess.run(
             ["bash", str(FLEET_WRAPPER)],
             cwd=work.name,
@@ -727,9 +730,10 @@ class FleetWrapperTests(unittest.TestCase):
         return proc.returncode, call_lines, proc.stderr
 
     def test_passthrough_each_guard_code(self):
-        # Trim exit 1 (survivors / APPLIED-UNVERIFIED) and guards 2-6 must
-        # reach the wrapper's status. Remaining apps still run.
-        for code in (1, 2, 3, 4, 5, 6):
+        # Trim exit 1 (survivors / APPLIED-UNVERIFIED), guards 2-6, and a
+        # passed-through exec failure (126) must reach the wrapper's status.
+        # Remaining apps still run.
+        for code in (1, 2, 3, 4, 5, 6, 126):
             with self.subTest(code=code):
                 rc, calls, err = self._run({"TRIM_RC": str(code)})
                 self.assertEqual(rc, code)
@@ -767,13 +771,40 @@ class FleetWrapperTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("LITESTREAM_L1_TRIM_APPLY must be 0, 1, or unset", err)
 
-        rc, calls, err = self._run({
-            "LITESTREAM_L1_TRIM_BIN": "/tmp/no-such-l1-trim-binary",
-            "TRIM_RC": "4",
-        })
+        def missing(root, env):
+            env["LITESTREAM_L1_TRIM_BIN"] = str(root / "no-such-trim")
+            env["TRIM_RC"] = "4"
+
+        rc, calls, err = self._run(prepare=missing)
         self.assertEqual(rc, 127)
         self.assertEqual(calls, [])
         self.assertIn("missing executable", err)
+        self.assertNotIn("not a regular file", err)
+
+    def test_non_regular_trim_bin_is_missing_executable(self):
+        def as_dir(root, env):
+            path = root / "trim-dir"
+            path.mkdir()
+            path.chmod(0o755)
+            env["LITESTREAM_L1_TRIM_BIN"] = str(path)
+
+        rc, calls, err = self._run(prepare=as_dir)
+        self.assertEqual(rc, 127)
+        self.assertEqual(calls, [])
+        self.assertIn("missing executable", err)
+        self.assertIn("not a regular file", err)
+
+        def as_fifo(root, env):
+            path = root / "trim-fifo"
+            os.mkfifo(path)
+            os.chmod(path, 0o755)
+            env["LITESTREAM_L1_TRIM_BIN"] = str(path)
+
+        rc, calls, err = self._run(prepare=as_fifo)
+        self.assertEqual(rc, 127)
+        self.assertEqual(calls, [])
+        self.assertIn("missing executable", err)
+        self.assertIn("not a regular file", err)
 
 
 if __name__ == "__main__":

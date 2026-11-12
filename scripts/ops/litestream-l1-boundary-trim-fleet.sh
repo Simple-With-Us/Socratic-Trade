@@ -22,8 +22,16 @@ case "${LITESTREAM_L1_TRIM_APPLY-}" in
     ;;
 esac
 
-if [ -z "$TRIM" ] || [ ! -x "$TRIM" ]; then
-  echo "litestream-l1-boundary-trim-fleet: missing executable $TRIM" >&2
+# -x is true for a searchable directory, so also require a regular file
+# (symlinks to a regular file still count).  Directories and other
+# non-regular paths fail closed here as 127 instead of reaching bash's
+# exec status 126.
+if [ -z "$TRIM" ] || [ ! -x "$TRIM" ] || [ ! -f "$TRIM" ]; then
+  if [ -n "$TRIM" ] && [ -e "$TRIM" ] && [ ! -f "$TRIM" ]; then
+    echo "litestream-l1-boundary-trim-fleet: missing executable $TRIM (not a regular file)" >&2
+  else
+    echo "litestream-l1-boundary-trim-fleet: missing executable $TRIM" >&2
+  fi
   exit 127
 fi
 
@@ -31,10 +39,13 @@ fi
 # the same B2 account burns Class A/C and can collide on hide markers.
 # Keep running the remaining apps after a failure, and exit with the first
 # non-zero trim status so systemctl status shows that guard (1-6).  Wrapper
-# codes 2 (bad LITESTREAM_L1_TRIM_APPLY) and 127 (missing binary) are only
-# used above, before any trim runs.  Trim itself uses 2 for "no snapshot"
-# and never uses 127; see docs/litestream.md Exit codes to tell them apart.
+# codes 2 (bad LITESTREAM_L1_TRIM_APPLY) and 127 (missing or non-regular
+# path) are used above, before any trim runs.  The same numbers can also be
+# passed through (trim exit 2, or a failed exec of an accepted path).
+# See docs/litestream.md Exit codes for the log lines that tell them apart.
 # APPLIED-UNVERIFIED from trim stays exit 1 and is passed through unchanged.
+# A regular executable path that then fails exec (permission denied) is
+# passed through as 126.
 apps=(socratic congress usage-monitor)
 rc=0
 for app in "${apps[@]}"; do
