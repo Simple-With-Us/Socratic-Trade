@@ -55,10 +55,11 @@ final class LiveResumeGate {
     /// How many times `run` saw a finished handle and started a new resume
     /// instead of rejoining it.
     private(set) var declinedFinishedHandleCount = 0
-    /// Test seam, compiled in every configuration so a Release test build can
-    /// use it. Off unless a test sets it. The first settled resume waits here,
-    /// still current, so a joiner can start the next one before this handle
-    /// is dropped.
+    #if DEBUG
+    /// Test seam. The first settled resume waits here, still current, so a
+    /// joiner can start the next one before this handle is dropped. Debug
+    /// only, so a Release binary has no continuation that can park. The
+    /// shared scheme tests Debug.
     private var finishedResumeHold: CheckedContinuation<Void, Never>?
     var holdFinishedResumeForTest = false
     private(set) var isHoldingFinishedResume = false
@@ -69,6 +70,7 @@ final class LiveResumeGate {
         finishedResumeHold = nil
         hold?.resume()
     }
+    #endif
 
     func run(_ body: @escaping @MainActor () async -> Bool) async -> LiveResumeOutcome {
         if let inFlight {
@@ -85,6 +87,7 @@ final class LiveResumeGate {
             handle.finish(await body())
         }
         let startedEvents = await handle.value()
+        #if DEBUG
         if holdFinishedResumeForTest {
             holdFinishedResumeForTest = false
             isHoldingFinishedResume = true
@@ -92,6 +95,7 @@ final class LiveResumeGate {
                 finishedResumeHold = continuation
             }
         }
+        #endif
         if inFlight === handle {
             inFlight = nil
         }

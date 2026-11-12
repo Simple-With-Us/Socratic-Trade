@@ -143,6 +143,7 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertEqual(store.loadCount, 2)
     }
 
+    #if DEBUG
     func testJoinerRetriesWhileFinishedHandleIsStillCurrent() async {
         let gate = LiveResumeGate()
         gate.holdFinishedResumeForTest = true
@@ -219,6 +220,7 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertEqual(store.loadCount, 2)
         XCTAssertTrue(store.isAuthenticated)
     }
+    #endif
 
     func testCancellingTheRunnerDoesNotAbortTheSharedLoad() async {
         let gate = LiveResumeGate()
@@ -249,6 +251,7 @@ final class AppLiveSessionResumeTests: XCTestCase {
     }
 }
 
+#if DEBUG
 /// Returns the task result, or nil if it is still unfinished after the bound.
 /// The waiter is cancelled when the bound wins, so it does not stay suspended
 /// for the rest of the process.
@@ -285,6 +288,7 @@ private final class OnceResume<T> {
 private final class ResumeEventChecks {
     var checks = 0
 }
+#endif
 
 @MainActor
 private final class LiveSessionResumeTestDouble: LiveSessionResuming {

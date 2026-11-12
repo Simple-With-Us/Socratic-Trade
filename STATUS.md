@@ -2,7 +2,7 @@
 
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
 
-**Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled in every configuration, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
+**Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled only in Debug, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
 
 ## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
 
