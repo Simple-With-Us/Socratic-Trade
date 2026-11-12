@@ -179,6 +179,10 @@ final class AppLiveSessionResumeTests: XCTestCase {
             spins += 1
             await Task.yield()
         }
+        guard store.loadCount == 1 else {
+            XCTFail("The resume did not reach its suspended load.")
+            return
+        }
         let joiner = Task {
             await AppLiveSessionResume.resumeThroughGate(
                 gate: gate,
@@ -193,18 +197,25 @@ final class AppLiveSessionResumeTests: XCTestCase {
             spins += 1
             await Task.yield()
         }
+        guard gate.joinCount == 1 else {
+            XCTFail("The second resume did not join the in-flight load.")
+            return
+        }
         store.finishLoad()
         spins = 0
-        while (gate.declinedFinishedHandleCount == 0 || store.loadCount < 2) && spins < 50 {
+        while (gate.declinedFinishedHandleCount == 0 || store.loadCount < 2 || !gate.isHoldingFinishedResume) && spins < 50 {
             spins += 1
             await Task.yield()
         }
-        XCTAssertEqual(gate.declinedFinishedHandleCount, 1)
-        XCTAssertTrue(gate.isHoldingFinishedResume)
-        XCTAssertEqual(store.loadCount, 2)
+        guard gate.declinedFinishedHandleCount == 1, store.loadCount == 2, gate.isHoldingFinishedResume else {
+            XCTFail("The joiner did not start a fresh resume while the finished handle was still current.")
+            return
+        }
         gate.releaseFinishedResumeForTest()
-        await runner.value
-        await joiner.value
+        let runnerFinished = await boundedValue(of: runner)
+        let joinerFinished = await boundedValue(of: joiner)
+        XCTAssertNotNil(runnerFinished)
+        XCTAssertNotNil(joinerFinished)
         XCTAssertEqual(store.loadCount, 2)
         XCTAssertTrue(store.isAuthenticated)
     }
@@ -235,6 +246,38 @@ final class AppLiveSessionResumeTests: XCTestCase {
         XCTAssertFalse(store.sawCancellationDuringLoad)
         XCTAssertTrue(outcome.startedEvents)
         XCTAssertEqual(store.loadCount, 1)
+    }
+}
+
+/// Returns the task result, or nil if it is still unfinished after the bound.
+/// The waiter is abandoned rather than awaited, so a stuck continuation cannot
+/// hold the suite open.
+@MainActor
+private func boundedValue<T: Sendable>(
+    of task: Task<T, Never>,
+    nanoseconds: UInt64 = 2_000_000_000
+) async -> T? {
+    let once = OnceResume<T>()
+    return await withCheckedContinuation { continuation in
+        Task { @MainActor in
+            let value = await task.value
+            once.resume(continuation, with: value)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            once.resume(continuation, with: nil)
+        }
+    }
+}
+
+@MainActor
+private final class OnceResume<T> {
+    private var didResume = false
+
+    func resume(_ continuation: CheckedContinuation<T?, Never>, with value: T?) {
+        guard !didResume else { return }
+        didResume = true
+        continuation.resume(returning: value)
     }
 }
 
