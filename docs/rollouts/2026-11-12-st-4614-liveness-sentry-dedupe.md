@@ -6,9 +6,10 @@
 
 ## Changes Made
 
-- `src/lib/db-health.ts` — `evaluateLivenessSentryCapture`, decoupled Sentry from the 15-minute admin cooldown, stable Sentry message text, episode keys cleared on recovery.
-- `src/lib/trading-liveness.ts` — `tradingLivenessSentryStateSignature` for account/reason signatures.
-- `app/api/health/route.ts` — pass signatures into `alertLivenessWarning` (response shape unchanged).
+- `src/lib/db-health.ts` — `evaluateLivenessSentryCapture`, decoupled Sentry from the 15-minute admin cooldown, stable Sentry message text, episode keys cleared on recovery; post-Kody: scrubbed Sentry context, capture success gates dedupe stamps, escalated admin bypasses cooldown, corrupt admin cooldown treated as expired.
+- `src/lib/trading-liveness.ts` — hashed `tradingLivenessSentryStateSignature` and `runFailureLivenessSentrySignature`.
+- `app/api/health/route.ts` — pass signatures into `alertLivenessWarning` (response shape unchanged); scheduler uses one stable signature.
+- `src/lib/run-failure-watchdog.ts` — per-account Sentry signatures for streak and halt alerts.
 - `test/liveness-sentry-dedupe.test.ts` — unit coverage for dedupe rules and fingerprint.
 
 ## Decisions & Trade-offs

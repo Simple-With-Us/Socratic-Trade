@@ -1001,15 +1001,15 @@ async function captureHealthSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>
-): Promise<void> {
-  if (!process.env.SENTRY_DSN) return;
+): Promise<boolean> {
+  if (!process.env.SENTRY_DSN) return false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
     };
     const captureMessage = mod.captureMessage ?? mod.default?.captureMessage;
     const withScope = mod.withScope ?? mod.default?.withScope;
-    if (typeof captureMessage !== "function" || typeof withScope !== "function") return;
+    if (typeof captureMessage !== "function" || typeof withScope !== "function") return false;
     withScope((scope) => {
       scope.setLevel(level);
       scope.setTag("component", "api-health");
@@ -1034,9 +1034,21 @@ async function captureHealthSentryMessage(
       scope.setContext("api-health", context);
       captureMessage(message);
     });
+    return true;
   } catch {
     // Observability must not affect trading control flow.
+    return false;
   }
+}
+
+function livenessWarningSentryService(warningType: string): string {
+  if (warningType.startsWith("run_failure")) {
+    return "run-failure-watchdog";
+  }
+  if (warningType.startsWith("scheduler")) {
+    return "scheduler";
+  }
+  return "trading-liveness";
 }
 
 /**
@@ -1357,8 +1369,12 @@ export async function alertLivenessWarning(
     });
 
     const lastAdminSent = getInternalSetting<string>(adminCooldownKey);
+    const lastAdminMs = lastAdminSent ? Date.parse(lastAdminSent) : NaN;
     const adminDue =
-      !lastAdminSent || Date.now() - Date.parse(lastAdminSent) >= LIVENESS_ALERT_COOLDOWN_MS;
+      dueForEscalation ||
+      !lastAdminSent ||
+      Number.isNaN(lastAdminMs) ||
+      Date.now() - lastAdminMs >= LIVENESS_ALERT_COOLDOWN_MS;
 
     if (!shouldCaptureSentry && !adminDue) {
       return;
@@ -1378,29 +1394,28 @@ export async function alertLivenessWarning(
       sentryStateSignature: effectiveSignature
     };
 
+    const sentryService = livenessWarningSentryService(warningType);
     if (shouldCaptureSentry) {
-      const sentryMessage = dueForEscalation
-        ? `${title}: trading liveness still degraded (escalated)`
-        : `Liveness Warning: trading liveness degraded (${warningType.replace(/_/g, " ")})`;
-      await captureHealthSentryMessage("error", sentryMessage, {
-        service: "trading-liveness",
+      const sentryMessage = dueForEscalation ? `${title} (escalated)` : title;
+      const captured = await captureHealthSentryMessage("error", sentryMessage, {
+        service: sentryService,
         failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
         warningType,
         degradedHours: Math.round(degradedHours * 10) / 10,
         escalated: dueForEscalation,
-        stateSignature: effectiveSignature,
-        detail: message
+        stateSignature: effectiveSignature
       });
-      setInternalSetting(sentrySignatureKey, effectiveSignature);
-      setInternalSetting(sentrySentKey, new Date().toISOString());
-    }
-
-    if (dueForEscalation && shouldCaptureSentry) {
-      setInternalSetting(escalatedAtKey, new Date().toISOString());
+      if (captured) {
+        setInternalSetting(sentrySignatureKey, effectiveSignature);
+        setInternalSetting(sentrySentKey, new Date().toISOString());
+      }
     }
 
     if (adminDue) {
       setInternalSetting(adminCooldownKey, new Date().toISOString());
+      if (dueForEscalation) {
+        setInternalSetting(escalatedAtKey, new Date().toISOString());
+      }
       audit("liveness_warning_alert", payload, "local");
       await deliverSystemAlertToAdmins({
         type: "liveness_warning",

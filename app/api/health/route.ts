@@ -181,7 +181,7 @@ async function assembleHealth(): Promise<HealthPayload> {
       lastTick
         ? `The autonomous scheduler has not ticked in ${checks.schedulerAgeSeconds} seconds (threshold ${Math.round(schedulerStaleMs / 1000)}s).`
         : `The autonomous scheduler has never ticked, and the process has been up for ${Math.round(release.processUptimeSeconds)} seconds.`,
-      lastTick ? "scheduler_heartbeat_stale" : "scheduler_heartbeat_missing"
+      "scheduler_stale"
     );
   } else {
     // Recovery: reset the escalation episode clock so the next stale episode

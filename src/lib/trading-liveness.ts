@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { batchedHaltCauseKinds, haltCauseReadStatus } from "./autonomy-halt-cause";
 import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy } from "./db";
 import { isMarketOpen } from "./market-calendar";
@@ -336,9 +337,14 @@ export interface PublicTradingLiveness {
   autonomyHaltCauseReadFailures: number;
 }
 
+/** Opaque token for dedupe signatures — never send raw account ids to Sentry. */
+export function livenessDedupeToken(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+}
+
 /**
- * Stable signature for trading-liveness Sentry dedupe — account ids and degraded
- * reason codes only (no labels, timestamps, or run summaries that drift each poll).
+ * Stable signature for trading-liveness Sentry dedupe — hashed account ids and
+ * degraded reason codes only (no labels, timestamps, or run summaries).
  */
 export function tradingLivenessSentryStateSignature(
   accounts: AccountTradingLiveness[] | undefined,
@@ -350,9 +356,24 @@ export function tradingLivenessSentryStateSignature(
   }
   const parts = (accounts ?? [])
     .filter((a) => a.degraded)
-    .map((a) => `${a.connectedAccountId}:${[...a.degradedReasons].sort().join(",")}`)
+    .map((a) => `${livenessDedupeToken(a.connectedAccountId)}:${[...a.degradedReasons].sort().join(",")}`)
     .sort();
   return parts.length > 0 ? parts.join(";") : "degraded:none";
+}
+
+/** Per-account watchdog dedupe so streak and halt episodes do not collapse. */
+export function runFailureLivenessSentrySignature(
+  userId: string,
+  accountId: string,
+  kind: "streak" | "halted",
+  streak?: number
+): string {
+  const u = livenessDedupeToken(userId);
+  const a = livenessDedupeToken(accountId);
+  if (kind === "halted") {
+    return `${u}:${a}:halted`;
+  }
+  return `${u}:${a}:streak:${streak ?? 0}`;
 }
 
 export function toPublicTradingLiveness(
