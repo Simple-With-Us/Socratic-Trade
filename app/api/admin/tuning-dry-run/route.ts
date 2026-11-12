@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { dryRunAutonomousWeightTuning } from "@/lib/strategy-tuning";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -19,9 +19,9 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return withAdminOperationGuard(request, "tuning-dry-run", async () => {
-    const userId = resolveRequestUserId(request);
-
     const decision = await dryRunAutonomousWeightTuning(userId);
     return NextResponse.json({
       ok: true,

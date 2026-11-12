@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   SOURCE_SETTING_GROUPS,
   SOURCE_SETTINGS_CATALOG,
@@ -19,7 +19,8 @@ export const dynamic = "force-dynamic";
  * PATCH — { settings: { [id]: value | null } } null resets to env+default.
  */
 export async function GET(request: NextRequest) {
-  const userId = resolveRequestUserId(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const rows = listEffectiveSourceSettings(userId).map((row) => {
     return {
       id: row.spec.id,
@@ -59,7 +60,8 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "settings object required (values: boolean, number, string or null)" }, { status: 400 });
     }
     const body = parsed.data;
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
 
     const sourcePatch: Record<string, boolean | number | string | null> = {};
     for (const [k, v] of Object.entries(body.settings)) {

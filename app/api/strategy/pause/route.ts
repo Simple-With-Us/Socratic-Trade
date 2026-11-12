@@ -1,12 +1,13 @@
 import { getPolicy, setPolicy } from "@/lib/db";
 import { releaseBrokerPlacementPauseToOwner } from "@/lib/broker-health";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const current = getPolicy(userId);
   const next = { ...current, enabled: false, systemState: "halted" as const };
   setPolicy(next, userId);
