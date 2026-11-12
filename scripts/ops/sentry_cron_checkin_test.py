@@ -62,6 +62,8 @@ class WrapTest(unittest.TestCase):
 
     def env(self, **extra: str) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
+        # Never read the real host file: a DSN there would mask missing-DSN cases.
+        env["ST_HOST_CRON_SENTRY_ENV_FILE"] = str(Path(self.tmp.name) / "no-such-default.env")
         env.update(extra)
         return env
 
@@ -96,13 +98,47 @@ class WrapTest(unittest.TestCase):
         self.assertIn("paused or deleted", r.stderr)
         self.assertEqual(_Stub.bodies, [])
 
+    def write_env(self, name: str, text: str) -> str:
+        path = Path(self.tmp.name) / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def check(self, *env_files: str, env: dict[str, str] | None = None) -> int:
+        argv = [sys.executable, str(WRAP)]
+        for f in env_files:
+            argv += ["--env-file", f]
+        argv.append("check")
+        return subprocess.run(argv, check=False, env=env or self.env(), capture_output=True).returncode
+
     def test_check_mode(self) -> None:
-        base = [sys.executable, str(WRAP), "check"]
-        self.assertEqual(subprocess.run(base, check=False, env=self.env(), capture_output=True).returncode, 78)
-        self.assertEqual(subprocess.run(base, check=False, env=self.env(SENTRY_FLEET_DSN=self.dsn)).returncode, 0)
-        self.assertEqual(
-            subprocess.run(base, check=False, env=self.env(SENTRY_CRONS_DISABLED="1"), capture_output=True).returncode, 0
-        )
+        empty = self.write_env("empty.env", "# nothing\n")
+        self.assertEqual(self.check(empty), 78)
+        self.assertEqual(self.check(self.write_env("dsn.env", f"SENTRY_FLEET_DSN={self.dsn}\n")), 0)
+        self.assertEqual(self.check(self.write_env("off.env", "SENTRY_CRONS_DISABLED=1\n")), 0)
+
+    # Preflight uses only the unit's env files, never the operator's shell.
+    def test_check_ignores_ambient_dsn_and_disable(self) -> None:
+        empty = self.write_env("empty.env", "")
+        self.assertEqual(self.check(empty, env=self.env(SENTRY_CRONS_DSN=self.dsn)), 78)
+        self.assertEqual(self.check(empty, env=self.env(SENTRY_FLEET_DSN=self.dsn)), 78)
+        self.assertEqual(self.check(empty, env=self.env(SENTRY_CRONS_DISABLED="1")), 78)
+
+    def test_check_later_env_file_wins_like_systemd(self) -> None:
+        first = self.write_env("first.env", f"SENTRY_CRONS_DSN={self.dsn}\n")
+        second = self.write_env("second.env", "SENTRY_CRONS_DSN=not-a-dsn\n")
+        self.assertEqual(self.check(first, second), 78)
+        self.assertEqual(self.check(second, first), 0)
+
+    # Default host env file is overridable and skipped when --env-file is given.
+    def test_default_env_file_override_and_skip(self) -> None:
+        default = self.write_env("default.env", f"SENTRY_CRONS_DSN={self.dsn}\n")
+        env = self.env(ST_HOST_CRON_SENTRY_ENV_FILE=default)
+        self.assertEqual(self.check(env=env), 0)
+        self.assertEqual(self.check(self.write_env("empty.env", ""), env=env), 78)
+        marker = Path(self.tmp.name) / "ran"
+        r = self.run_wrap(["touch", str(marker)], env, post=["--env-file", self.write_env("e2.env", "")])
+        self.assertEqual(r.returncode, 78, r.stderr)
+        self.assertFalse(marker.exists())
 
     # Item 3: --env-file works after the subcommand as well as before it.
     def test_env_file_after_wrap(self) -> None:
@@ -173,6 +209,25 @@ class WrapTest(unittest.TestCase):
         self.assertEqual(_Stub.bodies, [])
         for unit in HERE.glob("*.service"):
             self.assertNotIn("--treat-exit-2-as-ok", unit.read_text(encoding="utf-8"), unit.name)
+
+
+class InstallerHostCheckTest(unittest.TestCase):
+    """Installers refuse a host other than the expected one before touching anything."""
+
+    def test_installers_refuse_unexpected_host(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k not in DSN_VARS}
+        env["ST_INSTALL_EXPECTED_HOST"] = "st-unittest-no-such-host"
+        for name in ("install-litestream-l1-trim.sh", "install-st-container-restart-monitor.sh"):
+            r = subprocess.run(
+                ["bash", str(HERE / name)], check=False, env=env, capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(r.returncode, 1, name)
+            self.assertIn("refusing to install on host", r.stderr, name)
+            self.assertIn("st-unittest-no-such-host", r.stderr, name)
+            r = subprocess.run(
+                ["bash", str(HERE / name), "--bogus"], check=False, env=env, capture_output=True, timeout=30
+            )
+            self.assertEqual(r.returncode, 2, name)
 
 
 class UnitScheduleTest(unittest.TestCase):

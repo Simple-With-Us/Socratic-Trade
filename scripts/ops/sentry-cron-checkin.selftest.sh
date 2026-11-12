@@ -45,7 +45,12 @@ def statuses_from_bodies() -> list[str]:
 
 def run_wrap(port: int, extra_env: dict[str, str], cmd: list[str]) -> int:
     bodies.clear()
-    env = {**os.environ, **extra_env, "SENTRY_CRONS_DSN": f"http://publickey@127.0.0.1:{port}/1"}
+    env = {
+        **os.environ,
+        **extra_env,
+        "SENTRY_CRONS_DSN": f"http://publickey@127.0.0.1:{port}/1",
+        "ST_HOST_CRON_SENTRY_ENV_FILE": "/nonexistent/st-host-cron-sentry.selftest",
+    }
     return subprocess.call(
         [
             sys.executable,

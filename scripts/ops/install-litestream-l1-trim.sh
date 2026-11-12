@@ -5,7 +5,49 @@
 #
 # Usage (from this repo, as root on the host):
 #   bash scripts/ops/install-litestream-l1-trim.sh
+#
+# Host check: refuses unless `hostname` (short or full) equals the expected host,
+# ST_INSTALL_EXPECTED_HOST or --expected-host NAME, default fleet-hetzner-nbg1.
+# --skip-host-check is the explicit override (for example a rebuilt host).
 set -euo pipefail
+
+EXPECTED_HOST="${ST_INSTALL_EXPECTED_HOST:-fleet-hetzner-nbg1}"
+SKIP_HOST_CHECK=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --expected-host)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "install-litestream-l1-trim: --expected-host needs a host name" >&2
+        exit 2
+      fi
+      EXPECTED_HOST="$2"
+      shift 2
+      ;;
+    --expected-host=*)
+      EXPECTED_HOST="${1#--expected-host=}"
+      shift
+      ;;
+    --skip-host-check)
+      SKIP_HOST_CHECK=1
+      shift
+      ;;
+    *)
+      echo "install-litestream-l1-trim: unknown argument $1 (accepted: --expected-host NAME, --skip-host-check)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "$SKIP_HOST_CHECK" = 1 ]; then
+  echo "install-litestream-l1-trim: WARNING host check skipped (--skip-host-check)" >&2
+else
+  HOST_FULL="$(hostname 2>/dev/null || true)"
+  HOST_SHORT="${HOST_FULL%%.*}"
+  if [ -z "$EXPECTED_HOST" ] || { [ "$HOST_FULL" != "$EXPECTED_HOST" ] && [ "$HOST_SHORT" != "$EXPECTED_HOST" ]; }; then
+    echo "install-litestream-l1-trim: refusing to install on host '${HOST_FULL:-unknown}' (expected '${EXPECTED_HOST}').  Set ST_INSTALL_EXPECTED_HOST or pass --expected-host NAME for a renamed host, or --skip-host-check to override.  Nothing changed." >&2
+    exit 1
+  fi
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC_PY="$REPO_ROOT/scripts/litestream-l1-boundary-trim.py"

@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-`<host>` below is the dedicated fleet host that runs the ST systemd timers; the installers check it at install time.
+`<host>` below is the dedicated fleet host that runs the ST systemd timers.  Both installers refuse (exit 1, nothing changed) unless `hostname` matches the expected host: the dedicated fleet host by default, or `ST_INSTALL_EXPECTED_HOST` / `--expected-host NAME`.  `--skip-host-check` is the explicit override and logs a warning.
 
 ST host systemd timers on `<host>` (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) had no dead-man alerting when a timer stopped firing or the oneshot kept failing.  This adds reusable Sentry Crons check-ins (in_progress then ok/error) around each ST oneshot, mirroring `scripts/sentry-ci-report.py`.
 
@@ -13,7 +13,8 @@ ST host systemd timers on `<host>` (`litestream-l1-boundary-trim`, `st-container
 - `scripts/ops/litestream-l1-boundary-trim.service` — Crons wrap with slug `st-host-litestream-l1-boundary-trim`, schedule `4 0 * * *`.
 - `scripts/ops/st-container-restart-monitor.service` — Crons wrap with slug `st-host-st-container-restart-monitor`, schedule `2,17,32,47 * * * *`.  Exit 2 (incident found) reports Crons `error`.
 - `scripts/ops/st-container-restart-monitor.timer` — `OnCalendar=*:02,17,32,47 UTC`, so the timer fires on the same UTC clock the Crons schedule declares (matches `litestream-l1-boundary-trim.timer`).
-- `scripts/ops/install-litestream-l1-trim.sh`, `scripts/ops/install-st-container-restart-monitor.sh` — install check-in script + env file (idempotent).  Preflight `sentry-cron-checkin.py check` runs before any unit changes and exits 1 when no DSN is set and Crons are not disabled.
+- `scripts/ops/install-litestream-l1-trim.sh`, `scripts/ops/install-st-container-restart-monitor.sh` — install check-in script + env file (idempotent).  Hostname check (above) runs first.  Preflight `sentry-cron-checkin.py check` then runs before any unit changes and exits 1 when no DSN is set and Crons are not disabled.  The preflight reads only the unit's env files, in `EnvironmentFile=` order with later files winning, so a DSN or `SENTRY_CRONS_DISABLED=1` exported in the operator's shell cannot make it pass.
+- `sentry-cron-checkin.py` default env file — `/etc/default/st-host-cron-sentry`, overridable with `ST_HOST_CRON_SENTRY_ENV_FILE` and skipped when `--env-file` is given (tests point it at a missing path).
 - `scripts/ops/st-container-restart-monitor.env.example` — pointer to shared Crons env.
 - `test/sentry-cron-checkin.test.ts` — runs `scripts/ops/sentry-cron-checkin.selftest.sh`: stub HTTP server tests (ok, error, Sentry down, disabled) plus `scripts/ops/sentry_cron_checkin_test.py` unittests (missing DSN, `--env-file` after `wrap`, spawn failure, SIGTERM, signal exit, exit 2, timer UTC pin).
 

@@ -27,7 +27,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -37,20 +37,27 @@ ENV_DSN_PRIMARY = "SENTRY_CRONS_DSN"
 ENV_DSN_FALLBACK = "SENTRY_FLEET_DSN"
 ENV_DISABLE = "SENTRY_CRONS_DISABLED"
 DEFAULT_ENV_FILE = "/etc/default/st-host-cron-sentry"
+# Overrides DEFAULT_ENV_FILE (tests, non-standard hosts).  Ignored when --env-file is given.
+ENV_DEFAULT_ENV_FILE = "ST_HOST_CRON_SENTRY_ENV_FILE"
 EXIT_CONFIG = 78  # sysexits EX_CONFIG
 EXIT_SPAWN_FAILED = 127
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
-def load_env_file(path: str | Path) -> None:
-    """Load KEY=VALUE lines into os.environ without logging values."""
+def default_env_file() -> str:
+    return os.environ.get(ENV_DEFAULT_ENV_FILE, "").strip() or DEFAULT_ENV_FILE
+
+
+def parse_env_file(path: str | Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines (systemd EnvironmentFile subset) without logging values."""
+    out: dict[str, str] = {}
     p = Path(path)
     if not p.is_file():
-        return
+        return out
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return
+        return out
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -66,18 +73,43 @@ def load_env_file(path: str | Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def load_env_file(path: str | Path) -> None:
+    """Fill os.environ from an env file without overriding what is already set.
+
+    Under systemd the process env already holds the unit's EnvironmentFile
+    values, so those win for `wrap`.
+    """
+    for key, value in parse_env_file(path).items():
         os.environ.setdefault(key, value)
 
 
-def crons_disabled() -> bool:
-    flag = os.environ.get(ENV_DISABLE, "").strip().lower()
+def unit_env_from_files(paths: Sequence[str | Path]) -> dict[str, str]:
+    """The env a unit sees from EnvironmentFile= lines in order (later files win).
+
+    Deliberately ignores os.environ so an exported DSN or opt-out in the
+    operator's shell cannot make the installer preflight pass.
+    """
+    env: dict[str, str] = {}
+    for path in paths:
+        if not Path(path).is_file():
+            print(f"sentry-cron-checkin: env file {path} not found", file=sys.stderr)
+        env.update(parse_env_file(path))
+    return env
+
+
+def crons_disabled(env: Mapping[str, str] = os.environ) -> bool:
+    flag = env.get(ENV_DISABLE, "").strip().lower()
     return flag in ("1", "true", "yes", "on")
 
 
-def resolve_dsn() -> str:
+def resolve_dsn(env: Mapping[str, str] = os.environ) -> str:
     """Return the Crons DSN or raise KeyError naming both supported variables."""
     for key in (ENV_DSN_PRIMARY, ENV_DSN_FALLBACK):
-        value = os.environ.get(key, "").strip()
+        value = env.get(key, "").strip()
         if value:
             return value
     raise KeyError(
@@ -87,13 +119,13 @@ def resolve_dsn() -> str:
     )
 
 
-def check_config() -> int:
+def check_config(env: Mapping[str, str] = os.environ) -> int:
     """0 when check-ins are configured or explicitly disabled, else EXIT_CONFIG."""
-    if crons_disabled():
+    if crons_disabled(env):
         warn_disabled()
         return 0
     try:
-        parse_dsn(resolve_dsn())
+        parse_dsn(resolve_dsn(env))
     except KeyError as exc:
         print(f"sentry-cron-checkin: {exc.args[0]}", file=sys.stderr)
         return EXIT_CONFIG
@@ -346,13 +378,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    for path in [*args.env_file, *getattr(args, "sub_env_file", [])]:
-        load_env_file(path)
-    # Also honor default host path when not passed (installer).
-    load_env_file(DEFAULT_ENV_FILE)
+    # Explicit --env-file replaces the default host file; otherwise use
+    # ST_HOST_CRON_SENTRY_ENV_FILE or /etc/default/st-host-cron-sentry.
+    env_files = [*args.env_file, *getattr(args, "sub_env_file", [])] or [default_env_file()]
 
     if args.mode == "check":
-        return check_config()
+        # Installer preflight: only what the unit's EnvironmentFile= lines give it.
+        return check_config(unit_env_from_files(env_files))
+
+    for path in env_files:
+        load_env_file(path)
 
     if args.mode == "wrap":
         cmd = list(args.argv)
