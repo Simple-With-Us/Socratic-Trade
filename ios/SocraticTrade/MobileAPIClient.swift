@@ -123,13 +123,17 @@ struct MobileAPIClient {
         return snap
     }
 
-    /// `maxTransientRetries` defaults to 0 because `MobileStore.fetchSnapshotWithNetworkRetry`
-    /// already owns the snapshot retry budget (two attempts, `generation` checked between them).
-    /// Nesting the transport retry inside it would allow up to six requests and ~270s pending.
+    /// Snapshot retry budget is split so the two loops never compound (see
+    /// `MobileAPIHTTPRetryPolicy.snapshotMaxRequests`):
+    /// - transport network errors are never retried here; `MobileStore.fetchSnapshotWithNetworkRetry`
+    ///   owns them (two attempts, `generation` checked between them);
+    /// - a 502/503/504 gets `maxGatewayRetries` transport retries (one on the store's first attempt,
+    ///   none on its second).  The store never retries a `.serverError`, so a gateway failure
+    ///   that exhausts this budget is terminal and reported once.
     func snapshotData(
         timeout: TimeInterval = 30,
         captureFailures: Bool = true,
-        maxTransientRetries: Int = 0
+        maxGatewayRetries: Int = MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: 0)
     ) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
         // A shared URL cache can replay the previous account after a switch or sign-out.
@@ -140,7 +144,8 @@ struct MobileAPIClient {
         let data = try await successfulResponseData(
             for: req,
             captureFailures: captureFailures,
-            maxTransientRetries: maxTransientRetries
+            maxTransientRetries: maxGatewayRetries,
+            maxNetworkRetries: 0
         )
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
@@ -227,6 +232,7 @@ struct MobileAPIClient {
     }
 
     /// Runs the /api/scan retry loop and returns the final attempt's data and response.
+    /// At most `1 + marketScanMaxRetries` (two) requests: each is a 50s server-side scan.
     /// Each attempt binds its own `let` values inside the loop body, so the results are
     /// initialized exactly once per iteration (a `let` declared outside the loop cannot be
     /// assigned from inside it).
@@ -245,7 +251,8 @@ struct MobileAPIClient {
             } catch {
                 if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
                     method: req.httpMethod,
-                    attemptIndex: attemptIndex
+                    attemptIndex: attemptIndex,
+                    maxRetries: MobileAPIHTTPRetryPolicy.marketScanMaxRetries
                 ) {
                     let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
                         attemptIndex: attemptIndex,
@@ -268,7 +275,8 @@ struct MobileAPIClient {
                MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
                    statusCode: http.statusCode,
                    method: req.httpMethod,
-                   attemptIndex: attemptIndex
+                   attemptIndex: attemptIndex,
+                   maxRetries: MobileAPIHTTPRetryPolicy.marketScanMaxRetries
                ) {
                 let retryAfter = MobileAPIHTTPRetryPolicy.parseRetryAfterSeconds(
                     http.value(forHTTPHeaderField: "Retry-After")
@@ -507,7 +515,18 @@ struct MobileAPIClient {
             SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
-        try Self.requireSuccess(response, body: nil)
+        // The SSE stream is not retried here (MobileStore reconnects quietly), and
+        // sentry-cocoa's automatic capture skips 502-504, so report those once here.
+        // Other 5xx stay with the automatic capture so nothing is reported twice.
+        do {
+            try Self.requireSuccess(response, body: nil)
+        } catch let error as MobileAPIError {
+            if case .serverError(let statusCode, _) = error,
+               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
+                SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: "/api/mobile/events")
+            }
+            throw error
+        }
         onConnect()
 
         var parser = SSEFrameAccumulator()
@@ -625,14 +644,16 @@ struct MobileAPIClient {
         captureFailures: Bool = true,
         deviceTokenConflictPath: Bool = false,
         transport: URLSession? = nil,
-        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
+        maxNetworkRetries: Int? = nil
     ) async throws -> Data {
         let (data, _) = try await transientAwareData(
             for: request,
             captureFailures: captureFailures,
             deviceTokenConflictPath: deviceTokenConflictPath,
             transport: transport,
-            maxTransientRetries: maxTransientRetries
+            maxTransientRetries: maxTransientRetries,
+            maxNetworkRetries: maxNetworkRetries
         )
         return data
     }
@@ -643,7 +664,9 @@ struct MobileAPIClient {
         deviceTokenConflictPath: Bool = false,
         transport: URLSession? = nil,
         pathForTelemetry: String? = nil,
-        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
+        /// Transport-error retry budget; nil means the same as `maxTransientRetries`.
+        maxNetworkRetries: Int? = nil
     ) async throws -> (Data, URLResponse) {
         let endpoint = pathForTelemetry ?? request.url?.absoluteString ?? ""
         var attemptIndex = 0
@@ -660,7 +683,7 @@ struct MobileAPIClient {
                 if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
                     method: request.httpMethod,
                     attemptIndex: attemptIndex,
-                    maxRetries: maxTransientRetries
+                    maxRetries: maxNetworkRetries ?? maxTransientRetries
                 ) {
                     let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
                         attemptIndex: attemptIndex,

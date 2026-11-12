@@ -105,4 +105,27 @@ final class MobileAPIHTTPRetryPolicyTests: XCTestCase {
         XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(method: "GET", attemptIndex: 2))
     }
 
+    func testSnapshotRetryBudgetIsBoundedAndGatewayRetriedOnce() {
+        XCTAssertEqual(MobileAPIHTTPRetryPolicy.snapshotStoreMaxAttempts, 2)
+        XCTAssertEqual(MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: 0), 1)
+        XCTAssertEqual(MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: 1), 0)
+        XCTAssertEqual(MobileAPIHTTPRetryPolicy.snapshotMaxRequests, 3)
+        // A 503 on the first store attempt is retried exactly once at the transport level.
+        let first = MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: 0)
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+            statusCode: 503, method: "GET", attemptIndex: 0, maxRetries: first))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+            statusCode: 503, method: "GET", attemptIndex: 1, maxRetries: first))
+    }
+
+    func testMarketScanCappedAtTwoRequests() {
+        let cap = MobileAPIHTTPRetryPolicy.marketScanMaxRetries
+        XCTAssertEqual(cap, 1)
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+            statusCode: 502, method: "GET", attemptIndex: 0, maxRetries: cap))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+            statusCode: 502, method: "GET", attemptIndex: 1, maxRetries: cap))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
+            method: "GET", attemptIndex: 1, maxRetries: cap))
+    }
 }

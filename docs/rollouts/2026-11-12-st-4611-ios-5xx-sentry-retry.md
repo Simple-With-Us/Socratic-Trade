@@ -15,7 +15,9 @@ Deploy-swap and Cloudflare 502/503/504 responses on idempotent mobile GETs (espe
 
 - Exhausted 502/503/504 failures are always reported once via `captureHTTPServerFailure`, even when `captureFailures: false` (snapshot retry path).
 - Manual `captureHTTPServerFailure` is limited to 502–504.  500–501 and 505–599 stay with sentry-cocoa's automatic `HTTPClientError` capture, so one response never emits two events (Kody review).
-- `/api/mobile/snapshot` passes `maxTransientRetries: 0`: `MobileStore.fetchSnapshotWithNetworkRetry` already owns its two-attempt budget, and nesting the transport retry would allow six requests and ~270s pending (Kody review).
+- `/api/mobile/snapshot` splits one bounded budget between the two loops so they never compound (Kody review, two rounds).  `snapshotData` never retries transport errors; `MobileStore.fetchSnapshotWithNetworkRetry` owns those (2 attempts, `generation` checked between them).  A 502/503/504 gets exactly one transport retry on the store's first attempt and none on its second, and the store never retries a `.serverError`, so a gateway failure that survives its retry is terminal and reported once.  Max requests per refresh: 3 (`MobileAPIHTTPRetryPolicy.snapshotMaxRequests`; was 6 when nested, 2 before this PR).  Worst case: 3 × 45s timeouts + 1.5s store backoff + the gateway backoff (0.3s, or a Retry-After capped at 30s), about 137s, or about 167s with a 30s Retry-After.  A typical deploy-swap 503 that answers fast adds about 0.3s and one request.
+- `/api/scan` allows one retry (`marketScanMaxRetries = 1`) for both gateway codes and transport errors: at most 2 requests, about 100s worst case (2 × 50s), or about 130s with a 30s Retry-After.  The 503 `scan_quotes_unavailable` decode still runs on every response before the retry check.
+- The SSE stream `/api/mobile/events` is not retried (MobileStore reconnects quietly), so `events()` reports a 502/503/504 from `requireSuccess` once through `captureHTTPServerFailure`.  Other 5xx stay with the automatic capture, keeping the 502–504-only manual invariant (Kody review).
 - `marketScan` runs its retry loop in `marketScanAttempts`, which binds each attempt's `let data` / `let response` inside the loop body; assigning outer `let` values inside a loop fails Swift definite initialization.
 - `marketScan` keeps a localized retry loop so 503 `scan_quotes_unavailable` bodies are still decoded before `requireSuccess` and are never captured.
 - `DELETE` is not treated as idempotent for retry (mutating unregister paths).
@@ -29,7 +31,7 @@ npm test
 npm run build
 ```
 
-Swift XCTest: not run in Linux cloud seat; logic covered by `MobileAPIHTTPRetryPolicyTests` for hosted `ios-build` CI.  Kody fix pass: `swiftc -parse` clean on the touched files, and `MobileAPIHTTPRetryPolicyTests` (8 tests) passed against the policy file with Linux swiftc 6.4.2.
+Swift XCTest: not run in Linux cloud seat; logic covered by `MobileAPIHTTPRetryPolicyTests` for hosted `ios-build` CI.  Kody fix pass: `swiftc -parse` clean on the touched files, and `MobileAPIHTTPRetryPolicyTests` (10 tests) passed against the policy file with Linux swiftc 6.4.2.  `MobileAPIClientRetryTests` (stub URLProtocol request counts for snapshot and scan) runs in hosted `ios-build`.
 
 ## Next Steps & Blockers
 

@@ -7,6 +7,22 @@ enum MobileAPIHTTPRetryPolicy {
     /// Retries after the first attempt (three tries total).
     static let defaultMaxRetries = 2
     static let maxRetryAfterSeconds: TimeInterval = 30
+    /// /api/scan runs a 50s server-side scan per request, so allow one retry (two requests).
+    static let marketScanMaxRetries = 1
+    /// `MobileStore.fetchSnapshotWithNetworkRetry` attempts; it retries only `.network` errors.
+    static let snapshotStoreMaxAttempts = 2
+
+    /// 502/503/504 transport retries inside one snapshot store attempt: one on the first
+    /// attempt, none after.  Network errors are never retried inside snapshotData (the store
+    /// owns them), and the store never retries a `.serverError`, so the loops never compound.
+    static func snapshotGatewayRetries(storeAttempt: Int) -> Int {
+        storeAttempt == 0 ? 1 : 0
+    }
+
+    /// Upper bound on HTTP requests for one snapshot refresh (currently 3: 2 + 1).
+    static var snapshotMaxRequests: Int {
+        (0..<snapshotStoreMaxAttempts).reduce(0) { $0 + 1 + snapshotGatewayRetries(storeAttempt: $1) }
+    }
 
     static func isIdempotentRead(method: String?) -> Bool {
         let normalized = (method ?? "GET").uppercased()

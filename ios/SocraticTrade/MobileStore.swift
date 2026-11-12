@@ -1310,10 +1310,16 @@ final class MobileStore: ObservableObject {
         timeout: TimeInterval,
         generation: Int
     ) async throws -> (MobileSnapshot, Data) {
-        let maxAttempts = 2
+        let maxAttempts = MobileAPIHTTPRetryPolicy.snapshotStoreMaxAttempts
         for attempt in 0..<maxAttempts {
             do {
-                return try await client.snapshotData(timeout: timeout, captureFailures: false)
+                // Only network errors are retried here; a 502/503/504 already got its
+                // transport retry inside snapshotData and is terminal (reported once there).
+                return try await client.snapshotData(
+                    timeout: timeout,
+                    captureFailures: false,
+                    maxGatewayRetries: MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: attempt)
+                )
             } catch let error as MobileAPIError {
                 guard case .network(let underlying) = error else { throw error }
                 if attempt >= maxAttempts - 1 {
