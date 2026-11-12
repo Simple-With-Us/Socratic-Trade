@@ -6,7 +6,13 @@
 
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
-import { runCongressDailyShareIfDue } from "./congress-share";
+import {
+  probeCongressShareTokenIfDue,
+  runCongressDailyShareIfDue,
+  runCongressStaleCatchupIfDue
+} from "./congress-share";
+import { secXbrlEnrichmentEnabled } from "./data-providers";
+import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
 import { runWeeklyMarketDigestRefreshIfDue } from "./weekly-market-digest";
 import { runHealthLaneReprobeIfDue } from "./health-lane-reprobe";
@@ -15,24 +21,34 @@ import { isEarningsCallsRefreshDue, refreshEarningsCallsTranscriptsIfDue } from 
 import { isRoicTranscriptRefreshDue, refreshRoicTranscriptsIfDue } from "./web-sources/roic-transcripts";
 import { runDailyLearningReviewIfDue } from "./learning-review";
 import { isRunAllowedNow } from "./market-hours";
-import { shouldDeferRagIngestDuringRth } from "./sqlite-event-loop";
+import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry, yieldIfDue } from "./sqlite-event-loop";
+import { serverKnobBool } from "./server-knobs";
 import { runProviderTierCheckIfDue } from "./provider-tier";
+import { isRunBackedOff } from "./run-failure-watchdog";
 import { refreshLitestreamRemoteInventoryIfDue } from "./litestream-remote-inventory";
 import { runR2UsageCheckIfDue, runR2UsageDailyDigestIfDue } from "./r2-usage";
 import { maybeAdvisePineconeTrialRollback } from "./pinecone-trial-window";
 import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
-import { runAuditPruneIfDue } from "./audit-prune";
+import { runAuditPruneYieldingIfDue } from "./audit-prune";
+import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
+import { backfillCompressedTextPayloadsIfDue } from "./text-payload-backfill";
 import {
   applyBrokerOrderPlacementPause,
+  brokerPauseAccountScope,
   checkBrokerHealth,
+  getBrokerPlacementPauseMarker,
+  healthSignalsFromProbeFailure,
   persistBrokerHealthSkipRun,
+  releaseBrokerPlacementPauseToOwner,
   shouldPersistBrokerHealthSkip,
   type ApplyBrokerPauseResult
 } from "./broker-health";
+import { clearBootHaltReceiptIfNotHalted, recordBootHaltReceipt, type BootHaltReceipt } from "./autonomy-halt-cause";
 import { sendNotification } from "./notifications";
 import { expireStalePendingProposals } from "./proposal-revalidation";
-import { hasInFlightStrategyWork, markStaleRunningRuns } from "./db-execution";
+import { hasInFlightStrategyWork } from "./db-execution";
+import { sweepStaleRunsAndRetry } from "./strategy-run-retry";
 import { checkRegimeFlip } from "./regime-watch";
 import { getBrokerGateway } from "./broker";
 import { deriveExecutionState } from "./execution-mode";
@@ -58,7 +74,6 @@ import { rankDemandFirstSymbols } from "./rag/demand-first-symbols";
 import { acquireOrRenewLeadership, releaseLease, LEASE_OWNER } from "./scheduler-lease";
 import { reconcilePendingFills } from "./strategy-execution";
 import { safeErrorMessage } from "./telemetry-sanitize";
-import { runStPrimaryBridgeWriterIfDue } from "./st-primary-bridge-writer";
 import { journalLane } from "./task-journal";
 import { pruneTaskJournal } from "./db-task-journal";
 import { withDeadline, withLaneDeadline, isLaneDeadlineExpiry, LANE_STALL_ATTRIBUTION_RATIO, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
@@ -116,12 +131,18 @@ const managedVectorReconcileGuardHost = globalThis as unknown as {
  * global `local` tenant. The promise guard is pinned to globalThis so HMR/module duplication cannot
  * start a second provider/SQLite repair in the same process.
  */
-export async function reconcileManagedVectorRecordsIfDue(now = Date.now()): Promise<ManagedVectorReconcileRun | null> {
+export async function reconcileManagedVectorRecordsIfDue(
+  now = Date.now(),
+  signal?: AbortSignal
+): Promise<ManagedVectorReconcileRun | null> {
   const existing = managedVectorReconcileGuardHost.__schedulerManagedVectorReconcileInFlight;
   if (existing) return existing;
 
   const run = (async (): Promise<ManagedVectorReconcileRun | null> => {
     try {
+      // Defer heavy whole-index vector inventory during Regular Trading Hours (RTH):
+      if (process.env.NODE_ENV !== "test" && shouldDeferRagIngestDuringRth(new Date(now))) return null;
+
       // Live `9d71dda4`: thousands of Pinecone list/fetch ran in the same
       // window as gather.  Pause whole-index inventory while a run/request is
       // queued or running.  Do not consume the attempt marker so the next
@@ -130,21 +151,34 @@ export async function reconcileManagedVectorRecordsIfDue(now = Date.now()): Prom
         return { status: "busy", result: { skipped: true } };
       }
 
-      const lastAttemptAt = getInternalSetting<PersistedTimestamp>(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY);
-      const lastSuccessAt = getInternalSetting<PersistedTimestamp>(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY);
+      const lastAttemptAt = await sqliteYieldRetry(() =>
+        getInternalSetting<PersistedTimestamp>(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY)
+      );
+      const lastSuccessAt = await sqliteYieldRetry(() =>
+        getInternalSetting<PersistedTimestamp>(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY)
+      );
       if (!isManagedVectorReconcileDue(now, lastAttemptAt, lastSuccessAt)) return null;
 
-      setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY, new Date(now).toISOString());
+      // Timestamp writes are each their own retry envelope so a BUSY on lastSuccess
+      // cannot re-stamp lastAttempt (or re-run the provider pass).
+      await sqliteYieldRetry(() =>
+        setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_ATTEMPT_KEY, new Date(now).toISOString())
+      );
       const { reconcileManagedVectorRecords } = await import("./vector-db");
       // Scheduled maintenance is observation-only. Provider list inventory is eventually
       // consistent, so destructive repair requires an explicit operator invocation after review.
-      const result = await reconcileManagedVectorRecords({ dryRun: true });
+      // Self-healing 2026-09-30: thread the tick watchdog's abort signal through, so a
+      // watchdog unwedge actually kills an in-flight whole-index scroll instead of
+      // orphaning it to OOM the process (the 2026-09-25 restart-loop fatal).
+      const result = await reconcileManagedVectorRecords({ dryRun: true, signal });
       if (result.skipped) {
         console.warn("[scheduler] managed-vector reconciliation busy; retry deferred");
         return { status: "busy", result };
       }
 
-      setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY, new Date(now).toISOString());
+      await sqliteYieldRetry(() =>
+        setInternalSetting(MANAGED_VECTOR_RECONCILE_LAST_SUCCESS_KEY, new Date(now).toISOString())
+      );
       return { status: "success", result };
     } catch (error) {
       console.error(`[scheduler] managed-vector reconciliation failed: ${safeErrorMessage(error)}`);
@@ -304,6 +338,7 @@ export async function sendSentrySchedulerCheckIn(
 }
 
 let timer: NodeJS.Timeout | null = null;
+const schedulerStartHost = globalThis as unknown as { __schedulerStartInFlight?: boolean };
 // Schedule state is per (userId, connectedAccountId): each connected account runs autonomously on
 // its own cadence/state, so two accounts of the same user neither share a cadence clock nor block
 // each other. Keyed by scheduleKey(userId, accountId).
@@ -329,6 +364,56 @@ const stopMonitorInFlight: Set<string> =
 const staleExitGuardHost = globalThis as unknown as { __staleExitInFlight?: Set<string> };
 const staleExitInFlight: Set<string> =
   staleExitGuardHost.__staleExitInFlight ?? (staleExitGuardHost.__staleExitInFlight = new Set<string>());
+
+// Per-account in-flight guard for pending-fill reconciliation. Without it, a slow broker pass can
+// stack a second concurrent reconcile on the next tick (void fire-and-forget), multiplying order
+// history walks and SQLite fill writes for the same account.
+const pendingFillGuardHost = globalThis as unknown as { __pendingFillReconcileInFlight?: Set<string> };
+const pendingFillReconcileInFlight: Set<string> =
+  pendingFillGuardHost.__pendingFillReconcileInFlight ??
+  (pendingFillGuardHost.__pendingFillReconcileInFlight = new Set<string>());
+
+type ProtectiveLaneScope = {
+  signal: AbortSignal;
+  /** Flipped immediately before a broker write. A hung read releases the lane; a write in flight does not. */
+  writeStarted: boolean;
+};
+
+/**
+ * Protective lanes (stops, stale exits, fill reconcile) do not share the strategy run's
+ * broker calls. A read that never settles used to leave the in-flight guard set forever,
+ * so that account's protection stopped. The deadline aborts and releases unless a broker
+ * write has already started — that write finishes alone so the next tick cannot send it twice.
+ */
+function launchIsolatedProtectiveLane(args: {
+  key: string;
+  guard: Set<string>;
+  lane: string;
+  timeoutMessage: string;
+  work: (scope: ProtectiveLaneScope) => Promise<unknown>;
+  onOk?: () => void;
+  onError?: (err: unknown) => void;
+}): void {
+  if (args.guard.has(args.key)) return;
+  args.guard.add(args.key);
+  const controller = new AbortController();
+  const scope: ProtectiveLaneScope = { signal: controller.signal, writeStarted: false };
+  const work = args.work(scope);
+  const release = () => {
+    args.guard.delete(args.key);
+  };
+  void work.catch(() => undefined).finally(release);
+  void withLaneDeadline(work, SCHEDULER_BROKER_TIMEOUT_MS, args.timeoutMessage, args.lane)
+    .then(() => args.onOk?.())
+    .catch((err: unknown) => {
+      if (!scope.writeStarted) {
+        const reason = err instanceof Error ? err : new Error(String(err));
+        controller.abort(reason);
+        release();
+      }
+      args.onError?.(err);
+    });
+}
 
 // ── Observability: de-duplicated health-gate skip log + degraded-lane surfacing ──────────────
 //
@@ -363,8 +448,9 @@ export function isHaltedPauseAction(result: ApplyBrokerPauseResult): boolean {
   return result.action === "halted" || (result.action === "still_paused" && result.autoOwned);
 }
 
-/** Log an unhealthy-account skip once per NEW cause, then only on a low-rate heartbeat. */
-export function logHealthGateSkip(key: string, reason: string, halted: boolean): void {
+/** Log an unhealthy-account skip once per NEW cause, then only on a low-rate heartbeat.
+ *  @returns true when this tick starts a new skip episode (first occurrence or cause/halt change). */
+export function logHealthGateSkip(key: string, reason: string, halted: boolean): boolean {
   const prev = healthSkipLog.get(key);
   const changed = !prev || prev.reason !== reason || prev.halted !== halted;
   const occurrences = changed ? 1 : prev.occurrences + 1;
@@ -376,6 +462,7 @@ export function logHealthGateSkip(key: string, reason: string, halted: boolean):
   } else if (occurrences % HEALTH_SKIP_HEARTBEAT_EVERY === 0) {
     console.warn(`[scheduler] Skipping account ${key}: still unhealthy after ${occurrences} ticks (cause unchanged): ${reason}${suffix}`);
   }
+  return changed;
 }
 
 /** Clear a prior skip state and announce recovery — a no-op if the account was already healthy. */
@@ -504,9 +591,16 @@ const tickGuardHost = globalThis as unknown as {
  *  resume before those pages.  Override with SCHEDULER_TICK_WATCHDOG_MS. */
 export const DEFAULT_TICK_WATCHDOG_MS = 120_000;
 export const TICK_WATCHDOG_POLL_MS = 15_000;
-/** Serial per-account health probe ceiling.  Longer than SCHEDULER_BROKER_TIMEOUT_MS (15s)
- *  because checkBrokerHealth runs getAccounts+getPortfolio whose first+retry budget is 16+8s. */
+/** Serial per-account health probe ceiling.  Above the 16s+8s first+retry budget of the
+ *  getAccounts+getPortfolio reads checkBrokerHealth makes (the order-capability probe then reads
+ *  the 15s account cache).  Wrapped in withLaneDeadline so an expiry says whether it was the
+ *  broker or a pinned event loop. */
 export const SCHEDULER_HEALTH_PROBE_TIMEOUT_MS = 30_000;
+
+/** Ceiling for the awaited material-event drain.  DB-only work, not a broker read, so it keeps
+ *  the original 15s instead of following SCHEDULER_BROKER_TIMEOUT_MS up to 30s — an awaited lane
+ *  here delays every account's tick body. */
+export const MATERIAL_EVENT_DRAIN_TIMEOUT_MS = 15_000;
 
 export type SchedulerTickWatchdogResult = "idle" | "waiting" | "unwedged";
 
@@ -597,14 +691,26 @@ function startTickWatchdog(): void {
  * The env var is a global override — when set, ALL users resume regardless of their per-user
  * toggle. When not set, each user's `autoResumeOnBoot` setting controls their own accounts.
  */
-export function reconcileAutonomyOnBoot(): void {
+export async function reconcileAutonomyOnBoot(): Promise<void> {
   if (process.env.AUTONOMY_RESUME_ON_BOOT === "1") {
     console.log("[scheduler] AUTONOMY_RESUME_ON_BOOT=1 — persisted 'active' autonomy will resume");
     return;
   }
-  // Collect halted accounts per user so we can fire ONE summary notification per boot (not one
+  // Collect affected accounts per user so we can fire ONE summary notification per boot (not one
   // per account) after the reconcile loop finishes, rather than notifying inline per account.
-  const haltedByUser = new Map<string, string[]>();
+  // Two different facts, kept apart so the notification tells the truth about each account:
+  // `reverted` were `active` and this boot flipped them to `halted`; `autoPauseReleased` were
+  // ALREADY halted by a broker-health auto-pause before the restart and only lost the marker that
+  // would have auto-resumed them (board 687a5fb4 review round).
+  const affectedByUser = new Map<string, BootInterlockAccounts>();
+  const affected = (userId: string): BootInterlockAccounts => {
+    let entry = affectedByUser.get(userId);
+    if (!entry) {
+      entry = { reverted: [], autoPauseReleased: [] };
+      affectedByUser.set(userId, entry);
+    }
+    return entry;
+  };
   for (const userId of listUsers()) {
     // Per-user autoResumeOnBoot setting (default false) — the individual opt-in replaces
     // the old global env var. Each user independently decides whether their accounts resume.
@@ -623,13 +729,55 @@ export function reconcileAutonomyOnBoot(): void {
       try {
         const policy = getPolicy(userId, accountId);
         if (policy.systemState === "active") {
-          setPolicy({ ...policy, systemState: "halted" }, userId, accountId);
-          audit("autonomy_halted_on_boot", { from: "active", to: "halted", reason: "autoResumeOnBoot not enabled" }, userId, accountId);
+          // Wrap the policy write and the audit row separately so a contended
+          // write on one cannot take down the other; both used to throw
+          // straight out of the boot reconcile on a SQLITE_BUSY, leaving the
+          // policy halted but the audit row missing.
+          await sqliteYieldRetry(() =>
+            setPolicy({ ...policy, systemState: "halted" }, userId, accountId)
+          );
+          await sqliteYieldRetry(() =>
+            audit("autonomy_halted_on_boot", { from: "active", to: "halted", reason: "autoResumeOnBoot not enabled" }, userId, accountId)
+          );
+          // Board 687a5fb4 lane h5: remember WHY this account is halted, so the console and the ops
+          // snapshot say "stopped by the restart" instead of an unexplained "Stopped".  Display
+          // only, so a failure here must not skip this account's boot notification below.
+          await recordBootHaltReceiptSafely(userId, brokerPauseAccountScope(accountId, policy.accountNumber), {
+            at: new Date().toISOString(),
+            from: "active"
+          });
           console.warn(`[scheduler] autonomy was 'active' for ${userId}/${accountId ?? "(base)"} at boot; reverted to 'halted' (enable autoResumeOnBoot in Settings to auto-resume).`);
           const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
-          const labels = haltedByUser.get(userId) ?? [];
-          labels.push(label);
-          haltedByUser.set(userId, labels);
+          affected(userId).reverted.push(label);
+        } else if (policy.systemState === "halted") {
+          // A broker-health AUTO-pause is "active, paused for the broker" — without this, the
+          // first healthy probe after boot would auto-resume it even though the owner opted out
+          // of resuming autonomy after a restart.  Hand the halt to the owner like any other
+          // active account at boot (board 687a5fb4).  Same boot-time contention as the branch
+          // above, so the same SQLITE_BUSY hardening: the release is one transaction (rolls back
+          // as a unit), retried with yields instead of throwing into the per-account catch and
+          // leaving the stale auto-resume marker behind.
+          const pauseScope = brokerPauseAccountScope(accountId, policy.accountNumber);
+          const pausedBy = getBrokerPlacementPauseMarker(userId, pauseScope);
+          const released = await sqliteYieldRetry(() =>
+            releaseBrokerPlacementPauseToOwner({
+              userId,
+              connectedAccountId: accountId,
+              accountNumber: policy.accountNumber,
+              source: "boot-autonomy-interlock"
+            })
+          );
+          if (released) {
+            // Lane h5: without this receipt the account read as a plain "Stopped" for four days
+            // (2026-09-25..29) — nothing said the restart, not the owner, had ended the auto-pause.
+            await recordBootHaltReceiptSafely(userId, pauseScope, {
+              at: new Date().toISOString(),
+              from: "broker_auto_pause",
+              ...(pausedBy ? { autoPauseReason: pausedBy.reason, autoPausedSince: pausedBy.since } : {})
+            });
+            const label = accountId ? (accounts.find((a) => a.id === accountId)?.label ?? accountId) : "(base account)";
+            affected(userId).autoPauseReleased.push(label);
+          }
         }
       } catch (err) {
         console.error(`[scheduler] boot autonomy reconcile failed for ${userId}/${accountId ?? "(base)"}:`, err);
@@ -639,11 +787,70 @@ export function reconcileAutonomyOnBoot(): void {
   // Fire-and-forget: notification delivery must never block or fail boot. sendNotification already
   // catches its own channel errors internally, but this catch is the backstop against a synchronous
   // throw (e.g. a policy lookup failure) reaching the caller of reconcileAutonomyOnBoot().
-  for (const [userId, accountLabels] of haltedByUser) {
-    notifyAutonomyHaltedOnBoot(userId, accountLabels).catch((err) => {
+  for (const [userId, accounts] of affectedByUser) {
+    notifyAutonomyHaltedOnBoot(userId, accounts).catch((err) => {
       console.error(`[scheduler] boot-halt notification failed for ${userId}:`, err);
     });
   }
+}
+
+/** Lane h5: the boot-halt receipt is display-only.  Retried like the other boot writes, but a
+ *  failure is logged, never thrown into the reconcile loop. */
+async function recordBootHaltReceiptSafely(userId: string, accountScope: string, receipt: BootHaltReceipt): Promise<void> {
+  try {
+    await sqliteYieldRetry(() => recordBootHaltReceipt(userId, accountScope, receipt));
+  } catch (err) {
+    console.error(`[scheduler] boot-halt receipt write failed for ${userId}/${accountScope}:`, err);
+  }
+}
+
+type BootInterlockAccounts = {
+  /** Were `active`; this boot reverted them to `halted`. */
+  reverted: string[];
+  /** Were already `halted` by a broker-health auto-pause; this boot only removed the auto-resume. */
+  autoPauseReleased: string[];
+};
+
+/**
+ * Title and body of the boot-interlock summary.  Pure; exported for tests.  Each account is
+ * described by what actually happened to it: a restart never "reverted from active" an account that
+ * a broker auto-pause had already halted (board 687a5fb4 review round).  Lane h5: the title for an
+ * auto-paused account used to say the auto-pause was "kept after restart", which read as "still
+ * resuming by itself" when the restart had just taken the auto-resume away.  It now says the
+ * account stays stopped, and the body says how to start it and how to keep it running next time.
+ */
+export function autonomyBootInterlockNotificationCopy(accounts: BootInterlockAccounts): { title: string; body: string } {
+  const { reverted, autoPauseReleased } = accounts;
+  const total = reverted.length + autoPauseReleased.length;
+  const title =
+    autoPauseReleased.length === 0
+      ? reverted.length === 1
+        ? `Autonomy halted on boot: ${reverted[0]}`
+        : `Autonomy halted on boot for ${reverted.length} accounts`
+      : reverted.length === 0
+        ? autoPauseReleased.length === 1
+          ? `Restart ended the broker auto-pause: ${autoPauseReleased[0]} stays stopped`
+          : `Restart ended the broker auto-pause: ${autoPauseReleased.length} accounts stay stopped`
+        : `Autonomy halted on boot for ${total} accounts`;
+  const lines: string[] = [];
+  if (reverted.length > 0) {
+    lines.push(
+      `Autonomy was reverted from 'active' to 'halted' because the app restarted (deploy or crash restart).\n` +
+        `Affected account(s): ${reverted.join(", ")}.`
+    );
+  }
+  if (autoPauseReleased.length > 0) {
+    lines.push(
+      `Already halted before the restart by a broker auto-pause (the broker order path or connection was failing): ` +
+        `${autoPauseReleased.join(", ")}.  ` +
+        `Auto-resume on boot is off, so the restart ended that auto-pause: autonomy will not re-arm on its own when the broker recovers.`
+    );
+  }
+  lines.push(
+    `Nothing starts again by itself.  Start it with Start Agent when ready.  To keep accounts running through ` +
+      `restarts and deploys, turn on Auto-resume on boot in Settings (After a restart), or set AUTONOMY_RESUME_ON_BOOT=1.`
+  );
+  return { title, body: lines.join("\n") };
 }
 
 /** One summary notification per user per boot when reconcileAutonomyOnBoot halted at least one of
@@ -652,21 +859,20 @@ export function reconcileAutonomyOnBoot(): void {
  *  (owner ruling 2026-08-12, "ALL toggles must be real" — no force-include). A legacy stored
  *  enabledEvents array predating this event type was backfilled once by migration 78 (db.ts);
  *  after that the toggle is genuinely the user's. */
-async function notifyAutonomyHaltedOnBoot(userId: string, accountLabels: string[]): Promise<void> {
-  const accountsList = accountLabels.join(", ");
+async function notifyAutonomyHaltedOnBoot(userId: string, accounts: BootInterlockAccounts): Promise<void> {
   const activeAccountId = getActiveConnectedAccount(userId)?.id;
   const policy = getPolicy(userId, activeAccountId);
-  const title =
-    accountLabels.length === 1
-      ? `Autonomy halted on boot: ${accountsList}`
-      : `Autonomy halted on boot for ${accountLabels.length} accounts`;
-  const body =
-    `Autonomy was reverted from 'active' to 'halted' because the app restarted (deploy or crash restart).\n` +
-    `Affected account(s): ${accountsList}.\n` +
-    `Re-arm autonomy in Settings when ready. To skip this halt on future restarts, enable ` +
-    `"auto-resume on boot" for this user in Settings, or set AUTONOMY_RESUME_ON_BOOT=1.`;
+  const { title, body } = autonomyBootInterlockNotificationCopy(accounts);
   await sendNotification(
-    { type: "autonomy_halted_on_boot", title, payload: { accountLabels } },
+    {
+      type: "autonomy_halted_on_boot",
+      title,
+      payload: {
+        accountLabels: [...accounts.reverted, ...accounts.autoPauseReleased],
+        revertedAccountLabels: accounts.reverted,
+        autoPauseReleasedAccountLabels: accounts.autoPauseReleased
+      }
+    },
     { userId, policy, directBody: body }
   );
 }
@@ -692,7 +898,8 @@ export function getSchedulerState(userId: string = "local", connectedAccountId?:
 }
 
 export function startScheduler(): void {
-  if (timer) return; // guard against double-start
+  if (timer || schedulerStartHost.__schedulerStartInFlight) return; // guard against double-start
+  schedulerStartHost.__schedulerStartInFlight = true;
 
   // Release only after the event loop drains. SIGTERM/SIGINT intentionally retain the lease until
   // its TTL: signal shutdown can kill detached synthetic-stop/broker work, and immediate release
@@ -707,17 +914,23 @@ export function startScheduler(): void {
     for (const event of SCHEDULER_LEASE_RELEASE_EVENTS) process.on(event, release);
   }
 
-  // Boot interlock runs once, before any tick, so a restored/copied DB cannot resume live
-  // execution unattended.
-  reconcileAutonomyOnBoot();
-
-  // Run a tick immediately on start to schedule Next Run right away
-  void tick();
-
-  timer = setInterval(tick, TICK_MS);
-  timer.unref(); // don't hold the process open in dev
-  startTickWatchdog();
-  console.log("[scheduler] started (tick every 60s; watchdog every 15s)");
+  // Boot interlock must finish before the first tick so a restored/copied DB cannot resume
+  // live execution unattended.  Halt writes go through sqliteYieldRetry (async), so the
+  // interval is armed only after they settle.  A throw here must not start ticks — failing
+  // to halt and then running would resume persisted 'active' accounts.
+  void (async () => {
+    try {
+      await reconcileAutonomyOnBoot();
+      void tick();
+      timer = setInterval(tick, TICK_MS);
+      timer.unref(); // don't hold the process open in dev
+      startTickWatchdog();
+      console.log("[scheduler] started (tick every 60s; watchdog every 15s)");
+    } catch (err) {
+      schedulerStartHost.__schedulerStartInFlight = false;
+      console.error("[scheduler] boot autonomy reconcile failed; scheduler not started:", err);
+    }
+  })();
 }
 
 async function tickInner(signal?: AbortSignal): Promise<void> {
@@ -729,28 +942,38 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // close its own now-stale check-in a second time, or worse, clobber a newer tick's still-open
   // in-progress check-in (tickGuardHost.__tickSentryCheckInId by then belongs to that newer tick).
   const myTickGeneration = tickGuardHost.__tickGeneration;
-  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill,
-  // and close the matching strategy_run_requests row so Manual Run once is not left locked.
-  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
-  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
+  // Phase-boundary yields: synchronous DB helpers in the sweeps below can pin
+  // the event loop; yield between phases so /api/live can answer (stall class
+  // behind SOCRATIC-TRADE-2Q). yieldIfDue caps this at one yield per 50ms.
+  const tickYield = { ms: Date.now() };
+  // Crashed-run sweep for rows THIS instance started.  Runs before the leader gate so a process
+  // that lost leadership can still close its own wedged run.  reapUnowned stays false: a follower
+  // must never close the leader's runs (ST-8).  The leader reaps other instances after the gate.
   try {
     await journalLane("stale-run-sweep", {}, () => {
-      const repaired = markStaleRunningRuns(Date.now());
+      // Restart-killed runs that provably placed nothing get ONE queued retry (board 687a5fb4);
+      // eligibility + idempotency live in strategy-run-retry.ts.
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: false });
       if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
-      return { status: repaired > 0 ? ("ok" as const) : ("skipped" as const), summary: `repaired=${repaired}` };
+      if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for restart-killed run(s)`);
+      return {
+        status: repaired > 0 ? ("ok" as const) : ("skipped" as const),
+        summary: `repaired=${repaired} retried=${retry.enqueued} retrySkipped=${retry.skipped}`
+      };
     });
   } catch (err) {
     console.error("[scheduler] stale-run sweep error:", err);
   }
+  await yieldIfDue(tickYield);
 
   // Same repair for the mobile/PWA command queue: claimNextQueuedCommand marks a row 'running' and
   // nothing else in the codebase ever selects that status, so a crash mid-command strands the row
   // forever — which permanently blocks account deletion (activeMobileCommands) and permanently
-  // spins the PWA. Placed here for two reasons: before the single-leader gate (like the run sweep,
-  // so stale rows are repaired even on a follower — its liveness graces are all durable DB
-  // evidence, so a follower cannot misjudge a command the leader is running), and after the run
-  // sweep, so a strategy_runs row that sweep just left alive on this same tick still hands its
-  // grace through to the strategy.run_once command wrapping it. Dynamic import matches the
+  // spins the PWA. Placed here for two reasons: before the single-leader gate (a follower may
+  // repair a command whose liveness graces are all durable DB evidence, so it cannot misjudge a
+  // command the leader is running), and after the own-instance run sweep, so a strategy_runs row
+  // that sweep just left alive on this same tick still hands its grace through to the
+  // strategy.run_once command wrapping it. Dynamic import matches the
   // mobile-command-drain lane below and keeps scheduler -> mobile-api off the static graph.
   try {
     await journalLane("stale-mobile-command-sweep", {}, async () => {
@@ -763,20 +986,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
-  // Task-journal retention: 'skipped' heartbeat rows age out in 24h, ok/error in 30d
-  // (db-task-journal.ts). One cheap indexed DELETE per tick; never throws.
+  await yieldIfDue(tickYield);
+  // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
-  // Daily audit_events + provider-observability retention (audit-prune.ts):
-  // observability kinds 14d, everything else 90d, bounded batches. First-ever
-  // run drains a large backlog over several daily passes. Also sweeps the
-  // embed_stage table (35d orphan retention + defensive size cap, db-embed-stage.ts).
-  void journalLane("audit-prune", {}, () => {
-    const result = runAuditPruneIfDue();
+  // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
+  // The lane's only remaining work is the read-only embed_stage observer (db-embed-stage.ts,
+  // ST-4540): it counts undelivered paid vectors and raises the backlog / over-cap alarms.
+  void journalLane("audit-prune", {}, async () => {
+    const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
-    const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned;
-    return { status: "ok" as const, summary: `deleted=${total}` };
+    // Forever retention: the delete counts are structurally zero, so the lane summary reports
+    // the signal that still matters — undelivered embed_stage rows awaiting delivery (ST-4540).
+    const stageSummary = result.embedStageUndeliveredRetained > 0
+      ? ` embed_stage_undelivered=${result.embedStageUndeliveredRetained}`
+      : " embed_stage_undelivered=0";
+    return { status: "ok" as const, summary: `deleted=0${stageSummary}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
   signal?.throwIfAborted();
@@ -788,6 +1013,48 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     return; // not the leader this tick — no side effects
   }
 
+  // Leader-only reap of runs this process did not start (prior leader, or a legacy NULL owner).
+  // Followers returned above.  Boot grace and the drain-adoption skip live in the sweep, so this
+  // does not close a run the drain later in this tick is about to resume.
+  try {
+    await journalLane("stale-run-sweep-unowned", {}, () => {
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: true });
+      if (repaired > 0) console.log(`[scheduler] marked ${repaired} unowned stale running run(s) as failed`);
+      if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for unowned restart-killed run(s)`);
+      return {
+        status: repaired > 0 ? ("ok" as const) : ("skipped" as const),
+        summary: `repaired=${repaired} retried=${retry.enqueued} retrySkipped=${retry.skipped}`
+      };
+    });
+  } catch (err) {
+    console.error("[scheduler] unowned stale-run sweep error:", err);
+  }
+  await yieldIfDue(tickYield);
+
+  // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
+  // reclaim (no row deletes).  Leader only: every replica checkpointing
+  // the same WAL fights TRUNCATE.  Dry-run when SQLITE_STORAGE_HYGIENE_DRY_RUN=1.
+  void journalLane("storage-hygiene", {}, async () => {
+    const result = await runStorageHygieneIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `dryRun=${result.dryRun} shrinkBytes=${result.expectedFileShrinkBytes} deleted=${result.deletedRows}`
+    };
+  }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
+
+  // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
+  // The lane probes text_codec / segment_codec (indexed), then reads one body
+  // at a time and yields. It does not scan blob columns and does not delete rows.
+  void journalLane("text-payload-backfill", {}, async () => {
+    const result = await backfillCompressedTextPayloadsIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `transcripts=${result.transcripts} secFacts=${result.secFacts}`
+    };
+  }).catch((err) => console.error("[scheduler] text payload backfill error:", err));
+
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
   // the body finishes — not here — so a hung await cannot look like a successful tick.
@@ -796,6 +1063,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   let sentryStatus: SentrySchedulerCheckInStatus = "ok";
 
   try {
+  await yieldIfDue(tickYield);
 
   // Drain durable material-event inboxes on every leader tick, independent of SEC ingestion
   // flags. Events may be produced by filings, transcripts, broker state, or operator actions;
@@ -804,7 +1072,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   try {
     await withDeadline(
       journalLane("material-event-drain", {}, () => drainMaterialEventQueue()),
-      SCHEDULER_BROKER_TIMEOUT_MS,
+      MATERIAL_EVENT_DRAIN_TIMEOUT_MS,
       "material-event-drain timeout"
     );
   } catch (err) {
@@ -814,22 +1082,13 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Global managed-vector crash repair is cadence-gated and single-flight. It must never block or
   // throw into trading work; failed or lease-busy attempts persist their hourly retry marker.
   void journalLane("managed-vector-reconcile", {}, async () => {
-    const run = await reconcileManagedVectorRecordsIfDue();
+    // Pass the tick's abort signal: a watchdog unwedge must kill this lane's
+    // whole-index scroll, not orphan it (2026-09-25 OOM).  The lane is
+    // fire-and-forget, so without the signal the abort could never reach it.
+    const run = await reconcileManagedVectorRecordsIfDue(Date.now(), signal);
     if (run === null) return { status: "skipped" as const, summary: "not due" };
     return { status: "ok" as const, summary: `status=${run.status}` };
   }).catch((err) => console.error("[scheduler] managed-vector reconcile journal error:", err));
-
-  // Default-off, cadence-gated export of only the primary local user's Gemini
-  // and DeepSeek credentials to the isolated Usage Monitor bridge path. The
-  // writer is self-guarded and returns sanitized status codes without throwing
-  // into trading work.
-  void journalLane("st-primary-bridge-writer", {}, () => runStPrimaryBridgeWriterIfDue()).then((result) => {
-    if (result.status === "error") {
-      console.error(
-        `[scheduler] ST primary credential bridge failed (${result.errorCode ?? "unknown"})`
-      );
-    }
-  }).catch((err) => console.error("[scheduler] ST primary bridge journal error:", err));
 
   // Refresh backend web sources (congressional trades, etc.) independently of the
   // trading loop — these are low-frequency (cadence-gated, ~daily) data reads that
@@ -843,6 +1102,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // free-safe 5/min so the raised paid default can't 429-storm. No-op until due; fully self-guarded.
   void journalLane("provider-tier-check", {}, () => runProviderTierCheckIfDue())
     .catch((err) => console.error("[scheduler] provider-tier check error:", err));
+
+  // Consecutive-run-failure watchdog (self-healing 2026-09-30): the
+  // trading-liveness signal is read-only, so a streak of failing strategy runs
+  // had no in-process consumer (the 2026-09-30 incident: ~5 days unhandled).
+  // This lane alerts loudly, backs off the account's runs exponentially, and
+  // auto-halts after a long streak — never restarts the process.  Fully
+  // self-guarded so it can't break a tick.  See src/lib/run-failure-watchdog.ts.
+  void journalLane("run-failure-watchdog", {}, async () => {
+    const { runFailureWatchdogTick } = await import("./run-failure-watchdog");
+    await runFailureWatchdogTick();
+    return { status: "ok" as const, summary: "checked" };
+  }).catch((err) => console.error("[scheduler] run-failure watchdog error:", err));
 
   // Re-open hard-STOPPED Connections health lanes on a 3–6h cadence (or at known
   // quota reset). Prevents "red forever until an agent SSHs" — owner 2026-08-06.
@@ -893,8 +1164,11 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // this guard a breached ceiling would still let the weekly filing-body ingest spend.
   const filingIngestDue = isFilingIngestDue();
   const transcriptIngestDue = isFmpTranscriptRefreshDue();
-  const deferRagIngest = shouldDeferRagIngestDuringRth();
-  if ((filingIngestDue || transcriptIngestDue) && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  const isRth = isRegularTradingHours();
+  const deferFilingIngest = isRth && !serverKnobBool("SEC_INGEST_DAYTIME_ENABLED");
+  const deferTranscriptIngest = isRth && !serverKnobBool("TRANSCRIPTS_DAYTIME_ENABLED");
+
+  if (((filingIngestDue && !deferFilingIngest) || (transcriptIngestDue && !deferTranscriptIngest)) && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok) {
     // DEMAND-FIRST: held-by-value, watchlist, technical, policy universe, then the
     // 1k-issuer manifest.  Insertion order is the ingest order; a Set union used to
     // drop value ranking so the desk's names waited behind the alphabet.
@@ -903,14 +1177,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     // lease. Keep their scheduler admission ordered too, so a same-tick refresh does not make one
     // producer race into a benign busy result while the other starts embedding.
     void (async () => {
-      if (filingIngestDue) {
+      if (filingIngestDue && !deferFilingIngest) {
         try {
-          await journalLane("filing-body-ingest", { metadata: { symbols: symbols.length } }, () => refreshFilingBodies(symbols));
+          const maxFilings = isRth ? 3 : undefined;
+          await journalLane("filing-body-ingest", { metadata: { symbols: symbols.length } }, () => refreshFilingBodies(symbols, Date.now(), maxFilings));
         } catch (err) {
           console.error("[scheduler] filing-body refresh error:", err);
         }
       }
-      if (transcriptIngestDue) {
+      if (transcriptIngestDue && !deferTranscriptIngest) {
         try {
           await journalLane("fmp-transcript-ingest", { metadata: { symbols: symbols.length } }, () => refreshFmpTranscripts(symbols));
         } catch {
@@ -930,7 +1205,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // with them via the shared durable RAG_REINDEX operation lease (acquired inside the producer,
   // like refreshFilingBodies/refreshFmpTranscripts; a busy lease is a benign deferred pass —
   // the daily watermark is untouched, so a later tick retries). Self-guarded.
-  if (isEarningsCallsRefreshDue() && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  if (isEarningsCallsRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferTranscriptIngest) {
     void journalLane("earningscalls-refresh", {}, () => refreshEarningsCallsTranscriptsIfDue()).catch((err) =>
       console.error("[scheduler] earningscalls transcript refresh error:", err instanceof Error ? err.message : err)
     );
@@ -941,11 +1216,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // Cached earningscalls_transcripts + data/roic-artifacts never re-list or re-fetch.
   // Holdings → watchlist, last N fiscal quarters, cap ROIC_TRANSCRIPTS_MAX_PER_RUN.
   // Library helpers existed earlier without a scheduler caller — that left zero ROIC saves.
-  if (isRoicTranscriptRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferRagIngest) {
+  if (isRoicTranscriptRefreshDue() && !hasInFlightStrategyWork() && checkMonthlyLlmSpendCeiling().ok && !deferTranscriptIngest) {
     void journalLane("roic-transcript-refresh", {}, () => refreshRoicTranscriptsIfDue()).catch((err) =>
       console.error("[scheduler] roic transcript refresh error:", err instanceof Error ? err.message : err)
     );
   }
+
+  // Periodic congress-share token probe (~6h cadence): validates CONGRESS_TRADE_TOKEN against
+  // App A so a drifted/rotated token is surfaced via Sentry + health log well before the next
+  // nightly batch run. No-op when token is not configured or the interval hasn't elapsed.
+  void journalLane("congress-share-token-probe", {}, () => probeCongressShareTokenIfDue(Date.now())).catch((err) =>
+    console.error("[scheduler] congress-share token probe error:", err)
+  );
 
   // Once-per-day share of company refs + daily closes + the S&P-500 series to congress.trade
   // (App A) so it can avoid spending the shared FMP quota. No-op unless CONGRESS_TRADE_TOKEN +
@@ -953,6 +1235,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
   );
+
+  // Same-session retry of the tickers the nightly share withheld as stale (late-posting NAVs and
+  // thin names), so they do not wait a whole UTC day.  Bounded retries; no-op when nothing pending.
+  void journalLane("congress-stale-catchup", {}, () => runCongressStaleCatchupIfDue(Date.now())).catch((err) =>
+    console.error("[scheduler] congress-share stale catch-up error:", err)
+  );
+
+  if (secXbrlEnrichmentEnabled()) {
+    void journalLane("sec-companyfacts-sweep", {}, () => runSecCompanyFactsSweepIfDue(Date.now())).catch((err) =>
+      console.error("[scheduler] sec-companyfacts sweep error:", err)
+    );
+  }
 
   // Weekend/off-hours Market Scan freshness guarantee: scanMarket otherwise has no scheduled
   // caller, so a Friday-evening scan would sit stale until a user visits the app Monday.
@@ -1137,6 +1431,19 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
       prevNextRunAt: string | null;
     }> = [];
 
+    // Halt/strategy health is awaited per account.  Protective lanes are launched in this
+    // first pass and are not inside that await, so one hung health probe cannot delay the
+    // next account's stops or exits.
+    const healthPass: Array<{
+      userId: string;
+      account: ReturnType<typeof listConnectedAccounts>[number];
+      accountId: string;
+      key: string;
+      policy: TradingPolicy;
+      brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+      schedule: { lastRunAt: string | null; nextRunAt: string | null };
+    }> = [];
+
     for (const userId of listUsers()) {
       signal?.throwIfAborted();
       for (const account of listConnectedAccounts(userId)) {
@@ -1163,6 +1470,15 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
 
         const policy = getPolicy(userId, accountId);
 
+        // Lane h5: a "stopped by the restart" receipt is only true while the account stays halted.
+        // Once anyone re-arms it (console, mobile, ops token), drop it so a later manual stop is not
+        // mislabelled.  A read on every tick; a delete only on the tick after a re-arm.
+        try {
+          clearBootHaltReceiptIfNotHalted(userId, accountId, policy.systemState);
+        } catch (err) {
+          console.error("[scheduler] boot-halt receipt cleanup failed:", err);
+        }
+
         // Deterministic proposal expiry runs independently of the trading cadence so a stale
         // approval queue self-clears even while the system is halted or the market is closed.
         if (policy.accountNumber) {
@@ -1177,8 +1493,37 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           schedule.nextRunAt = null;
           continue;
         }
+        // Review rank 8: a parked account is skipped BEFORE anything reaches the broker, and the
+        // reason travels with the skip. Without this the flag would record a decision that nothing
+        // acted on, and a parked account would keep proposing trades. Checked before the execution
+        // state so no gateway is even constructed for an account the owner has parked.
+        if (account.parked) {
+          schedule.nextRunAt = null;
+          // The audit row IS the record — there is no `lastSkipReason` field on the per-account
+          // schedule, and inventing one here would add a shape nothing else reads.
+          audit(
+            "scheduler_account_parked_skip",
+            { connectedAccountId: account.id, parkedReason: account.parkedReason ?? null, parkedAt: account.parkedAt ?? null },
+            userId,
+            account.id
+          );
+          continue;
+        }
         const executionState = deriveExecutionState(policy, account);
-        const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        let brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+        try {
+          brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        } catch (error) {
+          // One account with unusable stored credentials (e.g. a key saved without its
+          // secret) must not abort the tick for every other account's lanes.
+          audit(
+            "scheduler_broker_gateway_unavailable",
+            { connectedAccountId: account.id, error: error instanceof Error ? error.message.slice(0, 300) : "unknown" },
+            userId,
+            account.id
+          );
+          continue;
+        }
         
         if (account.isDraining) {
           if (brokerGateway && policy.accountNumber) {
@@ -1213,35 +1558,29 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           continue;
         }
         
-        if (brokerGateway && !staleExitInFlight.has(key)) {
-          staleExitInFlight.add(key);
+        if (brokerGateway) {
           const gw = brokerGateway;
           const stalePolicy = policy as TradingPolicy & { accountNumber: string }; // accountNumber checked non-null above
-          const staleExitWork = journalLane("stale-limit-scan", { userId, connectedAccountId: accountId }, async () => {
-            const orders = await gw.getEquityOrders(stalePolicy.accountNumber);
-            await notifyStaleLimitOrders({ userId, policy, orders });
-            const outcome = await withAccountMutation(
-              { userId, accountNumber: stalePolicy.accountNumber, connectedAccountId: accountId, lane: "stale-exit-replacement", waitMs: LANE_WAITS.staleExit },
-              (ctx) => autoRemediateStaleExitOrders({ userId, policy: stalePolicy, activeAccount: account, gateway: gw, orders, fence: ctx.assertOwned })
-            );
-            if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
-            return undefined;
+          launchIsolatedProtectiveLane({
+            key,
+            guard: staleExitInFlight,
+            lane: "stale-limit-scan",
+            timeoutMessage: "stale-limit-scan broker timeout",
+            onOk: () => recordLaneRecovery("stale-limit-order handling", key),
+            onError: (err) => recordLaneFailure("stale-limit-order handling", key, err),
+            work: (scope) => journalLane("stale-limit-scan", { userId, connectedAccountId: accountId }, async () => {
+              const orders = await gw.getEquityOrders(stalePolicy.accountNumber);
+              if (scope.signal.aborted) return { status: "skipped" as const, summary: "aborted before remediation" };
+              await notifyStaleLimitOrders({ userId, policy, orders });
+              scope.writeStarted = true;
+              const outcome = await withAccountMutation(
+                { userId, accountNumber: stalePolicy.accountNumber, connectedAccountId: accountId, lane: "stale-exit-replacement", waitMs: LANE_WAITS.staleExit },
+                (ctx) => autoRemediateStaleExitOrders({ userId, policy: stalePolicy, activeAccount: account, gateway: gw, orders, fence: ctx.assertOwned })
+              );
+              if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
+              return undefined;
+            })
           });
-          // Guard is released by the REAL work, never by the 15s race loser: a lane still running
-          // past the deadline must not get a duplicate launched on the next tick.
-          void staleExitWork.catch(() => undefined).finally(() => staleExitInFlight.delete(key));
-          // Recovery/failure must both key off the SAME deadline-raced promise (2026-09-07 fix):
-          // attaching recordLaneRecovery to the raw staleExitWork promise let a run that timed out
-          // (recordLaneFailure fires) but later fulfilled in the background silently clear the
-          // just-recorded failure streak, so a lane that always times out but eventually succeeds
-          // could never reach lane_degraded. withDeadline's promise only fulfills when the real
-          // work finishes BEFORE the deadline; once it rejects (timeout OR a real error), it is
-          // settled and a later background fulfillment of staleExitWork can no longer reach this
-          // .then — recovery reflects success WITHIN the deadline, not late fulfillment of an
-          // invocation already classified as failed.
-          void withLaneDeadline(staleExitWork, SCHEDULER_BROKER_TIMEOUT_MS, "stale-limit-scan broker timeout", "stale-limit-scan")
-            .then(() => recordLaneRecovery("stale-limit-order handling", key))
-            .catch((err) => recordLaneFailure("stale-limit-order handling", key, err));
         }
 
         const protectiveState =
@@ -1253,29 +1592,32 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         // R2: synthetic trailing-stop monitor — runs every tick in states where risk-reducing exits
         // are allowed. `close_only` and `liquidating` must not disable the very protection that can
         // reduce exposure after a breaker trips. `halted` remains the only no-order state unless protectWhileHalted is active.
-        if (protectiveState && !stopMonitorInFlight.has(key)) {
-          stopMonitorInFlight.add(key);
-          const stopMonitorWork = journalLane("synthetic-stop-monitor", { userId, connectedAccountId: accountId }, async () => {
-            const outcome = await withAccountMutation(
-              { userId, accountNumber: policy.accountNumber, connectedAccountId: accountId, lane: "stop-monitor" },
-              (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned)
-            );
-            if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
-            const result = outcome.value;
-            return {
-              status: "ok" as const,
-              summary: `evaluated=${result.evaluated} triggered=${result.triggered} exited=${result.exited}`
-            };
+        if (protectiveState) {
+          launchIsolatedProtectiveLane({
+            key,
+            guard: stopMonitorInFlight,
+            lane: "synthetic-stop-monitor",
+            timeoutMessage: "runSyntheticStopMonitor timeout",
+            onOk: () => recordLaneRecovery("synthetic-stop monitor", key),
+            onError: (err) => recordLaneFailure("synthetic-stop monitor", key, err),
+            work: (scope) => journalLane("synthetic-stop-monitor", { userId, connectedAccountId: accountId }, async () => {
+              const outcome = await withAccountMutation(
+                { userId, accountNumber: policy.accountNumber, connectedAccountId: accountId, lane: "stop-monitor" },
+                (ctx) => runSyntheticStopMonitor(userId, policy, true, undefined, ctx.assertOwned, {
+                  signal: scope.signal,
+                  onBrokerWrite: () => {
+                    scope.writeStarted = true;
+                  }
+                })
+              );
+              if (!outcome.acquired) return { status: "skipped" as const, summary: "account mutation lease busy" };
+              const result = outcome.value;
+              return {
+                status: "ok" as const,
+                summary: `evaluated=${result.evaluated} triggered=${result.triggered} exited=${result.exited}`
+              };
+            })
           });
-          // Guard is released by the REAL work, never by the 15s race loser: a lane still running
-          // past the deadline must not get a duplicate launched on the next tick.
-          void stopMonitorWork.catch(() => undefined).finally(() => stopMonitorInFlight.delete(key));
-          // See the matching comment on the stale-limit-order lane above: recovery/failure both
-          // key off the SAME deadline-raced promise so a late background fulfillment (after the
-          // deadline already timed out and recorded a failure) cannot silently clear the streak.
-          void withLaneDeadline(stopMonitorWork, SCHEDULER_BROKER_TIMEOUT_MS, "runSyntheticStopMonitor timeout", "synthetic-stop-monitor")
-            .then(() => recordLaneRecovery("synthetic-stop monitor", key))
-            .catch((err) => recordLaneFailure("synthetic-stop monitor", key, err));
         }
 
         // Reconcile pending broker fills every tick (independent of the strategy cadence) so a broker
@@ -1286,12 +1628,33 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           // Captured outside the closure: the !accountNumber `continue` guard above narrows the
           // property here, but property narrowing does not propagate into arrow closures.
           const accountNumber = policy.accountNumber;
-          void journalLane(
-            "pending-fill-reconcile",
-            { userId, connectedAccountId: accountId },
-            () => reconcilePendingFills(brokerGateway, accountNumber, userId, policy.connectedAccountId)
-          ).catch((err) => console.error("[scheduler] pending-fill reconcile error:", err));
+          const gw = brokerGateway;
+          launchIsolatedProtectiveLane({
+            key,
+            guard: pendingFillReconcileInFlight,
+            lane: "pending-fill-reconcile",
+            timeoutMessage: "pending-fill-reconcile broker timeout",
+            onError: (err) => console.error("[scheduler] pending-fill reconcile error:", err),
+            work: (scope) => {
+              // Reconcile books fills.  Hold the guard until that work settles so a second
+              // pass cannot double-book the same fill.  Stops and exits release on a hung read.
+              scope.writeStarted = true;
+              return journalLane(
+                "pending-fill-reconcile",
+                { userId, connectedAccountId: accountId },
+                () => reconcilePendingFills(gw, accountNumber, userId, policy.connectedAccountId)
+              );
+            }
+          });
         }
+
+        healthPass.push({ userId, account, accountId, key, policy, brokerGateway, schedule });
+      }
+    }
+
+    for (const healthItem of healthPass) {
+      signal?.throwIfAborted();
+      const { userId, account, accountId, key, policy, brokerGateway, schedule } = healthItem;
 
         // Fast pre-proposal broker health gate.
         // E.g., skips queuing an LLM strategy run if the broker is unreachable, account is suspended,
@@ -1301,19 +1664,44 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         // Hard deadline: Alpaca REST has hung past 14s (inflight-deadline.ts); without this the
         // serial per-account await pins `__tickInFlight`, skips later interval ticks, and the
         // 90s lease expires (Firefighter SOCRATIC-TRADE-4, 2026-08-31).
+        //
+        // withLaneDeadline (not plain withDeadline, board 687a5fb4): the expiry carries how much of
+        // the window the event loop was pinned.  A stall-dominated expiry is the APP's fault —
+        // skip this tick's launch with that honest reason and never count it toward the
+        // auto-halt streak; any other expiry is a probe timeout, streak-eligible (3 in a row),
+        // never a first-strike halt.  Production 2026-09-22..24: 21 of 23 broker skips were this
+        // first-strike halt during RTH stalls, not an Alpaca outage.
         let healthSignals: Awaited<ReturnType<typeof checkBrokerHealth>>;
         try {
-          healthSignals = await withDeadline(
+          healthSignals = await withLaneDeadline(
             checkBrokerHealth(userId, account, brokerGateway),
             SCHEDULER_HEALTH_PROBE_TIMEOUT_MS,
-            "checkBrokerHealth timeout"
+            "checkBrokerHealth timeout",
+            "broker-health-probe",
+            { wraps: "call" }
           );
         } catch (err) {
-          healthSignals = {
-            isHealthy: false,
-            reason: `Broker health check timed out: ${safeErrorMessage(err)}`,
-            category: "connectivity"
-          };
+          healthSignals = healthSignalsFromProbeFailure(err);
+        }
+        if (healthSignals.processStall) {
+          // Visible in audit (per occurrence — each needs a >=75% stall of the probe window, so
+          // this is rare by construction) and in the broker-health-gate journal row below.
+          try {
+            audit(
+              "broker_health_probe_process_stalled",
+              {
+                reason: healthSignals.reason,
+                stalledMs: healthSignals.processStall.stalledMs,
+                elapsedMs: healthSignals.processStall.elapsedMs,
+                source: "scheduler-gate",
+                action: "skipped_strategy_launch_this_tick"
+              },
+              userId,
+              accountId
+            );
+          } catch (err) {
+            console.error("[scheduler] process-stall audit failed:", err);
+          }
         }
         const pauseResult = await applyBrokerOrderPlacementPause({
           userId,
@@ -1322,11 +1710,11 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           health: healthSignals,
           policy
         });
-        if (pauseResult.action === "halted" || pauseResult.action === "resumed") {
-          // Policy may have flipped; re-read so the rest of this tick sees durable state.
-          const refreshed = getPolicy(userId, accountId);
-          policy.systemState = refreshed.systemState;
-        }
+        // Re-read unconditionally so the rest of this tick sees durable state: the pause may have
+        // flipped it, and an operator (console Stop, POST /api/ops/account-control) may have
+        // changed it while the health probe was in flight.  A healthy probe must not launch a run
+        // on an account the operator halted or set close_only mid-probe.
+        policy.systemState = getPolicy(userId, accountId).systemState;
         if (!healthSignals.isHealthy) {
           // De-duplicated: logs on first occurrence and on any reason/halt-state change, then a
           // low-rate heartbeat — see logHealthGateSkip doc comment for why (1,364 identical
@@ -1334,19 +1722,25 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           // isHaltedPauseAction (not a raw `=== "halted"` check) tracks the DURABLE auto-halt
           // we own, not the one-tick transition marker and not a manual owner pause — see its
           // own doc comment.
-          logHealthGateSkip(key, healthSignals.reason ?? "unhealthy", isHaltedPauseAction(pauseResult));
+          const skipEpisodeStarted = logHealthGateSkip(
+            key,
+            healthSignals.reason ?? "unhealthy",
+            isHaltedPauseAction(pauseResult)
+          );
           // Journal the suppression itself: an unhealthy gate is exactly the event an operator
           // later asks "why didn't this account trade?" about.
           void journalLane("broker-health-gate", { userId, connectedAccountId: accountId }, () => ({
             status: "ok" as const,
             summary: `suppressed: ${healthSignals.reason ?? "unhealthy"}${pauseResult.action === "halted" ? "; auto-halted" : pauseResult.action === "still_paused" ? "; still paused" : ""}`
           })).catch(() => undefined);
-          // Equity-0 / OMS-down used to write NO strategy_runs row, so the completed-run
-          // counter never moved.  Persist once when we auto-halt an active account.
+          // Auto-halt and new low-equity skip episodes write one strategy_runs row so liveness/ops
+          // see why ticks stopped (deduped via skipEpisodeStarted for equity — account stays active).
           if (
             shouldPersistBrokerHealthSkip({
               wasActive: wasActiveForHealthGate,
-              pauseAction: pauseResult.action
+              pauseAction: pauseResult.action,
+              health: healthSignals,
+              skipEpisodeStarted
             })
           ) {
             try {
@@ -1355,7 +1749,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
                 connectedAccountId: accountId,
                 accountNumber: policy.accountNumber,
                 reason: healthSignals.reason ?? "unhealthy",
-                halted: true
+                halted: pauseResult.action === "halted"
               });
             } catch (err) {
               console.error("[scheduler] broker-health-gate skip row failed:", err);
@@ -1420,7 +1814,6 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         schedule.lastRunAt = new Date(now).toISOString();
         schedule.nextRunAt = new Date(now + cadenceMs).toISOString();
         dueRuns.push({ userId, accountId, key, prevLastRunAt, prevNextRunAt });
-      }
     }
 
     // Skip LLM strategy runs when the monthly operator spend ceiling is breached.
@@ -1441,6 +1834,26 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
         }
       }
     } else {
+      // Consecutive-run-failure backoff (self-healing 2026-09-30): suppress due
+      // runs for accounts the run-failure watchdog is backing off, so a broken
+      // broker/LLM path is not hammered every cadence.  Same cadence-state
+      // rollback as the monthly-ceiling suppression above: a run that never
+      // executed must NOT look completed.  Probe runs are allowed once the
+      // backoff expires (isRunBackedOff goes false), so recovery is automatic.
+      for (let i = dueRuns.length - 1; i >= 0; i--) {
+        const run = dueRuns[i];
+        if (isRunBackedOff(run.userId, run.accountId)) {
+          const s = accountSchedules[run.key];
+          if (s) {
+            s.lastRunAt = run.prevLastRunAt;
+            s.nextRunAt = run.prevNextRunAt;
+          }
+          console.log(
+            `[scheduler] run-failure backoff: suppressing due run for ${run.userId}/${run.accountId}`
+          );
+          dueRuns.splice(i, 1);
+        }
+      }
       // Do NOT await the strategy promises: a hung LLM/gather used to pin `__tickInFlight` until
       // process restart, which skipped every later 60s interval (no lease renew, no lastTick, no
       // Sentry close). Per-account strategy locks still prevent duplicate money-path work.
@@ -1473,7 +1886,9 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     // never reach this finally. A completed tick (ok or error) proves the loop is alive;
     // the watchdog does not write lastTick on unwedge.
     try {
-      setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      // SQLITE_BUSY after the 100ms pin must yield and retry.  A later success is a live
+      // leader — it must not incrementHealthFailures or releaseLease.
+      await sqliteYieldRetry(() => setInternalSetting("scheduler:lastTick", new Date().toISOString()));
       if (getHealthFailures() > 0) resetHealthFailures();
     } catch (err) {
       console.error("[scheduler] heartbeat write error:", err);

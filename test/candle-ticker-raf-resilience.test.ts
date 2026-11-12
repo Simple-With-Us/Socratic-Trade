@@ -21,7 +21,7 @@ import {
   tickerUnitAt,
   type TickerUnit,
   type Wordmark
-} from "../app/console/ui/candle-ticker";
+} from "../app/ui/brand/candle-ticker";
 
 /** A Wordmark of the shape sampleWordmark() returns, without needing a canvas. */
 function fixtureWordmark(overrides: Partial<Wordmark> = {}): Wordmark {

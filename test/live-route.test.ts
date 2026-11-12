@@ -38,6 +38,20 @@ describe("/api/live", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, probe: "live" });
   });
 
+  it("returns 200 when the serving SQLite handle is closed", async () => {
+    const { db, liveRoute } = await load();
+    db.getDb().close();
+    try {
+      const started = Date.now();
+      const response = await liveRoute.GET();
+      expect(Date.now() - started).toBeLessThan(200);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true, probe: "live" });
+    } finally {
+      db.resetDbForTesting();
+    }
+  });
+
   it("stays 200 when /api/health would 503 on a hard-stopped critical dependency", async () => {
     const { db, liveRoute, healthRoute } = await load();
     for (let i = 0; i < 5; i++) {
@@ -56,5 +70,14 @@ describe("Coolify Traefik liveness wiring", () => {
     expect(dockerfile).toMatch(/HEALTHCHECK[\s\S]*4000\/api\/live/);
     expect(dockerfile).not.toMatch(/HEALTHCHECK[\s\S]*4000\/api\/health/);
     expect(existsSync(join(repoRoot, "app/api/live/route.ts"))).toBe(true);
+  });
+
+  it("uses tini as PID1 and self-times out HEALTHCHECK curl (ST-3092)", () => {
+    const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/ENTRYPOINT\s+\["tini",\s+"--"\]/);
+    expect(dockerfile).toMatch(/HEALTHCHECK[\s\S]*curl[\s\S]*--max-time\s+14/);
+    expect(dockerfile).toMatch(/HEALTHCHECK[\s\S]*--connect-timeout\s+2/);
+    const startScript = readFileSync(join(repoRoot, "scripts/coolify-prod-start.sh"), "utf8");
+    expect(startScript).toMatch(/curl -fsS --max-time 14 --connect-timeout 2 http:\/\/127\.0\.0\.1:4000\/api\/live/);
   });
 });

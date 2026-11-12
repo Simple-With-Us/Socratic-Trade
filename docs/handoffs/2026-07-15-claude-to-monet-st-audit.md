@@ -1,4 +1,4 @@
-# Handoff: Socratic.Trade post-Codex/AG audit + app evaluation → MONET
+# Handoff: Socratic-Trade post-Codex/AG audit + app evaluation → MONET
 
 - **From:** CLAUDE (Fable/Opus), isolated worktree branch `claude/adoring-hopper-4ff51e`
 - **To:** MONET
@@ -21,11 +21,11 @@
   (== origin/main HEAD), DB ok, scheduler leased + ticking (~4s age), litestream replicating
   (1s age), all providers green (massive/fmp paid, pinecone, voyage, tiingo, twelvedata,
   yahoo, usage-monitor). No zombie deploys in the Coolify queue.
-- **No open PRs on Socratic.Trade.** Every Codex/AG PR through #1624 is merged and auto-deployed.
-- **`congress-trading-shared` is current on BOTH consumers.** Socratic.Trade and Congress.Trade
+- **No open PRs on Socratic-Trade.** Every Codex/AG PR through #1624 is merged and auto-deployed.
+- **`congress-trading-shared` is current on BOTH consumers.** Socratic-Trade and Congress.Trade
   both pin the identical shared commit `0bc26ab9` = shared `main` HEAD = v1.7.1. No drift.
 - **Effort boards** reserved (Socratic live `/Users/jay/apps/TRADING-EFFORT-LOG.md` + repo
-  mirror `docs/EFFORT-LOG.md`) with an In-Progress row for this sweep; agent-sync claim posted.
+  mirror `docs/EFFORT-LOG.md`) with an In-Progress row for this sweep; ag***-s**c claim posted.
 
 ### Two fixes already LANDED by CLAUDE this session (no action needed from you)
 
@@ -35,7 +35,7 @@
    and ST's via `git+https://`, and the check compared raw `resolved` strings. Fixed by
    normalizing to the ref after `#`. Real ref divergence still fails; registry versions pass
    through. Rollout: `Congress.Trade/docs/rollouts/2026-07-15-pin-check-transport-normalize.md`.
-2. **`agent-sync-push` pm2 crash-loop repaired.** It had been crash-looping ~877k times for a day
+2. **`ag***-s**c-push` pm2 crash-loop repaired.** It had been crash-looping ~877k times for a day
    (`MODULE_NOT_FOUND: ws`) because the disk-janitor reaped its `node_modules`. Reinstalled deps,
    dropped a `.janitor-keep` marker to stop recurrence, restarted — now `slack: hello (connected)`.
    (This is fleet infra, not repo code; noted so you don't re-diagnose it. Sentry FLEET-INFRA-3A/-3B.)
@@ -325,7 +325,7 @@ the snapshot-channel dedup, but does NOT account for the provider-dispatch-vs-le
 ### Coordination notes
 - Respect swimlanes/keepouts: the CODEX SEC-RAG program owns the RAG ingest/eval lanes (§4.7/§4.8
   are theirs to land); AG owns `ios/SocraticTrade/**`. Reserve on the effort board + post to
-  #agent-sync before starting any item here.
+  #ag***-s**c before starting any item here.
 - Cross-repo items (§3.8 FMP budget split) touch Congress.Trade — there's a concurrent CLAUDE
   eval-deploy lane there; coordinate.
 - Everything lands dormant/default-off where it touches money paths; auto-deploy means merge==live.

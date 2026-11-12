@@ -31,6 +31,10 @@ describe("information routing boundary", () => {
         "10-k",
         "10-q",
         "8-k",
+        "def 14a",
+        "s-1",
+        "13f-holdings",
+        "insider-filing",
         "document-summary",
         "earnings-transcript",
         "earnings-summary"
@@ -49,17 +53,10 @@ describe("information routing boundary", () => {
   it("only adds transcript vectors when the caller has enabled that narrative source", () => {
     // Full filings + document-summary abstracts always; earnings-transcript + earnings-summary
     // when the caller enables transcript producers (FMP dual-gate or EarningsCalls key).
-    expect(strategyInformationRouting(false).semantic.documentTypes).toEqual([
-      "10-k",
-      "10-q",
-      "8-k",
-      "document-summary"
-    ]);
+    const filings = ["10-k", "10-q", "8-k", "def 14a", "s-1", "13f-holdings", "insider-filing", "document-summary"];
+    expect(strategyInformationRouting(false).semantic.documentTypes).toEqual(filings);
     expect(strategyInformationRouting(true).semantic.documentTypes).toEqual([
-      "10-k",
-      "10-q",
-      "8-k",
-      "document-summary",
+      ...filings,
       "earnings-transcript",
       "earnings-summary"
     ]);

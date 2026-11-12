@@ -12,8 +12,7 @@ const restPlace = vi.hoisted(() => ({
 
 // Mock Alpaca Trade API SDK client
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "MOCK_REST_ACC_1", portfolio_value: "10000", buying_power: "5000", equity: "8000", cash: "2000" };
       }
@@ -43,8 +42,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         });
         throw err;
       }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 beforeEach(async () => {
   vi.useRealTimers();

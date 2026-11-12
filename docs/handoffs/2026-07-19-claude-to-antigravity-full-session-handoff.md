@@ -1,7 +1,7 @@
 # Handoff: CLAUDE session (2026-07-19) → Antigravity
 
 Full state of an owner-directed multi-day execution program: a top-to-bottom expert
-review of Socratic.Trade, the Codex 46-item audit fix wave, a bge-m3 embedding
+review of Socratic-Trade, the Codex 46-item audit fix wave, a bge-m3 embedding
 migration + RAG backfill program, and an EarningsCalls transcript program. This note
 is the single source of truth for picking the work up cold — read it before touching
 any of the branches below.
@@ -18,7 +18,7 @@ any of the branches below.
 
 ## 1. Standing fleet HOLD (do not lift until told)
 
-Posted to #agent-sync: **do not run `POST /api/admin/reembed {action:'purge-legacy'}`
+Posted to #ag***-s**c: **do not run `POST /api/admin/reembed {action:'purge-legacy'}`
 or any `symbols`-scoped corpus re-embed run** until PR #1777 (`corpus-reembed-hardening`)
 merges and its prod deploy is verified. The code currently live in prod (absorbed from
 my `corpus-reembed` design by another agent, PR #1764) has a **proven exploit**: a
@@ -26,7 +26,7 @@ symbol-scoped or partial re-embed run can satisfy the purge-completion gate, let
 purge-legacy delete voyage vectors that were never actually re-embedded into the bge-m3
 space. #1777 fixes this (revision-namespaced watermarks, live-identity dedup, insider-form4
 PIT fix) with an inverted exploit test proving the fix. **Once #1777 merges + deploys,
-lift this hold** (post to #agent-sync) and only then proceed with the corpus re-embed /
+lift this hold** (post to #ag***-s**c) and only then proceed with the corpus re-embed /
 backfill sequence in §5.
 
 ## 2. Ten Codex-audit + bge-m3 lanes — all built, adversarially verified, must-fixes applied
@@ -99,7 +99,7 @@ the new merge commit before considering the lane done (merge == auto-deploy on t
   (currently ~$49 remaining).
 - `PR #1771` (MONET, open): fixes a SiliconFlow bge-m3 price-table bug my verifier
   originally filed — not mine to land, just don't duplicate it.
-- `RAG_EMBED_PROVIDER=openrouter` — set directly in Infisical prod (Socratic.Trade
+- `RAG_EMBED_PROVIDER=openrouter` — set directly in Infisical prod (Socratic-Trade
   project `39d93bb7-76f9-498c-8b50-a7def52e072f`, env `prod`) by me this session. Already
   live (confirmed in prod health above). No action needed.
 - UptimeRobot monitors added this session (all UP): `congress.trade` health,
@@ -115,7 +115,7 @@ the new merge commit before considering the lane done (merge == auto-deploy on t
 From `docs/reviews/2026-07-18-backlog-clearing-plan.md` §3 — the RAG/filings backlog is
 ~99% un-ingested (Pinecone corpus was 8,476 vectors vs a 600k–1.2M target baseline; AG's
 `agent/ag-reindex-bge-m3` lane did run a production re-embed via `scripts/reindex-all.ts`
-already, per #agent-sync — verify actual corpus coverage before assuming more re-embed
+already, per #ag***-s**c — verify actual corpus coverage before assuming more re-embed
 work is needed):
 1. Lift the fleet HOLD (§1) once `corpus-reembed-hardening` deploys.
 2. Verify `rag_usage` rows now stamp `provider='openrouter'` correctly (the metering-gate
@@ -208,15 +208,15 @@ work, roughly in priority order):
   notes with exact files/tests/verification commands for every row in §2.
 - `/Users/jay/apps/TRADING-EFFORT-LOG.md` (live board) and `docs/EFFORT-LOG.md` (repo
   mirror) — updated with rows for all of the above; keep them current as you land things.
-- #agent-sync channel history — the fleet HOLD announcement, the metering-gate
+- #ag***-s**c channel history — the fleet HOLD announcement, the metering-gate
   deploy-live warning, and this session's claims are all there for context.
 
 ## 9. Standing coordination notes
 
 - Fleet is very active on other repos (Congress.Trade, Usage-Monitor/API-usage-monitor)
-  doing an Oracle cloud cutover and effort-log normalization — unrelated to Socratic.Trade,
+  doing an Oracle cloud cutover and effort-log normalization — unrelated to Socratic-Trade,
   safe to ignore unless a message explicitly names this repo.
-- CODEX has been actively fixing CI-runner routing and landing its own Socratic.Trade
+- CODEX has been actively fixing CI-runner routing and landing its own Socratic-Trade
   lanes in parallel (PRs #1751, #1759, #1761, #1775, #1776, #1778, #1779 in the list
   above) — check for overlap before assuming any given file is untouched.
 - Two PRs I don't recognize from this session appeared during handoff prep: **#1780

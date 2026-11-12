@@ -1,16 +1,30 @@
 import * as Sentry from "@sentry/nextjs";
-import { redactForTelemetry } from "./src/lib/telemetry-sanitize";
+import { resolveSentryRelease } from "./src/lib/sentry-release";
+import { redactForTelemetry, sanitizeTelemetryUrl, sanitizeTransactionEvent } from "./src/lib/telemetry-sanitize";
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
+    release: resolveSentryRelease(),
     environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? "0.2"),
-    enableLogs: true,
-    sendDefaultPii: false,
-    // Continuous profiling on the Node server only (not browser UI profiling).
-    // Native @sentry/profiling-node is attached from instrumentation.ts with
-    // webpackIgnore so `node:module` never enters the webpack graph.
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: {
+        request: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+        response: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      },
+      httpBodies: [],
+      urlQueryParams: { deny: ["forwarded", "-ip", "remote-", "via", "-user"] },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      graphQL: { document: false, variables: false },
+    },
+    // Continuous profiling, node runtime metrics, and the GenAI SDK hooks are
+    // attached from instrumentation.ts on the Node runtime only.  webpackIgnore
+    // keeps @sentry/profiling-node and @sentry/node out of the Edge bundle
+    // (a static import fails that compile on diagnostics_channel / worker_threads).
     profileSessionSampleRate: Number(process.env.SENTRY_PROFILE_SESSION_SAMPLE_RATE ?? "1"),
     profileLifecycle: "trace",
     tracePropagationTargets: [
@@ -20,16 +34,14 @@ if (process.env.SENTRY_DSN) {
       /^https:\/\/([\w-]+\.)?jays\.services/,
       /^https:\/\/usage\.jays\.services/,
     ],
-    integrations: [
-      Sentry.nodeRuntimeMetricsIntegration(),
-      Sentry.openAIIntegration(),
-      Sentry.anthropicAIIntegration(),
-      Sentry.googleGenAIIntegration(),
-      Sentry.vercelAIIntegration(),
-      Sentry.langChainIntegration(),
-    ],
     beforeSend(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeTelemetryUrl(event.request.url);
+      }
       return redactForTelemetry(event) as typeof event;
+    },
+    beforeSendTransaction(event) {
+      return sanitizeTransactionEvent(event);
     }
   });
 }

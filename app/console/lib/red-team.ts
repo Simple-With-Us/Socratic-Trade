@@ -4,7 +4,7 @@
  *  chip wording matches the "(provider error)"-style suffixes already stamped into proposal
  *  rationales by the policy-aware routing path. Pure module: safe for console AND mobile. */
 
-import { isModelRotationSentinel } from "@/lib/llm-request";
+import { isModelRotationSentinel } from "@/lib/llm-reasoning";
 import { describeRedTeamFailureKind } from "@/lib/red-team-routing";
 import type { TradeProposal } from "@/lib/types";
 

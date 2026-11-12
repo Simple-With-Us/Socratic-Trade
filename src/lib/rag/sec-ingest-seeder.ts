@@ -6,9 +6,11 @@
 // already known. Something has to translate "issuer N in the manifest" into "these accessions, these
 // primary-document URLs" — that's this module, via fetchRecentFilings (EDGAR submissions API).
 //
-// Baseline scope per issuer: latest 10-K + latest 4 10-Qs, primary document only (no exhibits) — one
-// task per document, sequence=1 (matches the worker's multi-document vectorDocId scheme, which only
-// matters when a single accession queues more than one document).
+// Baseline scope per issuer (2026-09-27 v2 "breadth"): the latest 10-K, latest 4 10-Qs, 2 8-Ks,
+// 1 DEF 14A, 1 S-1 and 2 ownership forms, plus up to 2 material exhibits per 8-K/10-K accession
+// (SEC_INGEST_BASELINE_FORM_LIMITS / SEC_INGEST_BASELINE_EXHIBIT_LIMIT below). One task per
+// document, sequence=1 — documentName keeps the worker's (accession, sequence, documentName) key
+// unique when one accession contributes more than one document.
 //
 // IDEMPOTENCY: one job per issuer per (corpusRevision, manifest snapshotId). The job's
 // idempotencyKey is buildSecIngestJobKey({corpusRevision, universeSnapshotId, scope: {cik}}) — a
@@ -34,18 +36,93 @@ import {
   transitionSecIngestJob,
   buildSecIngestJobKey
 } from "../db-rag-ingest";
-import { fetchRecentFilings } from "../web-sources/sec-filings";
+import {
+  fetchFilingDirectory,
+  fetchRecentFilings,
+  type FilingDirectoryItem
+} from "../web-sources/sec-filings";
+import { pickOwnershipXml } from "../web-sources/sec";
 import { blockingUniverseValidationIssues, validateSecUniverseManifest, type FrozenSecUniverseManifest } from "./universe-manifest";
 import { assertOperationLeaseOwnership, type OperationLeaseClaim } from "../operation-lease";
 import { collectSecIngestPrioritySets, resolveSecIngestPriority } from "./sec-ingest-priority";
 
-/** Stable, versioned identity for the baseline "latest 10-K + latest 4 10-Qs" backfill scope. Bump
- *  this (not the numbers below) if the baseline scope itself ever changes, so old and new scopes
- *  get distinct jobs instead of silently redefining an already-sealed job's contract. */
-export const SEC_INGEST_BASELINE_CORPUS_REVISION = "sec-ingest-baseline-10k-4x10q-v1";
+/** Stable, versioned identity for the backfill scope. Bump this (not the numbers below) if the
+ *  baseline scope itself ever changes, so old and new scopes get distinct jobs instead of
+ *  silently redefining an already-sealed job's contract. v2 (2026-09-27, breadth) added 8-K,
+ *  DEF 14A, S-1, ownership forms and material exhibits to the v1 "latest 10-K + latest 4 10-Qs"
+ *  scope. */
+export const SEC_INGEST_BASELINE_CORPUS_REVISION = "sec-ingest-baseline-v2-breadth";
 
 const DEFAULT_TEN_K_LIMIT = 1;
 const DEFAULT_TEN_Q_LIMIT = 4;
+
+/**
+ * Per-issuer backfill breadth, requested in ONE submissions-API call per issuer.
+ *
+ * Chosen deliberately — the corpus is starved (2,156 tasks pending since 2026-08-10 behind a
+ * starved worker), not overflowing, so breadth buys more than it costs, but each form still has
+ * to earn its embed cost:
+ *  - 10-K ×1 / 10-Q ×4 — unchanged v1 baseline (the expensive, high-value filings).
+ *  - 8-K ×2 — the highest trade-signal bytes per dollar in EDGAR (earnings releases, M&A,
+ *    guidance, officer changes), and the bodies are short.
+ *  - DEF 14A ×1 — proxy/compensation/governance narrative; the only place issuer-authored
+ *    strategy-adjacent text lives for a mature issuer.
+ *  - S-1 ×1 — offering/IPO context (capital raises, use of proceeds). Large but rare per issuer.
+ *  - "4" ×2 — Form 4/3/5 ownership documents. Tiny (a few KB), and the ONLY route that puts
+ *    insider transactions into the vector corpus through the normal chunk→embed→index path
+ *    (2026-09-27 B-3). Bounded at 2 because these are the highest-volume form in EDGAR and the
+ *    structured `insider_transactions` table already covers the querying side.
+ * Forms EDGAR returns that are not in this map are simply not requested.
+ */
+export const SEC_INGEST_BASELINE_FORM_LIMITS: Record<string, number> = {
+  "10-K": 1,
+  "10-Q": 4,
+  "8-K": 2,
+  "DEF 14A": 1,
+  "S-1": 1,
+  "4": 2
+};
+
+/** Material exhibits enqueued per 8-K / 10-K accession. Zero disables exhibit discovery
+ *  entirely (and its extra directory request). */
+export const SEC_INGEST_BASELINE_EXHIBIT_LIMIT = 2;
+
+/** Form types whose accessions also get a material-exhibit directory lookup. */
+const EXHIBIT_SOURCE_FORMS = new Set(["8-K", "10-K"]);
+
+/** Ownership-form accessions need the raw XML document name, not the XSL-rendered `primaryDoc` the
+ *  submissions API reports, so the worker parses the actual `<ownershipDocument>`. */
+const OWNERSHIP_FORMS = new Set(["3", "4", "4/A", "5", "5/A"]);
+
+/** Exhibit types worth embedding, best-first. Deliberately excludes the bulk of every filing's
+ *  exhibits: EX-21 subsidiaries, EX-23 consents, EX-31/32 certifications, EX-13 and the
+ *  graphic/financial-report folders are large, machine-generated and answer no research question. */
+const MATERIAL_EXHIBIT_TYPES = ["EX-99", "EX-10", "EX-19"];
+const MIN_EXHIBIT_BYTES = 5_000;
+const MAX_EXHIBIT_BYTES = 5_000_000;
+
+/** Pick up to `limit` material exhibit documents from an EDGAR filing directory. */
+export function selectMaterialExhibits(
+  items: FilingDirectoryItem[],
+  limit: number
+): Array<{ documentName: string; type: string; size: number }> {
+  if (limit <= 0) return [];
+  const ranked: Array<{ documentName: string; type: string; size: number; rank: number }> = [];
+  for (const item of items) {
+    const name = item.name ?? "";
+    if (!/\.(htm|html)$/i.test(name)) continue;
+    if (/^R\d+\.htm$/i.test(name)) continue; // SEC-rendered financial report pages
+    const size = item.size ?? 0;
+    if (size < MIN_EXHIBIT_BYTES || size > MAX_EXHIBIT_BYTES) continue;
+    const type = (item.type ?? "").toUpperCase();
+    const rank = MATERIAL_EXHIBIT_TYPES.findIndex((candidate) => type.startsWith(candidate));
+    if (rank < 0) continue;
+    ranked.push({ documentName: name, type, size, rank });
+  }
+  // EX-99 (press release / earnings tables) first, then EX-10 (material agreements), then EX-19.
+  ranked.sort((a, b) => a.rank - b.rank || b.size - a.size || a.documentName.localeCompare(b.documentName));
+  return ranked.slice(0, limit).map(({ documentName, type, size }) => ({ documentName, type, size }));
+}
 
 /** Job-level terminal states. A job can in principle reach failed_terminal/canceled without its
  *  intake ever having been sealed (e.g. an external caller fails it before this seeder finishes) —
@@ -68,6 +145,12 @@ export interface SeedSecIngestJobsOptions {
   corpusRevision?: string;
   tenKLimit?: number;
   tenQLimit?: number;
+  /** Per-form-type caps for the backfill, overriding SEC_INGEST_BASELINE_FORM_LIMITS wholesale.
+   *  Pass a narrow map (e.g. `{"10-K": 1, "10-Q": 4}`) to run the historical v1 scope. */
+  formLimits?: Record<string, number>;
+  /** Material exhibits enqueued per 8-K/10-K accession. Default SEC_INGEST_BASELINE_EXHIBIT_LIMIT;
+   *  0 disables exhibit discovery (and its extra EDGAR directory request). */
+  exhibitLimitPerAccession?: number;
   /** Inherited from an outer admin operation guard; checked between issuers so a lost/cancelled
    *  lease stops the run promptly instead of continuing to hammer EDGAR. */
   operationLeaseClaim?: OperationLeaseClaim;
@@ -103,6 +186,24 @@ export interface SeedSecIngestJobsResult {
   issuers: SeedSecIngestIssuerResult[];
 }
 
+/** One queued document: an accession's primary document, one of its material exhibits, or a raw
+ *  ownership XML. All three flow through the SAME SecIngestWorker checkpoint machine. */
+interface SeedDocument {
+  accession: string;
+  documentName: string;
+  url: string;
+  docType: string;
+  filedAt: string;
+  acceptanceDateTime: string;
+  exhibitType?: string;
+  ownershipXml?: boolean;
+}
+
+/** EDGAR archive directory for an accession, matching fetchFilingDirectory's own URL shape. */
+function filingDirUrl(cik: string, accession: string): string {
+  return `https://www.sec.gov/Archives/edgar/data/${cik}/${accession.replace(/-/g, "")}/`;
+}
+
 function loadManifest(opts: SeedSecIngestJobsOptions): FrozenSecUniverseManifest {
   if (opts.manifest) return opts.manifest;
   const manifestPath = opts.manifestPath ?? path.resolve("data/rag-universe-manifest.json");
@@ -128,6 +229,13 @@ export async function seedSecIngestJobsFromManifest(
   const corpusRevision = opts.corpusRevision ?? SEC_INGEST_BASELINE_CORPUS_REVISION;
   const tenKLimit = opts.tenKLimit ?? DEFAULT_TEN_K_LIMIT;
   const tenQLimit = opts.tenQLimit ?? DEFAULT_TEN_Q_LIMIT;
+  // An explicit `formLimits` map REPLACES the breadth map wholesale (that is how a caller runs the
+  // historical v1 scope); otherwise the baseline is used, with the legacy per-type knobs applied on
+  // top so an existing caller's tenKLimit/tenQLimit still take effect.
+  const formLimits: Record<string, number> = opts.formLimits
+    ? { ...opts.formLimits }
+    : { ...SEC_INGEST_BASELINE_FORM_LIMITS, "10-K": tenKLimit, "10-Q": tenQLimit };
+  const exhibitLimit = opts.exhibitLimitPerAccession ?? SEC_INGEST_BASELINE_EXHIBIT_LIMIT;
 
   let selected = manifest.issuers;
   if (opts.issuerCiks && opts.issuerCiks.length > 0) {
@@ -170,11 +278,11 @@ export async function seedSecIngestJobsFromManifest(
       continue;
     }
 
-    // Single submissions-API call for both docTypes: fetchRecentFilings accepts a per-docType
-    // limit map, so this no longer issues two identical requests to the same CIK's EDGAR
-    // submissions URL (previously one call for 10-K, one for 10-Q — ~1,000 requests saved per
-    // full seed of the 1,000-issuer universe).
-    const refs = await fetchRecentFilings(issuer.cik, ["10-K", "10-Q"], { "10-K": tenKLimit, "10-Q": tenQLimit });
+    // Single submissions-API call for EVERY requested docType: fetchRecentFilings accepts a
+    // per-docType limit map, so this issues ONE request to the CIK's EDGAR submissions URL
+    // instead of one per form type (~1,000 requests saved per full seed of the 1,000-issuer
+    // universe, and the reason the baseline is a map rather than a list of calls).
+    const refs = await fetchRecentFilings(issuer.cik, Object.keys(formLimits), formLimits);
 
     if (refs.length === 0) {
       // Leave intake open: fetchRecentFilings collapses "genuinely no filings" and "transient EDGAR
@@ -186,22 +294,79 @@ export async function seedSecIngestJobsFromManifest(
       continue;
     }
 
+    // 2026-09-27 breadth: expand the primary documents into the document list. One task per
+    // document; the worker keys artifacts and vector doc ids on (accession, sequence, documentName),
+    // so an accession that contributes its primary document plus exhibits stays collision-free
+    // without inventing a second chunker or a second ingest path.
+    const documents: SeedDocument[] = refs.map((ref) => ({
+      accession: ref.accession,
+      documentName: ref.primaryDoc || "document.html",
+      url: ref.url,
+      docType: ref.docType,
+      filedAt: ref.filedAt,
+      acceptanceDateTime: ref.acceptanceDateTime
+    }));
+
+    for (const ref of refs) {
+      if (exhibitLimit > 0 && EXHIBIT_SOURCE_FORMS.has(ref.docType)) {
+        const dir = filingDirUrl(issuer.cik, ref.accession);
+        const items = await fetchFilingDirectory(issuer.cik, ref.accession);
+        for (const exhibit of selectMaterialExhibits(items, exhibitLimit)) {
+          documents.push({
+            accession: ref.accession,
+            documentName: exhibit.documentName,
+            url: `${dir}${exhibit.documentName}`,
+            docType: ref.docType,
+            filedAt: ref.filedAt,
+            acceptanceDateTime: ref.acceptanceDateTime,
+            exhibitType: exhibit.type
+          });
+        }
+      }
+      // Gate on THIS form's own limit, not on the "4" entry: a caller asking only for "3" (or only
+      // for "5") must still get their raw XML, and a form that is not requested at all must not
+      // spend a directory read.  The EDGAR raw XML is the only document form the worker can parse
+      // — the primaryDocument the submissions API reports is the XSL-rendered page — so skipping
+      // this would silently queue an unparseable browse-edgar URL for that form.
+      if (OWNERSHIP_FORMS.has(ref.docType) && (formLimits[ref.docType] ?? 0) > 0) {
+        // The submissions API reports the XSL-rendered ownership document; the worker needs the raw
+        // XML (that is what parseAndSaveForm4 and the chunker are built for), so read the filing
+        // directory and reuse the same picker the incremental insider lane uses.
+        const dir = filingDirUrl(issuer.cik, ref.accession);
+        const items = await fetchFilingDirectory(issuer.cik, ref.accession);
+        const xmlName = pickOwnershipXml({ directory: { item: items.map((i) => ({ name: i.name })) } });
+        if (xmlName) {
+          documents.push({
+            accession: ref.accession,
+            documentName: xmlName,
+            url: `${dir}${xmlName}`,
+            docType: ref.docType,
+            filedAt: ref.filedAt,
+            acceptanceDateTime: ref.acceptanceDateTime,
+            ownershipXml: true
+          });
+        }
+      }
+    }
+
     let tasksEnqueued = 0;
-    refs.forEach((ref, index) => {
+    documents.forEach((doc, index) => {
       const { inserted } = enqueueSecIngestTask({
         jobId: job.id,
-        accession: ref.accession,
+        accession: doc.accession,
         cik: issuer.cik,
         symbol: issuer.ticker,
         sequence: 1,
-        documentName: ref.primaryDoc || "document.html",
+        documentName: doc.documentName,
         ordinal: index,
         priority: resolveSecIngestPriority(issuer.ticker, prioritySets, { deepen }),
         payload: {
-          url: ref.url,
-          docType: ref.docType,
-          filedAt: ref.filedAt,
-          acceptanceDateTime: ref.acceptanceDateTime
+          url: doc.url,
+          docType: doc.docType,
+          filedAt: doc.filedAt,
+          acceptanceDateTime: doc.acceptanceDateTime,
+          ...(doc.exhibitType ? { exhibitType: doc.exhibitType } : {}),
+          ...(doc.ownershipXml ? { ownershipXml: true } : {})
         }
       });
       if (inserted) tasksEnqueued++;

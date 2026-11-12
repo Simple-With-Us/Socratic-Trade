@@ -1,11 +1,11 @@
-# 2026-08-13 — iOS ship pipeline repair (Socratic.Trade side)
+# 2026-08-13 — iOS ship pipeline repair (Socratic-Trade side)
 
 ## 1. Context & Objective
 
 A fleet-wide audit found six defects in the iOS TestFlight ship pipeline, the
 worst of which is that PRs merged by `github-actions[bot]` land on `main` without
 dispatching **any** workflow — so neither CI nor `ios-ship` ever runs on the
-merge commit.  This note covers the Socratic.Trade-repo half of the repair plus
+merge commit.  This note covers the Socratic-Trade-repo half of the repair plus
 the two shared-tooling fixes that had to land alongside it.  Congress.Trade and
 Usage-Monitor are owned by a peer agent in the same effort; nothing here touches
 those repos.
@@ -22,7 +22,7 @@ on faith from the audit text.
 them are `event: push` (24 `workflow_run` Sentry reactions, one `schedule` CI,
 one `schedule` effort-sync, one `workflow_dispatch` ios-ship).  PR #2680, merged
 by `jaywedgeworth22`, gets the full push-triggered set.  So the audit's claim
-that Socratic.Trade is exempt is **wrong** — ST has the identical defect and only
+that Socratic-Trade is exempt is **wrong** — ST has the identical defect and only
 looked healthy because `ios-ship.yml` carries a `schedule:` cron.
 
 Root cause: GitHub raises no workflow events for actions performed with the
@@ -131,7 +131,7 @@ inert.  It becomes live the moment a target ships without that key.
 
 `betaBuildLocalizations` is **absent**, not blank, so the implementation must
 CREATE (`POST`) and not only `PATCH`.  `asc-api.mjs` now renders the mandatory
-`/Users/jay/apps/AGENT-SYNC.md` template from the commit range since the last
+`/Users/jay/apps/AG***-S**C.md` template from the commit range since the last
 successful ship.
 
 Blocker found while implementing, **not in the audit**: all three `ios-ship.yml`
@@ -158,7 +158,7 @@ the **end**: measured 2026-08-13, Congress.Trade has **48** commit subjects with
 a non-leading `[AG]` and **zero** leading ones (ST: 2 and 2).  So the marker was
 stripped from none of them, and because `AG` was also absent from the deny-list,
 the final assertion did not fire either — `[AG]` would have published to
-TestFlight, which AGENT-SYNC's STRICT rule names explicitly.  Reproduced on
+TestFlight, which AG***-S**C's STRICT rule names explicitly.  Reproduced on
 `fix(ios): set App Category to Finance and Display Name to Congress.Trade (#1030) [AG] (#1264)`,
 which rendered the bullet with `[AG]` intact.
 
@@ -244,7 +244,7 @@ in the same commit already solves.  Override removed; cron kept.
 
 ### Files touched
 
-Socratic.Trade (`monet/ship-pipeline-fix`):
+Socratic-Trade (`monet/ship-pipeline-fix`):
 
 - `.github/workflows/auto-merge-prs.yml`
 - `.github/workflows/auto-merge-shared-dependency.yml`
@@ -396,7 +396,7 @@ Exact gate numbers are recorded in STATUS.md.
 
 ## 6. Zero-Code Findings
 
-- The audit's DEFECT 1 framing needed one correction: Socratic.Trade is **not**
+- The audit's DEFECT 1 framing needed one correction: Socratic-Trade is **not**
   exempt.  Its bot-merged PR #2675 produced zero push runs too; the `schedule:`
   cron in `ios-ship.yml` masked it.
 - Defect 2 is currently latent rather than active — every app's Info.plist

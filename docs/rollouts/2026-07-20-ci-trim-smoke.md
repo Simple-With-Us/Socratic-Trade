@@ -25,9 +25,9 @@
   check's `pull_request` trigger entirely is only safe if nothing requires it to report on PRs.
   Checked both live gate mechanisms on this repo directly, rather than trusting older docs/notes
   that assumed `smoke` was required:
-  - `gh api repos/jaywedgeworth22/Socratic.Trade/rulesets/17945518` (the `main-protection`
+  - `gh api repos/jaywedgeworth22/Socratic-Trade/rulesets/17945518` (the `main-protection`
     ruleset) → `required_status_checks.required_status_checks` = `[{"context":"verify"}]` only.
-  - `gh api repos/jaywedgeworth22/Socratic.Trade/branches/main/protection` (classic branch
+  - `gh api repos/jaywedgeworth22/Socratic-Trade/branches/main/protection` (classic branch
     protection, layered on top of the ruleset on this repo) →
     `required_status_checks.contexts` = `["verify","gitleaks","check-pin"]` only.
   - Neither mechanism lists `smoke`. Grepped `.github/workflows/*.yml` and `scripts/land.sh` for
@@ -63,9 +63,9 @@
 - `PATH=/opt/homebrew/opt/node@24/bin:$PATH python3 -c "import yaml; yaml.safe_load(open('.github/workflows/e2e.yml')); print('YAML OK')"` → `YAML OK`.
 - `PATH=/opt/homebrew/opt/node@24/bin:$PATH node -e "require('js-yaml').load(require('fs').readFileSync('.github/workflows/e2e.yml','utf8')); console.log('js-yaml OK')"` → `js-yaml OK` (used the locally-resolvable `js-yaml` already in `node_modules` rather than `npx --yes js-yaml`, which has no CLI entry point and errors as "not a recognized file extension" when pointed at a `.yml` path directly).
 - Live GitHub API checks (not local, but load-bearing for the required-check decision above):
-  `gh api repos/jaywedgeworth22/Socratic.Trade/rulesets` (and `/rulesets/17945518`),
-  `gh api "repos/jaywedgeworth22/Socratic.Trade/rulesets?includes_parents=true"` (confirms no
-  org-level ruleset also applies), `gh api repos/jaywedgeworth22/Socratic.Trade/branches/main/protection`.
+  `gh api repos/jaywedgeworth22/Socratic-Trade/rulesets` (and `/rulesets/17945518`),
+  `gh api "repos/jaywedgeworth22/Socratic-Trade/rulesets?includes_parents=true"` (confirms no
+  org-level ruleset also applies), `gh api repos/jaywedgeworth22/Socratic-Trade/branches/main/protection`.
 - No source code changed (only `.github/workflows/e2e.yml` and docs), so the full
   `npm run lint && npx tsc --noEmit && npm test && npm run build` gate was not run for this
   change — nothing in that gate exercises workflow YAML. `scripts/land.sh`'s own `verify` job
@@ -80,5 +80,5 @@
   docs-only fast-path logic was deliberately left in place (not deleted) specifically so that
   restoring PR coverage is a one-line trigger re-add, not a redesign.
 - Nightly smoke failures now have no PR to attach to — worth confirming there's a notification
-  path (Slack `#agent-sync` or similar) for a red nightly `Playwright Smoke` run on `main`, so a
+  path (Slack `#ag***-s**c` or similar) for a red nightly `Playwright Smoke` run on `main`, so a
   regression doesn't go unnoticed until the weekly-turned-nightly cadence happens to catch it.

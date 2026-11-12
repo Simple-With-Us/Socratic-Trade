@@ -43,8 +43,11 @@ export function isSqliteBusy(err: unknown): boolean {
  * Run a sync sqlite call. On SQLITE_BUSY, yield and retry until SQLITE_BUSY_RETRY_BUDGET_MS.
  * Non-busy errors throw immediately.
  */
-export async function sqliteYieldRetry<T>(fn: () => T): Promise<T> {
-  const deadline = Date.now() + SQLITE_BUSY_RETRY_BUDGET_MS;
+export async function sqliteYieldRetry<T>(
+  fn: () => T,
+  budgetMs: number = SQLITE_BUSY_RETRY_BUDGET_MS
+): Promise<T> {
+  const deadline = Date.now() + budgetMs;
   for (;;) {
     try {
       return fn();
@@ -62,9 +65,25 @@ export async function yieldIfDue(lastYieldAt: { ms: number }, everyMs = SAFETY_L
 }
 
 /**
+ * Returns true if regular market hours (09:30-16:00 ET Monday-Friday) are active.
+ */
+export function isRegularTradingHours(now = new Date()): boolean {
+  return currentMarketSession(now) === "regular";
+}
+
+/**
+ * Pacing mode for RAG and SEC/transcript ingestion.
+ * "daytime" during regular US equity hours (09:30 - 16:00 ET Monday-Friday).
+ * "off_hours" at night, pre/post-market, and weekends.
+ */
+export function ragIngestPacingMode(now = new Date()): "daytime" | "off_hours" {
+  return isRegularTradingHours(now) ? "daytime" : "off_hours";
+}
+
+/**
  * FTS / filing / transcript producers tokenise and write on the serving event loop.
- * During regular US equity hours the safety lanes need that loop; defer ingest to
- * the next non-RTH tick (same durable watermarks — the pass is not skipped forever).
+ * Retained for backward compatibility and test assertions.  Producers use dynamic
+ * day/night pacing and yield to in-flight strategy work rather than blanket deferral.
  */
 export function shouldDeferRagIngestDuringRth(now = new Date()): boolean {
   return currentMarketSession(now) === "regular";
