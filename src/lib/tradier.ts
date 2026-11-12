@@ -102,6 +102,13 @@ function tradierProbeTtlMs(streak: number): number {
  * The row is not a required-field object.  A page of other orders often has no `tag`,
  * and rejecting that page would hide our own row and allow another POST.
  */
+/**
+ * A quote price that may value a held position: a finite, strictly positive number. Anything else
+ * (missing, NaN, Infinity, zero, negative, a string) leaves the position unpriced, so the order
+ * invariant treats its value as cost basis and refuses to size a dollar exit from it (ST-4616).
+ */
+const TradierPositionQuotePriceSchema = z.number().finite().positive();
+
 const TradierOrderRowSchema = z.record(z.string(), z.unknown());
 
 /**
@@ -645,9 +652,9 @@ class TradierBrokerGateway implements BrokerGateway {
         // averageCost stays positive — risk paths treat averageCost <= 0 as unusable and
         // would skip short add/cover checks for Tradier short holdings.
         const averageCost = quantity !== 0 ? totalCost / Math.abs(quantity) : 0;
-        const price = quotes[symbol]?.price;
-        const priced = Boolean(price && price > 0);
-        const marketValue = priced ? quantity * (price as number) : quantity * averageCost;
+        const parsedPrice = TradierPositionQuotePriceSchema.safeParse(quotes[symbol]?.price);
+        const priced = parsedPrice.success;
+        const marketValue = parsedPrice.success ? quantity * parsedPrice.data : quantity * averageCost;
         return {
           symbol,
           quantity,

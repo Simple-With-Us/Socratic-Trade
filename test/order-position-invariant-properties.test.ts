@@ -43,6 +43,7 @@ import {
   applyPositionInvariant,
   heldPositionFor,
   isRetryablePositionInvariantError,
+  normalizeExitSideForHeldPosition,
   OrderPositionInvariantError
 } from "../src/lib/order-position-invariant";
 import { allowedProposalSides } from "../src/lib/strategy-risk";
@@ -52,6 +53,7 @@ import type {
   OrderSide,
   OrderType,
   TimeInForce,
+  TradeProposal,
   TradingPolicy
 } from "../src/lib/types";
 import { OrderValidationError } from "../src/lib/types";
@@ -1170,8 +1172,129 @@ describe("money-path order invariant properties", () => {
     const { dollarAmount: _d, ...qtyOrder } = order;
     void _d;
     expect(applyPositionInvariant({ ...qtyOrder, quantity: 12 }, held, { resolvePartialDollarExits: true }).input.quantity).toBe(10);
-    // Without the Tradier option (Alpaca keeps notional), the dollar order is not refused here.
-    expect(() => applyPositionInvariant(order, held)).not.toThrow();
+    // The refusal does not depend on the Tradier option: the full-exit check reads the value too.
+    expect(() => applyPositionInvariant(order, held)).toThrow(OrderPositionInvariantError);
     expect(heldPositionFor([{ symbol: "MSFT", quantity: 10, averageCost: 20, marketValue: 1000 }], "MSFT").marketValuePriced).toBeUndefined();
+  });
+
+  // Kody PRRT_kwDOS7mOVM62mTCa: a $20-basis short with a $100 market. Sized from cost basis, a
+  // $100 buy-to-cover resolves to 5 shares and spends about $500.
+  const unpricedShort = [
+    { symbol: "MSFT", quantity: -10, averageCost: 20, marketValue: -200, marketValueSource: "cost_basis" as const }
+  ];
+  const pricedShort = [{ symbol: "MSFT", quantity: -10, averageCost: 20, marketValue: -1000, marketValueSource: "quote" as const }];
+  function exitProposal(patch: Partial<TradeProposal>): TradeProposal {
+    return {
+      symbol: "MSFT",
+      side: "buy",
+      type: "market",
+      dollarAmount: 100,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      rationale: "Close the MSFT short.",
+      confidenceScore: 0.6,
+      tradeThesisTag: "Risk-Exit",
+      entryMarketRegime: "neutral",
+      ...patch
+    } as TradeProposal;
+  }
+
+  it("a dollar buy against a cost-basis short is refused as retryable, never sized from cost basis", () => {
+    const order: EquityOrderInput = {
+      accountNumber: TRADIER_ACCOUNT,
+      symbol: "MSFT",
+      side: "buy",
+      type: "market",
+      dollarAmount: 100,
+      timeInForce: "gfd",
+      marketHours: "regular_hours"
+    };
+    for (const options of [undefined, { resolvePartialDollarExits: true }]) {
+      let thrown: unknown;
+      try {
+        applyPositionInvariant(order, heldPositionFor(unpricedShort, "MSFT"), options);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(OrderPositionInvariantError);
+      expect((thrown as OrderPositionInvariantError).code).toBe("position_unverified");
+      expect(isRetryablePositionInvariantError(thrown)).toBe(true);
+    }
+    // Control: priced at $100/share, the same $100 buy is a 1-share cover.
+    const priced = applyPositionInvariant(order, heldPositionFor(pricedShort, "MSFT"), { resolvePartialDollarExits: true });
+    expect(priced.input).toMatchObject({ side: "cover", quantity: 1 });
+    expect(priced.input.dollarAmount).toBeUndefined();
+  });
+
+  it("side normalization keeps the dollars on a cost-basis short, so the placement guard still sees them", () => {
+    for (const [patch, options] of [
+      [{ side: "buy" as const }, {}],
+      [{ side: "sell" as const }, { convertSellToCover: true }]
+    ] as const) {
+      const proposal = exitProposal(patch);
+      const unpriced = normalizeExitSideForHeldPosition(proposal, unpricedShort, options);
+      expect(unpriced.proposal, patch.side).toBe(proposal);
+      expect(unpriced.change, patch.side).toBeUndefined();
+      // Control: priced, the dollars resolve to whole shares of the short (the old path).
+      const priced = normalizeExitSideForHeldPosition(proposal, pricedShort, options);
+      expect(priced.proposal, patch.side).toMatchObject({ side: "cover", quantity: 1 });
+    }
+    // The untouched dollar buy then hits the placement guard as retryable.
+    const untouched = normalizeExitSideForHeldPosition(exitProposal({}), unpricedShort).proposal;
+    let thrown: unknown;
+    try {
+      applyPositionInvariant({ ...untouched, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput, heldPositionFor(unpricedShort, "MSFT"), {
+        resolvePartialDollarExits: true
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRetryablePositionInvariantError(thrown)).toBe(true);
+    // Quantity proposals do not read the value and still normalize.
+    expect(normalizeExitSideForHeldPosition(exitProposal({ dollarAmount: undefined, quantity: 4 }), unpricedShort).proposal).toMatchObject({
+      side: "cover",
+      quantity: 4
+    });
+  });
+
+  it("Tradier dollar buy-to-cover on a short sends nothing when the quote batch fails", async () => {
+    harness.state.posts = [];
+    harness.state.tradierFail = false;
+    harness.state.tradierQuoteFail = true;
+    harness.state.tradierPositions = [{ symbol: "MSFT", quantity: -10, cost_basis: -200 }];
+    tradierNow = CLOCKS.regular;
+    const error = await placeTradier({
+      accountNumber: TRADIER_ACCOUNT,
+      symbol: "MSFT",
+      side: "buy",
+      type: "market",
+      dollarAmount: 100,
+      timeInForce: "gfd",
+      marketHours: "regular_hours",
+      refId: "cover-quote-fail"
+    }).catch((err: unknown) => err);
+    expect(harness.state.posts).toHaveLength(0);
+    expect(isRetryablePositionInvariantError(error)).toBe(true);
+  });
+
+  // Kody PRRT_kwDOS7mOVM62mTIe: the quote price is Zod-parsed before it can value a position.
+  it("a Tradier quote price that is not a finite positive number leaves the position at cost basis", async () => {
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    harness.state.tradierFail = false;
+    harness.state.tradierQuoteFail = false;
+    harness.state.tradierPositions = [{ symbol: "MSFT", quantity: 10, cost_basis: 200 }];
+    const bad: unknown[] = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, "100", null, undefined];
+    for (const price of bad) {
+      const gateway = getTradierGateway("tradier-props", "acct-tradier-props");
+      vi.spyOn(gateway, "getEquityQuotes").mockResolvedValue({ MSFT: { symbol: "MSFT", price } } as never);
+      const [row] = await gateway.getEquityPositions(TRADIER_ACCOUNT);
+      expect(row.marketValueSource, String(price)).toBe("cost_basis");
+      expect(row.marketValue, String(price)).toBe(200);
+      expect(heldPositionFor([row], "MSFT").marketValuePriced, String(price)).toBe(false);
+    }
+    const gateway = getTradierGateway("tradier-props", "acct-tradier-props");
+    vi.spyOn(gateway, "getEquityQuotes").mockResolvedValue({ MSFT: { symbol: "MSFT", price: 100 } } as never);
+    const [row] = await gateway.getEquityPositions(TRADIER_ACCOUNT);
+    expect(row).toMatchObject({ marketValueSource: "quote", marketValue: 1000 });
   });
 });

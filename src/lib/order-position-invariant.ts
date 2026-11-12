@@ -271,6 +271,17 @@ export function applyPositionInvariant(
     // A buy only changes shape when it provably closes (part of) a held short.
     if (!(heldShort > 0)) return { input, receipts };
     let quantity = input.quantity;
+    if (quantity == null && input.dollarAmount != null && position.marketValuePriced === false) {
+      // The short's value is a cost-basis fallback (quote failure), not a market price. Sizing a
+      // cover from it can buy several times the intended dollars, and whether the buy exceeds
+      // the short cannot be told either, so it is refused as retryable (ST-4616).
+      throw new OrderPositionInvariantError(
+        `${symbol} BUY not placed: the account is short ${formatQty(heldShort)} ${symbol} and no live quote priced it ` +
+          `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} buy cannot be sized against the short safely.  ` +
+          "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
+        "position_unverified"
+      );
+    }
     if (quantity == null && input.dollarAmount != null) {
       // Dollar-sized buy (the autopilot's default sizing): resolve it against the short's own
       // per-share value before deciding.  Unpriceable, sub-share, or larger than the short ->
@@ -338,8 +349,9 @@ export function applyPositionInvariant(
   if (input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0) {
     // A cost-basis fallback (quote failure) is the entry price, not the market price. Sizing from
     // it can under- or over-exit, and it can even misread a partial as a full exit, so a dollar
-    // exit on an unpriced position is refused as retryable before either branch below.
-    if (options?.resolvePartialDollarExits && position.marketValuePriced === false) {
+    // exit on an unpriced position is refused as retryable before either branch below. This does
+    // not depend on `resolvePartialDollarExits`: the full-exit check also reads the value.
+    if (position.marketValuePriced === false) {
       throw new OrderPositionInvariantError(
         `${symbol} ${closingSide.toUpperCase()} not placed: no live quote priced the held ${formatQty(closable)} ${symbol} shares ` +
           `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} exit cannot be sized safely.  ` +
@@ -547,7 +559,8 @@ export interface ExitSideNormalization {
  * Closing a short is side "cover".  Upstream of sizing, Red Team, and policy, rewrite:
  *   - a BUY of at most the held short -> cover (same wire direction; strips its bracket legs).  A
  *     DOLLAR buy resolves against the short's own per-share value (a partial cover of that many
- *     whole shares); a dollar buy larger than the short is left alone.
+ *     whole shares); a dollar buy larger than the short is left alone.  No dollar proposal is
+ *     resolved when the short's value is cost basis (marketValuePriced false); it stays as-is.
  *   - a SELL of a symbol held SHORT -> cover, ONLY with `convertSellToCover: true`, which the
  *     autopilot passes only on a LONG-ONLY venue (there a short can only be unintended and a
  *     "sell" can only mean "exit").  On a shorting-enabled venue a sell of a short is ambiguous
@@ -572,6 +585,10 @@ export function normalizeExitSideForHeldPosition(
   const symbol = normalizeSymbol(proposal.symbol);
   const byQuantity = proposal.quantity != null && proposal.quantity > 0;
   const byDollars = !byQuantity && proposal.dollarAmount != null && proposal.dollarAmount > 0;
+  // A cost-basis value (quote failure) must not turn dollars into shares here: that would drop
+  // `dollarAmount` before the placement guard can see it. Leave the proposal unchanged; the
+  // choke point refuses it (a dollar buy against the short as retryable position_unverified).
+  if (byDollars && held.marketValuePriced === false) return { proposal };
 
   let quantity: number;
   if (proposal.side === "sell") {
