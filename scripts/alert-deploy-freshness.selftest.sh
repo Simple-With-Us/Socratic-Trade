@@ -146,6 +146,14 @@ exec "${REAL_GIT}" "\$@"
 SH
 chmod +x "${WORK}/shim-warn/git"
 
+mkdir -p "${WORK}/shim-npx"
+cat > "${WORK}/shim-npx/npx" <<'SH'
+#!/usr/bin/env bash
+echo "fatal: simulated npx registry failure" >&2
+exit 127
+SH
+chmod +x "${WORK}/shim-npx/npx"
+
 # The control for the RUN_CWD cases.  A non-interactive bash sources BASH_ENV
 # at startup, so the probe records the directory every child bash actually
 # started in.  Without it the subdirectory case would pass whether or not
@@ -399,6 +407,21 @@ EXPECT_OUTPUT="staleness decision: stale"
 run_case "off-hours stale unchanged" 3 "$OFF_HOURS" 200 "$(payload "\"${RTH_AFTER}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=43200 \
   DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+EXPECT_OUTPUT=""
+
+# ST-2793: when npx cannot fetch tsx, fall back to raw commit aging.
+NPX_GAP_LIVE="$(mkcommit npxlive "$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-7200)))')")"
+NPX_GAP_TIP="$(mkcommit npxtip)"
+EXPECT_OUTPUT="staleness decision: stale"
+run_case "npx failure still pages when raw commit age is past threshold" 3 "$RTH_AFTER" 200 "$(payload "\"${C1}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  "PATH=${WORK}/shim-npx:${PATH}"
+EXPECT_OUTPUT=""
+
+EXPECT_OUTPUT="staleness decision: in-flight"
+run_case "npx failure stays in-flight when raw commit age is under threshold" 0 "$NPX_GAP_TIP" 200 "$(payload "\"${NPX_GAP_LIVE}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  "PATH=${WORK}/shim-npx:${PATH}"
 EXPECT_OUTPUT=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"

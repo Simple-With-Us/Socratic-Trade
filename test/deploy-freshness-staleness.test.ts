@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isMarketOpen, regularSessionCloseUtcMs } from "../src/lib/market-calendar";
 import {
   decideDeployFreshnessStaleness,
   decideDeployFreshnessStalenessFromEnv,
+  RTH_DRAIN_UTC_HOUR,
+  RTH_DRAIN_UTC_MINUTE,
   rthDrainUtcMs
 } from "../src/lib/deploy-freshness-staleness";
 
@@ -83,6 +87,7 @@ describe("decideDeployFreshnessStaleness", () => {
       oldestCommitEpochSec: Math.floor(commitAt.getTime() / 1000),
       staleSeconds: 3600
     });
+    expect(decision.deployDueAnchorMs).toBe(rthDrainUtcMs(commitAt));
     expect(decision.verdict).toBe("stale");
     expect(decision.effectiveAgeSeconds).toBeGreaterThanOrEqual(3600);
   });
@@ -137,5 +142,16 @@ describe("decideDeployFreshnessStaleness", () => {
     });
     expect(decision.rawCommitAgeSeconds).toBe(1800);
     expect(decision.verdict).toBe("in-flight");
+  });
+});
+
+describe("rth-deploy-latch workflow cron", () => {
+  it("matches the deploy-freshness drain constants", () => {
+    const workflowPath = join(process.cwd(), ".github/workflows/rth-deploy-latch.yml");
+    const workflow = readFileSync(workflowPath, "utf8");
+    const match = workflow.match(/^\s+- cron:\s*["']?([^"'\n#]+)["']?/m);
+    expect(match?.[1]?.trim()).toBe(
+      `${RTH_DRAIN_UTC_MINUTE} ${RTH_DRAIN_UTC_HOUR} * * 1-5`
+    );
   });
 });
