@@ -938,6 +938,12 @@ export interface EquityPosition {
   quantity: number;
   averageCost: number;
   marketValue: number;
+  /**
+   * Where `marketValue` came from when the broker does not report it directly. "cost_basis"
+   * means no live quote priced the row (Tradier quote failure), so the value is entry price,
+   * not market price, and must not size a dollar exit. Absent = broker-reported/live.
+   */
+  marketValueSource?: "quote" | "cost_basis";
   sector?: string;
   industry?: string;
 }
