@@ -1,6 +1,9 @@
 ## 2026-11-12 CURSOR — ST-2793 deploy-freshness RTH latch
 
 **What.**  Deploy-freshness now ages undeployed `main` from session close (shared `evaluateRthDeployLatch` / `isMarketOpen` calendar), not raw commit time during weekday RTH.  `DEPLOY_FRESHNESS_STALE_SECONDS` is the post-close grace.  Rollout: `docs/rollouts/2026-11-12-st-2793-deploy-freshness-rth-latch.md`.
+## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
+
+**What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
 
 **Next.**  PR open; wait for `verify` green; do not merge from agent.
 ## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
