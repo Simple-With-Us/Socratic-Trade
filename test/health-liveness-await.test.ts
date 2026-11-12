@@ -133,4 +133,29 @@ describe("/api/health awaits the trading-liveness summary", () => {
     expect(liveness.degraded).toBe(1);
     expect(body.checks.tradingLivenessDegraded).toBe(true);
   });
+
+  it("pages trading-liveness when the fleet is fully dark (no degraded account rows)", async () => {
+    const cache = await import("../src/lib/health-probe-cache");
+    const healthRoute = await import("../app/api/health/route");
+    const original = cache.healthProbeDeps.getTradingLivenessSummary;
+    const fullyDarkSummary = { ...summaryFixture(), accounts: [] };
+    cache.healthProbeDeps.getTradingLivenessSummary = async () => fullyDarkSummary;
+    restore = () => {
+      cache.healthProbeDeps.getTradingLivenessSummary = original;
+    };
+
+    const response = await healthRoute.GET(new Request(HEALTH_URL));
+    expect(response.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { getInternalSetting } = await import("../src/lib/db");
+    const { TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY } = await import("../src/lib/trading-liveness");
+    expect(
+      getInternalSetting<string>(
+        `livenessDegradedSince:trading_liveness_degraded:${TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY}`
+      )
+    ).toBeTruthy();
+    expect(
+      getInternalSetting<string>("livenessAlertSent:trading_liveness_degraded")
+    ).toBeTruthy();
+  });
 });
