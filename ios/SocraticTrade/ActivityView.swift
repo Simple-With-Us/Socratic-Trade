@@ -808,7 +808,9 @@ struct NotificationHistorySection: View {
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Capsule())
                 .buttonStyle(.plain)
-                .accessibilityLabel(option.rawValue)
+                // Keep the unread badge in the spoken label; an explicit label replaces the
+                // children VoiceOver would otherwise read.
+                .accessibilityLabel(option == .unread ? "\(option.rawValue), \(unreadCount)" : option.rawValue)
                 .accessibilityAddTraits(filter == option ? .isSelected : [])
             }
             Spacer()
