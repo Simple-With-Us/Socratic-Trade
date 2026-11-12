@@ -30,6 +30,7 @@ ST deploy and fleet ops shell lived without static gates beyond a few `bash -n` 
 - `scripts/pr-touches-codeowners-paths.sh`
 - `scripts/verify-branch-protection.sh`
 - `scripts/verify-deploy-sha.selftest.sh`
+- `scripts/ios-fleet.sha256` (pin refresh after ShellCheck comment in `ship-testflight.sh`)
 
 ## 3. Decisions & Trade-offs
 
