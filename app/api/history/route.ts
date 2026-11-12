@@ -7,7 +7,7 @@ import {
   reportHandledErrorThrottled,
   resolveRequestUserIdOrApiError
 } from "@/lib/api-error";
-import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
+import { fetchDailyOHLC, HistoryProviderError, toBusinessDay } from "@/lib/history";
 
 export const dynamic = "force-dynamic";
 
@@ -38,8 +38,10 @@ export async function GET(req: Request) {
   if (userId instanceof Response) return userId;
 
   try {
-    const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
-    // null is a provider outage; an empty array is a confirmed "no usable series".
+    // A cascade where every attempted tier failed throws its last payload-free provider error,
+    // so a timeout or rejected key is classified below instead of collapsing to null.
+    const bars = await fetchDailyOHLC(symbol, Date.now(), userId, { throwOnProviderFailure: true });
+    // null means no tier could answer (all skipped); an empty array is a confirmed "no usable series".
     if (bars == null) {
       reportHandledErrorThrottled(
         HISTORY_PROVIDER_ERROR_KEY,
@@ -65,7 +67,7 @@ export async function GET(req: Request) {
     const chartBars = [...byDay.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
     return NextResponse.json({ symbol, bars: chartBars });
   } catch (error) {
-    if (isBrokerGatewayError(error)) {
+    if (error instanceof HistoryProviderError || isBrokerGatewayError(error)) {
       reportHandledErrorThrottled(HISTORY_PROVIDER_ERROR_KEY, "Price history fetch failed", error);
       return brokerReadError(error);
     }

@@ -146,6 +146,9 @@ export function reportHandledErrorThrottled(key: string, context: string, error:
   reportHandledError(context, error);
 }
 
+/** Throttle key for request-identity resolution faults (one report per window, not per request). */
+export const REQUEST_IDENTITY_ERROR_KEY = "request-identity";
+
 /**
  * Resolve the request user id.  Auth/session denials stay the 401/409 Response from
  * `resolveRequestUserIdOrResponse`.  Local faults (e.g. SQLITE_BUSY) return the JSON 500
@@ -158,7 +161,9 @@ export function resolveRequestUserIdOrApiError(request: Request): string | Respo
     return userId;
   } catch (error) {
     // Never classify identity/SQLite faults as broker_* even if the message looks gateway-shaped.
-    reportHandledError("Request identity resolution failed", error);
+    // Throttled: identity resolution touches SQLite with a short busy_timeout, so a lock storm
+    // would otherwise emit one console.error + Sentry event per failing request.
+    reportHandledErrorThrottled(REQUEST_IDENTITY_ERROR_KEY, "Request identity resolution failed", error);
     return jsonError(500, "internal_error", "The server could not resolve the request identity.");
   }
 }

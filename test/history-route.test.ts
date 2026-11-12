@@ -6,7 +6,7 @@ vi.mock("@/lib/history", async (importActual) => {
   return { ...actual, fetchDailyOHLC: vi.fn() };
 });
 
-import { fetchDailyOHLC } from "@/lib/history";
+import { fetchDailyOHLC, HistoryProviderError, toHistoryProviderError } from "@/lib/history";
 
 const closeOnlyBars = [
   { time: "2026-06-25", close: 57.5 },
@@ -113,6 +113,42 @@ describe("/api/history", () => {
     } finally {
       capture.mockRestore();
     }
+  });
+
+  it("asks fetchDailyOHLC to surface provider failures instead of resolving null", async () => {
+    vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(closeOnlyBars);
+    expect((await getHistory()).status).toBe(200);
+    expect(vi.mocked(fetchDailyOHLC).mock.calls[0]?.[3]).toMatchObject({ throwOnProviderFailure: true });
+  });
+
+  it("classifies a provider timeout as 504 broker_timeout and a rejected key as broker_auth_failed", async () => {
+    vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(closeOnlyBars);
+    expect((await getHistory()).status).toBe(200);
+
+    const abort = Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+    vi.mocked(fetchDailyOHLC).mockRejectedValueOnce(toHistoryProviderError("tradier", abort));
+    const timedOut = await getHistory();
+    expect(timedOut.status).toBe(504);
+    expect(await timedOut.json()).toMatchObject({ ok: false, error: "broker_timeout" });
+
+    vi.mocked(fetchDailyOHLC).mockRejectedValueOnce(
+      toHistoryProviderError("roic", new Error("HTTP 401 for https://api.roic.ai/v3.0.0/stock-prices/BAC?apikey=secret"))
+    );
+    const rejected = await getHistory();
+    expect(rejected.status).toBe(502);
+    const body = await rejected.json();
+    expect(body).toMatchObject({ ok: false, error: "broker_auth_failed" });
+    expect(JSON.stringify(body)).not.toContain("secret");
+  });
+
+  it("answers a payload-free provider failure with no status as broker_unavailable, not internal_error", async () => {
+    vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(closeOnlyBars);
+    expect((await getHistory()).status).toBe(200);
+
+    vi.mocked(fetchDailyOHLC).mockRejectedValueOnce(new HistoryProviderError("twelvedata"));
+    const response = await getHistory();
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ ok: false, error: "broker_unavailable" });
   });
 
   it("returns 401 when identity resolution denies the request, not a broker outage", async () => {

@@ -142,6 +142,37 @@ describe("src/lib/api-error", () => {
 
 
 describe("resolveRequestUserIdOrApiError", () => {
+  it("reports a burst of identity-resolution faults once per throttle window", async () => {
+    const { resolveRequestUserIdOrApiError, resetHandledErrorThrottleForTests } = await import("../src/lib/api-error");
+    const requestUser = await import("../src/lib/request-user");
+    const metrics = await import("../src/lib/sentry-metrics");
+    resetHandledErrorThrottleForTests();
+    const capture = vi.spyOn(metrics, "captureHandledException").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = vi.spyOn(requestUser, "resolveRequestUserIdOrResponse").mockImplementation(() => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    });
+    try {
+      for (let i = 0; i < 5; i++) {
+        const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+        expect((response as Response).status).toBe(500);
+      }
+      expect(spy).toHaveBeenCalledTimes(5);
+      expect(capture).toHaveBeenCalledOnce();
+      expect(capture.mock.calls[0]?.[1]).toBe("Request identity resolution failed");
+
+      // Control: a new throttle window reports again.
+      resetHandledErrorThrottleForTests();
+      resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(capture).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+      capture.mockRestore();
+      consoleError.mockRestore();
+      resetHandledErrorThrottleForTests();
+    }
+  });
+
   it("returns the JSON 500 envelope when identity resolution throws a local database fault", async () => {
     const requestUser = await import("../src/lib/request-user");
     const spy = vi.spyOn(requestUser, "resolveRequestUserIdOrResponse").mockImplementation(() => {
