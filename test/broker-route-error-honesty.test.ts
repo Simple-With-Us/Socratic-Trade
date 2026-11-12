@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brokerReadError, isBrokerGatewayError, jsonError, parseRequestJson } from "../src/lib/api-error";
+import { AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "../src/lib/auth/strip-identity";
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
 
 const brokerStub = vi.hoisted(() => ({
@@ -401,6 +402,46 @@ describe("malformed JSON on broker-adjacent routes", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ ok: false, error: "invalid_json" });
+  });
+
+  it("POST /api/keys returns 400 invalid_payload for unknown keys and wrong field types", async () => {
+    const { POST } = await import("../app/api/keys/route");
+    const secret = "sk-test-upsert-secret-value-never-echo";
+    const headers = {
+      "content-type": "application/json",
+      [AUTHENTICATED_EMAIL_HEADER]: "keys-zod@test.local",
+      [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: "authjs-session"
+    };
+    const post = (body: unknown) =>
+      POST(
+        new Request("http://localhost/api/keys", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body)
+        }) as import("next/server").NextRequest
+      );
+
+    const control = await post({ service: "openai", apiKey: secret, label: "lab" });
+    expect(control.status).toBe(200);
+    const controlBody = await control.json();
+    expect(controlBody).toMatchObject({ success: true, key: { service: "openai", label: "lab" } });
+    expect(JSON.stringify(controlBody)).not.toContain(secret);
+
+    const unknownKey = await post({ service: "openai", apiKey: secret, notAKeyField: true });
+    expect(unknownKey.status).toBe(400);
+    const unknownBody = await unknownKey.json();
+    expect(unknownBody).toEqual({
+      ok: false,
+      error: "invalid_payload",
+      message: "Invalid key upsert payload."
+    });
+    expect(JSON.stringify(unknownBody)).not.toContain(secret);
+
+    const wrongType = await post({ service: "openai", apiKey: 12345 });
+    expect(wrongType.status).toBe(400);
+    const wrongBody = await wrongType.json();
+    expect(wrongBody).toMatchObject({ ok: false, error: "invalid_payload" });
+    expect(JSON.stringify(wrongBody)).not.toContain("12345");
   });
 });
 

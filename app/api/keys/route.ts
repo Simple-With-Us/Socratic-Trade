@@ -1,6 +1,6 @@
 import "server-only";
 import { z } from "zod";
-import { parseRequestJson } from "@/lib/api-error";
+import { jsonError, parseRequestJson } from "@/lib/api-error";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
@@ -275,6 +275,23 @@ const PLAN_TIER_SERVICES = servicesWithPlanTierUi();
 
 const ServiceQueryParamSchema = z.string().min(1);
 
+/**
+ * Inbound POST /api/keys body.  Domain checks (catalog service, plan-tier options, route
+ * eligibility) still run after this parse.  `.strict()` rejects unknown keys.  The Zod error
+ * is never returned or logged, so a submitted apiKey value cannot leak into the 400 envelope.
+ */
+export const KeyUpsertSchema = z
+  .object({
+    service: z.string().optional(),
+    apiKey: z.string().optional(),
+    label: z.string().nullable().optional(),
+    planTier: z.string().nullable().optional(),
+    route: z.string().optional(),
+    // Accepted for client compatibility; identity comes only from middleware headers.
+    userId: z.string().optional()
+  })
+  .strict();
+
 function isAllowedService(canonical: string): boolean {
   return VALID_SERVICES.has(canonical) || isRetiredMarketDataService(canonical);
 }
@@ -408,16 +425,12 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
+  const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
+  if (!parsedBody.success) {
+    return jsonError(400, "invalid_payload", "Invalid key upsert payload.");
+  }
   try {
-    const body = parsed.body as {
-      userId?: string;
-      service?: string;
-      apiKey?: string;
-      label?: string;
-      planTier?: string | null;
-      route?: string;
-    };
-    const { service, apiKey, label, planTier, route } = body;
+    const { service, apiKey, label, planTier, route } = parsedBody.data;
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
@@ -510,7 +523,7 @@ export async function POST(request: NextRequest) {
       userId,
       canonical,
       apiKey!.trim(),
-      label,
+      label ?? undefined,
       planTier === undefined ? undefined : planTier === "" ? null : planTier
     );
     return NextResponse.json({
