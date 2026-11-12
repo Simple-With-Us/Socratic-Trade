@@ -9,7 +9,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 const notifyMock = vi.hoisted(() => ({ sendNotification: vi.fn(async () => {}) }));
 vi.mock("../src/lib/notifications", () => ({ sendNotification: notifyMock.sendNotification }));
@@ -42,11 +42,17 @@ function hoursAgoIso(h: number): string {
   return new Date(Date.now() - h * 3_600_000).toISOString();
 }
 
-type NotificationCall = [{ title: string }, { directBody: string }];
+type SendNotificationFn = (
+  notification: { title: string },
+  options: { directBody: string }
+) => Promise<void>;
+const sendNotificationMock = notifyMock.sendNotification as MockInstance<SendNotificationFn>;
+
 function lastNotification(): { title: string; body: string } {
-  const calls = notifyMock.sendNotification.mock.calls as unknown as NotificationCall[];
-  const last = calls[calls.length - 1];
-  return { title: last[0].title, body: last[1].directBody };
+  const last = sendNotificationMock.mock.calls.at(-1);
+  expect(last).toBeDefined();
+  const [notification, options] = last!;
+  return { title: notification.title, body: options.directBody };
 }
 
 describe("alertLivenessWarning escalation", () => {
