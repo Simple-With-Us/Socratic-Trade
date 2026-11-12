@@ -120,6 +120,23 @@ jobs:
             ios-fleet-socratic-${{ github.run_id }}-
             ios-fleet-socratic-
 
+      - name: Clear stale ship locks from restored cache
+        run: |
+          set -euo pipefail
+          cache_root="${HOME}/.cache/ios-fleet"
+          # A cancelled ship can save ship-testflight.sh's mkdir locks
+          # (*.lockdir, including archive.lockdir) into the ship-state cache.
+          # Hosted runners are single-use, so no other ship holds them when
+          # this job starts; left in place they block until archive lock timeout.
+          shopt -s nullglob
+          locks=("${cache_root}"/*.lockdir)
+          if (( ${#locks[@]} > 0 )); then
+            rm -rf "${locks[@]}"
+            echo "Removed stale lockdirs from restored cache."
+          else
+            echo "No stale ship lockdirs in restored cache."
+          fi
+
       # Runs FIRST so a tick with nothing to ship costs seconds and cannot go
       # red on an unrelated environment problem. The logic lives in a script,
       # not inline YAML, so CI can unit-test it on every PR -- otherwise it
@@ -495,6 +512,18 @@ jobs:
           path: ${{ runner.temp }}/ios-ship-logs
           retention-days: 7
           if-no-files-found: ignore
+
+      # Never persist archive (or other) lockdirs: a cancelled ship can leave
+      # them held, and saving them would hand the next run a stale lock to wait on.
+      - name: Remove ship lockdirs before saving state cache
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          locks=("${HOME}/.cache/ios-fleet"/*.lockdir)
+          if (( ${#locks[@]} > 0 )); then
+            rm -rf "${locks[@]}"
+          fi
 
       # Always: a skipped tick still needs its (unchanged) state persisted,
       # and a partial failure after record_successful_ship still ran should
