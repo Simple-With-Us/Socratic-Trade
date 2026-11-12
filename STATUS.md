@@ -1,3 +1,9 @@
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.

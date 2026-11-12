@@ -3,8 +3,10 @@
 ## Why
 
 `GET /api/health` returns **HTTP 200** whenever the process can serve and the
-**critical** dependencies are not hard-stopped.  That is the Coolify / deploy
-liveness probe.  A 503 here restarts the container, which re-halts autonomy and
+**critical** dependencies are not hard-stopped.  **Container liveness** (Docker
+`HEALTHCHECK`, Coolify HTTP health paths, Traefik backend selection) must use
+`GET /api/live` instead — see `Dockerfile` and `AGENTS.md`.  A 503 on
+`/api/health` must not be wired to container restart; it restarts autonomy and
 cannot heal a stale scheduler, a silent trading loop, or a wedged Litestream
 tier.
 
