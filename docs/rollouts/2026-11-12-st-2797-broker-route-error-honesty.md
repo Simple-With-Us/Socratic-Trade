@@ -12,11 +12,15 @@ Broker-backed GET routes threw uncaught gateway errors into Next's generic 500 p
 - `parseRequestJson` answers a body that cannot be read at all (stream error, body already consumed) with 400 `unreadable_body` instead of rethrowing, and logs the sanitized error (`console.error` plus Sentry `logError`).  `app/api/keys` POST, `app/api/orders/cancel` POST and `app/api/policy` PUT all parse through it, so none of them falls through to an unhandled 500.
 - Broker-backed GET routes (`accounts`, `positions`, `orders`, `portfolio`) keep the classified broker envelope; any other fault (an adapter defect such as a `TypeError`) is logged and answered as a 500 `internal_error` envelope.  `app/api/orders/cancel` keeps rethrowing non-broker faults so cancel behaviour is unchanged.
 - Added `test/broker-route-error-honesty.test.ts`; updated `test/api-security-hardening.test.ts` for the cancel envelope.
+- PUT `/api/policy` validates the body with a strict `PolicyUpdateSchema` after `parseRequestJson`; unknown keys or wrong field types return 400 `invalid_payload`. Domain validation after a successful parse is unchanged.
+- GET `/api/history` returns 502 `broker_unavailable` when the history provider throws. An empty-but-successful provider response is still 200 with `bars: []`.
+- `isBrokerGatewayError` / `extractHttpStatusFromMessage` recognise eToro adapter messages (`No eToro account connected.`, `eToro keys are missing`, `eToro /me 500`).
+- `reportHandledError` calls `Sentry.captureException` with the original exception and sanitized tags/context, so handled 500s reach Sentry without enabling `enableLogs`.
 
 ## Decisions & Trade-offs
 
 - Left success response bodies unchanged on broker GET routes; kept existing plain-text 400 for "No selected account."
-- Did not touch `app/api/history`, `app/api/quote`, or `app/api/watchlist` (open PR #5138).
+- Did not touch `app/api/quote` or `app/api/watchlist` (open PR #5138). GET `/api/history` is owned here because #5138 does not change that route.
 - Broker auth and outage messages are generic HTTP-status summaries only — no upstream body passthrough.
 
 ## Verification State
@@ -24,7 +28,7 @@ Broker-backed GET routes threw uncaught gateway errors into Next's generic 500 p
 ```bash
 npm run lint
 npx tsc --noEmit
-npm test -- test/broker-route-error-honesty.test.ts test/api-security-hardening.test.ts
+npm test -- test/broker-route-error-honesty.test.ts test/api-security-hardening.test.ts test/history-route.test.ts test/sentry-metrics.test.ts
 npm test
 npm run build
 ```

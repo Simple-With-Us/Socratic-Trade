@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonError } from "@/lib/api-error";
 import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
 import { resolveRequestUserId } from "@/lib/request-user";
 
@@ -44,7 +45,7 @@ export async function GET(req: Request) {
     const chartBars = [...byDay.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
     return NextResponse.json({ symbol, bars: chartBars });
   } catch {
-    return NextResponse.json({ symbol, bars: [], note: "price history fetch failed" });
+    return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
   }
 }
 

@@ -150,3 +150,19 @@ export function logError(message: string, attributes?: LogAttrs): void {
     }
   });
 }
+
+/** Capture a handled exception with the original error object.  Tags/extra stay sanitized. */
+export function captureHandledException(error: unknown, context: string, attributes?: LogAttrs): void {
+  const extra = compactAttrs({ context, ...attributes });
+  void loadSentry().then((Sentry) => {
+    try {
+      Sentry?.captureException(error, {
+        tags: { handled: "true" },
+        extra
+      });
+    } catch {
+      // Fail-soft: reporting must never crash the request
+    }
+  });
+}
+

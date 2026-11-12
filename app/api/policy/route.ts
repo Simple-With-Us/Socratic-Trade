@@ -1,4 +1,5 @@
-import { parseRequestJson } from "@/lib/api-error";
+import { jsonError, parseRequestJson } from "@/lib/api-error";
+import { PolicyUpdateSchema } from "@/lib/policy-update-schema";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
   getActiveConnectedAccount,
@@ -47,11 +48,11 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   const parsed = await parseRequestJson(request);
   if (!parsed.ok) return parsed.response;
-  const rawBody = parsed.body;
-  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-    return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
+  const validation = PolicyUpdateSchema.safeParse(parsed.body);
+  if (!validation.success) {
+    return jsonError(400, "invalid_payload", "Invalid policy update payload.");
   }
-  const body = rawBody as Record<string, unknown>;
+  const body = validation.data as Record<string, unknown>;
   const userId = resolveRequestUserId(request, body);
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
-import { logError } from "./sentry-metrics";
+import { captureHandledException } from "./sentry-metrics";
 import { safeErrorMessage } from "./telemetry-sanitize";
 
 export const API_ERROR_MESSAGE_MAX = 240;
@@ -32,6 +32,8 @@ function extractHttpStatusFromMessage(message: string): number | undefined {
     message.match(/HTTP\s+(\d{3})\b/i) ??
     // Public.com adapters throw "Public cancel 500" / "Public accounts 401" (no "HTTP" prefix).
     message.match(/\bPublic(?:\.com)?(?:\s+\w+){1,3}\s+(\d{3})\b/) ??
+    // eToro adapters throw "eToro /me 500", "eToro portfolio 401", or "eToro 500 <url>".
+    message.match(/\beToro(?:\s+\S+){0,6}\s+(\d{3})\b/i) ??
     message.match(/\bfailed\s+\((\d{3})\)/i);
   if (!match) return undefined;
   const code = Number(match[1]);
@@ -47,7 +49,7 @@ function isBrokerDeadlineMessage(message: string): boolean {
  * Kept narrow so a post-cancel database or notification fault is not classified as a broker outage.
  */
 const BROKER_ADAPTER_MESSAGE =
-  /robinhood not connected|robinhood session expired|robinhood mcp (?:tool reported an error|sse response)|alpaca mcp\b|no public\.com account connected|public\.com secret is missing|public token mint|no tradier account connected/i;
+  /robinhood not connected|robinhood session expired|robinhood mcp (?:tool reported an error|sse response)|alpaca mcp\b|no public\.com account connected|public\.com secret is missing|public token mint|no tradier account connected|no etoro account connected|etoro keys are missing/i;
 
 /**
  * Maps an uncaught broker-gateway read failure to a JSON envelope clients can parse.
@@ -69,7 +71,8 @@ export function brokerReadError(error: unknown): NextResponse<ApiErrorBody> {
     /no connected broker account/i.test(message) ||
     /robinhood not connected/i.test(message) ||
     /no public\.com account connected/i.test(message) ||
-    /no tradier account connected/i.test(message)
+    /no tradier account connected/i.test(message) ||
+    /no etoro account connected/i.test(message)
   ) {
     return jsonError(502, "broker_unavailable", "No connected broker account.");
   }
@@ -100,13 +103,14 @@ export function isBrokerGatewayError(error: unknown): boolean {
 }
 
 /**
- * Report a handled server-side fault to the server log and Sentry.  Only the sanitized message
- * is recorded, never raw upstream bodies or credential material.
+ * Report a handled server-side fault to the server log and Sentry.  The original exception is
+ * captured so the stack reaches Sentry even when `enableLogs` is off; tags and extra context use
+ * only the sanitized message, never raw upstream bodies or credential material.
  */
 function reportHandledError(context: string, error: unknown): void {
   const message = safeErrorMessage(error);
   console.error(`${context}: ${message}`);
-  logError(context, { error: message });
+  captureHandledException(error, context, { error: message });
 }
 
 /**

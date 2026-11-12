@@ -8,12 +8,14 @@ const sentryMock = vi.hoisted(() => ({
   logger: {
     warn: vi.fn(),
     error: vi.fn()
-  }
+  },
+  captureException: vi.fn()
 }));
 
 vi.mock("@sentry/nextjs", () => sentryMock);
 
 import {
+  captureHandledException,
   logError,
   logWarn,
   recordBrokerCall,
@@ -29,6 +31,7 @@ describe("sentry-metrics helpers", () => {
     sentryMock.metrics.distribution.mockReset();
     sentryMock.logger.warn.mockReset();
     sentryMock.logger.error.mockReset();
+    sentryMock.captureException.mockReset();
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -83,6 +86,18 @@ describe("sentry-metrics helpers", () => {
     expect(sentryMock.logger.error).toHaveBeenCalledWith("broker.call", {
       broker: "alpaca",
       endpoint: "mcp:get_orders"
+    });
+  });
+
+  it("captures the original exception with sanitized tags and context", async () => {
+    const failure = new TypeError("adapter exploded");
+    captureHandledException(failure, "Broker read failed with an internal server error", { error: "adapter exploded" });
+    await vi.waitFor(() => {
+      expect(sentryMock.captureException).toHaveBeenCalledOnce();
+    });
+    expect(sentryMock.captureException).toHaveBeenCalledWith(failure, {
+      tags: { handled: "true" },
+      extra: { context: "Broker read failed with an internal server error", error: "adapter exploded" }
     });
   });
 

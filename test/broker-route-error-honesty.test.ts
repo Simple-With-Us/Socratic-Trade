@@ -30,6 +30,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 async function seedRobinhoodAccount(email: string, accountNumber = "RH-ERR-TEST") {
@@ -107,6 +108,25 @@ describe("src/lib/api-error", () => {
       message: "Request body could not be read."
     });
   });
+
+  it("reportHandledError captures the original exception with sanitized context", async () => {
+    const metrics = await import("../src/lib/sentry-metrics");
+    const capture = vi.spyOn(metrics, "captureHandledException").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failure = new TypeError("Body is unusable");
+    try {
+      const { parseRequestJson: parseJson } = await import("../src/lib/api-error");
+      const parsed = await parseJson({ json: async () => { throw failure; } } as unknown as Request);
+      expect(parsed.ok).toBe(false);
+      expect(capture).toHaveBeenCalledOnce();
+      expect(capture.mock.calls[0]?.[0]).toBe(failure);
+      expect(capture.mock.calls[0]?.[1]).toBe("Failed to read request body");
+      expect(capture.mock.calls[0]?.[2]).toMatchObject({ error: expect.stringMatching(/Body is unusable/) });
+    } finally {
+      capture.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
 });
 
 describe("broker-backed GET routes", () => {
@@ -167,6 +187,9 @@ describe("broker-backed GET routes", () => {
       expect(res.status, name).toBe(500);
       expect(await res.json(), name).toMatchObject({ ok: false, error: "internal_error" });
     }
+    expect(brokerStub.getAccounts).toHaveBeenCalledOnce();
+    expect(brokerStub.getEquityOrders).toHaveBeenCalledOnce();
+    expect(brokerStub.getPortfolio).toHaveBeenCalledOnce();
     expect(consoleError).toHaveBeenCalledTimes(3);
     consoleError.mockRestore();
   });
@@ -324,6 +347,34 @@ describe("malformed JSON on broker-adjacent routes", () => {
     consoleError.mockRestore();
   });
 
+  it("PUT /api/policy returns 400 invalid_payload for unknown keys and wrong field types", async () => {
+    const { PUT } = await import("../app/api/policy/route");
+    const headers = { "content-type": "application/json", [AUTHENTICATED_EMAIL_HEADER]: "policy-zod@test.local" };
+    const unknownKey = await PUT(
+      new Request("http://localhost/api/policy", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ notAPolicyField: true, maxDailyOrders: 7 })
+      })
+    );
+    expect(unknownKey.status).toBe(400);
+    expect(await unknownKey.json()).toEqual({
+      ok: false,
+      error: "invalid_payload",
+      message: "Invalid policy update payload."
+    });
+
+    const wrongType = await PUT(
+      new Request("http://localhost/api/policy", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ maxDailyOrders: "7" })
+      })
+    );
+    expect(wrongType.status).toBe(400);
+    expect(await wrongType.json()).toMatchObject({ ok: false, error: "invalid_payload" });
+  });
+
   it("POST /api/keys returns 400 invalid_json", async () => {
     const { POST } = await import("../app/api/keys/route");
     const res = await POST(
@@ -345,6 +396,27 @@ describe("isBrokerGatewayError (ST-2797 cancel bookkeeping)", () => {
     expect(isBrokerGatewayError(new Error("Broker HTTP 500 Internal"))).toBe(true);
     expect(isBrokerGatewayError(new Error("No connected broker account"))).toBe(true);
     expect(isBrokerGatewayError(new TypeError("fetch failed"))).toBe(true);
+  });
+
+  it("recognises eToro adapter error shapes so outages stay broker_unavailable", async () => {
+    expect(isBrokerGatewayError(new Error("No eToro account connected."))).toBe(true);
+    expect(isBrokerGatewayError(new Error("eToro keys are missing for Demo.  Settings → Trading → API Key Management."))).toBe(true);
+    expect(isBrokerGatewayError(new Error("eToro /me 500"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("eToro portfolio 401"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("eToro 503 https://public-api.etoro.com/api/v1/me"))).toBe(true);
+    expect(isBrokerGatewayError(new Error("eToro US accounts are long-only.  Short/cover is not sent."))).toBe(false);
+
+    const missing = brokerReadError(new Error("No eToro account connected."));
+    expect(missing.status).toBe(502);
+    expect(await missing.json()).toMatchObject({ ok: false, error: "broker_unavailable", message: "No connected broker account." });
+
+    const http = brokerReadError(new Error("eToro /me 500"));
+    expect(http.status).toBe(502);
+    expect(await http.json()).toMatchObject({ ok: false, error: "broker_unavailable", message: "Broker returned HTTP 500." });
+
+    const auth = brokerReadError(new Error("eToro portfolio 401"));
+    expect(auth.status).toBe(502);
+    expect(await auth.json()).toMatchObject({ ok: false, error: "broker_auth_failed" });
   });
 
   it("recognises Public.com and Robinhood adapter error shapes without an HTTP prefix", () => {
