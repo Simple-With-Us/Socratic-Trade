@@ -33,8 +33,9 @@ npm run build
 
 ## Next steps and blockers
 
-- Land PR; confirm next weekday RTH merge does not fail deploy-freshness until latch grace after close.
+- Land PR #5143; confirm next weekday RTH merge does not fail deploy-freshness until latch grace after close.
 - Real silent-freeze class unchanged: off-hours / post-grace staleness still exit 3.
+- 2026-11-12: merged `origin/main` (`ba400936`, ST-4607 RAG embed timeout) into `cursor/st-2793-deploy-freshness-rth-latch-5247`; no conflicts in deploy-freshness / RTH latch files.
 
 ## Zero-code findings
 
