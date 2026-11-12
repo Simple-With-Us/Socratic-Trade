@@ -211,6 +211,12 @@ class WrapTest(unittest.TestCase):
             self.assertNotIn("--treat-exit-2-as-ok", unit.read_text(encoding="utf-8"), unit.name)
 
 
+def mutates_host(fn):
+    """Mark a test that passes the installer host check (it would write host units as root)."""
+    fn.MUTATES_HOST = True
+    return fn
+
+
 class InstallerHostCheckTest(unittest.TestCase):
     """Installers refuse a host other than the expected one before touching anything."""
 
@@ -219,10 +225,10 @@ class InstallerHostCheckTest(unittest.TestCase):
     def setUp(self) -> None:
         # Refusal exits at the host check, before the root check or any writes.
         # Acceptance tests pass the host check and would install units as root.
-        if os.geteuid() == 0 and self._testMethodName in {
-            "test_installers_accept_fqdn_expected_host_when_hostname_is_short",
-            "test_installers_accept_short_expected_host_when_hostname_is_fqdn",
-        }:
+        # The guard keys on a MUTATES_HOST attribute set by @mutates_host, so a
+        # renamed or newly added acceptance test keeps the protection.
+        test_fn = getattr(self, self._testMethodName)
+        if os.geteuid() == 0 and getattr(test_fn, "MUTATES_HOST", False):
             self.skipTest("installer acceptance tests must not run as root; they would mutate the host")
 
     def _env(self, bindir: Path | None = None) -> dict[str, str]:
@@ -281,6 +287,7 @@ class InstallerHostCheckTest(unittest.TestCase):
             r = self._run(name, env, "--bogus")
             self.assertEqual(r.returncode, 2, name)
 
+    @mutates_host
     def test_installers_accept_fqdn_expected_host_when_hostname_is_short(self) -> None:
         """An FQDN expected host must match when `hostname` returns the short name."""
         short = "st-unittest-host"
@@ -313,6 +320,7 @@ class InstallerHostCheckTest(unittest.TestCase):
                 self.assertIn("refusing to install on host", r.stderr, name)
                 self.assertIn(other, r.stderr, name)
 
+    @mutates_host
     def test_installers_accept_short_expected_host_when_hostname_is_fqdn(self) -> None:
         short = "st-unittest-host"
         fqdn = "st-unittest-host.example.ts.net"
