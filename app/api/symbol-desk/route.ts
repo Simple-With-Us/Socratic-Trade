@@ -28,8 +28,6 @@ export async function GET(request: Request) {
   const __resolvedUser = resolveRequestUserOrResponse(request);
   if (__resolvedUser instanceof Response) return __resolvedUser;
 
-  if (__resolvedUser instanceof Response) return __resolvedUser;
-
   const { userId } = __resolvedUser;
   const limited = enforceRateLimit(userId, "symbol-desk", { limit: 60, windowMs: 60_000 });
   if (limited) return limited;

@@ -6,9 +6,9 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const userId = resolveRequestUserIdOrResponse(request);
-  if (userId instanceof Response) return userId;
   try {
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     return NextResponse.json(activateStrategyProfile(id, userId));
   } catch (error) {
     return new NextResponse(error instanceof Error ? error.message : "Profile activation failed.", { status: 400 });

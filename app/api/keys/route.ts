@@ -18,7 +18,6 @@ import {
 } from "@/lib/db";
 import { isNativeRouteService, llmRouteFor, llmRouteSettingKey } from "@/lib/llm-route";
 import { checkAdmin } from "@/lib/auth/admin";
-import { } from "@/lib/request-user";
 import {
   defaultPlanTierForService,
   isRetiredMarketDataService,
@@ -419,7 +418,7 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserIdOrResponse(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
     if (userId instanceof Response) return userId;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
