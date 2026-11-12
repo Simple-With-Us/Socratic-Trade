@@ -4,15 +4,16 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ST-4610 Kody follow-ups: POST /api/profiles validates a strict envelope before it reaches the
-// database, and POST /api/profiles/[id]/activate keeps user-resolution server faults out of its 400 catch.
+// database, and POST /api/profiles/[id]/activate answers only a missing profile (404) and lets server faults surface as 500s.
 
 beforeEach(() => {
   vi.resetModules();
-  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-profile-routes-${randomUUID()}.db`)}`;
+  vi.stubEnv("DATABASE_URL", `file:${join(tmpdir(), `agentic-profile-routes-${randomUUID()}.db`)}`);
 });
 
 afterEach(() => {
   vi.doUnmock("@/lib/request-user");
+  vi.doUnmock("@/lib/db");
   vi.unstubAllEnvs();
 });
 
@@ -82,10 +83,30 @@ describe("POST /api/profiles/[id]/activate error mapping", () => {
     expect(response.status).toBe(401);
   });
 
-  it("still maps an activation failure to HTTP 400", async () => {
+  it("maps a missing profile to HTTP 404", async () => {
     const { POST } = await import("../app/api/profiles/[id]/activate/route");
     const response = await POST(activate("missing"), { params: Promise.resolve({ id: "missing" }) });
-    expect(response.status).toBe(400);
-    await expect(response.text()).resolves.toMatch(/not found/i);
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe("Strategy profile not found.");
+  });
+
+  it("lets an activation server fault escape as a 500 instead of a 400 with internal text", async () => {
+    vi.doMock("@/lib/db", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../src/lib/db")>()),
+      activateStrategyProfile: () => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+    }));
+    const { POST } = await import("../app/api/profiles/[id]/activate/route");
+    await expect(POST(activate("p1"), { params: Promise.resolve({ id: "p1" }) })).rejects.toThrow(/SQLITE_BUSY/);
+  });
+
+  it("activates an existing profile", async () => {
+    const { createStrategyProfile } = await import("../src/lib/db");
+    const created = createStrategyProfile({ name: "Swing" }, "local");
+    const { POST } = await import("../app/api/profiles/[id]/activate/route");
+    const response = await POST(activate(created.id), { params: Promise.resolve({ id: created.id }) });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ id: created.id, active: true });
   });
 });
