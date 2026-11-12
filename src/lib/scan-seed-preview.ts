@@ -84,16 +84,27 @@ export function scanSnapshotPriceLabel(input: {
 type RecoveryEntry = {
   userId: string | undefined;
   promise: Promise<LiveQuoteRecoveryResult>;
+  controller?: AbortController;
 };
 
-const recoveries = new Map<string, RecoveryEntry>();
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticScanSeedPreviewRecoveries: Map<string, RecoveryEntry> | undefined;
+}
+
+// Pin on globalThis so a second Next.js bundle copy still sees recoveries
+// registered by the scan route in another copy of this module.
+const recoveries: Map<string, RecoveryEntry> =
+  globalThis.__socraticScanSeedPreviewRecoveries ??
+  (globalThis.__socraticScanSeedPreviewRecoveries = new Map<string, RecoveryEntry>());
 
 export function registerScanRecovery(
   id: string,
   userId: string | undefined,
-  promise: Promise<LiveQuoteRecoveryResult>
+  promise: Promise<LiveQuoteRecoveryResult>,
+  controller?: AbortController
 ): void {
-  const entry: RecoveryEntry = { userId, promise };
+  const entry: RecoveryEntry = { userId, promise, controller };
   recoveries.set(id, entry);
   void promise.finally(() => {
     const timer = setTimeout(() => {
@@ -110,6 +121,13 @@ export function awaitScanRecovery(
   const entry = recoveries.get(id);
   if (!entry || entry.userId !== userId) return undefined;
   return entry.promise;
+}
+
+/** Abort an in-flight recovery started on this isolate, if the id still matches. */
+export function abortScanRecovery(id: string, userId: string | undefined, reason?: unknown): void {
+  const entry = recoveries.get(id);
+  if (!entry || entry.userId !== userId) return;
+  entry.controller?.abort(reason);
 }
 
 export function resetScanRecoveriesForTests(): void {

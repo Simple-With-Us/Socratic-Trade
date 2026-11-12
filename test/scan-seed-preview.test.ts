@@ -202,4 +202,107 @@ describe("interactive seed preview", () => {
     expect(kept.scan.topCandidates[0]?.price).toBe(91);
     expect(kept.priceAgeLabel).toBe(age);
   });
+
+  it("follows a live reply that is itself another refreshPending preview", () => {
+    const snapshot = {
+      source: "persisted-strategy-scan",
+      generatedAt: pricesAsOf,
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [{ symbol: "AAPL", price: 91 }],
+      sectorBySymbol: {},
+      quotesBySymbol: {},
+      warnings: [],
+      pricesAsOf,
+      refreshPending: true,
+      recoveryId: "11111111-1111-4111-8111-111111111111"
+    } as unknown as MarketScan;
+    const chainedId = "22222222-2222-4222-8222-222222222222";
+    const chained = {
+      ...snapshot,
+      recoveryId: chainedId
+    } as unknown as MarketScan;
+    const next = scanAfterLiveRecovery(snapshot, chained, now);
+    expect(next.scan.recoveryId).toBe(chainedId);
+    expect(next.scan.refreshPending).toBe(true);
+    expect(next.priceAgeLabel).toBe(`${age}.\u00A0 Updating with live prices.`);
+  });
+
+  it("keeps the snapshot when a refreshPending reply has no recovery id", () => {
+    const snapshot = {
+      source: "persisted-strategy-scan",
+      generatedAt: pricesAsOf,
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [{ symbol: "AAPL", price: 91 }],
+      sectorBySymbol: {},
+      quotesBySymbol: {},
+      warnings: [],
+      pricesAsOf,
+      refreshPending: true,
+      recoveryId: "11111111-1111-4111-8111-111111111111"
+    } as unknown as MarketScan;
+    const stuck = { ...snapshot, recoveryId: undefined, topCandidates: [{ symbol: "AAPL", price: 1 }] } as unknown as MarketScan;
+    const kept = scanAfterLiveRecovery(snapshot, stuck, now);
+    expect(kept.scan.topCandidates[0]?.price).toBe(91);
+    expect(kept.scan.recoveryId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(kept.priceAgeLabel).toBe(age);
+  });
+
+  it("pins recoveries on globalThis so a second module copy can await them", async () => {
+    const result = { keptSnapshot: true as const, pricesAsOf, refreshPending: false };
+    const { registerScanRecovery } = await import("../src/lib/scan-seed-preview");
+    registerScanRecovery("33333333-3333-4333-8333-333333333333", "user-1", Promise.resolve(result));
+    const shared = globalThis.__socraticScanSeedPreviewRecoveries;
+    expect(shared?.has("33333333-3333-4333-8333-333333333333")).toBe(true);
+    const again = await shared?.get("33333333-3333-4333-8333-333333333333")?.promise;
+    expect(again).toEqual(result);
+  });
+
+  it("stops background live recovery when the caller aborts", async () => {
+    const snapshotAsOf = new Date(Date.now() - 23 * 60_000).toISOString();
+    let yahooStarted = false;
+    let yahooAborted = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url.includes("api.nasdaq.com")) return emptyNasdaq();
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A=B" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) return new Response("crumb", { status: 200 });
+      if (url.includes("/v7/finance/quote") || url.includes("/v8/finance/chart/AAPL")) {
+        yahooStarted = true;
+        return await new Promise<Response>((_, reject) => {
+          const signal = init?.signal;
+          if (signal?.aborted) {
+            yahooAborted = true;
+            reject(signal.reason ?? new Error("aborted"));
+            return;
+          }
+          signal?.addEventListener("abort", () => {
+            yahooAborted = true;
+            reject(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        });
+      }
+      return new Response("nope", { status: 404 });
+    }));
+
+    const controller = new AbortController();
+    const first = await scanMarket(["AAPL"], [], undefined, undefined, [], {
+      enrichmentMode: "skip",
+      previewSeedBeforeLiveRecovery: true,
+      seedAsOf: snapshotAsOf,
+      seedEnrichment: { AAPL: seedQuote(snapshotAsOf) },
+      signal: controller.signal
+    });
+    expect(first.refreshPending).toBe(true);
+    expect(first.recoveryId).toMatch(/^[0-9a-f-]{36}$/i);
+
+    await vi.waitFor(() => expect(yahooStarted).toBe(true));
+    controller.abort(new Error("caller cancelled"));
+    const live = await awaitScanRecovery(first.recoveryId ?? "", undefined);
+    expect(yahooAborted).toBe(true);
+    expect(live).toEqual({ keptSnapshot: true, pricesAsOf: snapshotAsOf, refreshPending: false });
+  });
 });

@@ -1747,6 +1747,12 @@ function beginInteractiveSeedPreview(input: {
 
   const recoveryId = globalThis.crypto.randomUUID();
   const controller = new AbortController();
+  const outerSignal = input.options?.signal;
+  if (outerSignal?.aborted) {
+    controller.abort(outerSignal.reason);
+  } else if (outerSignal) {
+    outerSignal.addEventListener("abort", () => controller.abort(outerSignal.reason), { once: true });
+  }
   const timer = setTimeout(() => {
     controller.abort(new Error("Live quote recovery deadline exceeded."));
   }, LIVE_QUOTE_RECOVERY_BUDGET_MS);
@@ -1777,7 +1783,7 @@ function beginInteractiveSeedPreview(input: {
       clearTimeout(timer);
     }
   })();
-  registerScanRecovery(recoveryId, userId, promise);
+  registerScanRecovery(recoveryId, userId, promise, controller);
 
   const candidateLimit = normalizeMarketScanCandidateLimit(
     input.options?.candidateLimit,

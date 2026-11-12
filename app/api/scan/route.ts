@@ -8,7 +8,7 @@ import { getBrokerGateway } from "@/lib/broker";
 import { fetchRecentGroupedBarsRest } from "@/lib/market-signals/massive";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import { awaitScanRecovery, isKeptSeedSnapshot } from "@/lib/scan-seed-preview";
+import { abortScanRecovery, awaitScanRecovery, isKeptSeedSnapshot } from "@/lib/scan-seed-preview";
 import type { EquityPosition, MarketScan, TradingPolicy } from "@/lib/types";
 import {
   interactiveScanKey,
@@ -90,17 +90,31 @@ export async function GET(request: Request) {
     const policy = getPolicy(userId);
     connectedAccountId = policy.connectedAccountId;
     const recoveryId = new URL(request.url).searchParams.get("recovery")?.trim() ?? "";
+    let previewSeedBeforeLiveRecovery = true;
     if (recoveryId) {
       if (!RECOVERY_ID.test(recoveryId)) {
         return NextResponse.json({ error: "That live quote refresh is no longer running." }, { status: 404 });
       }
       const pending = awaitScanRecovery(recoveryId, userId);
-      if (!pending) {
-        return NextResponse.json({ error: "That live quote refresh is no longer running." }, { status: 404 });
+      if (pending) {
+        const onAbort = () => abortScanRecovery(recoveryId, userId, request.signal.reason);
+        if (request.signal.aborted) {
+          onAbort();
+        } else {
+          request.signal.addEventListener("abort", onAbort, { once: true });
+        }
+        try {
+          const outcome = await pending;
+          if (isKeptSeedSnapshot(outcome)) return NextResponse.json(outcome);
+          return NextResponse.json(await finishInteractiveScan(outcome, policy, userId));
+        } finally {
+          request.signal.removeEventListener("abort", onAbort);
+        }
       }
-      const outcome = await pending;
-      if (isKeptSeedSnapshot(outcome)) return NextResponse.json(outcome);
-      return NextResponse.json(await finishInteractiveScan(outcome, policy, userId));
+      // The in-memory promise lives only on the isolate that started it.
+      // A follow-up that lands elsewhere, or after the entry expired, should
+      // still run a live scan rather than 404 and leave the snapshot stuck.
+      previewSeedBeforeLiveRecovery = false;
     }
     // Seed from whichever kind is newer at each scope — a scheduled market_scan_freshness
     // audit (weekend/off-hours) can be fresher than the last strategy_run, and vice versa.
@@ -155,7 +169,7 @@ export async function GET(request: Request) {
           universeFloor: policy.universeFloor,
           enrichmentMode: "skip",
           seedEnrichment,
-          previewSeedBeforeLiveRecovery: true,
+          previewSeedBeforeLiveRecovery,
           seedAsOf: seedAsOfFromAudits(latestAccountAudit, latestGlobalAudit),
           signal,
           // Account-scoped market-data tape: bind the scan to the operating

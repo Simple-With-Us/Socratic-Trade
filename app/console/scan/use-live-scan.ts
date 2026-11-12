@@ -77,7 +77,17 @@ export function scanAfterLiveRecovery(
   now = Date.now()
 ): { scan: MarketScan; priceAgeLabel: string | null } {
   const keptLabel = scanSnapshotPriceLabel({ pricesAsOf: snapshot.pricesAsOf, refreshPending: false, now }) ?? null;
-  if (isKeptSeedSnapshot(body) || !isMarketScan(body) || body.refreshPending === true) {
+  if (isKeptSeedSnapshot(body) || !isMarketScan(body)) {
+    return { scan: snapshot, priceAgeLabel: keptLabel };
+  }
+  // A follow-up that is itself another preview must keep the new recoveryId
+  // so the hook can follow it, instead of treating refreshPending as failure.
+  if (body.refreshPending === true) {
+    if (typeof body.recoveryId === "string" && body.recoveryId.length > 0) {
+      const pricesAsOf = body.pricesAsOf ?? snapshot.pricesAsOf;
+      const label = scanSnapshotPriceLabel({ pricesAsOf, refreshPending: true, now }) ?? keptLabel;
+      return { scan: body, priceAgeLabel: label };
+    }
     return { scan: snapshot, priceAgeLabel: keptLabel };
   }
   return { scan: body, priceAgeLabel: null };
@@ -116,22 +126,42 @@ export function useLiveScan(scopeKey: string | null): LiveScan {
       if (data.refreshPending === true && data.recoveryId && data.pricesAsOf) {
         setScan(data);
         setPriceAgeLabel(scanSnapshotPriceLabel({ pricesAsOf: data.pricesAsOf, refreshPending: true }) ?? null);
-        const liveRes = await fetch(`/api/scan?recovery=${encodeURIComponent(data.recoveryId)}`, {
-          cache: "no-store",
-          signal: controller.signal
-        });
-        if (controller.signal.aborted) return { status: "superseded" };
-        if (!liveRes.ok) {
-          const kept = scanAfterLiveRecovery(data, { keptSnapshot: true, pricesAsOf: data.pricesAsOf, refreshPending: false });
-          setPriceAgeLabel(kept.priceAgeLabel);
-          return { status: "ok", scan: kept.scan };
+        let snapshot = data;
+        let recoveryId = data.recoveryId;
+        const maxHops = 3;
+        for (let hop = 0; hop < maxHops; hop += 1) {
+          const liveRes = await fetch(`/api/scan?recovery=${encodeURIComponent(recoveryId)}`, {
+            cache: "no-store",
+            signal: controller.signal
+          });
+          if (controller.signal.aborted) return { status: "superseded" };
+          if (!liveRes.ok) {
+            const kept = scanAfterLiveRecovery(snapshot, {
+              keptSnapshot: true,
+              pricesAsOf: snapshot.pricesAsOf,
+              refreshPending: false
+            });
+            setScan(kept.scan);
+            setPriceAgeLabel(kept.priceAgeLabel);
+            return { status: "ok", scan: kept.scan };
+          }
+          const live: unknown = await liveRes.json();
+          if (controller.signal.aborted) return { status: "superseded" };
+          const next = scanAfterLiveRecovery(snapshot, live);
+          setScan(next.scan);
+          setPriceAgeLabel(next.priceAgeLabel);
+          if (
+            next.scan.refreshPending === true &&
+            typeof next.scan.recoveryId === "string" &&
+            next.scan.recoveryId !== recoveryId
+          ) {
+            snapshot = next.scan;
+            recoveryId = next.scan.recoveryId;
+            continue;
+          }
+          return { status: "ok", scan: next.scan };
         }
-        const live: unknown = await liveRes.json();
-        if (controller.signal.aborted) return { status: "superseded" };
-        const next = scanAfterLiveRecovery(data, live);
-        setScan(next.scan);
-        setPriceAgeLabel(next.priceAgeLabel);
-        return { status: "ok", scan: next.scan };
+        return { status: "ok", scan: snapshot };
       }
       setScan(data);
       setPriceAgeLabel(null);
