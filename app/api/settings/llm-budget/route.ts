@@ -5,7 +5,7 @@ import {
   resolveLlmLimits,
   setUserLlmDailyBudget
 } from "@/lib/llm-budget";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +47,8 @@ function payloadFor(userId: string) {
 
 /** GET — per-user daily LLM cap + today's spend. Not an Infisical secret. */
 export async function GET(request: NextRequest) {
-  const userId = resolveRequestUserId(request, {});
+  const userId = resolveRequestUserIdOrResponse(request, {});
+  if (userId instanceof Response) return userId;
   return NextResponse.json(payloadFor(userId));
 }
 
@@ -61,7 +62,8 @@ export async function PATCH(request: NextRequest) {
       tokenBudget?: number | null;
       costBudgetUsd?: number | null;
     };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request, body);
+    if (userId instanceof Response) return userId;
     const tokenBudget = parseOptionalBudget(body.tokenBudget, "tokenBudget");
     const costBudgetUsd = parseOptionalBudget(body.costBudgetUsd, "costBudgetUsd");
     if (tokenBudget === undefined && costBudgetUsd === undefined) {

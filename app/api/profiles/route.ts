@@ -1,11 +1,13 @@
 import { createStrategyProfile, listStrategyProfiles } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  return NextResponse.json(listStrategyProfiles(resolveRequestUserId(request)));
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
+  return NextResponse.json(listStrategyProfiles(userId));
 }
 
 export async function POST(request: Request) {
@@ -13,7 +15,8 @@ export async function POST(request: Request) {
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request, body);
+  if (userId instanceof Response) return userId;
   const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "New Strategy";
   const profile = createStrategyProfile({
     name,

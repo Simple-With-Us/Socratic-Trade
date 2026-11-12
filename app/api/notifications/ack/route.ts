@@ -1,5 +1,5 @@
 import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { acknowledgeAllNotificationEvents, acknowledgeNotificationEvents } from "@/lib/db";
 import { NextResponse } from "next/server";
 
@@ -12,11 +12,12 @@ export const dynamic = "force-dynamic";
  *  (plus account-less rows) — it must match the account the Alert Center's "attention" list is
  *  actually rendering (see inScopeNotifications in app/console/components/alert-center.tsx), or
  *  "Acknowledge all" would silently ack alerts from a different account the user never saw. Always
- *  user-scoped via resolveRequestUserId — never trusts a client-supplied userId (mirrors
+ *  user-scoped via — never trusts a client-supplied userId (mirrors
  *  app/api/notifications/route.ts). */
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { ids?: unknown; all?: unknown; filter?: unknown; connectedAccountId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request, body);
+  if (userId instanceof Response) return userId;
 
   if (body.all === true) {
     const filter = body.filter === "attention" ? "attention" : "attention";

@@ -28,17 +28,34 @@ export interface ResolvedRequestUser {
   email?: string;
 }
 
+export const VERIFIED_IDENTITY_REQUIRED_ERROR = "verified_identity_required" as const;
+
+/** Thrown when a route needs a verified user identity but the request has none. */
+export class IdentityRequiredError extends Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = "IdentityRequiredError";
+    this.reason = reason;
+  }
+}
+
 function assertIdentityAllowedInLiveBootstrap(
   email: string | null,
   identitySource: string | null
 ): void {
   if (!isLiveBootstrap()) return;
   if (identitySource === AUTHENTICATED_IDENTITY_SOURCES.localFallback) {
-    throw new Error("Verified identity is required in live bootstrap (local fallback is not allowed).");
+    throw new IdentityRequiredError(
+      "Verified identity is required in live bootstrap (local fallback is not allowed)."
+    );
   }
   const normalized = email?.trim().toLowerCase();
   if (!normalized || !normalized.includes("@")) {
-    throw new Error("Verified identity is required in live bootstrap (missing authenticated email).");
+    throw new IdentityRequiredError(
+      "Verified identity is required in live bootstrap (missing authenticated email)."
+    );
   }
 }
 
@@ -57,7 +74,7 @@ export function resolveRequestUser(request: Request): ResolvedRequestUser {
   if (process.env.CODE_CLI_ENABLED === "true" && (!email?.trim().includes("@") ||
     (identitySource !== AUTHENTICATED_IDENTITY_SOURCES.authJsSession
     && identitySource !== AUTHENTICATED_IDENTITY_SOURCES.cloudflareAccess))) {
-    throw new Error("Verified identity required while Code CLI is enabled");
+    throw new IdentityRequiredError("Verified identity required while Code CLI is enabled");
   }
   const resolved = resolveRequestUserFromEmail(email);
   const issuedAt = request.headers.get(AUTHENTICATED_SESSION_ISSUED_AT_HEADER);
@@ -88,4 +105,41 @@ export function resolveRequestUser(request: Request): ResolvedRequestUser {
 export function resolveRequestUserId(request: Request, _body?: unknown): string {
   void _body;
   return resolveRequestUser(request).userId;
+}
+
+/** Map identity failures to the API 401 contract; other errors return null (rethrow upstream). */
+export function identityErrorResponse(error: unknown): Response | null {
+  const reason =
+    error instanceof IdentityRequiredError
+      ? error.reason
+      : error instanceof Error &&
+          (error.message.includes("Verified identity is required in live bootstrap") ||
+            error.message === "Verified identity required while Code CLI is enabled")
+        ? error.message
+        : null;
+  if (!reason) return null;
+  return Response.json(
+    { ok: false, error: VERIFIED_IDENTITY_REQUIRED_ERROR, reason },
+    { status: 401, headers: { "content-type": "application/json" } }
+  );
+}
+
+export function resolveRequestUserOrResponse(request: Request): ResolvedRequestUser | Response {
+  try {
+    return resolveRequestUser(request);
+  } catch (error) {
+    const denied = identityErrorResponse(error);
+    if (denied) return denied;
+    throw error;
+  }
+}
+
+export function resolveRequestUserIdOrResponse(request: Request, body?: unknown): string | Response {
+  try {
+    return resolveRequestUserId(request, body);
+  } catch (error) {
+    const denied = identityErrorResponse(error);
+    if (denied) return denied;
+    throw error;
+  }
 }

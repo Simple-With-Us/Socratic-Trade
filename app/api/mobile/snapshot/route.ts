@@ -3,7 +3,7 @@ import { buildMobileBrief, listMobileCommands, mobileControlCatalog, mobileReadi
 import { withMobileEquityCurveCompat } from "@/lib/mobile-equity-curve-compat";
 import { compactMobileMarketScan } from "@/lib/mobile-scan";
 import { buildNotificationHistory } from "@/lib/notification-history";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { listAlerts } from "@/lib/alerts";
 import { listWatchlist } from "@/lib/watchlist";
 import { isWorkingOrderState } from "@/lib/broker-held-orders";
@@ -22,7 +22,8 @@ function activeAccountMode(
 }
 
 export async function GET(request: Request) {
-  const user = resolveRequestUser(request);
+  const user = resolveRequestUserOrResponse(request);
+  if (user instanceof Response) return user;
   const snapshot = await getDashboardSnapshot(user.userId, user.email);
   const readiness = mobileReadiness(user.userId);
   const alerts = listAlerts(user.userId, "all");

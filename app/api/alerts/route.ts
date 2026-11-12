@@ -1,11 +1,12 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { createAlert, listAlerts, removeAlert } from "@/lib/alerts";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const statusParam = url.searchParams.get("status");
   const status = statusParam === "armed" || statusParam === "triggered" ? statusParam : "all";
@@ -20,7 +21,8 @@ export async function POST(request: Request) {
     note?: unknown;
     userId?: unknown;
   };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request, body);
+  if (userId instanceof Response) return userId;
   if (typeof body.symbol !== "string" || typeof body.op !== "string" || body.price == null) {
     return NextResponse.json({ error: "symbol, op, and price are required" }, { status: 400 });
   }
@@ -37,7 +39,8 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const url = new URL(request.url);
   const body = (await request.json().catch(() => ({}))) as { id?: unknown; userId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request, body);
+  if (userId instanceof Response) return userId;
   const id = typeof body.id === "string" ? body.id : url.searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id is required" }, { status: 400 });
   const removed = removeAlert(userId, id);

@@ -1,7 +1,7 @@
 import { getPolicy } from "@/lib/db";
 import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { retryProposalRedTeam, RetryRedTeamError } from "@/lib/retry-red-team";
 import { NextResponse } from "next/server";
@@ -11,7 +11,8 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const body = (await request.json().catch(() => ({}))) as { userId?: unknown };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request, body);
+    if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/retry-red-team", RATE_LIMITS.orders);
     if (limited) return limited;
     if (isProposalActionStopped(getPolicy(userId))) {

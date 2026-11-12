@@ -11,7 +11,7 @@ import {
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { getActiveConnectedAccount, getPolicy } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -23,7 +23,8 @@ export async function POST(request: Request) {
       liveConfirmation?: MarketReplaceConfirmation;
       userId?: unknown;
     };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request, body);
+    if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "orders/replace-market", RATE_LIMITS.orders);
     if (limited) return limited;
 

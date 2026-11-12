@@ -9,7 +9,7 @@ import {
   listPortfolioSnapshots,
   listSocraticDecisionCases
 } from "@/lib/db";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { buildSymbolDesk } from "@/lib/symbol-desk";
 import { normalizeSymbol } from "@/lib/money";
@@ -25,7 +25,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
-  const { userId } = resolveRequestUser(request);
+  const __resolvedUser = resolveRequestUserOrResponse(request);
+  if (__resolvedUser instanceof Response) return __resolvedUser;
+
+  if (__resolvedUser instanceof Response) return __resolvedUser;
+
+  const { userId } = __resolvedUser;
   const limited = enforceRateLimit(userId, "symbol-desk", { limit: 60, windowMs: 60_000 });
   if (limited) return limited;
 

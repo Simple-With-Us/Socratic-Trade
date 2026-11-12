@@ -1,6 +1,6 @@
 import { getActiveConnectedAccount, listConnectedAccounts, upsertConnectedAccount } from "@/lib/db";
 import { getRobinhoodGateway } from "@/lib/robinhood";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { ALPACA_ALLOWED_HOSTS, validateBrokerBaseUrl } from "@/lib/egress-guard";
 import { NextResponse } from "next/server";
 import crypto from "crypto";
@@ -17,7 +17,8 @@ function isAlpacaPaperCredential(input: { accountNumber?: unknown; apiKey?: unkn
 // List the user's connected accounts for the UI (e.g. the copy-strategy-to-account picker).
 // listConnectedAccounts never includes secrets; we still project an explicit safe subset.
 export async function GET(req: Request) {
-  const userId = resolveRequestUserId(req);
+  const userId = resolveRequestUserIdOrResponse(req);
+  if (userId instanceof Response) return userId;
   const accounts = listConnectedAccounts(userId)
     // `broker: "test"` remains an internal unit-test adapter, never a product account.
     .filter((a) => a.broker !== "test")
@@ -36,7 +37,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const userId = resolveRequestUserId(req, body);
+    const userId = resolveRequestUserIdOrResponse(req, body);
+    if (userId instanceof Response) return userId;
     if (body.broker === "test") {
       return new NextResponse("Test broker accounts are test infrastructure and cannot be added.", { status: 400 });
     }
