@@ -3,6 +3,11 @@
 **What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
 
 **Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
 
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
