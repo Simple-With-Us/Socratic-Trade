@@ -356,6 +356,8 @@ export interface RoicTranscriptRefreshResult {
   phase: RoicIngestPhase;
   /** Walk paused so a Manual Run once / strategy run can reach Green. */
   pausedForStrategyRun?: boolean;
+  /** Walk paused because the ROIC credential is in a transcript hold. */
+  pausedForProviderHold?: boolean;
 }
 
 const roicRefreshHost = globalThis as unknown as {
@@ -576,6 +578,18 @@ function deferRoicTranscriptCredential(opts: RoicFetchOpts, holdMs: number, now 
 /** Test-only: clear transcript Retry-After holds. */
 export function resetRoicTranscriptRateHold(): void {
   roicTranscriptHoldUntil.clear();
+}
+
+async function roicTranscriptCredentialCooling(userId?: string): Promise<boolean> {
+  const keyInfo = resolveApiKeyWithSource("roic", userId);
+  if (!keyInfo.key) return false;
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
+  return roicTranscriptRateHoldCooling({
+    service: "roic",
+    keySource: keyInfo.source,
+    credentialId,
+    suppressHealthStatuses: []
+  });
 }
 
 async function roicLimitedFetch(url: string, fetchOpts: RoicFetchOpts): Promise<Response | null> {
@@ -1208,6 +1222,11 @@ async function runRoicTranscriptRefresh(
           writeRoicCursor(queue, nowIso, phase);
           continue;
         }
+        if (indexRows.length === 0 && await roicTranscriptCredentialCooling(options?.userId)) {
+          base.pausedForProviderHold = true;
+          writeRoicCursor(queue, nowIso, phase);
+          return;
+        }
       }
 
       const rawPeriods = indexRows.length > 0
@@ -1252,6 +1271,11 @@ async function runRoicTranscriptRefresh(
         try {
           const item = await fetchRoicTranscript(symbol, period.year, period.quarter, options?.userId);
           if (!item) {
+            if (await roicTranscriptCredentialCooling(options?.userId)) {
+              base.pausedForProviderHold = true;
+              symbolDone = false;
+              break;
+            }
             base.skippedNoContent += 1;
             continue;
           }
@@ -1294,7 +1318,8 @@ async function runRoicTranscriptRefresh(
     skippedAlreadyStored: base.skippedAlreadyStored,
     symbolsConsidered: base.symbolsConsidered,
     remaining: base.remaining,
-    phase
+    phase,
+    pausedForProviderHold: base.pausedForProviderHold === true
   });
   return { ...base, due: true };
 }
