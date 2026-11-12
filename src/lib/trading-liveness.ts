@@ -3,6 +3,9 @@ import { getDb, getInternalSetting, listConnectedAccounts, listUsers, peekPolicy
 import { isMarketOpen } from "./market-calendar";
 import type { SystemState } from "./types";
 
+/** Synthetic per-account episode key when `autonomy_fully_dark` pages with no degraded rows. */
+export const TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY = "fleet:autonomy_fully_dark";
+
 // Handoff 6b.7: the scheduler heartbeat (/api/health's schedulerAgeSeconds) only proves the tick
 // FUNCTION is running — it goes green the instant a DB write succeeds, even if every strategy run
 // it kicks off then fails (persistent LLM/broker outage). This module adds a second, orthogonal
