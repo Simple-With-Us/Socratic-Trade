@@ -207,6 +207,11 @@ export const YAHOO_CHART_FALLBACK_QUOTE_TIMEOUT_MS = 5_000;
 export const YAHOO_CHART_FALLBACK_MAX_ATTEMPTS = 2;
 export const YAHOO_CHART_QUOTE_BACKOFF_MS = 400;
 
+/** Drop an unread body so a proxied error cannot keep a concurrency slot. */
+async function cancelUnreadBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
 function chartAttemptBudget(options?: YahooFetchOptions): {
   maxAttempts: number;
   perAttemptTimeoutMs: number;
@@ -270,13 +275,17 @@ export async function fetchYahooFinanceQuote(
       });
 
       if (response.status === 429 && attempt < maxAttempts - 1) {
+        await cancelUnreadBody(response);
         const backoff = jitteredBackoffMs(attempt, YAHOO_CHART_QUOTE_BACKOFF_MS, 4_000);
         if (deadlineAt !== undefined && Date.now() + backoff >= deadlineAt) return undefined;
         const slept = await yahooSleepOrAborted(backoff, callerSignal);
         if (!slept) return undefined;
         continue;
       }
-      if (!response.ok) return undefined;
+      if (!response.ok) {
+        await cancelUnreadBody(response);
+        return undefined;
+      }
       const raw = await response.json();
       const parsed = YahooChartResponseSchema.safeParse(raw);
       if (!parsed.success) return undefined;
@@ -501,12 +510,14 @@ async function fetchYahooQuoteChunk(
       });
 
       if (response.status === 401 || response.status === 403) {
+        await cancelUnreadBody(response);
         stats.v7ChunksAuth += 1;
         invalidateYahooSessionCreds(userId);
         markYahooV7AuthBlocked();
         return result;
       }
       if (!response.ok) {
+        await cancelUnreadBody(response);
         emitYahooQuoteTelemetry({ kind: "v7_chunk_empty", v7Chunks: stats.v7Chunks });
         return result;
       }
