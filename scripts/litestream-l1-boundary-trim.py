@@ -22,7 +22,8 @@ the run; later chunks are not sent.
   --max-snapshot-age-hours N                refuse a staler snapshot (default 48)
   --apply                                   actually delete
 
-Exit codes: 0 ok/no-op, 1 delete failures, 2 no usable snapshot,
+Exit codes: 0 ok/no-op, 1 delete failures or a failed listing (rclone error,
+timeout, missing binary, malformed lsl line), 2 no usable snapshot,
 3 snapshot failed a safety guard, 4 would leave a restore hole,
 5 kept chain has internal gaps (L2 will stay wedged -- needs a human),
 6 nothing superseded although L1 is large (boundary did not advance).
@@ -279,16 +280,21 @@ def execute(argv=None, *, rclone_fn=None, now=None, chunk=None) -> int:
     log("mode=%s app=%s bucket=%s prefix=%s max_snapshot_age=%.1fh"
         % ("APPLY" if args.apply else "DRY-RUN", args.app, bucket, prefix,
            args.max_snapshot_age_hours))
+    # A listing failure is exit 1 (documented), never exit 2: 2 means "no
+    # usable snapshot" and would send the operator to the wrong cause.
+    # Exception, not RuntimeError: rclone() raises TimeoutExpired on a hang,
+    # FileNotFoundError without the binary, and listing() ValueError on a
+    # malformed lsl line.
     try:
         snap_rows = listing(bucket, prefix, "0009", runner)
-    except RuntimeError:
-        log("ABORT: snapshot listing failed")
-        return 2
+    except Exception as exc:
+        log("ABORT: snapshot listing failed (%s)" % type(exc).__name__)
+        return 1
     try:
         l1_rows = listing(bucket, prefix, "0001", runner)
-    except RuntimeError:
-        log("ABORT: L1 listing failed")
-        return 2
+    except Exception as exc:
+        log("ABORT: L1 listing failed (%s)" % type(exc).__name__)
+        return 1
     plan = plan_boundary(
         snap_rows, l1_rows, now=clock, max_age_hours=args.max_snapshot_age_hours)
     if plan.code != 0:
@@ -339,8 +345,8 @@ def execute(argv=None, *, rclone_fn=None, now=None, chunk=None) -> int:
                 pass
     try:
         remaining = {nm for nm, _size, _when in listing(bucket, prefix, "0001", runner)}
-    except RuntimeError:
-        log("ABORT: post-delete listing failed")
+    except Exception as exc:
+        log("ABORT: post-delete listing failed (%s)" % type(exc).__name__)
         return 1
     survivors = [nm for nm in plan.doomed if nm in remaining]
     deleted = len(plan.doomed) - len(survivors)

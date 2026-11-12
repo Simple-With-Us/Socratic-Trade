@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
@@ -81,6 +82,7 @@ class FakeB2:
         self.deleted = []
         self.methods = []
         self.bucket_ids = []
+        self.listed = []
 
     def __call__(self, method, payload):
         self.methods.append(method)
@@ -92,9 +94,10 @@ class FakeB2:
                     {"bucketName": real, "bucketId": "realbucket1"},
                 ]
             }
-        if method == "b2_list_file_versions":
+        if method in ("b2_list_file_versions", "b2_list_file_names"):
             self.bucket_ids.append(payload.get("bucketId"))
             level = str(payload.get("prefix") or "")[len(HEAL.REPLICA_PREFIX):].strip("/")
+            self.listed.append((method, level))
             return {"files": self.versions_by_level.get(level, [])}
         if method == "b2_delete_file_version":
             if self.fail_delete_at is not None and len(self.deleted) >= self.fail_delete_at:
@@ -346,8 +349,13 @@ class HealExecuteTests(unittest.TestCase):
 
         calls.clear()
         with mock.patch("urllib.request.urlopen", wrong_cluster):
-            _text, caught = run_heal([])
+            text, caught = run_heal([])
         self.assertIsNotNone(caught)
+        self.assertEqual(caught.code, 2)
+        # Control: the mocked authorize ran, and the cluster check stopped the run there.
+        self.assertEqual(len(calls), 1)
+        self.assertIn("b2_authorize_account", calls[0])
+        self.assertIn("not the live EU B2 cluster", text)
         self.assertTrue(all("b2_delete_file_version" not in url for url in calls))
 
     def test_dry_run_deletes_nothing_and_apply_deletes_the_plan(self):
@@ -357,6 +365,17 @@ class HealExecuteTests(unittest.TestCase):
         self.assertNotIn("b2_delete_file_version", dry.methods)
         self.assertIn("DRY-RUN", text)
         self.assertEqual(set(dry.bucket_ids), {"realbucket1"})
+        # Count-only L0/L9 list current names, not every retained version.
+        self.assertEqual(
+            sorted(dry.listed),
+            sorted([
+                ("b2_list_file_names", "0000"),
+                ("b2_list_file_names", "0009"),
+                ("b2_list_file_versions", "0001"),
+                ("b2_list_file_versions", "0002"),
+                ("b2_list_file_versions", "0003"),
+            ]),
+        )
 
         applied = FakeB2(self.versions)
         _text, caught = run_heal(["--apply", "--keep-l1", "8"], post=applied)
@@ -578,8 +597,43 @@ class BoundaryExecuteTests(unittest.TestCase):
     def test_list_failure_and_restore_hole_do_not_delete(self):
         failed = FakeRclone(self.snaps, self.l1, fail_list=True)
         code, _text = self._run(failed, ["--apply"])
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 1)
         self.assertNotIn("delete", [call[0] for call in failed.calls])
+
+        # A hang, a missing rclone, or a malformed lsl line is the same exit 1,
+        # never a traceback and never exit 2 ("no usable snapshot").
+        for exc in (
+            subprocess.TimeoutExpired(["rclone", "lsl"], 300),
+            FileNotFoundError("rclone"),
+            ValueError("bad lsl size"),
+        ):
+            def boom(args, _exc=exc):
+                if args[0] == "lsl":
+                    raise _exc
+                raise AssertionError(args[0])
+
+            code, text = self._run(boom, ["--apply"])
+            self.assertEqual(code, 1, type(exc).__name__)
+            self.assertIn("listing failed", text)
+            self.assertNotIn("APPLIED", text)
+
+        malformed = FakeRclone("notanumber 2026-11-12 00:00:00 x.ltx", self.l1)
+        code, text = self._run(malformed, ["--apply"])
+        self.assertEqual(code, 1)
+        self.assertIn("snapshot listing failed (ValueError)", text)
+
+        post_fail = FakeRclone(self.snaps, self.l1)
+        real_call = post_fail.__call__
+
+        def fail_after_delete(args):
+            if args[0] == "lsl" and any(call[0] == "delete" for call in post_fail.calls):
+                post_fail.calls.append(list(args))
+                raise subprocess.TimeoutExpired(["rclone", "lsl"], 300)
+            return real_call(args)
+
+        code, text = self._run(fail_after_delete, ["--apply"])
+        self.assertEqual(code, 1)
+        self.assertIn("post-delete listing failed (TimeoutExpired)", text)
 
         hole_l1 = "\n".join([lsl(basename(1, 50)), lsl(basename(110, 120))])
         hole = FakeRclone(self.snaps, hole_l1)

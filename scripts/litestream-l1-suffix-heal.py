@@ -239,6 +239,51 @@ def list_file_versions(post: Any, bucket_id: str, prefix: str) -> list[dict[str,
     return out
 
 
+def list_file_names(post: Any, bucket_id: str, prefix: str) -> list[dict[str, Any]]:
+    """Current (live) B2 objects under prefix: one row per name, no history.
+
+    For count-only levels (L0, L9).  Listing every retained version there
+    would load each superseded upload and hide marker just to print a count.
+    """
+    out: list[dict[str, Any]] = []
+    start_name = None
+    seen: set[str] = set()
+    pages = 0
+    while True:
+        pages += 1
+        if pages > 10000:
+            die("b2_list_file_names pagination did not finish")
+        payload: dict[str, Any] = {
+            "bucketId": bucket_id,
+            "prefix": prefix,
+            "maxFileCount": 10000,
+        }
+        if start_name is not None:
+            payload["startFileName"] = start_name
+        try:
+            data = post("b2_list_file_names", payload)
+        except SystemExit:
+            raise
+        except Exception as err:
+            die(f"b2_list_file_names failed ({type(err).__name__})")
+        if not isinstance(data, dict):
+            die("b2_list_file_names returned a non-object")
+        for item in data.get("files") or []:
+            name = str(item.get("fileName") or "")
+            if not name.startswith(prefix):
+                continue
+            out.append(item)
+        nxt_name = data.get("nextFileName")
+        if not nxt_name:
+            break
+        cursor = str(nxt_name)
+        if cursor in seen or cursor == start_name:
+            die("b2_list_file_names pagination cursor repeated")
+        seen.add(cursor)
+        start_name = cursor
+    return out
+
+
 def _stamp(row: dict[str, Any]) -> tuple[int, str]:
     return (int(row.get("uploadTimestamp") or 0), str(row.get("fileId") or ""))
 
@@ -437,8 +482,12 @@ def execute(argv: list[str] | None = None, *, post: Any = None, authorize: Any =
     print("bucket_id_len", len(bucket_id))
 
     raw: dict[str, list[dict[str, Any]]] = {}
-    for level in (FORBIDDEN_LEVELS[0], LEVEL_L1, "0002", "0003", FORBIDDEN_LEVELS[1]):
+    # Every version only where the run deletes (L1/L2/L3).  L0 and L9 are
+    # never deleted and only counted, so list their current names.
+    for level in (LEVEL_L1,) + LEVELS_DELETE_ALL:
         raw[level] = list_file_versions(post, bucket_id, f"{REPLICA_PREFIX}{level}/")
+    for level in FORBIDDEN_LEVELS:
+        raw[level] = list_file_names(post, bucket_id, f"{REPLICA_PREFIX}{level}/")
     l1 = live_rows(raw[LEVEL_L1])
     l2 = live_rows(raw["0002"])
     l3 = live_rows(raw["0003"])

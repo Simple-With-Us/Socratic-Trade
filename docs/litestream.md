@@ -299,7 +299,7 @@ Do **not** add `verify-compaction: true` (ListObjects after every compact; tcp_m
 
 ### The heal: `scripts/litestream-l1-boundary-trim.py`
 
-Installed on `fleet-hetzner-nbg1` as `/usr/local/sbin/litestream-l1-boundary-trim`.  The repo copy is the source of truth for review and re-installation.  As of ST-4621 (2026-11-12) that copy is no longer byte-identical to the host file.  Do not copy `/usr/local/sbin/litestream-l1-boundary-trim` back over the repo, or the safety fixes below are wiped.  Jay installs the repo copy when ready.  Until then the host keeps the previous behavior.  It lists the newest L9 snapshot,
+Installed on the fleet host as `<install-path>/litestream-l1-boundary-trim` (the systemd unit's `ExecStart` names the fleet wrapper beside it).  The repo copy is the source of truth for review and re-installation.  As of ST-4621 (2026-11-12) that copy is no longer byte-identical to the host file.  Do not copy the installed `<install-path>/litestream-l1-boundary-trim` back over the repo, or the safety fixes below are wiped.  Jay installs the repo copy when ready.  Until then the host keeps the previous behavior.  It lists the newest L9 snapshot,
 reads its `maxTXID` as a boundary, and deletes every L1 object whose `maxTXID` is at or
 below that boundary.  This is safe by construction: a full snapshot already contains those
 transactions, so a restore is snapshot + the remaining L1/L0 chain.
@@ -367,7 +367,7 @@ Unparseable object names are warned about and skipped, never deleted.
 | Code | Meaning |
 |---|---|
 | 0 | Deleted successfully, or a legitimate no-op (small L1, nothing superseded), or a dry run |
-| 1 | Doomed objects **survived** the trim - measured by re-listing the bucket afterwards, not inferred from rclone's return codes.  Also covers an `rclone lsl` listing that raised, since that propagates uncaught and Python exits 1 on the traceback; the tell is that a listing failure produces no `APPLIED` line at all |
+| 1 | Doomed objects **survived** the trim - measured by re-listing the bucket afterwards, not inferred from rclone's return codes.  Also covers a failed `rclone lsl` listing (non-zero rclone exit, a timeout, a missing `rclone` binary, or a malformed line), before or after the deletes.  The tell is an `ABORT: ... listing failed` line and no `APPLIED` line |
 | 2 | No usable L9 snapshot |
 | 3 | The snapshot failed a safety guard (too small, shrank, or too old) |
 | 4 | Trimming would leave a restore hole |
@@ -437,7 +437,7 @@ exit 1.
 
 ### Known defects
 
-These are confirmed by reproduction, not suspected.  ST-4621 (2026-11-12) fixes items 2 and 3 in the repo copies of both tools.  The installed host copies stay on the old behavior until Jay reinstalls them.  Do not resync the repo from `/usr/local/sbin`.
+These are confirmed by reproduction, not suspected.  ST-4621 (2026-11-12) fixes items 2 and 3 in the repo copies of both tools.  The installed host copies stay on the old behavior until Jay reinstalls them.  Do not resync the repo from `<install-path>`.
 
 0. **The truncation guard is a heuristic, not an integrity check.**  It compares byte sizes -
    a 100 MB floor, and 50% of the previous snapshot.  A snapshot truncated to 3 GB from 4.5 GB

@@ -83,15 +83,41 @@ else
   cat "$CALLS" >&2 || true
 fi
 
-# Missing trim binary (unset override uses a path that is not on this machine,
-# and an explicit empty value is the same failure).
-if [ ! -x /usr/local/sbin/litestream-l1-boundary-trim ]; then
-  run_case missing_default_bin 127 "unset LITESTREAM_L1_TRIM_BIN"
+# Missing trim binary.  The unset-override case runs a copy of the script whose
+# default path points into $WORK, so the result never depends on whether the
+# host has the real binary installed (hermetic on the fleet host too).
+DEFAULT_BIN='/usr/local/sbin/litestream-l1-boundary-trim'
+grep -qF -- "-${DEFAULT_BIN}}" "$UNDER_TEST" || {
+  echo "error: default trim path not found in ${UNDER_TEST}" >&2
+  exit 1
+}
+HERMETIC="${WORK}/fleet-hermetic.sh"
+sed "s#-${DEFAULT_BIN}}#-${WORK}/no-default-trim}#" "$UNDER_TEST" > "$HERMETIC"
+REAL_UNDER_TEST="$UNDER_TEST"
+UNDER_TEST="$HERMETIC"
+run_case missing_default_bin 127 "unset LITESTREAM_L1_TRIM_BIN"
+# An explicit empty override fails closed (127), even when the default
+# exists: put a stub at the default path and prove it is not run.
+cp "$STUB" "${WORK}/no-default-trim"
+run_case missing_empty_bin 127 "export LITESTREAM_L1_TRIM_BIN="
+if [ ! -f "$CALLS" ]; then
+  PASSES=$((PASSES + 1))
+  echo "PASS empty_bin_does_not_run_default"
 else
   FAILURES=$((FAILURES + 1))
-  echo "FAIL missing_default_bin (host binary exists; selftest is not isolated)" >&2
+  echo "FAIL empty_bin_does_not_run_default" >&2
 fi
-run_case missing_empty_bin 127 "export LITESTREAM_L1_TRIM_BIN="
+# Control: with the override unset, the same hermetic copy runs the default.
+run_case default_bin_runs 0 "unset LITESTREAM_L1_TRIM_BIN"
+if [ -f "$CALLS" ] && [ "$(wc -l < "$CALLS")" -eq 3 ]; then
+  PASSES=$((PASSES + 1))
+  echo "PASS default_bin_args"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL default_bin_args" >&2
+fi
+rm -f "${WORK}/no-default-trim"
+UNDER_TEST="$REAL_UNDER_TEST"
 run_case missing_path 127 "export LITESTREAM_L1_TRIM_BIN='${WORK}/no-such-trim'"
 
 # A bad opt-in value fails before the trim binary is executed.

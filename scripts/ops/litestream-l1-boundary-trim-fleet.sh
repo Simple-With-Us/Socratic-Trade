@@ -4,7 +4,9 @@
 # Does not bounce Coolify.  Does not FORCE_RESTORE.  Does not touch L0/L9.
 set -euo pipefail
 
-TRIM="${LITESTREAM_L1_TRIM_BIN:-/usr/local/sbin/litestream-l1-boundary-trim}"
+# No colon: an explicitly empty LITESTREAM_L1_TRIM_BIN stays empty and fails
+# closed below (exit 127) instead of silently running the production binary.
+TRIM="${LITESTREAM_L1_TRIM_BIN-/usr/local/sbin/litestream-l1-boundary-trim}"
 # Snapshot freshness: scheduled units pass 6h so a late/failed nightly aborts
 # instead of trimming to yesterday's boundary.
 MAX_AGE_HOURS="${LITESTREAM_L1_TRIM_MAX_SNAPSHOT_AGE_HOURS:-6}"

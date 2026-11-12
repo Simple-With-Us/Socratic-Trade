@@ -21,7 +21,7 @@ Planning functions load without authorizing or listing.  Suffix-heal keeps only
 
 ## Decisions & Trade-offs
 
-CLI flags and defaults are unchanged.  Heal still rejects `--keep-l1` below 8, and it now does that before credentials or the network.  The pure planner still defines keep 0, keep 1, and keep above the file count so tests can pin those edges.  Boundary-trim still hides with rclone and does not pass `--b2-hard-delete`.  Defect 0 (size heuristic) and defect 1 (no lock) stay open on purpose.  There is no new CI workflow.  ST-4624 wires ops checks into CI.  The repo copy is no longer byte-identical to `/usr/local/sbin/litestream-l1-boundary-trim`.  Do not resync the repo from the host.
+CLI flags and defaults are unchanged.  Heal still rejects `--keep-l1` below 8, and it now does that before credentials or the network.  The pure planner still defines keep 0, keep 1, and keep above the file count so tests can pin those edges.  Boundary-trim still hides with rclone and does not pass `--b2-hard-delete`.  Defect 0 (size heuristic) and defect 1 (no lock) stay open on purpose.  There is no new CI workflow.  ST-4624 wires ops checks into CI.  The repo copy is no longer byte-identical to the installed `<install-path>/litestream-l1-boundary-trim`.  Do not resync the repo from the host.
 
 ## Verification State
 
@@ -32,11 +32,11 @@ bash -n scripts/ops/litestream-l1-boundary-trim-fleet.sh
 bash -n scripts/ops/litestream-l1-boundary-trim-fleet.selftest.sh
 ```
 
-The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch: 23 unittest cases and 11 selftest checks.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
+The safety command is the one documented command.  It runs the unittest discovery and the fleet-shell selftest.  Both passed on this branch: 23 unittest cases and 14 selftest checks.  `npm run lint` exited 0 (warnings only, none from this diff).  `npx tsc --noEmit` exited 0.  `npm test` passed 10245 tests, with 42 skipped.  `npm run build` exited 0.  Node on this cloud VM is 22.  `.nvmrc` is 26.  CI `verify` runs Node 26.
 
 ## Next Steps & Blockers
 
-Open a ready PR against `main`.  Do not merge and do not enable auto-merge.  Do not SSH and do not install the unit.  Jay installs the repo copies on `fleet-hetzner-nbg1` when the host behavior should change.  Until that install, production keeps the previous scripts.
+Open a ready PR against `main`.  Do not merge and do not enable auto-merge.  Do not SSH and do not install the unit.  Jay installs the repo copies on the fleet host when the host behavior should change.  Until that install, production keeps the previous scripts.
 
 ## Zero-Code Findings
 
