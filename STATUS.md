@@ -3,6 +3,11 @@
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
 
 **Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
+
+**What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  SOCRATIC-TRADE-2E on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  Do not raise the cap.
 ## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
 
 **What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
