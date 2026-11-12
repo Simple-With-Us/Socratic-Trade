@@ -24,7 +24,8 @@ the run; later chunks are not sent.
 
 Exit codes: 0 ok/no-op, 1 delete failures or a failed listing (rclone error,
 timeout, missing binary, malformed lsl line; a failed post-delete listing
-also logs an APPLIED-UNVERIFIED line with the attempted count), 2 no usable snapshot,
+also logs an APPLIED-UNVERIFIED line: attempted names were all handed
+to rclone, only issued_ok names came from clean batches), 2 no usable snapshot,
 3 snapshot failed a safety guard, 4 would leave a restore hole,
 5 kept chain has internal gaps (L2 will stay wedged -- needs a human),
 6 nothing superseded although L1 is large (boundary did not advance).
@@ -350,9 +351,11 @@ def execute(argv=None, *, rclone_fn=None, now=None, chunk=None) -> int:
     try:
         remaining = {nm for nm, _size, _when in listing(bucket, prefix, "0001", runner)}
     except Exception as exc:
-        # The deletes already ran and are not reverted, so say how many were
-        # sent: without this line an applied-but-unverified run reads as a
-        # no-op.  Still exit 1 (a failed listing), never 0.
+        # Deletes were handed to rclone and are not reverted, so report them:
+        # without this line an applied-but-unverified run reads as a no-op.
+        # attempted counts every name handed to rclone; issued_ok counts only
+        # names from batches that returned cleanly.  The difference (an
+        # errored batch) may or may not be hidden.  Still exit 1, never 0.
         log("ABORT: post-delete listing failed (%s); delete state is unverified"
             % type(exc).__name__)
         log("APPLIED-UNVERIFIED app=%s attempted=%d issued_ok=%d batch_errors=%d "
