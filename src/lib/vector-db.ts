@@ -61,6 +61,8 @@ import {
   settleEmbedProviderAttempt,
   getCachedContentEmbedding,
   isEmbedCircuitOpenError,
+  isRagEmbedProviderTimeout,
+  isRagEmbedProviderTimeoutText,
   noteEmbedProviderFailure,
   noteEmbedProviderSuccess,
   setCachedContentEmbedding
@@ -1723,6 +1725,7 @@ const RAG_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 };
 
 const RAG_RETRIEVAL_TIMEOUT_FINGERPRINT = ["rag", "retrieval-timeout"];
+const RAG_EMBED_TIMEOUT_FINGERPRINT = ["rag", "embed-timeout"];
 
 /** Caller-side 15s deadline. Warning only, and not the provider-outage fingerprint. */
 async function reportStrategyRagRetrievalTimeout(
@@ -1738,6 +1741,81 @@ async function reportStrategyRagRetrievalTimeout(
     leaseGuard,
     { fingerprint: RAG_RETRIEVAL_TIMEOUT_FINGERPRINT }
   );
+}
+
+function embedDocumentsTimeoutStreakStartedMs(
+  service: string,
+  source: ApiKeySource,
+  targetUserId: string
+): number {
+  const userClause = source === "user" ? "AND user_id = ?" : "AND user_id IS NULL";
+  const args: Array<string> = source === "user" ? [service, source, targetUserId] : [service, source];
+  const rows = dbModule.getDb().prepare(
+    `SELECT ok, error_text, ts FROM api_health_log WHERE service = ? AND key_source IS ?${userClause} ORDER BY ts DESC, rowid DESC LIMIT 32`
+  ).all(...args) as Array<{ ok: number; error_text: string | null; ts: string }>;
+  let started: string | null = null;
+  for (const row of rows) {
+    if (row.ok === 1) break;
+    if (row.error_text && isRagEmbedProviderTimeoutText(row.error_text)) {
+      started = row.ts;
+      continue;
+    }
+    break;
+  }
+  return started ? Date.parse(started) : NaN;
+}
+
+/** Ingest document-embed lane: provider slowness is a timeout, not a hard integration outage. */
+async function reportRagEmbedDocumentsTimeout(
+  error: unknown,
+  context: Record<string, string | number | boolean | null | undefined>,
+  leaseGuard: VectorStoreLeaseGuard | undefined,
+  service: "pinecone" | "voyage" | "voyage-rerank" | "rag-embed" | "rag-rerank" | "openrouter" | "openrouter-rerank" | "siliconflow" | "siliconflow-rerank",
+  source: ApiKeySource,
+  targetUserId: string
+): Promise<void> {
+  markRagSentryCaptured(error);
+  const streakStartedMs = embedDocumentsTimeoutStreakStartedMs(service, source, targetUserId);
+  const withinEscalationWindow =
+    !Number.isFinite(streakStartedMs) ||
+    Date.now() - streakStartedMs < transientEscalationWindowMs();
+  const level: "warning" | "error" = withinEscalationWindow ? "warning" : "error";
+  const baseKey = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
+  const key = `${baseKey}:embed-timeout`;
+  const cooldownMs = transientEscalationWindowMs();
+  const last = getInternalSetting<string>(key);
+  if (last && Date.now() - Date.parse(last) < cooldownMs) return;
+  setInternalSetting(
+    key,
+    Number.isFinite(streakStartedMs)
+      ? new Date(streakStartedMs).toISOString()
+      : new Date().toISOString()
+  );
+  await captureRagSentryMessage(
+    level,
+    "RAG embed timed out",
+    { ...context, failureClass: "timeout" },
+    leaseGuard,
+    { fingerprint: RAG_EMBED_TIMEOUT_FINGERPRINT }
+  );
+  if (level === "error") {
+    const title = "RAG embed timed out";
+    const body = `${context.operation}: ${context.reason ?? "embed provider timed out"}`;
+    const assertActive = leaseGuard ? () => assertVectorStoreLease(leaseGuard) : undefined;
+    assertVectorStoreLease(leaseGuard);
+    await sendNotification(
+      { type: "provider_degraded", title, payload: {
+        provider: context.provider,
+        lane: service,
+        source,
+        operation: context.operation,
+        reason: context.reason,
+        userSpecific: source === "user"
+      } },
+      { userId: targetUserId, directBody: body, assertActive, signal: leaseGuard?.signal }
+    );
+    assertVectorStoreLease(leaseGuard);
+  }
 }
 
 async function alertRagConnectionFailure(
@@ -1770,6 +1848,20 @@ async function alertRagConnectionFailure(
         userSpecific: source === "user",
         reason: message
       }, leaseGuard);
+      return;
+    }
+    const embedDocumentsProviderTimeout =
+      operation === "embed documents"
+      && (isRagEmbedProviderTimeout(rawError) || isRagEmbedProviderTimeoutText(message));
+    if (embedDocumentsProviderTimeout) {
+      await reportRagEmbedDocumentsTimeout(rawError ?? message, {
+        provider: activeProvider ?? service,
+        lane: service,
+        source,
+        operation,
+        userSpecific: source === "user",
+        reason: message
+      }, leaseGuard, service, source, targetUserId);
       return;
     }
     // Transport-blip warnings arm a short cooldown on a `:transient` key so they cannot suppress a
@@ -2247,6 +2339,9 @@ async function withRagApiHealth<T>(
     const limitStatus = ragLimitStatus(rawMessage);
     const isTransient = limitStatus === "transient";
     const retrievalTimeout = isStrategyRagRetrievalTimeout(error);
+    const embedDocumentsTimeout =
+      operation === "embed documents"
+      && (isRagEmbedProviderTimeout(error) || isRagEmbedProviderTimeoutText(rawMessage));
     assertVectorStoreLease(leaseGuard);
     logApiHealth({
       service: loggedService,
@@ -2255,7 +2350,7 @@ async function withRagApiHealth<T>(
       errorText: message,
       keySource: source,
       userId: targetUserId,
-      ...(wuExhausted || isTransient || retrievalTimeout ? { soft: true } : {})
+      ...(wuExhausted || isTransient || retrievalTimeout || embedDocumentsTimeout ? { soft: true } : {})
     });
     markRagSentryCaptured(error);
     const alert = wuExhausted
