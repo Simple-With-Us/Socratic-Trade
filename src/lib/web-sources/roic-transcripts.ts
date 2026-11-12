@@ -16,7 +16,7 @@
 
 import "server-only";
 import { z } from "zod";
-import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
+import { CircuitOpenError, isPaidQuoteBreakerCooling, quoteRetryAfterCapMs } from "../api-circuit-breaker";
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
@@ -532,6 +532,39 @@ const ROIC_HEADERLESS_RETRY_MS = 600;
 /** The transcript walk has no time budget and tries up to three identifiers. */
 const ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS = 5_000;
 
+// A long transcript Retry-After must not sleep the walk and must not open the
+// shared quote lane. This map only skips later transcript calls for that key.
+declare global {
+  // eslint-disable-next-line no-var
+  var __socraticRoicTranscriptHoldUntil: Map<string, number> | undefined;
+}
+const roicTranscriptHoldUntil: Map<string, number> =
+  globalThis.__socraticRoicTranscriptHoldUntil ??
+  (globalThis.__socraticRoicTranscriptHoldUntil = new Map<string, number>());
+
+function roicTranscriptHoldKey(opts: RoicFetchOpts): string {
+  return `${opts.keySource}\0${opts.credentialId ?? ""}\0${opts.userId ?? ""}`;
+}
+
+function roicTranscriptRateHoldCooling(opts: RoicFetchOpts, now = Date.now()): boolean {
+  const until = roicTranscriptHoldUntil.get(roicTranscriptHoldKey(opts));
+  return until != null && now < until;
+}
+
+function deferRoicTranscriptCredential(opts: RoicFetchOpts, retryAfterMs: number, now = Date.now()): void {
+  if (retryAfterMs <= 0) return;
+  const holdMs = Math.min(retryAfterMs, quoteRetryAfterCapMs());
+  const key = roicTranscriptHoldKey(opts);
+  const until = now + holdMs;
+  const existing = roicTranscriptHoldUntil.get(key) ?? 0;
+  if (until > existing) roicTranscriptHoldUntil.set(key, until);
+}
+
+/** Test-only: clear transcript Retry-After holds. */
+export function resetRoicTranscriptRateHold(): void {
+  roicTranscriptHoldUntil.clear();
+}
+
 async function roicLimitedFetch(url: string, fetchOpts: RoicFetchOpts): Promise<Response | null> {
   return withProviderLimit("roic", async () => {
     try {
@@ -550,6 +583,7 @@ async function roicGetJson<T>(
 ): Promise<T | null> {
   const credKey = `${fetchOpts.keySource}:${fetchOpts.userId ?? ""}`;
   if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource, Date.now(), fetchOpts.credentialId)) return null;
+  if (roicTranscriptRateHoldCooling(fetchOpts)) return null;
   const allowed = admitProviderRequests("roic", credKey, 1);
   if (!allowed) return null;
   const first = await roicLimitedFetch(url, fetchOpts);
@@ -568,13 +602,20 @@ async function roicGetJson<T>(
   }
   const headerWait = retryAfterDelayMs(first) ?? 0;
   await cancelResponseBody(first);
-  if (headerWait > ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS) return null;
+  if (headerWait > ROIC_TRANSCRIPT_RETRY_WAIT_CAP_MS) {
+    deferRoicTranscriptCredential(fetchOpts, headerWait);
+    return null;
+  }
   if (admitProviderRequests("roic", credKey, 1) < 1) return null;
   const waitMs = Math.max(headerWait, ROIC_HEADERLESS_RETRY_MS);
   if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   const second = await roicLimitedFetch(url, fetchOpts);
   if (!second) return null;
   if (!second.ok) {
+    if (second.status === 429) {
+      const again = retryAfterDelayMs(second) ?? 0;
+      if (again > 0) deferRoicTranscriptCredential(fetchOpts, again);
+    }
     await cancelResponseBody(second);
     return null;
   }

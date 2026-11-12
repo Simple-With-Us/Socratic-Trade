@@ -9,6 +9,7 @@ import {
   parseRoicTranscriptResponse,
   publishedAtIso,
   recentFiscalPeriods,
+  resetRoicTranscriptRateHold,
   roleOfSpeaker,
   roicRefreshDueFromState,
   roicTranscriptAccession,
@@ -16,6 +17,7 @@ import {
   speakerTurnsFromRoicPayload,
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
+import { listOpenApiCircuitBreakers, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
 import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 
@@ -23,6 +25,9 @@ describe("roic-transcripts", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     resetProviderRateLimiterState("roic");
+    resetProviderQuotaState("roic");
+    resetRoicTranscriptRateHold();
+    resetApiCircuitBreaker();
   });
 
   it("retries one ROIC list 429 with a second reserved call", async () => {
@@ -32,6 +37,7 @@ describe("roic-transcripts", () => {
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-retry-${randomUUID()}.db`)}`;
     resetProviderQuotaState("roic");
     resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
     let calls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       calls += 1;
@@ -61,17 +67,20 @@ describe("roic-transcripts", () => {
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-skip-${randomUUID()}.db`)}`;
     resetProviderQuotaState("roic");
     resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
     let calls = 0;
     vi.stubGlobal("fetch", vi.fn(async () => {
       calls += 1;
       return new Response("slow", { status: 429, headers: { "Retry-After": "120" } });
     }));
     try {
-      const started = Date.now();
       const result = await fetchRoicCallIndex("AAPL");
       expect(result.rows).toEqual([]);
-      expect(calls).toBe(3);
-      expect(Date.now() - started).toBeLessThan(500);
+      expect(calls).toBe(1);
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBe(1);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
     } finally {
       if (originalKey === undefined) delete process.env.ROIC_API_KEY;
       else process.env.ROIC_API_KEY = originalKey;
