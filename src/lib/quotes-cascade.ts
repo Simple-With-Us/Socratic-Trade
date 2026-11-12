@@ -15,6 +15,7 @@ import {
 } from "./db";
 import { getBrokerGateway } from "./broker";
 import { DEFAULT_POLICY } from "./defaults";
+import { CircuitOpenError, isPaidQuoteBreakerCooling } from "./api-circuit-breaker";
 import { AlpacaSnapshotEnrichmentProvider, apiKeyFingerprint, fetchWithRetry } from "./data-providers";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
 import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
@@ -341,6 +342,7 @@ export async function fetchTiingoQuote(
   // upstream attempt must be independently reserved and metered instead of hiding
   // an uncounted retry inside one logical call (Codex P1 review on #3449).
   const credKey = await apiKeyFingerprint(apiKey);
+  if (isPaidQuoteBreakerCooling("tiingo", keySource, Date.now(), credKey)) return undefined;
   if (admitProviderRequests("tiingo", credKey, 1) < 1) return undefined;
   const res = await fetchWithRetry(
     `https://api.tiingo.com/iex/${encodeURIComponent(ticker)}?token=${encodeURIComponent(apiKey)}`,
@@ -348,7 +350,7 @@ export async function fetchTiingoQuote(
       headers: { Authorization: `Token ${apiKey}`, Accept: "application/json" },
       signal
     },
-    { service: "tiingo", keySource, userId, retries: 0 }
+    { service: "tiingo", keySource, credentialId: credKey, userId, retries: 0 }
   );
   if (!res.ok) return undefined;
   const parsed = parseTiingoIexQuote(symbol, await res.json());
@@ -1139,6 +1141,7 @@ export async function fetchFreshQuotesCascade(
                 acceptIfComplete(symbol, q);
               }
             } catch (err) {
+              if (err instanceof CircuitOpenError) return;
               console.warn(`[quotes-cascade] Level 4 (Tiingo) fetch failed for ${symbol}:`, err);
             }
           })
@@ -1240,13 +1243,15 @@ export async function fetchFreshQuotesCascade(
     try {
       const roic = resolveApiKeyWithSource("roic", userId);
       if (roic.key) {
+        const credKey = await apiKeyFingerprint(roic.key);
+        if (!isPaidQuoteBreakerCooling("roic", roic.source, Date.now(), credKey)) {
         await Promise.all(
           pendingSymbols.map(async (symbol) => {
             try {
               const res = await fetchWithRetry(
                 `https://api.roic.ai/v2/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(roic.key!)}`,
                 { signal },
-                { service: "roic", keySource: roic.source, userId }
+                { service: "roic", keySource: roic.source, credentialId: credKey, userId }
               );
               if (res.ok) {
                 const profile = await res.json();
@@ -1258,11 +1263,13 @@ export async function fetchFreshQuotesCascade(
                 }
               }
             } catch (err) {
+              if (err instanceof CircuitOpenError) return;
               console.warn(`[quotes-cascade] Level 7 (ROIC) fetch failed for ${symbol}:`, err);
             }
           })
         );
         pendingSymbols = pendingSymbols.filter((s) => !result[s]);
+        }
       }
     } catch (error) {
       console.warn("[quotes-cascade] Level 7 (ROIC) fetch failed:", error instanceof Error ? error.message : error);

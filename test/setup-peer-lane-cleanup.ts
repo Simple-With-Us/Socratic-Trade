@@ -13,6 +13,11 @@ console.log = noop;
 console.info = noop;
 console.debug = noop;
 
-afterEach(() => {
+afterEach(async () => {
   resetPeerLaneBackoffForTests();
+  // maxWorkers is 1, so a paid-quote 429/402 hold would otherwise stay open for the
+  // next file. Import only after a test has run so setup does not open SQLite
+  // before that file sets DATABASE_URL.
+  const { resetApiCircuitBreaker } = await import("../src/lib/api-circuit-breaker");
+  resetApiCircuitBreaker();
 });
