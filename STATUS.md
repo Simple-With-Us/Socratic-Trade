@@ -3,6 +3,11 @@
 **What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
 
 **Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
 
 ## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
 
