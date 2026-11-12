@@ -3,11 +3,19 @@
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
 
 **Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled in every configuration, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
+
+## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
+
+**What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+
+**Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+
 ## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
 
 **What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
 
 **Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
+
 ## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
 
 **What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
@@ -19,6 +27,7 @@
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
 
 **Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+
 ## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
 
 **What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  SOCRATIC-TRADE-2E on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
