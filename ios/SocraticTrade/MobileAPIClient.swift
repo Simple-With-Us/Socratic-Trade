@@ -203,7 +203,7 @@ struct MobileAPIClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: req)
+            (data, response) = try await dataRetryingTransportTimeout(for: req, transport: session)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -525,7 +525,11 @@ struct MobileAPIClient {
                 return try await send(req, captureFailures: false)
             } catch let error as MobileAPIError {
                 let shouldRetry = {
-                    if case .network = error { return true }
+                    // Transport timeouts are retried inside dataRetryingTransportTimeout.
+                    // Retrying them again here would stack another full timeout budget.
+                    if case .network(let underlying) = error {
+                        return !MobileAPITransportTimeoutRetry.isTransportTimeout(underlying)
+                    }
                     if case .serverError(let statusCode, _) = error, statusCode >= 500 { return true }
                     return false
                 }()
@@ -576,7 +580,10 @@ struct MobileAPIClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await (transport ?? session).data(for: request)
+            (data, response) = try await dataRetryingTransportTimeout(
+                for: request,
+                transport: transport ?? session
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -592,6 +599,34 @@ struct MobileAPIClient {
         }
         try Self.requireSuccess(response, body: data)
         return data
+    }
+
+    /// One or two extra attempts when an idempotent read hits NSURLError -1001.
+    /// POST, PATCH, PUT, and DELETE return the first timeout.  HTTP status retries
+    /// stay in `get`.
+    private func dataRetryingTransportTimeout(
+        for request: URLRequest,
+        transport: URLSession
+    ) async throws -> (Data, URLResponse) {
+        var attemptIndex = 0
+        while true {
+            do {
+                return try await transport.data(for: request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard MobileAPITransportTimeoutRetry.shouldRetry(
+                    error: error,
+                    method: request.httpMethod,
+                    attemptIndex: attemptIndex
+                ) else {
+                    throw error
+                }
+                let delay = MobileAPITransportTimeoutRetry.backoffNanoseconds(attemptIndex: attemptIndex)
+                attemptIndex += 1
+                try await Task.sleep(nanoseconds: delay)
+            }
+        }
     }
 
     private static func requireSuccess(_ response: URLResponse, body: Data?) throws {

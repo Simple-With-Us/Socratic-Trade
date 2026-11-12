@@ -1316,7 +1316,10 @@ final class MobileStore: ObservableObject {
                 return try await client.snapshotData(timeout: timeout, captureFailures: false)
             } catch let error as MobileAPIError {
                 guard case .network(let underlying) = error else { throw error }
-                if attempt >= maxAttempts - 1 {
+                // snapshotData already retried NSURLError -1001.  Another pass here
+                // would wait out the full snapshot timeout again.
+                let transportTimeout = MobileAPITransportTimeoutRetry.isTransportTimeout(underlying)
+                if transportTimeout || attempt >= maxAttempts - 1 {
                     // Only the terminal failure is reported: per-attempt capture in
                     // snapshotData is suppressed above, so a retry that recovers
                     // never mints a Sentry issue for the transient.
