@@ -3,6 +3,12 @@
 **What.**  Offline tests and backup-tier guards for the L1 suffix-heal and boundary-trim scripts.  Planning is importable, a TXID gap drops the pre-gap L1 even when the count is under the keep window, listings use every B2 version, a delete error stops the run, and the fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The systemd unit opts in so a later install still applies.  Nothing was run against production B2, R2, or the Hetzner host.  Rollout: `docs/rollouts/2026-11-12-st-4621-litestream-l1-safety-tests.md`.
 
 **Next.**  Ready PR against `main`.  Do not merge, do not enable auto-merge, and do not install on the host from this lane.  `verify` is the merge gate.  Jay installs the repo copies when he wants the host behavior to change.
+## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
+
+**What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
+
+**Next.**  PR open against `main`.  Do not merge and do not dispatch a deploy.
+
 ## 2026-11-12 CURSOR — ST-4617 flaky verify tests
 
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
