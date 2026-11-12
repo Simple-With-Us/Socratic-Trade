@@ -1226,35 +1226,73 @@ describe("money-path order invariant properties", () => {
     expect(priced.input.dollarAmount).toBeUndefined();
   });
 
-  it("side normalization keeps the dollars on a cost-basis short, so the placement guard still sees them", () => {
+  it("side normalization keeps a cost-basis dollar exit an exit with its own dollars, and the placement guard refuses it as retryable", () => {
+    const held = heldPositionFor(unpricedShort, "MSFT");
+    const refusal = (order: EquityOrderInput): unknown => {
+      try {
+        applyPositionInvariant(order, held, { resolvePartialDollarExits: true });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+    // Kody PRRT_kwDOS7mOVM62m-Jm: a dollar BUY against the short becomes a dollar COVER (not an
+    // opening buy that sizing would re-size), keeps its $100, and drops its bracket legs.
+    const buy = exitProposal({ bracketStopLoss: 140, bracketTakeProfit: 80 });
+    const normalizedBuy = normalizeExitSideForHeldPosition(buy, unpricedShort).proposal;
+    expect(normalizedBuy).toMatchObject({ side: "cover", dollarAmount: 100 });
+    expect(normalizedBuy.quantity).toBeUndefined();
+    expect(normalizedBuy.bracketStopLoss).toBeUndefined();
+    expect(normalizedBuy.bracketTakeProfit).toBeUndefined();
+    const coverError = refusal({ ...normalizedBuy, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput);
+    expect(isRetryablePositionInvariantError(coverError)).toBe(true);
+    // Once quotes recover, the same dollar cover can only cover, never flip the account long.
+    const recovered = applyPositionInvariant({ ...normalizedBuy, dollarAmount: 5000, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput, heldPositionFor(pricedShort, "MSFT"), {
+      resolvePartialDollarExits: true
+    }).input;
+    expect(recovered).toMatchObject({ side: "cover", quantity: 10 });
+    // Kody PRRT_kwDOS7mOVM62m-SW: a long-only dollar SELL of the unpriced short stays a dollar sell,
+    // and the choke point refuses it as retryable position_unverified, not terminal sell_against_short.
+    const sell = exitProposal({ side: "sell" });
+    const normalizedSell = normalizeExitSideForHeldPosition(sell, unpricedShort, { convertSellToCover: true });
+    expect(normalizedSell.proposal).toBe(sell);
+    const sellError = refusal({ ...sell, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput);
+    expect(sellError).toBeInstanceOf(OrderPositionInvariantError);
+    expect((sellError as OrderPositionInvariantError).code).toBe("position_unverified");
+    // A priced short still gets the terminal verb error for a sell, and priced dollars still
+    // resolve to whole shares in normalization (the old path).
+    expect(() => applyPositionInvariant({ ...sell, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput, heldPositionFor(pricedShort, "MSFT"))).toThrow(
+      expect.objectContaining({ code: "sell_against_short" })
+    );
     for (const [patch, options] of [
       [{ side: "buy" as const }, {}],
       [{ side: "sell" as const }, { convertSellToCover: true }]
     ] as const) {
-      const proposal = exitProposal(patch);
-      const unpriced = normalizeExitSideForHeldPosition(proposal, unpricedShort, options);
-      expect(unpriced.proposal, patch.side).toBe(proposal);
-      expect(unpriced.change, patch.side).toBeUndefined();
-      // Control: priced, the dollars resolve to whole shares of the short (the old path).
-      const priced = normalizeExitSideForHeldPosition(proposal, pricedShort, options);
-      expect(priced.proposal, patch.side).toMatchObject({ side: "cover", quantity: 1 });
+      expect(normalizeExitSideForHeldPosition(exitProposal(patch), pricedShort, options).proposal, patch.side).toMatchObject({ side: "cover", quantity: 1 });
     }
-    // The untouched dollar buy then hits the placement guard as retryable.
-    const untouched = normalizeExitSideForHeldPosition(exitProposal({}), unpricedShort).proposal;
-    let thrown: unknown;
-    try {
-      applyPositionInvariant({ ...untouched, accountNumber: TRADIER_ACCOUNT } as EquityOrderInput, heldPositionFor(unpricedShort, "MSFT"), {
-        resolvePartialDollarExits: true
-      });
-    } catch (error) {
-      thrown = error;
-    }
-    expect(isRetryablePositionInvariantError(thrown)).toBe(true);
     // Quantity proposals do not read the value and still normalize.
     expect(normalizeExitSideForHeldPosition(exitProposal({ dollarAmount: undefined, quantity: 4 }), unpricedShort).proposal).toMatchObject({
       side: "cover",
       quantity: 4
     });
+  });
+
+  // Kody PRRT_kwDOS7mOVM62m-NZ: a non-positive dollar buy is invalid input, not a retryable position error.
+  it("a zero or negative dollar buy against an unpriced short is not a retryable position refusal", () => {
+    for (const dollarAmount of [0, -5]) {
+      const order: EquityOrderInput = {
+        accountNumber: TRADIER_ACCOUNT,
+        symbol: "MSFT",
+        side: "buy",
+        type: "market",
+        dollarAmount,
+        timeInForce: "gfd",
+        marketHours: "regular_hours"
+      };
+      const result = applyPositionInvariant(order, heldPositionFor(unpricedShort, "MSFT"), { resolvePartialDollarExits: true });
+      expect(result.input, String(dollarAmount)).toMatchObject({ side: "buy", dollarAmount });
+      expect(result.receipts).toHaveLength(0);
+    }
   });
 
   it("Tradier dollar buy-to-cover on a short sends nothing when the quote batch fails", async () => {

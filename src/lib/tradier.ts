@@ -102,14 +102,14 @@ function tradierProbeTtlMs(streak: number): number {
  * The row is not a required-field object.  A page of other orders often has no `tag`,
  * and rejecting that page would hide our own row and allow another POST.
  */
+const TradierOrderRowSchema = z.record(z.string(), z.unknown());
+
 /**
  * A quote price that may value a held position: a finite, strictly positive number. Anything else
  * (missing, NaN, Infinity, zero, negative, a string) leaves the position unpriced, so the order
  * invariant treats its value as cost basis and refuses to size a dollar exit from it (ST-4616).
  */
 const TradierPositionQuotePriceSchema = z.number().finite().positive();
-
-const TradierOrderRowSchema = z.record(z.string(), z.unknown());
 
 /**
  * Listing `order` is an array, one object, the string "null", or null.

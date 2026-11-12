@@ -271,7 +271,7 @@ export function applyPositionInvariant(
     // A buy only changes shape when it provably closes (part of) a held short.
     if (!(heldShort > 0)) return { input, receipts };
     let quantity = input.quantity;
-    if (quantity == null && input.dollarAmount != null && position.marketValuePriced === false) {
+    if (quantity == null && input.dollarAmount != null && input.dollarAmount > 0 && position.marketValuePriced === false) {
       // The short's value is a cost-basis fallback (quote failure), not a market price. Sizing a
       // cover from it can buy several times the intended dollars, and whether the buy exceeds
       // the short cannot be told either, so it is refused as retryable (ST-4616).
@@ -314,6 +314,17 @@ export function applyPositionInvariant(
     closingSide = "cover";
     closable = heldShort;
   } else if (side === "sell") {
+    if (heldShort > 0 && input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0 && position.marketValuePriced === false) {
+      // A dollar sell of an unpriced short is the long-only exit that normalization could not
+      // size (no live quote). Refuse it as retryable so it is re-proposed once quotes recover,
+      // before the terminal sell_against_short below (ST-4616).
+      throw new OrderPositionInvariantError(
+        `${symbol} SELL not placed: the account is short ${formatQty(heldShort)} ${symbol} and no live quote priced it ` +
+          `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} exit cannot be sized as a cover safely.  ` +
+          "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
+        "position_unverified"
+      );
+    }
     if (heldShort > 0) {
       throw new OrderPositionInvariantError(
         `${symbol} SELL refused: the account is SHORT ${formatQty(heldShort)} ${symbol}, and a sell would ADD to the short, not close it.  ` +
@@ -560,7 +571,8 @@ export interface ExitSideNormalization {
  *   - a BUY of at most the held short -> cover (same wire direction; strips its bracket legs).  A
  *     DOLLAR buy resolves against the short's own per-share value (a partial cover of that many
  *     whole shares); a dollar buy larger than the short is left alone.  No dollar proposal is
- *     resolved when the short's value is cost basis (marketValuePriced false); it stays as-is.
+ *     resolved when the short's value is cost basis (marketValuePriced false): a dollar buy
+ *     becomes a dollar cover, a dollar sell stays as-is, and the choke point refuses either.
  *   - a SELL of a symbol held SHORT -> cover, ONLY with `convertSellToCover: true`, which the
  *     autopilot passes only on a LONG-ONLY venue (there a short can only be unintended and a
  *     "sell" can only mean "exit").  On a shorting-enabled venue a sell of a short is ambiguous
@@ -586,9 +598,24 @@ export function normalizeExitSideForHeldPosition(
   const byQuantity = proposal.quantity != null && proposal.quantity > 0;
   const byDollars = !byQuantity && proposal.dollarAmount != null && proposal.dollarAmount > 0;
   // A cost-basis value (quote failure) must not turn dollars into shares here: that would drop
-  // `dollarAmount` before the placement guard can see it. Leave the proposal unchanged; the
-  // choke point refuses it (a dollar buy against the short as retryable position_unverified).
-  if (byDollars && held.marketValuePriced === false) return { proposal };
+  // `dollarAmount` before the placement guard can see it. Keep the dollars, and keep the exit an
+  // exit: a dollar BUY against the short becomes a dollar COVER (legs stripped), so opening sizing
+  // cannot replace its notional or flip the account long, and the choke point's cover guard
+  // refuses it as retryable position_unverified while the value stays unpriced. A dollar SELL is
+  // already an exit; the choke point refuses it the same way.
+  if (byDollars && held.marketValuePriced === false) {
+    if (proposal.side !== "buy") return { proposal };
+    const { next } = stripLegs(proposal);
+    return {
+      proposal: {
+        ...next,
+        side: "cover",
+        rationale:
+          `${proposal.rationale} [Side normalized: ${symbol} is held SHORT ${formatQty(heldShort)} with no live quote; ` +
+          `the $${(proposal.dollarAmount as number).toFixed(2)} buy is a cover, sized at placement.]`
+      }
+    };
+  }
 
   let quantity: number;
   if (proposal.side === "sell") {
