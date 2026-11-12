@@ -29,7 +29,7 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 
 - The hold reuses the existing in-memory lane map, keyed by service and key source, so one user's 402 does not close the env lane.
 - A paid-quote 429 or 402 is stored on the credential fingerprint when the caller has one.  The public list still shows `env` or `user`, not the fingerprint.  `API_CIRCUIT_BREAKER_DISABLED=1` also restores the in-call 429 retry for these four providers.  Twelve Data's HTTP 200 credit message opens the six-hour 402 hold.  `GET /api/health` sets `checks.quoteProviderBreakersError` to `unavailable` when the list cannot be read, and that field does not change `ok`.
-- A header-less 429 does not open a hold.  The in-call retry spends the remaining budget, and the next symbol is blocked only when a positive Retry-After or an HTTP 402 opened the lane.  The quote path and the history path both cap that Retry-After at one hour.  A Twelve Data credit or quota body opens the six-hour hold and is a soft health row.  A rate-limit phrase opens a one-minute hold instead.
+- A header-less 429 does not open a hold.  The in-call retry spends the remaining budget, and the next symbol is blocked only when a positive Retry-After or an HTTP 402 opened the lane.  The quote path and the history path both cap that Retry-After at one hour.  A Twelve Data credit or quota body opens the six-hour hold and is a soft health row.  A rate-limit phrase stays a soft signal and does not open a 429 hold.
 - A 402 still performs one network call, then later calls skip until the hold elapses.
 - History paid providers stay on `politeFetch` (not the residential proxy) and share the same hold.  Yahoo chart retries in `history.ts` only cancel the body.  `src/lib/yahoo-finance.ts` is not edited.  `src/lib/proxy-fetch.ts` is not edited (ST-3999).
 - Holds are process-local.  A restart clears them, and the next 429 or 402 opens them again.
@@ -38,11 +38,11 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 - A later response cannot shorten a hold that is already open.  A longer Retry-After or a 402 still extends it.  The old per-credential strike map is gone, because the hold length comes from Retry-After and nothing read the count.
 - The cooling check looks at the credential fingerprint first, then the plain key-source lane, matching the skip check.  A consecutive-failure hold on the plain lane therefore skips before `admitProviderRequests`.
 - `API_CIRCUIT_BREAKER_DISABLED=1` still disables trips and skips.  A paid-provider 402 stays a soft health row while the switch is on.
-- A Twelve Data message that names the current minute opens the one-minute 429 hold.  A day or unscoped credit message still opens the six-hour 402 hold.
+- A Twelve Data minute or rate-limit body does not open a 429 hold.  A day or unscoped credit message still opens the six-hour 402 hold.
 - Suppressing 429 on a paid-quote caller still skips that lane's hold.  The same suppression on a non-quote provider only drops the health row.  The older rate-limit hold still opens when Retry-After is present.
 - The in-call Retry-After wait, in `fetchWithRetry` and paid history, uses the same one-hour cap as the hold.
 - A ROIC history page with one non-object row keeps the other bars.  `next_page_url` of an unexpected type stops pagination instead of throwing away the bars already collected.
-- ROIC profile enrichment and transcript fetches pass `retries: 0` because they reserve one provider request.  Ratios already did.
+- ROIC profile enrichment passes `retries: 0` because it reserves one provider request.  A transcript fetch reserves one call, then one more call when that response is HTTP 429, and waits for Retry-After before the second call.  Ratios already used `retries: 0`.
 - `src/lib/web-sources/roic-transcripts.ts` and `src/lib/web-sources/roic-financials.ts` import `server-only`.
 - Paid history retries one 5xx, one network error, and one 429.  A 402 is not retried.  The lane stays per credential, because a 402 on these keys is account credit rather than one endpoint.  Plan-gated ROIC transcripts, financials, and ratios do not open the quote lane on 402 or 429.
 - No trading account, policy, or order-path change.

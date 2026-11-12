@@ -679,8 +679,8 @@ type PaidHistoryService = "twelvedata" | "tiingo" | "marketstack" | "roic";
 const PAID_HISTORY_TRANSIENT_RETRY_MS = 600;
 const looseJsonRow = z.record(z.string(), z.unknown());
 const RoicStockPricesSchema = z.object({
-  // One bad row must not fail the page. parseRoicStockPrices skips non-objects.
-  data: z.array(z.unknown()).optional().catch([]),
+  // A bad row is skipped by parseRoicStockPrices. A non-array page fails the schema.
+  data: z.array(z.unknown()).optional(),
   next_page_url: z.string().nullable().optional().catch(null)
 }).passthrough();
 const TiingoPricesSchema = z.array(looseJsonRow);
@@ -1042,8 +1042,8 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
     if (parsed.status === "error" || !Array.isArray(parsed.values)) {
       const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
       const hold = twelveDataBodyHold(message);
-      if (hold) {
-        observePaidQuoteStatus("twelvedata", lane, hold.status, hold.retryAfterMs, Date.now(), credKey);
+      if (hold?.status === 402) {
+        observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
       }
       recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
       return null;

@@ -16,7 +16,7 @@
 
 import "server-only";
 import { z } from "zod";
-import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
+import { CircuitOpenError, isPaidQuoteBreakerCooling, quoteRetryAfterCapMs } from "../api-circuit-breaker";
 import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
@@ -44,8 +44,10 @@ import {
 import { hasIngestedAccession, insertIngestedAccession } from "../db-learning";
 import { getInternalSetting, setInternalSetting } from "../db-settings";
 import { normalizeSymbol } from "../money";
+import { retryAfterDelayMs } from "../network-errors";
 import { admitProviderRequests, withProviderLimit } from "../provider-rate-limit";
 import { lookupRegisteredPlanTier, roicTranscriptQuartersForPlan } from "../provider-tier-plan";
+import { cancelResponseBody } from "../response-body";
 import {
   ROIC_TRANSCRIPT_DOC_TYPE,
   ROIC_TRANSCRIPT_SOURCE,
@@ -528,7 +530,17 @@ async function roicGetJson<T>(
   if (!allowed) return null;
   return withProviderLimit("roic", async () => {
     try {
-      const res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
+      let res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
+      // The first call spent the reserved request. A 429 gets one more reserved
+      // attempt, after Retry-After, and still does not hide a third call inside
+      // fetchWithRetry. Plan-gated 429s stay off the quote lane.
+      if (res?.status === 429 && admitProviderRequests("roic", credKey, 1) >= 1) {
+        const retryAfter = retryAfterDelayMs(res) ?? 0;
+        await cancelResponseBody(res);
+        const waitMs = Math.min(Math.max(0, retryAfter), quoteRetryAfterCapMs());
+        if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+        res = await fetchWithRetry(url, {}, { ...fetchOpts, retries: 0 });
+      }
       if (!res || !res.ok) return null;
       const parsed = schema.safeParse(await res.json());
       return parsed.success ? parsed.data : null;

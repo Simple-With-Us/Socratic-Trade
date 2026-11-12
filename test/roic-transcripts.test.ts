@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { shouldDeferBackgroundRagForStrategy, shouldSkipWholeIndexInventory } from "../src/lib/db-execution";
 import {
+  fetchRoicCallIndex,
   parseRoicEarningsCallList,
   parseRoicTranscriptResponse,
   publishedAtIso,
@@ -13,8 +17,39 @@ import {
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
+import { resetProviderQuotaState } from "../src/lib/provider-rate-limit";
 
 describe("roic-transcripts", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retries one ROIC list 429 with a second reserved call", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-retry-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response("slow", { status: 429, headers: { "Retry-After": "0" } });
+      return new Response(JSON.stringify({
+        data: [{ symbol: "AAPL", fiscal_year: 2024, fiscal_quarter: 1, date: "2024-02-01" }]
+      }), { status: 200 });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toHaveLength(1);
+      expect(calls).toBe(2);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
   it("parses valid transcript JSON response with content string", () => {
     const raw = {
       symbol: "AAPL",

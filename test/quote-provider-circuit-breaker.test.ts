@@ -271,12 +271,13 @@ describe("paid quote provider circuit breaker", () => {
     const now = 1_700_000_000_000;
     const minuteHold = twelveDataBodyHold(minute);
     expect(minuteHold).toEqual({ status: 429, retryAfterMs: 60_000 });
-    expect(observePaidQuoteStatus("twelvedata", "env", minuteHold!.status, minuteHold!.retryAfterMs, now, "finger-minute")).toBe(60_000);
+    // A body-only 429 is not an HTTP Retry-After. Callers open the lane for a 402 only.
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now, "finger-minute")).toBe(0);
     const dayHold = twelveDataBodyHold(day);
     expect(dayHold).toEqual({ status: 402 });
     expect(observePaidQuoteStatus("twelvedata", "user", dayHold!.status, dayHold!.retryAfterMs, now, "finger-day")).toBeGreaterThan(5 * 60 * 60 * 1000);
     const open = listOpenApiCircuitBreakers(now + 1);
-    expect(open.find((row) => row.status === 429)?.openForMs).toBe(59_999);
+    expect(open.find((row) => row.status === 429)).toBeUndefined();
     expect(open.find((row) => row.status === 402)?.openForMs).toBeGreaterThan(5 * 60 * 60 * 1000);
   });
 
@@ -357,6 +358,36 @@ describe("paid quote provider circuit breaker", () => {
     expect(res.status).toBe(429);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("waits out a paid-quote Retry-After before the second attempt", async () => {
+    const { apiCircuitBreakerShouldSkip, fetchWithRetry, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    delete process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS;
+    const fetchMock = vi.fn(async () => new Response("slow", {
+      status: 429,
+      headers: { "Retry-After": "2" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    try {
+      const pending = fetchWithRetry("https://example.test/tiingo-wait-control", { cache: "no-store" }, {
+        service: "tiingo",
+        keySource: "env",
+        retries: 1,
+        backoffMs: 1
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const res = await pending;
+      expect(res.status).toBe(429);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(apiCircuitBreakerShouldSkip("tiingo", "env").skip).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("caps a paid-quote Retry-After at one hour", async () => {

@@ -12,6 +12,15 @@ import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provi
 import { apiKeyFingerprint } from "../src/lib/data-providers";
 
 const historyTestDb = `file:${join(tmpdir(), `agentic-history-cache-test-${randomUUID()}.db`)}`;
+const originalRoicApiKey = process.env.ROIC_API_KEY;
+const originalRoicHistoryEnabled = process.env.ROIC_HISTORY_ENABLED;
+
+function restoreRoicHistoryEnv(): void {
+  if (originalRoicApiKey === undefined) delete process.env.ROIC_API_KEY;
+  else process.env.ROIC_API_KEY = originalRoicApiKey;
+  if (originalRoicHistoryEnabled === undefined) delete process.env.ROIC_HISTORY_ENABLED;
+  else process.env.ROIC_HISTORY_ENABLED = originalRoicHistoryEnabled;
+}
 
 beforeEach(() => {
   process.env.DATABASE_URL = historyTestDb;
@@ -51,7 +60,10 @@ beforeEach(() => {
   // deleted env vars above, which reset per-test on their own).
   getDb().exec("DELETE FROM connected_accounts WHERE broker IN ('tradier', 'alpaca', 'alpaca-mcp')");
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  restoreRoicHistoryEnv();
+});
 
 // Tradier's price-history credential comes from the "local" (owner's) connected broker account, not
 // a stored API key — see resolveTradierHistoryCredential in src/lib/history.ts. Connects a fresh
@@ -279,6 +291,20 @@ describe("fetchDailyOHLC", () => {
     expect(bars).toHaveLength(2);
     expect(bars![0]).toMatchObject({ time: "2026-06-16", close: 40.5 });
     expect(bars![1]).toMatchObject({ time: "2026-06-17", close: 41.2 });
+  });
+
+  it("rejects a ROIC page when data is not an array", async () => {
+    process.env.ROIC_API_KEY = "roic-test-key";
+    process.env.ROIC_HISTORY_ENABLED = "on";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("api.roic.ai/v3.0.0/stock-prices/")) {
+        return new Response(JSON.stringify({ data: { date: "2026-06-16", close: 40.5 } }), { status: 200 });
+      }
+      return new Response("unexpected source", { status: 500 });
+    }));
+
+    const bars = await fetchDailyOHLC("AAPL");
+    expect(bars).toBeNull();
   });
 
   it("uses Tiingo ahead of Marketstack, applying adjClose-scaled O/H/L", async () => {

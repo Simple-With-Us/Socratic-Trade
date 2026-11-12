@@ -5820,7 +5820,7 @@ export function isTwelveDataCreditExhausted(message: string): boolean {
   return /\b(quota|credits?)\b/i.test(message);
 }
 
-/** A per-minute rate limit. This opens a one-minute hold, not the six-hour park. */
+/** A per-minute limit or a rate-limit phrase. The body does not open a 429 hold. */
 export function isTwelveDataRateLimitSignal(message: string): boolean {
   if (TWELVE_DATA_MINUTE_WINDOW.test(message) && /\b(quota|credits?|limits?|requests?)\b/i.test(message)) {
     return true;
@@ -5828,7 +5828,7 @@ export function isTwelveDataRateLimitSignal(message: string): boolean {
   return /\b(rate limit|too many requests|api limit)\b/i.test(message);
 }
 
-/** Map a Twelve Data error body onto the 402 or 429 hold. Null when the text is neither. */
+/** Map a Twelve Data error body. Only a 402 credit hold may open the lane. A 429 here is a signal, not a header. */
 export function twelveDataBodyHold(message: string): { status: 402 | 429; retryAfterMs?: number } | null {
   if (isTwelveDataCreditExhausted(message)) return { status: 402 };
   if (isTwelveDataRateLimitSignal(message)) return { status: 429, retryAfterMs: 60_000 };
@@ -5940,8 +5940,8 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
         if (rawObj.status === "error" || (rawObj.message && !rawObj.symbol && !rawObj.data)) {
           const msg = typeof rawObj.message === "string" ? rawObj.message : "TwelveData API error";
           const hold = twelveDataBodyHold(msg);
-          if (hold) {
-            observePaidQuoteStatus(this.name, this.keySource, hold.status, hold.retryAfterMs, Date.now(), credKey);
+          if (hold?.status === 402) {
+            observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
           }
           logApiHealth({
             service: this.name,
@@ -5994,15 +5994,8 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             const code = Number(q.code);
             const embedded = typeof q.message === "string" ? q.message : "";
             const hold = twelveDataBodyHold(embedded);
-            if (code === 429 || hold) {
-              observePaidQuoteStatus(
-                this.name,
-                this.keySource,
-                hold?.status ?? 429,
-                hold?.status === 402 ? undefined : 60_000,
-                Date.now(),
-                credKey
-              );
+            if (hold?.status === 402) {
+              observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
             }
             if (code === 429 || code >= 500) {
               result[symbol] = {}; // transient — retry next scan, no cache write
