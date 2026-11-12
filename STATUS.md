@@ -3,6 +3,11 @@
 **What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
 
 **Next.**  PR open; `verify` green required.  Jay may add the job to branch protection later.  Do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
+
+**What.**  Keyless and global provider timeouts were paging as hard connection failures.  Nasdaq delayed screener, congress-nasdaq-screener, finnhub, and alpaca-broker (Sentry SOCRATIC-TRADE-3K, 3M, 3R, and 3D) logged a named timeout that matched neither the expected-limit shapes nor the ST-3079 transport-blip shapes.  `db-health` now records AbortError, TimeoutError, undici header and body timeouts, "timed out waiting for", and broker-call timeouts as transient-network.  They warn, use the short transient cooldown, and escalate to error once the streak passes `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare "This operation was aborted" stays an expected limit.  Quote, scan, screener, order, and strategy fetch behavior is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4608-provider-health-timeout-class.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  The budget-cancel test reads the `env` lane it writes, after one success, so five hard rows would show the lane stopped.
 ## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
 
 **What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
