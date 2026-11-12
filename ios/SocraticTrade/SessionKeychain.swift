@@ -430,7 +430,7 @@ final class IsolatedInMemoryHTTPCookieStorage: HTTPCookieStorage, @unchecked Sen
         }
     }
 
-    override func getCookies(for task: URLSessionTask, completionHandler: @escaping ([HTTPCookie]?) -> Void) {
+    override func getCookiesFor(_ task: URLSessionTask, completionHandler: @escaping ([HTTPCookie]?) -> Void) {
         // Never fall back to the whole jar: with no URL to match, return nothing
         // rather than cookies for unrelated hosts.
         let url = task.currentRequest?.url ?? task.originalRequest?.url ?? task.response?.url
