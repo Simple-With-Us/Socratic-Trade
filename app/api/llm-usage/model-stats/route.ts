@@ -4,7 +4,7 @@ import { getLlmUsageSummary } from "@/lib/llm-usage";
 import { CATALOG_DISPLAY_SLUGS } from "@/lib/llm-model-catalog";
 import { aggregateModelStats, normalizeBenchmarkSummaries, type ClosedLotLike } from "@/lib/model-stats";
 import { calculatePnl, getRedTeamEfficacy, RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT } from "@/lib/performance";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 // Static benchmark reference (2026-07-08 model benchmark run): bundled at build time so the
 // endpoint has cost/latency numbers for every catalog model even with zero live traffic.
 import benchmarkJson from "../../../../docs/benchmarks/2026-07-08-llm-model-benchmark.json";
@@ -47,7 +47,8 @@ export const dynamic = "force-dynamic";
 // `stats` array already carries `role: "strategist"` rows via aggregateModelStats, so the drawer
 // filters on that role rather than this route needing a separate response field.
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const sinceDaysParam = url.searchParams.get("sinceDays");
   // Default to 0 (all time / lifetime) unless a specific bounded window is requested.

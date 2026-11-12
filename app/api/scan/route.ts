@@ -6,7 +6,7 @@ import { newestPersistedMarketScan } from "@/lib/market-scan-freshness";
 import { allowedSymbolsForPolicy } from "@/lib/policy";
 import { getBrokerGateway } from "@/lib/broker";
 import { fetchRecentGroupedBarsRest } from "@/lib/market-signals/massive";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import type { EquityPosition, MarketScan } from "@/lib/types";
 import {
@@ -32,26 +32,15 @@ function lastGoodScanResponse(userId: string, connectedAccountId: string | undef
   );
 }
 
-/** Identity failures must not fall through to user `local`'s last-good scan. */
-function identityErrorResponse(error: unknown): NextResponse {
-  const message = error instanceof Error ? error.message : "unauthorized";
-  const status = (error as { status?: unknown } | null)?.status;
-  const httpStatus = status === 401 || status === 403 || status === 409 ? status : 401;
-  return NextResponse.json({ error: message }, { status: httpStatus });
-}
-
 // Fresh, standalone market scan for the Market Scan tab. It returns current screener,
 // broker, and persisted web-signal data instead of waiting for the next strategy run.
 // Slow fundamentals are reused from that run while prices refresh; deep provider work
 // stays on the scheduled strategy and on-demand ticker paths. Cheap on repeat calls:
 // scanMarket caches the screener (~5 min). Read-only; places nothing.
 export async function GET(request: Request) {
-  let userId: string;
-  try {
-    userId = resolveRequestUserId(request);
-  } catch (error) {
-    return identityErrorResponse(error);
-  }
+  const userIdOrDenied = resolveRequestUserIdOrResponse(request);
+  if (userIdOrDenied instanceof Response) return userIdOrDenied;
+  const userId = userIdOrDenied;
   let connectedAccountId: string | undefined;
   try {
     // Per-user rate limit: read-only, but each scan fans out to several data providers, so a

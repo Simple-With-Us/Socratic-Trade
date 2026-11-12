@@ -6,7 +6,7 @@
 
 import crypto from "crypto";
 import { NextResponse } from "next/server";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   audit,
   dailyExecutionStats,
@@ -40,7 +40,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as { draft?: ChatDraft; dryRun?: boolean; userId?: unknown };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "proposals/from-draft", RATE_LIMITS.orders);
   if (limited) return limited;
 

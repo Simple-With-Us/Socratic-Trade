@@ -6,7 +6,7 @@ import {
 import { fetchGroupedBarsRest } from "@/lib/market-signals/massive";
 import { fetchGroupedDailyBars } from "@/lib/market-signals/massive-s3";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
-import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserId } from "@/lib/request-user";
+import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -39,15 +39,8 @@ export async function GET(req: Request) {
   if (!hasFlatfileSession(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  let userId: string;
-  try {
-    userId = resolveRequestUserId(req);
-  } catch (error) {
-    const status = (error as { status?: unknown } | null)?.status;
-    const httpStatus = status === 401 || status === 403 || status === 409 ? status : 401;
-    const message = error instanceof Error ? error.message : "unauthorized";
-    return NextResponse.json({ ok: false, error: message }, { status: httpStatus });
-  }
+  const userId = resolveRequestUserIdOrResponse(req);
+  if (userId instanceof Response) return userId;
 
   const { searchParams } = new URL(req.url);
   const date = searchParams.get("date");
