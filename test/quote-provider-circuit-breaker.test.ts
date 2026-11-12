@@ -4,6 +4,20 @@ import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const originalEncryptionKey = process.env.ENCRYPTION_KEY;
+const originalBreakerEnv = {
+  API_CIRCUIT_BREAKER_DISABLED: process.env.API_CIRCUIT_BREAKER_DISABLED,
+  QUOTE_PROVIDER_402_HOLD_MS: process.env.QUOTE_PROVIDER_402_HOLD_MS,
+  QUOTE_PROVIDER_429_BASE_MS: process.env.QUOTE_PROVIDER_429_BASE_MS,
+  QUOTE_PROVIDER_429_CAP_MS: process.env.QUOTE_PROVIDER_429_CAP_MS,
+  QUOTE_PROVIDER_RETRY_AFTER_CAP_MS: process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS
+};
+
+function restoreBreakerEnv(): void {
+  for (const [key, value] of Object.entries(originalBreakerEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-quote-breaker-${randomUUID()}.db`)}`;
@@ -24,11 +38,7 @@ describe("paid quote provider circuit breaker", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
-    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
-    delete process.env.QUOTE_PROVIDER_402_HOLD_MS;
-    delete process.env.QUOTE_PROVIDER_429_BASE_MS;
-    delete process.env.QUOTE_PROVIDER_429_CAP_MS;
-    delete process.env.QUOTE_PROVIDER_RETRY_AFTER_CAP_MS;
+    restoreBreakerEnv();
     if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = originalEncryptionKey;
   });

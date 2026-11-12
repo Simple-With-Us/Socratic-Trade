@@ -57,6 +57,7 @@ NODE_OPTIONS=--max-old-space-size=4096 npm run build
 ```
 
 - GB-Fixer (2026-11-12): merged `origin/main`; resolved `app/api/health/route.ts` import conflict (`listOpenApiCircuitBreakers` + `TRADING_LIVENESS_FLEET_DARK_ACCOUNT_KEY`).  Re-ran `npm run lint`, `npx tsc --noEmit`, and `npx vitest run test/quote-provider-circuit-breaker.test.ts test/history.test.ts` — all exited 0 (48 tests).
+- The quote-breaker suite captures `API_CIRCUIT_BREAKER_DISABLED` and the quote hold env vars before the file runs, then restores those values in `afterEach`.
 - Follow-up review (2026-11-12): `npx tsc --noEmit` and `npm run lint` exited 0.  `npx vitest run test/quote-provider-circuit-breaker.test.ts test/history.test.ts test/roic-transcripts.test.ts test/roic-financials.test.ts test/roic-archive-resume.test.ts test/pinecone-write-class.test.ts` exited 0.  `NODE_OPTIONS=--max-old-space-size=4096 npm run build` exited 0.
 - `npx tsc --noEmit` exited 0.
 - `npx eslint . --quiet` exited 0.
