@@ -82,3 +82,40 @@ enum MobileAPIHTTPRetryPolicy {
         transientGatewayStatusCodes.contains(statusCode)
     }
 }
+
+/// Per-outage dedup for a manual Sentry report on a path that reconnects on its own (the SSE
+/// stream).  The first 502/503/504 of an outage is reported; later failures are not, until a
+/// successful connect calls `reset()`.  Lock-guarded (same pattern as NYSEMarketSession's
+/// holiday cache) because reconnects can run on any task.
+final class OutageReportLatch: @unchecked Sendable {
+    /// Shared by every MobileAPIClient copy so `MobileStore`'s reconnect loop sees one outage.
+    static let events = OutageReportLatch()
+
+    private let lock = NSLock()
+    private var latched = false
+    private var granted = 0
+
+    /// True for the first failure of an outage; false until `reset()` after that.
+    func shouldReport() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !latched else { return false }
+        latched = true
+        granted += 1
+        return true
+    }
+
+    /// A successful connect ends the outage.
+    func reset() {
+        lock.lock()
+        latched = false
+        lock.unlock()
+    }
+
+    /// Reports granted so far (tests).
+    var grantedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return granted
+    }
+}

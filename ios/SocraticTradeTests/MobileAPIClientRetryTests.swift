@@ -66,6 +66,32 @@ final class MobileAPIClientRetryTests: XCTestCase {
         XCTAssertEqual(RetryStubURLProtocol.paths, ["/api/scan", "/api/scan"])
     }
 
+    func testEventsGatewayFailureReportedOncePerOutage() async {
+        // Two 503s in one outage, a successful connect, then a 503 in a new outage.
+        RetryStubURLProtocol.script = [.status(503), .status(503), .status(200, ""), .status(503)]
+        let latch = OutageReportLatch()
+        var client = MobileAPIClient(baseURL: base, session: Self.stubbedSession())
+        client.eventsOutageLatch = latch
+        for _ in 0..<2 {
+            do {
+                try await client.events(onEvent: {})
+                XCTFail("expected serverError")
+            } catch {}
+        }
+        XCTAssertEqual(latch.grantedCount, 1)
+        do {
+            try await client.events(onEvent: {})
+        } catch {
+            XCTFail("expected a clean connect, got \(error)")
+        }
+        do {
+            try await client.events(onEvent: {})
+            XCTFail("expected serverError")
+        } catch {}
+        XCTAssertEqual(latch.grantedCount, 2)
+        XCTAssertEqual(RetryStubURLProtocol.paths.count, 4)
+    }
+
     private static func stubbedSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RetryStubURLProtocol.self]

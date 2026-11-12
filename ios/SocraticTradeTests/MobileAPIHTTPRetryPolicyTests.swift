@@ -128,4 +128,19 @@ final class MobileAPIHTTPRetryPolicyTests: XCTestCase {
         XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
             method: "GET", attemptIndex: 1, maxRetries: cap))
     }
+    func testOutageLatchReportsFirstFailureUntilReset() {
+        let latch = OutageReportLatch()
+        XCTAssertTrue(latch.shouldReport())
+        XCTAssertFalse(latch.shouldReport())
+        XCTAssertFalse(latch.shouldReport())
+        latch.reset()
+        XCTAssertTrue(latch.shouldReport())
+        XCTAssertEqual(latch.grantedCount, 2)
+    }
+
+    func testOutageLatchGrantsOnceUnderConcurrency() {
+        let latch = OutageReportLatch()
+        DispatchQueue.concurrentPerform(iterations: 200) { _ in _ = latch.shouldReport() }
+        XCTAssertEqual(latch.grantedCount, 1)
+    }
 }

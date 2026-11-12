@@ -117,6 +117,8 @@ struct MobileAPIClient {
     /// URLSession does not return `configuration.protocolClasses`, so a stub
     /// installed on `session` has to be repeated here.
     var isolatedProtocolClasses: [AnyClass]? = nil
+    /// Dedups the manual 502-504 Sentry report on the SSE stream to one per outage.
+    var eventsOutageLatch: OutageReportLatch = .events
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
@@ -516,17 +518,21 @@ struct MobileAPIClient {
             throw MobileAPIError.network(error)
         }
         // The SSE stream is not retried here (MobileStore reconnects quietly), and
-        // sentry-cocoa's automatic capture skips 502-504, so report those once here.
+        // sentry-cocoa's automatic capture skips 502-504, so report those here, once per
+        // outage: MobileStore reconnects after every failure, so the latch stops one outage
+        // from minting an event per reconnect.  A successful connect resets it.
         // Other 5xx stay with the automatic capture so nothing is reported twice.
         do {
             try Self.requireSuccess(response, body: nil)
         } catch let error as MobileAPIError {
             if case .serverError(let statusCode, _) = error,
-               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
+               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode),
+               eventsOutageLatch.shouldReport() {
                 SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: "/api/mobile/events")
             }
             throw error
         }
+        eventsOutageLatch.reset()
         onConnect()
 
         var parser = SSEFrameAccumulator()
