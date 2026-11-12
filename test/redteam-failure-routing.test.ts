@@ -29,21 +29,13 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
     expect(routing.holdForHuman).toBe(true);
   });
 
-  describe("default (policy.tuning.deRiskExitsOnAdversaryUnavailable is OFF/undefined)", () => {
-    it("still holds a de-risking SELL for human review — byte-identical to main", () => {
-      const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429");
-      expect(routing.holdForHuman).toBe(true);
-      expect(routing.note).toContain("routed to human approval");
-    });
-
-    it("still holds a de-risking COVER for human review — byte-identical to main", () => {
-      const routing = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", false);
-      expect(routing.holdForHuman).toBe(true);
-      expect(routing.note).toContain("routed to human approval");
-    });
-  });
-
-  describe("opted in (policy.tuning.deRiskExitsOnAdversaryUnavailable === true)", () => {
+  // Owner ruling 2026-09-24 (board 687a5fb4): the default flipped from OFF to ON — see
+  // src/lib/defaults.ts's DEFAULT_POLICY.tuning.deRiskExitsOnAdversaryUnavailable and
+  // test/model-defaults-derisk-exits.test.ts for the merge-inheritance coverage. This file keeps
+  // testing the PURE routeOnAdversaryUnavailable helper directly, so "default" here means the
+  // boolean value mergePolicy now actually threads through (`true`), plus the bare-`undefined`
+  // case for a caller that bypasses the merged policy entirely (same behavior as `true`).
+  describe("default (policy.tuning.deRiskExitsOnAdversaryUnavailable is true, or undefined)", () => {
     it("does NOT hold a de-risking SELL — appends a loud 'RED TEAM FAILED' note instead", () => {
       const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429", true);
       expect(routing.holdForHuman).toBe(false);
@@ -59,6 +51,16 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(routing.note).toContain("malformed response");
     });
 
+    it("a bare undefined 4th arg (no policy override reached this call) also does NOT hold — matches the new merged-policy default, never silently reverts to the old hold-by-default", () => {
+      const sell = routeOnAdversaryUnavailable("sell", "rate_limited", "429");
+      expect(sell.holdForHuman).toBe(false);
+      expect(sell.note).toContain("RED TEAM FAILED");
+
+      const cover = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", undefined);
+      expect(cover.holdForHuman).toBe(false);
+      expect(cover.note).toContain("RED TEAM FAILED");
+    });
+
     it("handles an absent failureKind (legacy/unclassified unavailability) with a generic label", () => {
       const opening = routeOnAdversaryUnavailable("buy", undefined, "unknown error", true);
       expect(opening.holdForHuman).toBe(true);
@@ -69,7 +71,7 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(exit.note).toContain("RED TEAM FAILED");
     });
 
-    it("under propose authority (autoExecutes=false) an opt-in de-risk exit is NOT held but the note says 'surfaced for approval', never 'proceeding'", () => {
+    it("under propose authority (autoExecutes=false) a de-risk exit is NOT held but the note says 'surfaced for approval', never 'proceeding'", () => {
       const decide = routeOnAdversaryUnavailable("sell", "timeout", "timed out", true, true);
       expect(decide.holdForHuman).toBe(false);
       expect(decide.note).toContain("proceeding because this order reduces risk");
@@ -79,6 +81,20 @@ describe("routeOnAdversaryUnavailable — pure routing helper", () => {
       expect(propose.note).toContain("RED TEAM FAILED");
       expect(propose.note).toContain("surfaced for your approval");
       expect(propose.note).not.toContain("proceeding because"); // never falsely claims it proceeds
+    });
+  });
+
+  describe("opted OUT (policy.tuning.deRiskExitsOnAdversaryUnavailable === false)", () => {
+    it("holds a de-risking SELL for human review — the pre-2026-09-24 behavior, still available per-account", () => {
+      const routing = routeOnAdversaryUnavailable("sell", "rate_limited", "429", false);
+      expect(routing.holdForHuman).toBe(true);
+      expect(routing.note).toContain("routed to human approval");
+    });
+
+    it("holds a de-risking COVER for human review", () => {
+      const routing = routeOnAdversaryUnavailable("cover", "malformed_response", "bad shape", false);
+      expect(routing.holdForHuman).toBe(true);
+      expect(routing.note).toContain("routed to human approval");
     });
   });
 });
@@ -246,6 +262,10 @@ describe("Red Team unavailable — opening routing + audit parity (decide author
     expect(initialRedTeamReason?.summary).not.toMatch(/\.\./);
     expect(initialRedTeamReason?.summary).toContain("No model critiqued this opening");
 
+    // lane G3: an initial_red_team hold (decide authority's fail-closed requiresHumanReview
+    // branch) classifies as the "red_team_unavailable" holdReason bucket (hold-reason.ts).
+    expect(aaplProposal?.proposal.holdReason).toBe("red_team_unavailable");
+
     // Deliverable B: audit parity with strategy_bear_review_unavailable.
     const unavailableAudits = listAudit(500).filter((e) => e.kind === "strategy_red_team_unavailable");
     expect(unavailableAudits.length).toBeGreaterThanOrEqual(1);
@@ -343,5 +363,9 @@ describe("Red Team unavailable — propose authority surfaces the flag on the pe
     expect(aaplProposal).toBeDefined();
     expect(aaplProposal?.status).toBe("proposed");
     expect(aaplProposal?.proposal.rationale).toContain("RED TEAM FAILED");
+    // lane G3: the "propose" authority branch classifies holdReason from whatever
+    // HumanReviewReasonCode(s) it carries — an opening's Red-Team-unavailable hold still fires
+    // here (routeOnAdversaryUnavailable holds every OPENING regardless of authority).
+    expect(aaplProposal?.proposal.holdReason).toBe("red_team_unavailable");
   }, 30_000);
 });

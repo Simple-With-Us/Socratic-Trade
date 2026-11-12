@@ -19,7 +19,7 @@
 //   - `curl -i https://backend.simfin.com/api/v3/companies/general/compact?ticker=AAPL` (no key)
 //     -> HTTP 401 `{"error":"Full authentication is required to access this resource"}`. This
 //     confirms the base host/path are live and real (not a stale/renamed endpoint) without
-//     needing a key — creating one is against fleet policy (see AGENT-SYNC.md "NEVER create a
+//     needing a key — creating one is against fleet policy (see FLEET-PROTOCOL.md "NEVER create a
 //     new provider API key").
 //   - The official `SimFin/simfin` Python client on GitHub (raw.githubusercontent.com), whose
 //     `simfin/names.py` is "auto-generated from the SimFin database" per its own header comment
@@ -362,6 +362,19 @@ export class SimFinEnrichmentProvider implements MarketEnrichmentProvider {
   readonly configured = true;
   // SimFin's FREE tier ($0, no card) is what this provider targets — see the file header.
   readonly costTier = "free" as const;
+  // Deliberately NOT quotaScarce (docs/market-data-provider-pricing.md): the wave-B gap
+  // gate keys on profile fields, so gating would let SimFin be skipped before it fills
+  // the five tracked ratios; first-wins by registration order keeps it near Wisesheets.
+  readonly suppliesFields = [
+    "grossProfitMargin",
+    "revenueGrowth",
+    "returnOnEquity",
+    "returnOnAssets",
+    "debtToEquity",
+    "companyName",
+    "sector",
+    "industry"
+  ] as const;
 
   constructor(private readonly apiKey: string) {}
 

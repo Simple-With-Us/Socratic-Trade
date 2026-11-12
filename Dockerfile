@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 # Production image for Coolify (socratic-app).
 #
 # Design constraints (learned the hard way 2026-08-04):
@@ -22,7 +22,7 @@
 #   keep python3/make/g++ for that step, and fail the image build if the
 #   .node binary is missing or unloadable.
 
-FROM node:24.14.1-bookworm-slim AS build
+FROM node:26.13.0-bookworm-slim AS build
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl python3 make g++ \
@@ -60,8 +60,19 @@ COPY . .
 # --ignore-scripts on prune: avoid re-extracting glibc-2.38 prebuilds.
 # Then wipe any prebuild/build residue and compile better-sqlite3 from source
 # with a real node-gyp (installed globally so prune cannot remove it).
+# Deploy 3f931acb (2026-10-16): next build printed "Failed to type check."
+# yet exited 0 and skipped emitting .next, and the image shipped without a
+# production build (prod down, build log 4658).  Never trust next build's
+# exit code for type validity again:
+# - `npx tsc --noEmit` is the same gate CI runs (ci.yml) and fails the RUN on
+#   any TS error.  Runs AFTER the rm above so this checks exactly the tree
+#   the image sees.
+# - `test -f .next/BUILD_ID` fails the build if Next ever again completes
+#   without emitting a production build, whatever the cause.
 RUN rm -rf scripts/eval test \
+  && npx tsc --noEmit \
   && npm run build \
+  && test -f .next/BUILD_ID \
   && npm prune --omit=dev --ignore-scripts \
   && npm install -g node-gyp@11 \
   && rm -rf node_modules/better-sqlite3/prebuilds node_modules/better-sqlite3/build \
@@ -73,7 +84,7 @@ RUN rm -rf scripts/eval test \
   && find docs -mindepth 1 -maxdepth 1 ! -name benchmarks -exec rm -rf {} + 2>/dev/null || true \
   && rm -rf node_modules/.cache
 
-FROM node:24.14.1-bookworm-slim AS runtime
+FROM node:26.13.0-bookworm-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl tar gzip tini \
@@ -96,11 +107,12 @@ EXPOSE 4000
 # Traefik follows Docker health.  /api/health is the rich ops probe and
 # can 503 (Pinecone/RAG hard-stop) or exceed this 15s timeout after boot.
 # That marks running:unhealthy while the process is up -- public 503 for
-# ~20 min after #2810 finished on 2026-08-17.  /api/live is process+SQLite
-# only.  Do not point Coolify HTTP health back at /api/health.
-# 2026-09-09: /api/live itself intermittently takes ~8s.  better-sqlite3 is
-# SYNCHRONOUS, so a heavy query against the now-11GB app.db blocks the event
-# loop and every request behind it, including this probe.  Measured on prod:
+# ~20 min after #2810 finished on 2026-08-17.  /api/live is process-only:
+# it does not open app.db.  Do not point Coolify HTTP health back at /api/health.
+# 2026-09-09: /api/live itself intermittently took ~8s because it read SQLite.
+# better-sqlite3 is SYNCHRONOUS, so a heavy query against the ~11GB app.db
+# blocked the event loop and every request behind it, including this probe.
+# Measured on prod:
 # 8.60s then 0.09s then 0.03s back-to-back, CPU 107%, disk %util 0.10 -- CPU
 # bound in-process, not IO.  At timeout=5s/retries=3 that flapped the container
 # to unhealthy and Traefik served a public 503 while the app was fine (DB ok,

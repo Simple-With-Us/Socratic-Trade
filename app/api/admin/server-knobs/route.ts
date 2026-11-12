@@ -1,23 +1,26 @@
 import { NextResponse } from "next/server";
 import { checkAdmin, requireAdmin } from "@/lib/auth/admin";
 import { userIdForEmail } from "@/lib/auth/identity";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { audit } from "@/lib/db";
 import {
   SERVER_KNOB_GROUPS,
   listEffectiveServerKnobs,
   resolveServerKnob,
   serverKnobById,
-  setServerKnobOverride
+  writeServerKnobThrough
 } from "@/lib/server-knobs";
+import { InfisicalWriteError, infisicalSettingsStatus } from "@/lib/infisical-settings";
 
 export const dynamic = "force-dynamic";
 
 // Admin/operator route for the server-level operational knobs (Admin > Operations panel):
 //   GET  -> catalog + effective value, provenance (override/env/default), and env reset target
 //     for every knob in SERVER_KNOBS_CATALOG.
-//   POST {id, value} -> set a DB override (boolean or number per the knob's type);
-//   POST {id, value: null} -> clear the override, falling back to env/default.
+//   POST {id, value} -> write-through save: Infisical FIRST, then the settings cache, then the
+//     DB override (see writeServerKnobThrough).  A failed Infisical write fails the save.
+//   POST {id, value: null} -> clear the override, falling back to Infisical/default (the
+//     Infisical value itself is left alone).
 // Admin-gated via the shared requireAdmin gate (same as app/api/admin/r2-usage — these are
 // UI-driven flips by a verified admin, not token-scripted backfills). Every write audits
 // `server_knob.changed` with the effective before/after values.
@@ -25,6 +28,9 @@ export const dynamic = "force-dynamic";
 function knobsPayload() {
   return {
     ok: true,
+    // Infisical SOT status: whether the live settings cache is credentialed
+    // (write-through + background refresh available) or boot-env-seeded.
+    settings: infisicalSettingsStatus(),
     groups: SERVER_KNOB_GROUPS,
     knobs: listEffectiveServerKnobs().map((row) => ({
       id: row.spec.id,
@@ -83,16 +89,35 @@ export async function POST(request: Request) {
   // verified email on the allowlist path; the legacy `x-admin-token` path has no email by design, so
   // it is recorded as the token principal rather than silently attributed to a person.
   const actor = checkAdmin(request);
-  const actorUserId = actor.email ? userIdForEmail(actor.email) : resolveRequestUserId(request);
+  let actorUserId: string | Response;
+  if (actor.email) {
+    actorUserId = userIdForEmail(actor.email);
+  } else {
+    actorUserId = resolveRequestUserIdOrResponse(request);
+    if (actorUserId instanceof Response) return actorUserId;
+  }
 
   const from = resolveServerKnob(id);
-  setServerKnobOverride(id, value as boolean | number | null);
+  let infisicalWriteThrough = false;
+  try {
+    ({ infisicalWriteThrough } = await writeServerKnobThrough(id, value as boolean | number | null));
+  } catch (error) {
+    if (error instanceof InfisicalWriteError) {
+      // Write-through contract: a failed Infisical write fails the save — the DB
+      // override is never written, so the layers cannot diverge silently.
+      return NextResponse.json(
+        { ok: false, error: `Infisical write-through failed for ${id}; save rejected. ${error.message}` },
+        { status: 502 }
+      );
+    }
+    throw error;
+  }
   const to = resolveServerKnob(id);
   audit(
     "server_knob.changed",
-    { id, from, to, override: value, actor: { email: actor.email, via: actor.reason } },
+    { id, from, to, override: value, infisicalWriteThrough, actor: { email: actor.email, via: actor.reason } },
     actorUserId
   );
 
-  return NextResponse.json(knobsPayload());
+  return NextResponse.json({ ...knobsPayload(), infisicalWriteThrough });
 }

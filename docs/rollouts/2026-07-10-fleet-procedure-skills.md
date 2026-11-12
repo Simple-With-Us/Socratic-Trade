@@ -17,7 +17,7 @@ frontmatter (`name`, `description`) plus a procedure body:
   regression test, reply-then-resolve, the auto-merge race on the last thread, stop at round 2-3).
 - **`pickup-seat`** — pick up another agent seat's in-flight work after a usage/time cap
   (owner-directed only): inventory effort boards/PRs/dirty worktrees/Slack history, claim on
-  `#agent-sync`, adopt uncommitted work with correct `Co-Authored-By` trailer, disposition each
+  `#ag***-s**c`, adopt uncommitted work with correct `Co-Authored-By` trailer, disposition each
   item, hand back gracefully, close out boards + rollout note + Slack summary.
 - **`deploy-verify`** — verify production after a deploy fires (app health via `/api/health`,
   Coolify deployment status with the CF-IP-allowlist caveat, litestream backup continuity, the
@@ -81,7 +81,7 @@ find .claude -type f                                     # only the 5 SKILL.md f
 `scripts/claude-hooks/board-check.sh` — a Claude Code PreToolUse (Bash) hook that DENIES
 `git push` / `scripts/land.sh` / `gh pr create` when the current branch has not touched
 `docs/EFFORT-LOG.md` since forking from origin/main (and it is not dirty), replying with the
-full pre-push checklist (board row, STATUS stanza, rollout note, #agent-sync claim).
+full pre-push checklist (board row, STATUS stanza, rollout note, #ag***-s**c claim).
 Escape hatch: `BOARD_CHECK_SKIP=1` prefix with stated reason. Fail-open on internal errors.
 Self-scoping: only acts in repos that track `docs/EFFORT-LOG.md`; silent elsewhere.
 
@@ -92,5 +92,5 @@ CLAUDE and MONET seats and all worktrees. Verified: bash -n, ASCII-only, four pi
 scenarios (non-push allow / violating-push deny / BOARD_CHECK_SKIP allow / docs-touched
 allow), settings schema via jq.
 
-Why: owner 2026-07-10 — "I have to remind you about agent-sync and effort log all the
+Why: owner 2026-07-10 — "I have to remind you about ag***-s**c and effort log all the
 time." Prose in AGENTS.md reminds; the harness hook enforces at the moment it matters.

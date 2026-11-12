@@ -14,15 +14,7 @@ name: iOS build
 # TestFlight shipping stays in the fleet ship script, which has its own guard.
 
 on:
-  pull_request:
-    paths:
-      - 'ios/**'
-      - '.github/workflows/ios-build.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'ios/**'
-      - '.github/workflows/ios-build.yml'
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -30,7 +22,11 @@ permissions:
 
 concurrency:
   group: ios-build-${{ github.ref }}
-  cancel-in-progress: true
+  # Must match the caller (ci.yml `concurrency`): never cancel an in-flight lane.
+  # A ref-keyed predicate here diverged from ci.yml and could tear down the iOS
+  # lane of a workflow_dispatch re-kick while the rest of the suite kept running
+  # (Kody review, PR #4231). Pending duplicates still collapse per ref.
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -45,13 +41,14 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # project.yml is the source of truth.  Linux seats cannot run xcodegen, and
       # the Cursor hook blocks hand-edits of project.pbxproj, so this Mac job
-      # generates before build/test.  The checked-in pbxproj still matters for
-      # TestFlight (the ship script does not generate); after this job, commit
-      # the generated file from the artifact so they stay in sync.
+      # generates before build/test.  ios-ship.yml installs the same XcodeGen
+      # pin so the ship script can generate before archive.  After this job,
+      # commit the generated file from the artifact so the checked-in pbxproj
+      # stays in sync.
       - name: Generate Xcode project from project.yml
         run: |
           set -euo pipefail
@@ -87,20 +84,13 @@ jobs:
           echo "Using xcodegen: $xcg"
           "$xcg" --version || "$xcg" version || true
           ( cd ios && "$xcg" generate )
-          python3 -c '
-          from pathlib import Path
-          p = Path("ios/Socratic Trade.xcodeproj/project.pbxproj")
-          text = p.read_text()
-          text = text.replace("objectVersion = 77;", "objectVersion = 100;")
-          text = text.replace("preferredProjectObjectVersion = 77;", "preferredProjectObjectVersion = 100;")
-          p.write_text(text)
-          '
+          python3 ios/xcodegen-post.py
           grep -F "LayoutMathTests.swift in Sources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
           grep -F "AppUpdatePromptTests.swift in Sources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
           grep -F "PrivacyInfo.xcprivacy in Resources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
 
       - name: Upload generated pbxproj
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: generated-pbxproj
           path: ios/Socratic Trade.xcodeproj/project.pbxproj

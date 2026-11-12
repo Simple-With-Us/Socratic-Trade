@@ -1,5 +1,5 @@
 import { ImportAccountSettingsError, importAccountSettings } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +20,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return NextResponse.json({ error: "sourceConnectedAccountId is required." }, { status: 400 });
     }
 
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const policy = importAccountSettings(userId, sourceConnectedAccountId, targetConnectedAccountId);
     return NextResponse.json({ ok: true, policy });
   } catch (error) {

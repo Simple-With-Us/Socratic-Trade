@@ -1,34 +1,22 @@
-import { getInternalSetting } from "@/lib/db";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Coolify / Docker / Traefik liveness.  Cheap on purpose.
+ * Coolify / Docker / Traefik liveness.  Process-only on purpose.
  *
- * `/api/health` is the rich public/ops probe and may return 503 when a
- * critical dependency hard-stops, or take longer than the Dockerfile
- * HEALTHCHECK timeout (15s).  Pointing Traefik at that probe marks a
- * serving container `running:unhealthy` and Cloudflare returns
- * `no available server` even though Next and Litestream are up — the
- * 2026-08-17 ~7:22–7:43pm CT window after docs-only #2810 finished.
+ * `/api/health` is the rich public/ops probe.  It can 503 when a critical
+ * dependency hard-stops, and a cache miss still reads SQLite.  Pointing
+ * Traefik at that probe marks a serving container `running:unhealthy` and
+ * Cloudflare returns `no available server` even though Next and Litestream
+ * are up (2026-08-17, after docs-only #2810).
  *
- * This route 200s when the process can answer HTTP and SQLite is
- * readable.  It does not inspect Pinecone, RAG, credits, or Litestream
- * freshness.  Those stay on `/api/health`.
+ * This route does not open `app.db`, stat the data volume, or call the
+ * network.  A locked or huge database must not turn liveness into a
+ * restart.  DB reachability and dependency hard-stops stay on `/api/health`
+ * and `/api/ready`.  200 means the process can run a handler.  A pinned
+ * event loop still cannot answer; that is the watchdog's restart signal.
  */
 export async function GET() {
-  try {
-    getInternalSetting<string>("scheduler:lastTick");
-    return NextResponse.json({ ok: true, probe: "live" }, { status: 200 });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        ok: false,
-        probe: "live",
-        error: error instanceof Error ? error.message : "error"
-      },
-      { status: 503 }
-    );
-  }
+  return NextResponse.json({ ok: true, probe: "live" }, { status: 200 });
 }

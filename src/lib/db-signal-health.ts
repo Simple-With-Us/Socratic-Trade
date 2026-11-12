@@ -70,11 +70,14 @@ const SIGNAL_HEALTH_WINDOW_DAYS = 90;
 
 export function listSignalHealthDecisionRows(
   userId: string = "local",
-  opts: { limit?: number; windowDays?: number } = {}
+  opts: { limit?: number; windowDays?: number; now?: number } = {}
 ): SignalHealthDecisionRow[] {
   const limit = Math.max(1, Math.min(5000, Math.floor(opts.limit ?? 2000)));
   const windowDays = Math.max(1, Math.floor(opts.windowDays ?? SIGNAL_HEALTH_WINDOW_DAYS));
-  const cutoffIso = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+  // Window is relative to the refresh clock (opts.now), not wall-clock Date.now().
+  // Tests inject a fixed `now`; production passes the lane's now. Using wall clock here
+  // dropped hard-coded Aug-2026 fixtures once real calendar day crossed the 90d edge (CI 2026-11-06).
+  const cutoffIso = new Date((opts.now ?? Date.now()) - windowDays * 86_400_000).toISOString();
   const rows = getDb()
     .prepare(
       `SELECT id, symbol, side, confidence_score, created_at, outcome

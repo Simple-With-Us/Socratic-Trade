@@ -319,7 +319,32 @@ describe("strategy Red Team rejection — F2 audit", () => {
     };
     expect(payload.symbol).toBe("AAPL");
     expect(payload.side).toBe("buy");
-    expect(payload.thesisTag).toBe("Quality-Compounder");
+    // P0-2 (2026-09-27): the downstream consumers of `thesisTag` — the Red Team receipt here, and
+    // the sizing multiplier / negative-EV skip / thesis scorecards in production — now see the
+    // ASSIGNED tag, not the model's pick. This is the whole point of the change: the gate and the
+    // thing being graded are no longer the same actor, so a model cannot relabel its way out of a
+    // penalty by changing its mind about the thesis. The model's original pick is preserved on the
+    // proposal as `tradeThesisProposedTag` and is asserted below.
+    expect(payload.thesisTag).toBe("Value-Quality");
+    expect(payload.thesisTag).not.toBe(BULL_PROPOSAL.tradeThesisTag);
+    // The divergence is auditable: a thesis_tag_assigned receipt records the proposal, the
+    // assignment, the rule that fired, and the margin over the runner-up.
+    const assignmentAudits = listAudit(500).filter((e) => e.kind === "thesis_tag_assigned");
+    expect(assignmentAudits.length).toBeGreaterThanOrEqual(1);
+    const assignment = assignmentAudits[0].payload as {
+      symbol?: string;
+      proposedTag?: string;
+      assignedTag?: string;
+      overrode?: boolean;
+      rule?: string | null;
+      margin?: number;
+    };
+    expect(assignment.symbol).toBe("AAPL");
+    expect(assignment.proposedTag).toBe("Quality-Compounder");
+    expect(assignment.assignedTag).toBe("Value-Quality");
+    expect(assignment.overrode).toBe(true);
+    expect(assignment.rule).toBe("Value-Quality");
+    expect(assignment.margin).toBeGreaterThanOrEqual(8); // cleared the required margin, it did not abstain
     expect(payload.reason).toContain("Overbought");
     // runId + model are stamped so getRedTeamEfficacy() can join this veto to its matured
     // counterfactual return.

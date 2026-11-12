@@ -27,7 +27,7 @@ import { inferExternalCashFlows, isInferredFlowUnverified } from "@/lib/cash-flo
 import { REALITY_PAPER_WORD } from "@/lib/guardrail-copy";
 import { centralTradingDayKey } from "@/lib/trading-day";
 import type { FillEvent } from "@/lib/types";
-import { dayKey, startOfCentralDay } from "./format";
+import { dayKey, SENTENCE_GAP, startOfCentralDay } from "./format";
 
 // ── Money-reality ────────────────────────────────────────────────────────────
 
@@ -116,6 +116,9 @@ export interface StateInfo {
   label: string;
   /** One-line honest explanation. */
   detail: string;
+  /** Why a halted account is halted and whether it starts again by itself (server-computed, lane h5).
+   *  Absent when the snapshot does not say. */
+  cause?: string;
   tone: "pos" | "warn" | "neg" | "muted";
   /** Only meaningful when state === "active" — whether the market (per current session + the
    *  account's extended-hours policy) is open right now. undefined for every other state (those
@@ -193,6 +196,35 @@ export function deriveStateInfo(
         tone: "neg"
       };
   }
+}
+
+/**
+ * Fold the server's halt cause (DashboardSnapshot.haltCause, lane h5) into the run-state display.
+ * The run-state WORD stays "Stopped" (shared vocabulary); only the chip label, tone, and the `cause`
+ * sentence change.  A broker auto-pause is amber, not red: the app will lift it by itself.
+ */
+export function withHaltCause(info: StateInfo, cause: DashboardSnapshot["haltCause"]): StateInfo {
+  if (info.state !== "halted" || !cause) return info;
+  if (cause.kind === "broker_auto_pause") {
+    return { ...info, label: "Stopped · auto-paused", tone: "warn", cause: cause.summary };
+  }
+  if (cause.kind === "restart") {
+    return { ...info, label: "Stopped · by restart", cause: cause.summary };
+  }
+  if (cause.kind === "breaker") {
+    return { ...info, label: "Stopped · breaker", cause: cause.summary };
+  }
+  if (cause.kind === "auto_pause_lost") {
+    return { ...info, label: "Stopped · by app", cause: cause.summary };
+  }
+  return { ...info, cause: cause.summary };
+}
+
+/** Tooltip text for a run-state chip: the halt cause (when there is one) ahead of the state detail,
+ *  with the owner's two-space sentence gap kept visible in rendered HTML (SENTENCE_GAP). */
+export function stateChipTitle(info: StateInfo): string {
+  const text = info.cause ? `${info.cause}  ${info.detail}` : info.detail;
+  return text.replace(/ {2}/g, SENTENCE_GAP);
 }
 
 export function authorityWord(policy: TradingPolicy): "Ask-first" | "Autopilot" {

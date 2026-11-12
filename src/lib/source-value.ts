@@ -26,7 +26,6 @@ const SCORE_FIELD_NEUTRALIZERS: Partial<
   fiftyTwoWeekLow: (quote) => { quote.fiftyTwoWeekLow = undefined; },
   insiderSentiment: (quote) => { quote.insiderSentiment = undefined; },
   fcfYield: (quote) => { quote.fcfYield = undefined; },
-  freeCashFlowYield: (quote) => { quote.freeCashFlowYield = undefined; },
   debtToEquity: (quote) => { quote.debtToEquity = undefined; },
   epsGrowth: (quote) => { quote.epsGrowth = undefined; },
   senateTrades: (quote) => { quote.senateTrades = undefined; }

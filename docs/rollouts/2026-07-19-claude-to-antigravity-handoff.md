@@ -22,10 +22,10 @@ code-class failure). It also owns post-merge closeout: worktree removal
 (`.claude/worktrees/land-ag-reindex-bge-m3`), effort-board completion row, and measuring whether
 the post-merge auto-deploy actually fires (see wedge below).
 
-**Antigravity: check `gh pr view 1775 --repo jaywedgeworth22/Socratic.Trade` and #agent-sync
+**Antigravity: check `gh pr view 1775 --repo jaywedgeworth22/Socratic-Trade` and #ag***-s**c
 before touching this PR.** If it's already MERGED, this task is done — verify via the effort
 board / Slack closeout post. If it's still open and the CLAUDE seat has gone quiet (no
-#agent-sync activity for >1h), the shepherd likely died with the session; pick it up using the
+#ag***-s**c activity for >1h), the shepherd likely died with the session; pick it up using the
 "still in-flight" procedure below rather than starting a competing shepherd.
 
 What was fixed to get this PR here (context if you need to re-verify): three real test-suite bugs
@@ -53,7 +53,7 @@ persisted cooldown row (bounded ~5s) instead. Full history:
    box, same failure class as the 2026-07-10 litestream/tcp_mem incident, but NOT the same trigger
    (litestream is healthy, confirmed via `/api/health`). **Prod itself is healthy right now**
    (`ok: true`) — this only blocks *new* code from shipping, it is not a live incident.
-3. Both items posted to #agent-sync already; re-post only if genuinely new information emerges.
+3. Both items posted to #ag***-s**c already; re-post only if genuinely new information emerges.
 
 ## Root-caused, fix recommended but NOT executed (needs owner call)
 

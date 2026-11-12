@@ -223,6 +223,32 @@ describe("runSyntheticStopMonitor (orchestration)", () => {
     expect(listFillEvents("SYN-TARGET-A", "live", 10, "local")).toHaveLength(0);
   });
 
+  it("re-arms a claimed stop when the lane aborts before the broker write", async () => {
+    const account = "SYN-ABORT-WRITE";
+    broker.positions = [{ symbol: "AAPL", quantity: 10, averageCost: 100, marketValue: 1000 }];
+    broker.quotes = { AAPL: { price: 90 } };
+    connectTestAccount(account);
+    const controller = new AbortController();
+    controller.abort(new Error("lane deadline"));
+
+    const result = await runSyntheticStopMonitor("local", policyFor(account), true, undefined, undefined, {
+      signal: controller.signal,
+      onBrokerWrite: () => {
+        throw new Error("broker write started after abort");
+      }
+    });
+
+    expect(result.exited).toBe(0);
+    expect(result.triggered).toBe(1);
+    expect(broker.placed).toHaveLength(0);
+    const active = listSyntheticStops(account, "local");
+    const triggered = listSyntheticStops(account, "local", "triggered");
+    expect(active).toHaveLength(1);
+    expect(triggered).toHaveLength(0);
+    expect(active[0]?.lastAttemptRefId).toEqual(expect.any(String));
+    expect(active[0]?.lastAttemptRefId?.length).toBeGreaterThan(0);
+  });
+
   it("rebinds spoofed policy routing fields to the owned target account row", async () => {
     broker.positions = [{ symbol: "AAPL", quantity: 10, averageCost: 100, marketValue: 1000 }];
     broker.quotes = { AAPL: { price: 90 } };

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyVersionedMigrations,
   beginVectorCommit,
@@ -13,14 +13,20 @@ import {
 import { insertChunkOccurrences, insertDocumentChunkFts, insertSecFiling } from "../src/lib/db-learning";
 import {
   compileCorpusWideLexicalQuery,
-  searchCorpusWideLexicalCandidates
+  searchCorpusWideLexicalCandidates,
+  searchCorpusWideLexicalCandidatesOffLoop
 } from "../src/lib/rag/corpus-wide-lexical";
+import { resetSqliteAllOffLoopForTesting } from "../src/lib/rag/sqlite-all-offloop";
 
 const NOW = "2026-07-21T12:00:00.000Z";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-corpus-wide-lexical-${randomUUID()}.db`)}`;
   applyVersionedMigrations(getDb());
+});
+
+afterAll(async () => {
+  await resetSqliteAllOffLoopForTesting();
 });
 
 beforeEach(() => {
@@ -500,5 +506,20 @@ describe("searchCorpusWideLexicalCandidates", () => {
       query: "covenant evidence",
       asOf: "2025-05-15T00:00:00.000Z"
     }).map((row) => row.id)).toEqual(["vec-old-version"]);
+  });
+
+  it("returns the same candidates when the FTS .all() runs off the event loop", async () => {
+    seed({
+      vectorId: "vec-offloop",
+      hash: "hash-offloop",
+      accession: "0000320193-25-000301",
+      acceptedAt: "2025-11-01T18:00:00.000Z",
+      text: "Item 1.01. Off-loop lexical evidence records a material agreement."
+    });
+    const options = { symbol: "AAPL", query: "off-loop lexical evidence" };
+    const syncRows = searchCorpusWideLexicalCandidates(options);
+    const offloopRows = await searchCorpusWideLexicalCandidatesOffLoop(options);
+    expect(offloopRows).toEqual(syncRows);
+    expect(offloopRows.map((row) => row.id)).toEqual(["vec-offloop"]);
   });
 });

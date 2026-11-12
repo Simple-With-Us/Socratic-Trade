@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { fetchGroupedBarsRest } from "@/lib/market-signals/massive";
 import { fetchGroupedDailyBars } from "@/lib/market-signals/massive-s3";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +20,8 @@ export async function GET(req: Request) {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return NextResponse.json({ error: "date=YYYY-MM-DD is required" }, { status: 400 });
   }
-  const userId = resolveRequestUserId(req);
+  const userId = resolveRequestUserIdOrResponse(req);
+  if (userId instanceof Response) return userId;
   // Prefer the working REST grouped endpoint for stocks; fall back to S3 flat files.
   const bars = (asset === "stocks" ? await fetchGroupedBarsRest(date, userId) : null) ?? (await fetchGroupedDailyBars(date, asset, userId));
   if (!bars) {

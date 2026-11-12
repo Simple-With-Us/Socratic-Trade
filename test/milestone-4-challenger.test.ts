@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sanitizeUserId, retrieveContext, retryAfterMs } from "../src/lib/vector-db";
 import {
   FinnhubEnrichmentProvider,
-  FmpEnrichmentProvider,
   AlphaVantageEnrichmentProvider,
   clearEnrichmentCache,
   isTransientError
@@ -286,7 +285,7 @@ describe("Milestone 4 Challenger: Voyage API Jitter Distribution Analysis", () =
   });
 });
 
-describe("Milestone 4 Challenger: Finnhub & FMP Cache Poisoning Protection", () => {
+describe("Milestone 4 Challenger: Finnhub Cache Poisoning Protection", () => {
   beforeEach(() => {
     clearEnrichmentCache();
     vi.stubGlobal("fetch", vi.fn());
@@ -323,31 +322,6 @@ describe("Milestone 4 Challenger: Finnhub & FMP Cache Poisoning Protection", () 
     const res2 = await provider.enrich(["AAPL"], skipCalendar);
     expect(res2.AAPL).toEqual({ companyName: "Apple Inc.", sector: "Technology", industry: "Technology" });
     expect(mockFetch).toHaveBeenCalledTimes(12); // Cache was bypassed!
-  });
-
-  it.skip("prevents cache writes on FMP when a transient error occurs in at least one promise [retired: no direct FMP]", async () => {
-    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
-      if (url.includes("ratios-ttm")) {
-        return new Response("Timeout", { status: 504 }); // transient error
-      }
-      if (url.includes("insider-trading")) {
-        return new Response(JSON.stringify([{ transactionType: "Buy", acquistionOrDisposition: "A" }]));
-      }
-      return new Response(JSON.stringify([]));
-    });
-    vi.stubGlobal("fetch", mockFetch);
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-
-    expect(res1.AAPL).toEqual({ insiderSentiment: 100 });
-    // FMP calls 4 endpoints: ratios-ttm, grades-consensus, insider-trading, senate-trading.
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-
-    // Call second time to ensure cache bypass
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({ insiderSentiment: 100 });
-    expect(mockFetch).toHaveBeenCalledTimes(8); // Bypassed cache!
   });
 
   it("caches normally on Finnhub when all queries are successful or have non-transient errors", async () => {

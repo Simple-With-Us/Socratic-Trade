@@ -89,7 +89,7 @@ describe("getOrRecordHeadlineFirstSeen", () => {
     expect(anomalies[0]!.ageHours).toBeGreaterThan(0);
   });
 
-  it("prunes stale last_seen rows", () => {
+  it("does not prune stale last_seen rows (forever retention)", () => {
     getOrRecordHeadlineFirstSeen({
       userId: "u-prune",
       symbol: "OLD",
@@ -99,8 +99,10 @@ describe("getOrRecordHeadlineFirstSeen", () => {
     getDb()
       .prepare(`UPDATE headline_first_seen SET last_seen = ? WHERE user_id = ?`)
       .run("2020-01-02T00:00:00.000Z", "u-prune");
-    const removed = pruneHeadlineFirstSeen(7 * 24 * 60 * 60 * 1000, Date.parse("2026-08-04T00:00:00.000Z"));
-    expect(removed).toBeGreaterThanOrEqual(1);
+    expect(pruneHeadlineFirstSeen(7 * 24 * 60 * 60 * 1000, Date.parse("2026-08-04T00:00:00.000Z"))).toBe(0);
+    expect(
+      (getDb().prepare("SELECT count(*) c FROM headline_first_seen WHERE user_id = ?").get("u-prune") as { c: number }).c
+    ).toBe(1);
   });
 });
 

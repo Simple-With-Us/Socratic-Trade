@@ -1,6 +1,6 @@
 # Copy Deck — Settings & Navigation Redesign (v2)
 
-**Author:** Copy Deck author · **Date:** 2026-07-01 · **Canonical design:** [`docs/settings-navigation-redesign.md`](../settings-navigation-redesign.md) (v2 — read Part I §"Target IA", §"Global frame", §"Multi-account & scoping model", §"Settings taxonomy", and Part II-B before wiring any of these strings).
+**Author:** Copy Deck author · **Date:** 2026-07-01 · **Canonical design:** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2 — read Part I §"Target IA", §"Global frame", §"Multi-account & scoping model", §"Settings taxonomy", and Part II-B before wiring any of these strings).
 
 This is the **canonical content/copy** for the whole redesign: every user-facing string, organized by surface. It is a build spec, not prose — each entry names the control type, the state it renders in, the backing field/route where relevant, and acceptance criteria. Where a string is load-bearing for safety (money-reality, one-way doors, halt), it is marked **[SAFETY-CRITICAL]** and its exact bytes are normative.
 
@@ -617,4 +617,4 @@ Full account-scope parity is **specified now**, implementation later (LOCKED DEC
 
 ---
 
-*This deck is organized by surface and cross-references [`docs/settings-navigation-redesign.md`](../settings-navigation-redesign.md) for the design rationale; it does not restate the design. Every phrase constant is defined once (§0) so client dialogs and server-side validators share one source of truth. Recommended homes: `src/lib/copy/nav-v2-copy.ts` (badge/word-class/label strings), `src/lib/copy/confirm-phrases.ts` (type-to-confirm constants). Existing conventions honored: `ConfirmationModal` type-to-confirm behavior (`app/components/ConfirmationModal.tsx`), `ACCOUNT_DELETE_PHRASE` (`src/lib/account-deletion.ts:5`).*
+*This deck is organized by surface and cross-references [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) for the design rationale; it does not restate the design. Every phrase constant is defined once (§0) so client dialogs and server-side validators share one source of truth. Recommended homes: `src/lib/copy/nav-v2-copy.ts` (badge/word-class/label strings), `src/lib/copy/confirm-phrases.ts` (type-to-confirm constants). Existing conventions honored: `ConfirmationModal` type-to-confirm behavior (`app/components/ConfirmationModal.tsx`), `ACCOUNT_DELETE_PHRASE` (`src/lib/account-deletion.ts:5`).*

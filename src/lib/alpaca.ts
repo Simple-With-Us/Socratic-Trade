@@ -1,4 +1,7 @@
-import Alpaca from "@alpacahq/alpaca-trade-api";
+import {
+  createAlpacaBrokerSdk,
+  type LegacyAlpacaRestClient
+} from "./alpaca-sdk-legacy-client";
 import crypto from "crypto";
 import type {
   AccountCapabilities,
@@ -25,12 +28,75 @@ import {
   type OptionOrderInput
 } from "./option-orders";
 import { OrderValidationError } from "./types";
+import { z } from "zod";
 import { fromAlpacaSymbol, normalizeSymbol, roundAlpacaPrice, toAlpacaSymbol } from "./money";
+import {
+  ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+  ALPACA_PAPER_DELAYED_FEED,
+  ALPACA_PAPER_EXPECTED_DELAY_SEC,
+  isAlpacaPaperAccount
+} from "./alpaca-paper-quotes";
 import { mergeAccountCapabilities } from "./venue-contract";
+import { normalizeVenueOrder } from "./venue-normalization";
+
+/**
+ * Pure resolution matrix for Alpaca time-in-force (Codex review, item 10). Alpaca rejects a
+ * GTC order carrying a fractional share quantity, a notional (dollar) amount, or placed in the
+ * extended-hours session — all require `time_in_force="day"` (docs.alpaca.markets). Bracket orders also require "day" for an
+ * unrelated reason (native OCO leg support), so they always resolve to "day" but are NOT
+ * counted as this item's normalization (bracket is the bracket path's own pre-existing reason).
+ *
+ * The integration side calls this once per order path (REST, MCP, native trailing) so the
+ * three call sites can't disagree, then audits `alpaca_tif_normalized_to_day` when
+ * `normalized === true` (the caller's intent was overridden).
+ */
+export function resolveAlpacaTimeInForce(input: {
+  requestedTimeInForce: TimeInForce;
+  isBracket: boolean;
+  quantity?: number;
+  notional?: number;
+  extendedHours?: boolean;
+}): { timeInForce: TimeInForce | "day"; normalized: boolean; reason?: "fractional_quantity" | "notional" | "extended_hours" } {
+  const { requestedTimeInForce, isBracket, quantity, notional, extendedHours } = input;
+  const isFractionalQty = quantity != null && !Number.isInteger(quantity);
+  const isNotional = notional != null && notional > 0;
+  // Extended-hours orders are day-only on Alpaca, like fractional/notional — a "gtc" would 422.
+  const isExtendedHours = extendedHours === true;
+
+  // Bracket forces day for its own pre-existing reason — don't double-flag as our normalization.
+  if (isBracket) {
+    return { timeInForce: "day", normalized: false };
+  }
+
+  // Whole-share, no notional, regular-hours, gtc: pass through unchanged — Alpaca accepts GTC whole-share orders.
+  if (!isFractionalQty && !isNotional && !isExtendedHours && requestedTimeInForce === "gtc") {
+    return { timeInForce: "gtc", normalized: false };
+  }
+
+  // Whole-share, no notional, regular-hours, gfd: Alpaca's docs treat gfd equivalent to day for the same trading
+  // session. Sending "gfd" is redundant — the broker normalizes to "day" anyway. We mirror that
+  // locally so the wire field is canonical "day" (matches what the broker will accept).
+  if (!isFractionalQty && !isNotional && !isExtendedHours && requestedTimeInForce === "gfd") {
+    return { timeInForce: "day", normalized: false };
+  }
+
+  // Fractional, notional, or extended-hours: only "gtc" is overridden (flag normalized=true
+  // so the override is observable). gfd already resolves to day via Alpaca's own rules; we mirror
+  // that and do NOT claim it was our normalization — the caller never asked for gtc so we
+  // shouldn't claim a gtc->day override.
+  if (requestedTimeInForce === "gtc") {
+    return {
+      timeInForce: "day",
+      normalized: true,
+      reason: isExtendedHours ? "extended_hours" : (isFractionalQty ? "fractional_quantity" : "notional")
+    };
+  }
+  return { timeInForce: "day", normalized: false };
+}
 import { toBrokerSide, isRejectedOrCanceledState } from "./broker-side";
 import { audit, getActiveConnectedAccount, getConnectedAccount, resolveApiKey } from "./db";
 import { logApiHealth } from "./db-health";
-import { fetchDailyOHLC } from "./history";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { isTransientNetworkError } from "./network-errors";
 import { SESSION_CLOSE_PROVIDER } from "./quote-delayed-fallback";
 import {
@@ -38,8 +104,10 @@ import {
   alpacaAccountReadBudgetMs,
   awaitWithFirstCallRetry,
   ALPACA_BROKER_IO_DEADLINE_MS,
+  BROKER_ORDER_PAGE_CAP,
   EQUITY_QUOTES_MS,
   equityOrdersDefaultSinceIso,
+  rejectIfAborted,
   withDeadline
 } from "./inflight-deadline";
 
@@ -98,6 +166,43 @@ const ALPACA_ACCOUNT_TTL_MS = 15_000;
 export function resetAlpacaAccountCacheForTests(): void {
   alpacaAccountCache.clear();
   alpacaAccountInflight.clear();
+  alpacaProbeCache.clear();
+}
+
+/** Expected Alpaca trading host for an environment. */
+export function alpacaExpectedHost(environment: string | undefined): string {
+  return environment === "live" ? "api.alpaca.markets" : "paper-api.alpaca.markets";
+}
+
+/**
+ * Resolve the REST baseUrl for a stored connected account, mirroring Tradier:
+ * `environment` is the venue authority. A stored baseUrl is honored only when
+ * its host matches that environment; a mismatched or unparseable value is
+ * ignored (undefined lets the SDK derive the host from the paper flag) so a
+ * paper key can never be sent to the live host, or vice versa.
+ */
+export function resolveAlpacaRestBaseUrl(input: {
+  environment?: string;
+  storedBaseUrl?: string;
+}): string | undefined {
+  const stored = input.storedBaseUrl?.trim();
+  if (!stored) return undefined;
+  let host: string | undefined;
+  try {
+    host = new URL(stored).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (host !== alpacaExpectedHost(input.environment)) return undefined;
+  let baseUrl = stored.replace(/\/+$/, "");
+  if (baseUrl.toLowerCase().endsWith("/v2")) baseUrl = baseUrl.slice(0, -3);
+  return baseUrl;
+}
+
+/** Non-reversible credential fingerprint for cache keys. Never the secret itself. */
+export function alpacaCredentialFingerprint(keyId: string, secretKey: string): string {
+  if (!keyId) return "none";
+  return crypto.createHash("sha256").update(`${keyId}:${secretKey}`).digest("hex").slice(0, 16);
 }
 
 // Re-exported for existing callers/tests that import symbol conversion from this module — the
@@ -169,40 +274,7 @@ export function estimateReviewNotional(
   };
 }
 
-export interface AlpacaTimeInForceResolution {
-  timeInForce: "day" | "gtc";
-  /** True only when the CALLER asked for "gtc" and this resolved to "day" because of it — the
-   *  honest signal for an audit receipt. A caller that already asked for "gfd" isn't "normalized". */
-  normalized: boolean;
-  reason?: "fractional_quantity" | "notional";
-}
 
-/**
- * Alpaca requires time_in_force="day" for any order carrying a fractional share quantity or a
- * notional (dollar) amount — fractional-share trading is day-only regardless of order type
- * (docs.alpaca.markets); a "gtc" on either is a guaranteed 422. Bracket orders already require
- * "day" for an unrelated reason (native OCO leg support). Resolves against the quantity/notional
- * actually being submitted (the caller must resolve any bracket-floor qty first), never the raw
- * proposal, so this can't drift from what really gets sent to the broker. Exported (and called from
- * a single place per order path below) so REST, MCP, and the native-trailing path can't disagree.
- */
-export function resolveAlpacaTimeInForce(input: {
-  requestedTimeInForce: TimeInForce;
-  isBracket: boolean;
-  quantity?: number;
-  notional?: number;
-}): AlpacaTimeInForceResolution {
-  const isFractionalQty = input.quantity != null && !Number.isInteger(input.quantity);
-  const isNotional = input.notional != null && input.notional > 0;
-  const requiresDay = input.isBracket || isFractionalQty || isNotional;
-  const timeInForce: "day" | "gtc" = requiresDay || input.requestedTimeInForce === "gfd" ? "day" : "gtc";
-  const normalized = input.requestedTimeInForce === "gtc" && (isFractionalQty || isNotional);
-  return {
-    timeInForce,
-    normalized,
-    reason: normalized ? (isFractionalQty ? "fractional_quantity" : "notional") : undefined
-  };
-}
 
 /** Alpaca's wire word for a stop-market is `stop`.  Keep `stop_limit` and everything else as-is. */
 export function mapAlpacaOrderTypeWrite(type: OrderType | string): string {
@@ -255,7 +327,7 @@ export function mcpWriteFailureAllowsRestFallback(error: unknown): boolean {
 class AlpacaBrokerGateway implements BrokerGateway {
   // Default getEquityOrders returns open orders plus terminal orders inside a bounded window.
   readonly ordersListIncludesTerminal = true;
-  private alpaca: Alpaca;
+  private alpaca: LegacyAlpacaRestClient;
   private label: string;
   private isMcp: boolean;
   private mcpUrl?: string;
@@ -264,7 +336,16 @@ class AlpacaBrokerGateway implements BrokerGateway {
   private keySource: string;
   /** Stable per-credential cache key.  Never includes the secret. */
   private accountCacheKey: string;
+  private credentialFingerprint: string;
   private hasRestKeys: boolean;
+  /**
+   * Connected-account identity for the quote tape.  Alpaca PAPER trades on
+   * Alpaca's `delayed_sip` feed (expected ~900s delay); every other account
+   * keeps the broker's default feed.  ACCOUNT SCOPED — the connected account
+   * row decides, never a process-global env var.
+   */
+  private connectedAccountBroker?: string;
+  private connectedAccountEnvironment?: string;
 
   constructor(private userId: string, connectedAccountId?: string) {
     const targeted = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
@@ -275,7 +356,13 @@ class AlpacaBrokerGateway implements BrokerGateway {
         ? brokerAccount
         : undefined;
     this.keySource = accountKeys ? "user" : "env";
-    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}`;
+    this.connectedAccountBroker = accountKeys?.broker;
+    this.connectedAccountEnvironment = accountKeys?.environment;
+    this.credentialFingerprint = alpacaCredentialFingerprint(
+      accountKeys?.apiKey?.trim() || "",
+      accountKeys?.apiSecret?.trim() || ""
+    );
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
     this.isMcp = brokerAccount?.broker === "alpaca-mcp";
     this.label = accountKeys?.label || (accountKeys?.environment === "live" ? "Alpaca Brokerage" : "Alpaca Paper");
     // A connected-account key (per-user account data) wins. If an Alpaca account is explicitly
@@ -287,6 +374,9 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const keyId = accountKeys?.apiKey?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_api_key", userId) || "" : "");
     const secretKey = accountKeys?.apiSecret?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_secret_key", userId) || "" : "");
     this.hasRestKeys = !!keyId;
+    // Recompute with the resolved credentials (covers the operator env fallback).
+    this.credentialFingerprint = alpacaCredentialFingerprint(keyId, secretKey);
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
 
     let baseUrl = accountKeys?.baseUrl?.trim();
     if (this.isMcp) {
@@ -303,31 +393,32 @@ class AlpacaBrokerGateway implements BrokerGateway {
         `Alpaca MCP credentials are missing for ${this.label}. Open Connections and re-save the MCP endpoint or API key.`
       );
     }
-
-    if (baseUrl && !this.isMcp) {
-      baseUrl = baseUrl.replace(/\/+$/, "");
-      if (baseUrl.toLowerCase().endsWith("/v2")) {
-        baseUrl = baseUrl.slice(0, -3);
-      }
+    // Alpaca API keys are a key-ID + secret pair. A key ID alone was previously
+    // sent as an OAuth access token, which 401s every run with an opaque auth
+    // failure. Fail at construction with the actionable cause instead. MCP
+    // accounts are exempt: their key may be a genuine OAuth/bearer token.
+    if (!this.isMcp && keyId && !secretKey) {
+      throw new Error(
+        `Alpaca API secret is missing for ${this.label}. Open Connections and re-save both the API key ID and the secret key.`
+      );
     }
 
-    const options: any = {
+    if (!this.isMcp) {
+      baseUrl = resolveAlpacaRestBaseUrl({
+        environment: accountKeys?.environment,
+        storedBaseUrl: baseUrl
+      });
+    }
+
+    const legacyOpts = {
       paper: accountKeys?.environment !== "live",
-      usePolygon: false
+      keyId: keyId && secretKey ? keyId : undefined,
+      secretKey: keyId && secretKey ? secretKey : undefined,
+      oauth: this.isMcp && keyId && !secretKey ? keyId : undefined,
+      baseUrl: baseUrl && !this.isMcp ? baseUrl : undefined
     };
 
-    if (keyId && !secretKey) {
-      options.oauth = keyId;
-    } else {
-      options.keyId = keyId;
-      options.secretKey = secretKey;
-    }
-
-    if (baseUrl && !this.isMcp) {
-      options.baseUrl = baseUrl;
-    }
-
-    this.alpaca = new Alpaca(options);
+    this.alpaca = createAlpacaBrokerSdk(legacyOpts);
   }
 
   // Wrap a raw Alpaca SDK call so the admin connections-health page can show whether the
@@ -354,7 +445,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const attempts = opts?.retryTransient === false ? 1 : 2;
     let lastErr: unknown;
     const runOnce = () => {
-      const call = fn();
+      const call = rejectIfAborted(fn(), opts?.signal);
       return opts?.deadlineMs != null
         ? withDeadline(call, opts.deadlineMs, "Alpaca broker call timed out")
         : call;
@@ -526,7 +617,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       }
       return undefined;
     } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
+      const status = alpacaErrorHttpStatus(error);
       if (status === 404) return undefined;
       const msg = error instanceof Error ? error.message : String(error);
       if (/\b404\b|not found/i.test(msg)) return undefined;
@@ -552,7 +643,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       }
       return undefined;
     } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
+      const status = alpacaErrorHttpStatus(error);
       if (status === 404) {
         return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { reconciled: true, missing: true } };
       }
@@ -566,7 +657,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
    * `trading_blocked` / non-ACTIVE status means strategy runs would only mint unplaceable proposals.
    */
   async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
-    const key = `alpaca|${accountNumber}|${this.keySource}`;
+    const key = `alpaca|${accountNumber}|${this.keySource}|${this.credentialFingerprint}`;
     const cached = alpacaProbeCache.get(key);
     if (cached && Date.now() - cached.at < ALPACA_PROBE_TTL_MS) {
       return { ok: cached.ok, reason: cached.reason };
@@ -752,7 +843,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const seen = new Set<string>();
     const PAGE = 500;
     let until: string | undefined = params.until;
-    for (let guard = 0; guard < 50; guard++) {
+    for (let guard = 0; guard < BROKER_ORDER_PAGE_CAP; guard++) {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
       const page = (await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(() => this.alpaca.getOrders({
@@ -807,11 +898,22 @@ class AlpacaBrokerGateway implements BrokerGateway {
     }
     const normalizedSymbols = Array.from(aliasesByCanonical.keys());
     const quotes: Record<string, BrokerQuote> = {};
+    const wireSymbols = normalizedSymbols.map(toAlpacaSymbol);
+    // Alpaca PAPER trades on the `delayed_sip` feed (expected ~900s delay).
+    // ACCOUNT SCOPED: only the connected Alpaca paper account switches feed;
+    // live Alpaca and every other account keep the broker default.
+    const delayedPaper = isAlpacaPaperAccount({
+      broker: this.connectedAccountBroker,
+      environment: this.connectedAccountEnvironment
+    });
+    const feed = delayedPaper ? ALPACA_PAPER_DELAYED_FEED : undefined;
+    let quoteResponse: Record<string, Record<string, unknown>> = {};
+    let tradeResponse: Record<string, Record<string, unknown>> = {};
     try {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
-      const response = await awaitWithFirstCallRetry(
+      quoteResponse = await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(
-          () => this.alpaca.getLatestQuotes(normalizedSymbols.map(toAlpacaSymbol)),
+          () => this.alpaca.getLatestQuotes(wireSymbols, feed ? { feed } : undefined),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS, signal }
         ),
         {
@@ -822,34 +924,53 @@ class AlpacaBrokerGateway implements BrokerGateway {
           }
         }
       );
-      for (const [rawSymbol, q] of Object.entries(response)) {
-        const symbol = fromAlpacaSymbol(rawSymbol);
-        const anyQ = q as Record<string, number | string>;
-        const bid = optionalNumber(anyQ.bp);
-        const ask = optionalNumber(anyQ.ap);
-        quotes[symbol] = {
-          symbol,
-          price: ask ?? bid ?? 0,
-          bid,
-          ask,
-          asOf: optionalIso(anyQ.t),
-          provider: "alpaca",
-          fetchedAt: new Date().toISOString()
-        };
-      }
     } catch (error) {
-      // Don't fail silently — a swallowed quote error is what makes the review fall through to an
-      // unusable price. Surface it; the keyless fallback below still tries to price the symbols.
       console.warn(`[alpaca] getLatestQuotes failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
     }
-    // Keyless market-data fallback for any symbol the broker left unpriced (0/empty bid-ask — common
-    // outside market hours and on the free IEX tier). A recent daily close keeps the chat quote and
-    // the pre-trade notional review usable instead of failing closed to the over-cap sentinel.
-    await fillMissingQuotesWithClose(quotes, normalizedSymbols, async (symbol) => {
-      const bars = await fetchDailyOHLC(symbol, Date.now(), this.userId);
-      const last = bars && bars.length ? bars[bars.length - 1] : undefined;
-      return last && typeof last.close === "number" ? { price: last.close, asOf: last.time != null ? String(last.time) : undefined } : undefined;
-    });
+    const latestTrades = this.alpaca.getLatestTrades;
+    if (typeof latestTrades === "function") {
+      try {
+        tradeResponse = await this.trackHealth(
+          () => latestTrades.call(this.alpaca, wireSymbols, feed ? { feed } : undefined),
+          { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS }
+        );
+      } catch (error) {
+        console.warn(`[alpaca] getLatestTrades failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
+      }
+    }
+    const rawSymbols = new Set<string>([...Object.keys(quoteResponse), ...Object.keys(tradeResponse)]);
+    for (const rawSymbol of rawSymbols) {
+      const symbol = fromAlpacaSymbol(rawSymbol);
+      const anyQ = (quoteResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const anyT = (tradeResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const bid = optionalNumber(anyQ.bp);
+      const ask = optionalNumber(anyQ.ap);
+      // Last print, then the two-sided mid.  Quote size (`as`/`bs`) and trade
+      // size (`s`) are not prices, and a one-sided book is not a mid.
+      const selected = selectObservedQuotePrice({ last: anyT.p, bid, ask });
+      if (selected.price === undefined) continue;
+      const asOf = providerObservationIso(selected.basis === "last" ? anyT.t : anyQ.t);
+      quotes[symbol] = {
+        symbol,
+        price: selected.price,
+        bid,
+        ask,
+        ...(asOf ? { asOf } : {}),
+        provider: "alpaca",
+        fetchedAt: new Date().toISOString(),
+        // Alpaca PAPER `delayed_sip`: the venue tape is authoritative and the
+        // ~900s publication delay is EXPECTED.  Consumers must age the snapshot
+        // by `fetchedAt`, must not overlay a fresher realtime quote, and must
+        // still flag lag beyond expected + tolerance as excess delay.
+        ...(delayedPaper
+          ? {
+              venuePriceAuthoritative: true,
+              expectedDelaySec: ALPACA_PAPER_EXPECTED_DELAY_SEC,
+              delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC
+            }
+          : {})
+      };
+    }
     for (const [canonical, aliases] of aliasesByCanonical) {
       const quote = quotes[canonical];
       if (!quote) continue;
@@ -861,7 +982,21 @@ class AlpacaBrokerGateway implements BrokerGateway {
   }
 
   async getEquityTradability(accountNumber: string, symbols: string[]) {
-    return Object.fromEntries(symbols.map((symbol) => [normalizeSymbol(symbol), { tradable: true, fractional: true }]));
+    const results: Record<string, { tradable: boolean; fractional: boolean }> = {};
+    for (const symbol of symbols) {
+      try {
+        const asset = await this.trackHealth(() => this.alpaca.getAsset(toAlpacaSymbol(symbol)), {
+          deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS
+        });
+        results[normalizeSymbol(symbol)] = {
+          tradable: asset.tradable === true,
+          fractional: asset.fractionable === true
+        };
+      } catch (error) {
+        results[normalizeSymbol(symbol)] = { tradable: false, fractional: false };
+      }
+    }
+    return results;
   }
 
   async reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder> {
@@ -871,9 +1006,37 @@ class AlpacaBrokerGateway implements BrokerGateway {
     return { estimatedNotional, alerts, raw: { alpaca: true } };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "alpaca", this.userId) as typeof rawInput;
     const isBracket = !!(input.bracketTakeProfit || input.bracketStopLoss);
     const isTrailing = input.trailPercent != null && input.trailPercent > 0;
+
+    // Single TIF resolution per order — used by all three submission paths below (native
+    // trailing, REST, MCP) so they can't disagree, and audited once when we override the
+    // caller's intent (Codex review, item 10).
+    //
+    // Use the ORIGINAL rawInput.timeInForce (the caller's expressed intent) — normalizeVenueOrder
+    // already coerced fractional/notional gtc -> day, so by the time we reach this line the
+    // request looks like a 'day' request and we couldn't tell what the caller actually asked
+    // for. The audit payload's requestedTimeInForce field must reflect the original 'gtc'/'gfd'
+    // so the override is observable downstream.
+    const tifResolution = resolveAlpacaTimeInForce({
+      requestedTimeInForce: rawInput.timeInForce,
+      isBracket,
+      quantity: input.quantity,
+      notional: input.dollarAmount,
+      extendedHours: input.marketHours === "extended_hours"
+    });
+    if (tifResolution.normalized) {
+      audit("alpaca_tif_normalized_to_day", {
+        symbol: input.symbol,
+        requestedTimeInForce: rawInput.timeInForce,
+        reason: tifResolution.reason,
+        ...(input.quantity != null ? { quantity: input.quantity } : {}),
+        ...(input.dollarAmount != null ? { dollarAmount: input.dollarAmount } : {})
+      }, this.userId);
+    }
+    const resolvedTimeInForce = tifResolution.timeInForce;
 
     // Native trailing stop: Alpaca's `trailing_stop` order type with `trail_percent` — the broker
     // trails the high-water mark itself. Mutually exclusive with brackets (both would claim the
@@ -887,10 +1050,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       if (!input.quantity || !(input.quantity > 0)) {
         throw new OrderValidationError("Alpaca trailing stop requires a positive share quantity (no notional trailing stops).");
       }
-      const trailingTif = resolveAlpacaTimeInForce({ requestedTimeInForce: input.timeInForce, isBracket: false, quantity: input.quantity });
-      if (trailingTif.normalized) {
-        audit("alpaca_tif_normalized_to_day", { symbol: input.symbol, side: input.side, requestedTimeInForce: input.timeInForce, reason: trailingTif.reason, quantity: input.quantity }, this.userId);
-      }
+      
       try {
         const raw = await this.trackHealth(
           () => this.alpaca.createOrder({
@@ -899,7 +1059,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
             type: "trailing_stop",
             trail_percent: String(input.trailPercent),
             qty: input.quantity,
-            time_in_force: trailingTif.timeInForce,
+            time_in_force: resolvedTimeInForce,
             client_order_id: input.refId
           }),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS, retryTransient: false }
@@ -943,22 +1103,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
     // is day-only (docs.alpaca.markets). A caller-requested "gtc" (an LLM proposal, or any
     // dollar-routed entry) that would otherwise 422 gets normalized instead of reaching the broker;
     // the original intent is preserved via an audit receipt (Codex review, item 10).
-    const tif = resolveAlpacaTimeInForce({
-      requestedTimeInForce: input.timeInForce,
-      isBracket,
-      quantity: effectiveQty,
-      notional: effectiveNotional
-    });
-    if (tif.normalized) {
-      audit("alpaca_tif_normalized_to_day", {
-        symbol: input.symbol,
-        side: input.side,
-        requestedTimeInForce: input.timeInForce,
-        reason: tif.reason,
-        quantity: effectiveQty,
-        dollarAmount: effectiveNotional
-      }, this.userId);
-    }
+
 
     const fallbackFn = async () => {
       try {
@@ -966,7 +1111,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
           symbol: toAlpacaSymbol(input.symbol),
           side: toBrokerSide(input.side), // short→sell, cover→buy; Alpaca infers open/close from position
           type: mapAlpacaOrderTypeWrite(input.type),
-          time_in_force: tif.timeInForce,
+          time_in_force: resolvedTimeInForce,
           client_order_id: input.refId
         };
 
@@ -976,7 +1121,12 @@ class AlpacaBrokerGateway implements BrokerGateway {
           orderOptions.notional = effectiveNotional;
         }
 
-        if (input.limitPrice) orderOptions.limit_price = roundAlpacaPrice(input.limitPrice);
+        // limit_price is only legal on limit-family order types — Alpaca rejects a market order that
+        // carries one with HTTP 422 "market orders require no stop or limit price" (the PG cover,
+        // 2026-07-16 and 07-22: a market buy-to-cover still wearing the proposal's limitPrice).
+        if (input.limitPrice && (input.type === "limit" || input.type === "stop_limit")) {
+          orderOptions.limit_price = roundAlpacaPrice(input.limitPrice);
+        }
         // stop_price is only legal on stop-family order types — Alpaca rejects a limit order that
         // carries one with HTTP 422 40010001 "limit orders require no stop price" (proposals may
         // carry a protective stopPrice idea; that intent rides the bracket stop_loss /
@@ -1030,18 +1180,24 @@ class AlpacaBrokerGateway implements BrokerGateway {
       symbol: toAlpacaSymbol(input.symbol),
       side: toBrokerSide(input.side), // short→sell, cover→buy; Alpaca infers open/close from position
       type: mapAlpacaOrderTypeWrite(input.type),
-      time_in_force: tif.timeInForce,
+      time_in_force: resolvedTimeInForce,
       client_order_id: input.refId
     };
 
     if (effectiveQty != null) orderArgs.qty = String(effectiveQty);
     else if (effectiveNotional != null) orderArgs.notional = String(effectiveNotional);
 
-    if (input.limitPrice) orderArgs.limit_price = String(roundAlpacaPrice(input.limitPrice));
-    // Same constraint as the REST path: stop_price only on stop-family types (Alpaca 422s a
-    // limit order carrying one).
+    // Same constraints as the REST path: limit_price only on limit-family types (Alpaca 422s a
+    // market order carrying one), stop_price only on stop-family types (Alpaca 422s a limit order
+    // carrying one).
+    if (input.limitPrice && (input.type === "limit" || input.type === "stop_limit")) {
+      orderArgs.limit_price = String(roundAlpacaPrice(input.limitPrice));
+    }
     if (input.stopPrice && (input.type === "stop_market" || input.type === "stop_limit")) {
       orderArgs.stop_price = String(roundAlpacaPrice(input.stopPrice));
+    }
+    if (input.marketHours === "extended_hours") {
+      orderArgs.extended_hours = true;
     }
 
     if (isBracket) {
@@ -1166,7 +1322,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
       // propagate so reconcilePendingBracketTeardowns' bounded-retry sweep actually retries it,
       // instead of the row being silently and permanently dropped on the first hiccup (adversarial
       // review of PR #1661, 2026-07-16).
-      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+      if (alpacaErrorHttpStatus(error) === 404) {
         return { cancelledOrderIds: [] };
       }
       throw error;
@@ -1270,21 +1426,46 @@ function optionalIso(value: unknown): string | undefined {
   return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
 }
 
+/** Broker-error shape shared by the v3 axios envelope (`response.status` / `response.data`)
+ *  and the v5 fetch `ApiError` (top-level `status`, broker text folded into `message`).
+ *  Parsed with safeParse — never asserted — so a timeout abort or foreign throw cannot
+ *  crash the order path; unparseable input behaves as "no status, no body". */
+const AlpacaErrorSchema = z
+  .object({
+    status: z.number().optional(),
+    message: z.string().optional(),
+    response: z
+      .object({
+        status: z.number().optional(),
+        data: z.unknown().optional()
+      })
+      .passthrough()
+      .optional()
+  })
+  .passthrough();
+
+function alpacaErrorHttpStatus(error: unknown): number | undefined {
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  if (!parsed.success) return undefined;
+  if (typeof parsed.data.status === "number") return parsed.data.status;
+  return parsed.data.response?.status;
+}
+
 function formatAlpacaOrderError(error: unknown): string {
-  const err = error as {
-    message?: string;
-    response?: { status?: number; data?: unknown };
-  };
-  const status = err.response?.status;
-  const data = err.response?.data;
+  const parsed = AlpacaErrorSchema.safeParse(error);
+  const err = parsed.success ? parsed.data : undefined;
+  const status = alpacaErrorHttpStatus(error);
+  const data = err?.response?.data;
   const body = typeof data === "string"
     ? data
     : data && typeof data === "object"
       ? JSON.stringify(data)
       : "";
-  const message = err.message ?? String(error);
+  const message = err?.message ?? String(error);
   const detail = [status ? `HTTP ${status}` : "", message, body].filter(Boolean).join(" — ");
-  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(body)) {
+  // The v5 SDK folds the broker `{code, message}` envelope into `message` (there is no
+  // `response.data` to test), so match the permission keywords against both.
+  if (status === 403 && !/position|short|permission|forbidden|insufficient/i.test(`${message} ${body}`)) {
     return `${detail} — broker forbade the order; verify the account has permission and a matching open position if this was a sell/cover.`;
   }
   return detail;
