@@ -124,13 +124,50 @@ describe("src/lib/api-error", () => {
       expect(captured).toBeInstanceOf(Error);
       expect(captured).not.toBe(failure);
       expect((captured as Error).name).toBe("TypeError");
+      expect((captured as Error).message).toContain("Tradier HTTP 401");
       expect((captured as Error).message).not.toMatch(/sk-live/);
       expect((captured as Error).cause).toBeUndefined();
       expect(capture.mock.calls[0]?.[1]).toBe("Failed to read request body");
-      expect(capture.mock.calls[0]?.[2]).toMatchObject({ error: expect.not.stringMatching(/sk-live/) });
+      const extra = capture.mock.calls[0]?.[2] as { error?: string } | undefined;
+      expect(extra?.error).toContain("Tradier HTTP 401");
+      expect(extra?.error).not.toMatch(/sk-live/);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("Tradier HTTP 401"));
+      expect(consoleError).toHaveBeenCalledWith(expect.not.stringMatching(/sk-live/));
     } finally {
       capture.mockRestore();
       consoleError.mockRestore();
+    }
+  });
+});
+
+
+describe("resolveRequestUserIdOrApiError", () => {
+  it("returns the JSON 500 envelope when identity resolution throws a local database fault", async () => {
+    const requestUser = await import("../src/lib/request-user");
+    const spy = vi.spyOn(requestUser, "resolveRequestUserIdOrResponse").mockImplementation(() => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    });
+    try {
+      const { resolveRequestUserIdOrApiError } = await import("../src/lib/api-error");
+      const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(500);
+      expect(await (response as Response).json()).toMatchObject({ ok: false, error: "internal_error" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("passes through an identity-denial Response unchanged", async () => {
+    const requestUser = await import("../src/lib/request-user");
+    const denied = Response.json({ ok: false, error: "verified_identity_required" }, { status: 401 });
+    const spy = vi.spyOn(requestUser, "resolveRequestUserIdOrResponse").mockReturnValue(denied);
+    try {
+      const { resolveRequestUserIdOrApiError } = await import("../src/lib/api-error");
+      const response = resolveRequestUserIdOrApiError(new Request("http://localhost/api/accounts"));
+      expect(response).toBe(denied);
+    } finally {
+      spy.mockRestore();
     }
   });
 });

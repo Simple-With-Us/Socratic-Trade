@@ -92,7 +92,8 @@ describe("sentry-metrics helpers", () => {
   it("captures a sanitized Error with tags and context, not the raw exception", async () => {
     const failure = new TypeError("Tradier HTTP 401: invalid token sk-live-secret-value");
     failure.stack = "TypeError: Tradier HTTP 401: invalid token sk-live-secret-value\n    at broker.ts:1:1";
-    captureHandledException(failure, "Broker read failed with an internal server error", { error: "ignored raw" });
+    const callerMessage = "Tradier HTTP 401: invalid token [redacted]";
+    captureHandledException(failure, "Broker read failed with an internal server error", { error: callerMessage });
     await vi.waitFor(() => {
       expect(sentryMock.captureException).toHaveBeenCalledOnce();
     });
@@ -100,12 +101,14 @@ describe("sentry-metrics helpers", () => {
     expect(captured).toBeInstanceOf(Error);
     expect(captured).not.toBe(failure);
     expect(captured.name).toBe("TypeError");
+    expect(captured.message).toContain("Tradier HTTP 401");
     expect(captured.message).not.toMatch(/sk-live/);
     expect(captured.cause).toBeUndefined();
+    expect(String(captured.stack ?? "")).toContain("Tradier HTTP 401");
     expect(String(captured.stack ?? "")).not.toMatch(/sk-live/);
     expect(ctx).toEqual({
       tags: { handled: "true", error_name: "TypeError" },
-      extra: { context: "Broker read failed with an internal server error", error: expect.not.stringMatching(/sk-live/) }
+      extra: { context: "Broker read failed with an internal server error", error: callerMessage }
     });
   });
 

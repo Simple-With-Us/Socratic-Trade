@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
+import { resolveRequestUserIdOrResponse } from "./request-user";
 import { captureHandledException, sanitizedCapturedError } from "./sentry-metrics";
 import { safeErrorMessage } from "./telemetry-sanitize";
 
@@ -108,11 +109,26 @@ export function isBrokerGatewayError(error: unknown): boolean {
  * `cause`), so upstream bodies and credentials never leave the process.
  */
 export function reportHandledError(context: string, error: unknown): void {
-  const message = safeErrorMessage(error);
-  console.error(`${context}: ${message}`);
-  // Pass a sanitized Error (message + name + rewritten stack, no raw `cause`) rather than
-  // the original exception, which may embed upstream bodies or credentials.
-  captureHandledException(sanitizedCapturedError(error), context, { error: message });
+  // Sanitize once, before any telemetry leaves the process.  console.error and Sentry
+  // both receive only this Error (sanitized message, original name, rewritten stack, no raw cause).
+  const sanitized = sanitizedCapturedError(error);
+  console.error(`${context}: ${sanitized.message}`);
+  captureHandledException(sanitized, context, { error: sanitized.message });
+}
+
+/**
+ * Resolve the request user id.  Auth/session denials stay the 401/409 Response from
+ * `resolveRequestUserIdOrResponse`.  Local faults (e.g. SQLITE_BUSY) return the JSON 500
+ * `internal_error` envelope instead of escaping as Next's default non-JSON 500.
+ */
+export function resolveRequestUserIdOrApiError(request: Request): string | Response {
+  try {
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
+    return userId;
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 /**

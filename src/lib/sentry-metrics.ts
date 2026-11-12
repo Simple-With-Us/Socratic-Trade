@@ -167,9 +167,10 @@ export function sanitizedCapturedError(error: unknown): Error {
 
 /** Capture a handled exception without sending the raw error object to Sentry. */
 export function captureHandledException(error: unknown, context: string, attributes?: LogAttrs): void {
-  const message = safeErrorMessage(error);
   const captured = sanitizedCapturedError(error);
-  const extra = compactAttrs({ context, ...attributes, error: message });
+  // Preserve the caller's `error` attribute (already sanitized once by reportHandledError)
+  // so Sentry matches console.error and the truncation count stays correct.
+  const extra = compactAttrs({ context, ...attributes });
   const errorName = captured.name || undefined;
   void loadSentry().then((Sentry) => {
     try {

@@ -3,10 +3,11 @@ import {
   brokerReadError,
   brokerReadOrInternalError,
   isBrokerGatewayError,
-  reportHandledError
+  jsonError,
+  reportHandledError,
+  resolveRequestUserIdOrApiError
 } from "@/lib/api-error";
 import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -31,19 +32,18 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
-  // Resolve identity before the provider try so a local SQLite or auth failure is
-  // not mapped to a 502 broker outage.
-  let userId: string | Response;
-  try {
-    userId = resolveRequestUserIdOrResponse(req);
-  } catch (error) {
-    return brokerReadOrInternalError(error);
-  }
+  const userId = resolveRequestUserIdOrApiError(req);
   if (userId instanceof Response) return userId;
 
   try {
     const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
-    if (!bars || bars.length === 0) {
+    // fetchDailyOHLC catches provider failures and resolves null; a genuine empty
+    // series is an array (possibly length 0).  Only null is a total provider failure.
+    if (bars == null) {
+      reportHandledError("Price history fetch failed", new Error("History provider returned no series"));
+      return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
+    }
+    if (bars.length === 0) {
       return NextResponse.json({ symbol, bars: [], note: "no price history available" });
     }
 

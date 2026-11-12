@@ -48,7 +48,31 @@ describe("/api/history", () => {
     expect(await response.json()).toEqual({ symbol: "BAC", bars: [], note: "no price history available" });
   });
 
-  it("returns 502 broker_unavailable when the history provider fails", async () => {
+  it("returns 502 broker_unavailable when fetchDailyOHLC resolves null", async () => {
+    vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(closeOnlyBars);
+    const control = await getHistory();
+    expect(control.status).toBe(200);
+    expect((await control.json()).bars).toHaveLength(2);
+
+    const metrics = await import("../src/lib/sentry-metrics");
+    const capture = vi.spyOn(metrics, "captureHandledException").mockImplementation(() => {});
+    vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(null);
+    try {
+      const response = await getHistory();
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "broker_unavailable",
+        message: "Price history is temporarily unavailable."
+      });
+      expect(capture).toHaveBeenCalledOnce();
+      expect(capture.mock.calls[0]?.[1]).toBe("Price history fetch failed");
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
+  it("returns 502 broker_unavailable when the history provider rejects", async () => {
     vi.mocked(fetchDailyOHLC).mockResolvedValueOnce(closeOnlyBars);
     const control = await getHistory();
     expect(control.status).toBe(200);

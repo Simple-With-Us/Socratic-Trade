@@ -1,4 +1,4 @@
-import { jsonError, parseRequestJson } from "@/lib/api-error";
+import { jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
 import { PolicyUpdateSchema } from "@/lib/policy-update-schema";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
@@ -17,7 +17,6 @@ import { isIndexUniverse, normalizeIncludedIndices } from "@/lib/index-universes
 import { getBrokerGateway } from "@/lib/broker";
 import { stripNullsDeep } from "@/lib/policy-null-stripping";
 import { normalizeExclusivePolicyCaps } from "@/lib/policy-normalization";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   invalidSymbolMessage,
   newlyAddedInvalidSymbols,
@@ -42,7 +41,7 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   return NextResponse.json(getPolicy(userId));
 }
@@ -55,7 +54,7 @@ export async function PUT(request: Request) {
     return jsonError(400, "invalid_payload", "Invalid policy update payload.");
   }
   const body = validation.data as Record<string, unknown>;
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {

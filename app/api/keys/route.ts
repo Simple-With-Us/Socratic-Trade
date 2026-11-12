@@ -1,10 +1,10 @@
 import "server-only";
 import { z } from "zod";
-import { jsonError, parseRequestJson } from "@/lib/api-error";
+import { jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
-import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserIdOrResponse } from "@/lib/request-user";
+import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
 import {
   apiKeyEnvVarForService,
@@ -316,7 +316,7 @@ function canSelectCodeCli(request: NextRequest, userId: string): boolean {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   const rawService = searchParams.get("service");
   let service: string | undefined;
@@ -434,7 +434,7 @@ export async function POST(request: NextRequest) {
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserIdOrResponse(request);
+    const userId = resolveRequestUserIdOrApiError(request);
     if (userId instanceof Response) return userId;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
@@ -544,7 +544,7 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
   if (!parsedService.success) {
