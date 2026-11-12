@@ -108,7 +108,8 @@ extension Font {
 
 /// Bars and tab items are drawn by UIKit, which never sees SwiftUI's `.font` — without these
 /// proxies the nav title and tab labels would stay on SF while the content switched to Lato,
-/// which is more jarring than not switching at all.  Called once at launch.
+/// which is more jarring than not switching at all.  Called once at launch; a Dynamic Type
+/// change re-applies the proxies and restyles the bars already on screen.
 ///
 /// Only the title/label fonts are touched; colours, materials, and scroll-edge behaviour are
 /// left to the system so this cannot regress the glass tab bar.
@@ -147,6 +148,52 @@ enum AppAppearance {
         for state in [UIControl.State.normal, .selected, .highlighted, .disabled] {
             UITabBarItem.appearance().setTitleTextAttributes([.font: tabFont], for: state)
             UISegmentedControl.appearance().setTitleTextAttributes([.font: segmentedFont], for: state)
+        }
+
+        refreshLiveChrome(nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
+    }
+
+    /// `UIAppearance` only styles views created after the proxy changes.  The root navigation
+    /// and tab bars live for the whole session, so a Dynamic Type change must also restyle the
+    /// bars already on screen or they keep the old size until relaunch.
+    private static func refreshLiveChrome(
+        nav: UINavigationBarAppearance,
+        tabFont: UIFont,
+        segmentedFont: UIFont
+    ) {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                restyle(view: window, nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
+            }
+        }
+    }
+
+    private static func restyle(
+        view: UIView,
+        nav: UINavigationBarAppearance,
+        tabFont: UIFont,
+        segmentedFont: UIFont
+    ) {
+        let states: [UIControl.State] = [.normal, .selected, .highlighted, .disabled]
+        if let bar = view as? UINavigationBar {
+            bar.standardAppearance = nav
+            bar.compactAppearance = nav
+            bar.scrollEdgeAppearance = nav
+            bar.setNeedsLayout()
+        } else if let bar = view as? UITabBar {
+            for item in bar.items ?? [] {
+                for state in states {
+                    item.setTitleTextAttributes([.font: tabFont], for: state)
+                }
+            }
+            bar.setNeedsLayout()
+        } else if let control = view as? UISegmentedControl {
+            for state in states {
+                control.setTitleTextAttributes([.font: segmentedFont], for: state)
+            }
+        }
+        for subview in view.subviews {
+            restyle(view: subview, nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
         }
     }
 }
