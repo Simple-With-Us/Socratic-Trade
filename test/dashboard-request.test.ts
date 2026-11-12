@@ -128,6 +128,15 @@ describe("shared dashboard request", () => {
     await expect(second).resolves.toEqual({ ok: true });
     expect(fetches).toBe(2);
   });
+
+  it("keeps a refresh waiter that joined the attempt which just finished", async () => {
+    const { refreshWaitersReadyForAttempt } = await import("../app/console/lib/dashboard-request");
+    const early = { seenAttempt: 1, id: "early" };
+    const current = { seenAttempt: 2, id: "current" };
+    const split = refreshWaitersReadyForAttempt([early, current], 2);
+    expect(split.ready.map((waiter) => waiter.id)).toEqual(["early"]);
+    expect(split.waiting.map((waiter) => waiter.id)).toEqual(["current"]);
+  });
 });
 
 describe("fetchDashboard", () => {

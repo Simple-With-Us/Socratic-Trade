@@ -40,6 +40,24 @@ export function shouldSkipDashboardPoll(now = nowFn()): boolean {
   return shared !== null || now < backoffUntil;
 }
 
+export interface RefreshWaiter {
+  seenAttempt: number;
+}
+
+/** A refresh that joined attempt N is ready when a later attempt has finished. */
+export function refreshWaitersReadyForAttempt<T extends RefreshWaiter>(
+  waiters: readonly T[],
+  finishedAttempt: number
+): { ready: T[]; waiting: T[] } {
+  const ready: T[] = [];
+  const waiting: T[] = [];
+  for (const waiter of waiters) {
+    if (waiter.seenAttempt < finishedAttempt) ready.push(waiter);
+    else waiting.push(waiter);
+  }
+  return { ready, waiting };
+}
+
 export function setDashboardRequestClockForTests(clock: (() => number) | null): void {
   nowFn = clock ?? (() => Date.now());
 }

@@ -19,7 +19,7 @@ import {
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { ConsoleApiError, fetchDashboard } from "./api";
 import { deriveConsoleLoadState } from "./console-load-state";
-import { shouldSkipDashboardPoll } from "./dashboard-request";
+import { refreshWaitersReadyForAttempt, shouldSkipDashboardPoll } from "./dashboard-request";
 import { SENTENCE_GAP } from "./format";
 
 // Shown the instant a 401 is detected, replacing whatever freshness copy would otherwise
@@ -154,10 +154,17 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // Explicit refresh() calls that arrived while a fetch was already running. Released when that
   // fetch (and the one follow-up it queued) settles, so await refresh() still sees the new snapshot
   // without aborting the request that is already on the wire.
-  const refreshWaiters = useRef<Array<() => void>>([]);
-  const releaseRefreshWaiters = useCallback(() => {
-    const waiters = refreshWaiters.current.splice(0);
-    for (const resolve of waiters) resolve();
+  const refreshWaiters = useRef<Array<{ resolve: () => void; seenAttempt: number }>>([]);
+  const attemptRef = useRef(0);
+  const releaseRefreshWaiters = useCallback((finishedAttempt?: number) => {
+    if (finishedAttempt == null) {
+      const waiters = refreshWaiters.current.splice(0);
+      for (const waiter of waiters) waiter.resolve();
+      return;
+    }
+    const split = refreshWaitersReadyForAttempt(refreshWaiters.current, finishedAttempt);
+    refreshWaiters.current = split.waiting;
+    for (const waiter of split.ready) waiter.resolve();
   }, []);
 
   // Returns "deadline" when THIS attempt was killed by our own FETCH_DEADLINE_MS timer (distinct
@@ -219,9 +226,6 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     // Tracks consecutive deadline timeouts for exponential backoff — reset to 0 on any non-deadline
     // result so the backoff only applies to repeated hung attempts.
     let consecutiveDeadlines = 0;
-    // An awaited refresh() waits for the attempt it joined plus one follow-up. Later SSE ticks may
-    // keep this loop going; they must not hold that promise open for the whole scan.
-    let consumedFollowUp = false;
     for (;;) {
       if (!mounted.current) {
         releaseRefreshWaiters();
@@ -234,6 +238,8 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
         releaseRefreshWaiters();
         return;
       }
+      attemptRef.current += 1;
+      const finishedAttempt = attemptRef.current;
       const controller = new AbortController();
       inFlight.current = controller;
       const result = await runFetch(controller);
@@ -265,10 +271,11 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
         continue;
       }
       consecutiveDeadlines = 0;
+      // A refresh() that joined an earlier attempt is ready now. One that joined this
+      // attempt waits for the follow-up, so it does not resolve on the pre-mutation snapshot.
+      releaseRefreshWaiters(finishedAttempt);
       if (pendingBackgroundRefresh.current) {
         pendingBackgroundRefresh.current = false;
-        if (consumedFollowUp) releaseRefreshWaiters();
-        consumedFollowUp = true;
         continue;
       }
       stop();
@@ -288,8 +295,9 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     if (sessionExpiredRef.current) return;
     if (inFlight.current) {
       pendingBackgroundRefresh.current = true;
+      const seenAttempt = attemptRef.current;
       await new Promise<void>((resolve) => {
-        refreshWaiters.current.push(resolve);
+        refreshWaiters.current.push({ resolve, seenAttempt });
       });
       return;
     }
