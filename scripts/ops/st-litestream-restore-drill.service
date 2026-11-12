@@ -11,4 +11,6 @@ IOSchedulingClass=idle
 EnvironmentFile=-/etc/default/st-litestream-restore-drill
 ExecStart=/usr/local/sbin/st-litestream-restore-drill.sh
 SyslogIdentifier=st-litestream-restore-drill
-TimeoutStartSec=21600
+# 30 min above the wrapper default (ST_RESTORE_DRILL_TIMEOUT_SECONDS=21600) so the wrapper's own
+# timeout fires first, writes the failure status, alerts, and cleans scratch.  Raise both together.
+TimeoutStartSec=23400
