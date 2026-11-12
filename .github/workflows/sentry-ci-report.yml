@@ -57,6 +57,7 @@ on:
       - iOS TestFlight ship
       - Kody MiniMax M3.1 Flash Fix Proposals
       - merge-shepherd
+      - Ops scripts
       - PR Autofix
       - Shared package pin check
       - Playwright Smoke
