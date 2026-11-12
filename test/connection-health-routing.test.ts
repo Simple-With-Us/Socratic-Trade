@@ -33,7 +33,13 @@ describe("Connection Health & Failure Routing", () => {
     delete process.env.PUSHOVER_APP_TOKEN;
     delete process.env.PUSHOVER_ST_API_TOKEN;
     delete process.env.PUSHOVER_USER_KEY;
-    
+    process.env.HEALTH_SNAPSHOT_TTL_MS = "0";
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
+    const { resetRateLimiter } = await import("../src/lib/rate-limit");
+    resetRateLimiter();
+
     // Clear out cooldown keys from DB
     const { db } = await load();
     db.getDb().prepare("DELETE FROM settings").run();
@@ -60,6 +66,12 @@ describe("Connection Health & Failure Routing", () => {
       db.deleteUserApiKey("local", "siliconflow");
       db.deleteUserApiKey("local", "voyage");
     } catch { /* best-effort */ }
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
+    const { resetRateLimiter } = await import("../src/lib/rate-limit");
+    resetRateLimiter();
+    delete process.env.HEALTH_SNAPSHOT_TTL_MS;
     vi.unstubAllGlobals();
   });
 

@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { getLegalNoticeConsent, needsLegalNoticeConsent, setLegalNoticeConsent } from "@/lib/db";
 import { LEGAL_NOTICE_VERSION } from "@/lib/legal-notice";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const consent = getLegalNoticeConsent(userId);
   return NextResponse.json({
     ...consent,
@@ -16,7 +17,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   let accepted = false;
   try {
     const body = (await request.json()) as { accepted?: boolean };
