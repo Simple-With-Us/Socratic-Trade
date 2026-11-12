@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 const sentry = vi.hoisted(() => ({
   captureMessage: vi.fn(),
@@ -59,12 +59,17 @@ async function clearLivenessKeys() {
   getDb().prepare("DELETE FROM settings WHERE key LIKE 'liveness%'").run();
 }
 
-type NotificationCall = [{ title: string }, { directBody: string }];
+type SendNotificationFn = (
+  notification: { title: string },
+  options: { directBody: string }
+) => Promise<void>;
+const sendNotificationMock = notifyMock.sendNotification as MockInstance<SendNotificationFn>;
+
 function lastNotificationTitle(): string {
-  const calls = notifyMock.sendNotification.mock.calls as unknown as NotificationCall[];
+  const calls = sendNotificationMock.mock.calls;
   const last = calls[calls.length - 1];
   expect(last).toBeDefined();
-  return last![0].title;
+  return last[0].title;
 }
 
 describe("evaluateLivenessSentryCapture", () => {
