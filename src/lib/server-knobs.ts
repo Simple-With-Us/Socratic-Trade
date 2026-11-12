@@ -4,8 +4,17 @@
  * pause anything in Infisical").  Resolution order per knob:
  *
  *   1. server-scoped DB override (settings KV `server_knobs`, written from Admin > Operations)
- *   2. process.env[id] (Infisical-injected)
+ *   2. Infisical settings cache (src/lib/infisical-settings.ts) — the live, background-refreshed
+ *      in-memory copy of the Infisical project values; falls back to process.env before the
+ *      cache initializes (the runner injects the same Infisical-sourced values at boot, so the
+ *      fallback is identical)
  *   3. catalog defaultValue
+ *
+ * Admin flips are WRITE-THROUGH (fleet SOT directive 2026-10-03): writeServerKnobThrough()
+ * persists the value to the Infisical app project FIRST, then updates the cache, then the DB
+ * override.  A failed Infisical write fails the save.  In production the app process holds no
+ * Infisical credentials (the secrets runner scrubs them by design), so write-through is
+ * unavailable there and the DB override remains the persistent local layer — see INFISICAL.md.
  *
  * Reads are hot-path cheap: one in-process cache with a short TTL (SERVER_KNOB_CACHE_TTL_MS) plus
  * explicit invalidation on write, and they FAIL OPEN to env/default on any store error — a broken
@@ -63,6 +72,11 @@
  */
 
 import { getInternalSetting, setInternalSetting } from "./db-settings";
+import {
+  infisicalSettingsStatus,
+  peekSetting,
+  setSetting
+} from "./infisical-settings";
 
 export type ServerKnobType = "boolean" | "number";
 
@@ -109,8 +123,48 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     label: "SEC backfill worker",
     description: "Background job queue for large 10-K/10-Q backfills.  Jobs are seeded separately via the sec-ingest admin route.",
     type: "boolean",
-    defaultValue: false,
+    defaultValue: true,
     effect: "Takes effect within about 20 seconds.  The worker loop parks itself while off and resumes when turned back on."
+  },
+  {
+    id: "SEC_INGEST_DAYTIME_ENABLED",
+    group: "workers",
+    label: "SEC ingest during market hours",
+    description: "Allow polite 1-task-per-tick SEC filing ingestion during regular trading hours (09:30-16:00 ET).  When off, ingest defers to non-RTH ticks.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Takes effect on the next worker tick.  When on, the worker paces at 1 task per tick and yields to in-flight strategy work."
+  },
+  {
+    id: "SEC_INGEST_TASKS_PER_TICK_RTH",
+    group: "workers",
+    label: "SEC ingest daytime tasks / tick",
+    description: "Number of filing tasks claimed per tick during regular trading hours.",
+    type: "number",
+    defaultValue: 1,
+    min: 1,
+    max: 5,
+    effect: "Applies on the next worker tick during market hours."
+  },
+  {
+    id: "SEC_INGEST_TASKS_PER_TICK_OFF_HOURS",
+    group: "workers",
+    label: "SEC ingest night/off-hours tasks / tick",
+    description: "Number of filing tasks claimed per tick outside trading hours and at night (accelerated throughput).",
+    type: "number",
+    defaultValue: 5,
+    min: 1,
+    max: 20,
+    effect: "Applies on the next worker tick outside market hours."
+  },
+  {
+    id: "TRANSCRIPTS_DAYTIME_ENABLED",
+    group: "workers",
+    label: "Earnings transcripts daytime ingestion",
+    description: "Allow earnings call transcripts (ROIC, EarningsCalls, FMP) to ingest at a measured pace during market hours rather than deferring entirely to off-hours.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Applies at the next scheduler pass.  Ingest yields immediately to in-flight strategy runs."
   },
   {
     id: "STREAMS_ALPACA_NEWS_ENABLED",
@@ -191,7 +245,7 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     description: "Send RAG upserts, deletes, and inventory to the self-hosted Qdrant collection instead of Pinecone.  Default on when QDRANT_URL is configured so ingest is not parked on exhausted Pinecone write units.",
     type: "boolean",
     defaultValue: true,
-    effect: "Applies to the next store, delete, or inventory call.  Requires QDRANT_URL (and QDRANT_API_KEY) in the environment; without them writes stay on Pinecone.  The string env RAG_VECTOR_WRITE_BACKEND=qdrant|pinecone is honored when neither this override nor this env var is set.  The Pinecone monthly WU breaker and daily write fuse apply only to the Pinecone write backend."
+    effect: "Applies to the next store, delete, or inventory call.  Requires QDRANT_URL (and QDRANT_API_KEY) in the environment when Qdrant is selected (default on); without them vectorWriteBackend() fails closed instead of silently using Pinecone.  The string env RAG_VECTOR_WRITE_BACKEND=qdrant|pinecone is honored when neither this override nor this env var is set.  The Pinecone monthly WU breaker and daily write fuse apply only to the Pinecone write backend."
   },
   {
     id: "SEC_FILING_RAG_MAX_PER_RUN",
@@ -203,6 +257,15 @@ export const SERVER_KNOBS_CATALOG: readonly ServerKnobSpec[] = [
     min: 0,
     max: 5000,
     effect: "Applies at the next scheduler tick.  A signed-in user's own Settings > Sources override still wins over this server value."
+  },
+  {
+    id: "CONGRESS_SHARE_FUNDAMENTALS_ENABLED",
+    group: "retrieval",
+    label: "Share fundamentals with Congress Trade",
+    description: "Includes fundamentals and analyst consensus in data shared with Congress Trade.",
+    type: "boolean",
+    defaultValue: true,
+    effect: "Applies at the next market scan or daily share. When true, forwards PE, EPS, beta, dividend yield, and analyst consensus to Congress Trade."
   }
 ] as const;
 
@@ -254,7 +317,9 @@ export function serverKnobOverride(id: string): boolean | number | undefined {
 }
 
 function envValueFor(spec: ServerKnobSpec): boolean | number | undefined {
-  const raw = process.env[spec.id];
+  // Live Infisical settings cache first; boot-injected process.env before the cache
+  // initializes (identical source — the runner populated it from Infisical).
+  const raw = peekSetting(spec.id);
   if (raw == null) return undefined;
   const v = raw.trim().toLowerCase();
   if (v === "") return undefined;
@@ -319,9 +384,46 @@ export function setServerKnobOverride(id: string, value: boolean | number | null
   invalidateServerKnobCache();
 }
 
+/**
+ * Write-through knob save (fleet SOT directive 2026-10-03): persists the value to the
+ * Infisical app project FIRST, then updates the local settings cache, then the DB
+ * override.  A failed Infisical write fails the whole save — the layers never diverge
+ * silently.  Clearing (null) only clears the DB override and leaves the Infisical value
+ * alone (clear = "fall back to Infisical/default").
+ *
+ * In production the app process holds no Infisical credentials (the secrets runner
+ * scrubs them by design), so write-through is unavailable there: the save still lands
+ * the DB override (today's behavior) and reports infisicalWriteThrough: false so the
+ * admin surface can say so honestly.  See INFISICAL.md.
+ */
+export async function writeServerKnobThrough(
+  id: string,
+  value: boolean | number | null
+): Promise<{ infisicalWriteThrough: boolean }> {
+  const spec = serverKnobById(id);
+  if (!spec) throw new Error(`Unknown server knob: ${id}`);
+  if (value !== null) {
+    if (spec.type === "boolean" && typeof value !== "boolean")
+      throw new Error(`${id} expects a boolean`);
+    if (spec.type === "number" && (typeof value !== "number" || !Number.isFinite(value)))
+      throw new Error(`${id} expects a finite number`);
+  }
+  let through = false;
+  if (value !== null && infisicalSettingsStatus().credentialed) {
+    const serialized = spec.type === "boolean" ? (value ? "true" : "false") : String(value);
+    // Infisical FIRST — setSetting() throws InfisicalWriteError on failure and the
+    // DB override below is never written, so the layers cannot diverge silently.
+    await setSetting(id, serialized);
+    through = true;
+  }
+  setServerKnobOverride(id, value);
+  return { infisicalWriteThrough: through };
+}
+
 export interface EffectiveServerKnob {
   spec: ServerKnobSpec;
   value: boolean | number;
+  /** "env" = the Infisical-backed layer (live settings cache, or boot env before init). */
   source: "override" | "env" | "default";
   /** What env alone would resolve to (env value, else default) — shown as the reset target. */
   envValue: boolean | number;

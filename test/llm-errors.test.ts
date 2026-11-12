@@ -3,7 +3,7 @@
  * Pure function; no DB/network.
  */
 import { describe, expect, it } from "vitest";
-import { humanizeLlmError, humanizeLlmTransportError, providerFromText, providerLabel } from "../src/lib/llm-errors";
+import { describeProviderErrorDetail, humanizeLlmError, humanizeLlmTransportError, providerFromText, providerLabel } from "../src/lib/llm-errors";
 
 describe("providerLabel / providerFromText", () => {
   it("maps internal provider ids to display names", () => {
@@ -170,5 +170,72 @@ describe("humanizeLlmError", () => {
     });
 
     expect(msg).toBe("Green Team proposal timed out after 60s using OpenAI gpt-5.5. Lower reasoning effort, choose a faster model, or retry.");
+  });
+});
+
+describe("provider error detail (#4535)", () => {
+  const body = (error: Record<string, unknown>) => JSON.stringify({ error });
+
+  it("keeps the friendly 403 sentence and appends status, code, model and provider message", () => {
+    const out = humanizeLlmError(body({ code: 403, message: "Your account is not allowed to use this model in your region", metadata: { provider_name: "Azure" } }), {
+      provider: "openrouter",
+      status: 403,
+      model: "openai/gpt-5.6-sol"
+    });
+    expect(out).toContain("doesn't have access to this model or region");
+    expect(out).toContain("[provider detail: HTTP 403; model openai/gpt-5.6-sol; code 403; upstream Azure;");
+    expect(out).toContain("not allowed to use this model in your region");
+  });
+
+  it("keeps different 403 causes distinguishable after humanizing", () => {
+    const region = humanizeLlmError(body({ code: "unsupported_country_region_territory", message: "Country, region, or territory not supported" }), { provider: "openrouter", status: 403, model: "m/x" });
+    const moderation = humanizeLlmError(body({ code: 403, message: "Input flagged by moderation", metadata: { reasons: ["violence"], provider_name: "OpenAI" } }), { provider: "openrouter", status: 403, model: "m/x" });
+    const allowlist = humanizeLlmError(body({ code: 403, message: "Key not permitted for this model: plan restriction" }), { provider: "openrouter", status: 403, model: "m/x" });
+    expect(region).toContain("unsupported_country_region_territory");
+    expect(moderation).toContain("reasons violence");
+    expect(moderation).toContain("upstream OpenAI");
+    expect(allowlist).toContain("plan restriction");
+    expect(new Set([region, moderation, allowlist]).size).toBe(3);
+  });
+
+  it("redacts API keys, bearer tokens and auth headers", () => {
+    const detail = describeProviderErrorDetail(
+      body({ code: 401, message: "Bad key sk-or-v1-abcdef1234567890abcdef1234567890 sent with Authorization: Bearer abcdef1234567890XYZ and api_key=zzzzzzzzzzzz1234" }),
+      { status: 401 }
+    );
+    expect(detail).not.toContain("abcdef1234567890");
+    expect(detail).not.toContain("zzzzzzzzzzzz1234");
+    expect(detail).toContain("[redacted]");
+    const long = "A".repeat(45);
+    expect(describeProviderErrorDetail(`plain body ${long}`, { status: 500 })).not.toContain(long);
+  });
+
+  it("bounds oversized bodies", () => {
+    const huge = "word ".repeat(2000);
+    const detail = describeProviderErrorDetail(huge, { status: 502 });
+    expect(detail.length).toBeLessThan(500);
+    expect(detail).toContain("...");
+    const structured = describeProviderErrorDetail(body({ message: huge, code: 403 }), { status: 403 });
+    expect(structured.length).toBeLessThan(600);
+  });
+
+  it("does not stutter when an already-detailed message is humanized again", () => {
+    const once = humanizeLlmError(body({ code: 403, message: "nope" }), { provider: "openrouter", status: 403, model: "m/x" });
+    expect(humanizeLlmError(once, { provider: "openrouter" })).toBe(once);
+    expect(humanizeLlmTransportError(new Error(once), { provider: "openrouter", model: "m/x", stepLabel: "Bull" })).toContain(once);
+  });
+
+  it("does not skip humanizing a raw body that only mentions the detail marker", () => {
+    const out = humanizeLlmError('forbidden [provider detail: fake] trailing words', { provider: "openrouter", status: 403 });
+    expect(out).toContain("doesn't have access to this model or region");
+  });
+
+  it("returns nothing extra when there is no status, model or body", () => {
+    expect(describeProviderErrorDetail("", {})).toBe("");
+    expect(humanizeLlmError("", { provider: "xai", status: 503 })).toContain("[provider detail: HTTP 503]");
+  });
+
+  it("still maps unrecognized text and older plain records unchanged", () => {
+    expect(humanizeLlmError("something odd", { provider: "openai" })).toBe("OpenAI error: something odd");
   });
 });

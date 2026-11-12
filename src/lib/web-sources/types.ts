@@ -21,14 +21,27 @@ import type { TechnicalDirection } from "../types";
 export interface CongressTrade {
   symbol: string; // normalized ticker (uppercase, no class suffix)
   member: string; // e.g. "John Boozman"
-  chamber: "senate" | "house";
-  side: "buy" | "sell";
+  chamber: "senate" | "house" | "executive";
+  side: "buy" | "sell" | "exchange";
   amountLow?: number; // lower bound of the disclosed dollar range
   amountHigh?: number; // upper bound of the disclosed dollar range
   owner?: string; // Self / Joint / Spouse / Child
   tradedAt: string; // ISO date the trade occurred (txDate)
-  disclosedAt?: string; // ISO date the report was filed
+  disclosedAt?: string; // ISO date the report was filed.  Absent when the filing date was not disclosed.
   source: string; // adapter id that produced this record
+  /** App A transaction id.  Present rows dedupe on this instead of the lossy summary key. */
+  id?: string;
+  docId?: string;
+  rowKey?: string;
+  party?: string;
+  bioguideId?: string;
+  pdfUrl?: string;
+  disclosureLagDays?: number;
+  stockActStatus?: string;
+  priceAtTrade?: number;
+  spxAtTrade?: number;
+  priceAtFiling?: number;
+  spxAtFiling?: number;
   latencyProbeHealth?: string;
   latencyProbeDelayMs?: number;
   providerPublishedAt?: string;

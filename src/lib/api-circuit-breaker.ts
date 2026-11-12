@@ -78,3 +78,15 @@ export function apiCircuitBreakerShouldSkip(
 export function resetApiCircuitBreaker(): void {
   trippedUntil.clear();
 }
+
+/** Hold a lane for an explicit cool-down.  HTTP 429 uses this only after retries are
+ *  exhausted and only for a positive Retry-After.  A 60s floor is not applied here. */
+export function tripApiCircuitBreakerLane(
+  service: string,
+  keySource: string | null,
+  holdMs: number,
+  now = Date.now()
+): void {
+  if (breakerDisabled() || holdMs <= 0) return;
+  trippedUntil.set(laneKey(service, keySource), now + holdMs);
+}

@@ -50,4 +50,4 @@ jobs:
             exit 0
           fi
           echo "Enabling auto-merge for $PR_URL"
-          gh pr merge --auto --squash --delete-branch "$PR_URL" || echo "Auto-merge already set or failed."
+          gh pr merge --auto --squash "$PR_URL" || echo "Auto-merge already set or failed."

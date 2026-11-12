@@ -36,14 +36,14 @@ SSHing into, monitoring, or referencing dead boxes.
 
 ## GitHub-side verification (nothing to clean up)
 
-- `gh api repos/jaywedgeworth22/{Socratic.Trade,Congress.Trade,API-Usage-Monitor,Congress-Trading-Shared}/actions/runners`:
+- `gh api repos/jaywedgeworth22/{Socratic-Trade,Congress.Trade,API-Usage-Monitor,Congress-Trading-Shared}/actions/runners`:
   no registrations from the deleted boxes remain. The only runners are the
   fleet's Oracle-hosted `oracle-{socratic,congress,usage,shared}-ci` (ARM64,
   online) used by the *other* repos — this repo's workflows are all
   `ubuntu-latest`.
 - DNS: `host.jays.services` / `jays.services` are Cloudflare-proxied to the
   current infrastructure; no records point at the deleted IPs.
-- `/Users/jay/apps/AGENT-SYNC.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
+- `/Users/jay/apps/AG***-S**C.md` + `~/apps/README.md`: no ci-cpx32/Hetzner
   references — no edits needed there.
 
 ## Verification State

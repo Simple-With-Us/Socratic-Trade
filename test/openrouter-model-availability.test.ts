@@ -53,6 +53,13 @@ describe("OpenRouter account model availability", () => {
     expect(isOpenRouterModelAvailable("kimi-latest", versioned)).toBe(false);
   });
 
+  it("does not treat a listed retired minimax/minimax-m3 row as proof M3.1 Flash is servable", () => {
+    const legacyOnly = new Set(["minimax/minimax-m3"]);
+    expect(isOpenRouterModelAvailable("minimax-m3.1-flash", legacyOnly)).toBe(false);
+    expect(isOpenRouterModelAvailable("minimax/minimax-m3.1-flash", legacyOnly)).toBe(false);
+    expect(isOpenRouterModelAvailable("minimax-m3", legacyOnly)).toBe(true);
+  });
+
   it("treats OpenRouter ~ latest aliases as the same class as dated public ids", () => {
     const listed = new Set([
       "~anthropic/claude-sonnet-latest",

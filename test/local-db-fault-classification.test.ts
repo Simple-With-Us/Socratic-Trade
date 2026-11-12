@@ -150,6 +150,10 @@ describe("local-DB fault classification", () => {
     expect(isLocalDbFaultMessage("no such table: provider_usage_outbox")).toBe(true);
     expect(isLocalDbFaultMessage("SQLITE_BUSY: unable to write")).toBe(true);
 
+    const congressD1 =
+      'App A reported ok=false with 19 error(s); first: "WMT price: D1 batch error: SQLITE_BUSY: database is locked"';
+    expect(isLocalDbFaultMessage(congressD1)).toBe(false);
+
     // Genuine provider failures must stay on the provider-degraded path.
     expect(isLocalDbFaultMessage(PINECONE_NETWORK_ERROR)).toBe(false);
     expect(isLocalDbFaultMessage("HTTP 429 Too Many Requests")).toBe(false);

@@ -60,11 +60,43 @@ describe("checkPriceAlerts evaluation", () => {
     });
 
     const triggered = await checkPriceAlerts(userId);
-    expect(mockFetchFreshQuotesCascade).toHaveBeenCalledWith(["AAPL"], userId);
+    expect(mockFetchFreshQuotesCascade).toHaveBeenCalledWith(["AAPL"], userId, undefined, undefined);
     expect(triggered).toHaveLength(1);
     expect(triggered[0]?.id).toBe(created.id);
     expect(triggered[0]?.status).toBe("triggered");
     expect(mockSendNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards the operating account (accountNumber + connectedAccountId) into the cascade", async () => {
+    // The alert check must run against the OPERATING account's tape (Alpaca
+    // PAPER `delayed_sip`), not a process-global default.
+    setPolicy(
+      {
+        ...DEFAULT_POLICY,
+        accountNumber: "PA33IDTHMFK9",
+        connectedAccountId: "ap-paper",
+        maxQuoteAgeSec: 120
+      },
+      userId
+    );
+    createAlert(userId, { symbol: "AAPL", op: "<", price: 200 });
+    mockFetchFreshQuotesCascade.mockResolvedValue({
+      AAPL: {
+        symbol: "AAPL",
+        price: 150,
+        provider: "alpaca",
+        asOf: new Date().toISOString()
+      }
+    });
+
+    await checkPriceAlerts(userId);
+
+    expect(mockFetchFreshQuotesCascade).toHaveBeenCalledWith(
+      ["AAPL"],
+      userId,
+      "PA33IDTHMFK9",
+      "ap-paper"
+    );
   });
 
   it("logs and audits a cascade failure instead of returning silently", async () => {

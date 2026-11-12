@@ -2,7 +2,7 @@
 
 ## Context & Objective
 
-Owner asked for a quantitative / microstructure / risk / trading-systems / model-validation audit of Socratic.Trade's macro analysis, Green/Red/Bull process, proposal→execution outcomes, portfolio/risk, backtests, benchmarks, slippage/fees, causality/leakage, paper-vs-live parity, learning loops, and outcome accuracy.  Goal: a dated evidence report and a prioritized test/eval plan, without placing trades or changing money-path behavior.
+Owner asked for a quantitative / microstructure / risk / trading-systems / model-validation audit of Socratic-Trade's macro analysis, Green/Red/Bull process, proposal→execution outcomes, portfolio/risk, backtests, benchmarks, slippage/fees, causality/leakage, paper-vs-live parity, learning loops, and outcome accuracy.  Goal: a dated evidence report and a prioritized test/eval plan, without placing trades or changing money-path behavior.
 
 ## Changes Made
 
@@ -12,7 +12,7 @@ Read-only.  No execution, policy, or schema edits.
 - Pointed `docs/phase-7-strategy.md` at the paper/live doc-vs-retrieval contradiction.
 - Pointed `docs/phase-3-performance.md` at residual cost / join / slippage gaps.
 - Reserved the effort on `docs/EFFORT-LOG.md`, `STATUS.md`, and `PLAN.md`.
-- Posted reservation to #agent-sync.
+- Posted reservation to #ag***-s**c.
 
 Files touched:
 

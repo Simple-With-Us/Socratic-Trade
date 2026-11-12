@@ -2,7 +2,7 @@
 
 ## Summary
 
-Owner-directed pass to (a) make the Socratic.Trade improvement/action backlog exhaustive,
+Owner-directed pass to (a) make the Socratic-Trade improvement/action backlog exhaustive,
 (b) build equivalent GitHub-issue-linked backlogs for the other three apps
 (Congress.Trade, congress-trading-shared, API-usage-monitor), and (c) assign the work
 across the agent fleet: a large slate to CURSOR (Cursor background agents running
@@ -45,7 +45,7 @@ directly), so the promotion happened on the boards.
 ## Cross-repo half (separate PRs, same pass)
 
 - **Congress.Trade**: merged Codex's docs-only bootstrap PR #137 (announced on
-  #agent-sync first), then a `claude/effort-issues-mirror` PR adds the fleet-standard
+  #ag***-s**c first), then a `claude/effort-issues-mirror` PR adds the fleet-standard
   `scripts/sync-effort-issues.py` + `.github/workflows/effort-issues-sync.yml`
   (verbatim copies per protocol) and a populated `docs/EFFORT-LOG.md` (14 Planned rows:
   CODEX house-live-search; AG ticker-alias guard + push/SSE repair; CURSOR pin-check
@@ -67,7 +67,7 @@ Four parallel read-only audit agents (Sonnet) — one per repo — cross-checked
 issues, boards, review docs, rollout follow-ups, and code sweeps. Notable corrections
 made during consolidation: the shared-package audit's "consumers never left the private
 registry" finding was based on stale local checkouts and was discarded (Congress.Trade
-PR #139 + Socratic.Trade #439/#444 verified against origin); the genuinely-new finds
+PR #139 + Socratic-Trade #439/#444 verified against origin); the genuinely-new finds
 include `usage-budget.ts` Phase-2 enforcement being fully built but never called,
 Congress.Trade's `shared-package-pin-check.yml` pointing at the pre-rename peer repo
 slug, and the shared repo's `publish.yml` still publishing to the retired registry on
@@ -100,7 +100,7 @@ approvals-triage includes portfolio-impact preview; omnibox means search-anywher
 
 ## Follow-ups
 
-- Agents pick up their lanes (announced on #agent-sync; assignments are reservations,
+- Agents pick up their lanes (announced on #ag***-s**c; assignments are reservations,
   re-negotiable there).
 - The unassigned owner-decision bucket (15 rows here + LICENSE/premium-routes/login
   decisions in the other repos) needs owner triage.

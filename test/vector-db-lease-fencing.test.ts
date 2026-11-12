@@ -224,7 +224,12 @@ describe("vector-store durable lease fencing", () => {
     });
     const { storeContexts } = await import("../src/lib/vector-db");
 
-    await expect(storeContexts([...context(), ...context()], "local", {
+    const distinct = context();
+    distinct.push({
+      text: "Management discussed margin pressure and supply constraints.",
+      metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
+    });
+    await expect(storeContexts(distinct, "local", {
       leaseGuard: leaseGuard(controller, () => owns)
     })).rejects.toThrow(/lease/i);
 

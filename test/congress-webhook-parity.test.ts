@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyCongressEvent, resetCongressEventDedupe, type CongressEvent } from "../src/lib/congress-trade-events";
+import { applyCongressEvent, resetCongressEventDedupe } from "../src/lib/congress-trade-events";
 import { getCongressDataset } from "../src/lib/web-sources";
 
 beforeAll(() => {
@@ -22,7 +22,7 @@ const trade = (symbol: string) => ({
   tradedAt: recent(5),
   disclosedAt: recent(2),
 });
-const apply = (e: unknown) => applyCongressEvent(e as CongressEvent);
+const apply = (e: unknown) => applyCongressEvent(e);
 const hasSymbol = (symbol: string) => (getCongressDataset()?.trades ?? []).some((t) => t.symbol === symbol);
 
 /**

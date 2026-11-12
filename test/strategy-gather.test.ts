@@ -21,6 +21,7 @@ vi.mock("../src/lib/market-scan-freshness", () => ({
   newestPersistedMarketScan: (...args: unknown[]) => mockNewestPersisted(...args)
 }));
 
+import { ScanQuotesUnavailableError } from "../src/lib/market";
 import {
   STRATEGY_GATHER_TIMEOUT_MESSAGE,
   gatherStrategyMarket
@@ -170,11 +171,48 @@ describe("gatherStrategyMarket", () => {
     const result = await pending;
 
     expect(result.usedLastGood).toBe(true);
+    expect(result.lastGoodReason).toBe("timeout");
     expect(result.lastGoodAt).toBe(seed.generatedAt);
     expect(result.marketScan.topCandidates[0]?.symbol).toBe("MSFT");
     expect(result.marketScan.topCandidates[0]?.price).toBe(402);
     expect(result.marketScan.warnings.some((warning) => warning.includes("last completed scan"))).toBe(true);
     expect(mockNewestPersisted).toHaveBeenCalledWith("local", "roth-1");
+  });
+
+  // Regression for the prod crash "k.warnings is not iterable": `withLastGoodWarning` used to
+  // spread `...scan.warnings` unconditionally. A `strategy_run` audit's marketScan is a bounded
+  // `{ omitted: true, ... }` summary with NO `warnings` field (audit-bounded-run.ts) — before
+  // market-scan-freshness.ts's `extractScan` validated/normalized this, `newestPersistedMarketScan`
+  // could hand back exactly that shape, and the spread threw. Defends the spread site directly
+  // (belt-and-suspenders with the extractScan-level fix) regardless of what the mocked/real
+  // `newestPersistedMarketScan` returns.
+  it("does not throw when the last-good scan is missing `warnings` — defaults to [] and still appends the fallback note", async () => {
+    vi.useFakeTimers();
+    const seed = lastGoodScan();
+    const { warnings: _omit, ...seedWithoutWarnings } = seed;
+    mockScanMarket.mockImplementation(
+      (_symbols: unknown, _positions: unknown, _weights: unknown, _userId: unknown, _universes: unknown, options: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => {
+            reject(options.signal?.reason ?? new Error("aborted"));
+          });
+        })
+    );
+    mockNewestPersisted.mockReturnValue({
+      scan: seedWithoutWarnings as unknown as MarketScan,
+      entry: { id: "audit-2", createdAt: seed.generatedAt }
+    });
+    mockFetchFreshQuotesCascade.mockResolvedValue({
+      MSFT: { symbol: "MSFT", price: 402, asOf: "2026-08-21T19:08:00.000Z", provider: "alpaca" }
+    });
+
+    const pending = gatherStrategyMarket(gatherArgs());
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await pending;
+
+    expect(result.usedLastGood).toBe(true);
+    expect(Array.isArray(result.marketScan.warnings)).toBe(true);
+    expect(result.marketScan.warnings.some((warning) => warning.includes("last completed scan"))).toBe(true);
   });
 
   it("still fails the run when gather times out and no last-good tape exists", async () => {
@@ -187,5 +225,40 @@ describe("gatherStrategyMarket", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     await expect(pending).rejects.toThrow(STRATEGY_GATHER_TIMEOUT_MESSAGE);
+  });
+
+  it("uses the last completed tape when the live scan throws ScanQuotesUnavailableError", async () => {
+    const seed = lastGoodScan();
+    mockScanMarket.mockRejectedValue(
+      new ScanQuotesUnavailableError({ scannedSymbols: 500, warnings: ["nasdaq empty"] })
+    );
+    mockNewestPersisted.mockReturnValue({
+      scan: seed,
+      entry: { id: "audit-unavail-1", createdAt: seed.generatedAt }
+    });
+    mockFetchFreshQuotesCascade.mockResolvedValue({
+      MSFT: { symbol: "MSFT", price: 401, asOf: "2026-11-09T17:22:00.000Z", provider: "alpaca" }
+    });
+
+    const result = await gatherStrategyMarket(gatherArgs());
+
+    expect(result.usedLastGood).toBe(true);
+    expect(result.lastGoodReason).toBe("quotes_unavailable");
+    expect(result.lastGoodAt).toBe(seed.generatedAt);
+    expect(result.marketScan.topCandidates[0]?.symbol).toBe("MSFT");
+    expect(result.marketScan.topCandidates[0]?.price).toBe(401);
+    expect(
+      result.marketScan.warnings.some((warning) => warning.includes("no usable quotes"))
+    ).toBe(true);
+    expect(mockNewestPersisted).toHaveBeenCalledWith("local", "roth-1");
+  });
+
+  it("still fails when quotes are unavailable and no last-good tape exists", async () => {
+    mockScanMarket.mockRejectedValue(
+      new ScanQuotesUnavailableError({ scannedSymbols: 500, warnings: ["yahoo empty"] })
+    );
+    mockNewestPersisted.mockReturnValue(undefined);
+
+    await expect(gatherStrategyMarket(gatherArgs())).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 });

@@ -3,6 +3,16 @@ const SECRET_VALUE =
   /\b(?:Bearer\s+)?(?:sk|pk|rk|ghp|gho|ghs|xox[baprs]?|rh|mcp|pc|voyage|fred|finnhub|tradier|marketstack|massive)[A-Za-z0-9._:-]{12,}\b/g;
 const HEX_SECRET = /\b[A-Fa-f0-9]{48,}\b/g;
 
+// Query-param names that must be redacted in addition to whatever SENSITIVE_KEY
+// already catches. These are either trading-specific identifiers that are not
+// "secrets" in the SENSITIVE_KEY sense (symbol/proposal/account/code) or legacy
+// bare aliases ("key", "auth") that predate SENSITIVE_KEY's compound patterns
+// (api[_-]?key etc). Exact-match only -- SENSITIVE_KEY already does the
+// substring-style matching for anything provider-key-shaped, e.g. a query param
+// literally named "apikey" (no separator) matches api[_-]?key's optional
+// separator, so it's covered without listing every provider's naming style here.
+const SENSITIVE_QUERY_PARAM_NAME = /^(?:symbol|proposal|account|code|auth|key)$/i;
+
 type RedactionOptions = {
   maxDepth?: number;
   maxArrayItems?: number;
@@ -167,4 +177,154 @@ function schemaName(record: Record<string, unknown>): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Parses actual query-param names (rather than matching a fixed alternation
+// literal) and redacts any whose decoded name matches SENSITIVE_KEY or the
+// trading-specific SENSITIVE_QUERY_PARAM_NAME list above. This fixed a real gap:
+// the previous implementation matched "api_key" exactly but not "apikey" (no
+// separator), which is what this app's actual providers use (Alpha Vantage,
+// Twelve Data, ROIC -- see src/lib/history.ts's `?apikey=`), so provider keys
+// were leaking into Sentry unredacted. Parsing param names against the shared
+// sensitive-key list means a future provider using a differently-shaped key
+// param name (as long as it still reads as "...key..."/"...token..."/etc, or is
+// one of the exact trading-identifier names above) is covered automatically.
+export function sanitizeTelemetryUrl(rawUrl: string): string {
+  return sanitizeTelemetryUrlAtDepth(rawUrl, 0);
+}
+
+function sanitizeTelemetryUrlAtDepth(rawUrl: string, depth: number): string {
+  if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
+  if (depth > 3) return rawUrl;
+
+  const hashIndex = rawUrl.indexOf("#");
+  const withoutHash = hashIndex === -1 ? rawUrl : rawUrl.slice(0, hashIndex);
+  // A fragment can carry params too (OAuth implicit flow puts access_token
+  // there), so a key=value fragment gets the same per-param redaction.
+  const rawHash = hashIndex === -1 ? "" : rawUrl.slice(hashIndex + 1);
+  const hash = hashIndex === -1 ? "" : `#${rawHash.includes("=") ? redactParams(rawHash, depth) : rawHash}`;
+
+  const queryIndex = withoutHash.indexOf("?");
+  if (queryIndex === -1) return `${withoutHash}${hash}`;
+
+  const base = withoutHash.slice(0, queryIndex);
+  const query = withoutHash.slice(queryIndex + 1);
+  if (!query) return `${withoutHash}${hash}`;
+
+  return `${base}?${redactParams(query, depth)}${hash}`;
+}
+
+// Any param whose name ends in a key segment (access_key, x-key, accessKey)
+// is a credential slot too; SENSITIVE_KEY alone only knows api/encryption keys.
+// camelCase is matched case-sensitively so words like "monkey" stay readable.
+const KEY_SUFFIXED_PARAM_NAME = /(?:^|[_.-])key$/i;
+const KEY_CAMEL_SUFFIXED_PARAM_NAME = /[a-z0-9]Key$/;
+
+function redactParams(query: string, depth: number): string {
+  return query
+    .split("&")
+    .map((pair) => {
+      if (!pair) return pair;
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex === -1) return pair; // bare flag, no value to redact
+
+      const rawName = pair.slice(0, eqIndex);
+      let decodedName = rawName;
+      try {
+        decodedName = decodeURIComponent(rawName.replace(/\+/g, " "));
+      } catch {
+        // malformed percent-encoding in the param name: fall back to the raw form
+      }
+
+      const isSensitive =
+        SENSITIVE_KEY.test(decodedName) ||
+        SENSITIVE_QUERY_PARAM_NAME.test(decodedName) ||
+        KEY_SUFFIXED_PARAM_NAME.test(decodedName) ||
+        KEY_CAMEL_SUFFIXED_PARAM_NAME.test(decodedName);
+      if (isSensitive) return `${rawName}=[REDACTED]`;
+      // A non-sensitive value can still smuggle secrets inside a nested URL
+      // (e.g. ?next=https://provider/q?apikey=SECRET): recurse into values
+      // that decode to an http(s) URL carrying params or a key=value fragment.
+      const rawValue = pair.slice(eqIndex + 1);
+      const nested = redactNestedUrlValue(rawValue, depth);
+      if (nested !== rawValue) return `${rawName}=${nested}`;
+      return pair;
+    })
+    .join("&");
+}
+
+// Returns the input unchanged unless it decodes to an http(s) URL with a
+// query or a key=value fragment, in which case the redacted form replaces it.
+function redactNestedUrlValue(rawValue: string, depth: number): string {
+  if (depth > 3) return rawValue;
+  let percentEncoded = false;
+  try {
+    percentEncoded = decodeURIComponent(rawValue) !== rawValue;
+  } catch {
+    // malformed percent-encoding: treat the value as plain
+  }
+  let candidate = rawValue;
+  try {
+    // + means space only for the URL-detection/sanitizing pass; the encoding
+    // decision above deliberately ignores it so plain a+b values are not
+    // mistaken for encoded ones.
+    candidate = decodeURIComponent(rawValue.replace(/\+/g, " "));
+  } catch {
+    // keep the raw text when it cannot be decoded at all
+  }
+  if (!/^https?:\/\//i.test(candidate)) return rawValue;
+  if (!/[?#]/.test(candidate)) return rawValue;
+  const redacted = sanitizeTelemetryUrlAtDepth(candidate, depth + 1);
+  // Preserve the outer delimiters: when the value was percent-encoded, return
+  // the redacted form re-encoded, or a literal & in the nested URL would split
+  // into fake top-level params.
+  return percentEncoded ? encodeURIComponent(redacted) : redacted;
+}
+
+const URL_IN_TEXT = /(?:https?:\/\/|\/)[^\s"'<>]*\?[^\s"'<>]*/g;
+
+type TransactionLike = {
+  request?: { url?: unknown; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
+  spans?: Array<{ description?: unknown; data?: Record<string, unknown> } | null | undefined>;
+};
+
+/**
+ * Transaction events cannot go through redactForTelemetry whole: its array and
+ * depth limits would truncate the span list and replace spans with strings,
+ * which breaks the trace.  So the request and the URL-bearing span fields are
+ * redacted in place and the span structure is left intact.
+ */
+export function sanitizeTransactionEvent<T>(event: T): T {
+  const e = event as unknown as TransactionLike;
+  if (e && typeof e === "object") {
+    const req = e.request;
+    if (req && typeof req === "object") {
+      if (typeof req.url === "string") req.url = sanitizeTelemetryUrl(req.url);
+      if (typeof req.query_string === "string" && req.query_string) {
+        req.query_string = redactParams(req.query_string.replace(/^\?/, ""), 0);
+      } else if (req.query_string !== undefined) {
+        req.query_string = redactForTelemetry(req.query_string);
+      }
+      if (req.headers !== undefined) req.headers = redactForTelemetry(req.headers);
+      if (req.cookies !== undefined) req.cookies = "[redacted]";
+      if (req.data !== undefined) req.data = redactForTelemetry(req.data);
+    }
+    if (Array.isArray(e.spans)) {
+      for (const span of e.spans) {
+        if (!span || typeof span !== "object") continue;
+        if (typeof span.description === "string") {
+          span.description = span.description.replace(URL_IN_TEXT, (m) => sanitizeTelemetryUrl(m));
+        }
+        const data = span.data;
+        if (data && typeof data === "object") {
+          for (const k of ["url", "http.url", "http.query", "http.fragment"]) {
+            const v = data[k];
+            if (typeof v !== "string") continue;
+            data[k] = k === "http.query" || k === "http.fragment" ? redactParams(v.replace(/^[?#]/, ""), 0) : sanitizeTelemetryUrl(v);
+          }
+        }
+      }
+    }
+  }
+  return event;
 }

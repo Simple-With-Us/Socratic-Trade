@@ -146,7 +146,7 @@ Infisical prod via the proven universal-auth CLI path (allow-listed keys only). 
 default; the launchd job is not installed yet. See
 `docs/rollouts/2026-07-10-provider-knob-sync.md`.
 
-Socratic.Trade now also commits one durable provider-attempt reservation before each actual FMP,
+Socratic-Trade now also commits one durable provider-attempt reservation before each actual FMP,
 Voyage, or Pinecone boundary and replays deterministic outcomes (`succeeded`, `failed`, or crash-
 reconciled `unknown`) through API Usage Monitor. The FMP enrichment and transcript paths therefore
 share the same credential-wide quota inside this app. This does **not** yet prove cross-app quota
@@ -357,7 +357,7 @@ separate paid data subscription. Verified 2026-07-10 against this repo.
 | **Yahoo Finance** (`yahoo-finance`) | Final keyless tier in the enrichment cascade (`data-providers.ts:1732,791`) + free fallback in the history cascade (`history.ts` `fetchYahoo`) | Free, unofficial, no SLA. Paced (`minIntervalMs: 400, concurrency: 2` in `provider-rate-limit.ts:42`) because the prod egress IP gets HTTP 429 on unpaced bursts |
 | **NASDAQ Delayed Screener** (`nasdaq-delayed-screener`) | PRIMARY market-scan universe source (~8,000 rows) — `src/lib/market.ts:88-90`, hits `api.nasdaq.com/api/screener/stocks` | Free, public, unauthenticated — "no user API key is consumed, so this single shared cache is safe to serve to all users" (code comment). No rate-limit knob wired in `provider-rate-limit.ts` |
 | **Webull unofficial** (`webull-unofficial`) | Opt-in quote bridge shelling out to `scripts/webull_unofficial_quote.py` (community `tedchou12/webull` package, no login) — `data-providers.ts:1140-1146` | Free but unofficial/ToS-gray-area. Default **OFF** (`WEBULL_UNOFFICIAL_ENABLED`); capped at 20 symbols / 8s timeout by default (`WEBULL_UNOFFICIAL_MAX_SYMBOLS`, `WEBULL_UNOFFICIAL_TIMEOUT_MS`) |
-| **SEC XBRL** (`sec-xbrl`) | Fills `debtToEquity` (+ `revenueGrowth`, added 2026-08-02: fiscal-YoY from annual-duration 10-K `Revenues`/`RevenueFromContractWithCustomerExcludingAssessedTax` facts, restricted to true ~365-day spans so a same-concept quarterly/YTD duration is never mistaken for the full year) from audited 10-K/10-Q filings via the public companyfacts API this provider already fetches per symbol — `data-providers.ts` `parseCompanyFacts` | Free, keyless, public `data.sec.gov`. Default **OFF** (`SEC_XBRL_ENRICHMENT_ENABLED`); 300ms polite inter-symbol delay + 8s wall-clock scan budget, per SEC fair-access guidance |
+| **SEC XBRL** (`sec-xbrl`) | Fills `debtToEquity`, `revenueGrowth`, `returnOnEquity`, `returnOnAssets`, `grossProfitMargin`, `sharesOutstanding`, and implied `marketCap` (SEC shares × live quote) from cached companyfacts JSON — `parseCompanyFacts` in `data-providers.ts`. Nightly scheduler sweep (`sec-companyfacts-sweep.ts`) fetches EDGAR off the scan path into `sec_facts`; enrich reads cache only. | Free, keyless, public `data.sec.gov`. Default **ON** (`SEC_XBRL_ENRICHMENT_ENABLED=0` to disable); 300ms inter-symbol delay during sweep only |
 | **SEC EDGAR** (`sec-edgar`) | Insider-sentiment sourcing (`market.ts:348-349`) + RAG filings corpus ingestion (`vector-db.ts:1381`) | Free, keyless besides a required `SEC_EDGAR_USER_AGENT` string — a UA SEC requires, not a secret (`db-api-keys.ts` comment: "one per app") |
 | **Alpaca news + snapshot** (`alpaca-news`, `alpaca-snapshot`) | Headlines/sentiment (`data-providers.ts:1444-1503`) + real-time price/bid/ask/volume/vwap (`:1592+`) | Rides the SAME broker API key/secret already used for order execution — not a separate subscription (`resolveAlpacaMarketData`: own key → operator's paper key for background/shared passes). Defaults to the free **IEX** feed; **SIP** (full consolidated tape) needs the paid Algo Trader Plus subscription below — configurable via `ALPACA_DATA_FEED=iex\|sip\|otc`, and SIP without the subscription returns HTTP 403 |
 | **Robinhood quotes + fundamentals** (`robinhood-quotes`, `robinhood-fundamentals`) | Position quote fallback (`robinhood.ts:239,350`, `provider: "robinhood"`) + delayed fundamentals — pe_ratio, 52wk hi/lo, avg volume, sector/industry (`data-providers.ts:1379-1420`) | Rides the user's own Robinhood MCP/OAuth broker connection — not a separate data subscription. Per-user; fails closed with no user in scope (never borrows the operator's `'local'` token for a shared/background pass) |
@@ -382,8 +382,8 @@ covers the LLM providers behind the agentic loop and model picker (OpenAI,
 Anthropic, DeepSeek, Gemini, Mistral, xAI — `API_KEY_ENV_MAP` in
 `src/lib/db-api-keys.ts`) and the RAG stack (Pinecone, Voyage — same file,
 `shared-operator-infra` tier). Live spend, per-model rates, and usage tracking
-for all of these already live in the **API-Usage-Monitor** app (see
-`docs/slack-coordination.md`'s topic-tag table) — that app, not this doc, is the
+for all of these already live in the **API-Usage-Monitor** app — that app,
+not this doc, is the
 source of truth for what we're actually spending on LLM/RAG usage. Don't
 duplicate per-token pricing tables here; if a rate looks stale in
 API-Usage-Monitor, fix it there.

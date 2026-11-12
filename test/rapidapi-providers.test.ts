@@ -12,11 +12,12 @@ import {
   parseAlphaVantageOverview,
   parseAlphaVantageNewsSentiment,
   resolveRapidApiKey,
-  AlphaVantageRapidApiEnrichmentProvider, FmpRapidApiEnrichmentProvider, InsidersRapidApiEnrichmentProvider, TwelveDataRapidApiEnrichmentProvider,
+  AlphaVantageRapidApiEnrichmentProvider, InsidersRapidApiEnrichmentProvider, TwelveDataRapidApiEnrichmentProvider,
   type MarketEnrichmentProvider,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
 import { __resetRapidApiQuotaForTests } from "../src/lib/rapidapi-quota";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
 
 // Isolated temp SQLite DB per this test file (repo convention — see beforeAll in
 // test/data-providers.test.ts) so persisted budget/exhaustion state never leaks between files.
@@ -29,6 +30,7 @@ beforeAll(() => {
 beforeEach(() => {
   __resetRapidApiQuotaForTests();
   clearEnrichmentCache();
+  clearProviderFieldCacheForTests();
 });
 
 afterEach(() => {
@@ -481,23 +483,6 @@ describe("SteadyApiEnrichmentProvider (via getEnrichmentProvider) — combined c
     // Each provider's own cap (50) has plenty of headroom — the combined ceiling (3) is what binds,
     // regardless of how many symbols/fields would otherwise be requested.
     expect(rapidApiCallCount).toBeLessThanOrEqual(3);
-  });
-});
-
-describe("FmpRapidApiEnrichmentProvider", () => {
-  it("is a permanent no-op (FMP direct access retired — use Congress.Trade)", async () => {
-    const provider = new FmpRapidApiEnrichmentProvider("key");
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    const res = await provider.enrich(["AAPL"]);
-    expect(res).toEqual({});
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("keeps the provider name for cascade attribution stability", async () => {
-    const provider = new FmpRapidApiEnrichmentProvider("key");
-    expect(provider.name).toBe("fmp-rapidapi");
-    expect(provider.configured).toBe(true);
   });
 });
 

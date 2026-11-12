@@ -66,6 +66,23 @@ async function readCappedBody(request: Request): Promise<string | null> {
   return new TextDecoder("utf-8", { fatal: false }).decode(joined);
 }
 
+/** Classic report-uri object, a report-to `{ body }` wrapper, or a Reporting API array. */
+function cspReportRecords(report: unknown): Record<string, unknown>[] {
+  if (Array.isArray(report)) {
+    const records: Record<string, unknown>[] = [];
+    for (const item of report) {
+      records.push(...cspReportRecords(item));
+      if (records.length >= 20) break;
+    }
+    return records;
+  }
+  if (!report || typeof report !== "object") return [];
+  const record = report as Record<string, unknown>;
+  const nested = record["csp-report"] ?? record.body;
+  if (nested && typeof nested === "object") return cspReportRecords(nested);
+  return [record];
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const raw = await readCappedBody(request);
@@ -78,24 +95,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     } catch {
       return new NextResponse(null, { status: 204 });
     }
-    const csp =
-      report && typeof report === "object"
-        ? ((report as { "csp-report"?: Record<string, unknown>; body?: Record<string, unknown> })[
-            "csp-report"
-          ] ??
-          (report as { body?: Record<string, unknown> }).body ??
-          report)
-        : null;
-    if (csp && typeof csp === "object") {
-      const violated = String((csp as { "violated-directive"?: unknown; effectiveDirective?: unknown })["violated-directive"]
-        ?? (csp as { effectiveDirective?: unknown }).effectiveDirective
-        ?? "");
-      const blocked = String((csp as { "blocked-uri"?: unknown; blockedURL?: unknown })["blocked-uri"]
-        ?? (csp as { blockedURL?: unknown }).blockedURL
-        ?? "");
-      const doc = String((csp as { "document-uri"?: unknown; documentURL?: unknown })["document-uri"]
-        ?? (csp as { documentURL?: unknown }).documentURL
-        ?? "");
+    // report-uri posts one object.  report-to (Reporting API) posts an array of
+    // { type, body } records.  Cap the log lines so a stuffed array cannot flood.
+    for (const csp of cspReportRecords(report).slice(0, 20)) {
+      const violated = String(csp["violated-directive"] ?? csp.effectiveDirective ?? "");
+      const blocked = String(csp["blocked-uri"] ?? csp.blockedURL ?? "");
+      const doc = String(csp["document-uri"] ?? csp.documentURL ?? "");
       console.info(
         "[csp-report]",
         JSON.stringify({

@@ -284,7 +284,7 @@ export function applyOpeningOrderHeadroom(value: number): number {
  * and systemState (halted / close-only / liquidating).
  */
 export const HARD_GATE_REASON_PATTERNS: readonly string[] = [
-  "No Robinhood account is selected.", // account boundary — the one absolute rule
+  "No broker account is selected.", // account boundary — the one absolute rule
   "not tradable", // broker: symbol not tradable
   "buying power", // broker/accounting: can't spend more than available
   "Sell quantity exceeds", // accounting: can't sell more than held
@@ -338,7 +338,7 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
   }
   if (context.policy.systemState === "liquidating" && proposal.side !== "sell" && proposal.side !== "cover") reasons.push("System is liquidating. Only close orders allowed.");
   if (context.policy.systemState === "close_only" && proposal.side !== "sell" && proposal.side !== "cover") reasons.push("System is close-only. New entries are disabled.");
-  if (!context.policy.accountNumber) reasons.push("No Robinhood account is selected.");
+  if (!context.policy.accountNumber) reasons.push("No broker account is selected.");
   // Universe/blocklist applies to OPENING trades only. Never block a risk-reducing exit
   // (sell/cover) because the symbol was removed from the universe or blocklisted — that
   // would trap a position in a name you flagged precisely to get out of.
@@ -407,16 +407,15 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       }
     }
   }
-  // STALENESS GATE (OPENINGS only) — NEVER blocks and NEVER escalates to a pending card.
+  // STALENESS GATE (OPENINGS only) — never escalates to a pending card.
   // Primary path: the quote cascade must supply a trade-time within maxQuoteAgeSec (default 120s).
   // Venue-authoritative delayed feeds (Tradier sandbox): age the FETCH snapshot (`fetchedAt`), not
   // trade-time `asOf` — the ~15m delay is the venue's fill world, not a broken cascade.
   // Delayed Yahoo fallback (owner 2026-08-18): same rule — age the fetch, stamp
-  // user-facing "Delayed Quote" on the card, KEEP TRADING.  Do not fail-closed
-  // openings.  Do not skip Green/Red.  Do not write coordinator notes into rationale.
-  // Backup if data is still old/missing (should be rare once cascade is healthy): convert the order
-  // to a LIMIT at the proposal's intended entry (referencePrice / existing limit), so the price the
-  // strategy identified as worth buying/shorting is honored instead of chasing a stale market print.
+  // user-facing "Delayed Quote" on the card, KEEP TRADING when the observation time parses.
+  // A quote with no parseable provider observation is unknown age.  That opening is blocked.
+  // A known-old observation still converts to a LIMIT at the proposal's intended entry
+  // (referencePrice / existing limit), so the price the strategy identified is honored.
   // Timestamps are read from the run's MarketScan — never fabricated. Exits (sell/cover) are ungated.
   let quoteStaleMetadata: {
     ageSec?: number;
@@ -440,11 +439,42 @@ export function evaluateTradeProposal(proposal: TradeProposal, context: PolicyCo
       // Stamp lives on the approval card.  Do not append coordinator notes to
       // rationale — that text is user-facing on website + iOS.
     }
-    if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
-      const { ageSec, missing, venueDelayed } = quoteAgeSecForStalenessGate(scanQuote, now);
-      const isStale = missing || (ageSec !== undefined && ageSec > maxQuoteAgeSec);
-
-      if (isStale) {
+    // A tape with a DOCUMENTED expected delay (Alpaca PAPER `delayed_sip`,
+    // ~900s).  Two honest cases land here:
+    //   (a) the market was OPEN and the observation runs beyond expected +
+    //       tolerance.  During RTH that can mean an ILLIQUID LAST PRINT (a
+    //       quiet name simply has not traded) OR a TAPE LAGGING behind what
+    //       the venue promises — the number cannot tell them apart, so the
+    //       opening is blocked either way, but the tape is not "proven
+    //       broken".
+    //   (b) the market was CLOSED.  An old asOf is then EXPECTED (no prints
+    //       happen while the market is shut), so it is NOT excess delay — but
+    //       a closed-session print is still not a tradable observation, so the
+    //       opening is blocked with its own reason.
+    // The expected ~900s delay is NOT excess and never lands here.  Checked
+    // independently of the maxQuoteAgeSec policy knob so it can never be
+    // skipped.
+    const quoteGate = quoteAgeSecForStalenessGate(scanQuote, now);
+    const excessDelaySec = quoteGate.excessDelaySec;
+    if (excessDelaySec !== undefined && excessDelaySec > 0) {
+      reasons.push(
+        `quote_last_print_beyond_delayed_sla: ${symbol} quote observation is ${excessDelaySec}s beyond the ` +
+          `expected delayed-feed window (illiquid last print or excess tape lag). The staleness gate is ` +
+          `blocking this opening.`
+      );
+    } else if (quoteGate.marketSessionOpen === false) {
+      reasons.push(
+        `quote_delayed_tape_session_closed: ${symbol} quote comes from a delayed tape and the market ` +
+          `session is closed, so the print is not a tradable observation. The staleness gate is blocking ` +
+          `this opening.`
+      );
+    } else if (maxQuoteAgeSec != null && maxQuoteAgeSec > 0) {
+      const { ageSec, missing, venueDelayed } = quoteGate;
+      if (missing) {
+        reasons.push(
+          `quote_age_unknown: ${symbol} quote has no provider observation time. The staleness gate is blocking this opening.`
+        );
+      } else if (ageSec !== undefined && ageSec > maxQuoteAgeSec) {
         const originalType = proposal.type;
         const originalLimitPrice = proposal.limitPrice;
 
