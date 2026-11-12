@@ -1,5 +1,5 @@
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "./request-user";
-import { enforceRateLimit, RATE_LIMITS, type RateLimitOptions } from "./rate-limit";
+import { enforceRateLimit, previewRateLimit, RATE_LIMITS, type RateLimitOptions } from "./rate-limit";
 
 export type AdminIngestLimitKind = "job" | "read";
 
@@ -41,4 +41,17 @@ export function enforceAdminIngestRateLimit(
   kind: AdminIngestLimitKind
 ): Response | null {
   return enforceRateLimit(adminIngestSubject(request), `admin-ingest:${kind}:${route}`, optionsFor(kind));
+}
+
+/**
+ * 429 when this admin is already out of ingest budget, without recording a hit.
+ * Guarded routes call this before `withAdminOperationGuard`, then `enforceAdminIngestRateLimit`
+ * inside the callback after the lease claim succeeds.
+ */
+export function previewAdminIngestRateLimit(
+  request: Request,
+  route: string,
+  kind: AdminIngestLimitKind
+): Response | null {
+  return previewRateLimit(adminIngestSubject(request), `admin-ingest:${kind}:${route}`, optionsFor(kind));
 }

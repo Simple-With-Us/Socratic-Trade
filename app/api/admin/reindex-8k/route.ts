@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getEightKDataset, reindexEightKDataset } from "@/lib/web-sources/sec8k";
 import { getVectorStoreStats } from "@/lib/vector-db";
 import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
-import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy } from "@/lib/operation-lease";
@@ -43,8 +43,11 @@ export async function POST(request: Request) {
   } catch {
     // no body / not JSON -> reindex the whole dataset
   }
+  const blocked = previewAdminIngestRateLimit(request, "reindex-8k", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "reindex-8k", async (operationLeaseClaim) => {
-    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
     const limited = enforceAdminIngestRateLimit(request, "reindex-8k", "job");
     if (limited) return limited;
     const before = await getVectorStoreStats(userId);

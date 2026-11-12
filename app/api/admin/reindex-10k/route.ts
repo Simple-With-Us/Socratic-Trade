@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { listIngestedAccessions } from "@/lib/db";
 import { refreshFilingBodies } from "@/lib/web-sources/sec-filings";
 import { getVectorStoreStats } from "@/lib/vector-db";
-import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy } from "@/lib/operation-lease";
@@ -68,8 +68,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "Provide { symbols: string[], limit?: number, clearCache?: boolean } or { all: true } in the request body." }, { status: 400 });
   }
 
+  const blocked = previewAdminIngestRateLimit(request, "reindex-10k", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "reindex-10k", async (operationLeaseClaim) => {
-    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
     const limited = enforceAdminIngestRateLimit(request, "reindex-10k", "job");
     if (limited) return limited;
     if (clearCache) {

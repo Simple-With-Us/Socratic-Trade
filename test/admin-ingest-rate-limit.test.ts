@@ -8,6 +8,7 @@ import {
   AUTHENTICATED_IDENTITY_SOURCE_HEADER,
   AUTHENTICATED_IDENTITY_SOURCES
 } from "../src/lib/auth/strip-identity";
+import * as operationLease from "../src/lib/operation-lease";
 import { RATE_LIMITS, rateLimit, resetRateLimiter } from "../src/lib/rate-limit";
 import { AUTHENTICATED_EMAIL_HEADER } from "../src/lib/request-user";
 import * as chatHistory from "../src/lib/chat-history";
@@ -170,6 +171,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  operationLease.resetOperationLeaseForTest();
   vi.unstubAllEnvs();
   resetRateLimiter();
   resetAdminOperationInFlight();
@@ -404,10 +406,14 @@ describe("admin ingest jobs", () => {
     }, tokenAuth));
 
     const first = seed();
-    await vi.waitFor(() => expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce());
-    const duplicate = await seed();
-    expect(duplicate.status).toBe(409);
-    release();
+    try {
+      await vi.waitFor(() => expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce());
+      const duplicate = await seed();
+      expect(duplicate.status).toBe(409);
+    } finally {
+      release();
+      await first;
+    }
     expect((await first).status).toBe(200);
 
     // One slot is left only if the 409 did not spend one.
@@ -429,13 +435,58 @@ describe("admin ingest jobs", () => {
     await expectLimited(response, mocks.requeueSecIngestDeadLetters);
   });
 
-  it("earningscalls clear-block over the limit does not write entitlement state", async () => {
-    saturate(tokenAuth, "earningscalls", "job");
+  it("an already-full sec-ingest budget returns 429 without taking the seed lease", async () => {
+    const spy = vi.spyOn(operationLease, "runWithOperationLease");
+    const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, tokenAuth));
+    expect(allowed.status).toBe(200);
+    expect(spy).toHaveBeenCalled();
+    spy.mockClear();
+    resetRateLimiter();
+    saturate(tokenAuth, "sec-ingest", "job");
+    const blocked = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed" })
+    }, tokenAuth));
+    expect(blocked.status).toBe(429);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("earningscalls clear-block over its own limit does not write entitlement state", async () => {
+    saturate(tokenAuth, "earningscalls-entitlement", "job");
     const response = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
       method: "POST",
       body: JSON.stringify({ action: "clear-entitlement-block" })
     }, tokenAuth));
     await expectLimited(response, mocks.clearEarningsCallsEntitlementBlock);
+  });
+
+  it("an earnings-call entitlement reset does not share the probe budget", async () => {
+    saturate(tokenAuth, "earningscalls", "job");
+    const reset = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear-entitlement-block" })
+    }, tokenAuth));
+    expect(reset.status).toBe(200);
+    expect(mocks.clearEarningsCallsEntitlementBlock).toHaveBeenCalledOnce();
+
+    resetRateLimiter();
+    saturate(tokenAuth, "earningscalls-entitlement", "job");
+    const blockedReset = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "clear-entitlement-block" })
+    }, tokenAuth));
+    expect(blockedReset.status).toBe(429);
+    const probe = await earningsCallsPost(adminRequest("/api/admin/earningscalls", {
+      method: "POST",
+      body: JSON.stringify({ action: "probe-entitlement" })
+    }, tokenAuth));
+    expect(probe.status).toBe(200);
+    expect(mocks.manuallyProbeEarningsCallsEntitlement).toHaveBeenCalledOnce();
   });
 
   it("reindex-10k in production still requires the token and still accepts it", async () => {

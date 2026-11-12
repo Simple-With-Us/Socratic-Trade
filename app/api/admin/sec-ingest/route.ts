@@ -4,7 +4,7 @@ import { getSecIngestJobReceipt, reconcileSecIngestJob, requeueSecIngestDeadLett
 import { seedSecIngestJobsFromManifest } from "@/lib/rag/sec-ingest-seeder";
 import { padCik } from "@/lib/web-sources/sec-filings";
 import { SecIngestBodySchema } from "@/lib/sec-ingest-body-schema";
-import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 
@@ -106,8 +106,12 @@ export async function POST(request: Request) {
     }
   }
 
+  const blocked = previewAdminIngestRateLimit(request, "sec-ingest", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "sec-ingest-seed", async (claim) => {
-    // Charge the job budget only after the lease claim succeeds, so a 409 duplicate is free.
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
+    // An already-full budget returned above and never took the lease.
     const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "job");
     if (limited) return limited;
     try {
