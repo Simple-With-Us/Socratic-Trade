@@ -1,4 +1,4 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { resolveLlmCredential } from "@/lib/db";
 import { NextResponse } from "next/server";
 
@@ -20,7 +20,8 @@ export const dynamic = "force-dynamic";
  * status for it correctly anyway.
  */
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const services = ["openai", "anthropic", "xai", "gemini", "mistral", "deepseek", "meta", "moonshot", "minimax", "openrouter"] as const;
   const providers: Record<string, boolean> = {};
   for (const service of services) {

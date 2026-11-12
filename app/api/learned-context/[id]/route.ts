@@ -1,5 +1,5 @@
 import { audit, deleteLearnedContext } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,8 @@ export const dynamic = "force-dynamic";
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const deleted = deleteLearnedContext(id, userId);
     if (!deleted) return new NextResponse("Learned-context item not found.", { status: 404 });
 
