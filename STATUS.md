@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
+
+**What.** The app can reject traffic that did not come from Cloudflare.  The check stays off until `REQUIRE_CLOUDFLARE_ORIGIN` is set, so merging does not change production.  A Node hook reads the TCP peer and middleware repeats it.  `CF-Connecting-IP` and `X-Forwarded-For` stay as they are while the flag is off, and are removed while it is on unless the peer is Cloudflare or the origin secret matched.  `GET` and `HEAD /api/live`, loopback, and Tailscale `100.64.0.0/10` stay open and do not make those headers trusted.  Rollout: `docs/rollouts/2026-11-12-st-4595-cloudflare-origin-lock.md`.  Runbook: `docs/runbooks/cloudflare-origin-lock.md`.
+
+**Next.** PR is the delivery.  Do not set the flag and do not edit the Hetzner firewall from this change.
+
 ## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
 
 **What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
