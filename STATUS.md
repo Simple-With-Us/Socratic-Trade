@@ -1,3 +1,9 @@
+## 2026-11-12 CURSOR — ST-4619 minimatch Dependabot override
+
+**What.**  Dependabot Updates failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
+
+**Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Weekday RTH latch still applies when this lockfile change reaches `main`.
+
 ## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
 
 **What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
