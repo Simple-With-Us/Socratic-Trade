@@ -23,7 +23,8 @@ the run; later chunks are not sent.
   --apply                                   actually delete
 
 Exit codes: 0 ok/no-op, 1 delete failures or a failed listing (rclone error,
-timeout, missing binary, malformed lsl line), 2 no usable snapshot,
+timeout, missing binary, malformed lsl line; a failed post-delete listing
+also logs an APPLIED-UNVERIFIED line with the attempted count), 2 no usable snapshot,
 3 snapshot failed a safety guard, 4 would leave a restore hole,
 5 kept chain has internal gaps (L2 will stay wedged -- needs a human),
 6 nothing superseded although L1 is large (boundary did not advance).
@@ -322,13 +323,16 @@ def execute(argv=None, *, rclone_fn=None, now=None, chunk=None) -> int:
     step = DELETE_CHUNK if not chunk else int(chunk)
     if step < 1:
         step = DELETE_CHUNK
-    sent = errors = 0
+    sent = errors = attempted = 0
     for start in range(0, len(plan.doomed), step):
         names = plan.doomed[start:start + step]
         handle, listfile = tempfile.mkstemp(prefix="l1-trim-", suffix=".txt")
         try:
             with os.fdopen(handle, "w") as fh:
                 fh.write("".join(item + "\n" for item in names))
+            # A failed batch still counts as attempted: rclone may have
+            # hidden some of its objects before it errored.
+            attempted += len(names)
             try:
                 runner(["delete", target, "--files-from", listfile,
                         "--transfers", "16", "--checkers", "16"])
@@ -346,7 +350,13 @@ def execute(argv=None, *, rclone_fn=None, now=None, chunk=None) -> int:
     try:
         remaining = {nm for nm, _size, _when in listing(bucket, prefix, "0001", runner)}
     except Exception as exc:
-        log("ABORT: post-delete listing failed (%s)" % type(exc).__name__)
+        # The deletes already ran and are not reverted, so say how many were
+        # sent: without this line an applied-but-unverified run reads as a
+        # no-op.  Still exit 1 (a failed listing), never 0.
+        log("ABORT: post-delete listing failed (%s); delete state is unverified"
+            % type(exc).__name__)
+        log("APPLIED-UNVERIFIED app=%s attempted=%d issued_ok=%d batch_errors=%d "
+            "survived=unverified" % (args.app, attempted, sent, errors))
         return 1
     survivors = [nm for nm in plan.doomed if nm in remaining]
     deleted = len(plan.doomed) - len(survivors)

@@ -641,6 +641,39 @@ class BoundaryExecuteTests(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertNotIn("delete", [call[0] for call in hole.calls])
 
+    def _post_delete_listing_fails(self, fake):
+        real_call = fake.__call__
+
+        def fail_after_delete(args):
+            if args[0] == "lsl" and any(call[0] == "delete" for call in fake.calls):
+                fake.calls.append(list(args))
+                raise subprocess.TimeoutExpired(["rclone", "lsl"], 300)
+            return real_call(args)
+
+        return fail_after_delete
+
+    def test_post_delete_listing_failure_reports_attempted_deletes(self):
+        # Deletes already ran, so the run must not read like a no-op: it
+        # reports what it sent and that the result is unverified (exit 1).
+        sent = FakeRclone(self.snaps, self.l1)
+        code, text = self._run(self._post_delete_listing_fails(sent), ["--apply"], chunk=2)
+        self.assertEqual(code, 1)
+        self.assertEqual(sum(len(batch) for batch in sent.files_from), 3)
+        self.assertIn("post-delete listing failed (TimeoutExpired)", text)
+        self.assertIn(
+            "APPLIED-UNVERIFIED app=socratic attempted=3 issued_ok=3 batch_errors=0 "
+            "survived=unverified", text)
+        self.assertNotIn("APPLIED app=", text)
+
+        # A failed batch still counts as attempted: rclone may have hidden
+        # some of its objects before it errored.
+        broken = FakeRclone(self.snaps, self.l1, fail_delete=True)
+        code, text = self._run(self._post_delete_listing_fails(broken), ["--apply"], chunk=2)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "APPLIED-UNVERIFIED app=socratic attempted=2 issued_ok=0 batch_errors=1 "
+            "survived=unverified", text)
+
     def test_timer_opts_into_apply(self):
         service = (SCRIPTS / "ops" / "litestream-l1-boundary-trim.service").read_text()
         self.assertIn("Environment=LITESTREAM_L1_TRIM_APPLY=1\n", service)

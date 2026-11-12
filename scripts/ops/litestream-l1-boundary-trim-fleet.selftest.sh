@@ -126,6 +126,42 @@ else
   FAILURES=$((FAILURES + 1))
   echo "FAIL installer_drift_detected: ${PATHS_SEEN}" >&2
 fi
+
+# The installer must also put the fleet wrapper exactly where the systemd unit
+# starts it (DST_FLEET == ExecStart), or the nightly timer fails to start.
+SERVICE_UNIT="${SCRIPT_DIR}/litestream-l1-boundary-trim.service"
+[ -f "$SERVICE_UNIT" ] || { echo "error: ${SERVICE_UNIT} not found." >&2; exit 1; }
+# fleet_paths_agree <installer> <unit>: 0 only when the installer's DST_FLEET
+# and the unit's single ExecStart executable are one identical absolute path.
+fleet_paths_agree() {
+  local fleet exec_lines exec_bin
+  fleet="$(sed -n 's/^DST_FLEET="\(.*\)"$/\1/p' "$1")"
+  exec_lines="$(grep -c '^ExecStart=' "$2")"
+  # Executable is the first word; drop systemd's -@:+! prefixes.
+  exec_bin="$(sed -n 's/^ExecStart=[-@:+!]*\([^[:space:]]*\).*$/\1/p' "$2")"
+  PATHS_SEEN="installer DST_FLEET='${fleet}' unit ExecStart='${exec_bin}' (ExecStart lines: ${exec_lines})"
+  [ -n "$fleet" ] && [ "${fleet#/}" != "$fleet" ] \
+    && [ "$(printf '%s\n' "$fleet" | wc -l)" -eq 1 ] \
+    && [ "$exec_lines" -eq 1 ] && [ "$fleet" = "$exec_bin" ]
+}
+if fleet_paths_agree "$INSTALLER" "$SERVICE_UNIT"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS installer_fleet_matches_unit_execstart"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL installer_fleet_matches_unit_execstart: ${PATHS_SEEN}" >&2
+fi
+# Controls: moving DST_FLEET alone, or the unit's ExecStart alone, must be caught.
+sed 's#^DST_FLEET=".*"$#DST_FLEET="/opt/drifted/litestream-l1-boundary-trim-fleet"#' "$INSTALLER" > "${WORK}/installer-fleet-drifted.sh"
+sed 's#^ExecStart=.*$#ExecStart=/opt/drifted/litestream-l1-boundary-trim-fleet#' "$SERVICE_UNIT" > "${WORK}/unit-drifted.service"
+if ! fleet_paths_agree "${WORK}/installer-fleet-drifted.sh" "$SERVICE_UNIT" \
+  && ! fleet_paths_agree "$INSTALLER" "${WORK}/unit-drifted.service"; then
+  PASSES=$((PASSES + 1))
+  echo "PASS installer_fleet_drift_detected"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL installer_fleet_drift_detected: ${PATHS_SEEN}" >&2
+fi
 HERMETIC="${WORK}/fleet-hermetic.sh"
 sed "s#-${DEFAULT_BIN}}#-${WORK}/no-default-trim}#" "$UNDER_TEST" > "$HERMETIC"
 REAL_UNDER_TEST="$UNDER_TEST"
