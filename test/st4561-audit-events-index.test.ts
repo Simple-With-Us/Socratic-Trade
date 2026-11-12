@@ -130,4 +130,27 @@ describe("ST-4561 audit_events composite index", () => {
     expect(after[0].kind).toBe("broker_placement_auto_halted");
     expect(after[0].handed_over).toBe(1);
   });
+
+  it("does not treat an earlier same-millisecond policy change as a handover", () => {
+    const db = getDb();
+    db.exec("DELETE FROM audit_events");
+    const at = "2026-11-12T06:01:30.000Z";
+    insertAudit("evt-before", "policy_change", at, '{"value":{"systemState":"active"}}');
+    insertAudit(
+      "evt-breaker",
+      "policy_violation_drawdown",
+      at,
+      '{"revertedTo":"halted","reason":"Trailing drawdown 72.10% breached the 15% limit."}'
+    );
+
+    const { sql, params } = latestHaltBranch(ACCOUNT);
+    const before = db.prepare(sql).all(...params) as { kind: string; handed_over: number }[];
+    expect(before).toHaveLength(1);
+    expect(before[0].kind).toBe("policy_violation_drawdown");
+    expect(before[0].handed_over).toBe(0);
+
+    insertAudit("evt-after", "policy_change", at, '{"value":{"systemState":"active"}}');
+    const after = db.prepare(sql).all(...params) as { handed_over: number }[];
+    expect(after[0].handed_over).toBe(1);
+  });
 });
