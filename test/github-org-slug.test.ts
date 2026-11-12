@@ -59,6 +59,7 @@ const STALE_PATTERNS: RegExp[] = [
   /\bjaywedgeworth22\/Socratic[-.]Trade\b/i,
   /\bjaywedgeworth22\/Congress\.Trade\b/i,
   /\bjaywedgeworth22\/Usage-Monitor\b/i,
+  /\bjaywedgeworth22\/congress-trading-shared\b/i,
   /\bjaywedgeworth22\/ai-fleet-coordinator\b/i,
   /\bjaywedgeworth22\/agentic-trading\b/i,
   /\bjaywedgeworth22\/robinhood-agentic-trading\b/i,
@@ -74,8 +75,9 @@ function shouldSkipFile(rel: string): boolean {
 }
 
 function isScannableTextFile(rel: string, sizeBytes: number): boolean {
-  if (sizeBytes > MAX_SCAN_BYTES) return false;
   const lower = rel.toLowerCase();
+  const isTextDocument = lower.endsWith(".md") || lower.endsWith(".txt");
+  if (sizeBytes > MAX_SCAN_BYTES && !isTextDocument) return false;
   return !BINARY_SUFFIXES.some((suffix) => lower.endsWith(suffix));
 }
 
