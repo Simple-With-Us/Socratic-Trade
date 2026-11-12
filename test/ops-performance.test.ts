@@ -262,6 +262,9 @@ describe("ops performance snapshot — shape and math", () => {
     expect(account.label).toBe("Ops Perf Test Account");
     expect(account.environment).toBe("paper");
     expect(account.systemState).toBe("active");
+    expect(account.parked).toBe(false);
+    expect(account.parkedReason).toBeNull();
+    expect(account.parkedAt).toBeNull();
     // Every round trip in this fixture is closed, so there is nothing to mark: "prices unavailable"
     // would be a false statement about a book that needs no prices.
     expect(account.pricesUnavailable).toBe(false);
@@ -344,9 +347,65 @@ describe("ops performance snapshot — shape and math", () => {
     expect(snapshot.accounts).toHaveLength(1);
     const account = snapshot.accounts[0];
     expect(account.accountNumber).toBeNull();
+    expect(account.parked).toBe(false);
+    expect(account.parkedReason).toBeNull();
+    expect(account.parkedAt).toBeNull();
     expect(account.tradeStats).toEqual({ windowDays: 90, tradeCount: 0, winRate: 0, expectancyUsd: 0 });
     expect(account.equityCurve).toEqual([]);
     expect(account.proposalFunnel.counts).toEqual([]);
+  });
+
+  it("reports a park on a synced book and on an account that has never synced, and clears it on un-park", async () => {
+    const db = await import("../src/lib/db");
+    const { runOpsAccountControl } = await import("../src/lib/ops-account-control");
+    const { buildOpsPerformanceSnapshot } = await import("../src/lib/ops-performance");
+    const userId = `ops-perf-park-${randomUUID()}`;
+    const syncedId = `acct-park-synced-${randomUUID()}`;
+    const emptyId = `acct-park-empty-${randomUUID()}`;
+    const reason = "dormant since Jul 6; parked pending owner review of the unknown balance";
+
+    db.upsertConnectedAccount({
+      id: syncedId,
+      userId,
+      broker: "alpaca",
+      environment: "paper",
+      accountNumber: `PARK-${randomUUID()}`,
+      label: "Parked Paper",
+      isActive: true
+    });
+    db.setPolicy({ ...db.getPolicy(userId, syncedId), systemState: "active", strategyAuthority: "decide" }, userId, syncedId);
+    db.upsertConnectedAccount({
+      id: emptyId,
+      userId,
+      broker: "public",
+      environment: "live",
+      label: "Parked unsynced",
+      isActive: false
+    });
+
+    expect((await runOpsAccountControl({ action: "park_account", connectedAccountId: syncedId, reason, dryRun: false })).status).toBe(200);
+    expect((await runOpsAccountControl({ action: "park_account", connectedAccountId: emptyId, reason, dryRun: false })).status).toBe(200);
+
+    const synced = (await buildOpsPerformanceSnapshot({ connectedAccountId: syncedId, days: 30 })).accounts[0];
+    expect(synced.parked).toBe(true);
+    expect(synced.parkedReason).toBe(reason);
+    expect(synced.parkedAt).toEqual(expect.any(String));
+    // Parking records a decision.  It does not halt, so an active book can still be parked.
+    expect(synced.systemState).toBe("active");
+
+    const empty = (await buildOpsPerformanceSnapshot({ connectedAccountId: emptyId })).accounts[0];
+    expect(empty.accountNumber).toBeNull();
+    expect(empty.parked).toBe(true);
+    expect(empty.parkedReason).toBe(reason);
+    expect(empty.parkedAt).toEqual(expect.any(String));
+    expect(empty.tradeStats.tradeCount).toBe(0);
+
+    expect((await runOpsAccountControl({ action: "unpark_account", connectedAccountId: syncedId, dryRun: false })).status).toBe(200);
+    const cleared = (await buildOpsPerformanceSnapshot({ connectedAccountId: syncedId, days: 30 })).accounts[0];
+    expect(cleared.parked).toBe(false);
+    expect(cleared.parkedReason).toBeNull();
+    expect(cleared.parkedAt).toBeNull();
+    expect(cleared.systemState).toBe("active");
   });
 
   it("survives a malformed Red Team audit payload for an account — falls back to an empty " +

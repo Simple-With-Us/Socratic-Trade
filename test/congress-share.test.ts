@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import {
+  SHARE_PAYLOAD_SCHEMA_VERSION,
+  isSupportedSharePayloadSchemaVersion,
+} from "@jaywedgeworth22/congress-trading-shared";
 import type { OHLCBar } from "../src/lib/indicators";
 import type { MarketQuote, MarketScan } from "../src/lib/types";
 
@@ -26,6 +30,7 @@ vi.mock("../src/lib/history", () => {
 
 import { fetchDailyOHLC } from "../src/lib/history";
 import {
+  buildFundamentalsAndAnalystImport,
   buildInsiderImport,
   buildShortVolumeImport,
   canonicalMarketDataSymbol,
@@ -33,19 +38,27 @@ import {
   chunkPrices,
   dropInvalidShareRows,
   isCongressAuthBreakerTripped,
+  isCongressUpstreamBreakerTripped,
   isCongressDailyShareDue,
   isCongressShareAutoEnabled,
   marketQuoteToAnalyst,
   marketQuoteToFundamentals,
   marketQuoteToRef,
+  closesCoverLatestSession,
   ohlcBarsToCloses,
   ohlcBarsToPriceEntry,
   fetchCongressPriceNeeds,
+  getStaleCatchupState,
+  isCongressStaleCatchupDue,
+  recordStaleCatchup,
   mergeShareUniverse,
   resetCongressAuthBreakerForTests,
+  resetCongressUpstreamBreakerForTests,
   resetCongressRefThrottle,
   runCongressDailyShare,
   runCongressDailyShareIfDue,
+  runCongressStaleCatchupIfDue,
+  probeCongressShareToken,
   probeCongressShareTokenIfDue,
   probeCongressShareTokenOnStartup,
   shareScanRefs,
@@ -57,11 +70,25 @@ import {
   type CongressPrice,
   type CongressRef,
 } from "../src/lib/congress-share";
-import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
+import { deleteInternalSetting, getInternalSetting, listAuditByKind, setInternalSetting } from "../src/lib/db";
+import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { flushDurableStateNow, resetDurableStateCacheForTests } from "../src/lib/durable-state";
 
 const recentDate = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
+
+function isoDaysBefore(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Ascending bars whose newest close is the latest completed session for `now`. */
+function barsEndingOnSession(now: number, closes: number[]): OHLCBar[] {
+  const latest = latestCompletedTradingSessionEtKey(now);
+  return closes.map((close, index) => ({
+    time: isoDaysBefore(latest, closes.length - 1 - index),
+    close
+  }));
+}
 
 function congressTradeTestToken(): string {
   const token = process.env.CONGRESS_TRADE_TEST_TOKEN;
@@ -125,8 +152,11 @@ beforeEach(() => {
   delete process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER;
   delete process.env.CONGRESS_TRADE_BASE_URL;
   delete process.env.CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS;
+  delete process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES;
+  delete process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS;
   resetCongressRefThrottle();
   resetCongressAuthBreakerForTests();
+  resetCongressUpstreamBreakerForTests();
   mockedFetchDailyOHLC.mockReset();
 });
 
@@ -579,6 +609,17 @@ describe("ohlcBarsToPriceEntry", () => {
   });
 });
 
+describe("closesCoverLatestSession", () => {
+  const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+
+  it("accepts a newest close on the latest completed session and rejects an older tail", () => {
+    const session = latestCompletedTradingSessionEtKey(now);
+    expect(closesCoverLatestSession([{ date: isoDaysBefore(session, 3) }, { date: session }], now)).toBe(true);
+    expect(closesCoverLatestSession([{ date: "2026-06-15" }, { date: "2026-06-16" }], now)).toBe(false);
+    expect(closesCoverLatestSession([], now)).toBe(false);
+  });
+});
+
 describe("chunkPrices", () => {
   const mk = (ticker: string, n: number): CongressPrice => ({
     ticker,
@@ -690,6 +731,23 @@ describe("shareWithCongressTrade", () => {
     });
   });
 
+  it("stamps the shared SHARE_PAYLOAD_SCHEMA_VERSION on the POST body", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "secret-token";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.trade/";
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
+      new Response(ctImportOkBody({ refs: 1, spxRows: 1 }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }], spx: [{ date: "2026-06-15", close: 5400 }] });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.schemaVersion).toBe(SHARE_PAYLOAD_SCHEMA_VERSION);
+    expect(isSupportedSharePayloadSchemaVersion(body)).toBe(true);
+  });
+
   it("returns ok:false on an HTTP error without throwing", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     vi.stubGlobal("fetch", vi.fn(async () => new Response("denied", { status: 401 })));
@@ -766,6 +824,48 @@ describe("shareWithCongressTrade", () => {
     await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
     expect(isCongressAuthBreakerTripped()).toBe(false);
     expect(fetchSpy).toHaveBeenCalledTimes(6); // 2 calls * 3 retry attempts on 5xx
+    expect(isCongressUpstreamBreakerTripped()).toBe(false);
+  });
+
+  it("opens the upstream breaker after exhausted HTTP 500 calls and skips the next POST quietly", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    const fetchSpy = vi.fn(async () => new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(first.ok).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+    expect(isCongressUpstreamBreakerTripped()).toBe(true);
+    const errorsAfterTrip = errorSpy.mock.calls.length;
+
+    const second = await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
+    expect(second).toMatchObject({ ok: false, skipped: false, reason: "upstream-breaker" });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(errorSpy.mock.calls.length).toBe(errorsAfterTrip);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("logs upstream circuit open only once across repeated half-open failures", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS = "20";
+    const upstreamWarns = () =>
+      vi.mocked(console.warn).mock.calls.filter((call) => String(call[0]).includes("upstream circuit open")).length;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await shareWithCongressTrade({ refs: [{ ticker: "MSFT" }] });
+    expect(upstreamWarns()).toBe(1);
+
+    warnSpy.mockRestore();
   });
 
   it("does NOT trip the breaker on a transport error", async () => {
@@ -999,19 +1099,33 @@ describe("runCongressDailyShare", () => {
     expect(mockedFetchDailyOHLC).not.toHaveBeenCalled(); // collection phase never started
   });
 
+  it("skips OHLC when the upstream breaker is cooling", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await shareWithCongressTrade({ refs: [{ ticker: "AAPL" }] });
+    expect(isCongressUpstreamBreakerTripped()).toBe(true);
+    expect(isCongressAuthBreakerTripped()).toBe(false);
+
+    mockedFetchDailyOHLC.mockClear();
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20");
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
+
+    expect(res).toMatchObject({ ok: false, skipped: false, reason: "upstream-breaker" });
+    expect(mockedFetchDailyOHLC).not.toHaveBeenCalled();
+  });
+
   it("shares custom symbols + SPX as separate bounded POSTs and does not advance the daily marker", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
-    const bars: OHLCBar[] = [
-      { time: "2026-06-15", close: 100 },
-      { time: "2026-06-16", close: 101 }
-    ];
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    const bars = barsEndingOnSession(now, [100, 101]);
     mockedFetchDailyOHLC.mockResolvedValue(bars);
     const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) =>
       new Response(ctImportOkBody(), { status: 200 })
     );
     vi.stubGlobal("fetch", fetchSpy);
 
-    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
     setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20"); // a known past marker
     const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
 
@@ -1039,10 +1153,8 @@ describe("runCongressDailyShare", () => {
 
   it("deduplicates concurrent runs via a shared in-flight promise", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
-    const bars: OHLCBar[] = [
-      { time: "2026-06-15", close: 100 }
-    ];
-    mockedFetchDailyOHLC.mockResolvedValue(bars);
+    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [100]));
     const fetchSpy = vi.fn(async (url: string, _init?: RequestInit) => {
       await new Promise(r => setTimeout(r, 50));
       if (url.includes("nasdaq.com")) {
@@ -1052,7 +1164,6 @@ describe("runCongressDailyShare", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    const now = Date.UTC(2026, 5, 22, 13, 0, 0);
     setInternalSetting("congress-share:lastDailyRunDate", "2026-06-20");
 
     const [res1, res2] = await Promise.all([
@@ -1062,6 +1173,37 @@ describe("runCongressDailyShare", () => {
 
     expect(res1).toBe(res2); // Should return the exact same promise/result reference
     expect(fetchSpy.mock.calls.filter((c) => (c[1] as RequestInit)?.body)).toHaveLength(2); // Should only execute one run (which POSTs SPX and prices payload separately)
+  });
+
+  it("withholds a price and SPX series whose newest close is behind the latest session", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+    const session = latestCompletedTradingSessionEtKey(now);
+    mockedFetchDailyOHLC.mockResolvedValue([
+      { time: "2026-06-15", close: 100 },
+      { time: "2026-06-16", close: 101 }
+    ]);
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL", "MSFT"] });
+
+    expect(session > "2026-06-16").toBe(true);
+    expect(res).toMatchObject({
+      priced: 0,
+      spxRows: 0,
+      stalePricesWithheld: 2,
+      staleSpxWithheld: true
+    });
+    const bodies = fetchSpy.mock.calls
+      .filter((c) => c[1]?.body)
+      .map((c) => JSON.parse(String(c[1]?.body)));
+    expect(bodies.some((b) => b.prices || b.spx)).toBe(false);
+    const withheld = listAuditByKind("congress_share_stale_price_withheld", 20);
+    expect(withheld.some((row) => {
+      const payload = row.payload as { session?: string; prices?: number; spx?: boolean };
+      return payload.session === session && payload.prices === 2 && payload.spx === true;
+    })).toBe(true);
   });
 });
 
@@ -1091,7 +1233,8 @@ describe("insider / short-volume import builders", () => {
       recordCount: 1
     });
     const aapl = buildInsiderImport().find((r) => r.ticker === "AAPL");
-    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 75, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
+    // No prices on the row, so the score is share-weighted: 12000 / 14000.
+    expect(aapl).toMatchObject({ ticker: "AAPL", sentiment: 86, buyFilings: 1, sellFilings: 0, buyShares: 12000, sellShares: 2000 });
     expect(aapl?.owners).toContain("Jane Director");
   });
 
@@ -1103,6 +1246,75 @@ describe("insider / short-volume import builders", () => {
       recordCount: 1
     });
     expect(buildShortVolumeImport().find((r) => r.ticker === "NVDA")).toMatchObject({ ticker: "NVDA", ratio: 48.3 });
+  });
+});
+
+describe("buildFundamentalsAndAnalystImport", () => {
+  it("maps symbol_field_latest rows into fundamentals + analyst import rows", async () => {
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const now = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "25",
+        source: "yahoo-finance",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: JSON.stringify({
+          fmp: { score: 80, label: "Buy", counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        }),
+        source: "fmp",
+        asOf: now,
+        fetchedAt: now,
+      },
+    ]);
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { fundamentals, analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(fundamentals).toHaveLength(1);
+    expect(fundamentals[0]).toMatchObject({ ticker: "AAPL", peRatio: 25 });
+    expect(analyst).toHaveLength(1);
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2 });
+  });
+
+  it("includes blended analyst counts when analystBySource is in the field store", async () => {
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest, encodeFieldValue } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "analystBySource",
+        valueJson: encodeFieldValue({
+          fmp: { counts: { strongBuy: 2, buy: 1, hold: 0, sell: 0, strongSell: 0 } },
+        })!,
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Buy"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    const { analyst } = buildFundamentalsAndAnalystImport(["AAPL"], "2026-10-15");
+    expect(analyst[0]).toMatchObject({ ticker: "AAPL", rating: "Buy", strongBuy: 2, buy: 1 });
   });
 });
 
@@ -1132,42 +1344,70 @@ describe("runCongressDailyShare — insider + short-volume on the nightly batch"
     expect(bodies.every((b) => !(b.insider && b.prices))).toBe(true);
   });
 
+  it("sends fundamentals + analyst from symbol_field_latest on scheduled nightly runs", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED = "on";
+    const { upsertSymbolFieldLatest } = await import("../src/lib/db-fundamentals");
+    const ts = new Date().toISOString();
+    upsertSymbolFieldLatest([
+      {
+        symbol: "AAPL",
+        field: "peRatio",
+        valueJson: "30",
+        source: "yahoo-finance",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+      {
+        symbol: "AAPL",
+        field: "analystRating",
+        valueJson: JSON.stringify("Hold"),
+        source: "fmp",
+        asOf: ts,
+        fetchedAt: ts,
+      },
+    ]);
+    mockedFetchDailyOHLC.mockResolvedValue([{ time: recentDate(1), close: 2 }]);
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await runCongressDailyShare({ now: Date.now(), force: true, symbols: ["AAPL"] });
+    expect(res.fundamentalsRows).toBeGreaterThanOrEqual(1);
+    expect(res.analystRows).toBeGreaterThanOrEqual(1);
+    const bodies = fetchSpy.mock.calls
+      .filter((c) => (c[1] as RequestInit | undefined)?.body != null)
+      .map((c) => JSON.parse((c[1] as RequestInit).body as string));
+    expect(bodies.some((b) => Array.isArray(b.fundamentals) && b.fundamentals.length >= 1)).toBe(true);
+    expect(bodies.some((b) => Array.isArray(b.analyst) && b.analyst.length >= 1)).toBe(true);
+  });
+
   it("caps each symbol's closes to CONGRESS_SHARE_MAX_CLOSES_PER_TICKER (most-recent N)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2";
-    mockedFetchDailyOHLC.mockResolvedValue([
-      { time: "2026-06-12", close: 1 },
-      { time: "2026-06-13", close: 2 },
-      { time: "2026-06-14", close: 3 },
-      { time: "2026-06-15", close: 4 },
-      { time: "2026-06-16", close: 5 }
-    ]);
+    const now = Date.UTC(2026, 5, 22);
+    const latest = latestCompletedTradingSessionEtKey(now);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [1, 2, 3, 4, 5]));
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"] });
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL"] });
     expect(res.ok).toBe(true);
     const bodies = fetchSpy.mock.calls
       .filter((c) => (c[1] as RequestInit)?.body)
       .map((c) => JSON.parse((c[1] as RequestInit).body as string));
     const entry = bodies.find((b) => b.prices)?.prices.find((p: { ticker: string }) => p.ticker === "AAPL");
     expect(entry.closes).toHaveLength(2); // capped from 5 → most-recent 2
-    expect(entry.closes.map((c: { date: string }) => c.date)).toEqual(["2026-06-15", "2026-06-16"]);
+    expect(entry.closes.map((c: { date: string }) => c.date)).toEqual([isoDaysBefore(latest, 1), latest]);
     expect(entry.currentPrice).toBe(5); // still the latest close
   });
 
   it("fullHistory backfill bypasses the per-symbol close cap (sends the full series)", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2"; // would cap nightly, but backfill ignores it
-    mockedFetchDailyOHLC.mockResolvedValue([
-      { time: "2026-06-12", close: 1 },
-      { time: "2026-06-13", close: 2 },
-      { time: "2026-06-14", close: 3 },
-      { time: "2026-06-15", close: 4 },
-      { time: "2026-06-16", close: 5 }
-    ]);
+    const now = Date.UTC(2026, 5, 22);
+    mockedFetchDailyOHLC.mockResolvedValue(barsEndingOnSession(now, [1, 2, 3, 4, 5]));
     const fetchSpy = vi.fn(async (_u: string, _i?: RequestInit) => new Response(ctImportOkBody(), { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);
-    const res = await runCongressDailyShare({ now: Date.UTC(2026, 5, 22), force: true, symbols: ["AAPL"], fullHistory: true });
+    const res = await runCongressDailyShare({ now, force: true, symbols: ["AAPL"], fullHistory: true });
     expect(res.ok).toBe(true);
     const bodies = fetchSpy.mock.calls
       .filter((c) => (c[1] as RequestInit)?.body)
@@ -1320,17 +1560,352 @@ describe("fetchCongressPriceNeeds", () => {
     );
     expect(bad.tickers).toEqual([]);
   });
+
+  it("follows App A's nextCursor so tickers past the first page are not starved", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "4";
+    onTestFinished(() => {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES;
+    });
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    const pages: Record<string, unknown> = {
+      first: { tickers: [{ ticker: "AA" }, { ticker: "AAL" }], spx: { needsHistoryBefore: "2014-01-01" }, pagination: { nextCursor: "AAL", limit: 2 } },
+      AAL: { tickers: [{ ticker: "ABBV" }, { ticker: "aal" }], pagination: { nextCursor: "ABBV", limit: 2 } },
+      ABBV: { tickers: [{ ticker: "ZZZ" }], pagination: { nextCursor: null, limit: 2 } }
+    };
+    const urls: string[] = [];
+    const pagedFetch = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      urls.push(url);
+      const cursor = new URL(url).searchParams.get("cursor") ?? "first";
+      return new Response(JSON.stringify(pages[cursor]), { status: 200 });
+    });
+    const res = await fetchCongressPriceNeeds(2, pagedFetch as unknown as typeof fetch);
+    expect(res.tickers.map((t) => t.ticker)).toEqual(["AA", "AAL", "ABBV", "ZZZ"]);
+    expect(res.spx?.needsHistoryBefore).toBe("2014-01-01");
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).not.toContain("cursor=");
+    expect(urls[1]).toContain("cursor=AAL");
+  });
+
+  it("resumes after a persisted cursor and wraps around once the listing ends", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "4";
+    try {
+      const urls: string[] = [];
+      const lapFetch = vi.fn(async (input: unknown) => {
+        const url = String(input);
+        urls.push(url);
+        const cursor = new URL(url).searchParams.get("cursor");
+        if (cursor === "M") {
+          return new Response(JSON.stringify({ tickers: [{ ticker: "N" }, { ticker: "O" }], pagination: { nextCursor: null } }), { status: 200 });
+        }
+        // wrapped: the head of the listing again, running back past the resume point
+        return new Response(
+          JSON.stringify({ tickers: [{ ticker: "A" }, { ticker: "B" }, { ticker: "N" }], pagination: { nextCursor: "N" } }),
+          { status: 200 }
+        );
+      });
+      const res = await fetchCongressPriceNeeds(50, lapFetch as unknown as typeof fetch, "m");
+      expect(res.tickers.map((t) => t.ticker)).toEqual(["N", "O", "A", "B"]);
+      expect(res.nextCursor).toBeNull(); // a full lap: the next run starts at the head
+      expect(urls[0]).toContain("cursor=M");
+      expect(urls[1]).not.toContain("cursor=");
+    } finally {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES;
+    }
+  });
+
+  it("caps needs per run and resumes right after the last ticker taken", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_TOTAL_CAP = "2";
+    try {
+      const capFetch = vi.fn(async () =>
+        new Response(
+          JSON.stringify({ tickers: [{ ticker: "A" }, { ticker: "B" }, { ticker: "C" }], pagination: { nextCursor: "C" } }),
+          { status: 200 }
+        )
+      );
+      const res = await fetchCongressPriceNeeds(50, capFetch as unknown as typeof fetch);
+      expect(res.tickers.map((t) => t.ticker)).toEqual(["A", "B"]);
+      expect(res.nextCursor).toBe("B"); // C was not skipped by taking the page end
+    } finally {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_TOTAL_CAP;
+    }
+  });
+
+  it("ignores a page that fails schema validation", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    const bad = vi.fn(async () => new Response(JSON.stringify({ tickers: "nope" }), { status: 200 }));
+    const res = await fetchCongressPriceNeeds(10, bad as unknown as typeof fetch);
+    expect(res.tickers).toEqual([]);
+  });
+
+  it("stops at the page cap and keeps pages read before a later page fails", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "2";
+    try {
+      let n = 0;
+      const endless = vi.fn(async () => {
+        n += 1;
+        return new Response(
+          JSON.stringify({ tickers: [{ ticker: `T${n}` }], pagination: { nextCursor: `T${n}` } }),
+          { status: 200 }
+        );
+      });
+      const capped = await fetchCongressPriceNeeds(1, endless as unknown as typeof fetch);
+      expect(capped.tickers.map((t) => t.ticker)).toEqual(["T1", "T2"]);
+      expect(endless).toHaveBeenCalledTimes(2);
+
+      process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "4";
+      let calls = 0;
+      const flaky = vi.fn(async () => {
+        calls += 1;
+        if (calls === 2) return new Response("boom", { status: 500 });
+        return new Response(
+          JSON.stringify({ tickers: [{ ticker: "KEEP" }], pagination: { nextCursor: "KEEP" } }),
+          { status: 200 }
+        );
+      });
+      const partial = await fetchCongressPriceNeeds(1, flaky as unknown as typeof fetch);
+      expect(partial.tickers.map((t) => t.ticker)).toEqual(["KEEP"]);
+    } finally {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES;
+    }
+  });
+});
+
+describe("stale-price catch-up", () => {
+  const now = Date.UTC(2026, 5, 22, 23, 0, 0); // Mon 7 PM ET, after the close
+  const session = latestCompletedTradingSessionEtKey(now);
+  const STATE_KEY = "congress-share:staleCatchup";
+
+  beforeEach(() => {
+    deleteInternalSetting(STATE_KEY);
+    deleteInternalSetting("congress-share:lastDailyRunDate");
+    deleteInternalSetting("congress-share:priceNeedsCursor");
+    process.env.CONGRESS_TRADE_TOKEN = "tok";
+    process.env.CONGRESS_TRADE_BASE_URL = "https://congress.example";
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.CONGRESS_SHARE_ENABLED;
+  });
+
+  /** Stub App A: a fixed needs page, and every import POST recorded and acknowledged. */
+  function stubAppA(posts: Array<Record<string, unknown>>, needs: Array<Record<string, unknown>> = [], needsUrls: string[] = []) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("/api/export/price-needs")) {
+          needsUrls.push(u);
+          return new Response(JSON.stringify({ tickers: needs }), { status: 200 });
+        }
+        if (u.includes("/api/admin/securities/import")) {
+          posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(ctImportOkBody(), { status: 200 });
+        }
+        return new Response("{}", { status: 200 });
+      })
+    );
+  }
+
+  const sentTickers = (posts: Array<Record<string, unknown>>): string[] =>
+    posts.flatMap((p) => (Array.isArray(p.prices) ? (p.prices as Array<{ ticker: string }>).map((x) => x.ticker) : []));
+
+  it("records the withheld set (with deep and spx) and clears it when nothing is owed", () => {
+    recordStaleCatchup(now, { tickers: ["ABEMX", "AAIC", "ABEMX"], deep: ["AAIC", "GONE"], spx: false }, false);
+    expect(getStaleCatchupState()).toEqual({
+      session,
+      tickers: ["ABEMX", "AAIC"],
+      deep: ["AAIC"],
+      spx: false,
+      attempts: 0,
+      lastAttemptMs: now
+    });
+    recordStaleCatchup(now, { tickers: [] }, false);
+    expect(getStaleCatchupState()).toBeNull();
+  });
+
+  it("keeps an SPX-only debt: no stale ticker, but the S&P series is still owed", () => {
+    recordStaleCatchup(now, { tickers: [], spx: true }, false);
+    expect(getStaleCatchupState()).toMatchObject({ tickers: [], spx: true, attempts: 0 });
+    expect(isCongressStaleCatchupDue(now + 2 * 3_600_000)).toBe(true);
+  });
+
+  it("caps the retry set so a large nightly stale list cannot multiply provider load", () => {
+    process.env.CONGRESS_SHARE_CATCHUP_MAX_TICKERS = "3";
+    try {
+      recordStaleCatchup(now, { tickers: ["A", "B", "C", "D", "E"], deep: ["E", "A"] }, false);
+      expect(getStaleCatchupState()).toMatchObject({ tickers: ["A", "B", "C"], deep: ["A"] });
+    } finally {
+      delete process.env.CONGRESS_SHARE_CATCHUP_MAX_TICKERS;
+    }
+  });
+
+  it("is due once the interval elapsed, for the same session, with attempts left", () => {
+    expect(isCongressStaleCatchupDue(now)).toBe(false); // nothing recorded
+    recordStaleCatchup(now, { tickers: ["ABEMX"] }, false);
+    expect(isCongressStaleCatchupDue(now + 60_000)).toBe(false); // interval not elapsed
+    expect(isCongressStaleCatchupDue(now + 2 * 3_600_000)).toBe(true);
+    // a newer session completed: the next nightly run owns it
+    expect(isCongressStaleCatchupDue(now + 26 * 3_600_000)).toBe(false); // Tue 9 PM ET, after Tue's close
+    // attempts exhausted
+    setInternalSetting(STATE_KEY, { session, tickers: ["ABEMX"], deep: [], spx: false, attempts: 4, lastAttemptMs: now });
+    expect(isCongressStaleCatchupDue(now + 2 * 3_600_000)).toBe(false);
+  });
+
+  it("a continuing record keeps the attempt count while refreshing what is still owed", () => {
+    setInternalSetting(STATE_KEY, { session, tickers: ["A", "B"], deep: [], spx: false, attempts: 2, lastAttemptMs: now });
+    recordStaleCatchup(now + 3_600_000, { tickers: ["B"] }, true);
+    expect(getStaleCatchupState()).toMatchObject({ tickers: ["B"], attempts: 2, lastAttemptMs: now + 3_600_000 });
+  });
+
+  it("the nightly run withholds stale tails, remembers them, and the price-only pass sends them once fresh", async () => {
+    const fresh = barsEndingOnSession(now, [10, 11, 12]);
+    const stale = fresh.slice(0, 2); // newest close is one session behind
+    let navPublished = false;
+    mockedFetchDailyOHLC.mockReset();
+    mockedFetchDailyOHLC.mockImplementation((async (sym: string) => {
+      if (sym === "^GSPC") return fresh;
+      if (sym === "LATENAV") return navPublished ? fresh : stale;
+      return fresh;
+    }) as unknown as typeof fetchDailyOHLC);
+    const posts: Array<Record<string, unknown>> = [];
+    stubAppA(posts, [{ ticker: "LATENAV" }, { ticker: "OKAY" }]);
+
+    const first = await runCongressDailyShare({ now, force: true });
+    expect("staleTickers" in first ? first.staleTickers : undefined).toEqual(["LATENAV"]);
+    expect(getStaleCatchupState()?.tickers).toEqual(["LATENAV"]);
+    // the nightly path keeps the shared cache: only the catch-up bypasses it
+    expect(mockedFetchDailyOHLC.mock.calls.every((call) => call[3] === undefined)).toBe(true);
+
+    navPublished = true;
+    posts.length = 0;
+    mockedFetchDailyOHLC.mockClear();
+    const pass = await runCongressDailyShare({ now: now + 3 * 3_600_000, symbols: ["LATENAV"], priceOnly: true });
+    expect("staleTickers" in pass ? pass.staleTickers : undefined).toBeUndefined();
+    expect(getStaleCatchupState()).toBeNull();
+    expect(sentTickers(posts)).toEqual(["LATENAV"]);
+    // price-only: no refs / fundamentals / analyst datasets re-sent
+    expect(posts.some((p) => "refs" in p || "fundamentals" in p || "analyst" in p)).toBe(false);
+    // the retry must not be served the pinned in-process stale series (Friday night: until Monday's open)
+    expect(mockedFetchDailyOHLC.mock.calls.length).toBeGreaterThan(0);
+    expect(mockedFetchDailyOHLC.mock.calls.every((call) => (call[3] as { bypassMemoryCache?: boolean } | undefined)?.bypassMemoryCache === true)).toBe(true);
+  });
+
+  it("a ticker whose retry errors or returns no bars stays owed; only delivered tickers leave the list", async () => {
+    const fresh = barsEndingOnSession(now, [10, 11, 12]);
+    mockedFetchDailyOHLC.mockReset();
+    mockedFetchDailyOHLC.mockImplementation((async (sym: string) => {
+      if (sym === "^GSPC") return fresh;
+      if (sym === "BOOM") throw new Error("provider rate limit");
+      if (sym === "NOBARS") return null;
+      return fresh;
+    }) as unknown as typeof fetchDailyOHLC);
+    const posts: Array<Record<string, unknown>> = [];
+    stubAppA(posts);
+    setInternalSetting(STATE_KEY, {
+      session, tickers: ["BOOM", "NOBARS", "GOOD"], deep: [], spx: false, attempts: 1, lastAttemptMs: now
+    });
+
+    await runCongressDailyShare({ now: now + 3 * 3_600_000, symbols: ["BOOM", "NOBARS", "GOOD"], priceOnly: true });
+
+    expect(sentTickers(posts)).toEqual(["GOOD"]);
+    expect(getStaleCatchupState()).toMatchObject({ tickers: ["BOOM", "NOBARS"], attempts: 1 });
+  });
+
+  it("an SPX-only stale series is retried and cleared once the S&P tail arrives", async () => {
+    const fresh = barsEndingOnSession(now, [10, 11, 12]);
+    let spxPublished = false;
+    mockedFetchDailyOHLC.mockReset();
+    mockedFetchDailyOHLC.mockImplementation((async (sym: string) => {
+      if (sym === "^GSPC") return spxPublished ? fresh : fresh.slice(0, 2);
+      return fresh;
+    }) as unknown as typeof fetchDailyOHLC);
+    const posts: Array<Record<string, unknown>> = [];
+    stubAppA(posts, [{ ticker: "OKAY" }]);
+
+    const first = await runCongressDailyShare({ now, force: true });
+    expect("staleSpxWithheld" in first ? first.staleSpxWithheld : undefined).toBe(true);
+    expect(getStaleCatchupState()).toMatchObject({ tickers: [], spx: true });
+
+    spxPublished = true;
+    posts.length = 0;
+    const pass = await runCongressDailyShare({ now: now + 3 * 3_600_000, symbols: [], priceOnly: true });
+    expect(pass.ok).toBe(true);
+    expect(posts.some((p) => Array.isArray(p.spx) && p.spx.length > 0)).toBe(true);
+    expect(getStaleCatchupState()).toBeNull();
+  });
+
+  it("the scheduler entry point runs a due pass, honors the deep subset, and stands down when nothing is owed", async () => {
+    process.env.CONGRESS_SHARE_ENABLED = "1";
+    process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2";
+    try {
+      const fiveBars = barsEndingOnSession(now, [1, 2, 3, 4, 5]);
+      mockedFetchDailyOHLC.mockReset();
+      mockedFetchDailyOHLC.mockImplementation((async () => fiveBars) as unknown as typeof fetchDailyOHLC);
+      const posts: Array<Record<string, unknown>> = [];
+      stubAppA(posts);
+      setInternalSetting(STATE_KEY, {
+        session, tickers: ["DEEPNAV", "PLAIN"], deep: ["DEEPNAV"], spx: false, attempts: 0, lastAttemptMs: now
+      });
+      const later = now + 2 * 3_600_000;
+
+      const summary = await runCongressStaleCatchupIfDue(later);
+
+      expect(summary?.ok).toBe(true);
+      const prices = posts.flatMap((p) => (Array.isArray(p.prices) ? (p.prices as Array<{ ticker: string; closes: unknown[] }>) : []));
+      expect(prices.find((p) => p.ticker === "DEEPNAV")?.closes).toHaveLength(5); // full history kept
+      expect(prices.find((p) => p.ticker === "PLAIN")?.closes).toHaveLength(2); // recent-capped
+      expect(getStaleCatchupState()).toBeNull();
+
+      // nothing owed any more: the entry point stands down
+      expect(await runCongressStaleCatchupIfDue(later + 3 * 3_600_000)).toBeNull();
+    } finally {
+      delete process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER;
+    }
+  });
+
+  it("persists the price-needs cursor after a run and resumes from it on the next", async () => {
+    const fresh = barsEndingOnSession(now, [10, 11, 12]);
+    mockedFetchDailyOHLC.mockReset();
+    mockedFetchDailyOHLC.mockImplementation((async () => fresh) as unknown as typeof fetchDailyOHLC);
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/api/export/price-needs")) {
+          urls.push(u);
+          return new Response(JSON.stringify({ tickers: [{ ticker: "AA" }], pagination: { nextCursor: "AA" } }), { status: 200 });
+        }
+        return new Response(ctImportOkBody(), { status: 200 });
+      })
+    );
+    process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES = "1";
+    try {
+      await runCongressDailyShare({ now, force: true });
+      expect(getInternalSetting<string>("congress-share:priceNeedsCursor")).toBe("AA");
+      await runCongressDailyShare({ now: now + 1_000, force: true });
+      expect(urls.some((u) => u.includes("cursor=AA"))).toBe(true);
+    } finally {
+      delete process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES;
+    }
+  });
 });
 
 describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () => {
   it("shares App A needs tickers with full history when needsDeepHistory", async () => {
     process.env.CONGRESS_TRADE_TOKEN = "tok";
     process.env.CONGRESS_SHARE_MAX_CLOSES_PER_TICKER = "2";
-    const bars = (n: number): OHLCBar[] =>
-      Array.from({ length: n }, (_, i) => ({
-        time: `2020-01-${String(i + 1).padStart(2, "0")}`,
-        close: 100 + i
-      }));
+    const now = Date.UTC(2026, 5, 22, 21, 0, 0);
+    const bars = (n: number): OHLCBar[] => barsEndingOnSession(now, Array.from({ length: n }, (_, i) => 100 + i));
     mockedFetchDailyOHLC.mockImplementation(async (sym: string) => {
       if (sym === "^GSPC") return bars(5);
       return bars(5);
@@ -1350,7 +1925,7 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
     });
     vi.stubGlobal("fetch", fetchSpy);
 
-    const summary = await runCongressDailyShare({ force: true, fromAppANeeds: true });
+    const summary = await runCongressDailyShare({ force: true, fromAppANeeds: true, now });
     expect(summary.ok).toBe(true);
     expect(summary.tickers).toBe(1);
     // price-needs GET + SPX/prices POSTs
@@ -1361,6 +1936,38 @@ describe("runCongressDailyShare — fromAppANeeds + deep history for needs", () 
     expect(pricePost?.prices[0].ticker).toBe("NEED");
     // full history despite MAX_CLOSES=2
     expect(pricePost?.prices[0].closes.length).toBe(5);
+  });
+});
+
+describe("congress-share token probe target", () => {
+  it("probes /api/export/capabilities and does not call price-needs?limit=0", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    const fetchSpy = vi.fn(async (url: unknown) => {
+      void url;
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    await probeCongressShareToken();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const url = String(fetchSpy.mock.calls[0]?.[0] ?? "");
+    expect(url).toContain("/api/export/capabilities");
+    expect(url).not.toContain("price-needs");
+    expect(url).not.toContain("limit=0");
+  });
+
+  it("treats a capabilities 404 as reachable and does not open the upstream breaker", async () => {
+    process.env.CONGRESS_TRADE_TOKEN = "test-token";
+    process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES = "1";
+    const fetchSpy = vi.fn(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await probeCongressShareToken();
+    await probeCongressShareToken();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(isCongressUpstreamBreakerTripped()).toBe(false);
+    expect(getServiceHealthLog("congress-share", 5).some((row) => String(row.error_text ?? "").includes("404"))).toBe(false);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes("capabilities returned 404"))).toBe(true);
+    warn.mockRestore();
   });
 });
 

@@ -27,6 +27,9 @@
 #   IOS_APPSTORE_PROFILES_MAP   profile map (default ios/appstore-profiles.json)
 #   IOS_PROFILES_DIR            install dir (default ~/Library/MobileDevice/Provisioning Profiles)
 #   IOS_PROFILE_SKIP_IDENTITY_CHECK=1   skip the keychain certificate match
+#   ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_P8   process env (wins over Infisical /asc,
+#                               which asc-api.mjs reads through fleet-secrets; a path in
+#                               ASC_KEY_PATH is not a credential source, AFC-459 rev 2)
 set +o xtrace
 set -euo pipefail
 umask 077
@@ -42,6 +45,10 @@ trap 'rm -rf "$WORKDIR"' EXIT
 [[ -f "$CLIENT" ]] || { echo "error: App Store Connect client missing: $CLIENT" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node not on PATH" >&2; exit 1; }
 command -v security >/dev/null 2>&1 || { echo "error: security(1) not found (macOS only)" >&2; exit 1; }
+
+# asc-api.mjs reads ASC_* from process env, then Infisical /asc via fleet-secrets
+# (AFC-359:  no handoff file is read).  ship-testflight.sh load_secrets exports
+# ASC_* before calling this installer.
 
 mkdir -p "$DEST"
 

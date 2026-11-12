@@ -1,9 +1,11 @@
 import * as Sentry from "@sentry/nextjs";
-import { redactForTelemetry } from "./src/lib/telemetry-sanitize";
+import { resolveSentryRelease } from "./src/lib/sentry-release";
+import { redactForTelemetry, sanitizeTelemetryUrl, sanitizeTransactionEvent } from "./src/lib/telemetry-sanitize";
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
+    release: resolveSentryRelease(),
     environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV,
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? "0.2"),
     dataCollection: {
@@ -20,7 +22,13 @@ if (process.env.SENTRY_DSN) {
       graphQL: { document: false, variables: false },
     },
     beforeSend(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeTelemetryUrl(event.request.url);
+      }
       return redactForTelemetry(event) as typeof event;
+    },
+    beforeSendTransaction(event) {
+      return sanitizeTransactionEvent(event);
     }
   });
 }

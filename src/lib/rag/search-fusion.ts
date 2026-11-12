@@ -1,9 +1,19 @@
 import { getDb, resolveApiKey } from "../db";
 import { siliconflowBaseUrl } from "../siliconflow-base";
-import { retrieveContextDetailed, getClients } from "../vector-db";
+import { retrieveContextDetailed, getClients, currentEmbedRev } from "../vector-db";
 import { applyOpenRouterClassifierEnrichment } from "../llm-call";
 import { providerRequestIdFromPayload } from "../llm-usage";
 import { meterEmbed } from "../rag-metering";
+import {
+  beginEmbedProviderAttempt,
+  createEmbedAttemptAbort,
+  getCachedContentEmbedding,
+  noteEmbedProviderSuccess,
+  settleEmbedProviderAttempt,
+  setCachedContentEmbedding
+} from "./embed-resilience";
+import { parseProviderEmbeddingResponse } from "./embedding-response-schema";
+import { embedRequestFits, packInWindowTexts, truncateEmbedText } from "./embed-request-pack";
 import { deconstructQuery } from "./query-deconstruct";
 import { routeRetrievalIntent } from "./intent-router";
 import { hashContent } from "./chunk";
@@ -48,40 +58,86 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
 
   const url = useSiliconFlow ? `${siliconflowBaseUrl()}/v1/embeddings` : "https://openrouter.ai/api/v1/embeddings";
   const model = useSiliconFlow ? "BAAI/bge-m3" : "baai/bge-m3";
+  const provider = useSiliconFlow ? "siliconflow" : "openrouter";
   const apiKey = useSiliconFlow ? siliconflowKey : openrouterKey;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${apiKey}`
-  };
-  const body: Record<string, unknown> = { model, input: texts };
-  if (!useSiliconFlow) {
-    // OpenRouter attribution headers + classifier enrichment (user + flat trace), same as the
-    // vector-db.ts OpenRouter embed path. Enrichment never breaks the call — see
-    // applyOpenRouterClassifierEnrichment. SiliconFlow bypasses OpenRouter, so its classifier
-    // context flows only via the pushed telemetry event (meterEmbed below).
-    headers["HTTP-Referer"] = "https://socratictrade.com";
-    headers["X-Title"] = "Socratic-Trade";
-    applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "search-fusion-mmr" });
+  const revision = currentEmbedRev();
+  const inputType = "document";
+  const cached = texts.map((text) => getCachedContentEmbedding(model, revision, inputType, text));
+  if (cached.every((row): row is number[] => Array.isArray(row) && row.length > 0)) {
+    return cached;
   }
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    throw new Error(`Alternative embedding failed in search fusion (${useSiliconFlow ? "siliconflow" : "openrouter"}): ${response.status}`);
+  // Open circuit: Jaccard MMR.  Do not throw, so the caller does not log embed.failed per call.
+  if (!beginEmbedProviderAttempt(provider)) return null;
+
+  // Truncate each string (1:1 with the caller's texts) then pack so a dense passage cannot 400.
+  const pieces = texts.map((text, sourceIndex) => ({ text: truncateEmbedText(text), sourceIndex }));
+  const packed = packInWindowTexts(pieces);
+  const vectors = new Array<number[] | undefined>(texts.length);
+  try {
+    for (const group of packed) {
+      const groupTexts = group.map((item) => item.text);
+      if (!embedRequestFits(groupTexts)) {
+        throw new Error(`search-fusion embed pack exceeded the token budget (${groupTexts.length} texts)`);
+      }
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      };
+      const body: Record<string, unknown> = { model, input: groupTexts };
+      if (!useSiliconFlow) {
+        // OpenRouter attribution headers + classifier enrichment (user + flat trace), same as the
+        // vector-db.ts OpenRouter embed path. Enrichment never breaks the call — see
+        // applyOpenRouterClassifierEnrichment. SiliconFlow bypasses OpenRouter, so its classifier
+        // context flows only via the pushed telemetry event (meterEmbed below).
+        headers["HTTP-Referer"] = "https://socratictrade.com";
+        headers["X-Title"] = "Socratic-Trade";
+        applyOpenRouterClassifierEnrichment(body, { userId, service: "rag", feature: "search-fusion-mmr" });
+      }
+      const attemptAbort = createEmbedAttemptAbort();
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: attemptAbort.signal
+        });
+        if (!response.ok) {
+          throw new Error(`Alternative embedding failed in search fusion (${provider}): ${response.status}`);
+        }
+        const raw = await response.json();
+        const res = parseProviderEmbeddingResponse(raw);
+        meterEmbed(
+          groupTexts,
+          model,
+          userId,
+          provider,
+          useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", raw),
+          undefined,
+          false
+        );
+        const groupVectors = (res.data ?? []).map((d) => d.embedding);
+        if (groupVectors.length !== group.length) {
+          throw new Error(`Alternative embedding cardinality mismatch in search fusion (${provider})`);
+        }
+        for (let i = 0; i < group.length; i++) {
+          const vec = groupVectors[i];
+          if (!vec) throw new Error(`Alternative embedding missing a vector in search fusion (${provider})`);
+          vectors[group[i]!.sourceIndex] = vec;
+        }
+      } finally {
+        attemptAbort.cancel();
+      }
+    }
+    for (let i = 0; i < texts.length; i++) {
+      const vec = vectors[i];
+      if (vec) setCachedContentEmbedding(model, revision, inputType, texts[i]!, vec);
+    }
+    noteEmbedProviderSuccess(provider);
+    return vectors as number[][];
+  } catch (error) {
+    settleEmbedProviderAttempt(provider, error);
+    throw error;
   }
-  const res = await response.json();
-  // Meter this paid embed call (usage-compliance WS1 gap #3), mirroring vector-db.ts's
-  // meterEmbed call sites; the OpenRouter generation id rides along for monitor-side verification.
-  meterEmbed(
-    texts,
-    model,
-    userId,
-    useSiliconFlow ? "siliconflow" : "openrouter",
-    useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", res)
-  );
-  return res.data.map((d: any) => d.embedding);
 }
 
 /**

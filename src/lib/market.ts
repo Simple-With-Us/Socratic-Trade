@@ -1,6 +1,6 @@
 import { shareScanRefs } from "./congress-share";
 import { congressLongScore, scoreCongressSignal } from "./congress-score";
-import { fetchWithRetry, getEnrichmentProvider, type SymbolEnrichment } from "./data-providers";
+import { getEnrichmentProvider, type SymbolEnrichment } from "./data-providers";
 import type { GroupedDailyBar } from "./market-signals/massive";
 import { getSymbolWebSignals, setTechnicalWatchlist } from "./web-sources";
 import type { SymbolWebSignal } from "./web-sources";
@@ -16,7 +16,7 @@ import {
   normalizeMarketScanCandidateLimit,
   normalizeMarketScanOutlierReserve
 } from "./scan-settings";
-import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
+import { fetchYahooFinanceChartQuotes, fetchYahooFinanceQuotesBatch, type YahooFinanceQuote } from "./yahoo-finance";
 import type {
   BrokerQuote,
   EnrichmentFieldObservations,
@@ -33,13 +33,16 @@ import type {
   UniverseFloor
 } from "./types";
 import { stampFieldObservation } from "./evidence-facts";
-import { BROWSER_UA } from "./web-sources/http";
 import {
+  fetchNasdaqScreenerResponse,
   nasdaqScreenerUrl,
-  NASDAQ_SCREENER_ATTEMPTS,
   NASDAQ_SCREENER_TIMEOUT_MESSAGE,
-  NASDAQ_SCREENER_TIMEOUT_MS
+  NASDAQ_SCREENER_TIMEOUT_MS,
+  readNasdaqScreenerJson
 } from "./nasdaq-screener-fetch";
+import { fetchFallbackUniverseRows } from "./nasdaq-universe-fallback";
+import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
+import { recoverUniverseQuotesFromBroker } from "./scan-broker-universe-recovery";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
@@ -116,12 +119,15 @@ const DEFAULT_ENRICHMENT_POOL_CAP = 500;
 const MAX_ENRICHMENT_POOL_MULTIPLIER = 10;
 const MAX_ENRICHMENT_POOL_CAP = 1_000;
 
-type RawNasdaqRow = Record<string, unknown>;
 type NasdaqExchange = "nasdaq" | "nyse";
 
 // Nasdaq screener is a public, unauthenticated endpoint — no user API key is
 // consumed, so this single shared cache is safe to serve to all users.
-let screenerCache = new Map<string, { expiresAt: number; rows: RawNasdaqRow[]; asOf?: string }>();
+// Rows are the parsed schema, not the raw JSON, so a drifted envelope is not cached.
+let screenerCache = new Map<string, { expiresAt: number; rows: NasdaqScreenerRow[]; asOf?: string }>();
+/** Last successful screener parse — served stale while a refresh runs or when live fetch fails. */
+let screenerLastGood = new Map<string, { rows: NasdaqScreenerRow[]; asOf?: string }>();
+const screenerRefreshInFlight = new Map<string, Promise<void>>();
 
 /**
  * True if a quote clears the universe floor. Each bound applies only when set (`> 0`); market-cap and
@@ -287,6 +293,8 @@ export async function scanMarket(
      * refreshes can reuse these locally while replacing price-family fields. */
     seedEnrichment?: Record<string, MarketQuoteSummary>;
     deadlineAt?: number;
+    /** Connected account the scan operates for (account-scoped market-data tape). */
+    connectedAccountId?: string;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -301,7 +309,8 @@ export async function scanMarket(
     congressMultiplier: scanOptions.congressMultiplier,
     enrichmentMode: scanOptions.enrichmentMode,
     seedEnrichment: scanOptions.seedEnrichment,
-    deadlineAt: scanOptions.deadlineAt
+    deadlineAt: scanOptions.deadlineAt,
+    connectedAccountId: scanOptions.connectedAccountId
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -329,13 +338,14 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     let cached = false;
     let breadthPct: number | undefined;
     let quoteFallbackAttempted = false;
+    let universeQuoteRecoverySource: string | undefined;
     const universeSources = new Set<string>();
 
     try {
-      // Own 15s timeout + abort retry.  Do not attach the interactive
-      // withScanDeadline signal — that 20s race is how an 8s stub-UA abort
-      // became a silent empty table before the deadline message could fire.
-      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs());
+      // 15s header budget + one transport retry live in the helper.  The scan
+      // deadline signal aborts that wait and the JSON body.  A deadline abort
+      // throws; it must not become a silent empty table.
+      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs(), undefined, options?.signal);
       cached = result.cached;
       const allQuotes = result.rows.flatMap((row) => toMarketQuote(row, positions, this.name, result.asOf));
       quotes = allQuotes.filter((quote) => allowed.has(quote.symbol));
@@ -354,19 +364,26 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       if (dynamicResult.cached) cached = true;
 
       if (quotes.length === 0 && allowed.size > 0) {
-        // A usable last-good seed must win before Yahoo-pricing the whole
-        // allowed set.  Live Refresh of a 5k-name universe (nasdaq composite)
-        // used to start that fallback, miss the 35s interactive budget / edge
-        // 503, and never reach the seed that web already shows as last-good.
+        // Yahoo whole-set pricing, then broker universe recovery, then last-good
+        // seed (ST-4590).  Live Refresh of a 5k-name universe used to start
+        // Yahoo-only fallback and miss the interactive budget / edge 503.
         quoteFallbackAttempted = true;
         const recovered = await recoverQuotesWhenScreenerEmpty({
           allowed,
           positions,
-          seed: options?.seedEnrichment
+          seed: options?.seedEnrichment,
+          userId: options?.userId,
+          connectedAccountId: options?.connectedAccountId,
+          signal: options?.signal,
+          deadlineAt: options?.deadlineAt
         });
         quotes = [...quotes, ...recovered.quotes];
         warnings.push(...recovered.warnings);
         if (recovered.usedSeed) cached = true;
+        if (recovered.recoverySource) {
+          universeQuoteRecoverySource = recovered.recoverySource;
+          universeSources.add(recovered.recoverySource);
+        }
         for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
       } else {
         const returnedSymbols = new Set(quotes.map((quote) => quote.symbol));
@@ -396,23 +413,20 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       const recovered = await recoverQuotesWhenScreenerEmpty({
         allowed,
         positions,
-        seed: options?.seedEnrichment
+        seed: options?.seedEnrichment,
+        userId: options?.userId,
+        connectedAccountId: options?.connectedAccountId,
+        signal: options?.signal,
+        deadlineAt: options?.deadlineAt
       });
       quotes = [...quotes, ...recovered.quotes];
       warnings.push(...recovered.warnings);
       if (recovered.usedSeed) cached = true;
-      for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
-    }
-
-    if (quotes.length === 0 && options?.seedEnrichment) {
-      const seeded = persistedMarketQuotes(options.seedEnrichment, positions);
-      if (seeded.length > 0) {
-        quotes = seeded;
-        cached = true;
-        warnings.push(
-          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
-        );
+      if (recovered.recoverySource) {
+        universeQuoteRecoverySource = recovered.recoverySource;
+        universeSources.add(recovered.recoverySource);
       }
+      for (const q of recovered.quotes) if (q.provider) universeSources.add(q.provider);
     }
 
     if (quotes.length === 0 && allowed.size === 0) {
@@ -485,7 +499,9 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     // symbols' last known fields available even if they are not in today's ranked set.
     const enrichPlan = enrichmentPlanForDeadline(options?.deadlineAt);
     const skipLiveEnrich = options?.enrichmentMode === "skip" || enrichPlan.skipLiveEnrich;
-    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId);
+    const provider = skipLiveEnrich ? undefined : getEnrichmentProvider(options?.userId, {
+      connectedAccountId: options?.connectedAccountId
+    });
     let rescoredRanked: MarketQuote[] = ranked;
     const preselectionPool = buildEnrichmentPreselectionPool(
       ranked,
@@ -774,6 +790,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       cacheTtlMs: options?.ttlMs ?? marketCacheTtlMs(),
       cached,
       warnings,
+      ...(universeQuoteRecoverySource ? { universeQuoteRecoverySource } : {}),
       dataCoverage
     };
 
@@ -927,11 +944,15 @@ function persistScanFieldsToStore(candidates: MarketQuote[], fetchedAt: string):
           const valueJson = mod.encodeFieldValue(value);
           if (!valueJson) continue;
           const obs = observations[field as keyof typeof observations];
-          const asOf =
+          const observationAsOf =
             (obs && typeof obs === "object" && ("asOf" in obs ? (obs as { asOf?: string }).asOf : undefined)) ||
-            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             (field === "asOf" && typeof value === "string" ? value : undefined) ||
-            quote.asOf ||
+            quote.asOf;
+          const quoteClock = field === "price" || field === "bid" || field === "ask";
+          if (quoteClock && !observationAsOf) continue;
+          const asOf =
+            observationAsOf ||
+            (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
             fetchedAt;
           const fieldFetched =
             (obs && typeof obs === "object" && ("fetchedAt" in obs ? (obs as { fetchedAt?: string }).fetchedAt : undefined)) ||
@@ -1245,6 +1266,8 @@ export function mergeQuoteData(
       // Venue-delayed execution prices (Tradier sandbox) must survive the merge so policy ages
       // the snapshot, not the delayed trade print, and the cascade never re-overwrites them.
       venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+      expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+      delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
       fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
       delayedFallback: extra.delayedFallback ?? quote.delayedFallback,
       // Carry synthetic bid/ask flags through from the broker/Yahoo quote. When a side had a real value
@@ -1308,6 +1331,8 @@ export function mergeQuoteData(
         provider: extra?.provider ?? quote.provider,
         asOf: extra?.asOf ?? quote.asOf,
         venuePriceAuthoritative: extra?.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+        expectedDelaySec: extra?.expectedDelaySec ?? quote.expectedDelaySec,
+        delayToleranceSec: extra?.delayToleranceSec ?? quote.delayToleranceSec,
         fetchedAt: extra?.fetchedAt ?? quote.fetchedAt,
         delayedFallback: extra?.delayedFallback ?? quote.delayedFallback,
         syntheticBid: usedBid ? bidSynthetic : quote.syntheticBid,
@@ -1362,6 +1387,8 @@ export function mergeQuoteData(
       provider: quote.provider,
       asOf: quote.asOf,
       venuePriceAuthoritative: quote.venuePriceAuthoritative,
+      expectedDelaySec: quote.expectedDelaySec,
+      delayToleranceSec: quote.delayToleranceSec,
       fetchedAt: quote.fetchedAt,
       delayedFallback: quote.delayedFallback,
       syntheticBid: quote.syntheticBid ?? quote.syntheticSpread ?? false,
@@ -1454,68 +1481,95 @@ function envNumber(name: string, fallback: number): number {
 
 export function clearMarketCache(): void {
   screenerCache = new Map();
+  screenerLastGood = new Map();
+  screenerRefreshInFlight.clear();
   clearFundHoldingsCache();
+}
+
+function storeScreenerRows(
+  cacheKey: string,
+  rows: NasdaqScreenerRow[],
+  ttlMs: number,
+  now: number,
+  asOf?: string
+): void {
+  screenerLastGood.set(cacheKey, { rows, asOf });
+  screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
+}
+
+async function refreshNasdaqScreenerLive(
+  cacheKey: string,
+  ttlMs: number,
+  exchange?: NasdaqExchange,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetchNasdaqScreenerResponse("nasdaq-delayed-screener", {
+    url: nasdaqScreenerUrl(exchange),
+    signal
+  });
+  if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
+  const payload = parseNasdaqScreenerPayload(await readNasdaqScreenerJson(response, signal));
+  const rows = payload.data.table.rows;
+  const asOf = payload.data.asof ?? undefined;
+  storeScreenerRows(cacheKey, rows, ttlMs, Date.now(), asOf);
+}
+
+function scheduleScreenerBackgroundRefresh(cacheKey: string, ttlMs: number, exchange?: NasdaqExchange): void {
+  if (screenerRefreshInFlight.has(cacheKey)) return;
+  const pending = refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange).catch(() => {
+    /* background refresh is best-effort */
+  }).finally(() => {
+    screenerRefreshInFlight.delete(cacheKey);
+  });
+  screenerRefreshInFlight.set(cacheKey, pending);
 }
 
 async function fetchNasdaqScreener(
   ttlMs: number,
-  exchange?: NasdaqExchange
-): Promise<{ rows: RawNasdaqRow[]; asOf?: string; cached: boolean }> {
+  exchange?: NasdaqExchange,
+  signal?: AbortSignal
+): Promise<{ rows: NasdaqScreenerRow[]; asOf?: string; cached: boolean; stale?: boolean }> {
   const now = Date.now();
   const cacheKey = exchange ?? "all";
   const cached = screenerCache.get(cacheKey);
+  const lastGood = screenerLastGood.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return { rows: cached.rows, asOf: cached.asOf, cached: true };
   }
-
-  // Same contract as nasdaq-quote / nasdaq-calendar (2026-08-05): BROWSER_UA +
-  // Origin/Referer + fetchWithRetry. Stub "Mozilla/5.0" + 8s abort() is why
-  // every scan since 2026-08-13T22:30Z returned 0 quotes.
-  let lastError: unknown;
-  for (let attempt = 0; attempt < NASDAQ_SCREENER_ATTEMPTS; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
-    }, NASDAQ_SCREENER_TIMEOUT_MS);
-    try {
-      const response = await fetchWithRetry(
-        nasdaqScreenerUrl(exchange),
-        {
-          cache: "no-store",
-          signal: controller.signal,
-          headers: {
-            Accept: "application/json,text/plain,*/*",
-            "User-Agent": BROWSER_UA,
-            Origin: "https://www.nasdaq.com",
-            Referer: "https://www.nasdaq.com/"
-          }
-        },
-        { service: "nasdaq-delayed-screener", retries: 1 }
-      );
-      clearTimeout(timeout);
-      if (!response.ok) throw new Error(`Market data request failed with ${response.status}.`);
-      const payload = await response.json();
-      const rows = Array.isArray(payload?.data?.table?.rows) ? (payload.data.table.rows as RawNasdaqRow[]) : [];
-      const asOf = typeof payload?.data?.asof === "string" ? payload.data.asof : undefined;
-      screenerCache.set(cacheKey, { rows, asOf, expiresAt: expiresAtRespectingMarketClose(new Date(now), ttlMs) });
-      return { rows, asOf, cached: false };
-    } catch (error) {
-      const reason = controller.signal.reason;
-      lastError = reason instanceof Error ? reason : error;
-      const timedOut =
-        (reason instanceof Error && reason.message === NASDAQ_SCREENER_TIMEOUT_MESSAGE) ||
-        (error instanceof Error && (error.name === "AbortError" || error.message === NASDAQ_SCREENER_TIMEOUT_MESSAGE));
-      if (!timedOut || attempt === NASDAQ_SCREENER_ATTEMPTS - 1) {
-        throw lastError;
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Nasdaq screener aborted.");
   }
-  throw lastError instanceof Error ? lastError : new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE);
+
+  if (lastGood) {
+    scheduleScreenerBackgroundRefresh(cacheKey, ttlMs, exchange);
+    return { rows: lastGood.rows, asOf: lastGood.asOf, cached: true, stale: true };
+  }
+
+  try {
+    await refreshNasdaqScreenerLive(cacheKey, ttlMs, exchange, signal);
+    const fresh = screenerCache.get(cacheKey)!;
+    return { rows: fresh.rows, asOf: fresh.asOf, cached: false };
+  } catch (error) {
+    // This catch runs only when last-good is empty, so there is no prior price to
+    // copy onto a symbol/name row.  The directory never carries lastsale.
+    // toMarketQuote would drop every row, and storing them would skip Nasdaq until
+    // the close.  Report the listing or the directory's own error, and leave both
+    // caches untouched.  Explicit symbols still recover from the last scan, then Yahoo.
+    const original = error instanceof Error ? error.message : "Nasdaq screener failed.";
+    let fallbackDetail: string;
+    try {
+      const listed = (await fetchFallbackUniverseRows(signal)).length;
+      fallbackDetail = listed === 1
+        ? "Keyless directory listed 1 symbol without a price; that row was not cached."
+        : `Keyless directory listed ${listed} symbols without prices; those rows were not cached.`;
+    } catch (err) {
+      fallbackDetail = err instanceof Error ? err.message : "keyless universe fallback failed";
+    }
+    throw new Error(`${original} ${fallbackDetail}`);
+  }
 }
 
-function toMarketQuote(row: RawNasdaqRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
+function toMarketQuote(row: NasdaqScreenerRow, positions: EquityPosition[], provider: string, asOf?: string): MarketQuote[] {
   const symbol = normalizeMarketDataSymbol(String(row.symbol ?? ""));
   const price = number(row.lastsale);
   const intradayChangePct = percent(row.pctchange);
@@ -1573,7 +1627,7 @@ async function loadDynamicUniverseQuotes(input: {
       const exchange = config.exchange;
       if (!exchange) continue;
       try {
-        const result = await fetchNasdaqScreener(input.ttlMs, exchange);
+        const result = await fetchNasdaqScreener(input.ttlMs, exchange, input.signal);
         cached = cached || result.cached;
         quotes.push(...result.rows.flatMap((row) => toMarketQuote(row, input.positions, input.providerName, result.asOf)));
         sources.push(`${universe}-universe`);
@@ -1614,27 +1668,71 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   allowed: Set<string>;
   positions: EquityPosition[];
   seed?: Record<string, MarketQuoteSummary>;
-}): Promise<{ quotes: MarketQuote[]; warnings: string[]; usedSeed: boolean }> {
-  const seeded = input.seed ? persistedMarketQuotes(input.seed, input.positions) : [];
-  if (seeded.length > 0) {
-    return {
-      quotes: seeded,
-      warnings: [
-        "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
-      ],
-      usedSeed: true
-    };
+  userId?: string;
+  connectedAccountId?: string;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}): Promise<{
+  quotes: MarketQuote[];
+  warnings: string[];
+  usedSeed: boolean;
+  recoverySource?: string;
+}> {
+  const requested = Array.from(input.allowed);
+  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
+    signal: input.signal,
+    deadlineAt: input.deadlineAt,
+    userId: input.userId
+  });
+  let quotes = quoteOnly.quotes;
+  const warnings = [...quoteOnly.warnings];
+  let recoverySource: string | undefined;
+
+  if (quotes.length === 0 && input.userId && !input.signal?.aborted) {
+    const brokerRecovery = await recoverUniverseQuotesFromBroker({
+      symbols: requested,
+      positions: input.positions,
+      userId: input.userId,
+      connectedAccountId: input.connectedAccountId,
+      signal: input.signal,
+      deadlineAt: input.deadlineAt
+    });
+    warnings.push(...brokerRecovery.warnings);
+    if (brokerRecovery.quotes.length > 0) {
+      quotes = brokerRecovery.quotes;
+      recoverySource = brokerRecovery.recoverySource;
+    }
   }
-  const quoteOnly = await fetchAllowedSetMarketQuotes(Array.from(input.allowed), input.positions);
-  return { quotes: quoteOnly.quotes, warnings: quoteOnly.warnings, usedSeed: false };
+
+  if (quotes.length === 0 && input.seed) {
+    const seeded = persistedMarketQuotes(input.seed, input.positions);
+    if (seeded.length > 0) {
+      return {
+        quotes: seeded,
+        warnings: [
+          ...warnings,
+          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
+        ],
+        usedSeed: true,
+        recoverySource
+      };
+    }
+  }
+
+  return { quotes, warnings, usedSeed: false, recoverySource };
 }
 
 async function fetchAllowedSetMarketQuotes(
   symbols: string[],
-  positions: EquityPosition[]
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineAt?: number; userId?: string }
 ): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, { concurrency: 4 });
+  const bySymbol = await fetchYahooFinanceQuotesBatch(requested, {
+    concurrency: 4,
+    userId: options?.userId,
+    signal: options?.signal
+  });
   const quotes: MarketQuote[] = [];
   const missing: string[] = [];
   for (const symbol of requested) {
@@ -1643,8 +1741,14 @@ async function fetchAllowedSetMarketQuotes(
     else missing.push(symbol);
   }
   const warnings: string[] = [];
-  if (missing.length > 0) {
-    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions);
+  if (missing.length > 0 && !options?.signal?.aborted) {
+    const remainingMs =
+      options?.deadlineAt != null ? Math.max(0, options.deadlineAt - Date.now()) : undefined;
+    const chart = await fetchQuoteOnlyMarketQuotes(missing, positions, {
+      signal: options?.signal,
+      deadlineMs: remainingMs,
+      userId: options?.userId
+    });
     quotes.push(...chart.quotes);
     if (requested.length <= 8) warnings.push(...chart.warnings);
   }
@@ -1654,12 +1758,24 @@ async function fetchAllowedSetMarketQuotes(
   return { quotes, warnings };
 }
 
-async function fetchQuoteOnlyMarketQuotes(symbols: string[], positions: EquityPosition[]): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
+async function fetchQuoteOnlyMarketQuotes(
+  symbols: string[],
+  positions: EquityPosition[],
+  options?: { signal?: AbortSignal; deadlineMs?: number; userId?: string }
+): Promise<{ quotes: MarketQuote[]; warnings: string[] }> {
   const quotes: MarketQuote[] = [];
   const unresolved: string[] = [];
   const requested = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
-  const results = await Promise.all(requested.map(async (symbol) => [symbol, await fetchYahooFinanceQuote(symbol)] as const));
-  for (const [symbol, quote] of results) {
+  // Bounded pool, not Promise.all: firing one chart call per symbol at once
+  // queued hundreds of requests behind the proxy gate, where each one's 5s
+  // timer fired before a slot freed up — zero quotes (prod 2026-11-06).
+  const bySymbol = await fetchYahooFinanceChartQuotes(requested, {
+    signal: options?.signal,
+    deadlineMs: options?.deadlineMs,
+    userId: options?.userId
+  });
+  for (const symbol of requested) {
+    const quote = bySymbol.get(symbol);
     if (quote) quotes.push(toQuoteOnlyMarketQuote(symbol, quote, positions));
     else unresolved.push(symbol);
   }
@@ -1720,6 +1836,30 @@ export function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote,
 export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): MarketQuote {
   const enrichmentBid = extra.bid && extra.bid > 0;
   const enrichmentAsk = extra.ask && extra.ask > 0;
+  // SEC-derived market cap is a gap fill.  The cascade builds its base only from
+  // enrichment providers, so it never sees the Nasdaq screener cap and emits
+  // shares × price whenever no provider already set marketCap.  A positive screener
+  // cap must win; a stale SEC share count (for example after a split) must not replace it.
+  const screenerMarketCap =
+    typeof quote.marketCap === "number" && quote.marketCap > 0 ? quote.marketCap : undefined;
+  const secDerivedMarketCap =
+    extra.sources?.marketCap === "sec-xbrl" &&
+    typeof extra.marketCap === "number" &&
+    extra.marketCap > 0;
+  const keepScreenerMarketCap = Boolean(secDerivedMarketCap && screenerMarketCap !== undefined);
+  const sources = mergeSources(quote, extra);
+  if (keepScreenerMarketCap) {
+    if (quote.sources?.marketCap) sources.marketCap = quote.sources.marketCap;
+    else delete sources.marketCap;
+  }
+  const fieldObservations: EnrichmentFieldObservations = {
+    ...(quote.fieldObservations ?? {}),
+    ...(extra.fieldObservations ?? {})
+  };
+  if (keepScreenerMarketCap) {
+    if (quote.fieldObservations?.marketCap) fieldObservations.marketCap = quote.fieldObservations.marketCap;
+    else delete fieldObservations.marketCap;
+  }
   return {
     ...quote,
     price: extra.price && extra.price > 0 ? extra.price : quote.price,
@@ -1739,6 +1879,16 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     intradayChangePct: typeof extra.intradayChangePct === "number" ? extra.intradayChangePct : quote.intradayChangePct,
     vwap: extra.vwap && extra.vwap > 0 ? extra.vwap : quote.vwap,
     asOf: extra.asOf ?? quote.asOf,
+    // DELAYED-TAPE METADATA: a `delayed_sip` enrichment (Alpaca PAPER) must be
+    // aged with the delayed-tape rules, not the realtime-stale bar — otherwise
+    // a healthy ~900s-old print is treated as a stale realtime quote and every
+    // scan row fails the staleness gate.
+    expectedDelaySec: extra.expectedDelaySec ?? quote.expectedDelaySec,
+    delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
+    venuePriceAuthoritative: extra.venuePriceAuthoritative ?? quote.venuePriceAuthoritative,
+    // A delayed tape ages by its RETRIEVAL stamp; a realtime quote keeps the
+    // observation time as its freshness signal (undefined here → unchanged).
+    fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
     companyName: extra.companyName ?? quote.companyName,
     sentiment: extra.sentiment ?? quote.sentiment,
     peRatio: extra.peRatio ?? quote.peRatio,
@@ -1749,6 +1899,11 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     sector: extra.sector ?? quote.sector,
     industry: extra.industry ?? quote.industry,
     volume: extra.volume && extra.volume > 0 ? extra.volume : quote.volume,
+    marketCap: keepScreenerMarketCap
+      ? screenerMarketCap
+      : extra.marketCap && extra.marketCap > 0
+        ? extra.marketCap
+        : quote.marketCap,
     dividendYield: extra.dividendYield ?? quote.dividendYield,
     eps: extra.eps ?? quote.eps,
     sharesOutstanding: extra.sharesOutstanding ?? quote.sharesOutstanding,
@@ -1785,15 +1940,13 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     evidenceBulletins: extra.shortInterestDisagreement
       ? Array.from(new Set([...(quote.evidenceBulletins ?? []), extra.shortInterestDisagreement]))
       : quote.evidenceBulletins,
-    sources: mergeSources(quote, extra),
+    sources,
     // Keep cascade receipts on the quote so admin/ops/coverage reporting (and drilldowns) can see
     // which providers failed and the per-field observation status — not only the winning scalar.
     // MERGE observations field-by-field so a live enrich layer does not wipe per-field as_of/
     // fetched_at stamps from the durable seed baseline for fields the live pass left empty.
-    fieldObservations: {
-      ...(quote.fieldObservations ?? {}),
-      ...(extra.fieldObservations ?? {})
-    },
+    // A kept screener market cap drops the SEC observation so the receipt matches the scalar.
+    fieldObservations,
     providerFailures: extra.providerFailures
       ? { ...(quote.providerFailures ?? {}), ...extra.providerFailures }
       : quote.providerFailures

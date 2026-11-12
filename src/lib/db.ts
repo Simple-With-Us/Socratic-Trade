@@ -5,12 +5,14 @@
 
 import "server-only";
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync } from "fs";
 import { dirname, resolve } from "path";
 import { resetDrizzleForTesting } from "./db/client";
 import crypto from "crypto";
 import { DEFAULT_POLICY, DEFAULT_SCORING_WEIGHTS, DEFAULT_STRATEGY_PROMPT } from "./defaults";
 import { SQLITE_BUSY_PIN_MS } from "./sqlite-event-loop";
+import { installSlowSqliteTiming } from "./sqlite-slow-timing";
+import { auditRowChangesHaltCause } from "./halt-audit-invalidation";
 import type { NotificationEventType, TradingPolicy } from "./types";
 
 let db: Database.Database | undefined;
@@ -90,8 +92,13 @@ export function getDb(): Database.Database {
   const path = databasePath();
   mkdirSync(dirname(path), { recursive: true });
   db = new Database(path);
+  installSlowSqliteTiming(db, { walBytes: () => walSizeBytes(path) });
   db.function("account_subject_token", { deterministic: true }, (value: unknown) => accountSubjectToken(String(value ?? "")));
   db.function("account_setting_matches_subject", { deterministic: true }, accountSettingMatchesSubject);
+  // Before journal_mode.  The WAL switch writes the file header, and auto_vacuum
+  // can only be armed while that header is still unset.  Existing files already
+  // have tables, so this returns without requesting a rewrite.
+  armIncrementalAutoVacuumIfEmpty(db);
   db.pragma("journal_mode = WAL");
   // Short pin, not a 60s sleep. better-sqlite3 waits for SQLITE_BUSY ON THE EVENT LOOP,
   // so a 60s busy_timeout (raised 5s → 30s → 60s to hide "database is locked") froze
@@ -113,6 +120,24 @@ export function getDb(): Database.Database {
   installAccountWriteFenceTriggers(db);
   assertEncryptionKeyAvailable(db);
   return db;
+}
+
+/** Size of `<db>-wal` for the slow-call log (ST-4542); null when there is no WAL file. */
+function walSizeBytes(dbPath: string): number | null {
+  try {
+    return statSync(`${dbPath}-wal`).size;
+  } catch {
+    return null;
+  }
+}
+
+/** INCREMENTAL sticks only when it is set before the first user table. */
+function armIncrementalAutoVacuumIfEmpty(database: Database.Database): void {
+  const existing = database
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1")
+    .get();
+  if (existing) return;
+  database.pragma("auto_vacuum = INCREMENTAL");
 }
 
 export function resetDbForTesting(): void {
@@ -3394,6 +3419,195 @@ const MIGRATIONS: Migration[] = [
           ON enrichment_coverage_fields (field, as_of DESC);
       `);
     }
+  },
+  {
+    // Ops snapshot: listOpsStrategyRuns orders by started_at per user without scanning the
+    // liveness index (status, connected_account_id in the key). 2026-10-14 prod profile: 84s
+    // snapshot builds with a 16.5 GB DB — this seek keeps recent-run reads off full user scans.
+    version: 95,
+    name: "strategy_runs_user_started_index",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_runs_user_started ON strategy_runs (user_id, started_at DESC)"
+      );
+    },
+  },
+  {
+    // Codec tag and plaintext length so backfill and hasLocalFilingCopy do not
+    // scan blob columns. text_codec NULL means the body has not been stamped yet.
+    version: 96,
+    name: "text_payload_codec_columns",
+    up: (database) => {
+      if (tableExists(database, "earningscalls_transcripts")) {
+        if (!columnExists(database, "earningscalls_transcripts", "text_codec")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN text_codec TEXT");
+        }
+        if (!columnExists(database, "earningscalls_transcripts", "plaintext_length")) {
+          database.exec("ALTER TABLE earningscalls_transcripts ADD COLUMN plaintext_length INTEGER");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_earningscalls_text_codec_pending
+            ON earningscalls_transcripts (symbol, fiscal_year, fiscal_quarter)
+            WHERE text_codec IS NULL AND content IS NOT NULL
+        `);
+      }
+      if (tableExists(database, "sec_facts")) {
+        if (!columnExists(database, "sec_facts", "segment_codec")) {
+          database.exec("ALTER TABLE sec_facts ADD COLUMN segment_codec TEXT");
+        }
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_sec_facts_segment_codec_pending
+            ON sec_facts (id)
+            WHERE segment_codec IS NULL
+              AND concept = '__companyfacts_json__'
+              AND segment IS NOT NULL
+        `);
+      }
+    }
+  },
+  {
+    version: 97,
+    name: "st4541_dedup_isolation_columns",
+    up: (database) => {
+      // ST-4541 (review 17915833/1): the near-duplicate signature/link tables gained tenant_scope,
+      // embed_model and embed_revision so a skip can never inherit a canonical vector from another
+      // tenant or another embedding space. These tables shipped WITH this PR and have never been on
+      // main, so production has no rows to migrate; this only rescues local/staging dev databases
+      // that already created the pre-isolation shape while the branch was in flight. Rows written
+      // before this migration carry tenant_scope='' and therefore simply stop matching any scoped
+      // lookup — the fail-open direction (an extra paid embed), never a wrong skip or a lost record.
+      const addColumnIfMissing = (table: string, column: string) => {
+        if (!tableExists(database, table)) return;
+        if (!columnExists(database, table, column)) {
+          database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+        }
+      };
+
+      for (const table of ["chunk_dedup_signatures", "chunk_dedup_links"]) {
+        addColumnIfMissing(table, "tenant_scope");
+        addColumnIfMissing(table, "embed_model");
+        addColumnIfMissing(table, "embed_revision");
+      }
+      // ST-4541 (Kody review): the signature row also records the upserted vector id, so a skip's
+      // link row can name the canonical vector instead of always writing ''. Pre-existing dev rows
+      // keep '' — a blank audit field, never a wrong skip.
+      addColumnIfMissing("chunk_dedup_signatures", "vector_id");
+    }
+  },
+  {
+    // ST-8: which process started the run.  The restart sweep on a follower must not close a
+    // run the leader still owns.  Nullable so rows written before this migration stay unowned
+    // and only a leader, after boot grace, may reap them.  Version 98, not 95, 96 or 97: main
+    // spent 95 on strategy_runs_user_started_index, 96 on text_payload_codec_columns (#4720) and
+    // 97 on st4541_dedup_isolation_columns (#4736), and two migrations can never share a version.
+    // This one renumbers again as main lands new migrations; the alternative is a duplicate
+    // version that silently runs the first migration only and skips the second.
+    version: 98,
+    name: "strategy_runs_owner_instance",
+    up: (database) => {
+      if (!tableExists(database, "strategy_runs")) return;
+      if (!columnExists(database, "strategy_runs", "owner_instance")) {
+        database.exec("ALTER TABLE strategy_runs ADD COLUMN owner_instance TEXT");
+      }
+    }
+  },
+  {
+    // ST-4543: the Usage Monitor push used to drop everything the provider reported beyond the
+    // prompt/completion totals (cache reads/writes, reasoning tokens, the model that actually
+    // served the call).  The push is rebuilt from this table by usage-monitor-replay.ts, so the
+    // detail must be persisted here or a replayed event would differ from the live one.  All
+    // columns are nullable: legacy rows stay valid and replay as before (no detail available).
+    version: 99,
+    name: "llm_usage_provider_detail",
+    up: (database) => {
+      if (!tableExists(database, "llm_usage")) return;
+      const columns: Array<[string, string]> = [
+        ["cached_prompt_tokens", "INTEGER"],
+        ["cache_creation_tokens", "INTEGER"],
+        ["cache_creation_1h_tokens", "INTEGER"],
+        ["reasoning_tokens", "INTEGER"],
+        ["served_model", "TEXT"],
+        ["request_count", "INTEGER"]
+      ];
+      for (const [name, type] of columns) {
+        if (!columnExists(database, "llm_usage", name)) {
+          database.exec(`ALTER TABLE llm_usage ADD COLUMN ${name} ${type}`);
+        }
+      }
+    }
+  },
+  {
+    // 2026-10-18 BF-FIXER (ST-4561): autonomy_halt_cause.latestHaltBranch correlated-EXISTS fix.
+    //
+    // audit_events carries idx_audit_events_user_account_kind (user_id, connected_account_id, kind)
+    // from v-earlier, and latestHaltBranch's own comment says both of its reads "can use
+    // (user_id, connected_account_id, kind) instead of scanning audit_events".  The database does
+    // not deliver that.  EXPLAIN QUERY PLAN on prod (2026-10-18) showed BOTH subplans narrowing on
+    // user_id alone:
+    //
+    //   SEARCH audit_events USING INDEX idx_audit_events_user_created (user_id=?)
+    //   CORRELATED SCALAR SUBQUERY 1
+    //   SEARCH e USING INDEX idx_audit_events_user_created (user_id=? AND created_at>?)
+    //
+    // connected_account_id and kind never enter a seek, so the handover check walks one user's whole
+    // audit history.  The existing composite cannot serve the shape because it has no created_at,
+    // which the query needs for both `ORDER BY created_at DESC LIMIT 1` and `e.created_at >= h.created_at`.
+    //
+    // Adding created_at as the trailing column lets the correlated EXISTS seek all four columns.
+    // Verified on a same-schema ANALYZEd copy: the correlated subquery becomes
+    //   SEARCH e USING INDEX ... (user_id=? AND connected_account_id=? AND kind=? AND created_at>?)
+    // and it does so with NO ANALYZE — the index alone is sufficient for that half.
+    //
+    // Purely additive: a new index, no data change, no ANALYZE, no PRAGMA.  Creating it over 1.4M
+    // rows takes a write lock for the build, so this is expected to run in the normal migration
+    // window like any other index build here.
+    //
+    // The halt-branch statement that motivated this index was rewritten in the same change:
+    // APP_HALT_PREDICATE is split per kind into two index-ordered latest-per-kind lookups
+    // combined with max(), so the statement seeks (user_id, connected_account_id, kind,
+    // created_at) with no sorter instead of walking the user's audit history.
+    version: 100,
+    name: "audit_events_account_kind_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_kind_created ON audit_events (user_id, connected_account_id, kind, created_at DESC)"
+      );
+    }
+  },
+  {
+    // ST-4561 follow-up: the correlated handover EXISTS constrains kind with an OR/IN, so
+    // created_at can never be a range bound on the kind-first v100 index (SQLite only ranges
+    // a column when every preceding column is equality-constrained).  This companion orders
+    // created_at directly after the two equality columns, so `e.created_at >= h.created_at`
+    // becomes a real bounded seek instead of a scan of the account group's audit rows.
+    version: 101,
+    name: "audit_events_account_created_index",
+    up: (database) => {
+      if (!tableExists(database, "audit_events")) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON audit_events (user_id, connected_account_id, created_at DESC)"
+      );
+    }
+  },
+  {
+    version: 102,
+    name: "st2599_auth_sessions",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          absolute_expires_at TEXT NOT NULL,
+          revoked_at TEXT,
+          last_seen_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active
+          ON auth_sessions (user_id, revoked_at);
+      `);
+    }
   }
 ];
 
@@ -3717,6 +3931,21 @@ export function audit(kind: string, payload: unknown, userId: string = "local", 
     db.prepare(
       "INSERT INTO audit_events (id, user_id, connected_account_id, created_at, kind, payload) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(id, userId, accountId, createdAt, kind, payloadJson);
+  }
+
+  // ST-4561: the halt-cause cache holds the answer to "did the APP halt this account, and has it
+  // stayed halted?" for up to a minute.  A row that matches the app-halt predicate (a HARD drawdown
+  // breaker, a broker auto-halt) or the handover predicate (an auto-resume, an owner override, a
+  // boot halt, an ops set_system_state, a policy change that leaves `halted`) changes that answer,
+  // so the write marks the cached answer for this scope stale and the next read re-reads it.  A
+  // row that matches neither -- the ADVISORY drawdown row written on every breached strategy run,
+  // for one -- cannot change it and must not force a fresh scan of the 19 GB audit table.
+  //
+  // The hook is registered by autonomy-halt-cause.ts, which imports this module; calling it
+  // through `globalThis` keeps the import graph acyclic.  It is absent in processes that never
+  // load that module, and then the cache TTL governs as before.
+  if (auditRowChangesHaltCause(kind, payloadJson)) {
+    globalThis.__socraticHaltAuditInvalidate?.(userId, accountId);
   }
 }
 
@@ -4272,6 +4501,7 @@ function migrate(database: Database.Database): void {
       tokens_out INTEGER,
       batch_count INTEGER NOT NULL DEFAULT 1,
       cost_est_usd REAL,
+      counts_toward_ingest INTEGER,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_rag_usage_user ON rag_usage (user_id, created_at);
@@ -4327,9 +4557,79 @@ function migrate(database: Database.Database): void {
       chunk_id TEXT NOT NULL DEFAULT '',
       user_scope TEXT NOT NULL DEFAULT 'local',
       created_at TEXT NOT NULL,
+      -- ST-4540 (embed-stage no-data-loss): durable delivery receipt. delivered_at IS NOT NULL
+      -- means the vector was PROVEN durably in the vector store (upsert acknowledged, or
+      -- managed two-phase commit finalized), so only then may the row be removed. Undelivered
+      -- rows are NEVER age- or size-deleted — a paid vector is kept until it lands.
+      delivered_at TEXT,
+      delivered_store TEXT,
+      -- ST-4540: undecodable (corrupt) vectors are quarantined and KEPT for re-embed from
+      -- source. They are never deleted; a re-embed (INSERT OR REPLACE) clears the marker.
+      quarantined_at TEXT,
+      quarantine_reason TEXT,
       PRIMARY KEY (content_hash, model, revision)
     );
     CREATE INDEX IF NOT EXISTS idx_embed_stage_created ON embed_stage (created_at);
+    -- NOTE: idx_embed_stage_delivered is NOT created here. On a pre-ST-4540 database this block is
+    -- a no-op (the table already exists WITHOUT delivered_at), so indexing that column here would
+    -- abort the whole migration with "no such column: delivered_at". It is created in the guarded
+    -- ALTER TABLE block below, once the columns are known to exist.
+    -- ST-4541 pre-embed near-duplicate detection. chunk_dedup_signatures holds one MinHash
+    -- signature (~256 B) per chunk we actually paid to embed, so a later ingest can compare
+    -- against recent same-source chunks without re-reading full text. chunk_dedup_links is the
+    -- provenance row written when a chunk's embed was SKIPPED, pointing at the canonical chunk that
+    -- answers for it. Deliberately registered in NEITHER sqlite-storage-hygiene's CATEGORY_BY_TABLE
+    -- nor PRUNABLE_TABLES: stored RAG data is kept forever, so these rows are never pruned or capped.
+    -- Write pattern is INSERT OR IGNORE only — no update, no delete.
+    --
+    -- ISOLATION (review 17915833/1): a skip is only safe when the canonical vector the duplicate
+    -- inherits is actually RETRIEVABLE for the skipping caller — i.e. same tenant namespace AND the
+    -- same embedding space. The tenant_scope column (vectorTenantScope: "shared:operator" or
+    -- "private:<sha256>") plus embed_model/embed_revision (the vector space that produced the
+    -- canonical vector) are therefore part of the signature's identity, and every lookup filters on
+    -- them. Without that, tenant A's chunk could be skipped against tenant B's signature and would
+    -- never get a vector in A's isolated namespace — silently unretrievable, i.e. a lost record.
+    -- Both keys are in the primary key so two tenants that embed identical text each keep their own
+    -- signature row instead of one silently winning the INSERT OR IGNORE.
+    CREATE TABLE IF NOT EXISTS chunk_dedup_signatures (
+      content_hash TEXT NOT NULL,
+      normalized_hash TEXT NOT NULL DEFAULT '',
+      signature BLOB NOT NULL,
+      num_perm INTEGER NOT NULL DEFAULT 64,
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      chunk_id TEXT NOT NULL DEFAULT '',
+      -- The record id actually upserted for this chunk, so a later skip's link row can name the
+      -- vector that answers for it (chunk_dedup_links.canonical_vector_id).
+      vector_id TEXT NOT NULL DEFAULT '',
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, tenant_scope, embed_model, embed_revision)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_scope
+      ON chunk_dedup_signatures (tenant_scope, symbol, source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_signatures_normalized
+      ON chunk_dedup_signatures (tenant_scope, embed_model, embed_revision, normalized_hash);
+    CREATE TABLE IF NOT EXISTS chunk_dedup_links (
+      content_hash TEXT NOT NULL,
+      canonical_hash TEXT NOT NULL,
+      canonical_chunk_id TEXT NOT NULL DEFAULT '',
+      canonical_vector_id TEXT NOT NULL DEFAULT '',
+      symbol TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      match_kind TEXT NOT NULL CHECK(match_kind IN ('exact','near')),
+      similarity REAL NOT NULL DEFAULT 0,
+      threshold REAL NOT NULL DEFAULT 0,
+      tenant_scope TEXT NOT NULL DEFAULT '',
+      embed_model TEXT NOT NULL DEFAULT '',
+      embed_revision TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (content_hash, canonical_hash, tenant_scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_dedup_links_scope
+      ON chunk_dedup_links (tenant_scope, symbol, source, created_at);
     CREATE TABLE IF NOT EXISTS learned_context (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -4480,6 +4780,20 @@ function migrate(database: Database.Database): void {
       PRIMARY KEY (ticker, date)
     );
     CREATE INDEX IF NOT EXISTS idx_imported_price_eod_ticker ON imported_price_eod (ticker, date);
+    -- Idempotent receipt for one Congress.Trade -> Socratic-Trade push.  Keyed by the
+    -- caller's push id.  An ok receipt is what a retry returns, and that retry does
+    -- not write the cache again.  A non-ok receipt is replaced on the next attempt.
+    -- A push with no id is stored under missing:<received_at> so the ops snapshot
+    -- can still show health.
+    CREATE TABLE IF NOT EXISTS peer_push_receipts (
+      push_id TEXT PRIMARY KEY,
+      received_at TEXT NOT NULL,
+      health TEXT NOT NULL,
+      delivered_at TEXT,
+      consumed_at TEXT,
+      body_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_push_receipts_received_at ON peer_push_receipts (received_at);
     CREATE TABLE IF NOT EXISTS imported_spx_eod (
       date TEXT PRIMARY KEY,
       close REAL NOT NULL,
@@ -4561,6 +4875,37 @@ function migrate(database: Database.Database): void {
   const counterfactualWatermarkColumns = database.prepare("PRAGMA table_info(counterfactual_learning_watermarks)").all() as Array<{ name: string }>;
   if (!counterfactualWatermarkColumns.some((column) => column.name === "last_audit_rowid")) {
     database.exec("ALTER TABLE counterfactual_learning_watermarks ADD COLUMN last_audit_rowid INTEGER");
+  }
+
+  // ST-4609: retrieval embeds stay in the cost ledger but do not spend the ingest text cap.
+  // NULL on rows written before this column still counts (no cap holiday).
+  {
+    const ragUsageCols = database.prepare("PRAGMA table_info(rag_usage)").all() as Array<{ name: string }>;
+    if (ragUsageCols.length > 0 && !ragUsageCols.some((column) => column.name === "counts_toward_ingest")) {
+      database.exec("ALTER TABLE rag_usage ADD COLUMN counts_toward_ingest INTEGER");
+    }
+  }
+
+  // ST-4540 (embed-stage no-data-loss): additive delivery/quarantine columns on embed_stage.
+  // Existing rows carry delivered_at = NULL, i.e. "never proven delivered" — the conservative
+  // default, so a pre-migration row is re-verified on the next retry instead of assumed safe to
+  // delete. Every deleter is gated on delivered_at IS NOT NULL.
+  {
+    const stageCols = database.prepare("PRAGMA table_info(embed_stage)").all() as Array<{ name: string }>;
+    if (stageCols.length > 0) {
+      const stageColumns: Array<[string, string]> = [
+        ["delivered_at", "TEXT"],
+        ["delivered_store", "TEXT"],
+        ["quarantined_at", "TEXT"],
+        ["quarantine_reason", "TEXT"]
+      ];
+      for (const [name, type] of stageColumns) {
+        if (!stageCols.some((column) => column.name === name)) {
+          database.exec(`ALTER TABLE embed_stage ADD COLUMN ${name} ${type}`);
+        }
+      }
+      database.exec("CREATE INDEX IF NOT EXISTS idx_embed_stage_delivered ON embed_stage (delivered_at)");
+    }
   }
 
   const columns = database.prepare("PRAGMA table_info(trade_proposals)").all() as Array<{ name: string }>;
@@ -5055,6 +5400,7 @@ export * from "./db-signal-health";
 export * from "./db-lookahead-audit";
 export * from "./db-enrichment-coverage";
 export * from "./db-device-tokens";
+export * from "./db-auth-sessions";
 export * from "./db-trade-locks";
 export * from "./db-memory-lifecycle";
 export * from "./db-overlays";

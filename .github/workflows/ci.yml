@@ -295,7 +295,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -307,9 +307,9 @@ jobs:
       - name: Disable lingering sparse-checkout
         run: rm -rf ./* ./.git || true
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
       # Split restore/save (2026-07-04, cache-hygiene): PR/merge_group runs only restore;
       # a new entry is saved only on main pushes and the nightly schedule so cache storage
       # stays a single rolling lineage per OS instead of one throwaway entry per PR push.
@@ -353,9 +353,30 @@ jobs:
           bash -n scripts/ios-stage-asc-key.sh
           bash -n scripts/test-ios-stage-asc-key.sh
           bash -n scripts/ios-fleet/publish-ios-versions.sh
+          bash -n scripts/ios-fleet/test-asc-credentials.sh
+          bash -n scripts/ios-fleet/ship-testflight.sh
+          bash -n scripts/ios-fleet/test-ship-seq.sh
+          bash -n scripts/ios-asc-key-env.sh
           bash scripts/test-ios-scheduled-ship-gate.sh
+          # The TestFlight ship checks this pin only after merge (ios-ship.yml), so a PR
+          # that edits scripts/ios-fleet/ without refreshing it lands green and breaks
+          # the next ship (#4947, #4954).  Run the same check here, inside required verify.
+          bash scripts/ios-fleet-pin.sh --check
           bash scripts/test-ios-stage-asc-key.sh
+          bash scripts/test-ios-asc-key-env.sh
+          bash scripts/ios-fleet/test-asc-credentials.sh
+          # The version-numbering rules (AFC-517): the pure copy is unit-tested,
+          # and the ship script's use of them is regression-tested offline with
+          # a stubbed App Store Connect.
+          bash scripts/ios-fleet/test-ship-seq.sh
+          node --test scripts/ios-fleet/version-plan.test.mjs
+          node --test scripts/ios-fleet/shared-build.test.mjs
           node --test scripts/ios-fleet/publish-ios-versions.test.mjs
+          node --test scripts/ios-fleet/publish-ios-versions.stale-snapshot.test.mjs
+          node --test scripts/ios-fleet/asc-api.credentials.test.mjs
+          node --test scripts/ios-fleet/asc-api.timestamp.test.mjs
+          node --test scripts/ios-fleet/test-asc-key.test.mjs
+          node --test scripts/ios-fleet/ship-tf-ready-labels.test.mjs
       # Deploy-freshness watchdog + shared-box OCR isolation are shell, so
       # vitest cannot cover them. Offline selftests (throwaway git + stub
       # /api/health, fake docker ps) catch a silent-pass the same way
@@ -366,11 +387,19 @@ jobs:
           bash -n scripts/verify-deploy-sha.selftest.sh
           bash -n scripts/alert-deploy-freshness.sh
           bash -n scripts/alert-deploy-freshness.selftest.sh
+          bash -n scripts/github-actions-infisical-zulip-ops.sh
+          bash -n scripts/simple-tools-fleet-post.sh
           bash -n scripts/isolate-shared-box-batch.sh
           bash -n scripts/isolate-shared-box-batch.selftest.sh
           bash scripts/verify-deploy-sha.selftest.sh
           bash scripts/alert-deploy-freshness.selftest.sh
           bash scripts/isolate-shared-box-batch.selftest.sh
+      # Merge shepherd:  stub-gh contract tests (ST-4553 tracking issue, ST-2874 in-flight CI).
+      - name: Merge shepherd selftests (bash)
+        run: |
+          bash -n scripts/merge-shepherd.sh
+          bash scripts/merge-shepherd-ci-inflight.selftest.sh
+          bash scripts/merge-shepherd-status-issue.selftest.sh
       # Every StallProfiler vitest test drives a FakeSession/FakeBridge by design (that module
       # must never touch a real V8 profiler under vitest), so createInspectorBindings() -- the
       # real node:inspector wiring -- was never exercised by the suite (review round, board

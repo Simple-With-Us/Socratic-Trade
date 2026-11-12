@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Prepare a GitHub-hosted macos-26 runner to archive for App Store review.
-# Writes ASC credentials and imports the iOS Distribution identity.
+# Stages the iOS Distribution identity and imports it.  ASC credentials reach the ship
+# script through process env (ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH); nothing is
+# written to disk outside a temp stage (AFC-359).
 # Never prints secret values.  Fail closed on a beta macOS host.
 set +o xtrace
 set -euo pipefail
@@ -20,36 +22,21 @@ fi
 
 : "${ASC_KEY_ID:?ASC_KEY_ID required}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID required}"
-# Current CI passes ASC_KEY_PATH; retain ASC_KEY_P8 for local legacy callers.
-if [[ -z "${ASC_KEY_PATH:-}" ]]; then
-  : "${ASC_KEY_P8:?ASC_KEY_P8 or ASC_KEY_PATH required}"
-fi
+# CI stages the key file and passes ASC_KEY_PATH.  The old ASC_KEY_P8 local path wrote a
+# key and an env file to a persistent folder;  it is gone (AFC-359).
+: "${ASC_KEY_PATH:?ASC_KEY_PATH required (CI stages the key file)}"
 : "${IOS_DIST_P12_BASE64:?IOS_DIST_P12_BASE64 required}"
 : "${IOS_DIST_P12_PASSWORD:?IOS_DIST_P12_PASSWORD required}"
 
-SECRETS_DIR="${HOME}/.secrets"
-mkdir -p "$SECRETS_DIR"
-chmod 700 "$SECRETS_DIR"
+STAGE_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ios-gm.XXXXXX")"
+chmod 700 "$STAGE_DIR"
 
-KEY_PATH="${ASC_KEY_PATH:-${SECRETS_DIR}/AuthKey.p8}"
-if [[ -n "${ASC_KEY_PATH:-}" ]]; then
-  [[ -s "$KEY_PATH" ]] || die "ASC_KEY_PATH has no key file"
-else
-  # Legacy local path: CI stages the key file before this helper runs.
-  printf '%s\n' "$ASC_KEY_P8" > "$KEY_PATH"
-fi
+KEY_PATH="$ASC_KEY_PATH"
+[[ -s "$KEY_PATH" ]] || die "ASC_KEY_PATH has no key file"
 chmod 600 "$KEY_PATH"
 
-ENV_PATH="${SECRETS_DIR}/appstore-connect.env"
-{
-  printf 'ASC_KEY_ID=%s\n' "$ASC_KEY_ID"
-  printf 'ASC_ISSUER_ID=%s\n' "$ASC_ISSUER_ID"
-  printf 'ASC_KEY_PATH=%s\n' "$KEY_PATH"
-} > "$ENV_PATH"
-chmod 600 "$ENV_PATH"
-
-P12_PATH="${SECRETS_DIR}/ios-distribution.p12"
-trap 'rm -f "$P12_PATH"' EXIT
+P12_PATH="${STAGE_DIR}/ios-distribution.p12"
+trap 'rm -rf "$STAGE_DIR"' EXIT
 printf '%s' "$IOS_DIST_P12_BASE64" | base64 --decode > "$P12_PATH"
 chmod 600 "$P12_PATH"
 
@@ -75,4 +62,4 @@ if ! security find-identity -v -p codesigning "$KC_PATH" | grep -q 'Apple Distri
   die "imported keychain has no Apple Distribution identity"
 fi
 log "Apple Distribution identity imported"
-log "ASC env written (key id length ${#ASC_KEY_ID})"
+log "ASC key staged (key id length ${#ASC_KEY_ID})"

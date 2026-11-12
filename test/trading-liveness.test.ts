@@ -34,6 +34,7 @@ function insertRunAt(
     status: "completed" | "failed" | "skipped" | "skipped_budget" | "skipped_market_closed" | "skipped_broker_unhealthy";
     startedAt: string;
     finishedAt: string;
+    summary?: string;
   }
 ): void {
   db.getDb()
@@ -41,7 +42,7 @@ function insertRunAt(
       `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.status);
+    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.summary ?? opts.status);
 }
 
 async function makeAccount(db: Awaited<ReturnType<typeof load>>["db"], label: string, systemState: "active" | "halted" = "active"): Promise<{ userId: string; accountId: string }> {
@@ -89,18 +90,172 @@ describe("countLeadingFailedRuns", () => {
 });
 
 describe("trading-liveness", () => {
-  it("omits the dimension entirely when there are zero active-autonomy accounts", async () => {
+  it("omits the dimension entirely when there are zero active-autonomy accounts AND no autopilot-eligible-but-halted ones", async () => {
     const { db, liveness } = await load();
-    // A connected account exists but is left at its default "halted" state — it must not make
-    // the dimension appear (a halted account not completing runs is expected, not degraded).
+    // A connected account exists with its default (non-autopilot) policy at the default "halted"
+    // systemState — it must not make the dimension appear because it is NEITHER active-autonomy
+    // NOR autopilot-eligible-but-halted (a halted non-autopilot account is expected to be quiet).
     await makeAccount(db, "Halted Account", "halted");
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).toBeNull();
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.degraded).toBe(0);
     expect(publicAgg.activeAccounts).toBe(0);
     expect(typeof publicAgg.marketOpen).toBe("boolean");
+  });
+
+  it("omits autonomy_fully_dark when every autopilot-eligible account is deliberately halted", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Dark Account", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).toBeNull();
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+  });
+
+  it("treats close_only as deliberate idle for autonomy_fully_dark", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Exit Only", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "close_only" },
+      userId,
+      accountId
+    );
+    expect(await liveness.getTradingLivenessSummary()).toBeNull();
+    expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
+  });
+
+  it("pages autonomy_fully_dark when the app halted an autopilot account and nothing else is active", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const { userId, accountId } = await makeAccount(db, "Boot Halted Autopilot", "halted");
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountId), strategyAuthority: "decide", systemState: "halted" },
+      userId,
+      accountId
+    );
+    recordBootHaltReceipt(userId, accountId, {
+      at: "2026-10-14T18:00:00.000Z",
+      from: "active"
+    });
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(true);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(0);
+    expect(summary!.darkness?.activeAccounts).toBe(0);
+    expect(summary!.darkness?.eligibleAccounts).toBeGreaterThan(summary!.darkness?.eligibleDeliberatelyIdle ?? 0);
+    expect(summary!.degraded).toBe(true);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(true);
+    expect(publicAgg.activeAccounts).toBe(0);
+    expect(publicAgg.degradedReasons).toContain("autonomy_fully_dark");
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active but every autopilot account is halted", async () => {
+    const { db, liveness } = await load();
+    const halted = await makeAccount(db, "Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    const running = await makeAccount(db, "Ask First Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.accounts.length).toBe(1);
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBe(1);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.activeAccounts).toBe(1);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
+  });
+
+  it("does not mark the fleet fully dark when ask-first is active even if the app halted autopilot", async () => {
+    const { db, liveness } = await load();
+    const { recordBootHaltReceipt } = await import("../src/lib/autonomy-halt-cause");
+    const halted = await makeAccount(db, "App Halted Autopilot", "halted");
+    db.setPolicy(
+      {
+        ...db.getPolicy(halted.userId, halted.accountId),
+        strategyAuthority: "decide",
+        systemState: "halted"
+      },
+      halted.userId,
+      halted.accountId
+    );
+    recordBootHaltReceipt(halted.userId, halted.accountId, {
+      at: "2026-10-14T18:05:00.000Z",
+      from: "active"
+    });
+    const running = await makeAccount(db, "Ask First Still Active", "active");
+    db.setPolicy(
+      {
+        ...db.getPolicy(running.userId, running.accountId),
+        strategyAuthority: "propose",
+        systemState: "active"
+      },
+      running.userId,
+      running.accountId
+    );
+
+    const summary = await liveness.getTradingLivenessSummary();
+    expect(summary).not.toBeNull();
+    expect(summary!.darkness?.fullyDark).toBe(false);
+    expect(summary!.darkness?.fleetActiveAccounts).toBeGreaterThan(0);
+    const publicAgg = liveness.toPublicTradingLiveness(summary);
+    expect(publicAgg.autonomyFullyDark).toBe(false);
+    expect(publicAgg.degradedReasons).not.toContain("autonomy_fully_dark");
+  });
+
+  it("maps a fully-dark fleet to degraded > 0 with the fleet-level reason (no account rows to count)", async () => {
+    const { liveness } = await load();
+    // Pure mapping check: a dark fleet has zero account rows, so the public `degraded` count
+    // cannot come from per-account rows — the darkness signal itself must flip it, or the
+    // health-route `degraded > 0` alert gate never fires for exactly the outage this tracks.
+    const publicAgg = liveness.toPublicTradingLiveness({
+      staleMinutes: 60,
+      maxConsecutiveFailures: 0,
+      marketOpen: true,
+      accounts: [],
+      degraded: true,
+      darkness: {
+        eligibleAccounts: 2,
+        activeAccounts: 0,
+        darkAccountLabels: [],
+        fleetActiveAccounts: 0,
+        eligibleDeliberatelyIdle: 0,
+        haltCauseUnknown: 0,
+        fullyDark: true
+      }
+    });
+    expect(publicAgg.degraded).toBeGreaterThan(0);
+    expect(publicAgg.autonomyFullyDark).toBe(true);
+    expect(publicAgg.autonomyEligibleAccounts).toBe(2);
+    expect(publicAgg.autonomyActiveAccounts).toBe(0);
+    expect(publicAgg.degradedReasons).toContain("autonomy_fully_dark");
   });
 
   it("reports healthy for a fresh completed run with no failures", async () => {
@@ -217,6 +372,23 @@ describe("trading-liveness", () => {
     expect(result.consecutiveFailedRuns).toBe(1);
     expect(result.consecutiveHaltEligibleFailures).toBe(1);
     expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
+  });
+
+  it("surfaces the newest failed run summary for alerts and clears it after a completion", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Summary Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 10 * 60_000).toISOString(), finishedAt: new Date(now - 9 * 60_000).toISOString(), summary: "older broker failure" });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 2 * 60_000).toISOString(), finishedAt: new Date(now - 1 * 60_000).toISOString(), summary: "Alpaca 401:  secret missing" });
+
+    const failing = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(failing.latestFailedRunSummary).toBe("Alpaca 401: secret missing");
+    expect(failing.latestFailedRunAt).toBe(new Date(now - 2 * 60_000).toISOString());
+
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "completed", startedAt: new Date(now - 30_000).toISOString(), finishedAt: new Date(now).toISOString() });
+    const recovered = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(recovered.latestFailedRunSummary).toBeNull();
+    expect(recovered.latestFailedRunAt).toBeNull();
   });
 
   it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {
@@ -343,7 +515,7 @@ describe("trading-liveness", () => {
       finishedAt: new Date(now - 60_000).toISOString()
     });
 
-    const summary = liveness.getTradingLivenessSummary(now);
+    const summary = await liveness.getTradingLivenessSummary(now);
     expect(summary).not.toBeNull();
     expect(summary!.degraded).toBe(true);
     const row = summary!.accounts.find((a) => a.connectedAccountId === accountId);
@@ -381,6 +553,11 @@ describe("trading-liveness", () => {
     expect(Object.keys(body.checks.tradingLiveness).sort()).toEqual(
       [
         "activeAccounts",
+        "autonomyActiveAccounts",
+        "autonomyEligibleAccounts",
+        "autonomyFullyDark",
+        "autonomyHaltCauseReadFailures",
+        "autonomyHaltCauseUnknown",
         "autopilotAccounts",
         "degraded",
         "degradedReasons",
@@ -406,8 +583,12 @@ describe("trading-liveness", () => {
     expect(Array.isArray(body.checks.tradingLiveness.degradedReasons)).toBe(true);
     expect(body.checks.tradingLiveness.degradedReasons).toContain("consecutive_failures");
     for (const reason of body.checks.tradingLiveness.degradedReasons) {
-      expect(["stale_last_completed_run", "consecutive_failures"]).toContain(reason);
+      expect(["stale_last_completed_run", "consecutive_failures", "autonomy_fully_dark"]).toContain(reason);
     }
+    // The fleet-level darkness counts are identity-free numbers/booleans, safe for the public route.
+    expect(typeof body.checks.tradingLiveness.autonomyEligibleAccounts).toBe("number");
+    expect(typeof body.checks.tradingLiveness.autonomyActiveAccounts).toBe("number");
+    expect(typeof body.checks.tradingLiveness.autonomyFullyDark).toBe("boolean");
     expect(body.checks.tradingLiveness).not.toHaveProperty("accounts");
     const serialized = JSON.stringify(body.checks.tradingLiveness);
     expect(serialized).not.toContain(accountId);

@@ -34,7 +34,7 @@ executed or definitively dispositioned:
      merge+deploy.
    - **Cross-agent conflict surfaced, then RESOLVED by retraction:** mid-session AG
      announced "Prod reindex triggered" (PR #1775) while the hold stood — flagged to AG in
-     #agent-sync with scope questions + push-notified the owner. AG then clarified **no
+     #ag***-s**c with scope questions + push-notified the owner. AG then clarified **no
      production reindex was triggered**; the health-log activity was a fresh container
      deploying and running standard startup ticks. Hold intact; record corrected here.
    - **PR #1771** (SiliconFlow bge-m3 price 10x undercount): healthy; verify-hosted green,
@@ -42,7 +42,7 @@ executed or definitively dispositioned:
    - **PR #1773 itself:** 4 Codex threads triaged — 1 fabricated-identity false positive
      (commit `15910f5e` author/committer verified = owner noreply) and 1 style nit replied +
      resolved; 2 REAL findings fixed by commit `b3f05425` pushed to the MONET branch
-     (owner-directed handoff execution, claim amended in #agent-sync first):
+     (owner-directed handoff execution, claim amended in #ag***-s**c first):
      `earningscalls` → `earningscalls-transcripts` (exact `CORPUS_REEMBED_DOC_TYPES` id;
      `resolveDocTypes()` silently drops unknown ids — an operator following the old list
      would have silently skipped earnings-call re-embedding) + the missing session ledger
@@ -78,8 +78,8 @@ executed or definitively dispositioned:
 **OpenRouter MCP = research/metadata only** (models, pricing, endpoints, docs, rankings,
 credits). No inference/generation through MCP-provisioned keys except explicit
 in-conversation owner request; app inference uses app-configured keys. Codified in
-`/Users/jay/apps/AGENT-SYNC.md` ("OpenRouter MCP usage policy"), agent memory, and announced
-in #agent-sync.
+`/Users/jay/apps/AG***-S**C.md` ("OpenRouter MCP usage policy"), agent memory, and announced
+in #ag***-s**c.
 
 ## Files
 
@@ -87,8 +87,8 @@ in #agent-sync.
 - `docs/rollouts/2026-07-19-four-handoff-conquest.md` — NEW (this note).
 - `STATUS.md`, `docs/EFFORT-LOG.md` — session rows.
 - On `monet/session-handoff-2026-07-19` (PR #1773): commit `b3f05425` (docType fix + ledger
-  rows) — pushed to the MONET branch under the amended #agent-sync claim.
-- Outside the repo: `/Users/jay/apps/AGENT-SYNC.md` (policy stanza),
+  rows) — pushed to the MONET branch under the amended #ag***-s**c claim.
+- Outside the repo: `/Users/jay/apps/AG***-S**C.md` (policy stanza),
   `/Users/jay/apps/TRADING-EFFORT-LOG.md` (board rows), agent memory files.
 
 ## Verification

@@ -1,6 +1,6 @@
 [Unit]
 Description=Socratic-Trade Docker container restart monitor (oneshot sample)
-Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
+Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
 After=docker.service network-online.target
 Wants=network-online.target
 

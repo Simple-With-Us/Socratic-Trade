@@ -179,6 +179,7 @@ enum AppFormat {
         case "pre": return "Pre-Market"
         case "post": return "After Hours"
         case "closed": return "Market Closed"
+        case "unknown": return "Market status unknown"
         case "": return "Market Session"
         default:
             return (session ?? "")
@@ -671,7 +672,10 @@ struct StoreTransientAlerts: ViewModifier {
             .alert(
                 "Something Went Wrong",
                 isPresented: Binding(
-                    get: { store.error != nil },
+                    get: {
+                        guard let message = store.error, !message.isEmpty else { return false }
+                        return true
+                    },
                     set: { if !$0 { store.dismissError() } }
                 )
             ) {
@@ -689,6 +693,17 @@ struct StoreTransientAlerts: ViewModifier {
                 Button("OK") { store.dismissSuccess() }
             } message: {
                 Text(store.successMessage ?? "")
+            }
+            .alert(
+                store.moneyActionResult?.title ?? "Result",
+                isPresented: Binding(
+                    get: { store.moneyActionResult != nil },
+                    set: { if !$0 { store.dismissMoneyActionResult() } }
+                )
+            ) {
+                Button("OK") { store.dismissMoneyActionResult() }
+            } message: {
+                Text(store.moneyActionResult?.message ?? "")
             }
     }
 }
@@ -831,7 +846,7 @@ private struct InitialSnapshotState: View {
                     .foregroundStyle(AppPalette.warning)
                 Text("Couldn’t load your workspace")
                     .font(.appHeadline)
-                Text(store.error ?? "Check your connection and try again.")
+                Text(store.error ?? DeskCopy.genericConnectionMessage)
                     .font(.appSubheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -874,7 +889,7 @@ private struct SnapshotStatusBanner: View {
                         .accessibilityLabel(store.isStreamConnected ? "Live" : "Updating")
                 }
                 // Keep the circlepath / radio glyph; label is "Market Closed" etc. on every tab.
-                Text(AppFormat.marketSessionBannerLabel(snapshot.marketSession))
+                Text(AppFormat.marketSessionBannerLabel(store.displayMarketSession(for: snapshot, at: context.date)))
                     .font(.appCaption.weight(.medium))
                     .foregroundStyle(.secondary)
             }
@@ -940,6 +955,9 @@ private struct PartialDataBanner: View {
         }
         if dropCounts.pendingProposals > 0 {
             parts.append("\(dropCounts.pendingProposals) pending proposal\(dropCounts.pendingProposals == 1 ? "" : "s")")
+        }
+        if parts.isEmpty, let reason = store.snapshot?.partialReason, !reason.isEmpty {
+            return "\(reason)\u{00A0} Owner Approve is paused until a complete refresh lands."
         }
         let which = parts.isEmpty ? "snapshot items" : parts.joined(separator: ", ")
         return "\(which) were dropped during decode. Owner Approve is paused until a clean refresh lands — a pending proposal might not be visible right now."

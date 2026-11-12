@@ -192,7 +192,7 @@ tests, all green; broader safety-net re-run of the original 33-file/381-test com
   the diff here was kept intentionally tight (import + a small `if (wantMultiQuery)` block inside
   the existing `topSymbols.map` callback) so a merge should stay mechanical — locate by the
   `retrieveContextDetailed` call site / `multiQueryEnabled` symbol rather than line number.
-  Coordinate on `#agent-sync` if a real conflict shows up.
+  Coordinate on `#ag***-s**c` if a real conflict shows up.
 - Not yet built (out of scope for this slice, natural next steps): a retrieval-quality eval
   entry comparing single-query vs. multi-query vs. multi-query+HyDE recall@k/MRR on the existing
   `test/fixtures/rag-retrieval-eval-fixture.ts` harness, so a future decision to flip either flag

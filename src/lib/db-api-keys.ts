@@ -1,9 +1,10 @@
+import { codeCliReady } from "./code-cli";
+import { llmRouteFor } from "./llm-route";
 // db-api-keys.ts — field-level encryption, user API keys, connected accounts,
 // synthetic stops, watchlist, price alerts, notify prefs, chat turns, memory,
 // and the catch-all listUsers helper.
 import "server-only";
 import crypto from "crypto";
-import { existsSync, readFileSync } from "fs";
 import { getDb, audit } from "./db";
 import { normalizeSymbol } from "./money";
 import { registerPlanTierLookup } from "./provider-tier-plan";
@@ -28,39 +29,11 @@ import { invalidateDashboardSnapshotCache } from "./dashboard-snapshot-cache";
 
 // ── Field-Level Encryption ──────────────────────────────────────────────────
 
-// Load the bootstrap-identity handoff file (Infisical client credentials + ALIASES only) for
-// local development. Production uses Infisical exclusively — see docs/secrets.md. The chmod-600
-// `~/.secrets/global-api-keys` file is the documented owner-side bootstrap identity store, NOT a
-// `.env` file: a working tree with no local dotenv file is the new contract as of 2026-09-18
-// (PR `cursor/strict-infisical-no-env-files`). For dev/CI/cloud-agent seats, run
-// `npm run dev:secrets` (Infisical runner) instead of `npm run dev` plain.
-if (process.env.NODE_ENV !== "test" && !process.env.VITEST && process.env.NODE_ENV !== "production" && !process.env.COOLIFY_PROD_PHASE2) {
-  const envPaths = [
-    "/Users/jay/.secrets/global-api-keys.env",
-    "/Users/jay/.secrets/global-api-keys"
-  ];
-  for (const envPath of envPaths) {
-    try {
-      if (existsSync(envPath)) {
-        const content = readFileSync(envPath, "utf8");
-        for (const line of content.split("\n")) {
-          const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-          if (match && match[1]) {
-            const key = match[1];
-            if (!process.env[key]) {
-              let value = match[2] || "";
-              if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
-              if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
-              process.env[key] = value;
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignore error
-    }
-  }
-}
+// No secrets file is loaded here.  Dev reads `process.env` only;  run `npm run dev:secrets`
+// (the Infisical runner) to get keys, which resolves the bootstrap machine identity from
+// `process.env` or the macOS login Keychain (service `socratic-trade-bootstrap`) in
+// scripts/infisical-bootstrap-env.mjs.  The retired flat key file must not
+// be read (owner, 2026-10-18, OPS-818).
 
 const IS_TEST_ENV = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
@@ -274,6 +247,7 @@ const API_KEY_ENV_MAP: Record<string, string> = {
   gemini: "GEMINI_API_KEY",
   mistral: "MISTRAL_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
+  meta: "META_API_KEY",
   moonshot: "MOONSHOT_API_KEY",
   kimi: "MOONSHOT_API_KEY",
   minimax: "MINIMAX_API_KEY",
@@ -330,6 +304,10 @@ const API_KEY_SERVICE_ALIASES: Record<string, string> = {
   mistral_api_key: "mistral",
   deepseek: "deepseek",
   deepseek_api_key: "deepseek",
+  meta: "meta",
+  meta_api_key: "meta",
+  meta_model_api_key: "meta",
+  model_api_key: "meta",
   moonshot: "moonshot",
   moonshot_api_key: "moonshot",
   moonshotai: "moonshot",
@@ -960,6 +938,12 @@ export function maskApiKeyPreview(key: string | undefined | null): string | unde
  */
 export function resolveLlmCredential(service: "openai" | "anthropic" | "xai" | "gemini" | "mistral" | "deepseek" | "meta" | "moonshot" | "minimax" | "openrouter", userId?: string): { key?: string; source: LlmKeySource; keyRef?: string } {
   const canonical = normalizeApiKeyService(service);
+  if (userId && (canonical === "meta" || canonical === "minimax") && llmRouteFor(canonical, userId) === "code-cli") {
+    // This sentinel is a capability marker, never an API credential. Endpoint + shared fetch
+    // re-check owner/config independently. An unavailable CLI must not become a paid API call.
+    if (!codeCliReady(userId)) return { source: "none" };
+    return { key: "code-cli-no-provider-key", source: "user", keyRef: "code-cli" };
+  }
   if (userId) {
     const userKey = getUserApiKey(userId, canonical);
     if (userKey?.apiKey === DELETED_KEY_TOMBSTONE) return { source: "none" };
@@ -1021,6 +1005,7 @@ const LOCAL_ENV_MIGRATION_SERVICES = [
   "gemini",
   "mistral",
   "deepseek",
+  "meta",
   "moonshot",
   "minimax",
   "openrouter",
@@ -1045,6 +1030,7 @@ const ALL_SERVICE_ENV_VARS: Record<string, string[]> = {
   gemini: ["GEMINI_API_KEY"],
   mistral: ["MISTRAL_API_KEY"],
   deepseek: ["DEEPSEEK_API_KEY"],
+  meta: ["META_API_KEY"],
   moonshot: ["MOONSHOT_API_KEY", "KIMI_API_KEY", "MOONSHOTAI_API_KEY"],
   minimax: ["MINIMAX_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],

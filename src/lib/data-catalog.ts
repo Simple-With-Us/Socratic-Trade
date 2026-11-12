@@ -70,7 +70,7 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "sec-edgar-13f", label: "SEC 13F-HR superinvestor holdings", status: "keyless", notes: "Official EDGAR 13F books for a curated filer set. Observe only." },
   { id: "ark-funds-holdings", label: "ARK official daily holdings CSVs", status: "keyless", notes: "ARKK/Q/W/G/F/X from assets.ark-funds.com. Observe only." },
   { id: "sec-filings-rag", label: "SEC 10-K/10-Q/8-K ingest → vector DB", status: "active", notes: "RAG corpus; presented as retrievedFinancialContext (not full corpus dump)." },
-  { id: "filingapi", label: "FilingAPI.dev", status: "scarce", notes: "Optional key; ~50/day; skip on missing/401. Sector/earnings/insider." },
+  { id: "filingapi", label: "FilingAPI.dev", status: "retired", notes: "Retired 2026-08-17. Earnings/transcripts are ROIC.ai only." },
   { id: "congress.trade", label: "Congress.Trade peer", status: "peer", notes: "Disclosures/analytics default ON; fundamentals peer default OFF." },
   { id: "congress-web", label: "Congressional trade web cache", status: "active", notes: "senateTrades / congress composite from local web-source cache." },
   { id: "finra", label: "FINRA short volume", status: "keyless", notes: "Short volume ratio signals." },
@@ -84,6 +84,9 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "quiverquant", label: "QuiverQuant", status: "retired", notes: "Direct ST access retired; congress via Congress.Trade." },
   { id: "unusual-whales", label: "Unusual Whales", status: "retired", notes: "Direct ST access retired." },
   { id: "robinhood-fundamentals", label: "Robinhood MCP fundamentals", status: "opt_in", notes: "ROBINHOOD_ENRICHMENT_ENABLED." },
+  { id: "cboe-options", label: "Cboe delayed options", status: "keyless", notes: "NTM IV / put-call via cdn.cboe.com; default ON." },
+  { id: "alpaca-options", label: "Alpaca indicative options", status: "opt_in", notes: "Snapshots feed=indicative when Alpaca market-data keys exist." },
+  { id: "tradier-options", label: "Tradier options chains", status: "opt_in", notes: "ORATS greeks when Tradier account connected." },
   { id: "robinhood-options", label: "Robinhood options chain", status: "opt_in", notes: "IV / put-call; default OFF." },
   { id: "webull-unofficial", label: "Webull unofficial", status: "opt_in", notes: "Flag-gated." },
   { id: "symbol_field_latest", label: "Durable field store (SQLite)", status: "active", notes: "Latest value per symbol×field with as_of + fetched_at; shared; seed for interactive scan." },
@@ -395,7 +398,13 @@ export const CATALOG_FIELDS: CatalogField[] = [
     description: "Option IV; sparse.",
     provenanceRequired: true,
     llmKey: "iv",
-    sources: [src("robinhood-options", "Opt-in MCP"), src("unusual-whales", "RETIRED")]
+    sources: [
+      src("cboe-options", "Keyless delayed", true),
+      src("alpaca-options", "Indicative snapshots"),
+      src("tradier-options", "Connected Tradier"),
+      src("robinhood-options", "Opt-in MCP"),
+      src("unusual-whales", "RETIRED")
+    ]
   },
   // RAG corpus (non-numerical completeness)
   {

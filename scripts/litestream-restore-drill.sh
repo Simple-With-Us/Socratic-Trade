@@ -44,7 +44,7 @@
 #   LIVE_DB                  default /app/data/app.db
 #   LITESTREAM_CONFIG        default /app/litestream.coolify.yml
 #   SCRATCH_DIR              default /data/scratch  (needs ~1x the DB size; NOT a tmpfs)
-#   RESTORE_PITR_TIMESTAMP   ISO 8601 point-in-time target, inside the 168h retention window
+#   RESTORE_PITR_TIMESTAMP   ISO 8601 point-in-time target, inside the 72h retention window
 set -euo pipefail
 
 LIVE_DB="${LIVE_DB:-/app/data/app.db}"

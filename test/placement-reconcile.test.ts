@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import type { EquityOrder, ExecutedOrder, MarketQuote, MarketScan, ReviewedOrder } from "../src/lib/types";
+import type { BrokerGateway, EquityOrder, ExecutedOrder, MarketQuote, MarketScan, ReviewedOrder } from "../src/lib/types";
 
 vi.mock("../src/lib/vector-db", () => ({
   managedVectorLedgerAuthority: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
     ...actual,
     loadApprovalQuoteScan: async () =>
       actual.buildApprovalQuoteScan(
-        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan" } },
+        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() } },
         []
       )
   };
@@ -129,12 +129,30 @@ function makeGateway() {
   };
 }
 
+// Minimal typed gateway for direct flagStalePlacingIntents calls: every member rejects
+// unless the case overrides it, so the mock provably satisfies BrokerGateway without `as never`.
+function stubBrokerGateway(overrides: Partial<BrokerGateway>): BrokerGateway {
+  const missing = (name: string) => async () => Promise.reject(new Error(`stubBrokerGateway: ${name} not implemented`));
+  return {
+    getAccounts: missing("getAccounts"),
+    getPortfolio: missing("getPortfolio"),
+    getEquityPositions: missing("getEquityPositions"),
+    getEquityOrders: missing("getEquityOrders"),
+    getEquityQuotes: missing("getEquityQuotes"),
+    getEquityTradability: missing("getEquityTradability"),
+    reviewEquityOrder: missing("reviewEquityOrder"),
+    placeEquityOrder: missing("placeEquityOrder"),
+    cancelEquityOrder: missing("cancelEquityOrder"),
+    ...overrides
+  };
+}
+
 vi.mock("../src/lib/broker", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/broker")>();
   return { ...actual, getBrokerGateway: () => makeGateway() };
 });
 
-async function seedApprovedProposal(userId: string): Promise<string> {
+async function seedApprovedProposal(userId: string, opts?: { stopPlan?: { style: "fixed"; rationale?: string }; omitReferencePrice?: boolean }): Promise<string> {
   const { upsertConnectedAccount, setPolicy, insertProposal } = await import("../src/lib/db");
   upsertConnectedAccount({
     id: "acc-reconcile-test",
@@ -173,7 +191,8 @@ async function seedApprovedProposal(userId: string): Promise<string> {
       rationale: "reconcile integration test",
       tradeThesisTag: "Momentum-Breakout",
       entryMarketRegime: "Neutral (Normal Volatility)",
-      referencePrice: 200
+      ...(opts?.omitReferencePrice ? {} : { referencePrice: 200 }),
+      ...(opts?.stopPlan ? { stopPlan: opts.stopPlan } : {})
     },
     decision: { approved: true, reasons: [] },
     status: "proposed"
@@ -336,9 +355,9 @@ describe("inline placement-error reconciliation via executeProposal", () => {
       userId
     );
     await flagStalePlacingIntents(
-      {
+      stubBrokerGateway({
         getEquityOrders: async () => [brokerOrder({ id: brokerOrderId, clientOrderId: capturedRefId, state: "filled", filledQuantity: 1, averagePrice: 203 })]
-      } as never,
+      }),
       ACCOUNT,
       userId,
       "acc-reconcile-test"
@@ -347,6 +366,54 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(listFillEventsByProposalId(proposalId, userId)).toMatchObject([{ status: "filled", quantity: 1, price: 203, notional: 203 }]);
     expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 203 });
     expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 203 });
+  });
+
+  it("stale recovery with no positive price anchor books the fill but records no zero-basis stop plan", async () => {
+    const userId = `reco-zero-basis-stop-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId, { stopPlan: { style: "fixed" }, omitReferencePrice: true });
+    const brokerOrderId = `direct-zero-basis-${randomUUID()}`;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      return { orderId: brokerOrderId, refId: input.refId, state: "filled", filledQuantity: 1, averagePrice: 203, raw: {} };
+    });
+
+    const { executeProposal, flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const { getDb, getStopPlans, listFillEventsByProposalId } = await import("../src/lib/db");
+    getDb().exec("CREATE TRIGGER fail_zero_basis_fill BEFORE INSERT ON fill_events BEGIN SELECT RAISE(ABORT, 'forced fill receipt failure'); END;");
+    let receiptError: unknown;
+    try {
+      receiptError = await executeProposal(proposalId, userId).then(
+        () => { throw new Error("expected receipt failure throw"); },
+        (error: unknown) => error
+      );
+    } finally {
+      // The temporary trigger must go even when the success callback throws, or it leaks
+      // into later tests sharing this database.
+      getDb().exec("DROP TRIGGER IF EXISTS fail_zero_basis_fill");
+    }
+    // Control: the trigger must be what actually failed the fill receipt, otherwise the
+    // stale-recovery path below proves nothing.
+    expect(String((receiptError as Error)?.message ?? receiptError)).toContain("forced fill receipt failure");
+    getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ? AND user_id = ?").run(
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      proposalId,
+      userId
+    );
+    // Broker now reports the fill WITHOUT an average price and holds no position basis:
+    // price resolves to 0 at both commitRecoveredOpeningStopPlan call sites.
+    await flagStalePlacingIntents(
+      stubBrokerGateway({
+        getEquityOrders: async () => [brokerOrder({ id: brokerOrderId, clientOrderId: capturedRefId, state: "filled", filledQuantity: 1 })],
+        getEquityPositions: async () => []
+      }),
+      ACCOUNT,
+      userId,
+      "acc-reconcile-test"
+    );
+
+    expect(listFillEventsByProposalId(proposalId, userId).length).toBeGreaterThan(0);
+    expect(getStopPlans(ACCOUNT, userId)).not.toHaveProperty("AAPL");
   });
 
   it("does not finalize a broker-reported fill until the broker supplies a positive realized price", async () => {
@@ -438,6 +505,223 @@ describe("inline placement-error reconciliation via executeProposal", () => {
     expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
   });
 
+  it("Tradier unexpected server error + order PRESENT → placed via reconcile, not not_placed", async () => {
+    const userId = `reco-tradier-400-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 400: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("Tradier unexpected server error + order ABSENT → not_placed only after the broker list", async () => {
+    const userId = `reco-tradier-400-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 400: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+  });
+
+  it("Tradier tag-lookup failure reconciles instead of booking not_placed up front", async () => {
+    const userId = `reco-tradier-lookup-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier order placement unverified: the tag lookup failed. Reconcile before retrying.");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+  });
+
+  it("HTTP 500 + order PRESENT → placed via reconcile, not not_placed", async () => {
+    const userId = `reco-500-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 500: Unexpected server error");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.status).toBe("placed");
+    expect(result.orderId).toBeTruthy();
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
+  it("HTTP 500 + order ABSENT → not_placed only after the broker list", async () => {
+    const userId = `reco-500-absent-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Alpaca order failed: HTTP 503 Service Unavailable");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: "some-other-key", state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBeGreaterThan(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
+  it("caller timeout + order PRESENT → placed via reconcile, not an immediate retry", async () => {
+    const userId = `reco-timeout-present-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("network timeout during placement");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result = await executeProposal(proposalId, userId);
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).toBe("placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("HTTP 403 buying power is terminal rejected_by_broker and does not reconcile", async () => {
+    const userId = `reco-403-terminal-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error("Tradier order failed: Tradier HTTP 403: Not enough buying power");
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBe(0);
+    expect(result.message).toMatch(/buying power/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("rejected_by_broker");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("not_placed");
+  });
+
+  it("sandbox open deferral books not_placed without a broker list", async () => {
+    const userId = `reco-deferral-${randomUUID()}`;
+    const proposalId = await seedApprovedProposal(userId);
+    let listsAfterPlace = 0;
+    placeEquityOrder.mockImplementation(async (input: { refId: string }) => {
+      capturedRefId = input.refId;
+      placementAttempted = true;
+      throw new Error(
+        "Tradier sandbox quotes are 15 minutes delayed, so strategy runs and order placement wait until 16 minutes after the open (9:46am ET).  Safe to retry."
+      );
+    });
+    getEquityOrders.mockImplementation(async () => {
+      if (!placementAttempted) return [];
+      listsAfterPlace += 1;
+      return [brokerOrder({ clientOrderId: capturedRefId, state: "accepted" })];
+    });
+
+    const { executeProposal } = await import("../src/lib/strategy");
+    const { getProposal } = await import("../src/lib/db");
+
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(placeEquityOrder).toHaveBeenCalledTimes(1);
+    expect(listsAfterPlace).toBe(0);
+    expect(result.message).toMatch(/safe to retry/i);
+    expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
+    expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
+  });
+
   it("HTTP 429 → not_placed (safe to retry), not rejected_by_broker", async () => {
     const userId = `reco-429-${randomUUID()}`;
     const proposalId = await seedApprovedProposal(userId);
@@ -454,7 +738,7 @@ describe("inline placement-error reconciliation via executeProposal", () => {
       (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
       (e) => e
     );
-    expect(result.message).toMatch(/safe to retry/i);
+    expect(result.message).toMatch(/rate-limited/);
     expect(getProposal(proposalId, userId)?.status).toBe("not_placed");
     expect(getProposal(proposalId, userId)?.status).not.toBe("rejected_by_broker");
   });

@@ -232,26 +232,83 @@ describe("required contexts are not renamed out from under the ruleset", () => {
   });
 
   it("the do-not-automerge hold still works, so protection does not remove the owner's brake", () => {
-    // `disable-on-hold` is the escape hatch: applying the `do-not-automerge` label turns merging
-    // off. Branch protection is a floor, not a replacement for it.
+    // The hold now lives in the AFC fleet reusable (hold_labels defaults to
+    // "do-not-automerge,needs-human-merge"): applying a hold label turns merging off and
+    // disables any armed merge. What ST must guarantee is that label changes re-evaluate the
+    // caller and that no override drops the brake.
     const auto = workflow("auto-merge-prs.yml");
-    expect(auto).toMatch(/^  disable-on-hold:\s*$/m);
+    const pr = triggerBlock(auto, "pull_request");
+    expect(pr).toMatch(/labeled/);
+    expect(pr).toMatch(/unlabeled/);
+    expect(auto).not.toMatch(/hold_labels:/);
     expect(auto).toContain("do-not-automerge");
   });
 
-  it("auto-merge skips CODEOWNERS trading paths so money-path PRs need a human merge", () => {
+  it("routes arming through the pinned AFC reusable with the CODEOWNERS money-path gate", () => {
+    // The gate itself (classify-protected, fail-closed API handling, disable jobs) moved into
+    // AI-Fleet-Coordinator/.github/workflows/auto-merge-reusable.yml; its behavior is pinned by
+    // full SHA here and covered by AFC's own checks. ST's guard is that the caller keeps
+    // declaring the gate, the self-guard paths, and a real merge token.
     const auto = workflow("auto-merge-prs.yml");
-    expect(auto).toMatch(/^  classify-protected:\s*$/m);
-    expect(auto).toMatch(/^  disable-on-protected:\s*$/m);
-    expect(auto).toMatch(/^  disable-on-skip-automerge:\s*$/m);
-    expect(auto).toContain("pr-touches-codeowners-paths.sh");
-    expect(auto).toMatch(/skip_automerge != 'true'/);
-    expect(auto).toMatch(/contents\/\.github\/CODEOWNERS\?ref=\$BASE/);
-    expect(auto).toMatch(/compare\/\$\{BASE\}\.\.\.\$\{HEAD\}/);
-    expect(auto).toContain("--paginate");
-    expect(auto).toContain("CODEOWNERS Contents API error -- fail closed");
-    expect(auto).toContain("Compare API returned no changed files -- fail closed");
+    expect(auto).toMatch(
+      /uses: Simple-With-Us\/AI-Fleet-Coordinator\/.github\/workflows\/auto-merge-reusable.yml@[0-9a-f]{40}\b/,
+    );
+    expect(auto).toMatch(/require_codeowners_gate:\s*true/);
+    expect(auto).toContain("gate_script: scripts/pr-touches-codeowners-paths.sh");
+    expect(auto).toContain(".github/CODEOWNERS");
+    expect(auto).toContain(".github/workflows/auto-merge-prs.yml");
+    expect(auto).toContain("scripts/automerge-gate-dry-run.sh");
+    expect(auto).toContain("scripts/disable-pr-automerge.sh");
+    // Arming must never fall back to GITHUB_TOKEN (a bot merge dispatches no workflows);
+    // the token resolves GH_PAT, then SHEPHERD_TOKEN, and the reusable probes it before use.
+    expect(auto).toMatch(/merge_token:\s*\$\{\{\s*secrets\.GH_PAT \|\| secrets\.SHEPHERD_TOKEN\s*\}\}/);
     expect(auto).not.toMatch(/fetch-depth:\s*0/);
-    expect(auto).toContain(".github/CODEOWNERS|");
+    const gate = readFileSync(join(repoRoot, "scripts", "pr-touches-codeowners-paths.sh"), "utf8");
+    expect(gate).toContain("CODEOWNERS");
+
+    // The reusable's in-flight gate looks up the head commit's check runs and the head
+    // branch's queued workflow runs.  A called workflow cannot elevate the caller's token:
+    // it fails at startup with "The workflow is requesting 'checks: read', but is only
+    // allowed 'checks: none'" when the caller omits a scope.  No job in this workflow
+    // declares its own permissions block, so the workflow-level block below is the
+    // effective one and these lines are the whole contract.  A later edit that drops one
+    // of them breaks arming for every pull request in this repo, so assert them here
+    // rather than trusting the grant to stay put (Kody review, PR #4908).
+    const callerPermissions =
+      withoutComments(auto).match(/^permissions:\n((?:[ \t]+\S+: \S+\n)+)/m)?.[1] ?? "";
+    expect(callerPermissions).toMatch(/^[ \t]+contents: write$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+pull-requests: write$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+checks: read$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+actions: read$/m);
+    expect(callerPermissions).toMatch(/^[ \t]+issues: read$/m);
+  });
+
+  it("does not ask the armer to delete the branch while the merge queue is on", () => {
+    // The merge queue is on (repo ruleset 17945518) and GitHub refuses
+    // `--delete-branch` when a queue is enabled: "Cannot use -d or --delete-branch when
+    // merge queue enabled". The armer passed the flag anyway, so its arm step exited 1
+    // and the "Auto-merge PRs" check was red on every PR in this repo - arming never
+    // happened for a PR that was not already armed. The queue's own "delete head
+    // branches" setting owns that job (ST-4566), so the caller must not ask for it.
+    // Scope to the caller's auto-merge job and anchor to real input keys, so a
+    // prose comment mentioning delete_branch can neither satisfy the positive
+    // assertion nor trip the negative one (Kody review, PR #4893).
+    const auto = workflow("auto-merge-prs.yml");
+    const job = jobBlock(auto, "auto-merge");
+    expect(job).toMatch(/^\s+delete_branch:\s*false\s*$/m);
+    expect(job).not.toMatch(/^\s+delete_branch:\s*true\s*$/m);
+    // The shared-dependency armer is a shell step, not the reusable: its gh CLI
+    // call must not pass --delete-branch either - the same refusal applies, and
+    // its `|| echo` would swallow the failure and leave the PR never armed.
+    const shared = workflow("auto-merge-shared-dependency.yml");
+    const sharedJob = jobBlock(shared, "auto-merge");
+    // Normalize before asserting: a prose comment must not satisfy the
+    // control, and a shell line continuation must not hide --delete-branch
+    // from the scan (Kody review, PR #4893).
+    const normalized = withoutComments(sharedJob).replace(/\\\n\s*/g, " ");
+    // Control: the negative assertion is vacuous if the job lookup missed, so
+    // first prove the armer's merge command is actually in the block.
+    expect(normalized).toContain("gh pr merge");
+    expect(normalized).not.toMatch(/gh pr merge[^\n]*--delete-branch/);
   });
 });

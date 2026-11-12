@@ -1,8 +1,10 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  __awaitPendingEnrichmentCoveragePersist,
   __resetEnrichmentCoverageForTests,
   buildEnrichmentCoverageReport,
   getLastEnrichmentCoverageReport,
@@ -17,23 +19,58 @@ import {
 } from "../src/lib/db-enrichment-coverage";
 import { resetDbForTesting } from "../src/lib/db";
 
-let dbPath: string;
+// Every call to buildEnrichmentCoverageReport persists a coverage report, so this file needs a
+// database of its own.  The path is held for the whole FILE because the persist is a
+// fire-and-forget dynamic import, so it can resolve after the test that triggered it has
+// finished.  The run's own database path is saved and restored rather than deleted, because
+// deleting it hands the next file in the worker the checkout's default database.
+const dbDir = mkdtempSync(join(tmpdir(), `enrich-cov-persist-${randomUUID()}-`));
+const dbUrl = `file:${join(dbDir, "app.db")}`;
+// The run's shared path is captured here, at module scope, before any hook can throw.  A capture
+// inside beforeAll would be skipped whenever the differential assertion below fails, and the
+// teardown would then read that missing capture as "the run had no DATABASE_URL" and delete the
+// variable instead of restoring it.
+const prevDb = process.env.DATABASE_URL;
+
+// The override is applied in beforeAll rather than at module scope.  A module-scope assignment
+// opens the window in which the environment points at this file's database at import time,
+// before the afterAll below is registered, so a throw in between leaves the override installed
+// with nothing to undo it.  Applying it here means the window opens only once this file's tests
+// are about to run, and it is always closed by the afterAll below.
+beforeAll(() => {
+  // The differential assertion.  Under the old module-scope override this file's database was
+  // already installed by the time this hook ran, so this fails and the old implementation is
+  // caught here rather than passing silently.  Under the override below, the run's shared path is
+  // still in place, so it passes.
+  expect(process.env.DATABASE_URL).not.toBe(dbUrl);
+  process.env.DATABASE_URL = dbUrl;
+  resetDbForTesting();
+});
+
+afterAll(async () => {
+  // The coverage persist is scheduled as a fire-and-forget dynamic import, and it resolves the
+  // database it writes to when the write lands rather than when it was scheduled.  Wait for it
+  // while this file's own database is still the target, or a write that is still in flight lands
+  // in the database the worker is pointing at by then, which is the shared one.
+  await __awaitPendingEnrichmentCoveragePersist();
+  resetDbForTesting();
+  if (prevDb === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = prevDb;
+  try {
+    rmSync(dbDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 beforeEach(() => {
   __resetEnrichmentCoverageForTests();
-  resetDbForTesting();
-  dbPath = join(mkdtempSync(join(tmpdir(), "enrich-cov-")), "app.db");
-  process.env.DATABASE_URL = `file:${dbPath}`;
-});
-
-afterEach(() => {
+  // Each test starts from an empty coverage store, so the run counts it asserts are its own runs.
   try {
     __clearEnrichmentCoverageStoreForTests();
   } catch {
-    /* db may already be torn down */
+    /* the store may not exist yet */
   }
-  resetDbForTesting();
-  delete process.env.DATABASE_URL;
 });
 
 describe("enrichment coverage persistence", () => {

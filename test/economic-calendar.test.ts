@@ -10,11 +10,10 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EconomicCalendar } from "../src/lib/fmp-gamma";
+import type { EconomicCalendar } from "../src/lib/economic-calendar";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-econ-calendar-${randomUUID()}.db`)}`;
-  delete process.env.FMP_API_KEY;
 });
 
 // Fixed clock so fixture dates are deterministic relative to "today".
@@ -97,7 +96,7 @@ describe("economic-calendar ingest (handoff 3.5)", () => {
 
   it("prompt read path: returns [] when the cache has nothing in the horizon (block omitted)", async () => {
     const { getUpcomingEconomicEventsForPrompt } = await import("../src/lib/economic-calendar");
-    // Far future: nothing ingested for this window, no FMP key, no fetcher => no fetch, empty read.
+    // Far future: nothing ingested for this window, no fetcher => no fetch, empty read.
     const events = await getUpcomingEconomicEventsForPrompt("local", new Date("2027-01-04T12:00:00.000Z"));
     expect(events).toEqual([]);
   });

@@ -48,7 +48,7 @@ import { loadCashFlowsForDrawdownBreaker } from "./risk-hwm";
 import { clearAccuracyDegradedMarker, evaluateAccuracyBreaker, getAccuracyDegradedMarker, setAccuracyDegradedMarker } from "./accuracy-breaker";
 import { refreshTradeLocksForRun } from "./apply-trade-locks";
 import { loadActiveOverlays } from "./apply-overlays";
-import { computeSignalAttribution, pricePosition52w } from "./market";
+import { computeSignalAttribution, pricePosition52w, SCAN_QUOTES_UNAVAILABLE_CODE } from "./market";
 import { deriveMetrics } from "./derived-metrics";
 import { deriveMacroMetrics } from "./macro-metrics";
 import { computeMarketInternals } from "./market-internals";
@@ -63,7 +63,7 @@ import { derivePromptRagConsumption, type PromptRagCandidate, type PromptRagCons
 import { summarizeSourceCoverage } from "./source-value";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmModeClarification, type ExecutionAccount } from "./execution-mode";
 import { applyBrokerOrderPlacementPause, brokerHealthRunSkip, checkBrokerHealth, isOrderPlacementInfrastructureFailure } from "./broker-health";
-import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
+import { greenFailoverExhaustedSuffix, interactiveStrategyReasoningEffort, isFailoverLlmStatus, isRetryableLlmError, LLM_OUTPUT_TOKEN_CAPS, LLM_REQUEST_DEFAULTS, LLM_TIMEOUT_MS, llmFetch, llmFetchCapturing, positiveEnvNumber, resolveLlmWireOutputCap, strategyLlmTimeoutMs, type LlmCallOutcome } from "./llm-request";
 import {
   assignDeterministicThesisTag,
   buildBullSystem,
@@ -71,11 +71,11 @@ import {
   STRATEGY_PROMPT_VERSION,
   THESIS_PLAYBOOK
 } from "./strategy-prompts";
-import { resolveLlmEndpoint } from "./llm-provider";
+import { CODE_CLI_NOT_CONFIGURED_MESSAGE, isUnavailableModelResolutionError, resolveLlmEndpoint } from "./llm-provider";
 import { isModelRotationSentinel, planRotationImplicitFallbacks, recordOpenRouterModelNotFound, resolveModelRotationForRun } from "./model-rotation";
 import { maybeOpenRouterCreditsExhaustedHint } from "./openrouter-credits";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload, detectLlmTruncation, toGeminiJsonSchema } from "./llm-call";
-import { humanizeLlmError, humanizeLlmTransportError } from "./llm-errors";
+import { describeProviderErrorDetail, humanizeLlmError, humanizeLlmTransportError } from "./llm-errors";
 import { planLlmProviderAttempts, recordLlmProviderFailure } from "./llm-provider-cooldown";
 import {
   LlmCredentialRequiredError,
@@ -126,7 +126,7 @@ import type { ProtectiveExitQuote } from "./protective-exit-routing";
 import { DEFAULT_TAX_SETTINGS } from "./defaults";
 import { atr, atrStopPct, sma, type OHLCBar } from "./indicators";
 import { computePortfolioHeat, positionRiskUsd, realizedVolPct, volTargetScale, type PortfolioHeatResult } from "./vol-targeting";
-import { fetchDailyOHLC } from "./history";
+import { fetchDailyOHLC, isBarSeriesFresh, toBusinessDay } from "./history";
 import { expireStalePendingProposals, revalidatePendingProposals } from "./proposal-revalidation";
 import { getTaxSummary, getUserWashSaleLockProvenance, overlayAccountTaxationType } from "./tax";
 import { getBrokerGateway } from "./broker";
@@ -169,6 +169,7 @@ import {
 import { earningsCallsTranscriptsEnabled } from "./earningscalls-gate";
 import { roicTranscriptsEnabled } from "./roic-transcripts-gate";
 import { deterministicFilingsRetrievalQuery, strategyInformationRouting } from "./rag/information-routing";
+import { retrievalConcurrencyLimit } from "./rag/retrieval-pressure";
 // (STRATEGY_PROMPT_VERSION comes with the prompt builders from ./strategy-prompts above —
 // ./strategy-prompt-version is a thin re-export kept for red-team.ts's cycle-free import.)
 import type { BrokerGateway } from "./types";
@@ -238,9 +239,10 @@ import { STOP_PLAN_FALLBACK_STOP_PCT, STOP_PLAN_STYLES } from "./types";
 import { computeRationaleDiversity } from "./rationale-diversity";
 import { isMarketOpen } from "./market-calendar";
 import { isTradingDay } from "./market-calendar";
-import { classifyPlaceOrderError } from "./placement-outcome";
+import { classifyPlaceOrderError, mustReconcileRetryablePlaceError } from "./placement-outcome";
 import { reconcilePendingFills, flagStalePlacingIntents, reconcilePlacementError, LiveApprovalConfirmation, LiveApprovalConfirmationError, coerceProtectiveExitToMarket } from "./strategy-execution";
-import { runSafetyMaintenance, withDeadline } from "./safety-maintenance";
+import { runSafetyMaintenance, withDeadline, withLaneDeadline, SCHEDULER_BROKER_TIMEOUT_MS } from "./safety-maintenance";
+import { STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS } from "./inflight-deadline";
 import { STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE, withStrategyRagRetrievalDeadline } from "./rag-retrieval-deadline";
 import { shouldSkipNegativeExpectancy, applyDeterministicSizing, isRiskAddingOpening, applyRedTeamHalfSize, applyEarningsBlackoutTag, applyCorrelationClusterGate, applyRiskReceipts, shouldEscalateDecision, allowedProposalSides, deterministicBearFilter, mapWithConcurrency } from "./strategy-risk";
 import { deriveVenueContract } from "./venue-contract";
@@ -335,6 +337,11 @@ export interface StrategyLlmStep {
   keySource: "operator" | "user";
   status: "started" | "completed" | "skipped" | "fallback" | "failed";
   proposalCount?: number;
+  finishReason?: string;
+  truncated?: boolean;
+  wireOutputCap?: number;
+  completionTokens?: number;
+  responseAttempts?: Array<{ provider: string; model: string; finishReason?: string; truncated?: boolean; wireOutputCap?: number; completionTokens?: number }>;
   reason?: string;
 }
 
@@ -593,7 +600,7 @@ export async function runStrategyOnce(
     // gate). A run that aborts before that point (account unavailable, over budget, no candidate
     // cleared the threshold) writes nothing, so it never skews the rotation weights with a run that
     // generated no proposal.
-    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
+    const { commit: commitRotation, emptyReason, greenRotationPool, redRotationPool, greenRotationBackupPool, redRotationBackupPool, ...rotationOverride } = await resolveModelRotationForRun({ userId, accountId: connectedAccountId, runId, policy });
     if (isModelRotationSentinel(policy.llmModel) && !rotationOverride.llmModel) {
       // Do not collapse this into "Choose both team models" — rotation IS the model choice.
       const reason =
@@ -664,7 +671,15 @@ export async function runStrategyOnce(
     // Check broker health before making LLM calls. When the account cannot place orders
     // (OMS down, trading blocked, elevated place failures, …), auto-halt autonomous trading
     // so future cadence ticks do not burn LLM budget on unplaceable proposals.
-    const healthSignals = activeAccount ? await checkBrokerHealth(userId, activeAccount, gateway) : undefined;
+    const healthSignals = activeAccount
+      ? await withLaneDeadline(
+          checkBrokerHealth(userId, activeAccount, gateway),
+          SCHEDULER_BROKER_TIMEOUT_MS,
+          "checkBrokerHealth timeout",
+          "strategy-broker-health",
+          { wraps: "call" }
+        )
+      : undefined;
     lockGuard.assertOwned();
     if (healthSignals) {
       const accountScope = connectedAccountId ?? `${policy.accountNumber}:${activeAccount?.broker ?? "unknown"}`;
@@ -707,7 +722,7 @@ export async function runStrategyOnce(
         gateway.getEquityPositions(policy.accountNumber),
         gateway.getEquityOrders(policy.accountNumber)
       ]),
-      45_000,
+      STRATEGY_BROKER_SNAPSHOT_DEADLINE_MS,
       "strategy broker snapshot timeout"
     );
     lockGuard.assertOwned();
@@ -840,7 +855,25 @@ export async function runStrategyOnce(
           runId,
           userId,
           lastGoodAt: gathered.lastGoodAt,
-          reason: STRATEGY_GATHER_TIMEOUT_MESSAGE
+          reason:
+            gathered.lastGoodReason === "quotes_unavailable"
+              ? SCAN_QUOTES_UNAVAILABLE_CODE
+              : STRATEGY_GATHER_TIMEOUT_MESSAGE
+        },
+        userId,
+        connectedAccountId
+      );
+    }
+    const brokerRecoverySource = gathered.baseMarketScan.universeQuoteRecoverySource;
+    if (brokerRecoverySource && !gathered.usedLastGood) {
+      audit(
+        "strategy_gather_broker_universe_recovery",
+        {
+          runId,
+          userId,
+          recoverySource: brokerRecoverySource,
+          returnedQuotes: gathered.baseMarketScan.returnedQuotes,
+          scannedSymbols: gathered.baseMarketScan.scannedSymbols
         },
         userId,
         connectedAccountId
@@ -1218,6 +1251,8 @@ export async function runStrategyOnce(
       userId,
       greenRotationPool,
       redRotationPool,
+      greenRotationBackupPool,
+      redRotationBackupPool,
       greenPick: rotationOverride.llmModel,
       redPick: rotationOverride.redTeamLlmModel,
       greenPrimary: runLlmOverride.llmModel ?? rotationOverride.llmModel ?? gatePolicy.llmModel,
@@ -1465,6 +1500,10 @@ export async function runStrategyOnce(
     // only checks the committed ledger, NOT live reservations, so retrieving here would still spend
     // Voyage/Pinecone budget the other run has claimed (the RAG half of the TOCTOU). It's advisory context
     // for the (now-skipped) proposal step anyway, so there is nothing to retrieve for.
+    // One retrieval deadline in this run skips RAG for every later symbol. The timed-out symbol
+    // already continues with no chunks; the rest must not each wait another 15s.
+    let ragTimedOutThisRun = false;
+    let ragSkippedAfterTimeout = 0;
     if (!skipLlmDueToBudget) {
       try {
         const { retrieveContextDetailed, defaultMinScore, defaultRelevanceFloor, defaultDedupeSimilarity, formatChunkWithProvenance } =
@@ -1500,7 +1539,7 @@ export async function runStrategyOnce(
         const allSymbols = uniqueSymbols([...scoutSymbols, ...deepSymbols]);
 
         const contexts: Array<{ sym: string; query: string; chunks: any[]; factsCard: string; insiderCard: string }> = [];
-        const batchSize = 5;
+        const batchSize = retrievalConcurrencyLimit();
         for (let i = 0; i < allSymbols.length; i += batchSize) {
           const chunk = allSymbols.slice(i, i + batchSize);
           const chunkResults = await Promise.all(
@@ -1567,8 +1606,20 @@ export async function runStrategyOnce(
               const { proposerDossierEnabled, assembleProposerDossier } = await import("./rag/proposer-dossier");
               // Issue #2961: a hung embed or vector query must not stall the trading loop.
               // Deadline aborts the signal and this symbol contributes no chunks. The run
-              // continues; the account is not halted.
-              let chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
+              // continues; the account is not halted. After the first deadline, later symbols
+              // in this run skip retrieval entirely.
+              let chunks: Awaited<ReturnType<typeof retrieveContextDetailed>> = [];
+              if (ragTimedOutThisRun) {
+                ragSkippedAfterTimeout += 1;
+                if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
+                  ragRetrievalStatusRows.push({
+                    symbol: normalizeSymbol(sym),
+                    status: "lookup_failed",
+                    reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+                  });
+                }
+              } else {
+              chunks = await withStrategyRagRetrievalDeadline(async (signal) => {
                 const optionsWithSignal = { ...retrieveOptions, signal };
                 if (proposerDossierEnabled()) {
                   const dossier = await assembleProposerDossier({
@@ -1603,7 +1654,7 @@ export async function runStrategyOnce(
                 }
                 return retrieveContextDetailed(query, sym, limit, userId, optionsWithSignal);
               }, () => {
-                console.warn(`[Strategy] ${STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE} for ${sym}; continuing without those chunks.`);
+                ragTimedOutThisRun = true;
                 if (!ragRetrievalStatusRows.some((row) => row.symbol === normalizeSymbol(sym))) {
                   ragRetrievalStatusRows.push({
                     symbol: normalizeSymbol(sym),
@@ -1613,6 +1664,7 @@ export async function runStrategyOnce(
                 }
                 return [];
               });
+              }
 
               // P1-3 (2026-09-27): apply the learned usefulness weighting to the FILINGS path too.
               // Until now the only caller was experience-memory.ts, so the per-doc-type statistics —
@@ -1672,6 +1724,12 @@ export async function runStrategyOnce(
             })
           );
           contexts.push(...chunkResults);
+        }
+
+        if (ragTimedOutThisRun) {
+          console.warn(
+            `[Strategy] ${STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE}; skipped RAG retrieval for ${ragSkippedAfterTimeout} later symbol(s) in this run.`
+          );
         }
 
         const validContexts = contexts.flatMap((context) => context.chunks).filter(Boolean);
@@ -1924,7 +1982,15 @@ export async function runStrategyOnce(
     // spends Voyage/Pinecone budget).
     let experienceAnalogs = "";
     let ownerCoaching = "";
-    if (!skipLlmDueToBudget) {
+    if (!skipLlmDueToBudget && ragTimedOutThisRun) {
+      if (!ragRetrievalStatusRows.some((row) => row.symbol === "PORTFOLIO")) {
+        ragRetrievalStatusRows.push({
+          symbol: "PORTFOLIO",
+          status: "lookup_failed",
+          reason: STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE
+        });
+      }
+    } else if (!skipLlmDueToBudget) {
       try {
         const { retrieveDecisionExperiences } = await import("./experience-memory");
         // Regime for the sketch: fetchMacroData is cached (6h TTL), so this is effectively free —
@@ -1983,6 +2049,27 @@ export async function runStrategyOnce(
             runId,
             regime: regimeForSketch,
             candidates: situationCandidates,
+            // ST-4589 B5: the tags the deterministic scorer would assign the top-slice openings
+            // (the same pure scorer that later sets tradeThesisTag), so the past-case affinity
+            // re-rank's thesis boost can fire.  Abstentions (null) are dropped.
+            thesisTags: [
+              ...new Set(
+                topSlice
+                  .map((c) =>
+                    assignDeterministicThesisTag({
+                      factorBreakdown: c.factorBreakdown,
+                      sectorRelStrength: c.sectorRelStrength,
+                      daysToEarnings: c.daysToEarnings,
+                      insiderSentiment: c.insiderSentiment,
+                      senateTrades: c.senateTrades,
+                      congressCompositeSignedScore: c.congressCompositeSignedScore,
+                      shortPercentOfFloat: c.shortPercentOfFloat,
+                      analystScore: c.analystScore
+                    }).tag
+                  )
+                  .filter((tag): tag is string => Boolean(tag))
+              )
+            ],
             connectedAccountId: policy.connectedAccountId,
             asOf: runAsOf,
             signal
@@ -2535,7 +2622,8 @@ export async function runStrategyOnce(
         ? getConfidenceCalibration(policy.accountNumber, learningSource, {}, userId, prefetchedFills)
         : undefined;
 
-    // Volatility-targeting sizing (opt-in, default off): precompute annualized realized vol (%) per
+    // Volatility-targeting sizing (default ON via DEFAULT_POLICY.tuning.volTargeting; a per-account
+    // `volTargeting: false` turns it off): precompute annualized realized vol (%) per
     // OPENING candidate symbol, mirroring the atrStopPctBySymbol precompute pattern above so the sync
     // sizer can use it. Gated on volTargeting-or-atrStops being on so we never add fetch load purely
     // for an advisory note when the feature is fully off; bars are shared with the ATR precompute's
@@ -4414,8 +4502,11 @@ export async function runStrategyOnce(
             // P2.6: Explicitly intercept pre-flight validation throws and broker 4xx rejections.
             // A 4xx (e.g. 403 Forbidden, 400 Bad Request) means the broker definitively received and rejected it.
             // HTTP 429 is a rate limit — book not_placed, never rejected_by_broker.
-            // HTTP 408 is a timeout: the order may already be live, and the next attempt
-            // mints a new refId, so it falls through to refId reconcile instead.
+            // HTTP 408, other timeouts, and HTTP 5xx may already be live, and the
+            // next attempt mints a new refId, so they fall through to refId reconcile
+            // instead of booking not_placed.  Tradier's HTTP 400 "Unexpected server
+            // error" is the same class once it escapes the adapter (the final POST
+            // may have landed).  A tag hit never throws it.  A 5xx can still halt.
             // HTTP 409, and a duplicate client_order_id on another status (Alpaca 422
             // "must be unique"), mean the key already exists and must be reconciled
             // rather than marked rejected. OrderValidationError means the adapter
@@ -4462,8 +4553,9 @@ export async function runStrategyOnce(
             // OrderValidationError is checked first so a validation message that happens
             // to mention HTTP 429 stays blocked, not retryable.
             const placeClass = placeError instanceof OrderValidationError ? null : classifyPlaceOrderError(message);
-            // 408 stays classified retryable but must not book not_placed before reconcile.
-            if (placeClass === "retryable" && !/\bHTTP 408\b/i.test(message)) {
+            // 408, other timeouts, HTTP 5xx, and Tradier's transient sentence stay
+            // classified retryable but must not book not_placed before reconcile.
+            if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
               const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
               updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
               audit(
@@ -5372,8 +5464,32 @@ async function proposeTrades(input: {
   const reflection = getReflectionSummary(input.userId, input.policy.accountNumber);
   const executionState = deriveExecutionState(input.policy, input.activeAccount);
   const source = fillSourceForExecutionMode(executionState);
-  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
-  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched) : [];
+  // ST-4589 B8: SPY closes so closed lots carry alpha (return vs SPY over the same entry->exit
+  // window) and the thesis/regime rows below get avgAlphaPct.  Same cached history cascade the
+  // counterfactual block below reads.  A failed fetch or a frozen (stale) series leaves alpha
+  // unstamped rather than measuring against an old close — never fabricated.  Bounded at 5s so a
+  // cold history cascade can never hold up the proposal pass; on timeout alpha is simply omitted.
+  let spyAlphaTimer: ReturnType<typeof setTimeout> | undefined;
+  const spyBarsForAlpha = input.policy.accountNumber
+    ? await Promise.race([
+        fetchDailyOHLC("SPY")
+          .then((bars) =>
+            bars && bars.length >= 2 && isBarSeriesFresh(bars)
+              ? bars
+                  .map((bar) => ({ date: toBusinessDay(bar.time) ?? "", close: bar.close }))
+                  .filter((bar) => bar.date !== "" && Number.isFinite(bar.close) && bar.close > 0)
+                  .sort((a, b) => a.date.localeCompare(b.date))
+              : undefined
+          )
+          .catch(() => undefined),
+        new Promise<undefined>((resolve) => {
+          spyAlphaTimer = setTimeout(() => resolve(undefined), 5_000);
+        })
+      ]).finally(() => clearTimeout(spyAlphaTimer))
+    : undefined;
+  const alphaOptions = spyBarsForAlpha && spyBarsForAlpha.length >= 2 ? { benchBars: spyBarsForAlpha } : {};
+  const thesisScorecard = input.policy.accountNumber ? getThesisScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
+  const regimeScorecard = input.policy.accountNumber ? getRegimeScorecard(input.policy.accountNumber, source, {}, input.userId, input.prefetched, undefined, alphaOptions) : [];
   // Multi-dimensional learning: thesis × regime buckets with >=5 closed lots. Fewer than
   // 5 trades produce a statistic that is dominated by the Bayesian shrinkage prior anyway
   // and adds noise to the agent's reasoning without improving signal quality.
@@ -5586,7 +5702,7 @@ async function proposeTrades(input: {
   );
 
   // Forward economic-event awareness (handoff 3.5): the next ~5 calendar days of scheduled
-  // HIGH-impact US events (CPI/FOMC/NFP class) from the daily-watermarked FMP calendar ingest.
+  // HIGH-impact US events (CPI/FOMC/NFP class) from the daily-watermarked economic-calendar ingest.
   // Key-gated + fail-open: no key, an ingest failure, or an empty calendar all yield [] and the
   // prompt block below is OMITTED entirely — never fabricated, never an empty scaffold.
   const upcomingEconomicEvents = await getUpcomingEconomicEventsForPrompt(input.userId).catch(() => []);
@@ -6503,9 +6619,28 @@ async function proposeTrades(input: {
       proposalModel: input.policy.llmModel?.trim() || model
     }
   ];
-  const fallbackModelList = Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
+  const fallbackModelList = !url.startsWith("code-cli://") && Array.isArray(input.policy.llmFallbackModels) ? input.policy.llmFallbackModels : [];
   for (const fallbackModel of fallbackModelList.filter((m): m is string => typeof m === "string").map((m) => m.trim()).filter(Boolean)) {
-    const ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    // A fallback model whose provider is misconfigured (e.g. a code-cli route that is not ready)
+    // throws out of resolveLlmEndpoint. Skip it like the no-credential case rather than aborting
+    // the whole proposal phase and leaving the run with zero proposals.
+    let ep: ReturnType<typeof resolveLlmEndpoint>;
+    try {
+      ep = resolveLlmEndpoint({ ...input.policy, llmModel: fallbackModel }, input.userId);
+    } catch (error) {
+      // Only an unavailable model is expected here: a Code CLI fallback whose route is not ready,
+      // or a Code CLI-only model while this user's Meta route is not Code CLI.  Do not hide
+      // DB/runtime failures.
+      if (!isUnavailableModelResolutionError(error)) throw error;
+      const detail = (error as Error).message;
+      // Accurate reason: "code_cli_unavailable" only when the Code CLI route itself is not ready;
+      // anything else (wrong route for a Code CLI-only model, no Code CLI adapter, a removed Llama
+      // id) is "model_unavailable", with the resolver's message carried for the reader.
+      const reason = detail === CODE_CLI_NOT_CONFIGURED_MESSAGE ? "code_cli_unavailable" : "model_unavailable";
+      console.warn(`[Strategy] skipping unavailable fallback ${fallbackModel}: ${detail}`);
+      audit("strategy_llm_failover", { reason, detail, model: fallbackModel, action: "skip" }, input.userId, input.policy.connectedAccountId);
+      continue;
+    }
     if (!ep.key) continue; // No credential for this provider's model — skip it rather than fail.
     bullAttempts.push({
       url: ep.url,
@@ -6542,7 +6677,7 @@ async function proposeTrades(input: {
     runId: input.runId,
     userId: input.userId,
     connectedAccountId: input.policy.connectedAccountId
-  });
+  }).map((attempt) => ({ ...attempt, truncationRetry: false, wireOutputCapOverride: undefined as number | undefined }));
   // Which endpoint actually served the run (starts as the primary; updated on failover). Transport
   // and keySource are tracked too so the served step/audit trail reports the FALLBACK's transport
   // (e.g. anthropic-messages vs the primary's responses), not the primary's — accurate money-path tracing.
@@ -6567,6 +6702,8 @@ async function proposeTrades(input: {
   // Stored Green calls actually issued this run.  The exhausted-chain sentence
   // may only cite this count — planned-but-uncalled seats are a silent lie.
   let bullAttemptsStarted = 0;
+  const bullResponseAttempts: NonNullable<StrategyLlmStep["responseAttempts"]> = [];
+  let bullResponseDetails: Pick<StrategyLlmStep, "finishReason" | "truncated" | "wireOutputCap" | "completionTokens"> = {};
 
   const bullStepBase = {
     step: "bull" as const,
@@ -6630,8 +6767,9 @@ async function proposeTrades(input: {
           const next = plannedBullAttempts[i + 1];
           lastBullAttemptProvider = attempt.provider;
           lastBullAttemptModel = attempt.model;
+          bullResponseDetails = {};
           try {
-            bullAttemptsStarted += 1;
+            if (!attempt.truncationRetry) bullAttemptsStarted += 1;
             const bullSoftTimeoutMs = strategyLlmTimeoutMs(attempt.model, input.policy.llmReasoningEffort);
             // Reasoning-class-aware SOFT wall-clock: a thinking-enabled model gets the widened bound.
             // The request is NOT severed at the wall — if it's slow the tick moves on, but the eventual
@@ -6689,13 +6827,15 @@ async function proposeTrades(input: {
                 recordOpenRouterModelNotFound(attempt.model, { status: response.status, userId: input.userId, detail });
               }
               if (!isLast && isFailoverLlmStatus(response.status)) {
-                lastError = new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status }));
+                lastError = new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status, model: attempt.model }));
                 bullLastFailoverReason = `HTTP ${response.status}`;
+                const bullFailoverDetail = describeProviderErrorDetail(detail, { status: response.status, model: attempt.model });
+                if (bullFailoverDetail) bullLastFailoverReason = `HTTP ${response.status}  ${bullFailoverDetail}`;
                 console.warn(`[Bull] ${attempt.model}/${attempt.provider} failed (HTTP ${response.status}); failing over to ${next.model}/${next.provider}.`);
-                audit("strategy_llm_failover", { runId: input.runId, step: "bull", fromModel: attempt.model, fromProvider: attempt.provider, httpStatus: response.status, toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
+                audit("strategy_llm_failover", { runId: input.runId, step: "bull", fromModel: attempt.model, fromProvider: attempt.provider, httpStatus: response.status, ...(bullFailoverDetail ? { providerDetail: bullFailoverDetail } : {}), toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
                 continue;
               }
-              throw new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status }));
+              throw new Error(humanizeLlmError(detail, { provider: attempt.provider, status: response.status, model: attempt.model }));
             }
             let payload: unknown;
             try {
@@ -6738,16 +6878,58 @@ async function proposeTrades(input: {
               };
             }
             const text = extractLlmText(payload);
-            const truncated = detectLlmTruncation(payload);
+            const providerTruncated = detectLlmTruncation(payload);
             // The wire cap actually sent for THIS attempt (base cap + provider reasoning headroom —
             // e.g. Gemini/xAI/Mistral/DeepSeek add up to +16000), not the pre-headroom constant.
-            const wireOutputCap = resolveLlmWireOutputCap(attempt.transport, {
+            const wireOutputCap = attempt.wireOutputCapOverride ?? resolveLlmWireOutputCap(attempt.transport, {
               maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.strategyProposal,
               model: attempt.model,
               reasoningEffort: interactiveStrategyReasoningEffort(attempt.model, input.policy.llmReasoningEffort)
             });
             const finishReason = extractBullFinishReason(payload);
+            const completionTokens = extractLlmUsage(payload).completionTokens;
+            const emptyAtCap = !text?.trim() && typeof completionTokens === "number" && completionTokens >= wireOutputCap;
+            const truncated = providerTruncated || emptyAtCap;
+            bullResponseDetails = { finishReason, truncated, wireOutputCap, completionTokens };
+            bullResponseAttempts.push({ provider: attempt.provider, model: attempt.model, ...bullResponseDetails });
 
+            if (!text?.trim() && truncated) {
+              // MiniMax can spend its entire completion allowance on hidden reasoning. Retry
+              // once, on the same endpoint, with a bounded larger allowance. Never loop or
+              // count the empty response as a successful zero-proposal decision.
+              // The ceiling is env-tunable and MUST stay above the base wire cap (see
+              // minimaxMuseReasoningHeadroom): if it does not, `retryCap > wireOutputCap` is
+              // false and this safety net silently stops firing. Sized so a retry at the ceiling
+              // still fits inside the reasoning wall (~13ms/token -> 24000 ~= 312s < 360s).
+              // Parsed with the same positive-value guard as the headroom: `Number(env) || 24_000`
+              // would let a NEGATIVE override through (Number("-1") is truthy) and disable the net.
+              const retryCeiling = positiveEnvNumber("STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP", 24_000);
+              const retryCap = Math.min(wireOutputCap * 2, retryCeiling);
+              const retry = !attempt.truncationRetry && attempt.transport === "chat-completions" &&
+                /^(?:minimax\/)?minimax-/i.test(attempt.model) && retryCap > wireOutputCap;
+              const reason = `Green Team returned empty content after output truncation at the ${wireOutputCap}-token cap (finish_reason=${finishReason ?? "unknown"}, completion_tokens=${completionTokens ?? "unknown"}).`;
+              recordStep({ ...bullStepBase, provider: attempt.provider, model: attempt.model,
+                transport: attempt.transport, keySource: attempt.keySource,
+                ...bullResponseDetails, status: !retry && !isLast ? "fallback" : "failed", reason }, { includeInResult: false });
+              audit("strategy_bull_truncated", { runId: input.runId, ...bullResponseDetails,
+                provider: attempt.provider, model: attempt.model, parsedProposals: 0,
+                retryScheduled: retry, ...(retry ? { retryWireOutputCap: retryCap } : {}) }, input.userId, input.policy.connectedAccountId);
+              if (retry) {
+                plannedBullAttempts.splice(i + 1, 0, { ...attempt, truncationRetry: true,
+                  wireOutputCapOverride: retryCap, body: { ...attempt.body, max_completion_tokens: retryCap } });
+                continue;
+              }
+              if (!isLast) {
+                lastError = new Error(reason);
+                bullLastFailoverReason = "empty truncated response";
+                audit("strategy_llm_failover", { runId: input.runId, step: "bull",
+                  fromModel: attempt.model, fromProvider: attempt.provider,
+                  reason: "empty_truncated_response", ...bullResponseDetails,
+                  toModel: next.model, toProvider: next.provider }, input.userId, input.policy.connectedAccountId);
+                continue;
+              }
+              throw new Error(reason);
+            }
             if (!text) {
               // An HTTP-200 with EMPTY content is a provider-side glitch (overloaded/deprecated
               // model), not a proposal — isRetryableLlmError deliberately doesn't match it, so
@@ -6853,7 +7035,8 @@ async function proposeTrades(input: {
   } catch (error) {
     let reason = humanizeLlmTransportError(error, { provider: lastBullAttemptProvider, model: lastBullAttemptModel, stepLabel: "Green Team proposal", timeoutMs: strategyLlmTimeoutMs(lastBullAttemptModel, input.policy.llmReasoningEffort) });
     reason = `${reason}${greenFailoverExhaustedSuffix(bullAttemptsStarted)}`;
-    const failedStep: StrategyLlmStep = { ...bullStepBase, status: "failed", reason };
+    const failedEndpoint = remapOpenRouterTelemetry(lastBullAttemptProvider, lastBullAttemptModel);
+    const failedStep: StrategyLlmStep = { ...bullStepBase, ...failedEndpoint, ...bullResponseDetails, responseAttempts: bullResponseAttempts, status: "failed", reason };
     recordStep(failedStep);
     throw new StrategyLlmStepFailure(reason, llmSteps, error);
   }
@@ -6998,6 +7181,8 @@ async function proposeTrades(input: {
     transport: bullServedTransport,
     keySource: bullServedKeySource,
     status: "completed",
+    ...bullResponseDetails,
+    responseAttempts: bullResponseAttempts,
     proposalCount: rawBullProposals.length,
     ...(bullCompletedReason ? { reason: bullCompletedReason } : {})
   });
@@ -7399,7 +7584,8 @@ export function bullAttemptUsesJsonObjectTransport(
   if (transport === "anthropic-messages") return false;
   // Native MiniMax receives a schema prompt but no enforced response_format.
   if (provider === "minimax") return true;
-  const isDeepSeek = provider === "deepseek" || /^deepseek\//i.test(model);
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest.
+  const isDeepSeek = provider === "deepseek" || /^~?deepseek\//i.test(model);
   if (isDeepSeek) return true;
   const isGemini = provider === "gemini" || /^google\//i.test(model);
   if (isGemini) return toGeminiJsonSchema(proposalSchema).unsupported;

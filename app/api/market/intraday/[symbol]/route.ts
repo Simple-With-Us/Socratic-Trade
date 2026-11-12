@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
-import { audit } from "@/lib/db";
 import { fetchIntradayBars, normalizeTimeframe } from "@/lib/market-realtime";
 import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import {
+  bestEffortAudit,
+  isSqliteBusyErrorCode,
+  peerReadRouteSqliteRetry,
+  peerReadSqliteContentionResponse
+} from "@/lib/sqlite-peer-read";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +27,7 @@ const MAX_RANGE_MS = 8 * 24 * 60 * 60 * 1000; // a week-plus of intraday is plen
 
 export async function GET(req: Request, { params }: { params: Promise<{ symbol: string }> }) {
   if (!verifySecuritiesImportToken(req)) {
-    audit("market_read_rejected", { reason: "token", route: "intraday" });
+    bestEffortAudit("market_read_rejected", { reason: "token", route: "intraday" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const rateLimitResp = enforceRateLimit("peer-app", "peer-read", RATE_LIMITS.peerRead);
@@ -42,14 +47,22 @@ export async function GET(req: Request, { params }: { params: Promise<{ symbol: 
   }
 
   const timeframe = normalizeTimeframe(sp.get("timeframe"));
-  const result = await fetchIntradayBars(
-    symbol,
-    new Date(startMs).toISOString(),
-    new Date(endMs).toISOString(),
-    timeframe,
-    undefined,
-    { operatorPeerRead: true }
-  );
+  let result;
+  try {
+    result = await peerReadRouteSqliteRetry(() =>
+      fetchIntradayBars(
+        symbol,
+        new Date(startMs).toISOString(),
+        new Date(endMs).toISOString(),
+        timeframe,
+        undefined,
+        { operatorPeerRead: true }
+      )
+    );
+  } catch (err) {
+    if (isSqliteBusyErrorCode(err)) return peerReadSqliteContentionResponse();
+    throw err;
+  }
   switch (result.kind) {
     case "ok":
       // Confirmed empty (weekend / halt) stays 200 so the caller only treats non-200 as a provider failure.

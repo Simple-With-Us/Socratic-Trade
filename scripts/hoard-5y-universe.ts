@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { FmpEnrichmentProvider, MassiveEnrichmentProvider } from "../src/lib/data-providers";
+import { MassiveEnrichmentProvider } from "../src/lib/data-providers";
 import { SP500_SYMBOLS } from "../src/lib/sp500";
 import { NASDAQ100_SYMBOLS, DOW30_SYMBOLS } from "../src/lib/index-universes";
 import { fetchBlackRockHoldingSymbols } from "../src/lib/fund-holdings";
@@ -50,10 +50,8 @@ async function hoard5YearMassiveBars(massiveKey: string, symbol: string): Promis
 }
 
 async function hoard() {
-  const fmpKey = resolveApiKey("fmp") || process.env.FMP_API_KEY;
   const massiveKey = resolveApiKey("massive") || process.env.MASSIVE_API_KEY_ALT || process.env.MASSIVE_API_KEY;
 
-  if (!fmpKey) console.warn("[Hoard 5Y] FMP_API_KEY not found.");
   if (!massiveKey) console.warn("[Hoard 5Y] MASSIVE_API_KEY not found.");
 
   // 1. Build Master Multi-Index Universe (~2,500+ symbols)
@@ -105,23 +103,7 @@ async function hoard() {
     console.log(`Massive 5-Year OHLC Bar Hoarding Complete! (${downloadedCount} downloaded, ${totalBarsCount} total daily candles stored in data/history-5y/)\n`);
   }
 
-  // 3. Fetch Fundamental Metrics, Ratings & Ratios via FMP API
-  if (fmpKey) {
-    console.log(`=== FETCHING FUNDAMENTALS & RATIOS VIA FMP API (${allSymbols.length} symbols) ===`);
-    const fmpProvider = new FmpEnrichmentProvider(fmpKey, "env", "local");
-    const chunkSize = 25;
-    const totalChunks = Math.ceil(allSymbols.length / chunkSize);
-
-    for (let i = 0; i < allSymbols.length; i += chunkSize) {
-      const chunk = allSymbols.slice(i, i + chunkSize);
-      console.log(`[FMP Fundamentals Progress] Chunk ${Math.floor(i / chunkSize) + 1}/${totalChunks} (${chunk.length} symbols)...`);
-      await fmpProvider.enrich(chunk);
-      await new Promise(r => setTimeout(r, 350));
-    }
-    console.log(`FMP Multi-Index Fundamentals Hoarding Complete!\n`);
-  }
-
-  // 4. Fetch Short Interest & Free Float via Massive API
+  // 3. Fetch Short Interest & Free Float via Massive API
   if (massiveKey) {
     console.log(`=== FETCHING SHORT INTEREST & FLOAT VIA MASSIVE API (${allSymbols.length} symbols) ===`);
     const massiveProvider = new MassiveEnrichmentProvider(massiveKey, "env", "local");
@@ -138,7 +120,7 @@ async function hoard() {
   }
 
   console.log("=========================================================================");
-  console.log(`ALL 5-YEAR HISTORICAL, FUNDAMENTAL & SHORT INTEREST HOARDING COMPLETE ACROSS ALL ${allSymbols.length} SYMBOLS!`);
+  console.log(`ALL 5-YEAR HISTORICAL & SHORT INTEREST HOARDING COMPLETE ACROSS ALL ${allSymbols.length} SYMBOLS!`);
   console.log("=========================================================================");
 }
 

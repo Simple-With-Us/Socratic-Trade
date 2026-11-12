@@ -54,6 +54,10 @@ export interface StrategyDecision {
 }
 
 export interface DashboardSnapshot {
+  /** True when a broker or dependency wait was cut so the snapshot could return inside 20s. */
+  partialData?: boolean;
+  /** Why `partialData` is set.  Absent on a complete snapshot. */
+  partialReason?: string;
   currentUser?: {
     userId: string;
     email?: string;

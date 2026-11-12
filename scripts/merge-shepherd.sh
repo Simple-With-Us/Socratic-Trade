@@ -26,6 +26,10 @@
 #   GITHUB_REPOSITORY   owner/repo (default: SHEPHERD_REPO or Simple-With-Us/Socratic-Trade)
 #   SHEPHERD_REPO       override when GITHUB_REPOSITORY unset (launchd / Mac driver)
 #   SHEPHERD_DRY_RUN=1  report only; attempt nothing
+#   SHEPHERD_STATUS_ISSUE=1  also keep one open "Merge shepherd status" issue updated with the
+#                          digest.  Off by default (ST-4553):  the digest already goes to stdout
+#                          (the launchd log) and the Actions step summary, and a stale host copy
+#                          opened 866 duplicates of that issue.
 #   GH_TOKEN/GITHUB_TOKEN  auth. A PAT (repo+workflow scope) is preferred so that
 #                          update-branch re-triggers verify; the default Actions
 #                          GITHUB_TOKEN still merges green PRs + reports.
@@ -41,6 +45,7 @@ REPO="${GITHUB_REPOSITORY:-${SHEPHERD_REPO:-$DEFAULT_REPO}}"
 DRY="${SHEPHERD_DRY_RUN:-0}"
 HAS_PAT="${SHEPHERD_HAS_PAT:-1}"
 ISSUE_TITLE="Merge shepherd status"
+STATUS_ISSUE="${SHEPHERD_STATUS_ISSUE:-0}"
 # Who am I? Needed so the reran-marker check below (Codex review, round 3) only
 # trusts a comment we ourselves posted, not one any commenter could spoof. A PAT
 # resolves to its owning user via /user; the default Actions GITHUB_TOKEN is an
@@ -51,6 +56,30 @@ ME=""
 [ "$HAS_PAT" = "1" ] && ME="$(gh api user --jq '.login' 2>/dev/null)"
 ME="${ME:-github-actions[bot]}"
 TMP="$(mktemp)"; trap 'rm -f "$TMP" "$TMP.md"' EXIT
+
+# The open tracking issue's number (the oldest when duplicates exist), or nothing.  Lists open
+# issues over REST rather than the search API:  search answered empty for a renamed repo slug, and
+# every empty answer created another issue (ST-4553).  A failed lookup returns non-zero.
+find_status_issue() {
+  gh api --paginate "repos/$REPO/issues?state=open&per_page=100" \
+    --jq ".[] | select(.pull_request == null and .title == \"$ISSUE_TITLE\") | .number" \
+    | sort -n | awk 'NR == 1'
+}
+
+# Update the tracking issue, or create it when the lookup proved there is none.  Fails closed:
+# a lookup error never creates an issue.
+publish_status_issue() {
+  local body="$1" existing
+  if ! existing="$(find_status_issue)"; then
+    echo "[shepherd] tracking-issue lookup failed;  not creating one" >&2
+    return 0
+  fi
+  if [ -n "$existing" ]; then
+    gh issue edit "$existing" -R "$REPO" --body "$body" >/dev/null && echo "[shepherd] updated tracking issue #$existing"
+  else
+    gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body "$body" >/dev/null && echo "[shepherd] created tracking issue"
+  fi
+}
 
 row() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$TMP"; }   # bucket \t num \t note
 
@@ -79,8 +108,34 @@ refresh_merge_state() {
   printf '%s' "UNKNOWN"
 }
 
+# True when any required/ancillary check is still running on the current head.
+# update-branch mid-run cancels verify-hosted (~20m); a 15-19m re-sync cadence then
+# starves PRs forever (board ST-2874 / Monet 2026-08-21).
+#
+# BEHIND re-sync callers keep verify=SUCCESS guards; do not relax those.
+ci_in_flight() {
+  local running="$1" verify="$2"
+  if [ "$running" -gt 0 ]; then
+    return 0
+  fi
+  case "$verify" in
+    # NEUTRAL|SKIPPED: GitHub terminal conclusions; listed for contract +
+    # selftest completeness (assert_idle), not a separate production path here.
+    SUCCESS|FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE|STALE|ERROR|NEUTRAL|SKIPPED|NONE)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 shepherd_sync_behind() {
-  local num="$1" title="$2"
+  local num="$1" title="$2" running="$3" verify="$4"
+  if ci_in_flight "$running" "$verify"; then
+    row WAITING "$num" "$title  (behind main; re-sync deferred -- CI in flight on current head)"
+    return 0
+  fi
   if [ "$HAS_PAT" != "1" ]; then
     row WAITING "$num" "$title  (behind main; re-sync skipped -- no PAT to re-trigger verify)"
   elif gh pr update-branch "$num" -R "$REPO" >/dev/null 2>&1; then
@@ -107,8 +162,7 @@ for num in $nums; do
   # conclusion (SUCCESS/FAILURE/...) for a finished check; else status (IN_PROGRESS/QUEUED)
   # for a running one; else state (PENDING) for a commit-status; else NONE = no check at all.
   verify=$(jq -r '[.statusCheckRollup[]? | select((.name // .context)=="verify")][0] | (.conclusion // .status // .state // "NONE")' <<<"$d")
-  nchecks=$(jq -r '[.statusCheckRollup[]?] | length' <<<"$d")   # any checks at all yet?
-  # In-flight (not-yet-concluded) checks -- distinct from nchecks, which also counts
+  # In-flight (not-yet-concluded) checks -- distinct from total check count, which also counts
   # checks that already finished, possibly on a workflow other than "verify" itself.
   # Covers both check-run statuses (QUEUED/IN_PROGRESS/WAITING/REQUESTED/PENDING) and
   # commit-status states (PENDING/EXPECTED), so a verify-absent-but-other-checks-still-
@@ -133,7 +187,12 @@ for num in $nums; do
         case "$merge_state" in
           BLOCKED) row BLOCKED "$num" "$title  (mergeStateStatus=BLOCKED -- unresolved review / rules)" ;;
           UNKNOWN) row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled)" ;;
-          BEHIND)  row WOULD-SYNC "$num" "$title  (behind main -- would re-sync)" ;;
+          BEHIND)
+            if ci_in_flight "$running" "$verify"; then
+              row WAITING "$num" "$title  (behind main; re-sync deferred -- CI in flight)"
+            else
+              row WOULD-SYNC "$num" "$title  (behind main -- would re-sync)"
+            fi ;;
           DIRTY)   row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
           CLEAN|UNSTABLE|HAS_HOOKS) row WOULD-MERGE "$num" "$title" ;;
           *)       row WAITING "$num" "$title  (mergeStateStatus=$merge_state -- not mergeable yet)" ;;
@@ -142,6 +201,8 @@ for num in $nums; do
                row FAILING "$num" "$title  (verify=$verify; reran=$reran)" ;;
       NONE)    if [ "$running" -gt 0 ]; then row WAITING "$num" "$title  (CI running; verify not posted yet)";
                else row WOULD-SYNC "$num" "$title  (no CI at all -- would re-sync to re-trigger it)"; fi ;;
+      NEUTRAL|SKIPPED)
+               row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)" ;;
       *)       row WAITING "$num" "$title  (verify=$verify -- CI running)" ;;
     esac
     continue
@@ -164,7 +225,7 @@ for num in $nums; do
       UNKNOWN)
         row WAITING "$num" "$title  (mergeStateStatus=UNKNOWN -- mergeability not settled; retry next run)" ;;
       BEHIND)
-        shepherd_sync_behind "$num" "$title" ;;
+        shepherd_sync_behind "$num" "$title" "$running" "$verify" ;;
       DIRTY)
         gh pr edit "$num" -R "$REPO" --add-label needs-human-merge >/dev/null 2>&1 || true
         row CONFLICT "$num" "$title  (mergeStateStatus=DIRTY -- needs a human)" ;;
@@ -179,7 +240,7 @@ for num in $nums; do
           elif [ "$merge_state" = "UNKNOWN" ]; then
             row WAITING "$num" "$title  (mergeability UNKNOWN after merge attempt)"
           elif [ "$merge_state" = "BEHIND" ] || printf '%s' "$lc" | grep -Eq 'conflict|not mergeable|not up to date|behind|base branch was modified'; then
-            shepherd_sync_behind "$num" "$title"
+            shepherd_sync_behind "$num" "$title" "$running" "$verify"
           else
             row MERGE-RETRY "$num" "$title  (gh: $(printf '%s' "$out" | head -1 | cut -c1-80))"
           fi
@@ -254,6 +315,9 @@ for num in $nums; do
       row WAITING "$num" "$title  (no verify check + branch up-to-date -- CI may need a nudge)"
     fi
 
+  elif [ "$verify" = "NEUTRAL" ] || [ "$verify" = "SKIPPED" ]; then
+    row WAITING "$num" "$title  (verify=$verify -- terminal optional check; not re-syncing)"
+
   else
     row WAITING "$num" "$title  (verify=$verify -- CI still running)"
   fi
@@ -299,16 +363,10 @@ now="$(date -u '+%Y-%m-%d %H:%MZ' 2>/dev/null || echo now)"
 cat "$TMP.md"
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$TMP.md" >> "$GITHUB_STEP_SUMMARY"
 
-if [ "$DRY" != "1" ]; then
+if [ "$DRY" != "1" ] && [ "$STATUS_ISSUE" = "1" ]; then
   body="$(cat "$TMP.md")
 <sub>Auto-maintained by the merge shepherd (\`scripts/merge-shepherd.sh\`, workflow \`merge-shepherd.yml\`). Overwritten each run.</sub>"
-  existing=$(gh issue list -R "$REPO" --state open --search "\"$ISSUE_TITLE\" in:title" \
-               --json number,title --jq "[.[] | select(.title==\"$ISSUE_TITLE\")][0].number" 2>/dev/null)
-  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-    gh issue edit "$existing" -R "$REPO" --body "$body" >/dev/null 2>&1 && echo "[shepherd] updated tracking issue #$existing"
-  else
-    gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body "$body" >/dev/null 2>&1 && echo "[shepherd] created tracking issue"
-  fi
+  publish_status_issue "$body"
 fi
 
 echo "[shepherd] done"

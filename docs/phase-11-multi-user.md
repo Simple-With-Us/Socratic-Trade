@@ -5,11 +5,15 @@ SQL is `user_id`-scoped; Pinecone private namespaces are `private:<sha256(userId
 cross-tenant surfaces are intentional (shared operator RAG) or token-gated (ops snapshot).
 Evidence: `docs/audits/2026-08-17-security-reliability.md` §5.3.
 
+**iOS session hardening (2026-11-11, ST-4594):** the native client calls `POST /api/mobile/auth/handoff-prepare` before Google/GitHub OAuth, fetches `GET /api/mobile/auth/apple/nonce` before Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out and a change of signed-in account delete the push token before the session cookies go away.  Broker-account switch keeps the same user, so it does not unregister.  The server's `__legacy_compat__` paths stay until this build is on TestFlight and the App Store.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+
 ## CI pin-check reliability (2026-07-22)
 
 The shared-package pin workflow runs on every pull request so the status cannot disappear for
 unrelated code changes. It installs the pinned Node 24 toolchain before the comparison script,
-which uses Node for GitHub API JSON parsing.
+which uses Node for GitHub API JSON parsing. Congress.Trade is public, so the script reads
+the vendor tree with the Actions installation token first and uses `GH_PACKAGES_TOKEN` only
+as a fallback. Putting the user PAT first made a burst of pull requests share one rate limit.
 
 Goal: let multiple users use the app — logging in at the same or different times —
 each getting analysis and trade proposals tailored to **their own preferences and
