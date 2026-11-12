@@ -1,4 +1,4 @@
-import { brokerReadError, jsonError, parseRequestJson } from "@/lib/api-error";
+import { brokerReadError, isBrokerGatewayError, jsonError, parseRequestJson } from "@/lib/api-error";
 import { cancelWorkingOrder, OrderCancelPreconditionError } from "@/lib/order-cancel";
 import { resolveRequestUserId } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
@@ -35,6 +35,9 @@ export async function POST(request: Request) {
     if (error instanceof OrderCancelPreconditionError) {
       return new NextResponse(error.message, { status: error.status });
     }
-    return brokerReadError(error);
+    // Post-cancel bookkeeping (audit, DB, notifications) can fail after the broker accepted the
+    // cancel.  Only broker-originated failures get the broker envelope; anything else stays a 500.
+    if (isBrokerGatewayError(error)) return brokerReadError(error);
+    throw error;
   }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { isAbortOrTimeoutError } from "./network-errors";
+import { isAbortOrTimeoutError, isTransientNetworkError } from "./network-errors";
 import { safeErrorMessage } from "./telemetry-sanitize";
 
 export const API_ERROR_MESSAGE_MAX = 240;
@@ -62,6 +62,18 @@ export function brokerReadError(error: unknown): NextResponse<ApiErrorBody> {
   }
 
   return jsonError(502, "broker_unavailable", "Broker is temporarily unavailable.");
+}
+
+/**
+ * True when an error plausibly came from the broker call itself (timeout, transport failure,
+ * HTTP status, or a missing broker account).  Routes that run local bookkeeping after a broker
+ * call use this so a database or notification fault is not misreported as a broker outage.
+ */
+export function isBrokerGatewayError(error: unknown): boolean {
+  if (isAbortOrTimeoutError(error) || isTransientNetworkError(error)) return true;
+  const message = safeErrorMessage(error);
+  if ((httpStatusFromError(error) ?? extractHttpStatusFromMessage(message)) !== undefined) return true;
+  return /no connected broker account/i.test(message);
 }
 
 export async function parseRequestJson(
