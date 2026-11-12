@@ -541,11 +541,24 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
           totalBytes = stats.blocks * stats.bsize;
         } catch {}
 
-        return { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs };
+        const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
+        const walLarge = walSizeBytes > 500 * 1024 * 1024;
+        let diskDerivedStorageDegraded = false;
+        if (diskLow || walLarge) {
+          diskDerivedStorageDegraded = true;
+          if (diskLow) {
+            void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
+          }
+          if (walLarge) {
+            void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+          }
+        }
+        return { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded };
       },
       { recomputeHeavySections: options.recomputeHeavySections }
     );
-    const { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs } = diskSection.value;
+    const { dbSizeBytes, walSizeBytes, freeBytes, totalBytes, latestLocalActivityAtMs, diskDerivedStorageDegraded } =
+      diskSection.value;
 
     const litestreamSection = await runHeavyHealthSection(
       "litestream",
@@ -634,18 +647,9 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
       r2Weekly: getR2WeeklyHealthStatus(),
     };
 
-    let storageDegraded = false;
-    // Thresholds:
-    // Disk free space < 1 GB or WAL size > 500 MB or Litestream last-sync age > 1 hour (3600s)
-    const diskLow = freeBytes > 0 && freeBytes < 1024 * 1024 * 1024;
-    const walLarge = walSizeBytes > 500 * 1024 * 1024;
-
-    if (diskLow || walLarge || litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
-      storageDegraded = true;
-
-      // Send a one-shot needs-attention notification/alert via the notifier if not sent recently
-      if (diskLow) void alertStorageWarning("disk_space_low", `Free disk space is low: ${(freeBytes / 1024 / 1024).toFixed(2)} MB remaining.`);
-      if (walLarge) void alertStorageWarning("wal_size_large", `SQLite WAL file size is large: ${(walSizeBytes / 1024 / 1024).toFixed(2)} MB.`);
+    let litestreamDerivedStorageDegraded = false;
+    if (litestreamAssessment.degraded || litestreamTiers.degraded || litestreamCompactionLogFindings.length > 0) {
+      litestreamDerivedStorageDegraded = true;
       for (const reason of litestreamAssessment.reasons) {
         if (reason === "stale") {
           void alertStorageWarning("litestream_replication_stale", `Litestream WAL replication has not synced in ${Math.round((litestreamAgeSeconds ?? 0) / 60)} minutes.`);
@@ -701,7 +705,7 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
       );
     }
 
-        return { storageBody, storageDegraded };
+        return { storageBody, litestreamDerivedStorageDegraded };
       },
       { recomputeHeavySections: options.recomputeHeavySections }
     );
@@ -717,7 +721,9 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
         ? { litestreamCachedAgeSeconds: litestreamSection.cachedAgeSeconds }
         : {})
     };
-    if (litestreamSection.value.storageDegraded) checks.storageDegraded = true;
+    if (diskDerivedStorageDegraded || litestreamSection.value.litestreamDerivedStorageDegraded) {
+      checks.storageDegraded = true;
+    }
   } catch {
     // never let storage monitoring break the health probe — still emit the monitor field
     if (!checks.storage || typeof checks.storage !== "object") {
@@ -732,13 +738,11 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
 
 export async function GET(request: Request) {
   const detailed = authorizeOpsRequest(request);
-  const assembleOpts = { recomputeHeavySections: true } as const;
+  const admission = admitAnonymousHeavyHealthProbe(request, detailed);
+  const assembleOpts = { recomputeHeavySections: admission.recomputeHeavySections } as const;
   const warm = readWarmHealthSnapshot(() => assembleHealth(assembleOpts));
   if (warm) return jsonHealth(warm, detailed);
-  const admission = admitAnonymousHeavyHealthProbe(request, detailed);
-  const payload = await assembleHealth({
-    recomputeHeavySections: admission.recomputeHeavySections
-  });
+  const payload = await assembleHealth(assembleOpts);
   storeHealthSnapshot(payload);
   return jsonHealth(payload, detailed);
 }
