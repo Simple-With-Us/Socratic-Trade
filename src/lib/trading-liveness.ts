@@ -336,6 +336,25 @@ export interface PublicTradingLiveness {
   autonomyHaltCauseReadFailures: number;
 }
 
+/**
+ * Stable signature for trading-liveness Sentry dedupe — account ids and degraded
+ * reason codes only (no labels, timestamps, or run summaries that drift each poll).
+ */
+export function tradingLivenessSentryStateSignature(
+  accounts: AccountTradingLiveness[] | undefined,
+  fleetFullyDark: boolean,
+  autonomyEligibleAccounts: number
+): string {
+  if (fleetFullyDark) {
+    return `fully_dark:${autonomyEligibleAccounts}`;
+  }
+  const parts = (accounts ?? [])
+    .filter((a) => a.degraded)
+    .map((a) => `${a.connectedAccountId}:${[...a.degradedReasons].sort().join(",")}`)
+    .sort();
+  return parts.length > 0 ? parts.join(";") : "degraded:none";
+}
+
 export function toPublicTradingLiveness(
   summary: TradingLivenessSummary | null,
   now: number = Date.now()

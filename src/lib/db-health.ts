@@ -1285,25 +1285,52 @@ export async function alertStorageWarning(warningType: string, message: string):
 }
 
 const LIVENESS_ALERT_COOLDOWN_PREFIX = "livenessAlertSent";
-const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000; // 15 mins for liveness since it's more critical, or maybe 12 hours? Let's use 1 hour.
+const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000;
+const LIVENESS_SENTRY_COOLDOWN_MS = 60 * 60_000;
+const LIVENESS_SENTRY_SIGNATURE_PREFIX = "livenessSentrySignature";
+const LIVENESS_SENTRY_SENT_PREFIX = "livenessSentrySentAt";
 // Episode tracking for escalation: a degradation nobody acts on must get LOUDER,
 // not just repeat.  `livenessDegradedSince:<type>` marks when the current episode
 // began; `livenessEscalatedAt:<type>` marks the last escalation ping.
 const LIVENESS_DEGRADED_SINCE_PREFIX = "livenessDegradedSince";
 const LIVENESS_ESCALATED_AT_PREFIX = "livenessEscalatedAt";
 
+export function evaluateLivenessSentryCapture(input: {
+  stateSignature: string;
+  previousSignature: string | undefined;
+  lastSentAtIso: string | undefined;
+  dueForEscalation: boolean;
+  nowMs?: number;
+}): boolean {
+  const now = input.nowMs ?? Date.now();
+  if (input.previousSignature !== input.stateSignature) {
+    return true;
+  }
+  if (input.dueForEscalation) {
+    return true;
+  }
+  if (!input.lastSentAtIso || Number.isNaN(Date.parse(input.lastSentAtIso))) {
+    return true;
+  }
+  return now - Date.parse(input.lastSentAtIso) >= LIVENESS_SENTRY_COOLDOWN_MS;
+}
+
 function livenessEscalationHours(): number {
   const raw = Number(process.env.ST_LIVENESS_ESCALATION_HOURS ?? 4);
   return Number.isFinite(raw) && raw > 0 ? raw : 4;
 }
 
-export async function alertLivenessWarning(warningType: string, message: string): Promise<void> {
+export async function alertLivenessWarning(
+  warningType: string,
+  message: string,
+  stateSignature?: string
+): Promise<void> {
   try {
-    const key = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
+    const adminCooldownKey = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
+    const sentrySignatureKey = `${LIVENESS_SENTRY_SIGNATURE_PREFIX}:${warningType}`;
+    const sentrySentKey = `${LIVENESS_SENTRY_SENT_PREFIX}:${warningType}`;
     const { getInternalSetting, setInternalSetting, audit } = await import("./db");
-    const last = getInternalSetting<string>(key);
-    if (last && Date.now() - Date.parse(last) < LIVENESS_ALERT_COOLDOWN_MS) return;
-    setInternalSetting(key, new Date().toISOString());
+    const effectiveSignature = stateSignature ?? warningType;
 
     // Track the episode start so a persistent degradation escalates.  First
     // alert of an episode stamps it; recovery clears it via clearLivenessWarning.
@@ -1315,14 +1342,27 @@ export async function alertLivenessWarning(warningType: string, message: string)
     }
     const degradedHours = (Date.now() - Date.parse(sinceIso)) / 3_600_000;
     const escalationHours = livenessEscalationHours();
-    // Escalate at most once per escalation window: loud on crossing, then the
-    // regular 15-min cadence resumes until the next window boundary.
     const escalatedAtKey = `${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`;
     const escalatedAt = getInternalSetting<string>(escalatedAtKey);
     const escalatedAtMs = escalatedAt ? Date.parse(escalatedAt) : NaN;
     const dueForEscalation =
       degradedHours >= escalationHours &&
       (Number.isNaN(escalatedAtMs) || Date.now() - escalatedAtMs >= escalationHours * 3_600_000);
+
+    const shouldCaptureSentry = evaluateLivenessSentryCapture({
+      stateSignature: effectiveSignature,
+      previousSignature: getInternalSetting<string>(sentrySignatureKey),
+      lastSentAtIso: getInternalSetting<string>(sentrySentKey),
+      dueForEscalation
+    });
+
+    const lastAdminSent = getInternalSetting<string>(adminCooldownKey);
+    const adminDue =
+      !lastAdminSent || Date.now() - Date.parse(lastAdminSent) >= LIVENESS_ALERT_COOLDOWN_MS;
+
+    if (!shouldCaptureSentry && !adminDue) {
+      return;
+    }
 
     const title = dueForEscalation
       ? `ESCALATED Liveness: ${warningType.replace(/_/g, " ")} still degraded after ${Math.floor(degradedHours)}h`
@@ -1334,35 +1374,42 @@ export async function alertLivenessWarning(warningType: string, message: string)
       warningType,
       message,
       degradedHours: Math.round(degradedHours * 10) / 10,
-      escalated: dueForEscalation
+      escalated: dueForEscalation,
+      sentryStateSignature: effectiveSignature
     };
 
-    audit("liveness_warning_alert", payload, "local");
+    if (shouldCaptureSentry) {
+      const sentryMessage = dueForEscalation
+        ? `${title}: trading liveness still degraded (escalated)`
+        : `Liveness Warning: trading liveness degraded (${warningType.replace(/_/g, " ")})`;
+      await captureHealthSentryMessage("error", sentryMessage, {
+        service: "trading-liveness",
+        failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
+        warningType,
+        degradedHours: Math.round(degradedHours * 10) / 10,
+        escalated: dueForEscalation,
+        stateSignature: effectiveSignature,
+        detail: message
+      });
+      setInternalSetting(sentrySignatureKey, effectiveSignature);
+      setInternalSetting(sentrySentKey, new Date().toISOString());
+    }
 
-    // Page via Sentry at error level (the level PagerDuty routes on) with a
-    // stable fingerprint per warning type, so a degradation that nobody acts on
-    // keeps paging instead of sitting in a notification nobody reads.  The
-    // 2026-09-30 incident had tradingLivenessDegraded=true for ~5 days with no
-    // escalation; this path is the in-app backstop for exactly that.
-    await captureHealthSentryMessage("error", `${title}: ${message}`, {
-      service: "trading-liveness",
-      failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
-      warningType,
-      degradedHours: Math.round(degradedHours * 10) / 10,
-      escalated: dueForEscalation
-    });
-
-    if (dueForEscalation) {
+    if (dueForEscalation && shouldCaptureSentry) {
       setInternalSetting(escalatedAtKey, new Date().toISOString());
     }
 
-    await deliverSystemAlertToAdmins({
-      type: "liveness_warning",
-      title,
-      body,
-      payload,
-      kind: "liveness_warning"
-    });
+    if (adminDue) {
+      setInternalSetting(adminCooldownKey, new Date().toISOString());
+      audit("liveness_warning_alert", payload, "local");
+      await deliverSystemAlertToAdmins({
+        type: "liveness_warning",
+        title,
+        body,
+        payload,
+        kind: "liveness_warning"
+      });
+    }
   } catch {
     // never throw on warnings
   }
@@ -1379,7 +1426,12 @@ export async function clearLivenessWarning(warningType: string): Promise<boolean
     // The public health endpoint calls this on every healthy hit: only touch
     // the settings table when an episode actually left state behind.
     let cleared = false;
-    for (const prefix of [LIVENESS_DEGRADED_SINCE_PREFIX, LIVENESS_ESCALATED_AT_PREFIX]) {
+    for (const prefix of [
+      LIVENESS_DEGRADED_SINCE_PREFIX,
+      LIVENESS_ESCALATED_AT_PREFIX,
+      LIVENESS_SENTRY_SIGNATURE_PREFIX,
+      LIVENESS_SENTRY_SENT_PREFIX
+    ]) {
       const key = `${prefix}:${warningType}`;
       if (getInternalSetting<string>(key) !== undefined) {
         deleteInternalSetting(key);
