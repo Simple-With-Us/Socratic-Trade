@@ -19,7 +19,8 @@ import {
   speakerTurnsFromRoicPayload,
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
-import { listOpenApiCircuitBreakers, quoteProvider402HoldMs, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
+import { listOpenApiCircuitBreakers, observePaidQuoteStatus, quoteProvider402HoldMs, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
+import { apiKeyFingerprint } from "../src/lib/data-providers";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
 import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 
@@ -175,8 +176,12 @@ describe("roic-transcripts", () => {
   it("keeps queued symbols when a transcript 402 holds the credential", async () => {
     const originalKey = process.env.ROIC_API_KEY;
     const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
     process.env.ROIC_API_KEY = "roic-transcript-test";
     process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-queue-${randomUUID()}.db`)}`;
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    delete process.env.ROIC_TRANSCRIPTS_DISABLED;
     resetProviderQuotaState("roic");
     resetProviderRateLimiterState("roic");
     resetRoicTranscriptRateHold();
@@ -201,6 +206,53 @@ describe("roic-transcripts", () => {
       else process.env.ROIC_API_KEY = originalKey;
       if (originalDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
+      if (originalTranscripts === undefined) delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      else process.env.ROIC_TRANSCRIPTS_DISABLED = originalTranscripts;
+    }
+  });
+
+  it("keeps queued symbols while the paid-quote lane is cooling", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-quote-hold-${randomUUID()}.db`)}`;
+    delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+    delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    resetApiCircuitBreaker();
+    const credentialId = await apiKeyFingerprint("roic-transcript-test");
+    observePaidQuoteStatus("roic", "env", 402, undefined, Date.now(), credentialId);
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }));
+    try {
+      const result = await refreshRoicTranscriptsIfDue({
+        force: true,
+        symbols: ["AAPL", "MSFT"],
+        phase: "latest"
+      });
+      expect(result.pausedForProviderHold).toBe(true);
+      expect(result.skippedNoContent).toBe(0);
+      expect(result.remaining).toBe(2);
+      expect(readRoicCursor()?.queue).toEqual(["AAPL", "MSFT"]);
+      expect(calls).toBe(0);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
+      if (originalTranscripts === undefined) delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      else process.env.ROIC_TRANSCRIPTS_DISABLED = originalTranscripts;
     }
   });
 

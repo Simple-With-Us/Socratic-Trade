@@ -584,6 +584,7 @@ async function roicTranscriptCredentialCooling(userId?: string): Promise<boolean
   const keyInfo = resolveApiKeyWithSource("roic", userId);
   if (!keyInfo.key) return false;
   const credentialId = await apiKeyFingerprint(keyInfo.key);
+  if (isPaidQuoteBreakerCooling("roic", keyInfo.source, Date.now(), credentialId)) return true;
   return roicTranscriptRateHoldCooling({
     service: "roic",
     keySource: keyInfo.source,
