@@ -124,11 +124,28 @@ export function identityErrorResponse(error: unknown): Response | null {
   );
 }
 
+/** Map resolveRequestUser failures that are auth/session (not server bugs) to 401 responses. */
+export function authErrorResponse(error: unknown): Response | null {
+  const identityDenied = identityErrorResponse(error);
+  if (identityDenied) return identityDenied;
+  if (!(error instanceof Error)) return null;
+  if (
+    /session revoked or expired/i.test(error.message) ||
+    /fresh provider sign-in is required/i.test(error.message)
+  ) {
+    return Response.json(
+      { error: error.message },
+      { status: 401, headers: { "content-type": "application/json" } }
+    );
+  }
+  return null;
+}
+
 export function resolveRequestUserOrResponse(request: Request): ResolvedRequestUser | Response {
   try {
     return resolveRequestUser(request);
   } catch (error) {
-    const denied = identityErrorResponse(error);
+    const denied = authErrorResponse(error);
     if (denied) return denied;
     throw error;
   }
@@ -138,7 +155,7 @@ export function resolveRequestUserIdOrResponse(request: Request, body?: unknown)
   try {
     return resolveRequestUserId(request, body);
   } catch (error) {
-    const denied = identityErrorResponse(error);
+    const denied = authErrorResponse(error);
     if (denied) return denied;
     throw error;
   }
