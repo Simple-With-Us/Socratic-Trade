@@ -58,25 +58,40 @@ final class SessionKeychainTests: XCTestCase {
     }
 
     func testInMemoryCookieStorageURLSessionTaskRoundTrip() async throws {
+        // A custom URLProtocol bypasses the loading system's own Set-Cookie
+        // handling, so exercise the task-based storage APIs that URLSession
+        // calls on the jar directly.
         let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [CookieRoundTripURLProtocol.self]
-        configuration.httpCookieStorage = jar
-        configuration.httpShouldSetCookies = true
-        configuration.httpCookieAcceptPolicy = .always
-        CookieRoundTripURLProtocol.reset()
-        let session = URLSession(configuration: configuration)
-        defer {
-            CookieRoundTripURLProtocol.reset()
-            session.invalidateAndCancel()
-        }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
         let url = URL(string: "https://cookie-roundtrip.test/session")!
-        _ = try await session.data(from: url)
-        XCTAssertEqual(CookieRoundTripURLProtocol.requestCount, 1)
-        XCTAssertNil(CookieRoundTripURLProtocol.lastCookieHeader)
-        _ = try await session.data(from: url)
-        XCTAssertEqual(CookieRoundTripURLProtocol.requestCount, 2)
-        XCTAssertEqual(CookieRoundTripURLProtocol.lastCookieHeader, "authjs.session-token=network-roundtrip")
+        let task = session.dataTask(with: url)
+        defer { task.cancel() }
+
+        let empty: [HTTPCookie]? = await withCheckedContinuation { continuation in
+            jar.getCookiesFor(task) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(empty?.count ?? 0, 0)
+
+        let cookies = HTTPCookie.cookies(
+            withResponseHeaderFields: ["Set-Cookie": "authjs.session-token=network-roundtrip; Path=/; Secure"],
+            for: url
+        )
+        XCTAssertEqual(cookies.count, 1)
+        jar.storeCookies(cookies, for: task)
+
+        let returned: [HTTPCookie]? = await withCheckedContinuation { continuation in
+            jar.getCookiesFor(task) { continuation.resume(returning: $0) }
+        }
+        let header = HTTPCookie.requestHeaderFields(with: returned ?? [])["Cookie"]
+        XCTAssertEqual(header, "authjs.session-token=network-roundtrip")
+
+        let other = session.dataTask(with: URL(string: "https://unrelated.test/")!)
+        defer { other.cancel() }
+        let unrelated: [HTTPCookie]? = await withCheckedContinuation { continuation in
+            jar.getCookiesFor(other) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(unrelated?.count ?? 0, 0)
     }
 
     func testAuthSessionCookieNameRecognition() {
@@ -582,47 +597,5 @@ final class SessionKeychainTests: XCTestCase {
             .secure: "TRUE",
             .version: "0",
         ]))
-    }
-}
-
-private final class CookieRoundTripURLProtocol: URLProtocol {
-    static var requestCount = 0
-    static var lastCookieHeader: String?
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.host == "cookie-roundtrip.test"
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        Self.requestCount += 1
-        Self.lastCookieHeader = request.value(forHTTPHeaderField: "Cookie")
-        let url = request.url ?? URL(string: "https://cookie-roundtrip.test/session")!
-        let headerFields: [String: String]
-        if Self.requestCount == 1 {
-            headerFields = [
-                "Content-Type": "application/json",
-                "Set-Cookie": "authjs.session-token=network-roundtrip; Path=/; Secure",
-            ]
-        } else {
-            headerFields = ["Content-Type": "application/json"]
-        }
-        let response = HTTPURLResponse(
-            url: url,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: headerFields
-        )!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data("{}".utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-
-    static func reset() {
-        requestCount = 0
-        lastCookieHeader = nil
     }
 }
