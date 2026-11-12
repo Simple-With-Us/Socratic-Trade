@@ -172,6 +172,35 @@ describe("ingest embed provider timeout (ST-4607)", () => {
     env.NODE_ENV = previousNodeEnv;
   });
 
+  it("arms embed-timeout cooldown at streak start during the warning window", async () => {
+    const env = process.env as { NODE_ENV?: string };
+    const previousNodeEnv = env.NODE_ENV;
+    env.NODE_ENV = "development";
+    const { transientEscalationWindowMs } = await import("../src/lib/db-health");
+    const windowMs = transientEscalationWindowMs();
+    await insertAgedEmbedTimeoutFailure(4);
+    vi.stubGlobal("fetch", async () => {
+      throw providerTimeout();
+    });
+    const { upsertUserApiKey, getInternalSetting } = await import("../src/lib/db");
+    upsertUserApiKey("local", "openrouter", "sk-or-test-not-mock", "test fixture");
+    upsertUserApiKey("local", "pinecone", "pinecone-test", "test fixture");
+    const { storeContexts } = await import("../src/lib/vector-db");
+    const beforeAlert = Date.now();
+    await storeContexts([
+      { text: "NVDA 8-K details", metadata: { symbol: "NVDA", source: "sec-8k", timestamp: "2026-06-18" } }
+    ]);
+    await vi.waitFor(() => {
+      expect(messages()).toContain("RAG embed timed out");
+    });
+    const anchored = getInternalSetting<string>("vectorStore:connectionAlert:rag-embed:user:local:embed-timeout");
+    expect(anchored).toBeTruthy();
+    const anchoredMs = Date.parse(anchored!);
+    expect(anchoredMs).toBeLessThan(beforeAlert - 3 * 60_000);
+    expect(anchoredMs).toBeGreaterThan(beforeAlert - windowMs);
+    env.NODE_ENV = previousNodeEnv;
+  });
+
   it("escalates to error after the timeout streak outlasts the escalation window", async () => {
     const env = process.env as { NODE_ENV?: string };
     const previousNodeEnv = env.NODE_ENV;
@@ -197,6 +226,15 @@ describe("ingest embed provider timeout (ST-4607)", () => {
     expect(mocks.tags.some((tag) => tag["health.failure_class"] === "timeout")).toBe(true);
     expect(mocks.tags.some((tag) => tag["health.failure_class"] === "hard")).toBe(false);
     expect(send).toHaveBeenCalled();
+
+    const sentryCallsAfterEscalation = mocks.captureMessage.mock.calls.length;
+    const notifyCallsAfterEscalation = send.mock.calls.length;
+    await storeContexts([
+      { text: "MSFT 8-K again", metadata: { symbol: "MSFT", source: "sec-8k", timestamp: "2026-06-19" } }
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(mocks.captureMessage.mock.calls.length).toBe(sentryCallsAfterEscalation);
+    expect(send.mock.calls.length).toBe(notifyCallsAfterEscalation);
     env.NODE_ENV = previousNodeEnv;
   });
 

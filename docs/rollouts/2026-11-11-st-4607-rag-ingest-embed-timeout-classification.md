@@ -35,3 +35,4 @@ Focused: `npm test -- test/rag-ingest-embed-timeout-classification.test.ts test/
 ## Zero-Code Findings
 
 - Soft health rows do not populate `streakStartedTs` for hard-failure walks; embed-timeout escalation walks `api_health_log` for consecutive `embed provider timed out` rows instead.
+- Embed-timeout Sentry cooldown anchors at streak start only while still in the warning window (parity with transport-blip `:transient` keys); after escalation it stores `now` and uses the one-hour connection-alert cooldown so error-level pages do not repeat on every ingest.

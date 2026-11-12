@@ -1782,12 +1782,15 @@ async function reportRagEmbedDocumentsTimeout(
   const level: "warning" | "error" = withinEscalationWindow ? "warning" : "error";
   const baseKey = `${RAG_CONNECTION_ALERT_PREFIX}:${service}:${source}:${targetUserId}`;
   const key = `${baseKey}:embed-timeout`;
-  const cooldownMs = transientEscalationWindowMs();
+  const cooldownMs = withinEscalationWindow ? transientEscalationWindowMs() : RAG_CONNECTION_ALERT_COOLDOWN_MS;
   const last = getInternalSetting<string>(key);
   if (last && Date.now() - Date.parse(last) < cooldownMs) return;
+  // Parity with alertRagConnectionFailure transport-blip cooldown: anchor at streak start during the
+  // warning window so suppression ends at streakStart+window; after escalation, store now so the
+  // hour cooldown throttles repeat error-level pages.
   setInternalSetting(
     key,
-    Number.isFinite(streakStartedMs)
+    withinEscalationWindow && Number.isFinite(streakStartedMs)
       ? new Date(streakStartedMs).toISOString()
       : new Date().toISOString()
   );
