@@ -17,7 +17,7 @@ A retrieval deadline, abort, or timeout on the retrieve path logs locally and fa
 
 ## Decisions & Trade-offs
 
-Did not keep a warning-level captureMessage.  The production events were already level warning and still opened SOCRATIC-TRADE-3Q.  Skipping the Sentry issue is what stops the page.  The pressure gate still records the failure and backs off.  When backoff is already open, or the slot already degraded the call, the catch does not report again.  Did not change RAG_QUERY_IO_DEADLINE_MS, ingest-embed classification (ST-4607), RAG ingest caps (ST-4609), order placement, sizing, or strategy settings.  lookup_failed stays the status for a timed-out retrieve, so strategy failure accounting is unchanged.  Empty chunks stay the continue path.
+Did not keep a warning-level captureMessage.  The production events were already level warning and still opened SOCRATIC-TRADE-3Q.  Skipping the Sentry issue is what stops the page.  The pressure gate still records the failure and backs off.  When backoff is already open, or the slot already degraded the call, the catch does not report again.  Did not change RAG_QUERY_IO_DEADLINE_MS, ingest-embed classification (ST-4607), RAG ingest caps (ST-4609), order placement, sizing, or strategy settings.  Merged origin/main through ba400936, which landed ST-4607.   The ingest document-embed timeout reporter and its embed-timeout fingerprint stay.   Only the retrieval reporter skips Sentry.  lookup_failed stays the status for a timed-out retrieve, so strategy failure accounting is unchanged.  Empty chunks stay the continue path.
 
 ## Verification State
 
@@ -28,7 +28,7 @@ npm test
 npm run build
 ```
 
-Ran on Node 26.13.1 with the nvm binary ahead of PATH.   `npm run lint` exited 0 with 869 grandfathered warnings.   `npx tsc --noEmit` was clean.   Focused vitest on the deadline, pressure, retrieval-deadline, and cooldown files passed 20 tests.   Those abort and deadline assertions failed before this classification change.   Full `npm test` reported 18 failures in 12 files and 10251 passes.   The failures are ambient provider keys plus a gh 401 in `test/automerge-reusable-pin.test.ts`, the same class noted for ST-4601, and none are in the retrieval files.   A clean `env -i` re-run of the five key-sensitive files passed 131 tests.   `npm run build` first aborted at the default 2 GB heap (exit 134).   The retry with `NODE_OPTIONS=--max-old-space-size=4096` exited 0.
+Ran on Node 26.13.1 with the nvm binary ahead of PATH.   `npm run lint` exited 0 with 869 grandfathered warnings.   `npx tsc --noEmit` was clean.   Focused vitest on the deadline, pressure, retrieval-deadline, and cooldown files passed 20 tests.   Those abort and deadline assertions failed before this classification change.   Full `npm test` reported 18 failures in 12 files and 10251 passes.   The failures are ambient provider keys plus a gh 401 in `test/automerge-reusable-pin.test.ts`, the same class noted for ST-4601, and none are in the retrieval files.   A clean `env -i` re-run of the five key-sensitive files passed 131 tests.   `npm run build` first aborted at the default 2 GB heap (exit 134).   The retry with `NODE_OPTIONS=--max-old-space-size=4096` exited 0.  After merging origin/main through ba400936, `npx tsc --noEmit` and `npm run lint` were clean again, the five retrieval and ingest-timeout files passed 26 tests, and `npm run build` with the 4 GB heap exited 0.
 
 ## Next Steps & Blockers
 
