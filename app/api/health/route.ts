@@ -38,10 +38,12 @@ import { safeErrorMessage } from "@/lib/telemetry-sanitize";
 import {
   admitAnonymousHeavyHealthProbe,
   healthProbeDeps,
+  onceHeavyRecomputePermission,
   readWarmHealthSnapshot,
   runHeavyHealthSection,
   storeHealthSnapshot,
-  type HealthPayload
+  type HealthPayload,
+  type HeavyRecomputePermission
 } from "@/lib/health-probe-cache";
 import { statSync, statfsSync } from "fs";
 import { dirname } from "path";
@@ -150,7 +152,7 @@ function jsonHealth(payload: HealthPayload, detailed: boolean): Response {
 // that MUST stay 200 so a Coolify restart cannot "heal" them.  Page those with keyword/JSON
 // monitors — see docs/runbooks/uptime-health-json-monitors.md.
 type AssembleHealthOptions = {
-  recomputeHeavySections: boolean;
+  recomputeHeavySections: HeavyRecomputePermission;
 };
 
 async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPayload> {
@@ -776,11 +778,18 @@ async function assembleHealth(options: AssembleHealthOptions): Promise<HealthPay
 
 export async function GET(request: Request) {
   const detailed = authorizeOpsRequest(request);
-  const admission = admitAnonymousHeavyHealthProbe(request, detailed);
-  const assembleOpts = { recomputeHeavySections: admission.recomputeHeavySections } as const;
-  const warm = readWarmHealthSnapshot(() => assembleHealth(assembleOpts));
+  // The background refresh is not this caller's work: it always recomputes heavy sections
+  // (still bounded by the section TTL and single-flight), so a throttled client cannot make
+  // the next snapshot reuse stale slots and skip their storage alerts.
+  const warm = readWarmHealthSnapshot(() => assembleHealth({ recomputeHeavySections: true }));
   if (warm) return jsonHealth(warm, detailed);
-  const payload = await assembleHealth(assembleOpts);
+  // Cold path only.  Admission is charged lazily, the first time a heavy section actually
+  // needs to recompute, so warm-snapshot and heavy-cache hits never consume the budget.
+  const payload = await assembleHealth({
+    recomputeHeavySections: onceHeavyRecomputePermission(
+      () => admitAnonymousHeavyHealthProbe(request, detailed).recomputeHeavySections
+    )
+  });
   storeHealthSnapshot(payload);
   return jsonHealth(payload, detailed);
 }

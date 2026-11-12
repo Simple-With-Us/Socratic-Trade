@@ -7,6 +7,8 @@ import { resetRateLimiter } from "../src/lib/rate-limit";
 import {
   __resetHeavyHealthSectionsForTests,
   admitAnonymousHeavyHealthProbe,
+  heavyHealthClientKey,
+  onceHeavyRecomputePermission,
   runHeavyHealthSection
 } from "../src/lib/health-heavy-probe";
 
@@ -105,6 +107,29 @@ describe("runHeavyHealthSection", () => {
     expect(limited.fromCache).toBe(true);
     expect(limited.cachedAgeSeconds).not.toBeNull();
   });
+
+  it("charges a lazy admission callback only when a section would recompute", async () => {
+    const admit = vi.fn(() => true);
+    const permission = onceHeavyRecomputePermission(admit);
+    const now = 1_000_000;
+    let calls = 0;
+    const compute = async () => (calls += 1);
+    await runHeavyHealthSection("disk", compute, { recomputeHeavySections: permission, now });
+    expect(admit).toHaveBeenCalledTimes(1);
+    // TTL-fresh hit: no charge, even with a fresh (uncharged) callback.
+    const fresh = vi.fn(() => true);
+    await runHeavyHealthSection("disk", compute, { recomputeHeavySections: fresh, now: now + 1_000 });
+    expect(fresh).not.toHaveBeenCalled();
+    // One request's memoized callback charges once across several sections.
+    await runHeavyHealthSection("litestream", compute, { recomputeHeavySections: permission, now });
+    expect(admit).toHaveBeenCalledTimes(1);
+    // Stale + denied serves the cached value.
+    const denied = vi.fn(() => false);
+    const stale = await runHeavyHealthSection("disk", compute, { recomputeHeavySections: denied, now: now + 6_000 });
+    expect(denied).toHaveBeenCalledTimes(1);
+    expect(stale.fromCache).toBe(true);
+    expect(calls).toBe(2);
+  });
 });
 
 describe("admitAnonymousHeavyHealthProbe", () => {
@@ -123,6 +148,32 @@ describe("admitAnonymousHeavyHealthProbe", () => {
   it("never throttles ops-token detailed probes", () => {
     const req = new Request(HEALTH_URL, { headers: { "x-ops-token": "secret" } });
     expect(admitAnonymousHeavyHealthProbe(req, true).recomputeHeavySections).toBe(true);
+  });
+
+  it("does not let a rotated CF-Connecting-IP mint a fresh per-IP budget without the origin lock", () => {
+    vi.stubEnv("REQUIRE_CLOUDFLARE_ORIGIN", "");
+    try {
+      const spoofed = (ip: string) => new Request(HEALTH_URL, { headers: { "cf-connecting-ip": ip } });
+      expect(heavyHealthClientKey(spoofed("198.51.100.1"))).toBe("unknown-ip");
+      expect(admitAnonymousHeavyHealthProbe(spoofed("198.51.100.1"), false).recomputeHeavySections).toBe(true);
+      expect(admitAnonymousHeavyHealthProbe(spoofed("198.51.100.2"), false).recomputeHeavySections).toBe(true);
+      // Per-IP limit is 2: a third, rotated address is still the same anonymous bucket.
+      expect(admitAnonymousHeavyHealthProbe(spoofed("198.51.100.3"), false).recomputeHeavySections).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("ignores CF-Connecting-IP under the origin lock unless the request carries the trust marker", () => {
+    vi.stubEnv("REQUIRE_CLOUDFLARE_ORIGIN", "1");
+    try {
+      const forged = new Request(HEALTH_URL, {
+        headers: { "cf-connecting-ip": "198.51.100.9", "x-socratic-cf-client-trusted": "forged|1" }
+      });
+      expect(heavyHealthClientKey(forged)).toBe("unknown-ip");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("throttles anonymous probes after the per-IP budget", () => {
@@ -227,23 +278,52 @@ describe("/api/health heavy sections", () => {
     }
   });
 
-  it("consumes anonymous admission before a warm snapshot short-circuit", async () => {
-    const { healthRoute, cache } = await loadRoute();
+  it("does not charge anonymous admission for a warm snapshot or heavy-cache hit", async () => {
+    const { healthRoute } = await loadRoute();
     process.env.HEALTH_SNAPSHOT_TTL_MS = "60000";
     process.env.HEALTH_HEAVY_PER_IP_LIMIT = "2";
     process.env.HEALTH_HEAVY_SECTION_TTL_MS = "60000";
     resetRateLimiter();
 
-    const ip = "203.0.113.99";
-    const request = () => new Request(HEALTH_URL, { headers: { "cf-connecting-ip": ip } });
+    const request = () => new Request(HEALTH_URL);
 
-    const first = await healthRoute.GET(request());
-    expect(first.status).toBe(200);
-
-    const second = await healthRoute.GET(request());
-    expect(second.status).toBe(200);
-
+    // Cold: the first heavy recompute charges once (one request, three sections).
+    expect((await healthRoute.GET(request())).status).toBe(200);
+    // Warm snapshot hits: no charge.
+    for (let i = 0; i < 5; i++) {
+      expect((await healthRoute.GET(request())).status).toBe(200);
+    }
+    // Control: exactly one of the two per-IP slots was used, so one more admission is allowed
+    // and the next is refused.  Under the old order every GET charged and both would be refused.
+    expect(admitAnonymousHeavyHealthProbe(request(), false).recomputeHeavySections).toBe(true);
     expect(admitAnonymousHeavyHealthProbe(request(), false).recomputeHeavySections).toBe(false);
+  });
+
+  it("background refresh recomputes heavy sections even when the triggering client is throttled", async () => {
+    const { healthRoute, cache } = await loadRoute();
+    process.env.HEALTH_SNAPSHOT_TTL_MS = "1";
+    process.env.HEALTH_HEAVY_PER_IP_LIMIT = "1";
+    process.env.HEALTH_HEAVY_SECTION_TTL_MS = "0";
+    resetRateLimiter();
+    let creditCalls = 0;
+    const original = cache.healthProbeDeps.getOpenRouterCreditStatus;
+    cache.healthProbeDeps.getOpenRouterCreditStatus = async () => {
+      creditCalls += 1;
+      return null;
+    };
+    try {
+      expect((await healthRoute.GET(new Request(HEALTH_URL))).status).toBe(200);
+      expect(creditCalls).toBe(1);
+      // Exhaust the anonymous budget, so this client is throttled.
+      admitAnonymousHeavyHealthProbe(new Request(HEALTH_URL), false);
+      expect(admitAnonymousHeavyHealthProbe(new Request(HEALTH_URL), false).recomputeHeavySections).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      // Stale snapshot: served warm, and the scheduled refresh must recompute heavy sections.
+      expect((await healthRoute.GET(new Request(HEALTH_URL))).status).toBe(200);
+      await vi.waitFor(() => expect(creditCalls).toBe(2), { timeout: 5000 });
+    } finally {
+      cache.healthProbeDeps.getOpenRouterCreditStatus = original;
+    }
   });
 
   it("merges live openrouter dependency state when credits are served from cache", async () => {
@@ -325,34 +405,50 @@ describe("disk vs litestream storage degradation", () => {
     delete process.env.HEALTH_HEAVY_SECTION_TTL_MS;
   });
 
-  it("keeps disk-derived storageDegraded in the disk section only", async () => {
-    const now = 1_000_000;
-    const disk = await runHeavyHealthSection(
+  async function storageDegradedWith(diskDegraded: boolean, litestreamDegraded: boolean): Promise<unknown> {
+    const { healthRoute, cache } = await loadRoute();
+    cache.__resetHealthSnapshotForTests();
+    __resetHeavyHealthSectionsForTests();
+    process.env.HEALTH_SNAPSHOT_TTL_MS = "0";
+    // Seed the real section slots TTL-fresh, so the route merges these verdicts instead of
+    // statting the host disk.  Shapes match what the route's own compute closures return.
+    await runHeavyHealthSection(
       "disk",
       async () => ({
-        freeBytes: 100,
+        dbSizeBytes: 1,
         walSizeBytes: 0,
-        diskDerivedStorageDegraded: true
+        freeBytes: 100,
+        totalBytes: 1000,
+        latestLocalActivityAtMs: 0,
+        diskDerivedStorageDegraded: diskDegraded
       }),
-      { recomputeHeavySections: true, now }
+      { recomputeHeavySections: true }
     );
     await runHeavyHealthSection(
       "litestream",
-      async () => ({
-        litestreamDerivedStorageDegraded: false
-      }),
-      { recomputeHeavySections: true, now }
+      async () => ({ storageBody: { litestreamTiersDegraded: false }, litestreamDerivedStorageDegraded: litestreamDegraded }),
+      { recomputeHeavySections: true }
     );
-    const litestream = await runHeavyHealthSection(
-      "litestream",
-      async () => ({
-        litestreamDerivedStorageDegraded: true
-      }),
-      { recomputeHeavySections: false, now }
-    );
-    const mergedDegraded = disk.value.diskDerivedStorageDegraded || litestream.value.litestreamDerivedStorageDegraded;
-    expect(disk.fromCache).toBe(false);
-    expect(litestream.fromCache).toBe(true);
-    expect(mergedDegraded).toBe(true);
+    const response = await healthRoute.GET(new Request(HEALTH_URL));
+    const body = await response.json();
+    expect(body.checks.storage?.diskCachedAgeSeconds).toBeGreaterThanOrEqual(0);
+    expect(body.checks.storage?.litestreamCachedAgeSeconds).toBeGreaterThanOrEqual(0);
+    return body.checks.storageDegraded;
+  }
+
+  it("the route folds the disk verdict from the disk slot and the Litestream verdict from its own slot", async () => {
+    const { db } = await loadRoute();
+    db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+    process.env.HEALTH_HEAVY_SECTION_TTL_MS = "60000";
+    try {
+      expect(await storageDegradedWith(true, false)).toBe(true);
+      expect(await storageDegradedWith(false, true)).toBe(true);
+      // Control: both clean is not degraded, so the two cases above are the slots talking.
+      expect(await storageDegradedWith(false, false)).not.toBe(true);
+    } finally {
+      delete process.env.HEALTH_SNAPSHOT_TTL_MS;
+      const { cache } = await loadRoute();
+      cache.__resetHealthSnapshotForTests();
+    }
   });
 });

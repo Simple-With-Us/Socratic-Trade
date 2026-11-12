@@ -27,11 +27,13 @@ export function __resetHealthSnapshotForTests(): void {
   healthRefreshInFlight = false;
 }
 
-export type { HeavySectionResult } from "@/lib/health-heavy-probe";
+export type { HeavyRecomputePermission, HeavySectionResult } from "@/lib/health-heavy-probe";
 export {
   __resetHeavyHealthSectionsForTests,
   admitAnonymousHeavyHealthProbe,
+  heavyHealthClientKey,
   heavyHealthSectionTtlMs,
+  onceHeavyRecomputePermission,
   runHeavyHealthSection
 } from "@/lib/health-heavy-probe";
 

@@ -28,7 +28,7 @@
 - Default heavy TTL 20s (`HEALTH_HEAVY_SECTION_TTL_MS`); warm full snapshot TTL unchanged (`HEALTH_SNAPSHOT_TTL_MS`, default 2s).
 - Limits default 12/min per IP and 60/min global (`HEALTH_HEAVY_PER_IP_LIMIT`, `HEALTH_HEAVY_GLOBAL_LIMIT`); ops-token view never throttled.
 - Storage alerts fire only on fresh Litestream/disk compute, not when serving a cached subsection.
-- Review follow-up (PR #5154): anonymous admission runs before the warm snapshot short-circuit; disk/WAL `storageDegraded` is computed in the disk heavy section; OpenRouter credits cache merges live `dependencies.openrouter` each request; heavy section map is pinned on `globalThis`.
+- Review follow-up (PR #5154): anonymous admission is charged only when a heavy section actually recomputes (cold path, lazily, once per request), so warm-snapshot and heavy-cache hits do not consume the budget; the background snapshot refresh always recomputes heavy sections; `CF-Connecting-IP` keys the per-IP bucket only under `REQUIRE_CLOUDFLARE_ORIGIN` with the origin trust marker, otherwise all anonymous callers share one bucket; disk/WAL `storageDegraded` is computed in the disk heavy section; OpenRouter credits cache merges live `dependencies.openrouter` each request; heavy section map is pinned on `globalThis`.
 - **Infra unchanged:** Docker/Coolify already probe `/api/live` (`Dockerfile` `HEALTHCHECK`).  UptimeRobot keyword monitors may remain on `/api/health` for JSON flags.
 
 ## Verification State

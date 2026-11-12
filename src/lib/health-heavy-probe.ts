@@ -1,3 +1,4 @@
+import { originLockEnabled } from "@/lib/cloudflare-origin-lock";
 import { rateLimit, type RateLimitOptions, trustedCloudflareClientIp } from "@/lib/rate-limit";
 
 export type HeavyHealthSectionKey = "openrouter" | "disk" | "litestream";
@@ -59,8 +60,21 @@ export function heavyHealthRateLimits(): { perIp: RateLimitOptions; global: Rate
 }
 
 /**
- * Anonymous callers that miss the warm full snapshot consume this budget before
- * heavy sections recompute.  Ops-token detailed view is never throttled.
+ * Per-IP limiter key for an anonymous probe.  CF-Connecting-IP is only a client address
+ * when the Cloudflare origin lock is on and has marked this request as Cloudflare-fronted.
+ * With REQUIRE_CLOUDFLARE_ORIGIN unset, anyone can send that header, and rotating it would
+ * mint a fresh per-IP budget per request, so every anonymous caller shares one bucket.
+ */
+export function heavyHealthClientKey(request: Request): string {
+  if (!originLockEnabled()) return "unknown-ip";
+  return trustedCloudflareClientIp(request) ?? "unknown-ip";
+}
+
+/**
+ * Charges the anonymous heavy-recompute budget.  Call it only when a heavy section is
+ * actually about to recompute (see `runHeavyHealthSection`'s `recomputeHeavySections`
+ * callback); warm-snapshot and heavy-cache hits must not consume it.  Ops-token detailed
+ * view is never throttled.
  */
 export function admitAnonymousHeavyHealthProbe(
   request: Request,
@@ -69,7 +83,7 @@ export function admitAnonymousHeavyHealthProbe(
 ): { recomputeHeavySections: boolean } {
   if (detailed) return { recomputeHeavySections: true };
   const limits = heavyHealthRateLimits();
-  const clientIp = trustedCloudflareClientIp(request) ?? "unknown-ip";
+  const clientIp = heavyHealthClientKey(request);
   const global = rateLimit("health-heavy:global", limits.global, now);
   const perIp = rateLimit(`health-heavy:ip:${clientIp}`, limits.perIp, now);
   const allowed = global.allowed && perIp.allowed;
@@ -81,14 +95,27 @@ function cachedAgeSeconds(at: number, now: number): number {
 }
 
 /**
+ * Recompute permission for heavy sections: a fixed answer, or a callback that charges the
+ * admission budget.  The callback runs only when a section would otherwise recompute, so a
+ * TTL-fresh hit or a join onto an in-flight compute never spends budget.
+ */
+export type HeavyRecomputePermission = boolean | (() => boolean);
+
+/** Memoize a permission callback so one request charges admission at most once. */
+export function onceHeavyRecomputePermission(admit: () => boolean): () => boolean {
+  let decided: boolean | undefined;
+  return () => (decided ??= admit());
+}
+
+/**
  * TTL + single-flight cache for one heavy /api/health subsection.
- * When `recomputeHeavySections` is false, returns the last value if any exists
+ * When recompute is denied, returns the last value if any exists
  * (cache miss still computes once so the probe never lies about a missing field).
  */
 export async function runHeavyHealthSection<T>(
   key: HeavyHealthSectionKey,
   compute: () => Promise<T>,
-  options: { recomputeHeavySections: boolean; now?: number }
+  options: { recomputeHeavySections: HeavyRecomputePermission; now?: number }
 ): Promise<HeavySectionResult<T>> {
   const now = options.now ?? Date.now();
   const ttl = heavyHealthSectionTtlMs();
@@ -103,13 +130,19 @@ export async function runHeavyHealthSection<T>(
   const hasCache = slot.at > 0 && slot.value !== undefined;
   const ttlFresh = ttl > 0 && hasCache && now - slot.at < ttl;
 
-  if (hasCache && (!options.recomputeHeavySections || ttlFresh)) {
+  if (hasCache && ttlFresh) {
     return serveCached(slot.at, slot.value as T);
   }
 
   if (slot.inflight) {
     const resolved = await slot.inflight;
     return serveCached(resolved.at, resolved.value);
+  }
+
+  const permission = options.recomputeHeavySections;
+  const recompute = typeof permission === "function" ? permission() : permission;
+  if (hasCache && !recompute) {
+    return serveCached(slot.at, slot.value as T);
   }
 
   slot.inflight = (async () => {
