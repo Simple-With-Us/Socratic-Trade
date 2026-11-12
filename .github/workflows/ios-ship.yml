@@ -120,6 +120,59 @@ jobs:
             ios-fleet-socratic-${{ github.run_id }}-
             ios-fleet-socratic-
 
+      # A cancelled or crashed ship can save ship-testflight.sh's mkdir lock
+      # into this cache. The next runner restores archive.lockdir and then
+      # waits until "archive lock timeout". Nothing on this fresh VM holds
+      # that lock. Drop it when the recorded owner pid or run is gone, or
+      # when the directory is older than this job's timeout, before the ship
+      # script acquires it.
+      - name: Clear stale archive lock from ship-state cache
+        run: |
+          set -euo pipefail
+          lockdir="${HOME}/.cache/ios-fleet/archive.lockdir"
+          if [ ! -e "$lockdir" ]; then
+            echo "No stale archive lock found."
+            exit 0
+          fi
+          stale=0
+          reasons=""
+          mark_stale() {
+            stale=1
+            if [ -n "$reasons" ]; then
+              reasons="${reasons}; ${1}"
+            else
+              reasons="${1}"
+            fi
+          }
+          owner_pid=""
+          owner_run=""
+          if [ -f "$lockdir/owner.pid" ]; then
+            owner_pid="$(tr -cd '0-9' < "$lockdir/owner.pid" 2>/dev/null || true)"
+          fi
+          if [ -f "$lockdir/owner.run" ]; then
+            owner_run="$(tr -cd '0-9' < "$lockdir/owner.run" 2>/dev/null || true)"
+          fi
+          owner_alive=0
+          if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+            owner_alive=1
+          fi
+          if [ "$owner_alive" -ne 1 ]; then
+            mark_stale "owner pid is gone"
+          fi
+          current_run="${GITHUB_RUN_ID:-}"
+          if [ -z "$owner_run" ] || [ -z "$current_run" ] || [ "$owner_run" != "$current_run" ]; then
+            mark_stale "owner run is gone"
+          fi
+          if [ -n "$(find "$lockdir" -maxdepth 0 -mmin +90 -print)" ]; then
+            mark_stale "lockdir is older than 90 minutes"
+          fi
+          if [ "$stale" -eq 1 ]; then
+            rm -rf "${HOME}/.cache/ios-fleet/archive.lockdir"
+            echo "Stale archive lock removed (${reasons})."
+          else
+            echo "Archive lock is held by pid ${owner_pid} for this run."
+          fi
+
       # Runs FIRST so a tick with nothing to ship costs seconds and cannot go
       # red on an unrelated environment problem. The logic lives in a script,
       # not inline YAML, so CI can unit-test it on every PR -- otherwise it
@@ -495,6 +548,13 @@ jobs:
           path: ${{ runner.temp }}/ios-ship-logs
           retention-days: 7
           if-no-files-found: ignore
+
+      # Never persist the archive lock. A cancelled ship can leave it held,
+      # and saving it would hand the next run a stale lock to wait on.
+      - name: Remove archive lock before saving ship-state cache
+        if: always()
+        run: |
+          rm -rf "${HOME}/.cache/ios-fleet/archive.lockdir"
 
       # Always: a skipped tick still needs its (unchanged) state persisted,
       # and a partial failure after record_successful_ship still ran should
