@@ -11,7 +11,7 @@ import {
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
-import { isRagEmbedProviderTimeoutText } from "./rag/embed-resilience";
+import { isRagEmbedProviderTimeoutText, RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE } from "./rag/embed-resilience";
 import { isStrategyRagRetrievalTimeoutText } from "./rag-retrieval-deadline";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
@@ -36,6 +36,41 @@ export const HEALTH_SOFT_FAILURE_PREFIX = "[expected-limit] ";
 export const HEALTH_CALLER_TIMEOUT_PREFIX = "[caller-timeout] ";
 
 /**
+ * A provider wait that expired, as it shows up in `error_text`.
+ *
+ * These are transport-class blips (ST-3079): they still count toward the hard streak so a
+ * lane that keeps timing out escalates after `HEALTH_TRANSIENT_ESCALATION_MS`, but a single
+ * burst must not page. Named shapes only — a bare caller-budget abort ("This operation was
+ * aborted", or the message-only "The operation was aborted due to timeout" that
+ * `AbortSignal.timeout()` budgets such as brokerAbortSignal produce) stays an expected limit,
+ * and a provider status (HTTP or the embed/rerank "API failed …: <status>" form) stays hard
+ * even when the body mentions a timeout. Strategy RAG deadlines keep the caller-timeout class. Ingest embed
+ * provider timeouts (ST-4607, message "embed provider timed out") keep the timeout class
+ * even when describeNetworkError also prefixes TimeoutError or AbortError.
+ *
+ * Deliberately not folded into `isTransientNetworkError` in network-errors.ts. That helper
+ * also decides whether a fetch is retried, and widening it would change quote, scan, and
+ * order retries.
+ */
+const PROVIDER_TIMEOUT_HEALTH_TEXT =
+  /\b(?:AbortError|TimeoutError|HeadersTimeoutError|BodyTimeoutError)\b|\bUND_ERR_(?:HEADERS|BODY)_TIMEOUT\b|\b(?:headers|body) timeout error\b|\btimed out waiting for\b|\bbroker call timed out\b/i;
+
+export function isProviderTimeoutHealthText(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  if (isStrategyRagRetrievalTimeoutText(errorText)) return false;
+  if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return false;
+  // ST-4607: ingest embed slowness is a timeout, not a transport blip. describeNetworkError
+  // flattens `TimeoutError embed provider timed out`, which would otherwise match below.
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return false;
+  // The provider answered. 401/403/5xx stay hard even if the body says "timed out".
+  if (/\bHTTP\s+[1-5]\d\d\b/i.test(errorText)) return false;
+  // Same guard as isTransientNetworkErrorText: `Embedding API failed …: ${status} ${body}`
+  // carries the status without an "HTTP" prefix.
+  if (/\b(?:Embedding|Rerank)\s+API\s+failed\b[^:\n]{0,120}:\s*[1-5]\d\d\b/i.test(errorText)) return false;
+  return PROVIDER_TIMEOUT_HEALTH_TEXT.test(errorText);
+}
+
+/**
  * True when an api_health_log failure row is a soft/expected limit (rate limit, daily cap, …).
  * Matches both the explicit prefix logApiHealth stamps for `soft: true`, and common free-text
  * shapes from older rows / call sites that forget the flag but still say "HTTP 429".
@@ -44,7 +79,12 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
   if (!errorText) return false;
   if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return true;
   if (isStrategyRagRetrievalTimeoutText(errorText)) return true;
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return true;
+  // An explicit soft stamp wins. Rows already persisted as `[expected-limit] …` (fetchWithRetry
+  // marks every AbortError/TimeoutError soft) must not turn hard and trip the breaker.
   if (errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) return true;
+  // A named provider timeout must stay on the transient streak so it can escalate.
+  if (isProviderTimeoutHealthText(errorText)) return false;
   // Legacy / free-text shapes that should never hard-STOP a lane on their own.
   return (
     /\bHTTP 429\b/i.test(errorText) ||
@@ -55,13 +95,16 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
     /\b25\/day cap\b/i.test(errorText) ||
     /\b25 requests per day\b/i.test(errorText) ||
     /\bproactive daily call budget\b/i.test(errorText) ||
-    // Caller-budget / AbortController cancellations.  GET /api/quote aborts the
-    // enrichment cascade at 6s; nasdaq-calendar's per-day fetch aborts at 8s.
-    // Those are expected and must not mint "<service> connection failed".
+    // Caller-budget cancellations whose text does not name a timeout. fetchWithRetry stores
+    // the message, not the error name. nasdaq-calendar's per-day fetch aborts at 8s with
+    // "This operation was aborted"; an AbortSignal.timeout() budget stores "The operation
+    // was aborted due to timeout". GET /api/quote's 6s cascade aborts with its own reasons
+    // (quote-cascade-budget.ts "cascade budget elapsed", route.ts "yahoo floor ready"), which
+    // isAbortOrTimeoutError does not recognize, so they are matched here.
     /\bthis operation was aborted\b/i.test(errorText) ||
     /\bthe operation was aborted\b/i.test(errorText) ||
-    /\bAbortError\b/i.test(errorText) ||
-    /\bTimeoutError\b/i.test(errorText)
+    /\bcascade budget elapsed\b/i.test(errorText) ||
+    /\byahoo floor ready\b/i.test(errorText)
   );
 }
 
@@ -92,6 +135,14 @@ export const HEALTH_TRANSIENT_FAILURE_PREFIX = "[transient-network] ";
 export function isTransientHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
   if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
+  if (
+    isStrategyRagRetrievalTimeoutText(errorText)
+    || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)
+    || errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)
+  ) {
+    return false;
+  }
+  if (isProviderTimeoutHealthText(errorText)) return true;
   if (isSoftHealthFailure(errorText)) return false;
   return isTransientNetworkErrorText(errorText);
 }
@@ -498,6 +549,15 @@ function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
   }
   const filingApiAuthSoft =
     opts.service === "filingapi" && !opts.ok && isFilingApiAuthErrorText(errorText);
+  // Named provider timeouts win over a caller's `soft: true`. fetchWithRetry sets that flag
+  // for every AbortError/TimeoutError, including a headers timeout whose message names the
+  // error. A bare "This operation was aborted" does not match and stays an expected limit.
+  if (!opts.ok && errorText && isProviderTimeoutHealthText(errorText)) {
+    if (!errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) {
+      errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}`;
+    }
+    return errorText;
+  }
   if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {
     if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
       errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
