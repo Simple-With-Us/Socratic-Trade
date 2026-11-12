@@ -14,6 +14,7 @@ A dedicated admin-ingest limiter now runs after the existing admin check and bef
 - `app/api/admin/reindex-10k/route.ts`
 - `app/api/admin/reindex-8k/route.ts`
 - `app/api/admin/sec-ingest/route.ts`
+- `src/lib/sec-ingest-body-schema.ts`
 - `app/api/admin/refresh-websource/route.ts`
 - `app/api/admin/earningscalls/route.ts`
 - `app/api/admin/transcript/route.ts`
@@ -24,7 +25,7 @@ A dedicated admin-ingest limiter now runs after the existing admin check and bef
 
 ## Decisions & Trade-offs
 
-The new cap is in addition to the hourly operation budgets.  Those budgets stay the tighter control where they already exist (2 reindexes per hour, 6 SEC seeds per hour).  The new cap is what stops paths the operation guard does not wrap: corpus reembed, SEC dead-letter requeue, vector-store status reads, and the chat transcript.  Empty 10-K symbol lists and unknown web-source ids still return 400 before the new budget is spent.  Reads and job starts use separate buckets so a transcript refresh does not consume a reindex start.  Learning-ledger and the ST-4610 identity handling were not edited.  The SEC ingest 400 body stays the existing action message.  The production-notes bullets stay under the admission section, and the test database URL is restored after each test.
+The new cap is in addition to the hourly operation budgets.  Those budgets stay the tighter control where they already exist (2 reindexes per hour, 6 SEC seeds per hour).  The new cap is what stops paths the operation guard does not wrap: corpus reembed, SEC dead-letter requeue, vector-store status reads, and the chat transcript.  Empty 10-K symbol lists and unknown web-source ids still return 400 before the new budget is spent.  Reads and job starts use separate buckets so a transcript refresh does not consume a reindex start.  Learning-ledger and the ST-4610 identity handling were not edited.  POST `/api/admin/sec-ingest` parses the body with a strict Zod schema in `src/lib/sec-ingest-body-schema.ts` and returns 400 `invalid_payload` on failure, before the new budget is spent.  The production-notes bullets stay under the admission section, the test database URL is restored after each test, and admin ingest tests use a localhost origin.
 
 ## Verification State
 

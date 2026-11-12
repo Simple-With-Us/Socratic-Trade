@@ -107,7 +107,7 @@ function adminRequest(path: string, init: RequestInit, auth: Auth): Request {
     headers.set(AUTHENTICATED_EMAIL_HEADER, auth.email);
     headers.set(AUTHENTICATED_IDENTITY_SOURCE_HEADER, AUTHENTICATED_IDENTITY_SOURCES.authJsSession);
   }
-  return new Request(`https://socratictrade.com${path}`, { ...init, headers });
+  return new Request(`http://localhost${path}`, { ...init, headers });
 }
 
 const tokenAuth: Auth = { token: TOKEN };
@@ -291,6 +291,59 @@ describe("admin ingest jobs", () => {
     }, tokenAuth));
     expect(started.status).not.toBe(429);
     expect(mocks.refreshCongress).toHaveBeenCalledOnce();
+  });
+
+  it("sec-ingest POST rejects an invalid body with 400 invalid_payload and does not seed", async () => {
+    const cases: unknown[] = [
+      { action: "unknown" },
+      { action: "seed", offset: "1" },
+      { action: "seed", limit: -1 },
+      { action: "seed", ciks: [""] },
+      { action: "seed", unexpected: true },
+      {}
+    ];
+    for (const body of cases) {
+      mocks.seedSecIngestJobsFromManifest.mockClear();
+      mocks.requeueSecIngestDeadLetters.mockClear();
+      const response = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+        method: "POST",
+        body: JSON.stringify(body)
+      }, tokenAuth));
+      expect(response.status, `status for ${JSON.stringify(body)}`).toBe(400);
+      await expect(response.json()).resolves.toEqual({ ok: false, error: "invalid_payload" });
+      expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
+      expect(mocks.requeueSecIngestDeadLetters).not.toHaveBeenCalled();
+    }
+
+    const malformed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: "{not-json"
+    }, tokenAuth));
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ ok: false, error: "invalid_payload" });
+    expect(mocks.seedSecIngestJobsFromManifest).not.toHaveBeenCalled();
+  });
+
+  it("sec-ingest POST invalid_payload does not spend the job budget", async () => {
+    const rejected = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", unexpected: true })
+    }, tokenAuth));
+    expect(rejected.status).toBe(400);
+
+    mocks.seedSecIngestJobsFromManifest.mockResolvedValue({ seeded: 1 });
+    const allowed = await secIngestPost(adminRequest("/api/admin/sec-ingest", {
+      method: "POST",
+      body: JSON.stringify({ action: "seed", offset: 2, limit: 3, ciks: ["320193", "1018724"] })
+    }, tokenAuth));
+    expect(allowed.status).not.toBe(429);
+    expect(allowed.status).not.toBe(400);
+    expect(mocks.seedSecIngestJobsFromManifest).toHaveBeenCalledOnce();
+    expect(mocks.seedSecIngestJobsFromManifest.mock.calls[0]?.[0]).toMatchObject({
+      offset: 2,
+      limit: 3,
+      issuerCiks: ["320193", "1018724"]
+    });
   });
 
   it("sec-ingest requeue over the limit does not requeue dead letters", async () => {

@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import { getSecIngestJobReceipt, reconcileSecIngestJob, requeueSecIngestDeadLetters, type SecIngestJobReceipt } from "@/lib/db-rag-ingest";
 import { seedSecIngestJobsFromManifest } from "@/lib/rag/sec-ingest-seeder";
 import { padCik } from "@/lib/web-sources/sec-filings";
+import { SecIngestBodySchema } from "@/lib/sec-ingest-body-schema";
 import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
@@ -79,25 +80,18 @@ export async function POST(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
 
-  let action: string | undefined;
-  let offset: number | undefined;
-  let limit: number | undefined;
-  let ciks: string[] = [];
+  let rawBody: unknown;
   try {
-    const body = (await request.json()) as { action?: string; offset?: number; limit?: number; ciks?: string[] };
-    action = body?.action;
-    if (Number.isFinite(Number(body?.offset))) offset = Number(body.offset);
-    if (Number.isFinite(Number(body?.limit))) limit = Number(body.limit);
-    if (Array.isArray(body?.ciks)) {
-      ciks = [...new Set(body.ciks.filter((c) => typeof c === "string" && c.length > 0).map((c) => padCik(c)))];
-    }
+    rawBody = await request.json();
   } catch {
-    // no body / not JSON -> action stays undefined (will return error below)
+    rawBody = null;
   }
-
-  if (action !== "seed" && action !== "requeue-dead-letter") {
-    return NextResponse.json({ ok: false, error: 'Provide { action: "seed" | "requeue-dead-letter", offset?: number, limit?: number, ciks?: string[] } in the request body.' }, { status: 400 });
+  const parsed = SecIngestBodySchema.safeParse(rawBody);
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "invalid_payload" }, { status: 400 });
   }
+  const { action, offset, limit } = parsed.data;
+  const ciks = [...new Set((parsed.data.ciks ?? []).map(padCik))];
 
   const limited = enforceAdminIngestRateLimit(request, "sec-ingest", "job");
   if (limited) return limited;
