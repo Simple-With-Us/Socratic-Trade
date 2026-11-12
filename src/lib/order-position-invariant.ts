@@ -112,6 +112,11 @@ export interface HeldPosition {
   marketValue?: number;
   /** "broker" = fresh placement-time read; "caller" = the caller's own just-verified read. */
   source?: "broker" | "caller";
+  /**
+   * false when any matched row's market value is a cost-basis fallback (no live quote). Such a
+   * value must not size a dollar exit. Absent/true = live or broker-reported.
+   */
+  marketValuePriced?: boolean;
 }
 
 /**
@@ -206,6 +211,7 @@ export function heldPositionFor(positions: EquityPosition[], symbol: string): He
   let signedQuantity = 0;
   let marketValue = 0;
   let matched = 0;
+  let marketValuePriced = true;
   for (const position of positions) {
     if (positionKey(position.symbol) !== target) continue;
     const quantity = Number(position.quantity);
@@ -216,8 +222,9 @@ export function heldPositionFor(positions: EquityPosition[], symbol: string): He
     signedQuantity = matched === 1 ? quantity : signedQuantity + quantity;
     const value = Number(position.marketValue);
     if (Number.isFinite(value)) marketValue = matched === 1 ? value : marketValue + value;
+    if (position.marketValueSource === "cost_basis") marketValuePriced = false;
   }
-  return { signedQuantity, marketValue, source: "broker" };
+  return { signedQuantity, marketValue, source: "broker", ...(marketValuePriced ? {} : { marketValuePriced: false }) };
 }
 
 /**
@@ -329,6 +336,17 @@ export function applyPositionInvariant(
   // with no notional field is resolved from the position's own per-share value, or refused: leaving
   // the dollars for the adapter lets a cheap limit or quote turn them into more shares than are held.
   if (input.quantity == null && input.dollarAmount != null && input.dollarAmount > 0) {
+    // A cost-basis fallback (quote failure) is the entry price, not the market price. Sizing from
+    // it can under- or over-exit, and it can even misread a partial as a full exit, so a dollar
+    // exit on an unpriced position is refused as retryable before either branch below.
+    if (options?.resolvePartialDollarExits && position.marketValuePriced === false) {
+      throw new OrderPositionInvariantError(
+        `${symbol} ${closingSide.toUpperCase()} not placed: no live quote priced the held ${formatQty(closable)} ${symbol} shares ` +
+          `(the position value is cost basis), so a $${input.dollarAmount.toFixed(2)} exit cannot be sized safely.  ` +
+          "Nothing was sent to the broker, so this is safe to retry once quotes recover.",
+        "position_unverified"
+      );
+    }
     const fullExit = heldMarketValue > 0 && input.dollarAmount >= heldMarketValue * (1 - FULL_EXIT_DOLLAR_TOLERANCE);
     if (fullExit) {
       const dollars = input.dollarAmount;
@@ -356,10 +374,15 @@ export function applyPositionInvariant(
           changedFields: ["dollarAmount", "quantity"]
         });
       } else {
+        // A caller-hinted position comes from a FAILED broker read (quantity only, no value), so
+        // the refusal is transient and retryable like any other unverified read. Only a
+        // broker-verified position that still cannot be priced is the terminal code.
+        const unverified = position.source === "caller";
         throw new OrderPositionInvariantError(
           `${symbol} ${closingSide.toUpperCase()} not placed: a $${input.dollarAmount.toFixed(2)} exit could not be priced inside the held ` +
-            `${formatQty(closable)} shares, so the broker's dollar sizing could sell more than the position. Nothing was sent to the broker.`,
-          "dollar_exit_unpriced"
+            `${formatQty(closable)} shares, so the broker's dollar sizing could sell more than the position. Nothing was sent to the broker` +
+            (unverified ? ", so this is safe to retry once the position read succeeds." : "."),
+          unverified ? "position_unverified" : "dollar_exit_unpriced"
         );
       }
     }

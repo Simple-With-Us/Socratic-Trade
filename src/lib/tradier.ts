@@ -646,12 +646,16 @@ class TradierBrokerGateway implements BrokerGateway {
         // would skip short add/cover checks for Tradier short holdings.
         const averageCost = quantity !== 0 ? totalCost / Math.abs(quantity) : 0;
         const price = quotes[symbol]?.price;
-        const marketValue = price && price > 0 ? quantity * price : quantity * averageCost;
+        const priced = Boolean(price && price > 0);
+        const marketValue = priced ? quantity * (price as number) : quantity * averageCost;
         return {
           symbol,
           quantity,
           averageCost,
           marketValue,
+          // Cost-basis fallback is not a market price; the order invariant refuses to size a
+          // dollar exit from it (ST-4616).
+          marketValueSource: priced ? "quote" : "cost_basis",
           sector: undefined,
           industry: undefined
         } satisfies EquityPosition;

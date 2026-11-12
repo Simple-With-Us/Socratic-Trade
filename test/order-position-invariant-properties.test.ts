@@ -39,7 +39,12 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { roundAlpacaPrice, roundCents } from "../src/lib/money";
-import { applyPositionInvariant, heldPositionFor, OrderPositionInvariantError } from "../src/lib/order-position-invariant";
+import {
+  applyPositionInvariant,
+  heldPositionFor,
+  isRetryablePositionInvariantError,
+  OrderPositionInvariantError
+} from "../src/lib/order-position-invariant";
 import { allowedProposalSides } from "../src/lib/strategy-risk";
 import type {
   AccountCapabilities,
@@ -82,6 +87,8 @@ interface HarnessState {
   tradierFail: boolean;
   tradierPositions: Record<string, unknown>[];
   tradierQuotes: Record<string, unknown>[];
+  /** Quote batch returns 503, so Tradier positions fall back to cost basis. */
+  tradierQuoteFail: boolean;
   posts: string[];
 }
 
@@ -92,6 +99,7 @@ const harness = vi.hoisted(() => {
     tradierFail: false,
     tradierPositions: [],
     tradierQuotes: [],
+    tradierQuoteFail: false,
     posts: []
   };
   const createOrder = vi.fn(async (opts: Record<string, unknown>) => ({
@@ -164,6 +172,8 @@ interface HitCounts {
   readFailed: number;
   dirtyTag: number;
   extendedLimit: number;
+  /** Alpaca quantity exits whose size was checked against the held position. */
+  exitBound: number;
 }
 
 function mulberry32(seed: number): () => number {
@@ -456,7 +466,8 @@ function emptyHits(): HitCounts {
     staleSmaller: 0,
     readFailed: 0,
     dirtyTag: 0,
-    extendedLimit: 0
+    extendedLimit: 0,
+    exitBound: 0
   };
 }
 
@@ -557,6 +568,7 @@ function installTradierFetch(): void {
       );
     }
     if (u.includes("/markets/quotes")) {
+      if (harness.state.tradierQuoteFail) return new Response("unavailable", { status: 503 });
       const quote = harness.state.tradierQuotes;
       return new Response(
         JSON.stringify({ quotes: { quote: quote.length === 1 ? quote[0] : quote } }),
@@ -569,6 +581,7 @@ function installTradierFetch(): void {
 
 function armBook(c: GenCase, broker: BrokerName): void {
   harness.state.posts = [];
+  harness.state.tradierQuoteFail = false;
   harness.createOrder.mockClear();
   const flat = Math.abs(c.freshQty) <= EPS;
   if (broker === "alpaca") {
@@ -765,10 +778,15 @@ function assertPayload(broker: BrokerName, c: GenCase, payload: Record<string, u
       }
       if (hadBrackets) hits.closingNoBracket += 1;
     }
-    if (closingLong && qty != null && qty > heldLong + 1e-6) {
+    // Quantity-independent exit predicates for the size bound. closingLong/closingShort above
+    // already require qty <= held, so a bound written against them could never fire.
+    const exitLong = c.side === "sell" && wireSide === "sell" && heldLong > 0;
+    const exitShort = c.side === "cover" && wireSide === "buy" && heldShort > 0;
+    if ((exitLong || exitShort) && qty != null) hits.exitBound += 1;
+    if (exitLong && qty != null && qty > heldLong + 1e-6) {
       throw new Error(`Exit qty ${qty} exceeds held long ${heldLong}. ${detail(c, payload)}`);
     }
-    if (closingShort && qty != null && qty > heldShort + 1e-6) {
+    if (exitShort && qty != null && qty > heldShort + 1e-6) {
       throw new Error(`Cover qty ${qty} exceeds held short ${heldShort}. ${detail(c, payload)}`);
     }
     if (book.verified && c.side === "sell" && heldLong <= 0) {
@@ -916,7 +934,7 @@ describe("money-path order invariant properties", () => {
   let tradierNow: Date = CLOCKS.regular;
 
   beforeAll(async () => {
-    process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-invariant-props-${randomUUID()}.db`)}`;
+    vi.stubEnv("DATABASE_URL", `file:${join(tmpdir(), `agentic-invariant-props-${randomUUID()}.db`)}`);
     const { upsertConnectedAccount } = await import("../src/lib/db");
     const { getBrokerGateway } = await import("../src/lib/broker");
     const { setTradierNowForTests } = await import("../src/lib/tradier-transient");
@@ -963,6 +981,7 @@ describe("money-path order invariant properties", () => {
 
   afterAll(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   async function runBroker(broker: BrokerName): Promise<HitCounts> {
@@ -1020,6 +1039,7 @@ describe("money-path order invariant properties", () => {
     expect(hits.freshClamp).toBeGreaterThan(0);
     expect(hits.shareClass).toBeGreaterThan(0);
     expect(hits.shortEntry + hits.policyBlockedShort).toBeGreaterThan(0);
+    expect(hits.exitBound).toBeGreaterThan(0);
   }, 180_000);
 
   it("Tradier payloads hold the money-path invariants (seed 0x4616)", async () => {
@@ -1092,7 +1112,66 @@ describe("money-path order invariant properties", () => {
     };
     armBook(generated, "tradier");
     tradierNow = CLOCKS.regular;
-    await expect(placeTradier(orderFrom(generated, TRADIER_ACCOUNT))).rejects.toBeInstanceOf(OrderPositionInvariantError);
+    const error = await placeTradier(orderFrom(generated, TRADIER_ACCOUNT)).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(OrderPositionInvariantError);
+    // The hint exists because the broker read FAILED: retryable, not a terminal block.
+    expect((error as OrderPositionInvariantError).code).toBe("position_unverified");
+    expect(isRetryablePositionInvariantError(error)).toBe(true);
     expect(harness.state.posts).toHaveLength(0);
+  });
+
+  it("Tradier dollar exits are refused (retryable) when the quote batch fails, never sized from cost basis", async () => {
+    // Live $100/share x 10 = $1000; entry cost basis is only $200. Sized from cost basis, a $500
+    // partial sell reads as a FULL exit and would sell all 10 shares.
+    for (const dollarAmount of [500, 1000]) {
+      const generated = { ...forceCase(generateCase(mulberry32(SEED), 5), 5), dollarAmount, refId: `quote-fail-${dollarAmount}` };
+      armBook(generated, "tradier");
+      harness.state.tradierPositions = [{ symbol: "MSFT", quantity: 10, cost_basis: 200 }];
+      harness.state.tradierQuoteFail = true;
+      tradierNow = CLOCKS.regular;
+      const error = await placeTradier(orderFrom(generated, TRADIER_ACCOUNT)).catch((err: unknown) => err);
+      expect(harness.state.posts, `$${dollarAmount}`).toHaveLength(0);
+      expect(error, `$${dollarAmount}`).toBeInstanceOf(OrderPositionInvariantError);
+      expect((error as OrderPositionInvariantError).code).toBe("position_unverified");
+      expect(isRetryablePositionInvariantError(error)).toBe(true);
+    }
+    // Control: the same order with quotes up is placed as a capped partial (5 shares).
+    const generated = forceCase(generateCase(mulberry32(SEED), 5), 5);
+    armBook(generated, "tradier");
+    harness.state.tradierPositions = [{ symbol: "MSFT", quantity: 10, cost_basis: 200 }];
+    tradierNow = CLOCKS.regular;
+    await placeTradier(orderFrom(generated, TRADIER_ACCOUNT));
+    expect(Number(new URLSearchParams(harness.state.posts.at(-1) ?? "").get("quantity"))).toBe(5);
+  });
+
+  it("a cost-basis position value never sizes a Tradier dollar exit; quantity exits and Alpaca are unchanged", () => {
+    const held = heldPositionFor(
+      [{ symbol: "MSFT", quantity: 10, averageCost: 20, marketValue: 200, marketValueSource: "cost_basis" }],
+      "MSFT"
+    );
+    expect(held.marketValuePriced).toBe(false);
+    const order: EquityOrderInput = {
+      accountNumber: TRADIER_ACCOUNT,
+      symbol: "MSFT",
+      side: "sell",
+      type: "market",
+      dollarAmount: 500,
+      timeInForce: "gfd",
+      marketHours: "regular_hours"
+    };
+    let thrown: unknown;
+    try {
+      applyPositionInvariant(order, held, { resolvePartialDollarExits: true });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRetryablePositionInvariantError(thrown)).toBe(true);
+    // A quantity exit does not use the value, so it still clamps to the held shares.
+    const { dollarAmount: _d, ...qtyOrder } = order;
+    void _d;
+    expect(applyPositionInvariant({ ...qtyOrder, quantity: 12 }, held, { resolvePartialDollarExits: true }).input.quantity).toBe(10);
+    // Without the Tradier option (Alpaca keeps notional), the dollar order is not refused here.
+    expect(() => applyPositionInvariant(order, held)).not.toThrow();
+    expect(heldPositionFor([{ symbol: "MSFT", quantity: 10, averageCost: 20, marketValue: 1000 }], "MSFT").marketValuePriced).toBeUndefined();
   });
 });
