@@ -14,8 +14,9 @@
 // (free=2, individual=20, professional=40 app cap) unless ROIC_TRANSCRIPTS_QUARTERS_PER_SYMBOL
 // overrides. Per-run fetch budget follows the same tier (free-safe 8, Individual default 80).
 
+import { z } from "zod";
 import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
-import { fetchWithRetry } from "../data-providers";
+import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { audit } from "../db";
 import { hasInFlightStrategyWork, shouldDeferBackgroundRagForStrategy } from "../db-execution";
 import {
@@ -499,19 +500,37 @@ export function publishedAtIso(date: string | undefined, year: number, quarter: 
   return new Date(Date.UTC(year, month - 1, 28, 16, 0, 0)).toISOString();
 }
 
-async function roicGetJson(
+const RoicCallListSchema = z.union([
+  z.array(z.unknown()),
+  z.object({ data: z.array(z.unknown()).optional() }).passthrough()
+]);
+const RoicTranscriptSchema = z.object({
+  transcript: z.unknown().optional(),
+  content: z.unknown().optional(),
+  text: z.unknown().optional(),
+  body: z.unknown().optional(),
+  date: z.unknown().optional(),
+  fiscal_year: z.unknown().optional(),
+  year: z.unknown().optional(),
+  fiscal_quarter: z.unknown().optional(),
+  quarter: z.unknown().optional()
+}).passthrough();
+
+async function roicGetJson<T>(
   url: string,
-  fetchOpts: { service: "roic"; keySource: "env" | "user" | "none"; userId?: string; suppressHealthStatuses: number[] }
-): Promise<unknown | null> {
+  fetchOpts: { service: "roic"; keySource: "env" | "user" | "none"; credentialId?: string; userId?: string; suppressHealthStatuses: number[] },
+  schema: z.ZodType<T>
+): Promise<T | null> {
   const credKey = `${fetchOpts.keySource}:${fetchOpts.userId ?? ""}`;
-  if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource)) return null;
+  if (isPaidQuoteBreakerCooling("roic", fetchOpts.keySource, Date.now(), fetchOpts.credentialId)) return null;
   const allowed = admitProviderRequests("roic", credKey, 1);
   if (!allowed) return null;
   return withProviderLimit("roic", async () => {
     try {
       const res = await fetchWithRetry(url, {}, fetchOpts);
       if (!res || !res.ok) return null;
-      return await res.json();
+      const parsed = schema.safeParse(await res.json());
+      return parsed.success ? parsed.data : null;
     } catch (err) {
       if (err instanceof CircuitOpenError) return null;
       throw err;
@@ -528,11 +547,13 @@ export async function fetchRoicCallIndex(
   if (!normalized) return { rows: [] };
   const keyInfo = resolveApiKeyWithSource("roic", userId);
   if (!keyInfo.key) return { rows: [] };
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
   const fetchOpts = {
     service: "roic" as const,
     keySource: keyInfo.source,
+    credentialId,
     userId,
-    suppressHealthStatuses: [400, 404, 429] as number[]
+    suppressHealthStatuses: [400, 402, 404, 429] as number[]
   };
   for (const identifier of identifiersForRoicFetch(normalized, preferredIdentifier)) {
     const url =
@@ -540,7 +561,7 @@ export async function fetchRoicCallIndex(
       `?identifier=${encodeURIComponent(identifier)}` +
       `&limit=100&order=desc&apikey=${encodeURIComponent(keyInfo.key)}`;
     try {
-      const json = await roicGetJson(url, fetchOpts);
+      const json = await roicGetJson(url, fetchOpts, RoicCallListSchema);
       const rows = parseRoicEarningsCallList(json, normalized);
       if (rows.length > 0) return { rows, identifier };
     } catch (err) {
@@ -565,11 +586,13 @@ export async function fetchRoicTranscript(
   const keyInfo = resolveApiKeyWithSource("roic", userId);
   if (!keyInfo.key) return null;
 
+  const credentialId = await apiKeyFingerprint(keyInfo.key);
   const fetchOpts = {
     service: "roic" as const,
     keySource: keyInfo.source,
+    credentialId,
     userId,
-    suppressHealthStatuses: [400, 404, 429] as number[]
+    suppressHealthStatuses: [400, 402, 404, 429] as number[]
   };
 
   const preferred = readRoicCallIndexArtifact(normalized)?.identifier;
@@ -578,7 +601,7 @@ export async function fetchRoicTranscript(
       `${ROIC_V3_BASE}/earnings-calls/${encodeURIComponent(identifier)}` +
       `?fiscal_year=${year}&fiscal_quarter=${quarter}&format=json&apikey=${encodeURIComponent(keyInfo.key)}`;
     try {
-      const json = await roicGetJson(url, fetchOpts);
+      const json = await roicGetJson(url, fetchOpts, RoicTranscriptSchema);
       const parsed = parseRoicTranscriptResponse(json, normalized, year, quarter);
       if (parsed) return parsed;
     } catch (err) {
@@ -593,7 +616,7 @@ export async function fetchRoicTranscript(
     const latestUrl =
       `${ROIC_V2_BASE}/company/earnings-calls/latest/${encodeURIComponent(normalized)}` +
       `?apikey=${encodeURIComponent(keyInfo.key)}`;
-    const json = await roicGetJson(latestUrl, fetchOpts);
+    const json = await roicGetJson(latestUrl, fetchOpts, RoicTranscriptSchema);
     const parsed = parseRoicTranscriptResponse(json, normalized, year, quarter);
     if (parsed) {
       const matchesPeriod =

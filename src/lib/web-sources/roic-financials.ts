@@ -4,8 +4,8 @@
 // computes multi-year financial trends (3-year revenue CAGR, margin trajectories, ROIC, FCF conversion),
 // and formats structured financial summaries for strategy reasoning and RAG vector store ingestion.
 
-import { CircuitOpenError } from "../api-circuit-breaker";
-import { fetchWithRetry } from "../data-providers";
+import { CircuitOpenError, isPaidQuoteBreakerCooling } from "../api-circuit-breaker";
+import { apiKeyFingerprint, fetchWithRetry } from "../data-providers";
 import { resolveApiKeyWithSource } from "../db-api-keys";
 import { normalizeSymbol } from "../money";
 import { storeDocument } from "../vector-db";
@@ -160,11 +160,13 @@ export async function fetchRoicFinancials(symbol: string, userId?: string): Prom
   if (!keyInfo.key) return null;
 
   const url = `${ROIC_BASE}/financials/${encodeURIComponent(normSymbol)}?apikey=${encodeURIComponent(keyInfo.key)}`;
+  const credKey = await apiKeyFingerprint(keyInfo.key);
+  if (isPaidQuoteBreakerCooling("roic", keyInfo.source, Date.now(), credKey)) return null;
   try {
     const res = await fetchWithRetry(
       url,
       {},
-      { service: "roic", keySource: keyInfo.source, userId, suppressHealthStatuses: [404, 429] }
+      { service: "roic", keySource: keyInfo.source, credentialId: credKey, userId, suppressHealthStatuses: [402, 404, 429] }
     );
     if (!res || !res.ok) return null;
     const json = await res.json();

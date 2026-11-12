@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const originalEncryptionKey = process.env.ENCRYPTION_KEY;
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-quote-breaker-${randomUUID()}.db`)}`;
+});
+
+beforeEach(() => {
   process.env.ENCRYPTION_KEY = "b".repeat(64);
 });
 
@@ -23,13 +28,14 @@ describe("paid quote provider circuit breaker", () => {
     delete process.env.QUOTE_PROVIDER_402_HOLD_MS;
     delete process.env.QUOTE_PROVIDER_429_BASE_MS;
     delete process.env.QUOTE_PROVIDER_429_CAP_MS;
+    if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = originalEncryptionKey;
   });
 
-  it("holds a header-less 429 with exponential backoff and a 402 for hours", async () => {
+  it("holds a 429 only for a positive Retry-After and a 402 for hours", async () => {
     const { paidQuoteHoldMs, resetApiCircuitBreaker, quoteProvider402HoldMs } = await load();
     resetApiCircuitBreaker();
-    expect(paidQuoteHoldMs("twelvedata", "env", 429, undefined)).toBe(1_000);
-    expect(paidQuoteHoldMs("twelvedata", "env", 429, undefined)).toBe(2_000);
+    expect(paidQuoteHoldMs("twelvedata", "env", 429, undefined)).toBe(0);
     expect(paidQuoteHoldMs("twelvedata", "env", 429, 12_000)).toBe(12_000);
     expect(paidQuoteHoldMs("roic", "env", 402, undefined)).toBe(quoteProvider402HoldMs());
     expect(quoteProvider402HoldMs()).toBeGreaterThanOrEqual(60 * 60 * 1000);
@@ -68,7 +74,7 @@ describe("paid quote provider circuit breaker", () => {
 
     const cancel = vi.fn().mockResolvedValue(undefined);
     const fetchMock = vi.fn(async () => {
-      const response = new Response("slow", { status: 429, headers: { "Retry-After": "30" } });
+      const response = new Response("slow", { status: 429, headers: { "Retry-After": "1" } });
       vi.spyOn(response.body!, "cancel").mockImplementation(cancel);
       return response;
     });
@@ -81,7 +87,7 @@ describe("paid quote provider circuit breaker", () => {
       backoffMs: 1
     });
     expect(first.status).toBe(429);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(cancel).toHaveBeenCalled();
     expect(apiCircuitBreakerShouldSkip("twelvedata", "env").skip).toBe(true);
     const open = listOpenApiCircuitBreakers();
@@ -93,7 +99,7 @@ describe("paid quote provider circuit breaker", () => {
         status: 429
       })
     ]);
-    expect(open[0].openForMs).toBeGreaterThan(20_000);
+    expect(open[0].openForMs).toBeGreaterThan(500);
 
     fetchMock.mockClear();
     await expect(
@@ -139,23 +145,22 @@ describe("paid quote provider circuit breaker", () => {
     expect(apiCircuitBreakerShouldSkip("roic", "env").skip).toBe(false);
   });
 
-  it("uses exponential backoff when a paid quote 429 has no Retry-After", async () => {
+  it("does not open a paid quote lane on a header-less 429 after the retry budget", async () => {
     const { fetchWithRetry, listOpenApiCircuitBreakers, resetApiCircuitBreaker } = await load();
     resetApiCircuitBreaker();
     delete process.env.API_CIRCUIT_BREAKER_DISABLED;
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow", { status: 429 })));
+    const fetchMock = vi.fn(async () => new Response("slow", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
 
     const res = await fetchWithRetry("https://example.test/tiingo", { cache: "no-store" }, {
       service: "tiingo",
       keySource: "env",
-      retries: 3,
+      retries: 1,
       backoffMs: 1
     });
     expect(res.status).toBe(429);
-    const open = listOpenApiCircuitBreakers().find((row) => row.service === "tiingo");
-    expect(open?.reason).toBe("rate-limit");
-    expect(open?.openForMs).toBeLessThan(5_000);
-    expect(open?.openForMs).toBeGreaterThan(500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(listOpenApiCircuitBreakers().find((row) => row.service === "tiingo")).toBeUndefined();
   });
 
   it("still retries a non-quote 429 and only opens that lane for a positive Retry-After", async () => {
@@ -179,9 +184,9 @@ describe("paid quote provider circuit breaker", () => {
     const { listOpenApiCircuitBreakers, observePaidQuoteStatus, resetApiCircuitBreaker } = await load();
     resetApiCircuitBreaker();
     const now = 1_700_000_000_000;
-    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now)).toBe(1_000);
-    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now + 10)).toBe(1_000);
-    expect(listOpenApiCircuitBreakers(now + 10)[0]?.openForMs).toBe(1_000);
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now)).toBe(0);
+    expect(observePaidQuoteStatus("twelvedata", "env", 429, undefined, now + 10)).toBe(0);
+    expect(listOpenApiCircuitBreakers(now + 10)).toHaveLength(0);
 
     expect(observePaidQuoteStatus("twelvedata", "env", 429, 30_000, now + 20)).toBe(30_000);
     expect(listOpenApiCircuitBreakers(now + 20)[0]?.openForMs).toBe(30_000);
@@ -200,5 +205,39 @@ describe("paid quote provider circuit breaker", () => {
     const kept = listOpenApiCircuitBreakers(now + 50)[0];
     expect(kept?.reason).toBe("quota");
     expect(kept?.openForMs).toBeGreaterThan(5 * 60 * 60 * 1000);
+  });
+
+  it("parks one credential fingerprint and leaves another open", async () => {
+    const { isPaidQuoteBreakerCooling, observePaidQuoteStatus, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    const now = 1_700_000_000_000;
+    observePaidQuoteStatus("twelvedata", "user", 402, undefined, now, "finger-a");
+    expect(isPaidQuoteBreakerCooling("twelvedata", "user", now + 1, "finger-a")).toBe(true);
+    expect(isPaidQuoteBreakerCooling("twelvedata", "user", now + 1, "finger-b")).toBe(false);
+    expect(isPaidQuoteBreakerCooling("twelvedata", "env", now + 1, "finger-a")).toBe(false);
+  });
+
+  it("retries a paid-quote 429 when the breaker is disabled", async () => {
+    const { apiCircuitBreakerShouldSkip, fetchWithRetry, resetApiCircuitBreaker } = await load();
+    resetApiCircuitBreaker();
+    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    const fetchMock = vi.fn(async () => new Response("slow", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await fetchWithRetry("https://example.test/twelvedata", { cache: "no-store" }, {
+      service: "twelvedata",
+      keySource: "env",
+      credentialId: "finger-a",
+      retries: 1,
+      backoffMs: 1
+    });
+    expect(res.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(apiCircuitBreakerShouldSkip("twelvedata", "env", "finger-a").skip).toBe(false);
+  });
+
+  it("treats a Twelve Data credit message as a quota signal and ignores a bad key", async () => {
+    const { isTwelveDataQuotaSignal } = await load();
+    expect(isTwelveDataQuotaSignal("You have run out of API credits for the current minute")).toBe(true);
+    expect(isTwelveDataQuotaSignal("Invalid API key")).toBe(false);
   });
 });

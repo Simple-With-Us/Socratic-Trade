@@ -6,7 +6,7 @@ Production span failures were mostly paid quote providers returning HTTP 429 and
 
 ## Changes made
 
-Paid quote lanes (`twelvedata`, `tiingo`, `marketstack`, `roic`) now open an in-memory hold on 429 and 402.  A 429 uses Retry-After when that header is present (capped at one hour) and exponential backoff when it is not (base 1s, cap 15 minutes).  A 402 holds the lane for six hours.  While the hold is cooling, `fetchWithRetry` throws `CircuitOpenError` before the fetch, and history fetchers return without calling the network.  That skip writes no health row and does not record a provider failure.  Enrichment and the Tiingo quote admit their local quota only after a cooling check, so a skip does not burn a credit.  The half-open probe is still one call after the hold elapses.  Other providers keep the existing retry, and a non-quote 429 opens the older hold only after retries are exhausted and only when Retry-After is present.  HTTP 402 on a paid quote lane is logged as a soft health row so it does not also paint a hard consecutive-failure streak.  Error bodies are cancelled on the retry and error paths in `fetchWithRetry`, `politeFetch`, and the Yahoo chart helper in `history.ts`.
+Paid quote lanes (`twelvedata`, `tiingo`, `marketstack`, `roic`) retry an HTTP 429 for the remaining budget and honor a positive Retry-After.  The hold opens only after that budget is spent, and only for that Retry-After duration (capped at one hour).  A 402 holds the lane for six hours.  While the hold is cooling, `fetchWithRetry` throws `CircuitOpenError` before the fetch, and history fetchers return without calling the network.  That skip writes no health row and does not record a provider failure.  Enrichment and the Tiingo quote admit their local quota only after a cooling check, so a skip does not burn a credit.  The half-open probe is still one call after the hold elapses.  Other providers keep the existing retry, and a non-quote 429 opens the older hold only after retries are exhausted and only when Retry-After is present.  HTTP 402 on a paid quote lane is logged as a soft health row so it does not also paint a hard consecutive-failure streak.  Error bodies are cancelled on the retry and error paths in `fetchWithRetry`, `politeFetch`, and the Yahoo chart helper in `history.ts`.
 
 Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GET /api/ops/snapshot` as `quoteProviderBreakers`.  Neither field changes health `ok` or the 503 decision.  The public health view may include provider names and the lane key source (`env` or `user`).  It does not include secrets.
 
@@ -28,14 +28,15 @@ Open holds are on `GET /api/health` as `checks.quoteProviderBreakers` and on `GE
 ## Decisions & trade-offs
 
 - The hold reuses the existing in-memory lane map, keyed by service and key source, so one user's 402 does not close the env lane.
-- Paid-quote 429 does not sleep inside the call.  The cascade falls through, and the hold is what stops the next symbol from calling the same provider.
-- The first 429 or 402 still performs one network call.  Later calls in that process skip until the hold elapses.
+- A paid-quote 429 or 402 is stored on the credential fingerprint when the caller has one.  The public list still shows `env` or `user`, not the fingerprint.  `API_CIRCUIT_BREAKER_DISABLED=1` also restores the in-call 429 retry for these four providers.  Twelve Data's HTTP 200 credit message opens the six-hour 402 hold.  `GET /api/health` sets `checks.quoteProviderBreakersError` to `unavailable` when the list cannot be read, and that field does not change `ok`.
+- A header-less 429 does not open a hold.  The in-call retry spends the remaining budget, and the next symbol is blocked only when a positive Retry-After or an HTTP 402 opened the lane.
+- A 402 still performs one network call, then later calls skip until the hold elapses.
 - History paid providers stay on `politeFetch` (not the residential proxy) and share the same hold.  Yahoo chart retries in `history.ts` only cancel the body.  `src/lib/yahoo-finance.ts` is not edited.  `src/lib/proxy-fetch.ts` is not edited (ST-3999).
 - Holds are process-local.  A restart clears them, and the next 429 or 402 opens them again.
 - `API_CIRCUIT_BREAKER_DISABLED=1` still disables trips and skips.
 - Vitest uses one worker, so the test setup clears the in-memory hold after every test.  A 402 hold would otherwise leak into the next file.
 - A burst of in-flight 429s is one strike, and a later response cannot shorten a hold that is already open.  A longer Retry-After or a 402 still extends it.
-- Paid history still retries one 5xx or network error.  A 429 or 402 is not retried.  The lane stays per credential, because a 402 on these keys is account credit rather than one endpoint.
+- Paid history retries one 5xx, one network error, and one 429.  A 402 is not retried.  The lane stays per credential, because a 402 on these keys is account credit rather than one endpoint.  Plan-gated ROIC transcripts, financials, and ratios do not open the quote lane on 402 or 429.
 - No trading account, policy, or order-path change.
 
 ## Verification state
@@ -49,14 +50,14 @@ NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 - `npx tsc --noEmit` exited 0.
 - `npx eslint . --quiet` exited 0.
-- Hermetic `npm test` (injected provider keys unset, matching CI): 902 files passed, 1 skipped, 10251 tests passed, 42 skipped.
+- Hermetic `npm test` (injected provider keys unset, matching CI): 902 files passed, 1 skipped, 10256 tests passed, 42 skipped.
 - `npm run build` exited 0 with a 4 GB Node heap.  The default heap aborted during webpack.
 
 PagerDuty #611 is the existing Sentry HTTP trace failure rate (`tracesSampleRate` in `sentry.server.config.ts`, default 0.2).  This change adds no new metric and no alert.  A cooling skip returns before `fetch`, so that call does not open a failed HTTP span.  After deploy, the same PagerDuty #611 signal is the check that the rate falls.  Open holds stay on `GET /api/health` and `GET /api/ops/snapshot`.
 
 ## Next steps & blockers
 
-- Open the PR against `main`.  Do not merge and do not enable auto-merge.
+- The review findings are addressed on the open PR.  Do not merge and do not enable auto-merge.
 - `verify` CI is the gate.  Merge `origin/main` if it moves, without a force-push.
 
 ## Zero-code findings

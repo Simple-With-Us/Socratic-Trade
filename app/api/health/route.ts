@@ -294,6 +294,8 @@ async function assembleHealth(): Promise<HealthPayload> {
     checks.quoteProviderBreakers = listOpenApiCircuitBreakers();
   } catch {
     checks.quoteProviderBreakers = [];
+    // Public probe: a fixed marker, not the exception text.
+    checks.quoteProviderBreakersError = "unavailable";
   }
 
   // Surface vector-store and embed-provider configuration status. After the Qdrant
