@@ -250,8 +250,8 @@ final class AppLiveSessionResumeTests: XCTestCase {
 }
 
 /// Returns the task result, or nil if it is still unfinished after the bound.
-/// The waiter is abandoned rather than awaited, so a stuck continuation cannot
-/// hold the suite open.
+/// The waiter is cancelled when the bound wins, so it does not stay suspended
+/// for the rest of the process.
 @MainActor
 private func boundedValue<T: Sendable>(
     of task: Task<T, Never>,
@@ -259,12 +259,13 @@ private func boundedValue<T: Sendable>(
 ) async -> T? {
     let once = OnceResume<T>()
     return await withCheckedContinuation { continuation in
-        Task { @MainActor in
+        let waiter = Task { @MainActor in
             let value = await task.value
             once.resume(continuation, with: value)
         }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: nanoseconds)
+            waiter.cancel()
             once.resume(continuation, with: nil)
         }
     }
