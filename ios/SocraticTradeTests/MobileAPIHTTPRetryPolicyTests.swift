@@ -79,10 +79,24 @@ final class MobileAPIHTTPRetryPolicyTests: XCTestCase {
     }
 
     func testExhaustedServerErrorCaptureFilter() {
-        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 404, captureFailures: true))
-        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 500, captureFailures: false))
-        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 500, captureFailures: true))
-        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 503, captureFailures: false))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 404))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 502))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 503))
+        XCTAssertTrue(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 504))
+        // Automatic sentry-cocoa capture owns these; a manual capture would duplicate it.
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 500))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 501))
+        XCTAssertFalse(MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: 505))
+    }
+
+    func testManualAndAutomaticCaptureNeverOverlap() {
+        for status in 400...599 {
+            XCTAssertFalse(
+                MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: status)
+                    && MobileAPIHTTPRetryPolicy.shouldReportAutomaticFailedRequest(statusCode: status),
+                "status \(status) would be captured twice"
+            )
+        }
     }
 
     func testNetworkRetryOnIdempotentReads() {

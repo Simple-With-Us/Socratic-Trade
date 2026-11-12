@@ -58,10 +58,11 @@ enum MobileAPIHTTPRetryPolicy {
         isIdempotentRead(method: method) && attemptIndex < maxRetries
     }
 
-    /// Manual capture after retries exhaust — never 4xx; transient gateway always; other 5xx when enabled.
-    static func shouldCaptureExhaustedServerError(statusCode: Int, captureFailures: Bool) -> Bool {
-        guard statusCode >= 500 else { return false }
-        if transientGatewayStatusCodes.contains(statusCode) { return true }
-        return captureFailures
+    /// Manual capture after retries exhaust — only the transient gateway codes (502–504).
+    /// sentry-cocoa's automatic failed-request capture still reports 500–501 and 505–599
+    /// (`failedRequestStatusCodes` in SentryTelemetry), so capturing those manually too would
+    /// emit two events for one response.  The two sets are complementary by construction.
+    static func shouldCaptureExhaustedServerError(statusCode: Int) -> Bool {
+        transientGatewayStatusCodes.contains(statusCode)
     }
 }

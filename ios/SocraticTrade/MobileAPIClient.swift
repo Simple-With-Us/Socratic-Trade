@@ -123,9 +123,13 @@ struct MobileAPIClient {
         return snap
     }
 
+    /// `maxTransientRetries` defaults to 0 because `MobileStore.fetchSnapshotWithNetworkRetry`
+    /// already owns the snapshot retry budget (two attempts, `generation` checked between them).
+    /// Nesting the transport retry inside it would allow up to six requests and ~270s pending.
     func snapshotData(
         timeout: TimeInterval = 30,
-        captureFailures: Bool = true
+        captureFailures: Bool = true,
+        maxTransientRetries: Int = 0
     ) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
         // A shared URL cache can replay the previous account after a switch or sign-out.
@@ -133,7 +137,11 @@ struct MobileAPIClient {
         req.timeoutInterval = timeout
         // Retrying callers pass captureFailures: false and report only the terminal
         // failure, so a recovered transient does not mint a Sentry issue per attempt.
-        let data = try await successfulResponseData(for: req, captureFailures: captureFailures)
+        let data = try await successfulResponseData(
+            for: req,
+            captureFailures: captureFailures,
+            maxTransientRetries: maxTransientRetries
+        )
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
             return (snap, data)
@@ -201,10 +209,35 @@ struct MobileAPIClient {
         var req = request(path: "/api/scan")
         req.timeoutInterval = Self.marketScanTimeout
         let endpoint = "/api/scan"
+        let (data, response) = try await marketScanAttempts(for: req, endpoint: endpoint)
+        do {
+            try Self.requireSuccess(response, body: data)
+        } catch let error as MobileAPIError {
+            if case .serverError(let statusCode, _) = error,
+               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
+                SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
+            }
+            throw error
+        }
+        do {
+            return try JSONDecoder().decode(MarketScanResponse.self, from: data)
+        } catch {
+            throw MobileAPIError.decoding(error)
+        }
+    }
+
+    /// Runs the /api/scan retry loop and returns the final attempt's data and response.
+    /// Each attempt binds its own `let` values inside the loop body, so the results are
+    /// initialized exactly once per iteration (a `let` declared outside the loop cannot be
+    /// assigned from inside it).
+    private func marketScanAttempts(
+        for req: URLRequest,
+        endpoint: String
+    ) async throws -> (Data, URLResponse) {
         var attemptIndex = 0
-        let data: Data
-        let response: URLResponse
         while true {
+            let data: Data
+            let response: URLResponse
             do {
                 (data, response) = try await session.data(for: req)
             } catch is CancellationError {
@@ -248,24 +281,7 @@ struct MobileAPIClient {
                 try await Task.sleep(nanoseconds: delay)
                 continue
             }
-            break
-        }
-        do {
-            try Self.requireSuccess(response, body: data)
-        } catch let error as MobileAPIError {
-            if case .serverError(let statusCode, _) = error,
-               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(
-                   statusCode: statusCode,
-                   captureFailures: true
-               ) {
-                SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
-            }
-            throw error
-        }
-        do {
-            return try JSONDecoder().decode(MarketScanResponse.self, from: data)
-        } catch {
-            throw MobileAPIError.decoding(error)
+            return (data, response)
         }
     }
 
@@ -689,10 +705,7 @@ struct MobileAPIClient {
                 try Self.requireSuccess(response, body: data)
             } catch let error as MobileAPIError {
                 if case .serverError(let statusCode, _) = error,
-                   MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(
-                       statusCode: statusCode,
-                       captureFailures: captureFailures
-                   ) {
+                   MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
                     SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
                 }
                 throw error
