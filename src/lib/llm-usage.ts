@@ -167,9 +167,12 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "grok-4.6": [2, 6],
   "grok-latest": [2, 6],
   "claude-fable-latest": [10, 50],
-  "claude-opus-latest": [4.5, 22.5],
-  "claude-opus-5-5": [4.5, 22.5],
-  "claude-opus-5.5": [4.5, 22.5],
+  // Verified 2026-11-13: Claude Opus 5.5 base rates, USD per million tokens.
+  // https://platform.claude.com/docs/en/models/opus-5-5/overview
+  // OpenRouter /api/v1/models agrees for anthropic/claude-opus-5.5 and ~anthropic/claude-opus-latest.
+  "claude-opus-latest": [4, 20],
+  "claude-opus-5-5": [4, 20],
+  "claude-opus-5.5": [4, 20],
   "claude-opus-5": [5, 25],
   "claude-sonnet-5": [2, 10], // was [3, 15] — real price is $2/$10 (verified 2026-09-18)
   "claude-sonnet-4-6": [2, 10], // was [3, 15] — kept in sync with claude-sonnet-5 above
