@@ -1,15 +1,30 @@
-import { getPolicy } from "@/lib/db";
+import { brokerReadOrInternalError, jsonError, resolveRequestUserIdOrApiError } from "@/lib/api-error";
 import { getBrokerGateway } from "@/lib/broker";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
+import { getPolicy } from "@/lib/db";
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
+// Permissive on purpose: TypeScript types do not validate runtime broker payloads, but a strict
+// field schema would 502 on a valid order that is missing an optional or newly added field.
+const equityOrdersResponseSchema = z.array(z.record(z.string(), z.unknown()));
+
 export async function GET(request: Request) {
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
-  const policy = getPolicy(userId);
-  const accountNumber = policy.accountNumber;
-  if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
-  return NextResponse.json(await getBrokerGateway(policy, userId).getEquityOrders(accountNumber));
+  try {
+    const policy = getPolicy(userId);
+    const accountNumber = policy.accountNumber;
+    if (!accountNumber) return new NextResponse("No selected account.", { status: 400 });
+    const parsed = equityOrdersResponseSchema.safeParse(
+      await getBrokerGateway(policy, userId).getEquityOrders(accountNumber)
+    );
+    if (!parsed.success) {
+      return jsonError(502, "broker_unavailable", "Broker returned a malformed order list.");
+    }
+    return NextResponse.json(parsed.data);
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }

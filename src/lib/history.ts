@@ -45,7 +45,7 @@ import { recordProviderCall } from "./usage-monitor-push";
 import { massiveApiBase, reserveMassiveRestCall } from "./market-signals/massive";
 import { fetchRobinhoodHistoricals } from "./robinhood";
 import { appAClosesToBars, congressReadsEnabled, getCongressTradeClient } from "./api-clients/congress";
-import { retryAfterDelayMs } from "./network-errors";
+import { isAbortOrTimeoutError, isTransientNetworkError, retryAfterDelayMs } from "./network-errors";
 import { cancelResponseBody } from "./response-body";
 import { BROWSER_UA, politeFetch, politeFetchJson, sleep } from "./web-sources/http";
 import { admitProviderRequests, withProviderLimit } from "./provider-rate-limit";
@@ -192,6 +192,62 @@ async function fetchYahooChartJson<T>(
   throw new Error("HTTP 429 for yahoo chart (exhausted retries)");
 }
 
+const HISTORY_PROVIDER_LABELS: Record<string, string> = {
+  roic: "ROIC",
+  massive: "Massive",
+  alpaca: "Alpaca",
+  tradier: "Tradier",
+  twelvedata: "Twelve Data",
+  tiingo: "Tiingo",
+  marketstack: "Marketstack",
+  "yahoo-finance": "Yahoo Finance",
+  "congress.trade": "Congress.Trade"
+};
+
+/**
+ * A history provider failure with no upstream payload.  Provider exceptions can carry response
+ * bodies, headers, or credential-bearing URLs (ROIC/Twelve Data put the API key in the query
+ * string), so the cascade only ever logs or rethrows this stable shape: provider id, HTTP status
+ * when one was observed, and a timeout/transport marker.  `status` and the "HTTP NNN" / "timed out"
+ * / "fetch failed" message text keep the error classifiable by `isBrokerGatewayError` and
+ * `brokerReadError` (broker_timeout / broker_auth_failed / broker_unavailable).
+ */
+export class HistoryProviderError extends Error {
+  readonly provider: string;
+  readonly status?: number;
+
+  constructor(provider: string, detail: { status?: number; timeout?: boolean; transport?: boolean } = {}) {
+    const label = HISTORY_PROVIDER_LABELS[provider] ?? "History provider";
+    const suffix = detail.timeout
+      ? " (timed out)"
+      : detail.status !== undefined
+        ? ` (HTTP ${detail.status})`
+        : detail.transport
+          ? " (fetch failed)"
+          : "";
+    super(`${label} history request failed${suffix}`);
+    // A timeout keeps the TimeoutError name so isAbortOrTimeoutError classifies it as broker_timeout.
+    this.name = detail.timeout ? "TimeoutError" : "HistoryProviderError";
+    this.provider = provider;
+    if (detail.status !== undefined) this.status = detail.status;
+  }
+}
+
+/** Replace a raw provider exception with a payload-free {@link HistoryProviderError}. */
+export function toHistoryProviderError(provider: string, error: unknown): HistoryProviderError {
+  if (error instanceof HistoryProviderError) return error;
+  if (isAbortOrTimeoutError(error)) return new HistoryProviderError(provider, { timeout: true });
+  const rawStatus = (error as { status?: unknown } | null)?.status;
+  let status = typeof rawStatus === "number" && Number.isInteger(rawStatus) ? rawStatus : undefined;
+  if (status === undefined && error instanceof Error) {
+    const match = error.message.match(/\bHTTP\s+(\d{3})\b/i);
+    if (match) status = Number(match[1]);
+  }
+  if (status !== undefined && (status < 100 || status > 599)) status = undefined;
+  if (status !== undefined) return new HistoryProviderError(provider, { status });
+  return new HistoryProviderError(provider, { transport: isTransientNetworkError(error) });
+}
+
 /**
  * Evaluates whether a series of daily OHLC bars is fresh: the latest bar must include the most
  * recently completed US equity trading session (session-counted, not calendar days).
@@ -286,7 +342,8 @@ function persistEodBarsToCache(symbol: string, bars: OHLCBar[]): void {
  * served with no network only when it reaches `startDate`, or when a prior Yahoo
  * `range=max` response confirmed the listing starts later.  A 2y cache with no
  * such marker cannot block a deep Yahoo fetch. Returns the first source that yields ≥2 bars,
- * or null (never fabricated).
+ * an empty array when a live provider confirmed there is no usable series, or null when
+ * providers failed or were unavailable (never fabricated).
  * ROIC is operator-key only (ROIC_API_KEY); CT (App A) never holds a ROIC key — it
  * pulls via ST market-read peer routes after ST has cached the series.
  */
@@ -302,10 +359,14 @@ export async function fetchDailyOHLC(
      *  fetched on a Friday night is cached until Monday's open (expiresAtRespectingMarketClose), so
      *  without it every retry would be served the same pinned bars and never ask a provider. */
     bypassMemoryCache?: boolean;
+    /** When every attempted tier failed (none confirmed an empty series), throw the last
+     *  payload-free {@link HistoryProviderError} instead of resolving null, so a route can
+     *  answer broker_timeout / broker_auth_failed rather than a generic outage. */
+    throwOnProviderFailure?: boolean;
   },
 ): Promise<OHLCBar[] | null> {
   const symbol = normalizeSymbol(rawSymbol);
-  if (!symbol) return null;
+  if (!symbol) return [];
 
   const keySources: Record<(typeof KEYED_HISTORY_SERVICES)[number], { key?: string; source: ApiKeySource }> = {
     massive: resolveApiKeyWithSource("massive", userId),
@@ -507,6 +568,8 @@ export async function fetchDailyOHLC(
   // (Cluster B H2): hold the first short series as a candidate and keep
   // cascading. It is returned only when no tier covers the requested start.
   let deepShortCandidate: { source: LiveSource; bars: OHLCBar[] } | undefined;
+  let sawConfirmedEmpty = false;
+  let lastProviderError: HistoryProviderError | undefined;
   for (const source of sources) {
     let liveBars: OHLCBar[] | null;
     try {
@@ -514,8 +577,15 @@ export async function fetchDailyOHLC(
     } catch (error) {
       // A pre-flight throw in one tier must not abort the whole cascade (H6), but a
       // failed provider must be distinguishable from genuinely unavailable history.
-      console.error(`[history] ${source.sourceId} failed for ${symbol}:`, error);
+      // Log only the payload-free shape: raw provider errors can carry bodies or keyed URLs.
+      lastProviderError = toHistoryProviderError(source.sourceId, error);
+      console.error(`[history] ${source.sourceId} failed for ${symbol}: ${lastProviderError.message}`);
       continue;
+    }
+    // A live provider that answered with 0–1 bars confirmed there is no usable series.
+    // null means the tier was skipped (no key, disabled, rate-limited, or a cache miss).
+    if (Array.isArray(liveBars) && liveBars.length < 2) {
+      sawConfirmedEmpty = true;
     }
     if (liveBars && liveBars.length >= 2) {
       if (
@@ -567,6 +637,11 @@ export async function fetchDailyOHLC(
   }
 
   bestEffortSqliteWrite(() => recordMarketDataDemand({ kind: "history", symbol, userId, now }));
+  // A tier that confirmed no usable series wins over a failure in an unrelated tier: that is
+  // "no history" (200 empty), not an outage.  Only a cascade where no tier confirmed anything
+  // is unavailable: null, or the last provider error when the caller asked for it.
+  if (sawConfirmedEmpty) return [];
+  if (lastProviderError && opts?.throwOnProviderFailure) throw lastProviderError;
   return null;
 }
 
@@ -807,11 +882,11 @@ async function fetchRoic(symbol: string, startDate: string, key?: string, usageL
     const byDate = new Map<string, OHLCBar>();
     for (const b of all) byDate.set(String(b.time), b);
     const bars = [...byDate.values()].sort((a, b) => String(a.time).localeCompare(String(b.time)));
-    return bars.length >= 2 ? bars : null;
-  } catch (err) {
-    if (err instanceof CircuitOpenError) return null;
+    return bars;
+  } catch (error) {
+    if (error instanceof CircuitOpenError) return null;
     recordProviderCall("roic", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw toHistoryProviderError("roic", error);
   }
 }
 
@@ -832,10 +907,10 @@ async function fetchMassive(symbol: string, startDate: string, key?: string, usa
       if (typeof r.c !== "number" || !Number.isFinite(r.c) || typeof r.t !== "number") continue;
       bars.push({ time: r.t, open: numOrUndef(r.o), high: numOrUndef(r.h), low: numOrUndef(r.l), close: r.c, volume: numOrUndef(r.v), vwap: numOrUndef(r.vw) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("massive", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw toHistoryProviderError("massive", error);
   }
 }
 
@@ -953,10 +1028,10 @@ async function fetchAlpacaDaily(
       if (!pageToken) break;
     }
     recordProviderCall("alpaca", { service: "market-data", ok: true });
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("alpaca", { service: "market-data", ok: false });
-    return null;
+    throw toHistoryProviderError("alpaca", error);
   }
 }
 
@@ -974,10 +1049,10 @@ async function fetchTradier(symbol: string, startDate: string, key: string | und
       if (typeof d.close !== "number" || !Number.isFinite(d.close) || !d.date) continue;
       bars.push({ time: d.date, open: numOrUndef(d.open), high: numOrUndef(d.high), low: numOrUndef(d.low), close: d.close, volume: numOrUndef(d.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
+    return bars;
+  } catch (error) {
     recordProviderCall("tradier", { service: "market-data", ok: false });
-    return null;
+    throw toHistoryProviderError("tradier", error);
   }
 }
 
@@ -1034,40 +1109,49 @@ async function fetchTwelveData(symbol: string, startDate: string, key?: string, 
   const credKey = await apiKeyFingerprint(key);
   if (paidQuoteBreakerSkip("twelvedata", lane, credKey)) return null;
   if (admitProviderRequests("twelvedata", credKey, 1) < 1) return null;
+  const url =
+    `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
+    `&interval=1day&start_date=${startDate}&order=ASC&outputsize=5000&apikey=${encodeURIComponent(key)}`;
+  // Each request is recorded exactly once: the transport catch and the payload check are
+  // separate, so a rejected payload is never counted again by a surrounding catch.
+  let parsed: TwelveDataTimeSeries;
   try {
-    const url =
-      `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}` +
-      `&interval=1day&start_date=${startDate}&order=ASC&outputsize=5000&apikey=${encodeURIComponent(key)}`;
-    const parsed = await readPaidQuoteJson("twelvedata", lane, url, TwelveDataTimeSeriesSchema, { Accept: "application/json" }, credKey);
-    if (parsed.status === "error" || !Array.isArray(parsed.values)) {
-      const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
-      const hold = twelveDataBodyHold(message);
-      if (hold?.status === 402) {
-        observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
-      }
-      recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
-      return null;
-    }
-    const bars: OHLCBar[] = [];
-    for (const row of parsed.values) {
-      const close = Number(row.close);
-      if (!row.datetime || !Number.isFinite(close)) continue;
-      bars.push({
-        time: row.datetime.slice(0, 10),
-        open: numOrUndef(Number(row.open)),
-        high: numOrUndef(Number(row.high)),
-        low: numOrUndef(Number(row.low)),
-        close,
-        volume: numOrUndef(Number(row.volume))
-      });
-    }
-    recordProviderCall("twelvedata", { service: "market-data", ok: bars.length >= 2, label: usageLabel });
-    return bars.length >= 2 ? bars : null;
-  } catch (err) {
-    if (err instanceof CircuitOpenError) return null;
+    parsed = await readPaidQuoteJson("twelvedata", lane, url, TwelveDataTimeSeriesSchema, { Accept: "application/json" }, credKey);
+  } catch (error) {
+    if (error instanceof CircuitOpenError) return null;
     recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw toHistoryProviderError("twelvedata", error);
   }
+  if (parsed.status === "error") {
+    // Twelve Data reports credit exhaustion as HTTP 200 + status "error"; open the 402 hold so
+    // later calls skip, then fail this one with a payload-free error.
+    const message = "message" in parsed && typeof parsed.message === "string" ? parsed.message : "";
+    const hold = twelveDataBodyHold(message);
+    if (hold?.status === 402) {
+      observePaidQuoteStatus("twelvedata", lane, 402, undefined, Date.now(), credKey);
+    }
+    recordProviderCall("twelvedata", { service: "market-data", ok: false, label: usageLabel });
+    throw new HistoryProviderError("twelvedata");
+  }
+  if (!Array.isArray(parsed.values)) {
+    recordProviderCall("twelvedata", { service: "market-data", ok: true, label: usageLabel });
+    return [];
+  }
+  const bars: OHLCBar[] = [];
+  for (const row of parsed.values) {
+    const close = Number(row.close);
+    if (!row.datetime || !Number.isFinite(close)) continue;
+    bars.push({
+      time: row.datetime.slice(0, 10),
+      open: numOrUndef(Number(row.open)),
+      high: numOrUndef(Number(row.high)),
+      low: numOrUndef(Number(row.low)),
+      close,
+      volume: numOrUndef(Number(row.volume))
+    });
+  }
+  recordProviderCall("twelvedata", { service: "market-data", ok: bars.length >= 2, label: usageLabel });
+  return bars;
 }
 
 interface TiingoPriceRow {
@@ -1121,11 +1205,11 @@ async function fetchTiingo(symbol: string, startDate: string, key?: string, usag
       }
       bars.push({ time: r.date.slice(0, 10), open: o, high: h, low: l, close, volume: numOrUndef(r.adjVolume ?? r.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch (err) {
-    if (err instanceof CircuitOpenError) return null;
+    return bars;
+  } catch (error) {
+    if (error instanceof CircuitOpenError) return null;
     recordProviderCall("tiingo", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw toHistoryProviderError("tiingo", error);
   }
 }
 
@@ -1157,11 +1241,11 @@ async function fetchMarketstack(symbol: string, key?: string, usageLabel?: strin
       if (typeof r.close !== "number" || !Number.isFinite(r.close) || !r.date) continue;
       bars.push({ time: r.date, open: numOrUndef(r.open), high: numOrUndef(r.high), low: numOrUndef(r.low), close: r.close, volume: numOrUndef(r.volume) });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch (err) {
-    if (err instanceof CircuitOpenError) return null;
+    return bars;
+  } catch (error) {
+    if (error instanceof CircuitOpenError) return null;
     recordProviderCall("marketstack", { service: "market-data", ok: false, label: usageLabel });
-    return null;
+    throw toHistoryProviderError("marketstack", error);
   }
 }
 
@@ -1181,7 +1265,7 @@ async function fetchYahoo(
     // Fall back to raw close if adjclose is absent or length-mismatched.
     const adjCloseArr = result?.indicators?.adjclose?.[0]?.adjclose ?? [];
     const useAdjusted = adjCloseArr.length === ts.length;
-    if (ts.length === 0 || rawClose.length === 0) return null;
+    if (ts.length === 0 || rawClose.length === 0) return [];
     const bars: OHLCBar[] = [];
     for (let i = 0; i < ts.length; i++) {
       const rawC = rawClose[i] ?? null;
@@ -1209,9 +1293,9 @@ async function fetchYahoo(
         volume: numOrUndef(q?.volume?.[i])
       });
     }
-    return bars.length >= 2 ? bars : null;
-  } catch {
-    return null;
+    return bars;
+  } catch (error) {
+    throw toHistoryProviderError("yahoo-finance", error);
   }
 }
 
@@ -1282,7 +1366,7 @@ async function fetchAppAHistory(symbol: string): Promise<OHLCBar[] | null> {
       closes = resp?.closes ?? [];
     }
   } catch (err) {
-    // Ignore error, fallback logic kicks in
+    throw toHistoryProviderError("congress.trade", err);
   }
   const bars = appAClosesToBars(closes);
   return bars.length >= 2 ? bars : null;

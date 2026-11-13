@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
-import { clearHistoryCache, fetchDailyOHLC, parseRoicStockPrices, parseStooqCsv, toBusinessDay } from "../src/lib/history";
+import { clearHistoryCache, fetchDailyOHLC, HistoryProviderError, parseRoicStockPrices, parseStooqCsv, toBusinessDay } from "../src/lib/history";
+import { recordProviderCall } from "../src/lib/usage-monitor-push";
 import { upsertHistoryCacheEod } from "../src/lib/history-cache";
 import { latestCompletedTradingSessionEtKey } from "../src/lib/market-hours";
 import { clearMassiveRestBudgetForTests } from "../src/lib/market-signals/massive";
@@ -10,6 +11,12 @@ import { clearMarketDataDemandsForTests, deleteInternalSetting, deleteUserApiKey
 import { subscribeDashboardEvents, type DashboardEvent } from "../src/lib/events";
 import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
 import { apiKeyFingerprint } from "../src/lib/data-providers";
+
+// Pass-through spy so provider usage accounting (one record per request) is observable.
+vi.mock("../src/lib/usage-monitor-push", async (importActual) => {
+  const actual = await importActual<typeof import("../src/lib/usage-monitor-push")>();
+  return { ...actual, recordProviderCall: vi.fn(actual.recordProviderCall) };
+});
 
 const historyTestDb = `file:${join(tmpdir(), `agentic-history-cache-test-${randomUUID()}.db`)}`;
 const originalRoicApiKey = process.env.ROIC_API_KEY;
@@ -556,6 +563,24 @@ describe("fetchDailyOHLC", () => {
     expect(yahooCalls).toHaveLength(4); // 1 initial attempt + 3 retries, all 429 — then gives up honestly
   });
 
+  it("returns an empty array, not null, when Yahoo confirms there is no usable series", async () => {
+    const emptyYahoo = JSON.stringify({
+      chart: { result: [{ timestamp: [], indicators: { quote: [{ close: [] }] } }] }
+    });
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("query1.finance.yahoo.com")
+        ? new Response(emptyYahoo, { status: 200 })
+        : new Response("unexpected source", { status: 500 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bars = await fetchDailyOHLC("NOSUCH", Date.UTC(2026, 5, 18));
+    // Control: the Yahoo fixture was actually queried, and the removed Stooq tier was not.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("query1.finance.yahoo.com"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("stooq.com"))).toBe(false);
+    expect(bars).toEqual([]);
+  });
+
   it("does not expire a Saturday-written cache entry before Monday's open (LANE A weekend-stable TTL)", async () => {
     const fetchMock = vi.fn(async (url: string) =>
       String(url).includes("query1.finance.yahoo.com") ? new Response(yahooBody(60), { status: 200 }) : new Response("nope", { status: 404 })
@@ -705,7 +730,10 @@ describe("fetchDailyOHLC", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const bars = await fetchDailyOHLC("BBB");
-    expect(bars).toBeNull();
+    // Control: the Yahoo fixture was actually queried.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("query1.finance.yahoo.com"))).toBe(true);
+    // Yahoo answered with an empty chart: confirmed no usable series, not a provider outage.
+    expect(bars).toEqual([]);
     // Stooq must never even be called — its endpoint sits behind a proof-of-work bot wall.
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("stooq.com"))).toBe(false);
   });
@@ -713,6 +741,99 @@ describe("fetchDailyOHLC", () => {
   it("returns null when no source has data (never fabricates)", async () => {
     vi.stubGlobal("fetch", async () => new Response("nope", { status: 404 }));
     expect(await fetchDailyOHLC("ZZZ")).toBeNull();
+  });
+
+  it("returns [] when one tier confirms an empty series even though another tier failed", async () => {
+    connectTradier("tradier-tkey");
+    const emptyYahoo = JSON.stringify({ chart: { result: [{ timestamp: [], indicators: { quote: [{ close: [] }] } }] } });
+    const mixed = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("query1.finance.yahoo.com")) return new Response(emptyYahoo, { status: 200 });
+      return new Response("tradier down", { status: 503 });
+    });
+    vi.stubGlobal("fetch", mixed);
+    const bars = await fetchDailyOHLC("EMPTYMIX", Date.UTC(2026, 5, 18), undefined, { throwOnProviderFailure: true });
+    expect(mixed.mock.calls.some(([url]) => String(url).includes("api.tradier.com"))).toBe(true);
+    expect(bars).toEqual([]);
+
+    // Control: when no tier confirms an empty series, the same Tradier failure is an outage.
+    clearHistoryCache();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));
+    await expect(fetchDailyOHLC("EMPTYMIX", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+  });
+
+  it("surfaces a classifiable provider error when every tier fails and the caller asks for it", async () => {
+    connectTradier("tradier-tkey");
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("api.tradier.com")
+        ? new Response("unauthorized", { status: 401 })
+        : new Response("nope", { status: 404 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const error = await fetchDailyOHLC("AUTHFAIL", Date.UTC(2026, 5, 18), undefined, { throwOnProviderFailure: true }).catch(
+      (e: unknown) => e
+    );
+    expect(error).toBeInstanceOf(HistoryProviderError);
+    expect(error).toMatchObject({ provider: "tradier", status: 401, message: "Tradier history request failed (HTTP 401)" });
+
+    // Control: without the option the cascade keeps resolving null for existing callers.
+    clearHistoryCache();
+    await expect(fetchDailyOHLC("AUTHFAIL", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+  });
+
+  it("never logs or rethrows raw ROIC provider errors (keyed URL, upstream body)", async () => {
+    process.env.ROIC_API_KEY = "roic-secret-key";
+    process.env.ROIC_HISTORY_ENABLED = "on";
+    const fetchMock = vi.fn(async (url: string) =>
+      String(url).includes("api.roic.ai")
+        ? new Response("upstream body roic-secret-key", { status: 403 })
+        : new Response("nope", { status: 404 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const error = await fetchDailyOHLC("ROICFAIL", Date.UTC(2026, 5, 18), undefined, { throwOnProviderFailure: true }).catch(
+        (e: unknown) => e
+      );
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("api.roic.ai"))).toBe(true);
+      expect(error).toBeInstanceOf(HistoryProviderError);
+      expect((error as Error).message).toBe("ROIC history request failed (HTTP 403)");
+      const logged = consoleError.mock.calls.map((args) => args.map((arg) => String(arg)).join(" "));
+      expect(logged.some((line) => line.includes("roic failed for ROICFAIL"))).toBe(true);
+      for (const line of logged) {
+        expect(line).not.toContain("roic-secret-key");
+        expect(line).not.toContain("api.roic.ai");
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("records a rejected Twelve Data response exactly once", async () => {
+    upsertUserApiKey("local", "twelvedata", "twelve-hist-key");
+    const record = vi.mocked(recordProviderCall);
+    const twelveCalls = () => record.mock.calls.filter(([provider]) => provider === "twelvedata");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).includes("api.twelvedata.com/time_series")
+          ? new Response(JSON.stringify({ status: "error", code: 401, message: "bad key" }), { status: 200 })
+          : new Response("nope", { status: 500 })
+      )
+    );
+    record.mockClear();
+    await expect(fetchDailyOHLC("TDERR", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+    expect(twelveCalls()).toHaveLength(1);
+    expect(twelveCalls()[0]?.[1]).toMatchObject({ ok: false });
+
+    // A transport failure is also recorded once.
+    clearHistoryCache();
+    resetProviderQuotaState("twelvedata");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));
+    record.mockClear();
+    await expect(fetchDailyOHLC("TDERR", Date.UTC(2026, 5, 18))).resolves.toBeNull();
+    expect(twelveCalls()).toHaveLength(1);
+    expect(twelveCalls()[0]?.[1]).toMatchObject({ ok: false });
   });
 
   it("retries one paid-history 5xx and one 429 before opening the lane", async () => {

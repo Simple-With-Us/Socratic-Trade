@@ -12,6 +12,7 @@
 
 import type * as SentryNs from "@sentry/nextjs";
 import { PROXY_GATE_HOLD_ALERT_MS } from "./proxy-gate-alert";
+import { safeErrorMessage } from "./telemetry-sanitize";
 
 type SentryMod = typeof SentryNs;
 type LogAttrs = Record<string, string | number | boolean | null | undefined>;
@@ -201,3 +202,36 @@ export function logError(message: string, attributes?: LogAttrs): void {
     }
   });
 }
+
+/** Build a Sentry-safe Error: sanitized message only, original name, no raw `cause`. */
+export function sanitizedCapturedError(error: unknown): Error {
+  const message = safeErrorMessage(error);
+  const captured = new Error(message);
+  if (error instanceof Error) {
+    captured.name = error.name;
+    if (error.stack) {
+      captured.stack = error.message ? error.stack.split(error.message).join(message) : error.stack;
+    }
+  }
+  return captured;
+}
+
+/** Capture a handled exception without sending the raw error object to Sentry. */
+export function captureHandledException(error: unknown, context: string, attributes?: LogAttrs): void {
+  const captured = sanitizedCapturedError(error);
+  // Preserve the caller's `error` attribute (already sanitized once by reportHandledError)
+  // so Sentry matches console.error and the truncation count stays correct.
+  const extra = compactAttrs({ context, ...attributes });
+  const errorName = captured.name || undefined;
+  void loadSentry().then((Sentry) => {
+    try {
+      Sentry?.captureException(captured, {
+        tags: { handled: "true", ...(errorName ? { error_name: errorName } : {}) },
+        extra
+      });
+    } catch {
+      // Fail-soft: reporting must never crash the request
+    }
+  });
+}
+
