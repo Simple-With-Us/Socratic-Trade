@@ -3,6 +3,17 @@
 **What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
 
 **Next.**  PR is open for review.  This lane does not merge.  CI runs the full gate.
+## 2026-11-12 CURSOR — ST-4605 iOS app lock
+
+**What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
+
+**Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled only in Debug, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
+
+## 2026-11-11 CURSOR — ST-4596 Keychain session cookies (#5131)
+
+**What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
+
+**Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
 ## 2026-11-12 gb-trader — ST-4622 scheduled Litestream B2 restore drill
 
 **What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Second Kody round: the token file must be a non-symlink `st.*` service token (20-2048 chars, no whitespace); inherited process-env AWS/Sentry creds are dropped unless `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1`; `INFISICAL_PROJECT_ID` is always required and passed as `--projectId`; token-file failures alert; every status carries a `runId`; the installer strips the `INFISICAL_ST_*` pair and `export ` prefixes; the notify-off helper traps HUP/INT/TERM and has `--cleanup`.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
@@ -88,21 +99,25 @@
 **What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
 
 **Next.**  PR open; `verify` green required.  Jay may add the job to branch protection later.  Do not merge from agent.
+
 ## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
 
 **What.**  Keyless and global provider timeouts were paging as hard connection failures.  Nasdaq delayed screener, congress-nasdaq-screener, finnhub, and alpaca-broker (Sentry SOCRATIC-TRADE-3K, 3M, 3R, and 3D) logged a named timeout that matched neither the expected-limit shapes nor the ST-3079 transport-blip shapes.  `db-health` now records AbortError, TimeoutError, undici header and body timeouts, "timed out waiting for", and broker-call timeouts as transient-network.  They warn, use the short transient cooldown, and escalate to error once the streak passes `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare "This operation was aborted" stays an expected limit.  Quote, scan, screener, order, and strategy fetch behavior is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4608-provider-health-timeout-class.md`.
 
 **Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  The budget-cancel test reads the `env` lane it writes, after one success, so five hard rows would show the lane stopped.
+
 ## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
 
 **What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
 
 **Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+
 ## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
 
 **What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
 
 **Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
+
 ## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
 
 **What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
@@ -114,6 +129,7 @@
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
 
 **Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+
 ## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
 
 **What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  The affected production deployment on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
