@@ -12,7 +12,7 @@
  *  - A failed refresh is a non-blocking notice; the last good scan stays up.
  *  - Missing data renders as "—"; P/E's "n/a" means negative/zero earnings. */
 
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useRef, type KeyboardEvent } from "react";
 import { RefreshCw } from "lucide-react";
 import type { MarketScan } from "@/lib/types";
 import type { CongressScoreVerdictRead } from "@/lib/congress-score-gate";
@@ -22,6 +22,7 @@ import { activeConnectedAccount } from "../lib/derive";
 import { cx, fmtExact, EM_DASH } from "../lib/format";
 import { CONSOLE_PAGE_WIDTH } from "../lib/page-width";
 import { formatScanCandidateBreakdown, scanCandidateBreakdown } from "../lib/scan";
+import { useSessionChoice } from "../lib/useSessionChoice";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Btn, Card, Chip, Empty, type ChipTone } from "../ui/primitives";
 import { useToast } from "../ui/toast";
@@ -31,7 +32,8 @@ import { asFullMarketScan, newestScan, useLiveScan } from "./use-live-scan";
 import { destinationLabel } from "../components/nav";
 import { WeeklyDigestCard } from "../components/weekly-digest-card";
 
-type Tab = "scan" | "smart";
+const SCAN_TABS = ["scan", "smart"] as const;
+type Tab = (typeof SCAN_TABS)[number];
 
 export default function ScanPage() {
   const { snapshot } = useConsoleData();
@@ -45,7 +47,7 @@ export default function ScanPage() {
     ? `${activeConnectedAccount(snapshot)?.id ?? ""}:${snapshot.policy.accountNumber ?? ""}`
     : null;
   const live = useLiveScan(scopeKey);
-  const [tab, setTab] = useState<Tab>("scan");
+  const [tab, setTab] = useSessionChoice<Tab>(scopeKey === null ? null : `console:scan:tab:${scopeKey}`, SCAN_TABS, "scan");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
 
   // Validate the run-captured scan before trusting it — historical/compact
