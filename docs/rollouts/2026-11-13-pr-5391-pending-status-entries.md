@@ -1,4 +1,4 @@
-# 2026-11-13 — ST-4622 pending STATUS/PLAN entries after #5391
+# 2026-11-13 — pending STATUS/PLAN cleanup after PR #5391
 
 ## Context & Objective
 
@@ -10,7 +10,7 @@ Marks the STATUS.md entries for ST-4622, ST-4611, ST-4618, ST-4633, ST-4631 and 
 
 - `STATUS.md`
 - `PLAN.md`
-- `docs/rollouts/2026-11-13-st-5391-pending-status-entries.md`
+- `docs/rollouts/2026-11-13-pr-5391-pending-status-entries.md`
 
 ## Decisions & Trade-offs
 
