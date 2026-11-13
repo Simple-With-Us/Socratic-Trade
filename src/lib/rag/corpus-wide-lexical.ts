@@ -160,18 +160,36 @@ function planCorpusWideLexicalQuery(
   const params: unknown[] = [symbol, matchQuery, symbol, ...visibleTenantScopes];
   const metadataFilters: string[] = [];
   const metadataFilterParams: string[] = [];
+  // Probe exact identity first. Managed keys have colon-delimited filing identities:
+  // enumerate their boundary-delimited substrings, then probe the filing PRIMARY KEY.
+  // This retains legacy prefix/infix matching without scanning every sec_filings row.
+  const secFilingForm = `
+      COALESCE(
+        (SELECT sf.form FROM sec_filings sf WHERE sf.accession = o.accession),
+        CASE WHEN instr(o.accession, ':') > 0 THEN (
+          WITH RECURSIVE boundaries(pos) AS (
+            VALUES(0)
+            UNION ALL
+            SELECT pos + instr(substr(o.accession, pos + 1), ':')
+            FROM boundaries
+            WHERE instr(substr(o.accession, pos + 1), ':') > 0
+          )
+          SELECT sf.form
+          FROM boundaries start
+          JOIN boundaries finish ON finish.pos > start.pos
+          JOIN sec_filings sf
+            ON sf.accession = substr(o.accession, start.pos + 1, finish.pos - start.pos - 1)
+          LIMIT 1
+        ) END
+      )`;
   const docTypes = Array.from(new Set(
     (options.docTypes ?? [])
       .filter((docType): docType is string => typeof docType === "string" && docType.trim().length > 0)
       .map((docType) => docType.trim().toLowerCase())
   ));
-  if (docTypes.length > 0) {
-    // Full-body 8-K ingestion mirrors chunks into FTS without creating a sec_filings row. Treat
-    // its authoritative occurrence source as the document type for filtering instead of dropping
-    // every otherwise-visible 8-K row on the NULL left join.
-    metadataFilters.push(`LOWER(TRIM(CASE WHEN o.source = 'sec-8k' THEN '8-k' ELSE sf.form END)) IN (${docTypes.map(() => "?").join(", ")})`);
-    metadataFilterParams.push(...docTypes);
-  }
+  // Materialize the resolved form once, then use it for filtering and projection.
+  // The filter still precedes the raw-result cap, so wrong-form hits cannot consume it.
+  const docTypeFilterSql = "LOWER(TRIM(CASE WHEN source = 'sec-8k' THEN '8-k' ELSE doc_type END))";
   if (options.source?.trim()) {
     metadataFilters.push("o.source = ?");
     metadataFilterParams.push(options.source.trim());
@@ -278,7 +296,7 @@ function planCorpusWideLexicalQuery(
     }
     params.push(asOf);
   }
-  params.push(rawLimit);
+  params.push(...docTypes, rawLimit);
 
   // Accession identity: production filing writers store managed document keys on
   // chunk_occurrences (e.g. `AAPL:000...:10-K` or `000...:1:main.html`) while some FTS
@@ -291,14 +309,9 @@ function planCorpusWideLexicalQuery(
         OR o.accession GLOB ('*:' || document_chunks_fts.accession || ':*')
         OR o.accession GLOB (document_chunks_fts.accession || ':*')
       )`;
-  const secFilingJoin = `
-      (
-        sf.accession = o.accession
-        OR o.accession GLOB ('*:' || sf.accession || ':*')
-        OR o.accession GLOB (sf.accession || ':*')
-      )`;
 
   const sql = `
+    WITH resolved_candidates AS MATERIALIZED (
     SELECT
       o.vector_id,
       document_chunks_fts.content_hash,
@@ -309,17 +322,18 @@ function planCorpusWideLexicalQuery(
       o.section,
       o.ordinal,
       o.accepted_at,
-      sf.form AS doc_type,
+      ${secFilingForm} AS doc_type,
       o.tenant_scope,
       owner_commit.user_id,
       bm25(document_chunks_fts) AS lexical_score
     FROM document_chunks_fts
-    INNER JOIN chunk_occurrences o
+    -- FTS matches drive indexed hash probes. An issuer-only probe repeats the full
+    -- issuer occurrence set per match on unanalyzed databases (quadratic broad queries).
+    CROSS JOIN chunk_occurrences o INDEXED BY idx_chunk_occurrences_hash
       ON o.content_hash = document_chunks_fts.content_hash
       AND o.symbol = document_chunks_fts.symbol
       AND o.source = document_chunks_fts.source
       AND ${accessionJoin}
-    LEFT JOIN sec_filings sf ON ${secFilingJoin}
     LEFT JOIN vector_ingest_commits owner_commit ON owner_commit.id = o.commit_id
     WHERE document_chunks_fts.symbol = ?
       AND document_chunks_fts.text MATCH ?
@@ -337,11 +351,14 @@ function planCorpusWideLexicalQuery(
       ${metadataFilters.length > 0 ? `AND ${metadataFilters.join(" AND ")}` : ""}
       ${receiptClause}
       ${pitClause}
+    )
+    SELECT * FROM resolved_candidates
+    ${docTypes.length > 0 ? `WHERE ${docTypeFilterSql} IN (${docTypes.map(() => "?").join(", ")})` : ""}
     ORDER BY
       lexical_score ASC,
-      CASE WHEN julianday(o.accepted_at) IS NULL THEN 1 ELSE 0 END ASC,
-      julianday(o.accepted_at) DESC,
-      o.vector_id ASC
+      CASE WHEN julianday(accepted_at) IS NULL THEN 1 ELSE 0 END ASC,
+      julianday(accepted_at) DESC,
+      vector_id ASC
     LIMIT ?
   `;
   return { sql, params, limit };
