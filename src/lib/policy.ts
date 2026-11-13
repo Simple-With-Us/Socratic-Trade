@@ -951,7 +951,8 @@ function taperedCrisisCap(cap: number, context: PolicyContext): number {
   if (!Number.isFinite(floor) || floor < 0) return cap;
 
   const tapered = cap * (1 - slope * Math.max(0, Math.min(1, severity)));
-  return Math.max(floor, Math.min(cap, tapered));
+  // An oversized configured floor must never loosen the original crisis cap.
+  return Math.min(cap, Math.max(floor, tapered));
 }
 
 // Typed-enum adoption (risk lane): classify the persisted regime label once via the shared source

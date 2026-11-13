@@ -394,6 +394,42 @@ describe("evaluateTradeProposal", () => {
     expect(decision.reasons.join(" ")).toContain("crisis/inverted-regime cap 5%");
   });
 
+  describe("opt-in severity taper preserves the base crisis cap", () => {
+    function severityDecision(floor: number, notional: number, enabled = true, degraded = false) {
+      return evaluateTradeProposal(
+        { ...proposal, entryMarketRegime: "Crisis (Extreme Volatility)", dollarAmount: notional },
+        {
+          ...context(notional),
+          regimeSeverity: { severity: 1, regime: "crisis", subScores: [], contributingSignals: ["vix", "breadth"], signalCount: 2, degraded },
+          policy: {
+            ...enabledPolicy,
+            maxOrderNotional: 2000, maxOrderPctOfNav: 100, maxDailyNotional: 5000,
+            maxSymbolExposurePct: 50,
+            tuning: { crisisMaxOpeningExposurePct: 10 },
+            riskRules: { severityTaperEnabled: enabled, severityTaperFloorPct: floor }
+          }
+        }
+      );
+    }
+    it("never lets an oversized taper floor authorize exposure above the original cap", () => {
+      const decision = severityDecision(20, 1200);
+      expect(decision.approved).toBe(false);
+      expect(decision.reasons.join(" ")).toContain("crisis/inverted-regime cap 10%");
+    });
+    it("still tightens the cap when the valid floor is below it", () => {
+      const decision = severityDecision(7, 800);
+      expect(decision.approved).toBe(false);
+      expect(decision.reasons.join(" ")).toContain("tapered to 7.00%");
+    });
+    it("preserves the base cap with taper off or degraded signals", () => {
+      expect(severityDecision(0, 800, false).approved).toBe(true);
+      expect(severityDecision(0, 800, true, true).approved).toBe(true);
+    });
+    it("allows exposure within a valid tightened cap", () => {
+      expect(severityDecision(7, 600).approved).toBe(true);
+    });
+  });
+
   it("does not apply the crisis exposure cap in normal regimes", () => {
     const decision = evaluateTradeProposal(
       { ...proposal, entryMarketRegime: "Neutral (Normal Volatility)", dollarAmount: 1200 },
