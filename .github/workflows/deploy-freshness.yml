@@ -4,7 +4,10 @@
 #
 # This workflow does NOT deploy, does NOT call the Coolify API, and does NOT
 # post a deploy claim. It compares public /api/health .checks.release.sha to
-# origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
+# origin/main. A stale verdict (oldest undeployed commit more than
+# DEPLOY_FRESHNESS_STALE_SECONDS past its deploy-due time: commit time, or for
+# a weekday RTH merge the later of session close and the 21:20 UTC drain; see
+# docs/deployment.md) fails the job
 # so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
 # to Zulip #Work-In-Progress when ST ops Zulip credentials are configured (Infisical prod
 # in Actions, or env on other hosts).
