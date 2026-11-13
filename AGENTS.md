@@ -227,19 +227,21 @@ current Hetzner host (app env lives in Coolify's DB, not a `/data/coolify` tree)
 
 **Infisical merge order (fleet, 2026-08-20):** the shared Infisical project loads first; the app project shadows it.  Fleet coordination keys (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`, the shared Zulip bot keys, the shared Coolify read-only stats token) belong ONLY in the shared project.  Do not copy them into the ST / CT / UM app projects — a rotate-in-shared then leftover-in-app leaves the old value winning.  LLM runtime keys are not Infisical at all (see Don't).  Use `scripts/infisical-secrets-safe.sh`.
 
-**Handoff-file grep trap (2026-08-14, binding):**  Never grep a secrets handoff file for `KEY=` lines:  `grep '^[A-Z0-9_]+='` / `grep '^ADMIN'` / `rg TOKEN file` print **values** (the whole matching line).  The flat key file `~/.secrets/global-api-keys` is RETIRED (owner, 2026-10-18, OPS-818) and a FORBIDDEN source:  flag any new read, grep, `cat`, or source of it.  List names with `fleet-secrets names`;  fleet keys come from the environment first, then `fleet-secrets get NAME` (Infisical Fleet-OPS).  The macOS Keychain is an approved store only for machine-identity bootstrap credentials, never for app secrets.  Never `cat` or open any handoff file with a Read tool, and never pass a secret value on argv (visible in `ps`).  One Grok session leaked the whole store this way.
+**Handoff-file grep trap (2026-08-14, binding):**  Never grep a secrets handoff file for `KEY=` lines:  `grep '^[A-Z0-9_]+='` / `grep '^ADMIN'` / `rg TOKEN file` print **values** (the whole matching line).  The flat key file `~/.secrets/global-api-keys` is RETIRED (owner, 2026-10-18, OPS-818) and a FORBIDDEN source:  flag any new read, grep, `cat`, or source of it.  List names with `fleet-secrets names`;  fleet keys come from the environment first, then `fleet-secrets get NAME` (Infisical Fleet-OPS).  The macOS Keychain bootstrap path below is legacy implementation context, not permission to store new machine-identity credentials or app secrets.  Never `cat` or open any handoff file with a Read tool, and never pass a secret value on argv (visible in `ps`).  One Grok session leaked the whole store this way.
+
+**Current credential policy (owner, November 11, 2026):** new or replacement Infisical bindings use scoped service tokens only, never automation or machine identities.  Infisical is the sole source for secrets and non-user settings; a consumer's bootstrap service token is the standing exception, and necessary environment transport is synced from Infisical, never hand-set.  The following machine-identity, Keychain and `.env.example` descriptions document legacy implementation, not current credential authorization.  Preserve a working binding until its replacement is live and verified; this documentation change does not replace the bootstrap loader or establish a runtime migration.
 
 **Strict Infisical, no `.env` files (owner, 2026-09-18, binding):** Infisical is the sole source
 of truth for every secret. No `.env`, `.env.local`, `.env.*`, `.env.yml`, or `.env.yaml` anywhere
 — the only env-shaped file in the repo is the committed `.env.example`, which is bootstrap-only
-(Infisical machine identity + `ENCRYPTION_KEY` + the optional `REQUIRE_SECRETS_MANAGER` arming
+(legacy implementation: Infisical machine identity + `ENCRYPTION_KEY` + the optional `REQUIRE_SECRETS_MANAGER` arming
 flag). The dev-only `.env.local` loader in `src/lib/db-api-keys.ts:32-60` is gone (2026-09-18 kept the
 `~/.secrets/global-api-keys` handoff paths as the owner-side identity store, NOT an `.env` file).
-**Update (owner, 2026-10-18, OPS-818):** the bootstrap machine identity now lives in the macOS
+**Legacy implementation context (2026-10-18, OPS-818):** the bootstrap machine-identity path uses the macOS
 login Keychain (generic passwords, service `socratic-trade-bootstrap`, account = env var name,
 read only by `scripts/infisical-bootstrap-env.mjs`, process env first). `~/.secrets/global-api-keys`
 is retired and must not be read by any script, loader, hook, or agent; the `db-api-keys.ts` dev
-loader that read it is deleted. Everything else in this rule stands. `scripts/cloud-setup.sh` no longer seeds `.env.local`. Prod
+loader that read it is deleted.  The no-env-loader and retired-file prohibitions remain binding; machine-identity provisioning does not.  `scripts/cloud-setup.sh` no longer seeds `.env.local`.  Prod
 `scripts/coolify-prod-start.sh` phase-2 explicitly exports `REQUIRE_SECRETS_MANAGER=1` so the
 fail-closed boot guard in `src/lib/secrets-source.ts` (called from `instrumentation.ts:51`)
 fires visibly from the boot script. Local dev: use `npm run dev:secrets`. Plain `npm run dev`
@@ -551,7 +553,7 @@ If you create, change, load, bootout, or retire a LaunchAgent, cron row, login i
   `$VAR`-adjacent glyph. Keep `scripts/*.sh` pure ASCII — use `...`/`-`/`->`, never
   `…`/`—`/`→`; check with `grep -nP '[^\x00-\x7F]' scripts/*.sh` and the
   `\$\{?\w+\}?[^\x00-\x7F]` adjacency pattern. Cost this the hard way once:
-  `docs/rollouts/2026-06-26-infisical-universal-auth.md`.
+  `docs/rollouts/2026-06-26-infisical-universal-auth.md` (historical implementation context, not current credential authorization).
 
 ## Conventions
 
