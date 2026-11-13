@@ -135,7 +135,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "o1": [15, 60],
   "gpt-5.5": [5, 30],
   "gpt-5.4": [2.5, 15],
-  "gpt-5.6": [5, 30],
+  "gpt-5.6": [4.4, 22], // catalog alias of retired gpt-5.6-sol, same base rate
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-3.1-pro-preview": [2, 12],
   "gemini-3.5-flash": [1.5, 9],
@@ -211,7 +211,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   // undefined for them instead of borrowing Wonder's price through the prefix match below.
   "muse-spark-1.3": [1.25, 4.25],
   "muse-spark-1.3-contributor": [0.1, 0.2], // verified 2026-10-12 on OpenRouter and dev.meta.ai pricing
-  "muse-glimmer-30b": [0.35, 1.5], // was [0.3, 1.1] — real (live OpenRouter) price is $0.35/$1.50 (verified 2026-09-18)
+  "muse-glimmer-30b": [0.3, 1.2], // exact meta/muse-glimmer-30b base rate, OpenRouter /models 2026-11-13
   // kimi-latest now pins moonshotai/kimi-k3.1-pro ($2/$10, 2026-11-04).
   "kimi-latest": [2, 10],
   "kimi-k3.1-pro": [2, 10],
@@ -221,7 +221,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   // --- Retired from the picker 2026-11-04 (RETIRED_LLM_MODEL_CATALOG) ---
   // A stored selection of these is still served, so they keep a live price.
   "gpt-6-astra-pro": [10, 50],
-  "gpt-5.6-sol": [4, 20], // was [2, 10]; OpenRouter lists openai/gpt-5.6-sol at $4/$20 (2026-11-04)
+  "gpt-5.6-sol": [4.4, 22], // exact openai/gpt-5.6-sol base rate, OpenRouter /models 2026-11-13
   "gpt-5.6-luna": [0.2, 1.2], // was [1, 6] — real price is $0.20/$1.20 (verified 2026-09-18)
 
   // --- Retired from the curated catalog 2026-09-18 (model-catalog cleanup) ---
