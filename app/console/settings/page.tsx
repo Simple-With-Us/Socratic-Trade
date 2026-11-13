@@ -131,7 +131,8 @@ function SettingsToc() {
 
   // The chip row hides its scrollbar. The More sections control sits beside
   // the row, and it stays mounted while the row overflows so the width does
-  // not jump when the user reaches the end.
+  // not jump when the user reaches the end. Its -my-1.5 keeps the 44px target
+  // inside the strip the section observer sizes as 48px.
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -238,7 +239,7 @@ function SettingsToc() {
         {overflows ? (
           <button
             type="button"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm disabled:opacity-40"
+            className="-my-1.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm disabled:opacity-40"
             aria-label="More sections"
             disabled={!canScrollRight}
             onClick={() => scrollerRef.current?.scrollBy({ left: 160, behavior: "smooth" })}

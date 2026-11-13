@@ -1,3 +1,9 @@
+## 2026-11-13 CURSOR — ST-4627 settings strip height
+
+**What.**  The Settings More sections control keeps a 44px target and a negative margin so the sticky strip stays the height the section list already assumes.  August login notes stay dated records.
+
+**Next.**  Replies are on the new Kody threads.  Do not merge.  GB-Designer merges.
+
 ## 2026-11-13 CURSOR — ST-4627 Kody chrome and chips
 
 **What.**  From the sm breakpoint up, the console bar scrolls inside the header.  The Settings More sections control sits beside the chips and stays mounted while the row overflows.  The iOS login comment no longer claims the last bullet matches the web list.
