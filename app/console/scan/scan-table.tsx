@@ -98,6 +98,21 @@ function cellTitleWithReceived(column: ScanColumn, q: MarketQuote, received: str
   return [own, own?.includes("Received ") ? undefined : received].filter(Boolean).join("\n") || undefined;
 }
 
+/** Desktop value cells are read-only. Keep the symbol/watch controls outside this trigger.
+ * Mobile cards have their own row action and are deliberately not wrapped here. */
+export function ScanCellValue({ column, quote, received, className }: {
+  column: ScanColumn;
+  quote: MarketQuote;
+  received: string;
+  className?: string;
+}) {
+  return (
+    <Tooltip content={cellTitleWithReceived(column, quote, received)} className="w-full">
+      <span className={cx("inline-flex w-full items-center", className)}>{column.render(quote)}</span>
+    </Tooltip>
+  );
+}
+
 /** Watch/unwatch toggle for a scan row — posts straight to the same
  *  /api/watchlist contract the Watchlist screen uses. Optimistic: the star
  *  flips immediately and only reverts if the request actually fails. Filled
@@ -533,7 +548,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
                     return (
                       <td
                         key={c.id}
-                        title={cellTitleWithReceived(c, q, received)}
+                        title={isSymbolCol ? cellTitleWithReceived(c, q, received) : undefined}
                         className={cx(
                           "cursor-default whitespace-nowrap",
                           alignmentClass,
@@ -553,7 +568,7 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
                             {c.render(q)}
                           </div>
                         ) : (
-                          <div className={cx("inline-flex w-full items-center", flexAlignClass)}>{c.render(q)}</div>
+                          <ScanCellValue column={c} quote={q} received={received} className={flexAlignClass} />
                         )}
                       </td>
                     );
