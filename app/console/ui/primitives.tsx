@@ -2,10 +2,12 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { useState, useEffect, useId, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { useState, useEffect, useLayoutEffect, useId, useRef, type CSSProperties, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
 import { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 import { AnimatePresence, motion } from "motion/react";
+import { createPortal } from "react-dom";
+import { tooltipPosition } from "../lib/tooltip-position";
 
 export { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 
@@ -466,6 +468,49 @@ export function Tooltip({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const tooltipId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const openAtPointerDown = useRef(false);
+  const [position, setPosition] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = ref.current;
+    const tooltip = contentRef.current;
+    if (!trigger || !tooltip) return;
+    const update = () => {
+      const inherited = getComputedStyle(trigger);
+      // A body portal escapes clipping ancestors, but no longer inherits the console theme.
+      // Copy its computed tokens rather than assuming the default or changing global styles.
+      const tokens: Record<string, string> = {};
+      for (const name of inherited) {
+        if (name.startsWith("--con-") || name.startsWith("--brand-")) {
+          tokens[name] = inherited.getPropertyValue(name);
+        }
+      }
+      setPosition({
+        ...tokens,
+        fontFamily: inherited.fontFamily,
+        ...tooltipPosition(trigger.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+          { width: window.innerWidth, height: window.innerHeight }, align)
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    const resize = new ResizeObserver(update);
+    resize.observe(trigger);
+    resize.observe(tooltip);
+    const theme = new MutationObserver(update);
+    const consoleRoot = trigger.closest(".console-root");
+    if (consoleRoot) theme.observe(consoleRoot, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    theme.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      resize.disconnect();
+      theme.disconnect();
+    };
+  }, [open, align, content]);
 
   useEffect(() => {
     if (!open) return;
@@ -489,13 +534,6 @@ export function Tooltip({
 
   if (!content) return <>{children}</>;
 
-  const alignClass =
-    align === "right"
-      ? "right-0 translate-x-0"
-      : align === "left"
-      ? "left-0 translate-x-0"
-      : "left-1/2 -translate-x-1/2";
-
   const interactive = isInteractiveTooltipTrigger(children);
 
   return (
@@ -511,7 +549,8 @@ export function Tooltip({
       aria-describedby={tooltipId}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
-      onClick={() => setOpen((prev) => !prev)}
+      onPointerDown={() => { openAtPointerDown.current = open; }}
+      onClick={(event) => setOpen(event.detail === 0 ? !open : !openAtPointerDown.current)}
       onFocus={() => setOpen(true)}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
@@ -521,9 +560,11 @@ export function Tooltip({
       <span id={tooltipId} className="sr-only">
         {content}
       </span>
-      <AnimatePresence>
+      {typeof document !== "undefined" && createPortal(<AnimatePresence>
         {open && (
           <motion.div
+            ref={contentRef}
+            style={position ?? { visibility: "hidden" }}
             initial={{ opacity: 0, y: 2, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 2, scale: 0.98 }}
@@ -531,14 +572,13 @@ export function Tooltip({
             role="tooltip"
             aria-hidden
             className={cx(
-              "pointer-events-none absolute bottom-full z-[100] mb-2 w-max max-w-xs rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line",
-              alignClass
+              "pointer-events-none fixed z-[1400] w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line"
             )}
           >
             {content}
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
     </span>
   );
 }
