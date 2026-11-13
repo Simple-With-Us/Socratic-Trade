@@ -7,6 +7,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 Nice=10
-# Repo source of truth.  Host copy is installed next to this unit.
-ExecStart=/usr/local/sbin/litestream-l1-boundary-trim-fleet
+EnvironmentFile=-/etc/default/st-host-cron-sentry
+# The fleet script dry-runs unless this is 1. The timer is the opt-in.
+# sentry-cron-checkin.py passes its environment through to the wrapped command.
+Environment=LITESTREAM_L1_TRIM_APPLY=1
+# Repo source of truth.  Host copies install next to these units.
+ExecStart=/usr/local/sbin/sentry-cron-checkin.py wrap --monitor-slug st-host-litestream-l1-boundary-trim --schedule "4 0 * * *" --checkin-margin 120 --max-runtime 180 -- /usr/local/sbin/litestream-l1-boundary-trim-fleet
 SyslogIdentifier=litestream-l1-trim
