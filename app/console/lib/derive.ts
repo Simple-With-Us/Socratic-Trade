@@ -783,7 +783,7 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
     },
     {
       id: "llm",
-      title: "Add a model key",
+      title: hasLlmKey && !hasGreenModel ? "Choose a model" : "Add a model key",
       detail:
         hasLlmKey && hasGreenModel
           ? `Key ready.\u00A0 Model ${snapshot.policy.llmModel!.trim()}.`
@@ -798,7 +798,7 @@ export function deriveReadinessChecklist(snapshot: DashboardSnapshot): Readiness
             ? "/console/connections#api-keys"
             : "/console/strategy#models",
       ctaLabel:
-        hasLlmKey && hasGreenModel ? undefined : !hasLlmKey ? "Add a model key" : "Choose model"
+        hasLlmKey && hasGreenModel ? undefined : !hasLlmKey ? "Add a model key" : "Choose Model"
     },
     {
       id: "run-once",

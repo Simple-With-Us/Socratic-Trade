@@ -167,6 +167,8 @@ describe("deriveReadinessChecklist", () => {
     expect(keyOnly.flags.hasLlmKey).toBe(true);
     expect(keyOnly.flags.hasGreenModel).toBe(false);
     expect(keyOnly.steps.find((s) => s.id === "llm")?.complete).toBe(false);
+    expect(keyOnly.steps.find((s) => s.id === "llm")?.title).toBe("Choose a model");
+    expect(keyOnly.steps.find((s) => s.id === "llm")?.ctaLabel).toBe("Choose Model");
     expect(keyOnly.steps.find((s) => s.id === "llm")?.href).toBe("/console/strategy#models");
 
     const modelOnly = deriveReadinessChecklist(
@@ -178,6 +180,8 @@ describe("deriveReadinessChecklist", () => {
     expect(modelOnly.flags.hasLlmKey).toBe(false);
     expect(modelOnly.flags.hasGreenModel).toBe(true);
     expect(modelOnly.steps.find((s) => s.id === "llm")?.complete).toBe(false);
+    expect(modelOnly.steps.find((s) => s.id === "llm")?.title).toBe("Add a model key");
+    expect(modelOnly.steps.find((s) => s.id === "llm")?.ctaLabel).toBe("Add a model key");
     expect(modelOnly.steps.find((s) => s.id === "llm")?.href).toBe("/console/connections#api-keys");
 
     // Older payloads omit llmConfigured — do not treat as missing key.
