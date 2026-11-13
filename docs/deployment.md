@@ -143,7 +143,16 @@ mid-build (SSH exec stream exit 255) while webhooks returned 200 and
 `.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
 every 20 minutes.  It fails (Sentry fleet-infra + optional `#Work-In-Progress`) when
 the oldest commit on `origin/main` that is not live **and that changed a path
-Coolify watches** is older than 1 hour.  The watched set is Coolify's live
+Coolify watches** is past its deploy-due time by more than
+`DEPLOY_FRESHNESS_STALE_SECONDS` (3600 in the workflow).  The deploy-due time is
+the commit timestamp, except for a gap that landed during weekday RTH without
+`HOTFIX=1` (on the oldest gap commit or the expected tip) or
+`RTH_DEPLOY_OVERRIDE=1`.  The Coolify build latch holds such a gap until the
+session close, and `.github/workflows/rth-deploy-latch.yml` drains it at 21:20 UTC,
+so its clock starts at the later of the close and that drain.  Early-close days
+use the 13:00 ET close; holidays and off-hours merges keep commit-timestamp
+aging.  If the staleness CLI cannot run, the script falls back to commit-timestamp
+aging so a registry outage never mutes a stale page.  The watched set is Coolify's live
 `watch_paths` allow list, mirrored in `src/lib/deploy-image-impact.ts` as
 `COOLIFY_WATCH_PATHS_LIVE`; a commit outside it never owed a deployment, so it
 must never age the verdict.  A gap where nothing watched changed is fresh and

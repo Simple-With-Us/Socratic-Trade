@@ -70,10 +70,19 @@ mkcommit() {
 # C1 (old) -> C2 (2.5h ago, the first undeployed when live=C1) -> C3 (tip, recent)
 # plus D off C1 for divergence.
 OLD_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-20000)))')"
-MID_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-9000)))')"
+# Pinned ET scenario (Wed 2026-06-10 RTH merge, check after that day's close) so
+# staleness uses the same calendar as test/deploy-freshness-staleness.test.ts and
+# does not flake on weekday RTH when this file is run live.
+PINNED_LATCH_NOW="2026-06-11T03:00:00Z"
+MID_DATE="2026-06-10T14:00:00Z"
 C1="$(mkcommit c1 "$OLD_DATE")"
 C2="$(mkcommit c2 "$MID_DATE")"
 C3="$(mkcommit c3)"
+RECENT_GAP="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-9000)))')"
+C2_RECENT="$(mkcommit c2r "$RECENT_GAP")"
+# Pinned off-hours gap head (17:00 ET, after the EDT close): 6h old at
+# PINNED_LATCH_NOW, so only the threshold decides the verdict.
+C3_RECENT="$(mkcommit c3r "2026-06-10T21:00:00Z")"
 gitc checkout -q -b sidebranch "$C1"
 D="$(mkcommit d)"
 gitc checkout -q "$C3"
@@ -83,9 +92,15 @@ gitc checkout -q "$C3"
 # before C4, so a watchdog that ages the oldest commit in the gap regardless
 # of what it changed reports C4 as hours stale.
 NOOP_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-28800)))')"
-FRESH_DATE="$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-600)))')"
+FRESH_DATE="2026-06-10T15:00:00Z"
 N1="$(mkcommit n1 "$NOOP_DATE" ".github/workflows/ci.yml")"
 C4="$(mkcommit c4 "$FRESH_DATE")"
+# An in-session watched commit inside the RTH gap; only its place in history matters.
+mkcommit rthlat "2026-06-10T14:00:00Z" >/dev/null
+RTH_AFTER="$(mkcommit rthat "2026-06-10T15:30:00Z")"
+# Pre-market (09:00 ET) watched commit: off-hours, so it ages from its own
+# timestamp (14h at PINNED_LATCH_NOW), not from the close or the drain.
+OFF_HOURS="$(mkcommit offh "2026-06-10T13:00:00Z")"
 
 # A subdirectory of the fixture repo.  The watchdog resolves a pathspec against
 # its working directory, so a run started here would resolve every watched
@@ -130,6 +145,14 @@ fi
 exec "${REAL_GIT}" "\$@"
 SH
 chmod +x "${WORK}/shim-warn/git"
+
+mkdir -p "${WORK}/shim-npx"
+cat > "${WORK}/shim-npx/npx" <<'SH'
+#!/usr/bin/env bash
+echo "fatal: simulated npx registry failure" >&2
+exit 127
+SH
+chmod +x "${WORK}/shim-npx/npx"
 
 # The control for the RUN_CWD cases.  A non-interactive bash sources BASH_ENV
 # at startup, so the probe records the directory every child bash actually
@@ -279,10 +302,15 @@ run_case "live == expected" 0 "$C3" 200 "$(payload "\"${C3}\"" 9000)"
 run_case "live AHEAD of expected" 0 "$C1" 200 "$(payload "\"${C3}\"" 9000)"
 run_case "in-flight: behind but newest gap is fresh" 0 "$C3" 200 "$(payload "\"${C2}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=3600
-run_case "stale: oldest undeployed is 2.5h old" 3 "$C3" 200 "$(payload "\"${C1}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=3600
-run_case "stale suppressed when threshold is huge" 0 "$C3" 200 "$(payload "\"${C1}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=864000
+run_case "stale: oldest undeployed is past RTH latch grace" 3 "$C3" 200 "$(payload "\"${C1}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+run_case "pinned 6h gap is stale at the default threshold" 3 "$C3_RECENT" 200 "$(payload "\"${C2_RECENT}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+run_case "stale suppressed when threshold is huge" 0 "$C3_RECENT" 200 "$(payload "\"${C2_RECENT}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=864000 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 run_case "divergent commit" 4 "$D" 200 "$(payload "\"${C3}\"" 10)"
 run_case "release sha null" 2 "$C3" 200 "$(payload null 9000)"
 run_case "unreachable treated as OK" 0 "$C3" 200 '<html>502 Bad Gateway</html>'
@@ -301,12 +329,14 @@ run_case "image-noop gap is fresh, not stale" 0 "$N1" 200 "$(payload "\"${C3}\""
 # look stale.  Before the fix this aged N1 and exited 3.
 EXPECT_OUTPUT="oldest image-affecting undeployed ${C4}"
 run_case "age comes from the watched commit, not an older noop commit" 0 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=3600
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="2026-06-10T15:30:00Z"
 EXPECT_OUTPUT=""
 
 # ST-4575: the guard still pages when a watched path really is missing.
 run_case "still stale when the gap changes a watched path" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=60
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 
 # A git failure is an operational error, not a verdict.  If the rev-list exit
 # status is swallowed, an empty list is indistinguishable from a failed git,
@@ -336,7 +366,8 @@ EXPECT_OUTPUT=""
 RUN_CWD="subdir"
 EXPECT_CWD_SUFFIX="subdir"
 run_case "a run from a subdirectory still ages the watched commit" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
-  DEPLOY_FRESHNESS_STALE_SECONDS=60
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
 RUN_CWD=""
 EXPECT_CWD_SUFFIX=""
 
@@ -352,9 +383,46 @@ EXPECT_CWD_SUFFIX=""
 EXPECT_SHIM_WARNING="warning: unable to access"
 run_case "a git warning on stderr does not break the verdict" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
   DEPLOY_FRESHNESS_STALE_SECONDS=60 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW" \
   "PATH=${WORK}/shim-warn:${PATH}" \
   "SHIM_WARN_PROBE=${SHIM_WARN_PROBE}"
 EXPECT_SHIM_WARNING=""
+
+# ST-2793: weekday RTH latch is in-flight, not the silent-freeze class.
+EXPECT_OUTPUT="staleness decision: in-flight"
+run_case "rth latched merge inside cash session is not stale" 0 "$RTH_AFTER" 200 "$(payload "\"${C1}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="2026-06-10T15:30:00Z"
+EXPECT_OUTPUT=""
+
+EXPECT_OUTPUT="staleness decision: stale"
+run_case "still stale after RTH latch grace from session close" 3 "$RTH_AFTER" 200 "$(payload "\"${C1}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+EXPECT_OUTPUT=""
+
+# 14h since the commit is past 12h, while a latch-anchored clock (close or the
+# 21:20 UTC drain) would still read under 12h, so this exercises commit aging.
+EXPECT_OUTPUT="staleness decision: stale"
+run_case "off-hours stale unchanged" 3 "$OFF_HOURS" 200 "$(payload "\"${RTH_AFTER}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=43200 \
+  DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW"
+EXPECT_OUTPUT=""
+
+# ST-2793: when npx cannot fetch tsx, fall back to raw commit aging.
+NPX_GAP_LIVE="$(mkcommit npxlive "$(python3 -c 'import time; print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-7200)))')")"
+NPX_GAP_TIP="$(mkcommit npxtip)"
+EXPECT_OUTPUT="staleness decision: stale"
+run_case "npx failure still pages when raw commit age is past threshold" 3 "$RTH_AFTER" 200 "$(payload "\"${C1}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  "PATH=${WORK}/shim-npx:${PATH}"
+EXPECT_OUTPUT=""
+
+EXPECT_OUTPUT="staleness decision: in-flight"
+run_case "npx failure stays in-flight when raw commit age is under threshold" 0 "$NPX_GAP_TIP" 200 "$(payload "\"${NPX_GAP_LIVE}\"" 9000)" \
+  DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
+  "PATH=${WORK}/shim-npx:${PATH}"
+EXPECT_OUTPUT=""
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

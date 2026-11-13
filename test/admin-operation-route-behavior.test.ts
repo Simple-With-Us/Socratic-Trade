@@ -195,16 +195,20 @@ describe("expensive admin route admission behavior", () => {
       method: "POST",
       body: JSON.stringify({ limit: 1 })
     }));
-    await vi.waitFor(() => expect(mocks.reindexEightKDataset).toHaveBeenCalledOnce());
+    try {
+      await vi.waitFor(() => expect(mocks.reindexEightKDataset).toHaveBeenCalledOnce());
 
-    const blocked = await reindexTenK(request("/api/admin/reindex-10k", {
-      method: "POST",
-      body: JSON.stringify({ symbols: ["AAPL"] })
-    }));
-    expect(blocked.status).toBe(409);
-    expect(mocks.refreshFilingBodies).not.toHaveBeenCalled();
-
-    release();
+      const blocked = await reindexTenK(request("/api/admin/reindex-10k", {
+        method: "POST",
+        body: JSON.stringify({ symbols: ["AAPL"] })
+      }));
+      expect(blocked.status).toBe(409);
+      expect(mocks.refreshFilingBodies).not.toHaveBeenCalled();
+    } finally {
+      // Always let the held reindex finish so its durable lease is released even if an assertion fails.
+      release();
+      await first;
+    }
     expect((await first).status).toBe(200);
   });
 });
