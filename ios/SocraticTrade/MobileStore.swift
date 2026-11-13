@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import os
 import Sentry
 
 // MARK: - Duplicate command folding
@@ -394,11 +395,11 @@ struct MoneyActionResult: Equatable, Identifiable {
     private static func successCopy(_ action: MoneyAction) -> String {
         switch action {
         case .approve:
-            return "Approved.  Waiting for the desk to refresh."
+            return "Approved.\u{00A0} Waiting for the desk to refresh."
         case .reject:
-            return "Rejected.  Waiting for the desk to refresh."
+            return "Rejected.\u{00A0} Waiting for the desk to refresh."
         case .cancel:
-            return "Order cancelled.  Waiting for the desk to refresh."
+            return "Order cancelled.\u{00A0} Waiting for the desk to refresh."
         }
     }
 
@@ -416,11 +417,11 @@ struct MoneyActionResult: Equatable, Identifiable {
     private static func retryableCopy(_ action: MoneyAction) -> String {
         switch action {
         case .approve:
-            return "Approve did not finish.  Try again."
+            return "Approve did not finish.\u{00A0} Try again."
         case .reject:
-            return "Reject did not finish.  Try again."
+            return "Reject did not finish.\u{00A0} Try again."
         case .cancel:
-            return "Cancel did not finish.  Try again."
+            return "Cancel did not finish.\u{00A0} Try again."
         }
     }
 }
@@ -439,6 +440,11 @@ final class MobileStore: ObservableObject {
     /// The first snapshot load was cancelled before it could sign the session in.
     /// A finished signed-out load does not set this.
     private(set) var initializationCancelled = false
+    @Published private(set) var isRestoringPersistedSession = false
+    private var didAttemptPersistedSessionRestore = false
+    private var persistedSessionRestoreAwaitingRetry = false
+    private var persistedSessionRestoreTask: Task<Void, Never>?
+    private let persistedSessionRestoreTaskLock = NSLock()
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdatedAt: Date?
     @Published private(set) var isStreamConnected = false
@@ -466,6 +472,7 @@ final class MobileStore: ObservableObject {
     @Published private(set) var proposalNotices: [String: (message: String, action: ProposalActionFeedback.ProposalAction)] = [:]
 
     let client: MobileAPIClient
+    private let sessionCookieCoordinator: SessionCookieCoordinator
     /// Push unregister for sign-out and for a change of signed-in account. Tests replace it.
     var pushTokenRelease: any PushTokenReleasing = PushNotificationCoordinator.shared
     /// Sign-in tests turn this off so the SSE reconnect loop does not outlive the test.
@@ -497,15 +504,25 @@ final class MobileStore: ObservableObject {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheTimestampKey)
     }
 
-    init(client: MobileAPIClient, previewSnapshot: MobileSnapshot? = nil) {
+    private static let sessionLog = Logger(subsystem: "com.socratictrade.ios", category: "session")
+
+    init(
+        client: MobileAPIClient,
+        previewSnapshot: MobileSnapshot? = nil,
+        sessionCookieCoordinator: SessionCookieCoordinator = SessionCookieCoordinator()
+    ) {
         self.client = client
+        self.sessionCookieCoordinator = sessionCookieCoordinator
         let cached = previewSnapshot ?? Self.loadCachedSnapshot()
         snapshot = cached
         // 2026-09-23 MM (held-batch): seed partialData from the preview snapshot so tests can
         // assert the gating path without going through a real load().
         partialData = cached?.partialData ?? false
-        isAuthenticated = cached != nil
+        isAuthenticated = false
         hasInitialized = previewSnapshot != nil
+        if previewSnapshot != nil, cached != nil {
+            isAuthenticated = true
+        }
         if cached == nil {
             lastUpdatedAt = nil
         } else if previewSnapshot != nil {
@@ -517,6 +534,97 @@ final class MobileStore: ObservableObject {
 
     var isInitialLoading: Bool {
         !hasInitialized && snapshot == nil
+    }
+
+    /// Blocks authenticated network work until the in-flight Keychain restore finishes, or runs restore once if needed.
+    func ensurePersistedSessionRestoredBeforeAuthenticatedRequests() async {
+        await persistedSessionRestoreTaskEnsured().value
+    }
+
+    /// Restores Keychain session archives into the client's cookie jar without blocking launch.
+    func restorePersistedSessionFromKeychainIfNeeded() async {
+        await persistedSessionRestoreTaskEnsured().value
+    }
+
+    private func persistedSessionRestoreTaskEnsured() -> Task<Void, Never> {
+        persistedSessionRestoreTaskLock.lock()
+        if let task = persistedSessionRestoreTask {
+            persistedSessionRestoreTaskLock.unlock()
+            return task
+        }
+        guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else {
+            persistedSessionRestoreTaskLock.unlock()
+            return Task {}
+        }
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runPersistedSessionRestoreIfNeeded()
+        }
+        persistedSessionRestoreTask = task
+        persistedSessionRestoreTaskLock.unlock()
+        return task
+    }
+
+    private func runPersistedSessionRestoreIfNeeded() async {
+        guard !didAttemptPersistedSessionRestore || persistedSessionRestoreAwaitingRetry else { return }
+        didAttemptPersistedSessionRestore = true
+        persistedSessionRestoreAwaitingRetry = false
+        isRestoringPersistedSession = true
+        defer { isRestoringPersistedSession = false }
+
+        let coordinator = sessionCookieCoordinator
+        let client = client
+        let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+            Result {
+                try coordinator.prepareClientSession(client)
+            }
+        }.value
+
+        switch result {
+        case .success:
+            applySuccessfulPersistedSessionRestore()
+        case .failure(let failure):
+            handlePersistedSessionRestoreFailure(failure)
+        }
+    }
+
+    private func applySuccessfulPersistedSessionRestore() {
+        let hasLiveCookies = !sessionCookieCoordinator.sessionCookies(for: client).isEmpty
+        let hasCachedSnapshot = snapshot != nil || Self.loadCachedSnapshot() != nil
+        isAuthenticated = hasLiveCookies && hasCachedSnapshot
+    }
+
+    private func handlePersistedSessionRestoreFailure(_ failure: Error) {
+        Self.sessionLog.error(
+            "Session restore failed: \(failure.localizedDescription, privacy: .public)"
+        )
+        if let credentialError = failure as? SessionCredentialStoreError {
+            if credentialError.isTransientKeychainFailure {
+                sessionCookieCoordinator.clearInMemorySession(from: client)
+                error =
+                    "Could not restore your saved session while the device is locked.\u{00A0} Unlock the device and try again."
+                isAuthenticated = false
+                didAttemptPersistedSessionRestore = false
+                persistedSessionRestoreAwaitingRetry = true
+                persistedSessionRestoreTaskLock.lock()
+                persistedSessionRestoreTask = nil
+                persistedSessionRestoreTaskLock.unlock()
+                return
+            }
+            if credentialError.shouldDeletePersistedCredentialsOnRestoreFailure {
+                do {
+                    try sessionCookieCoordinator.clearSession(from: client)
+                } catch {
+                    sessionCookieCoordinator.clearInMemorySession(from: client)
+                }
+            } else {
+                sessionCookieCoordinator.clearInMemorySession(from: client)
+            }
+        } else {
+            sessionCookieCoordinator.clearInMemorySession(from: client)
+        }
+        error = "Could not restore your saved session.\u{00A0} Sign in again."
+        isAuthenticated = false
     }
 
     var hasActiveCommandWork: Bool {
@@ -753,6 +861,7 @@ final class MobileStore: ObservableObject {
     }
 
     func load() async {
+        await ensurePersistedSessionRestoredBeforeAuthenticatedRequests()
         loadGeneration &+= 1
         let generation = loadGeneration
         let shouldReportSessionExpiry = hasInitialized || isAuthenticated
@@ -777,6 +886,7 @@ final class MobileStore: ObservableObject {
             partialData = loadedSnapshot.partialData
             isAuthenticated = true
             error = nil
+            persistAuthSessionCookies()
             if let pendingAccountId,
                loadedSnapshot.connectedAccounts.contains(where: { $0.id == pendingAccountId && $0.isActive == true })
                 || loadedSnapshot.readiness.activeConnectedAccount?.id == pendingAccountId {
@@ -929,7 +1039,7 @@ final class MobileStore: ObservableObject {
                     if let pending = pendingAccountId,
                        snapshot?.readiness.activeConnectedAccount?.id != pending,
                        snapshot?.connectedAccounts.first(where: { $0.id == pending })?.isActive != true {
-                        error = "Switched accounts.  Waiting for the new portfolio to load."
+                        error = "Switched accounts.\u{00A0} Waiting for the new portfolio to load."
                     }
                     finishAccountSwitch(command, operationID: operationID, payload: payload)
                 }
@@ -1142,6 +1252,7 @@ final class MobileStore: ObservableObject {
             await rebindPushAfterSuccessfulLogin(priorCookies: priorCookies)
             await load()
             if isAuthenticated {
+                persistAuthSessionCookies()
                 if opensEventStreamOnSignIn { startEvents() }
                 if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             }
@@ -1160,13 +1271,14 @@ final class MobileStore: ObservableObject {
             await rebindPushAfterSuccessfulLogin(priorCookies: priorCookies)
             await load()
             if isAuthenticated {
+                persistAuthSessionCookies()
                 if opensEventStreamOnSignIn { startEvents() }
                 if claimsPushOnSignIn { await claimPushTokenForCurrentSession() }
             } else if error == nil {
-                error = "Authentication failed after web sign-in.  Try again."
+                error = "Authentication failed after web sign-in.\u{00A0} Try again."
             }
         } catch {
-            self.error = "Web sign-in could not be completed.  Try again."
+            self.error = "Web sign-in could not be completed.\u{00A0} Try again."
         }
     }
 
@@ -1184,7 +1296,7 @@ final class MobileStore: ObservableObject {
     }
 
     private var sessionCookieStorage: HTTPCookieStorage {
-        client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        client.sessionCookieJar
     }
 
     /// Explicit sign-out. Session cookies stay until the authenticated push delete finishes.
@@ -1199,7 +1311,9 @@ final class MobileStore: ObservableObject {
         removeAccountScopedPersistence()
         sessionEpoch &+= 1
         await pushTokenRelease.signOutAndForgetToken()
-        clearSessionCookies()
+        if let message = clearSessionCookiesReportingFailure() {
+            error = message
+        }
     }
 
     func clearLocalSession() {
@@ -1257,10 +1371,41 @@ final class MobileStore: ObservableObject {
     }
 
     private func clearSessionCookies() {
-        let cookieStorage = client.session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
-        for cookie in cookieStorage.cookies ?? [] where client.ownsCookie(cookie) {
-            cookieStorage.deleteCookie(cookie)
+        _ = clearSessionCookiesReportingFailure()
+    }
+
+    @discardableResult
+    private func clearSessionCookiesReportingFailure() -> String? {
+        // Sign-out drops every first-party cookie in the client jar, not only the auth
+        // session cookie, so no CSRF or callback cookie outlives the signed-in session.
+        let jar = client.sessionCookieJar
+        for cookie in jar.cookies ?? [] where client.ownsCookie(cookie) {
+            jar.deleteCookie(cookie)
         }
+        do {
+            try sessionCookieCoordinator.clearSession(from: client)
+            return nil
+        } catch {
+            Self.sessionLog.error(
+                "Sign-out session clear failed: \(error.localizedDescription, privacy: .public)"
+            )
+            sessionCookieCoordinator.clearInMemorySession(from: client)
+            return "Sign-out could not clear the saved session.\u{00A0} Try again."
+        }
+    }
+
+    func persistAuthSessionCookies() {
+        do {
+            try sessionCookieCoordinator.persistSession(from: client)
+        } catch {
+            if self.error == nil {
+                self.error = "Could not save your session for the next launch.\u{00A0} Sign in again if needed after closing the app."
+            }
+        }
+    }
+
+    func authSessionCookiesForWebView() -> [HTTPCookie] {
+        sessionCookieCoordinator.sessionCookies(for: client)
     }
 
     /// UserDefaults snapshot plus every URL cache this client can read back.
@@ -1396,7 +1541,7 @@ final class MobileStore: ObservableObject {
            !snapshot.readiness.hasAccount || !snapshot.readiness.hasUniverse {
             return "Connect an account and configure a symbol universe before running the agent."
         }
-        return "Pull to refresh, then try again.  Stop remains available."
+        return "Pull to refresh, then try again.\u{00A0} Stop remains available."
     }
 
     private static let protectiveCommands: Set<String> = [

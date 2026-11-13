@@ -97,7 +97,7 @@ final class MobileSessionHardeningTests: XCTestCase {
 
     func testPrepareHandoffPostsTheChallengeAndReturnsTheServerNonce() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             XCTAssertEqual(request.url?.path, "/api/mobile/auth/handoff-prepare")
             XCTAssertEqual(request.httpMethod, "POST")
             return (200, Data(#"{"nonce":"issued-handoff"}"#.utf8))
@@ -105,6 +105,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let nonce = try await client.prepareHandoff(codeChallenge: String(repeating: "c", count: 43))
@@ -117,12 +118,13 @@ final class MobileSessionHardeningTests: XCTestCase {
     }
 
     func testAppleNonceFetchFailureDoesNotReturnAFallbackNonce() async {
-        let session = stubbedSession(log: AuthRequestLog()) { _ in
+        let (session, cookieJar) = stubbedSession(log: AuthRequestLog()) { _ in
             (503, Data(#"{"error":"unavailable"}"#.utf8))
         }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         do {
@@ -141,12 +143,13 @@ final class MobileSessionHardeningTests: XCTestCase {
     }
 
     func testLegacyNonceFromHandoffPrepareIsRefused() async {
-        let session = stubbedSession(log: AuthRequestLog()) { _ in
+        let (session, cookieJar) = stubbedSession(log: AuthRequestLog()) { _ in
             (200, Data(#"{"nonce":"__legacy_compat__"}"#.utf8))
         }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         do {
@@ -159,12 +162,13 @@ final class MobileSessionHardeningTests: XCTestCase {
 
     func testPushRegisterConflictIsASingleRequest() async {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { _ in
+        let (session, cookieJar) = stubbedSession(log: log) { _ in
             (409, Data(#"{"ok":false,"error":"other account"}"#.utf8))
         }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let registration = PushRegistrationRequest(
@@ -191,12 +195,13 @@ final class MobileSessionHardeningTests: XCTestCase {
     @MainActor
     func testNewSignInAllowsOneRegisterAfterAConflictHold() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { _ in
+        let (session, cookieJar) = stubbedSession(log: log) { _ in
             (409, Data(#"{"ok":false,"error":"other account"}"#.utf8))
         }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let coordinator = PushNotificationCoordinator(client: client)
@@ -253,7 +258,7 @@ final class MobileSessionHardeningTests: XCTestCase {
     func testTransientUploadKeepsTheTokenSoAccountChangeCanUnbind() async throws {
         let log = AuthRequestLog()
         let posts = RequestCounter()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             if request.httpMethod == "DELETE" {
                 return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
             }
@@ -266,6 +271,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let coordinator = PushNotificationCoordinator(client: client)
@@ -287,7 +293,7 @@ final class MobileSessionHardeningTests: XCTestCase {
     func testConflictAfterASuccessfulRegisterDoesNotDropTheToken() async throws {
         let log = AuthRequestLog()
         let posts = RequestCounter()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             if request.httpMethod == "DELETE" {
                 return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
             }
@@ -300,6 +306,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let coordinator = PushNotificationCoordinator(client: client)
@@ -320,7 +327,7 @@ final class MobileSessionHardeningTests: XCTestCase {
     @MainActor
     func testEmptyPriorCookiesSkipsTheAccountChangeDelete() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             if request.httpMethod == "DELETE" {
                 return (200, Data(#"{"ok":true,"removed":true}"#.utf8))
             }
@@ -329,6 +336,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let coordinator = PushNotificationCoordinator(client: client)
@@ -351,12 +359,13 @@ final class MobileSessionHardeningTests: XCTestCase {
     @MainActor
     func testCancelledUploadDoesNotRetry() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { _ in
+        let (session, cookieJar) = stubbedSession(log: log) { _ in
             throw URLError(.cancelled)
         }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let coordinator = PushNotificationCoordinator(client: client)
@@ -384,19 +393,24 @@ final class MobileSessionHardeningTests: XCTestCase {
     @MainActor
     func testSignOutUnregistersPushBeforeClearingCookies() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             (200, Data(#"{"ok":true,"removed":true}"#.utf8))
         }
-        let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
         let cookie = try sessionCookie()
-        storage.setCookie(cookie)
+        cookieJar.setCookie(cookie)
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let release = ScriptedPushRelease(client: client, token: "abc123")
-        let store = MobileStore(client: client)
+        let store = MobileStore(
+            client: client,
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
+            )
+        )
         store.pushTokenRelease = release
 
         await store.signOut()
@@ -406,14 +420,14 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(events[0].method, "DELETE")
         XCTAssertEqual(events[0].path, "/api/mobile/push/register")
         XCTAssertTrue(release.cookiePresentAtUnregister)
-        XCTAssertFalse(storage.cookies?.contains { $0.name == cookie.name } ?? false)
+        XCTAssertFalse(cookieJar.cookies?.contains { $0.name == cookie.name } ?? false)
     }
 
     @MainActor
     func testAccountChangeUnregistersAfterAppleSignInSucceeds() async throws {
         let log = AuthRequestLog()
         let swap = CookieSwap()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             if request.url?.path == "/api/mobile/auth/apple" {
                 swap.apply()
                 return (200, Data(#"{"success":true,"email":"owner@example.com"}"#.utf8))
@@ -433,15 +447,15 @@ final class MobileSessionHardeningTests: XCTestCase {
             }
             return (200, Data(#"{"ok":true}"#.utf8))
         }
-        let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
-        swap.storage = storage
+        swap.storage = cookieJar
         swap.next = try sessionCookie(value: "next-session")
-        storage.setCookie(try sessionCookie(value: "prior-session"))
+        cookieJar.setCookie(try sessionCookie(value: "prior-session"))
         clearSnapshotCache()
         defer { clearSnapshotCache() }
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let release = ScriptedPushRelease(client: client, token: "abc123")
@@ -462,7 +476,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(events[1].cookie, "st-session-hardening=prior-session")
         XCTAssertEqual(swap.storageValueAtDelete, "next-session")
         XCTAssertEqual(
-            storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
+            cookieJar.cookies?.first { $0.name == "st-session-hardening" }?.value,
             "rotated-during-delete"
         )
     }
@@ -470,17 +484,17 @@ final class MobileSessionHardeningTests: XCTestCase {
     @MainActor
     func testFailedAppleSignInLeavesThePushRowInPlace() async throws {
         let log = AuthRequestLog()
-        let session = stubbedSession(log: log) { request in
+        let (session, cookieJar) = stubbedSession(log: log) { request in
             if request.url?.path == "/api/mobile/auth/apple" {
                 return (401, Data(#"{"error":"invalid nonce"}"#.utf8))
             }
             return (200, Data(#"{"ok":true}"#.utf8))
         }
-        let storage = try XCTUnwrap(session.configuration.httpCookieStorage)
-        storage.setCookie(try sessionCookie(value: "prior-session"))
+        cookieJar.setCookie(try sessionCookie(value: "prior-session"))
         let client = MobileAPIClient(
             baseURL: base,
             session: session,
+            cookieJar: cookieJar,
             isolatedProtocolClasses: [SessionHardeningURLProtocol.self]
         )
         let release = ScriptedPushRelease(client: client, token: "abc123")
@@ -495,7 +509,7 @@ final class MobileSessionHardeningTests: XCTestCase {
         XCTAssertEqual(log.snapshot().first?.method, "POST")
         XCTAssertEqual(log.snapshot().first?.path, "/api/mobile/auth/apple")
         XCTAssertEqual(
-            storage.cookies?.first { $0.name == "st-session-hardening" }?.value,
+            cookieJar.cookies?.first { $0.name == "st-session-hardening" }?.value,
             "prior-session"
         )
         XCTAssertNotNil(store.error)
@@ -524,12 +538,16 @@ final class MobileSessionHardeningTests: XCTestCase {
     private func stubbedSession(
         log: AuthRequestLog,
         handler: @escaping (URLRequest) throws -> (Int, Data)
-    ) -> URLSession {
+    ) -> (URLSession, HTTPCookieStorage) {
         SessionHardeningURLProtocol.log = log
         SessionHardeningURLProtocol.handler = handler
+        let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SessionHardeningURLProtocol.self]
-        return URLSession(configuration: configuration)
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpCookieStorage = jar
+        return (URLSession(configuration: configuration), jar)
     }
 
     private let minimalSnapshotJSON = #"""
@@ -572,8 +590,8 @@ private final class ScriptedPushRelease: PushTokenReleasing {
     }
 
     private func delete(isolatedCookies: [HTTPCookie]? = nil) async {
-        let storage = client.session.configuration.httpCookieStorage
-        cookieValueAtUnregister = storage?.cookies?.first { $0.name == "st-session-hardening" }?.value
+        cookieValueAtUnregister = client.sessionCookieJar.cookies?
+            .first { $0.name == "st-session-hardening" }?.value
         cookiePresentAtUnregister = cookieValueAtUnregister != nil
         guard let token else { return }
         if let isolatedCookies {
