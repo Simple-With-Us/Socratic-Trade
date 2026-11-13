@@ -216,8 +216,40 @@ exit 99
   return { root, bin, home, state, fakeRepo, log, installerStub, ascNode, ascKeyP8 };
 }
 
+const ABSOLUTE_APPLE_TOOL = /\/(?:[^\s"']+\/)*(?:xcodebuild|xcrun|security|codesign)\b/;
+
+describe("manual-signing harness absolute-tool guard", () => {
+  it.each([
+    "$(/usr/bin/xcodebuild)",
+    "test -x /usr/bin/codesign;",
+    "/usr/bin/security",
+    "/usr/bin/security\n",
+    "'/usr/bin/xcrun' altool",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version"
+  ])("refuses shell delimiter and end-of-input form %s without execution", (source) => {
+    expect(source).toMatch(ABSOLUTE_APPLE_TOOL);
+  });
+});
+
 function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) {
   const nodeDir = resolve(process.execPath, "..");
+  // Absolute calls bypass shell functions. Refuse to run this harness if the
+  // production script gains one rather than falling back to a real Apple tool.
+  const script = read("scripts/ios-fleet/ship-testflight.sh");
+  expect(script).not.toMatch(ABSOLUTE_APPLE_TOOL);
+  // A function beats ship-testflight.sh's system-first PATH. Fail closed for all
+  // other signing/upload tools, even when a future production path calls one.
+  const guard = join(sb.root, "bash-guard.sh");
+  const stub = JSON.stringify(join(sb.bin, "xcodebuild"));
+  writeFileSync(guard, [
+    `xcodebuild() { printf 'STUB_XCODEBUILD\\n' >&2; ${stub} "$@"; }`,
+    'xcrun() { echo "REFUSED_TEST_REAL_TOOL:xcrun" >&2; return 97; }',
+    'security() { echo "REFUSED_TEST_REAL_TOOL:security" >&2; return 97; }',
+    'codesign() { echo "REFUSED_TEST_REAL_TOOL:codesign" >&2; return 97; }',
+    'curl() { echo "REFUSED_TEST_NETWORK:curl" >&2; return 97; }',
+    'export -f xcodebuild xcrun security codesign curl',
+    '',
+  ].join("\n"));
   const res = spawnSync(
     "bash",
     [
@@ -230,6 +262,7 @@ function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) 
       encoding: "utf8",
       env: {
         NODE_ENV: "test",
+        BASH_ENV: guard,
         HOME: sb.home,
         PATH: `${sb.bin}:${nodeDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
         TMPDIR: join(sb.root, "tmp"),
@@ -260,6 +293,7 @@ describe("ship-testflight.sh manual signing (stub xcodebuild)", () => {
     const r = ship(sb, {});
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("manual App Store signing");
+    expect(r.out).toContain("STUB_XCODEBUILD");
     expect(r.log).toContain(`INSTALL map=${join(sb.fakeRepo, "ios/appstore-profiles.json")}`);
     const archive = r.log.split("\n").find((l) => l.startsWith("CALL archive")) ?? "";
     expect(archive).toContain("-configuration Release");
@@ -281,6 +315,7 @@ describe("ship-testflight.sh manual signing (stub xcodebuild)", () => {
     const sb = sandbox("auto", { withMap: true });
     const r = ship(sb, { IOS_MANUAL_SIGN: "0" });
     expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("STUB_XCODEBUILD");
     expect(r.log).not.toContain("INSTALL ");
     const archive = r.log.split("\n").find((l) => l.startsWith("CALL archive")) ?? "";
     expect(archive).toContain("-allowProvisioningUpdates");
