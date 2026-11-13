@@ -18,7 +18,7 @@ function fixture() {
     writeFileSync(join(dir, name), trap);
     chmodSync(join(dir, name), 0o700);
   }
-  return { dir, marker, env: { HOME: dir, TMPDIR: dir, PATH: dir, FLEET_POST_BIN: join(dir, "simple-chat") } };
+  return { dir, marker, env: { NODE_ENV: "test" as const, HOME: dir, TMPDIR: dir, PATH: dir, FLEET_POST_BIN: join(dir, "simple-chat") } };
 }
 
 describe("retired fleet-post compatibility paths", () => {

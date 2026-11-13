@@ -325,8 +325,6 @@ fi
 VERDICT="stale"
 HOURS=$((EFFECTIVE_AGE / 3600))
 MINS=$(((EFFECTIVE_AGE % 3600) / 60))
-RAW_HOURS=$((OLDEST_AGE / 3600))
-RAW_MINS=$(((OLDEST_AGE % 3600) / 60))
 log "FAIL: production is STALE - deploy gap is ${HOURS}h${MINS}m past the latch-adjusted due anchor (raw commit age ${OLDEST_AGE}s)."
 log "  this is the silent-freeze class (webhook 200s, health green on an old sha)."
 log "  do NOT hand-trigger a deploy - investigate the webhook and Coolify build queue."
