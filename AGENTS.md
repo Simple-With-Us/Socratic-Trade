@@ -481,7 +481,7 @@ Details: `~/apps/FLEET-PROTOCOL.md` § Chat: The Zulip Contract, § Posting, and
 
 ### Fleet Post Headers
 
-Every post starts with the current fleet header, using the session's actual Operator-assigned letter, generation, and host (`M`, `S`, or `C`) when it has one.  A session without a letter uses the plain form; never invent an assignment or derive it from a transport session id.  Exactly one complete fleet header must open the delivered message.  Add it yourself only when the formatter emits none; if a formatter still prepends a legacy session tag, use a route that emits a complete header or no prefix before posting.  Never stack headers or treat the legacy tag as a complete header.
+Ordinary external posts to Zulip, Linear, GitHub, and other fleet-coordination destinations start with exactly one complete current fleet header, using the session's actual Operator-assigned letter, generation, and host (`M`, `S`, or `C`) when it has one.  A session without a letter uses the plain form; never invent an assignment or derive it from a transport session id.  Per Jay's direct clarification on November 13, 2026, Codex chat-pane messages may omit the header, and manual Kody requests put `@kody start-review` on comment line 1 and the complete fleet header on line 2; optional `👀` goes immediately before that header's opening bracket to suppress peer wakes while preserving supported inbox delivery.  For ordinary external posts, add the header yourself only when the formatter emits none; if a formatter still prepends a legacy session tag, use a route that emits a complete header or no prefix before posting.  Never stack headers or treat the legacy tag as a complete header.
 
 Use U+200A HAIR SPACE: three after the seat colon, two before `📁`, one after it and after repository commas, and two after recipient commas.  Use ordinary ASCII spaces around `→` and inside human display names, with no space after `[` or before `]`.  Generate these characters programmatically; do not substitute U+202F or sentence-gap U+00A0.
 
@@ -882,8 +882,8 @@ Examples: `[UM, Grok] TestFlight first ship` · `[ST, CT, Monet] R2 peer digests
 Acronyms: `UM` `ST` `CT` `CTS` `FLEET`. Multi-app: list each (`[ST, CT, Grok] …`).
 Agent display Title Case (`Grok`/`Monet`/`Claude`/…), not ALL-CAPS chat tags.
 
-**Second body row:** local stamp `Sun, Aug 9, 3:52pm` (create **or** last update —
-refresh on every change). Helper auto-injects/refreshes it.
+**Second body row:** local stamp `Sun, Aug 9, 3:52 PM` (create **or** last update —
+refresh on every change). Helper auto-injects/refreshes it.  Owner-facing Notes stamps use America/Chicago 12-hour `h:mm AM/PM`, with no zone or adjacent UTC.
 
 **Always** write/update living Completion notes for substantial work; update in place.
 Folder **Coding**, pin when able. Helper: `/Users/jay/apps/apple-notes-coding.sh`
