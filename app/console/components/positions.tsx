@@ -9,7 +9,7 @@ import Link from "next/link";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import type { OptionPosition } from "@/lib/types";
 import { deriveProtection, deriveUnmanagedShorts, grossExposure, grossExposureWeightPct, unmanagedShortNotice } from "../lib/derive";
-import { fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
+import { fmtMoney, fmtPct, fmtQty, paperDelayNote, EM_DASH } from "../lib/format";
 import { Card, Dash, Empty, SignedText } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -70,6 +70,11 @@ export const PositionsCard = memo(function PositionsCard({ snapshot }: { snapsho
   return (
     <>
       <Card title={`Positions (${positions.length})`} padded={false}>
+        {paperDelayNote(snapshot.priceDelay) && (
+          <p className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            {paperDelayNote(snapshot.priceDelay)}
+          </p>
+        )}
         {unmanagedShorts && (
           <div className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-warn)]">
             {unmanagedShorts}{" "}

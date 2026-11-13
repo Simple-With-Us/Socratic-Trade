@@ -1,6 +1,8 @@
 /** Formatting helpers for the console. One rule everywhere: missing data
  *  renders as "—" (em dash) — never a fabricated number. */
 
+import { PAPER_DELAYED_PRICE_NOTE } from "@/lib/paper-delayed-price-policy";
+
 export const EM_DASH = "—";
 
 /** Owner ruling (2026-08-11): every timestamp shown to the user displays in
@@ -52,6 +54,12 @@ export function startOfCentralDay(now: Date): Date {
  *  spaces to one, so the gap is rendered as NBSP + space — interpose
  *  {SENTENCE_GAP} between sentences in JSX copy instead of a literal "  ". */
 export const SENTENCE_GAP = "\u00A0 ";
+
+/** Account-level note for an Alpaca PAPER book.  No clock: a fallback price is not that tape's print. */
+export function paperDelayNote(active: unknown): string | undefined {
+  if (active == null || active === false || active === "") return undefined;
+  return PAPER_DELAYED_PRICE_NOTE;
+}
 
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");

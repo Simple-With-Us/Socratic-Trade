@@ -33,6 +33,13 @@ import type {
   UniverseFloor
 } from "./types";
 import { stampFieldObservation } from "./evidence-facts";
+import { paperPricePolicyForUser } from "./paper-delayed-price-account";
+import {
+  choosePaperPrice,
+  paperDelayedPricePolicy,
+  paperPolicyFromStamp,
+  type PaperDelayedPricePolicy
+} from "./paper-delayed-price-policy";
 import {
   fetchNasdaqScreenerResponse,
   nasdaqScreenerUrl,
@@ -340,6 +347,9 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     let quoteFallbackAttempted = false;
     let universeQuoteRecoverySource: string | undefined;
     const universeSources = new Set<string>();
+    const paperPolicy = options?.userId
+      ? paperPricePolicyForUser(options.userId, options.connectedAccountId)
+      : paperDelayedPricePolicy(undefined);
 
     try {
       // 15s header budget + one transport retry live in the helper.  The scan
@@ -522,7 +532,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const applySeedBaseline = (quote: MarketQuote): MarketQuote => {
       const prior = seedBySymbol[quote.symbol] ?? seedBySymbol[normalizeSymbol(quote.symbol)];
       if (!prior) return quote;
-      return applyEnrichment(quote, persistedSlowEnrichment(prior));
+      return applyEnrichment(quote, persistedSlowEnrichment(prior), paperPolicy);
     };
 
     const applySeededPool = (): MarketQuote[] => {
@@ -555,7 +565,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
           const rescoredBySymbol = new Map(
             baselinePool.map((quote) => {
               const live = enrichment[quote.symbol];
-              const enriched = live ? applyEnrichment(quote, live) : quote;
+              const enriched = live ? applyEnrichment(quote, live, paperPolicy) : quote;
               const factorBreakdown = scoreFactors(enriched, weights);
               return [quote.symbol, { ...enriched, factorBreakdown, score: factorBreakdown.weightedTotal }] as const;
             })
@@ -774,30 +784,33 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       dataCoverage = undefined;
     }
 
-    const result: MarketScan = {
-      source,
-      generatedAt: new Date().toISOString(),
-      scannedSymbols: new Set([...allowed, ...quotes.map((quote) => quote.symbol)]).size,
-      returnedQuotes: quotes.length,
-      candidateLimit,
-      outlierReserve,
-      outlierCandidateCount: eventExtra.length,
-      heldCandidateCount,
-      breadthPct,
-      topCandidates,
-      sectorBySymbol: sectorBySymbol(mergedRanked),
-      quotesBySymbol: quotesBySymbol(mergedRanked),
-      cacheTtlMs: options?.ttlMs ?? marketCacheTtlMs(),
-      cached,
-      warnings,
-      ...(universeQuoteRecoverySource ? { universeQuoteRecoverySource } : {}),
-      dataCoverage
-    };
+    const result = stampScanPaperDelay(
+      {
+        source,
+        generatedAt: new Date().toISOString(),
+        scannedSymbols: new Set([...allowed, ...quotes.map((quote) => quote.symbol)]).size,
+        returnedQuotes: quotes.length,
+        candidateLimit,
+        outlierReserve,
+        outlierCandidateCount: eventExtra.length,
+        heldCandidateCount,
+        breadthPct,
+        topCandidates,
+        sectorBySymbol: sectorBySymbol(mergedRanked),
+        quotesBySymbol: quotesBySymbol(mergedRanked),
+        cacheTtlMs: options?.ttlMs ?? marketCacheTtlMs(),
+        cached,
+        warnings,
+        ...(universeQuoteRecoverySource ? { universeQuoteRecoverySource } : {}),
+        dataCoverage
+      },
+      paperPolicy
+    );
 
     // Persist every filled field on every candidate (and the ranked merge set) into the
     // shared symbol_field_latest store — each field keeps its own as_of + fetched_at.
     // Fire-and-forget; never block or fail a scan on store write.
-    void persistScanFieldsToStore(topCandidates, result.generatedAt);
+    void persistScanFieldsToStore(result.topCandidates, result.generatedAt);
 
     return result;
   }
@@ -1097,6 +1110,7 @@ export function mergeQuoteData(
   scan: MarketScan,
   quoteData: Record<string, Partial<BrokerQuote>>
 ): MarketScan {
+  const paperPolicy = paperPolicyFromStamp(scan.priceDelay);
   // When a merge accepts a real broker bid/ask/price/volume, refresh THAT field's provenance too.
   // Otherwise a "yahoo-finance-synthetic" tag from the quote-only fallback (toQuoteOnlyMarketQuote)
   // would stick even after a real broker spread is merged in, making a genuine ask look synthetic to
@@ -1244,7 +1258,8 @@ export function mergeQuoteData(
       intradayChangePct = extra.changePct;
       netChange = extra.change ?? netChange;
     }
-    return {
+    return alignQuoteToPaperPolicy(
+      {
       ...quote,
       bid: usedBid ?? quote.bid,
       ask: usedAsk ?? quote.ask,
@@ -1270,6 +1285,7 @@ export function mergeQuoteData(
       delayToleranceSec: extra.delayToleranceSec ?? quote.delayToleranceSec,
       fetchedAt: extra.fetchedAt ?? quote.fetchedAt,
       delayedFallback: extra.delayedFallback ?? quote.delayedFallback,
+      priceDelayLabel: extra.priceDelayLabel ?? quote.priceDelayLabel,
       // Carry synthetic bid/ask flags through from the broker/Yahoo quote. When a side had a real value
       // (usedBid/usedAsk), the flag reflects whether THAT value was synthetic. When the side wasn't
       // provided, the original quote's flag is preserved by the spread operator above.
@@ -1286,7 +1302,10 @@ export function mergeQuoteData(
         prevClose: effectivePrevClose,
         vwap: positiveNumber(extra.vwap) ?? quote.vwap
       })
-    };
+    },
+      quote,
+      paperPolicy
+    );
   };
   const topCandidates = scan.topCandidates.map(normalize);
   const quoteMap = Object.fromEntries(
@@ -1312,7 +1331,7 @@ export function mergeQuoteData(
         intradayChangePct = extra.changePct;
         netChange = extra.change ?? netChange;
       }
-      const merged: MarketQuoteSummary = {
+      const merged: MarketQuoteSummary = alignQuoteToPaperPolicy({
         ...quote,
         bid: usedBid ?? quote.bid,
         ask: usedAsk ?? quote.ask,
@@ -1335,6 +1354,7 @@ export function mergeQuoteData(
         delayToleranceSec: extra?.delayToleranceSec ?? quote.delayToleranceSec,
         fetchedAt: extra?.fetchedAt ?? quote.fetchedAt,
         delayedFallback: extra?.delayedFallback ?? quote.delayedFallback,
+        priceDelayLabel: extra?.priceDelayLabel ?? quote.priceDelayLabel,
         syntheticBid: usedBid ? bidSynthetic : quote.syntheticBid,
         syntheticAsk: usedAsk ? askSynthetic : quote.syntheticAsk,
         sources: extra ? refreshSideProvenance(quote.sources, extra) : quote.sources,
@@ -1350,7 +1370,7 @@ export function mergeQuoteData(
               vwap: positiveNumber(extra.vwap) ?? quote.vwap
             })
           : quote.fieldObservations
-      };
+      }, quote, paperPolicy);
       return [quote.symbol, merged] as const;
     })
   );
@@ -1359,7 +1379,7 @@ export function mergeQuoteData(
     if (!symbol || quoteMap[symbol]) continue;
     const price = positiveNumber(quote.price);
     if (!price) continue;
-    quoteMap[symbol] = {
+    const added = alignQuoteToPaperPolicy({
       symbol,
       price,
       bid: positiveNumber(quote.bid),
@@ -1395,8 +1415,11 @@ export function mergeQuoteData(
       syntheticAsk: quote.syntheticAsk ?? quote.syntheticSpread ?? false,
       // Seed per-side provenance for a NEWLY-added quote too — otherwise a synthetic bid/ask on an
       // added row carries no sources and reads as a real quoted spread downstream (hasRealAsk etc.).
-      sources: refreshSideProvenance(undefined, quote)
-    };
+      sources: refreshSideProvenance(undefined, quote),
+      priceDelayLabel: quote.priceDelayLabel
+    }, { symbol, price: 0, score: 0 }, paperPolicy);
+    if (!(added.price > 0)) continue;
+    quoteMap[symbol] = added;
   }
   return {
     ...scan,
@@ -1828,12 +1851,78 @@ export function toQuoteOnlyMarketQuote(symbol: string, quote: YahooFinanceQuote,
   };
 }
 
+function alignQuoteToPaperPolicy<T extends {
+  price: number;
+  asOf?: string;
+  provider?: string;
+  expectedDelaySec?: number;
+  venuePriceAuthoritative?: boolean;
+  bid?: number;
+  ask?: number;
+  priceDelayLabel?: "15-min delayed";
+}>(merged: T, prior: T, policy: PaperDelayedPricePolicy | undefined): T {
+  if (!policy?.active) return merged;
+  const chosen = choosePaperPrice(
+    [
+      {
+        price: merged.price,
+        asOf: merged.asOf,
+        provider: merged.provider,
+        expectedDelaySec: merged.expectedDelaySec,
+        venuePriceAuthoritative: merged.venuePriceAuthoritative,
+        bid: merged.bid,
+        ask: merged.ask
+      },
+      {
+        price: prior.price,
+        asOf: prior.asOf,
+        provider: prior.provider,
+        expectedDelaySec: prior.expectedDelaySec,
+        venuePriceAuthoritative: prior.venuePriceAuthoritative,
+        bid: prior.bid,
+        ask: prior.ask
+      }
+    ],
+    policy
+  );
+  if (chosen.withheld || chosen.price === undefined) {
+    return { ...merged, price: 0, bid: undefined, ask: undefined, priceDelayLabel: undefined };
+  }
+  return {
+    ...merged,
+    price: chosen.price,
+    asOf: chosen.asOf,
+    bid: chosen.bid,
+    ask: chosen.ask,
+    priceDelayLabel: chosen.priceDelayLabel
+  };
+}
+
+function stampScanPaperDelay(scan: MarketScan, policy: PaperDelayedPricePolicy): MarketScan {
+  if (!policy.active || !policy.asOf) return scan;
+  return {
+    ...scan,
+    topCandidates: scan.topCandidates.map((quote) => alignQuoteToPaperPolicy(quote, quote, policy)),
+    quotesBySymbol: Object.fromEntries(
+      Object.entries(scan.quotesBySymbol).map(([symbol, quote]) => [
+        symbol,
+        alignQuoteToPaperPolicy(quote, quote, policy)
+      ])
+    ),
+    priceDelay: { label: policy.label, asOf: policy.asOf }
+  };
+}
+
 // Merge a provider enrichment record onto a screener quote (first-non-undefined wins,
 // enrichment overriding the screener). Exported + exhaustive on purpose: every enriched
 // field on SymbolEnrichment must be folded here or it silently never reaches the quote —
 // the dashboard, scoring, and the agent prompt all read these off MarketQuote. This is the
 // "merge in market.ts" half of the cross-file enrichment trap documented in CLAUDE.md.
-export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): MarketQuote {
+export function applyEnrichment(
+  quote: MarketQuote,
+  extra: SymbolEnrichment,
+  policy?: PaperDelayedPricePolicy
+): MarketQuote {
   const enrichmentBid = extra.bid && extra.bid > 0;
   const enrichmentAsk = extra.ask && extra.ask > 0;
   // SEC-derived market cap is a gap fill.  The cascade builds its base only from
@@ -1860,11 +1949,66 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     if (quote.fieldObservations?.marketCap) fieldObservations.marketCap = quote.fieldObservations.marketCap;
     else delete fieldObservations.marketCap;
   }
+  const paperChoice = policy?.active
+    ? choosePaperPrice(
+        [
+          {
+            price: extra.price,
+            asOf: extra.asOf,
+            provider: extra.sources?.price,
+            expectedDelaySec: extra.expectedDelaySec,
+            venuePriceAuthoritative: extra.venuePriceAuthoritative,
+            bid: extra.bid,
+            ask: extra.ask
+          },
+          {
+            price: quote.price,
+            asOf: quote.asOf,
+            provider: quote.provider,
+            expectedDelaySec: quote.expectedDelaySec,
+            venuePriceAuthoritative: quote.venuePriceAuthoritative,
+            bid: quote.bid,
+            ask: quote.ask
+          }
+        ],
+        policy
+      )
+    : undefined;
+  const paperWithheld = Boolean(paperChoice && (paperChoice.withheld || paperChoice.price === undefined));
+  const price = paperChoice
+    ? paperWithheld
+      ? 0
+      : paperChoice.price ?? 0
+    : extra.price && extra.price > 0
+      ? extra.price
+      : quote.price;
+  const bid = paperChoice ? (paperWithheld ? undefined : paperChoice.bid) : enrichmentBid ? extra.bid : quote.bid;
+  const ask = paperChoice ? (paperWithheld ? undefined : paperChoice.ask) : enrichmentAsk ? extra.ask : quote.ask;
+  const asOf = paperChoice ? paperChoice.asOf : extra.asOf ?? quote.asOf;
+  const priceDelayLabel = paperChoice ? paperChoice.priceDelayLabel : quote.priceDelayLabel;
+  const syntheticBidResolved = paperChoice
+    ? paperWithheld
+      ? false
+      : enrichmentBid && paperChoice.bid === extra.bid
+        ? false
+        : quote.syntheticBid
+    : enrichmentBid
+      ? false
+      : quote.syntheticBid;
+  const syntheticAskResolved = paperChoice
+    ? paperWithheld
+      ? false
+      : enrichmentAsk && paperChoice.ask === extra.ask
+        ? false
+        : quote.syntheticAsk
+    : enrichmentAsk
+      ? false
+      : quote.syntheticAsk;
   return {
     ...quote,
-    price: extra.price && extra.price > 0 ? extra.price : quote.price,
-    bid: enrichmentBid ? extra.bid : quote.bid,
-    ask: enrichmentAsk ? extra.ask : quote.ask,
+    price,
+    bid,
+    ask,
     bidSize: extra.bidSize && extra.bidSize > 0 ? extra.bidSize : quote.bidSize,
     askSize: extra.askSize && extra.askSize > 0 ? extra.askSize : quote.askSize,
     prevClose: extra.prevClose && extra.prevClose > 0 ? extra.prevClose : quote.prevClose,
@@ -1874,11 +2018,12 @@ export function applyEnrichment(quote: MarketQuote, extra: SymbolEnrichment): Ma
     netChange: typeof extra.netChange === "number" ? extra.netChange : quote.netChange,
     // Enrichment providers supply REAL bid/ask (exchange/broker); clear the synthetic flag when they
     // override a side. When enrichment doesn't provide bid/ask, the original flag is preserved by spread.
-    syntheticBid: enrichmentBid ? false : quote.syntheticBid,
-    syntheticAsk: enrichmentAsk ? false : quote.syntheticAsk,
+    syntheticBid: syntheticBidResolved,
+    syntheticAsk: syntheticAskResolved,
     intradayChangePct: typeof extra.intradayChangePct === "number" ? extra.intradayChangePct : quote.intradayChangePct,
     vwap: extra.vwap && extra.vwap > 0 ? extra.vwap : quote.vwap,
-    asOf: extra.asOf ?? quote.asOf,
+    asOf,
+    priceDelayLabel,
     // DELAYED-TAPE METADATA: a `delayed_sip` enrichment (Alpaca PAPER) must be
     // aged with the delayed-tape rules, not the realtime-stale bar — otherwise
     // a healthy ~900s-old print is treated as a stale realtime quote and every
@@ -2202,6 +2347,11 @@ function quotesBySymbol(quotes: MarketQuote[]): Record<string, MarketQuoteSummar
         score: quote.score,
         provider: quote.provider,
         asOf: quote.asOf,
+        priceDelayLabel: quote.priceDelayLabel,
+        expectedDelaySec: quote.expectedDelaySec,
+        delayToleranceSec: quote.delayToleranceSec,
+        venuePriceAuthoritative: quote.venuePriceAuthoritative,
+        fetchedAt: quote.fetchedAt,
         sentiment: quote.sentiment,
         peRatio: quote.peRatio,
         analystRating: quote.analystRating,

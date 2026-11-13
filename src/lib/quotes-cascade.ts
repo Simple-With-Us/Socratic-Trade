@@ -34,6 +34,8 @@ import {
   isAlpacaPaperAccount,
   isFutureProviderStamp
 } from "./alpaca-paper-quotes";
+import { paperPricePolicyForUser } from "./paper-delayed-price-account";
+import { alignBrokerQuoteRecord, paperDelayedPricePolicy } from "./paper-delayed-price-policy";
 import type { BrokerQuote, ConnectedAccount, QuoteFieldProvenance, TradingPolicy } from "./types";
 
 /**
@@ -925,9 +927,8 @@ export async function fetchFreshQuotesCascade(
           // UNUSABLE delayed tape: do NOT accept it as the authoritative venue
           // price.  The observation is kept (the gate/UI can then report WHY
           // it was refused) but it is explicitly NOT venue-authoritative, and
-          // it is not accepted here.  A symbol the delayed tape could not
-          // price stays missing — no realtime overlay may fill it on the
-          // execution path.
+          // it is not accepted here.  It stays in bestQuotes, so a later level
+          // does not replace a print Alpaca did return.
           updateBestQuote(symbol, { ...normalizedQuote, venuePriceAuthoritative: false });
           continue;
         }
@@ -947,14 +948,12 @@ export async function fetchFreshQuotesCascade(
   // --- LEVEL 1a: Active Broker Gateway ---
   throwIfCascadeAborted(signal);
   let venueMode: VenueQuoteMode = "realtime";
-  let venueBroker: string | undefined;
   let activeConnectedId: string | undefined;
   let activeAccount: ConnectedAccount | undefined;
   try {
     const policy = getPolicy(userId, connectedAccountId);
     maxAgeMs = cascadeFreshMaxAgeMs(policy.maxQuoteAgeSec);
     venueMode = resolveVenueQuoteMode(policy, userId);
-    venueBroker = policy.activeBroker ? String(policy.activeBroker) : undefined;
     activeConnectedId = policy.connectedAccountId;
     activeAccount =
       (activeConnectedId ? getConnectedAccount(activeConnectedId, userId) : undefined) ??
@@ -974,21 +973,18 @@ export async function fetchFreshQuotesCascade(
   } catch (error) {
     console.warn("[quotes-cascade] Level 1a (active broker) failed:", error instanceof Error ? error.message : error);
   }
-  // Tradier trades price off Tradier.  Paper and live both stop here so
-  // Alpaca, Yahoo, and the other levels cannot overlay the venue tape.
-  //
-  // Only venue-PRICED symbols are locked (Cluster B Q5): symbols the venue
-  // could not price at all stay pending for the external levels below.
   // Lock ONLY when the venue tape was actually attempted (L1a ran).  With
   // `skipActiveBroker` the caller already hit the broker itself and L1a never
   // ran, so filtering here would drop every fallback and leave the caller
   // with an empty result (Sentry thread on pendingSymbols).
   //
-  // Q5 applies to Tradier only.  Alpaca PAPER stays fail-closed: a symbol its
-  // delayed feed cannot price is missing, never a fresher secondary print.
+  // A quote the venue returned stays locked, including an unusable delayed
+  // print kept in bestQuotes.  A symbol the venue did not price at all stays
+  // pending.  Alpaca PAPER prefers its delayed quote and uses these later
+  // levels only for that gap.  Tradier paper and Tradier live keep the same
+  // split.  Live Alpaca is realtime and does not enter this block.
   if (venueMode !== "realtime" && !options?.skipActiveBroker) {
-    pendingSymbols =
-      venueBroker === "tradier" ? pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]) : [];
+    pendingSymbols = pendingSymbols.filter((s) => !result[s] && !bestQuotes[s]);
   }
 
   // --- LEVEL 1b: ALL other connected brokers for this user (market-data only) ---
@@ -1279,7 +1275,13 @@ export async function fetchFreshQuotesCascade(
   // Persist only accepted (fresh/venue-authoritative) quotes as latest
   // (Cluster B Q3): stale fallback quotes below are returned to the caller
   // but must not be written to symbol_field_latest as if they were latest.
-  syncQuotesToFieldStore(result);
+  // An Alpaca PAPER account prefers its delayed quote.  A symbol Alpaca did
+  // not price keeps the other source, without a synthetic 15-minute as-of.
+  const paperPolicy = activeAccount
+    ? paperDelayedPricePolicy(activeAccount)
+    : paperPricePolicyForUser(userId, connectedAccountId);
+  const accepted = alignBrokerQuoteRecord(result, paperPolicy);
+  syncQuotesToFieldStore(paperPolicy.active ? accepted : result);
 
   // --- FALLBACK ---
   // For any symbols that could not be resolved to a fresh quote (e.g. during market close / weekend),
@@ -1302,5 +1304,5 @@ export async function fetchFreshQuotesCascade(
     }
   }
 
-  return result;
+  return alignBrokerQuoteRecord(result, paperPolicy);
 }

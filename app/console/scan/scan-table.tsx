@@ -13,7 +13,7 @@ import { ArrowDown, ArrowUp, Columns3, Star } from "lucide-react";
 import { TableVirtuoso } from "react-virtuoso";
 import type { MarketQuote, MarketScan } from "@/lib/types";
 import { receivedLabel } from "@/lib/dashboard-ui";
-import { cx, SENTENCE_GAP } from "../lib/format";
+import { cx, paperDelayNote, SENTENCE_GAP } from "../lib/format";
 import { useFocusTrap } from "../ui/focus-trap";
 import { Tooltip } from "../ui/primitives";
 import { useToast } from "../ui/toast";
@@ -478,8 +478,14 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
     </tr>
   );
 
+  const delayLine = paperDelayNote(scan.priceDelay);
   return (
     <div>
+      {delayLine && (
+        <p className="border-b border-[color:var(--con-line)] px-4 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+          {delayLine}
+        </p>
+      )}
       {/* Column picker only applies to the desktop table — the mobile card
           list below always shows the same fixed load-bearing fields. */}
       <div className="hidden items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2 lg:flex">
