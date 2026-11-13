@@ -41,6 +41,60 @@ enum AppFont {
     }
 }
 
+/// UIKit chrome fonts scaled for Dynamic Type with a ceiling so nav/tab chrome stays usable.
+enum AppChromeFontScaling {
+    struct ChromeFontSpec {
+        let basePointSize: CGFloat
+        let textStyle: UIFont.TextStyle
+        let weight: UIFont.Weight
+        let maximumPointSize: CGFloat
+
+        static let navigationTitle = ChromeFontSpec(
+            basePointSize: 17,
+            textStyle: .headline,
+            weight: .bold,
+            maximumPointSize: 23
+        )
+        static let navigationLargeTitle = ChromeFontSpec(
+            basePointSize: 34,
+            textStyle: .largeTitle,
+            weight: .bold,
+            maximumPointSize: 41
+        )
+        static let tabBarItem = ChromeFontSpec(
+            basePointSize: 10,
+            textStyle: .caption2,
+            weight: .regular,
+            maximumPointSize: 13
+        )
+        static let segmentedControl = ChromeFontSpec(
+            basePointSize: 13,
+            textStyle: .footnote,
+            weight: .regular,
+            maximumPointSize: 17
+        )
+    }
+
+    static let navigationTitle = ChromeFontSpec.navigationTitle
+    static let navigationLargeTitle = ChromeFontSpec.navigationLargeTitle
+    static let tabBarItem = ChromeFontSpec.tabBarItem
+    static let segmentedControl = ChromeFontSpec.segmentedControl
+
+    static func scaledUIFont(
+        _ spec: ChromeFontSpec,
+        contentSizeCategory: UIContentSizeCategory = UIApplication.shared.preferredContentSizeCategory
+    ) -> UIFont {
+        let base = AppFont.uiFont(spec.basePointSize, weight: spec.weight)
+        let metrics = UIFontMetrics(forTextStyle: spec.textStyle)
+        let traits = UITraitCollection(preferredContentSizeCategory: contentSizeCategory)
+        return metrics.scaledFont(
+            for: base,
+            maximumPointSize: spec.maximumPointSize,
+            compatibleWith: traits
+        )
+    }
+}
+
 extension Font {
     static let appLargeTitle = Font.custom(AppFont.regular, size: 34, relativeTo: .largeTitle)
     static let appTitle = Font.custom(AppFont.regular, size: 28, relativeTo: .title)
@@ -59,23 +113,142 @@ extension Font {
 
 /// Bars and tab items are drawn by UIKit, which never sees SwiftUI's `.font` — without these
 /// proxies the nav title and tab labels would stay on SF while the content switched to Lato,
-/// which is more jarring than not switching at all.  Called once at launch.
+/// which is more jarring than not switching at all.  Called once at launch; a Dynamic Type
+/// change re-applies the proxies and restyles the bars already on screen.
 ///
 /// Only the title/label fonts are touched; colours, materials, and scroll-edge behaviour are
 /// left to the system so this cannot regress the glass tab bar.
 enum AppAppearance {
+    private static var contentSizeObserver: NSObjectProtocol?
+    private static var didInstallContentSizeObserver = false
+
     static func applyFonts() {
+        applyChromeFonts()
+        installContentSizeObserverIfNeeded()
+    }
+
+    private static func installContentSizeObserverIfNeeded() {
+        guard !didInstallContentSizeObserver else { return }
+        didInstallContentSizeObserver = true
+        contentSizeObserver = NotificationCenter.default.addObserver(
+            forName: UIContentSizeCategory.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            applyChromeFonts()
+        }
+    }
+
+    private static func applyChromeFonts() {
         let nav = UINavigationBarAppearance()
         nav.configureWithDefaultBackground()
-        nav.titleTextAttributes = [.font: AppFont.uiFont(17, weight: .bold)]
-        nav.largeTitleTextAttributes = [.font: AppFont.uiFont(34, weight: .bold)]
+        nav.titleTextAttributes = [.font: AppChromeFontScaling.scaledUIFont(.navigationTitle)]
+        nav.largeTitleTextAttributes = [.font: AppChromeFontScaling.scaledUIFont(.navigationLargeTitle)]
         UINavigationBar.appearance().standardAppearance = nav
         UINavigationBar.appearance().compactAppearance = nav
         UINavigationBar.appearance().scrollEdgeAppearance = nav
 
+        let tabFont = AppChromeFontScaling.scaledUIFont(.tabBarItem)
+        let segmentedFont = AppChromeFontScaling.scaledUIFont(.segmentedControl)
         for state in [UIControl.State.normal, .selected, .highlighted, .disabled] {
-            UITabBarItem.appearance().setTitleTextAttributes([.font: AppFont.uiFont(10)], for: state)
-            UISegmentedControl.appearance().setTitleTextAttributes([.font: AppFont.uiFont(13)], for: state)
+            UITabBarItem.appearance().setTitleTextAttributes([.font: tabFont], for: state)
+            UISegmentedControl.appearance().setTitleTextAttributes([.font: segmentedFont], for: state)
+        }
+
+        refreshLiveChrome(nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
+    }
+
+    /// `UIAppearance` only styles views created after the proxy changes.  The root navigation
+    /// and tab bars live for the whole session, so a Dynamic Type change must also restyle the
+    /// bars already on screen or they keep the old size until relaunch.
+    private static func refreshLiveChrome(
+        nav: UINavigationBarAppearance,
+        tabFont: UIFont,
+        segmentedFont: UIFont
+    ) {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                restyle(view: window, nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
+            }
+        }
+    }
+
+    /// Copies an existing bar appearance and changes only the title fonts, so a Dynamic Type
+    /// restyle cannot replace the live bar's background, material, or scroll-edge settings.
+    private static func appearanceByUpdatingFonts(
+        _ appearance: UINavigationBarAppearance,
+        titleFont: UIFont,
+        largeTitleFont: UIFont
+    ) -> UINavigationBarAppearance {
+        // copy() returns Any; unwrap that optional cast before subscripting attributes.
+        // UINavigationBarAppearance titleTextAttributes and largeTitleTextAttributes
+        // are non-optional dictionaries.
+        guard let copy = appearance.copy() as? UINavigationBarAppearance else {
+            return appearance
+        }
+        var titleAttributes: [NSAttributedString.Key: Any] = copy.titleTextAttributes
+        titleAttributes[.font] = titleFont
+        copy.titleTextAttributes = titleAttributes
+        var largeTitleAttributes: [NSAttributedString.Key: Any] = copy.largeTitleTextAttributes
+        largeTitleAttributes[.font] = largeTitleFont
+        copy.largeTitleTextAttributes = largeTitleAttributes
+        return copy
+    }
+
+    private static func restyle(
+        view: UIView,
+        nav: UINavigationBarAppearance,
+        tabFont: UIFont,
+        segmentedFont: UIFont
+    ) {
+        let states: [UIControl.State] = [.normal, .selected, .highlighted, .disabled]
+        if let bar = view as? UINavigationBar {
+            // Subscript the non-optional dictionaries; as? unwraps the Any font value.
+            let titleFont = nav.titleTextAttributes[.font] as? UIFont
+                ?? AppChromeFontScaling.scaledUIFont(.navigationTitle)
+            let largeTitleFont = nav.largeTitleTextAttributes[.font] as? UIFont
+                ?? AppChromeFontScaling.scaledUIFont(.navigationLargeTitle)
+            bar.standardAppearance = appearanceByUpdatingFonts(
+                bar.standardAppearance,
+                titleFont: titleFont,
+                largeTitleFont: largeTitleFont
+            )
+            if let compactAppearance = bar.compactAppearance {
+                bar.compactAppearance = appearanceByUpdatingFonts(
+                    compactAppearance,
+                    titleFont: titleFont,
+                    largeTitleFont: largeTitleFont
+                )
+            }
+            if let scrollEdgeAppearance = bar.scrollEdgeAppearance {
+                bar.scrollEdgeAppearance = appearanceByUpdatingFonts(
+                    scrollEdgeAppearance,
+                    titleFont: titleFont,
+                    largeTitleFont: largeTitleFont
+                )
+            }
+            if let compactScrollEdgeAppearance = bar.compactScrollEdgeAppearance {
+                bar.compactScrollEdgeAppearance = appearanceByUpdatingFonts(
+                    compactScrollEdgeAppearance,
+                    titleFont: titleFont,
+                    largeTitleFont: largeTitleFont
+                )
+            }
+            bar.setNeedsLayout()
+        } else if let bar = view as? UITabBar {
+            for item in bar.items ?? [] {
+                for state in states {
+                    item.setTitleTextAttributes([.font: tabFont], for: state)
+                }
+            }
+            bar.setNeedsLayout()
+        } else if let control = view as? UISegmentedControl {
+            for state in states {
+                control.setTitleTextAttributes([.font: segmentedFont], for: state)
+            }
+        }
+        for subview in view.subviews {
+            restyle(view: subview, nav: nav, tabFont: tabFont, segmentedFont: segmentedFont)
         }
     }
 }
