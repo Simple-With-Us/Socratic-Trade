@@ -482,31 +482,42 @@ export function Tooltip({
       // A body portal escapes clipping ancestors, but no longer inherits the console theme.
       // Copy its computed tokens rather than assuming the default or changing global styles.
       const tokens: Record<string, string> = {};
-      for (const name of inherited) {
+      for (let index = 0; index < inherited.length; index++) {
+        const name = inherited.item(index);
         if (name.startsWith("--con-") || name.startsWith("--brand-")) {
           tokens[name] = inherited.getPropertyValue(name);
         }
       }
-      setPosition({
+      const next: CSSProperties = {
         ...tokens,
         fontFamily: inherited.fontFamily,
         ...tooltipPosition(trigger.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
           { width: window.innerWidth, height: window.innerHeight }, align)
-      });
+      };
+      setPosition((previous) => previous && Object.keys(previous).length === Object.keys(next).length &&
+        Object.entries(next).every(([key, value]) => previous[key as keyof CSSProperties] === value) ? previous : next);
+    };
+    let frame = 0;
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; update(); });
     };
     update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    const resize = new ResizeObserver(update);
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
+    const resize = new ResizeObserver(schedule);
     resize.observe(trigger);
     resize.observe(tooltip);
-    const theme = new MutationObserver(update);
+    const theme = new MutationObserver(schedule);
     const consoleRoot = trigger.closest(".console-root");
     if (consoleRoot) theme.observe(consoleRoot, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    const scheme = window.matchMedia("(prefers-color-scheme: dark)");
+    scheme.addEventListener("change", schedule);
     return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      scheme.removeEventListener("change", schedule);
       resize.disconnect();
       theme.disconnect();
     };
