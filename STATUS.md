@@ -1,3 +1,8 @@
+## 2026-11-11 CURSOR — ST-4596 Keychain session cookies (#5131)
+
+**What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
+
+**Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
 ## 2026-11-12 gb-trader — ST-4622 scheduled Litestream B2 restore drill
 
 **What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Second Kody round: the token file must be a non-symlink `st.*` service token (20-2048 chars, no whitespace); inherited process-env AWS/Sentry creds are dropped unless `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1`; `INFISICAL_PROJECT_ID` is always required and passed as `--projectId`; token-file failures alert; every status carries a `runId`; the installer strips the `INFISICAL_ST_*` pair and `export ` prefixes; the notify-off helper traps HUP/INT/TERM and has `--cleanup`.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.

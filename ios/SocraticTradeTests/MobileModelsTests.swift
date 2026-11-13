@@ -935,10 +935,15 @@ final class MobileModelsTests: XCTestCase {
             )!
             return (response, Data(self.minimalSnapshotJSON.utf8))
         }
+        // Keep the test off the simulator Keychain: an unsigned test host gets
+        // errSecMissingEntitlement there, and the post-load save would set store.error.
         let store = MobileStore(
             client: MobileAPIClient(
                 baseURL: URL(string: "https://socratictrade.com")!,
                 session: session
+            ),
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
             )
         )
         await store.load()
