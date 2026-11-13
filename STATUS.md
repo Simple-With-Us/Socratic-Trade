@@ -3,6 +3,69 @@
 **What.**  When the Nasdaq screener is down and a saved snapshot is available, the interactive scan shows that snapshot immediately, labeled with its age in Central time (for example `Prices as of 2:14 PM, 23 min old`), and then replaces those prices when Yahoo or broker recovery returns.  If recovery fails, the snapshot stays on screen with its age.  The blocking recovery order is unchanged: Yahoo, then broker, then seed.  Freshness still passes `allowWholeSetYahooFallback: false`, and the priority proxy lane and quote-outage backoff stay as they are.  Rollout: `docs/rollouts/2026-11-11-st-4599-snapshot-first-scan.md`.
 
 **Next.**  PR #5125 stays open on `fix/st-3999-screener-gate-priority`.  ST-4599 stays In Progress until that PR merges.  iOS compile is the hosted `ios-build` job.
+## 2026-11-12 CURSOR — ST-4605 iOS app lock
+
+**What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
+
+**Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled only in Debug, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
+
+## 2026-11-11 CURSOR — ST-4596 Keychain session cookies (#5131)
+
+**What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
+
+**Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
+## 2026-11-12 gb-trader — ST-4622 scheduled Litestream B2 restore drill
+
+**What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Second Kody round: the token file must be a non-symlink `st.*` service token (20-2048 chars, no whitespace); inherited process-env AWS/Sentry creds are dropped unless `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1`; `INFISICAL_PROJECT_ID` is always required and passed as `--projectId`; token-file failures alert; every status carries a `runId`; the installer strips the `INFISICAL_ST_*` pair and `export ` prefixes; the notify-off helper traps HUP/INT/TERM and has `--cleanup`.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
+
+**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge (service token file + confirmed secret names).  Do not run against live B2 from the agent.
+## 2026-11-12 [gb-trader] ST-4611 — iOS 5xx Sentry capture and GET retry
+
+**What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
+
+**Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4618 — iOS Dynamic Type chrome + 44pt tap targets
+
+**What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
+
+**Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
+## 2026-11-12 CURSOR — ST-4633 iOS GET transport-timeout retry
+
+**What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once.  A persistent timeout now holds a snapshot refresh for two 45s waits (about 90s) and the Scan screen for two 50s waits (about 100s), down from three 45s waits (about 136s).  The scan runs only from the Scan screen (`ScanView` → `fetchMarketScan`), never inside the snapshot refresh, so the two budgets do not chain.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
+
+**What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
+
+**Next.** Open the PR against main.  Do not merge and do not enable auto-merge.
+## 2026-11-12 [gb-trader] ST-4623 — host systemd timer Sentry Crons dead-man
+
+**What.**  `scripts/ops/sentry-cron-checkin.py` wraps ST host oneshots (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) with Sentry Crons in_progress/ok/error, shared `/etc/default/st-host-cron-sentry`, and installer updates.  Rollout: `docs/rollouts/2026-11-12-st-4623-host-timer-deadman.md`.
+
+**Next.**  PR on `gb-trader/ST-4623-host-timer-deadman`; green `verify`.  Jay re-installs on `<host>` (the dedicated fleet host).  The installers refuse (exit 1, nothing changed) unless `hostname` matches the expected host: `<host>` by default, or `ST_INSTALL_EXPECTED_HOST` / `--expected-host NAME`; `--skip-host-check` is last resort and logs a warning.  Preflight reads only the env files (`/etc/default/st-host-cron-sentry`, and `/etc/default/st-container-restart-monitor` for the restart-monitor installer), so `SENTRY_CRONS_DSN` or `SENTRY_CRONS_DISABLED=1` must be set there, not in the shell.  The installers always pass `--env-file`, so `ST_HOST_CRON_SENTRY_ENV_FILE` applies only to manual `wrap` or `check` runs that omit `--env-file`.  Do not merge or deploy from agent.
+
+## 2026-11-12 [gb-trader] ST-4621 — Litestream L1 trim/heal safety tests
+
+**What.**  Offline tests and backup-tier guards for the L1 suffix-heal and boundary-trim scripts.  Planning is importable, a TXID gap drops the pre-gap L1 even when the count is under the keep window, suffix-heal lists L1/L2/L3 with `b2_list_file_versions` (key capability `listFiles`; every version, so a hide marker cannot unhide an older upload) and counts the never-deleted L0/L9 with `b2_list_file_names` (key capability `listFiles`; current names only), a delete error stops the run, and the fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The fleet selftest fails if the installer's `DST_PY` and the wrapper's default trim path drift apart, or if `DST_FLEET` and the unit's `ExecStart` do.  A failed post-delete listing logs `APPLIED-UNVERIFIED` with the attempted and cleanly issued delete counts and still exits 1.  The fleet wrapper now passes through the first non-zero trim exit, so a scheduled guard abort is visible in `systemctl status`.  Exit 2 and 127 are not unique; the Exit codes section names the journal lines that tell the wrapper's own causes apart from a passed-through trim or exec failure.  A directory or other non-regular `LITESTREAM_L1_TRIM_BIN` is refused as 127 before any trim runs.  A passed-through exec permission failure is exit 126.  Wrapper-only exits 2 (bad `LITESTREAM_L1_TRIM_APPLY`, before any trim) and 127 (missing binary) stay as they are.  `APPLIED-UNVERIFIED` still exits 1 and is passed through unchanged.  The systemd unit opts in so a later install still applies.  Nothing was run against production B2, R2, or the Hetzner host.  Rollout: `docs/rollouts/2026-11-12-st-4621-litestream-l1-safety-tests.md`.
+
+**Next.**  Ready PR against `main`.  Do not merge, do not enable auto-merge, and do not install on the host from this lane.  `verify` is the merge gate.  Jay installs the repo copies when he wants the host behavior to change.
+
+## 2026-11-12 CURSOR — ST-2793 deploy-freshness RTH latch
+
+**What.**  Deploy-freshness now ages undeployed `main` from session close (shared `evaluateRthDeployLatch` / `isMarketOpen` calendar), not raw commit time during weekday RTH.  `DEPLOY_FRESHNESS_STALE_SECONDS` is the post-close grace.  Rollout: `docs/rollouts/2026-11-12-st-2793-deploy-freshness-rth-latch.md`.
+
+**Next.**  PR #5143 — merged `origin/main` at `ba400936` (no conflict markers; ST-2793 paths untouched).  Local gate: selftest 18/18, staleness vitest 7/7, lint/tsc/build green.  Push head and wait for fresh `verify`; do not merge from agent.
+## 2026-11-12 [GB-TRADER] ST-2797 — broker route error honesty
+
+**What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` classifies a thrown provider/gateway failure as 504 `broker_timeout`, 502 `broker_auth_failed`, or 502 `broker_unavailable` (matching other broker-backed GETs).  `fetchDailyOHLC` returns `[]` when any live provider confirms no usable series (200 with `bars: []`); when every attempted tier failed the route gets a payload-free `HistoryProviderError` and classifies it (504/502).  Identity denials stay 401, and local identity or adapter faults stay 500 `internal_error`, never `broker_*`.  PUT `/api/policy` and POST `/api/keys` reject unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
+
+**Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4632 — admin ingest rate limits
+
+**What.**  The expensive admin ingest and backfill routes now call `enforceRateLimit` after the existing admin check.  A caller who already passed that check is still allowed the same way.  Starting a job is capped at 6 calls per 10 minutes per admin per route, and the next call returns 429 without starting OpenRouter, Qdrant, or SEC work.  Status reads on those routes, including the chat transcript, are capped at 30 per minute.  Hourly operation budgets that already covered some of these posts stay in place.  Empty 10-K lists, unknown web-source ids, and an invalid SEC ingest body still return 400 and do not spend the new budget.  A failed SEC ingest body parse is 400 `invalid_payload`.  Quoted numeric offsets and limits are still accepted; empty or non-numeric strings are rejected.  CIKs are padded to 10 digits and deduped.  Rollout: `docs/rollouts/2026-11-12-st-4632-admin-ingest-rate-limits.md`.
+
+**Next.**  The PR is the delivery.  The production-notes bullets stay with the admission section, the test database URL is restored after each test, and admin ingest tests use a localhost origin.  The 400-before-budget tests fill the bucket to one under the cap and expect the next real start to succeed and the one after that to return 429.  Quoted offsets are accepted and coerced.  SEC seed CIKs are asserted after 10-digit padding.  Those allowed starts expect HTTP 200.  An already-full guarded budget returns 429 before the shared lease, and the earnings-call entitlement reset has its own bucket.  Do not merge, do not enable auto-merge, and do not deploy from this lane.
 ## 2026-11-12 [gb-trader] ST-4616 — money-path order invariant properties
 
 **What.** Property tests place 1000 seeded Alpaca and Tradier orders through `getBrokerGateway` and check the final payload.  Two money-path bugs were real.  `BRK.B` now matches a `BRK-B` position.  A Tradier partial dollar exit becomes a share quantity from the position value, or is refused when that quantity cannot be priced.  Alpaca partial dollar sells stay notional.  Rollout: `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`.
@@ -36,21 +99,25 @@
 **What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
 
 **Next.**  PR open; `verify` green required.  Jay may add the job to branch protection later.  Do not merge from agent.
+
 ## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
 
 **What.**  Keyless and global provider timeouts were paging as hard connection failures.  Nasdaq delayed screener, congress-nasdaq-screener, finnhub, and alpaca-broker (Sentry SOCRATIC-TRADE-3K, 3M, 3R, and 3D) logged a named timeout that matched neither the expected-limit shapes nor the ST-3079 transport-blip shapes.  `db-health` now records AbortError, TimeoutError, undici header and body timeouts, "timed out waiting for", and broker-call timeouts as transient-network.  They warn, use the short transient cooldown, and escalate to error once the streak passes `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare "This operation was aborted" stays an expected limit.  Quote, scan, screener, order, and strategy fetch behavior is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4608-provider-health-timeout-class.md`.
 
 **Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  The budget-cancel test reads the `env` lane it writes, after one success, so five hard rows would show the lane stopped.
+
 ## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
 
 **What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
 
 **Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+
 ## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
 
 **What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
 
 **Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
+
 ## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
 
 **What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
@@ -62,6 +129,7 @@
 **What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
 
 **Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+
 ## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
 
 **What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  The affected production deployment on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.

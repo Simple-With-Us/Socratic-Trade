@@ -8,7 +8,7 @@
 # smart quotes / em dashes / arrows. Check: grep -nP '[^\x00-\x7F]' scripts/*.sh
 #
 # WHAT IT DOES
-#   1. GET https://usage.jays.services/api/subscriptions  (Bearer USAGE_READ_TOKEN
+#   1. GET https://usage.jays.services/api/subscriptions  (using USAGE_READ_TOKEN
 #      from env, else Infisical /usage-monitor via fleet-secrets, falling back to
 #      USAGE_INGEST_TOKEN).
 #      Prod UM denies ingest-token reads (Wave C). Bare JSON array; each element has
@@ -23,14 +23,14 @@
 #      else the payload asks for is refused (defense vs a buggy/compromised monitor).
 #   3. Read current values from Infisical prod (proven SSH + universal-auth CLI
 #      path on the Coolify box) and WRITE ONLY DIFFS.
-#   4. On any applied change, post ONE line to #Work-In-Progress.
+#   4. Journal every applied change to stderr; no fleet message is sent.
 #
 # Knob writes land in Infisical; the trading app reads them at boot, so a change
 # takes effect on the next prod deploy/restart ("rides next deploy").
 #
 # USAGE
 #   scripts/sync-provider-knobs.sh            # DRY RUN: print the diff, write nothing, exit 0
-#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + post to #Work-In-Progress
+#   scripts/sync-provider-knobs.sh --apply    # write changed keys to Infisical + journal changes
 #
 # SAFETY
 #   - No token available -> exit 1 (fail loudly).  Monitor unreachable / empty payload -> exit 0, no writes, no Zulip post (launchd-safe).
@@ -58,7 +58,6 @@ BOX_ENV="${KNOB_SYNC_BOX_ENV:-/data/coolify/applications/${COOLIFY_APP_UUID}/.en
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$SCRIPT_DIR/provider-knob-diff.mjs"
-FLEET_POST="$SCRIPT_DIR/simple-tools-fleet-post.sh"
 
 APPLY=0
 for arg in "$@"; do
@@ -192,7 +191,7 @@ if [ "$APPLY" -eq 0 ]; then
     st="$(printf '%s' "$rec" | cut -f6)"
     echo "  $k: $old -> $new (plan $plan $st)"
   done
-  echo "[knob-sync] re-run with --apply to write these and post to #Work-In-Progress."
+  echo "[knob-sync] re-run with --apply to write these and journal each applied change."
   exit 0
 fi
 
@@ -256,27 +255,20 @@ else
   log "apply session error: $(tr '\n' ' ' < "$WORK/apply.err" 2>/dev/null)"
 fi
 
-# -- 6) report + Zulip one line per applied change ---------------------------
+# -- 6) preserve the applied-change journal ---------------------------------
 FAILN=0
 while IFS= read -r out; do
   [ -z "$out" ] && continue
   tag="$(printf '%s' "$out" | cut -f1)"
   key="$(printf '%s' "$out" | cut -f2)"
   if [ "$tag" = "OK" ]; then
-    # look up the full change record for this key to build the Slack line
+    # Look up the change record for the existing write journal.
     rec="$(awk -F'\t' -v k="$key" '$1=="CHANGE" && $2==k {print; exit}' "$PLAN")"
     old="$(printf '%s' "$rec" | cut -f3)"
     new="$(printf '%s' "$rec" | cut -f4)"
     plan="$(printf '%s' "$rec" | cut -f5)"
     st="$(printf '%s' "$rec" | cut -f6)"
-    log "wrote $key: $old -> $new"
-    MSG="repo: Socratic-Trade | [CLAUDE->FLEET] knob-sync applied: $key $old->$new (plan $plan $st); rides next deploy"
-    if [ -x "$FLEET_POST" ]; then
-      FLEET_POST_SEAT="${FLEET_POST_SEAT:-CLAUDE}" \
-      FLEET_POST_REPO="${FLEET_POST_REPO:-Socratic-Trade}" \
-      FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
-        bash "$FLEET_POST" "$MSG" >/dev/null 2>&1 || log "fleet post failed for $key (write still succeeded)"
-    fi
+    log "wrote $key: $old -> $new (plan $plan $st)"
   else
     msg="$(printf '%s' "$out" | cut -f3)"
     log "FAILED $key: $msg"

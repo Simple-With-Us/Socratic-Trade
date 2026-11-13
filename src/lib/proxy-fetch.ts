@@ -214,6 +214,8 @@ interface ProxyHold {
 
 interface ProxyGateWaiter {
   enqueuedAt: number;
+  /** True while acquire() is still on the stack; a grant then is immediate. */
+  enqueuing?: boolean;
   signal?: AbortSignal;
   onAbort?: () => void;
   priority: boolean;
@@ -287,7 +289,7 @@ export class ProxyConcurrencyGate {
   acquire(signal?: AbortSignal, opts?: ProxyGateAcquireOptions): Promise<ProxySlot> {
     if (signal?.aborted) return Promise.reject(abortReason(signal));
     return new Promise<ProxySlot>((resolve, reject) => {
-      const waiter: ProxyGateWaiter = { enqueuedAt: Date.now(), signal, priority: opts?.priority === true, resolve, reject };
+      const waiter: ProxyGateWaiter = { enqueuedAt: Date.now(), enqueuing: true, signal, priority: opts?.priority === true, resolve, reject };
       if (signal) {
         waiter.onAbort = () => {
           const idx = this.queue.indexOf(waiter);
@@ -299,6 +301,7 @@ export class ProxyConcurrencyGate {
       }
       this.queue.push(waiter);
       this.pump();
+      waiter.enqueuing = false;
     });
   }
 
@@ -346,7 +349,9 @@ export class ProxyConcurrencyGate {
       const enqueuedAt = waiter.enqueuedAt;
       let released = false;
       waiter.resolve({
-        waitMs: Math.max(0, Date.now() - enqueuedAt),
+        // A slot granted inside acquire() itself never queued; a clock tick
+        // between enqueue and grant must not read as a queue wait (ST-4634).
+        waitMs: waiter.enqueuing ? 0 : Math.max(0, Date.now() - enqueuedAt),
         release: () => {
           if (released) return;
           released = true;
