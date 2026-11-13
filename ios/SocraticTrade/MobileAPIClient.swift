@@ -250,7 +250,7 @@ struct MobileAPIClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: req)
+            (data, response) = try await dataRetryingTransportTimeout(for: req, transport: session)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -573,22 +573,25 @@ struct MobileAPIClient {
     }
 
     private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
+        // One counter covers transport timeouts and HTTP 5xx.  The inner timeout
+        // loop is off here, so a 503 cannot start a fresh three-attempt timeout budget.
+        let timeoutBudget = MobileAPITransportTimeoutRetry.maxRetries(forTimeout: timeout)
         var attempt = 0
         while true {
             do {
                 var req = request(path: path)
                 req.timeoutInterval = timeout
-                return try await send(req, captureFailures: false)
+                return try await send(req, captureFailures: false, retryTransportTimeout: false)
             } catch let error as MobileAPIError {
-                let shouldRetry = {
-                    if case .network = error { return true }
-                    if case .serverError(let statusCode, _) = error, statusCode >= 500 { return true }
-                    return false
-                }()
-                if shouldRetry, attempt < retries {
+                if Self.shouldRetryGet(
+                    error,
+                    attempt: attempt,
+                    retries: retries,
+                    timeoutBudget: timeoutBudget
+                ) {
+                    let delay = MobileAPITransportTimeoutRetry.backoffNanoseconds(attemptIndex: attempt)
                     attempt += 1
-                    let delayMs = UInt64(150_000_000 * (1 << attempt)) // 300ms, 600ms backoff
-                    try await Task.sleep(nanoseconds: delayMs)
+                    try await Task.sleep(nanoseconds: delay)
                     continue
                 }
                 if case .network(let underlying) = error {
@@ -598,6 +601,27 @@ struct MobileAPIClient {
             } catch {
                 throw error
             }
+        }
+    }
+
+    /// Timeouts, other transport failures, and HTTP 5xx share `attempt`.
+    /// A long timeout still stops after `timeoutBudget` extras.  Writes do not use this.
+    private static func shouldRetryGet(
+        _ error: MobileAPIError,
+        attempt: Int,
+        retries: Int,
+        timeoutBudget: Int
+    ) -> Bool {
+        switch error {
+        case .network(let underlying):
+            if MobileAPITransportTimeoutRetry.isTransportTimeout(underlying) {
+                return attempt < timeoutBudget
+            }
+            return attempt < retries
+        case .serverError(let statusCode, _):
+            return statusCode >= 500 && attempt < retries
+        case .unauthorized, .deviceTokenConflict, .scanQuotesUnavailable, .decoding:
+            return false
         }
     }
 
@@ -614,8 +638,16 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest, captureFailures: Bool = true) async throws -> T {
-        let data = try await successfulResponseData(for: request, captureFailures: captureFailures)
+    private func send<T: Decodable>(
+        _ request: URLRequest,
+        captureFailures: Bool = true,
+        retryTransportTimeout: Bool = true
+    ) async throws -> T {
+        let data = try await successfulResponseData(
+            for: request,
+            captureFailures: captureFailures,
+            retryTransportTimeout: retryTransportTimeout
+        )
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -627,12 +659,20 @@ struct MobileAPIClient {
         for request: URLRequest,
         captureFailures: Bool = true,
         deviceTokenConflictPath: Bool = false,
-        transport: URLSession? = nil
+        transport: URLSession? = nil,
+        retryTransportTimeout: Bool = true
     ) async throws -> Data {
         let data: Data
         let response: URLResponse
+        let retryLimit = retryTransportTimeout
+            ? MobileAPITransportTimeoutRetry.maxRetries(forTimeout: request.timeoutInterval)
+            : 0
         do {
-            (data, response) = try await (transport ?? session).data(for: request)
+            (data, response) = try await dataRetryingTransportTimeout(
+                for: request,
+                transport: transport ?? session,
+                maxRetries: retryLimit
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -648,6 +688,40 @@ struct MobileAPIClient {
         }
         try Self.requireSuccess(response, body: data)
         return data
+    }
+
+    /// One or two extra attempts when an idempotent read hits NSURLError -1001.
+    /// A timeout of 45s or longer gets one extra attempt.  POST, PATCH, PUT, and
+    /// DELETE return the first timeout.  `get` turns this loop off and owns
+    /// that budget itself so a 5xx retry cannot start another one.
+    private func dataRetryingTransportTimeout(
+        for request: URLRequest,
+        transport: URLSession,
+        maxRetries: Int? = nil
+    ) async throws -> (Data, URLResponse) {
+        let retryLimit = maxRetries ?? MobileAPITransportTimeoutRetry.maxRetries(
+            forTimeout: request.timeoutInterval
+        )
+        var attemptIndex = 0
+        while true {
+            do {
+                return try await transport.data(for: request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard MobileAPITransportTimeoutRetry.shouldRetry(
+                    error: error,
+                    method: request.httpMethod,
+                    attemptIndex: attemptIndex,
+                    maxRetries: retryLimit
+                ) else {
+                    throw error
+                }
+                let delay = MobileAPITransportTimeoutRetry.backoffNanoseconds(attemptIndex: attemptIndex)
+                attemptIndex += 1
+                try await Task.sleep(nanoseconds: delay)
+            }
+        }
     }
 
     private static func requireSuccess(_ response: URLResponse, body: Data?) throws {
