@@ -883,7 +883,7 @@ Acronyms: `UM` `ST` `CT` `CTS` `FLEET`. Multi-app: list each (`[ST, CT, Grok] �
 Agent display Title Case (`Grok`/`Monet`/`Claude`/…), not ALL-CAPS chat tags.
 
 **Second body row:** local stamp `Sun, Aug 9, 3:52 PM` (create **or** last update —
-refresh on every change). Helper auto-injects/refreshes it.
+refresh on every change). Helper auto-injects/refreshes it.  Owner-facing Notes stamps use America/Chicago 12-hour `h:mm AM/PM`, with no zone or adjacent UTC.
 
 **Always** write/update living Completion notes for substantial work; update in place.
 Folder **Coding**, pin when able. Helper: `/Users/jay/apps/apple-notes-coding.sh`
