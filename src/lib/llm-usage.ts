@@ -155,6 +155,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "grok-4.5": [1.25, 2.5],
   "claude-fable-5": [10, 50],
   "claude-opus-4-8": [5, 25],
+  "claude-opus-4.8": [5, 25],
 
   // --- Curated catalog rows (LLM_MODEL_CATALOG, 26 rows as of 2026-11-04) ---
   // 2026-11-04 rows below are OpenRouter list prices for the exact wire slug each row uses
