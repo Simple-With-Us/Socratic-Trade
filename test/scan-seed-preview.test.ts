@@ -8,6 +8,7 @@ import { clearMarketCache, scanMarket } from "../src/lib/market";
 import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 import {
   awaitScanRecovery,
+  type KeptSeedSnapshot,
   formatScanPriceAge,
   resetScanRecoveriesForTests,
   scanSnapshotPriceLabel
@@ -250,7 +251,7 @@ describe("interactive seed preview", () => {
   });
 
   it("pins recoveries on globalThis so a second module copy can await them", async () => {
-    const result = { keptSnapshot: true as const, pricesAsOf, refreshPending: false };
+    const result: KeptSeedSnapshot = { keptSnapshot: true, pricesAsOf, refreshPending: false };
     const { registerScanRecovery } = await import("../src/lib/scan-seed-preview");
     registerScanRecovery("33333333-3333-4333-8333-333333333333", "user-1", Promise.resolve(result));
     const shared = globalThis.__socraticScanSeedPreviewRecoveries;

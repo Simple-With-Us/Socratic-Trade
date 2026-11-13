@@ -112,7 +112,7 @@ describe("GET /api/scan — connected account scope", () => {
     const email = `scan-route-preview-${randomUUID()}@example.com`;
     const { userId } = resolveRequestUserFromEmail(email);
     const otherEmail = `other-${email}`;
-    resolveRequestUserFromEmail(otherEmail);
+    const { userId: otherUserId } = resolveRequestUserFromEmail(otherEmail);
     const pricesAsOf = "2026-11-11T20:14:00.000Z";
     const recoveryId = "22222222-2222-4222-8222-222222222222";
     scanMarketMock.mockResolvedValueOnce({
@@ -174,7 +174,19 @@ describe("GET /api/scan — connected account scope", () => {
         headers: { [AUTHENTICATED_EMAIL_HEADER]: otherEmail }
       })
     );
-    expect(other.status).toBe(404);
+    // Recoveries are keyed to the user that started them. Another user's
+    // follow-up must not see this user's kept snapshot; since 96cb4d2b an
+    // unmatched recovery id falls through to a fresh live scan scoped to the
+    // caller (no seed preview) instead of a 404.
+    expect(other.status).toBe(200);
+    const otherBody = await other.json();
+    expect(otherBody.keptSnapshot).toBeUndefined();
+    expect(otherBody.pricesAsOf).toBeUndefined();
+    expect(otherBody.refreshPending).toBeUndefined();
+    expect(scanMarketMock).toHaveBeenCalledTimes(2);
+    const otherCall = scanMarketMock.mock.calls[1];
+    expect(otherCall[3]).toBe(otherUserId);
+    expect((otherCall[5] as { previewSeedBeforeLiveRecovery?: boolean }).previewSeedBeforeLiveRecovery).toBe(false);
     resetScanRecoveriesForTests();
   });
 });
