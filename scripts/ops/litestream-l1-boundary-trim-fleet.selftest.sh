@@ -156,23 +156,38 @@ fi
 # starts it (DST_FLEET == ExecStart), or the nightly timer fails to start.
 SERVICE_UNIT="${SCRIPT_DIR}/litestream-l1-boundary-trim.service"
 [ -f "$SERVICE_UNIT" ] || { echo "error: ${SERVICE_UNIT} not found." >&2; exit 1; }
-# fleet_paths_agree <installer> <unit>: 0 only when the installer's DST_FLEET
-# and the unit's single ExecStart executable are one identical absolute path.
+# fleet_paths_agree <installer> <unit>: 0 only when the unit's single ExecStart
+# runs the installer's DST_FLEET.  Two forms are accepted:
+#   ExecStart=<DST_FLEET> [args]
+#   ExecStart=<DST_CHECKIN> wrap ... -- <DST_FLEET> [args]
+# The wrapped form must start the installer's DST_CHECKIN (the installed
+# sentry-cron-checkin.py, which the installer must also install), use the
+# `wrap` subcommand, and have exactly one ` -- ` before the fleet path.
 fleet_paths_agree() {
-  local fleet exec_lines exec_bin
+  local fleet checkin exec_lines exec_line exec_bin wrap_sub dd_count prog
   fleet="$(sed -n 's/^DST_FLEET="\(.*\)"$/\1/p' "$1")"
+  checkin="$(sed -n 's/^DST_CHECKIN="\(.*\)"$/\1/p' "$1")"
   exec_lines="$(grep -c '^ExecStart=' "$2")"
-  # Executable is the first word; drop systemd's -@:+! prefixes.  When the
-  # unit wraps the job (sentry-cron-checkin.py wrap ... -- CMD), CMD is it.
-  if grep -q '^ExecStart=.* -- ' "$2"; then
-    exec_bin="$(sed -n 's/^ExecStart=.* -- \([^[:space:]]*\).*$/\1/p' "$2")"
+  # Drop systemd's -@:+! prefixes.
+  exec_line="$(sed -n 's/^ExecStart=[-@:+!]*//p' "$2")"
+  exec_bin="${exec_line%%[[:space:]]*}"
+  prog="$exec_bin"
+  WRAPPED=0
+  if [ "$(basename -- "$exec_bin")" = "sentry-cron-checkin.py" ]; then
+    WRAPPED=1
+    wrap_sub="$(printf '%s\n' "$exec_line" | awk '{print $2}')"
+    dd_count="$(printf '%s\n' "$exec_line" | grep -o '[[:space:]]--[[:space:]]' | wc -l)"
+    prog="$(printf '%s\n' "$exec_line" | sed -n 's/^.*[[:space:]]--[[:space:]]\{1,\}\([^[:space:]]*\).*$/\1/p')"
+    PATHS_SEEN="installer DST_FLEET='${fleet}' DST_CHECKIN='${checkin}' unit wrap='${exec_bin}' sub='${wrap_sub}' separators=${dd_count} wrapped='${prog}' (ExecStart lines: ${exec_lines})"
+    [ -n "$checkin" ] && [ "${checkin#/}" != "$checkin" ] && [ "$exec_bin" = "$checkin" ] \
+      && [ "$wrap_sub" = "wrap" ] && [ "$dd_count" -eq 1 ] \
+      && grep -q '^install -m 0755 "\$SRC_CHECKIN" "\$DST_CHECKIN"$' "$1" || return 1
   else
-    exec_bin="$(sed -n 's/^ExecStart=[-@:+!]*\([^[:space:]]*\).*$/\1/p' "$2")"
+    PATHS_SEEN="installer DST_FLEET='${fleet}' unit ExecStart='${exec_bin}' (ExecStart lines: ${exec_lines})"
   fi
-  PATHS_SEEN="installer DST_FLEET='${fleet}' unit ExecStart='${exec_bin}' (ExecStart lines: ${exec_lines})"
   [ -n "$fleet" ] && [ "${fleet#/}" != "$fleet" ] \
     && [ "$(printf '%s\n' "$fleet" | wc -l)" -eq 1 ] \
-    && [ "$exec_lines" -eq 1 ] && [ "$fleet" = "$exec_bin" ]
+    && [ "$exec_lines" -eq 1 ] && [ "$fleet" = "$prog" ]
 }
 if fleet_paths_agree "$INSTALLER" "$SERVICE_UNIT"; then
   PASSES=$((PASSES + 1))
@@ -191,6 +206,41 @@ if ! fleet_paths_agree "${WORK}/installer-fleet-drifted.sh" "$SERVICE_UNIT" \
 else
   FAILURES=$((FAILURES + 1))
   echo "FAIL installer_fleet_drift_detected: ${PATHS_SEEN}" >&2
+fi
+# The shipped unit must be the Sentry-wrapped form (ST-4623), and the wrapped
+# form's own drift is caught: the program after `--`, the wrap path, the
+# `wrap` subcommand, a missing `--`, and an installer that stops installing
+# the check-in script.
+fleet_paths_agree "$INSTALLER" "$SERVICE_UNIT"
+if [ "$WRAPPED" -eq 1 ]; then
+  PASSES=$((PASSES + 1))
+  echo "PASS unit_execstart_wrapped_by_sentry_checkin"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL unit_execstart_wrapped_by_sentry_checkin: ${PATHS_SEEN}" >&2
+fi
+sed 's#-- /usr/local/sbin/litestream-l1-boundary-trim-fleet#-- /opt/drifted/litestream-l1-boundary-trim-fleet#' "$SERVICE_UNIT" > "${WORK}/unit-wrapped-prog-drifted.service"
+sed 's#^ExecStart=/usr/local/sbin/sentry-cron-checkin.py#ExecStart=/opt/drifted/sentry-cron-checkin.py#' "$SERVICE_UNIT" > "${WORK}/unit-wrap-path-drifted.service"
+sed 's#sentry-cron-checkin.py wrap #sentry-cron-checkin.py check #' "$SERVICE_UNIT" > "${WORK}/unit-wrap-subcommand.service"
+sed 's# -- / /#' "$SERVICE_UNIT" > "${WORK}/unit-wrap-no-separator.service"
+grep -v '^install -m 0755 "\$SRC_CHECKIN" "\$DST_CHECKIN"$' "$INSTALLER" > "${WORK}/installer-no-checkin.sh"
+wrap_drift_caught=1
+for bad_unit in unit-wrapped-prog-drifted unit-wrap-path-drifted unit-wrap-subcommand unit-wrap-no-separator; do
+  if cmp -s "$SERVICE_UNIT" "${WORK}/${bad_unit}.service" || fleet_paths_agree "$INSTALLER" "${WORK}/${bad_unit}.service"; then
+    echo "  wrapped drift not caught: ${bad_unit}" >&2
+    wrap_drift_caught=0
+  fi
+done
+if cmp -s "$INSTALLER" "${WORK}/installer-no-checkin.sh" || fleet_paths_agree "${WORK}/installer-no-checkin.sh" "$SERVICE_UNIT"; then
+  echo "  wrapped drift not caught: installer-no-checkin" >&2
+  wrap_drift_caught=0
+fi
+if [ "$wrap_drift_caught" -eq 1 ]; then
+  PASSES=$((PASSES + 1))
+  echo "PASS installer_fleet_wrapped_drift_detected"
+else
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL installer_fleet_wrapped_drift_detected" >&2
 fi
 HERMETIC="${WORK}/fleet-hermetic.sh"
 sed "s#-${DEFAULT_BIN}}#-${WORK}/no-default-trim}#" "$UNDER_TEST" > "$HERMETIC"
