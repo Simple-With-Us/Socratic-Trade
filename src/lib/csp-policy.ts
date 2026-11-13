@@ -24,7 +24,7 @@ export const CSP_REPORT_PATH = "/api/csp-report";
  * `test/middleware-csp.test.ts` recomputes these from the script sources.
  */
 export const LAYOUT_SCRIPT_HASHES = [
-  "sha256-TBf1Yac6UR/nf27UgC3mljVU5QSKWPoVj0L6gik0d/k=",
+  "sha256-sY5Bc0fexkldbYVZD9VLxTor72+w47IxtcL/W8UFJCQ=",
   "sha256-u1teihVV9FYtrpqADi13pPRy8sqT9s/2Z5XtGZKkvus="
 ] as const;
 

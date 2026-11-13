@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState } from "react";
 
 export type ThemeChoice = "system" | "light" | "dark";
@@ -32,6 +33,24 @@ export function resolveTheme(choice: ThemeChoice, systemPrefersDark: boolean): R
   return choice;
 }
 
+/** Browser-chrome colors. Dark is #0a0a0a on every surface. Light is
+ *  surface-specific: console/admin `--con-bg` (#f1f4f6) vs the public root
+ *  layout's declared `themeColor` (#ffffff). Keep in lockstep with
+ *  app/layout.tsx, app/console/layout.tsx and console.css. */
+export const THEME_COLOR_DARK = "#0a0a0a";
+export const THEME_COLOR_LIGHT_CONSOLE = "#f1f4f6";
+export const THEME_COLOR_LIGHT_PUBLIC = "#ffffff";
+const CONSOLE_PATH = /^\/(console|admin)(\/|$)/;
+
+/** Light chrome color for the current surface. The boot script runs in <head>
+ *  before `.console-root` exists, so the pathname is checked as well. */
+export function themeColorFor(doc: Document, resolved: ResolvedTheme): string {
+  if (resolved === "dark") return THEME_COLOR_DARK;
+  const consoleSurface =
+    doc.querySelectorAll(".console-root").length > 0 || CONSOLE_PATH.test(doc.location?.pathname ?? "");
+  return consoleSurface ? THEME_COLOR_LIGHT_CONSOLE : THEME_COLOR_LIGHT_PUBLIC;
+}
+
 /** One writer for both theme signals. `.dark` drives Tailwind `dark:` and the
  *  public tokens. `data-theme` drives the console. They are always the resolved
  *  light or dark value, including when the stored choice is system. */
@@ -43,7 +62,7 @@ export function applyDocumentTheme(doc: Document, resolved: ResolvedTheme): void
   for (let i = 0; i < nodes.length; i++) {
     nodes[i]?.setAttribute("data-theme", resolved);
   }
-  const color = resolved === "dark" ? "#0a0a0a" : "#f1f4f6";
+  const color = themeColorFor(doc, resolved);
   const metas = doc.querySelectorAll('meta[name="theme-color"]');
   for (let i = 0; i < metas.length; i++) {
     const meta = metas[i];
@@ -74,11 +93,12 @@ export function syncDocumentTheme(
  * storage key, same light default, same system resolution, and both signals
  * written together. test/theme-sync.test.ts evals this string.
  */
-export const themeInitScript = `(function(){function paint(r){var root=document.documentElement;root.classList.toggle('dark',r==='dark');root.dataset.theme=r;var nodes=document.querySelectorAll('.console-root');for(var i=0;i<nodes.length;i++){nodes[i].setAttribute('data-theme',r);}var color=r==='dark'?'#0a0a0a':'#f1f4f6';var metas=document.querySelectorAll('meta[name="theme-color"]');for(var j=0;j<metas.length;j++){metas[j].setAttribute('content',color);metas[j].removeAttribute('media');}}try{var t=localStorage.getItem('theme');if(t!=='dark'&&t!=='light'&&t!=='system'){t='light';}var r=t==='system'?(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;paint(r);}catch(e){paint('light');}})();`;
+export const themeInitScript = `(function(){function paint(r){var root=document.documentElement;root.classList.toggle('dark',r==='dark');root.dataset.theme=r;var nodes=document.querySelectorAll('.console-root');for(var i=0;i<nodes.length;i++){nodes[i].setAttribute('data-theme',r);}var p=(document.location&&document.location.pathname)||'';var con=nodes.length>0||/^\\/(console|admin)(\\/|$)/.test(p);var color=r==='dark'?'#0a0a0a':(con?'#f1f4f6':'#ffffff');var metas=document.querySelectorAll('meta[name="theme-color"]');for(var j=0;j<metas.length;j++){metas[j].setAttribute('content',color);metas[j].removeAttribute('media');}}try{var t=localStorage.getItem('theme');if(t!=='dark'&&t!=='light'&&t!=='system'){t='light';}var r=t==='system'?(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t;paint(r);}catch(e){paint('light');}})();`;
 
 /**
- * `remembered` is the choice made this session.  It stands in when storage
- * is blocked, so a system change does not undo a pick that could not be saved.
+ * `remembered` is this session's pick when it could not be saved.  It wins
+ * over storage, so a system change does not undo a pick that a readable but
+ * unwritable store (quota, write-blocked) still holds a stale value for.
  */
 export function bindDocumentTheme(
   doc: Document,
@@ -87,11 +107,13 @@ export function bindDocumentTheme(
 ): () => void {
   const view = doc.defaultView;
   const apply = () => {
-    let stored: string | null;
-    try {
-      stored = view?.localStorage.getItem(THEME_STORAGE_KEY) ?? null;
-    } catch {
-      stored = remembered();
+    let stored: string | null = remembered();
+    if (stored === null) {
+      try {
+        stored = view?.localStorage.getItem(THEME_STORAGE_KEY) ?? null;
+      } catch {
+        stored = null;
+      }
     }
     let systemDark = false;
     try {
@@ -116,25 +138,36 @@ export function bindDocumentTheme(
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemeChoice>("light");
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>("light");
-  const pickedRef = useRef<ThemeChoice | null>(null);
+  // Set only while this session's pick is unsaved (the write threw).
+  const unsavedRef = useRef<ThemeChoice | null>(null);
+  const resolvedRef = useRef<ResolvedTheme>("light");
+  const pathname = usePathname();
 
   useLayoutEffect(() => {
     return bindDocumentTheme(
       document,
       (next) => {
+        resolvedRef.current = next.resolved;
         setThemeState(next.choice);
         setResolvedTheme(next.resolved);
       },
-      () => pickedRef.current
+      () => unsavedRef.current
     );
   }, []);
 
+  // Client navigation re-renders the segment's static viewport themeColor
+  // (#ffffff public, #f1f4f6 console), which would undo a dark pick. Repaint
+  // after each route change. The first run repeats bind's paint and is harmless.
+  useLayoutEffect(() => {
+    applyDocumentTheme(document, resolvedRef.current);
+  }, [pathname]);
+
   const set = useCallback((next: ThemeChoice) => {
-    pickedRef.current = next;
     try {
       localStorage.setItem(THEME_STORAGE_KEY, next);
+      unsavedRef.current = null;
     } catch {
-      /* ignore */
+      unsavedRef.current = next;
     }
     let systemDark = false;
     try {
@@ -143,6 +176,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       systemDark = false;
     }
     const resolved = resolveTheme(next, systemDark);
+    resolvedRef.current = resolved;
     applyDocumentTheme(document, resolved);
     setThemeState(next);
     setResolvedTheme(resolved);

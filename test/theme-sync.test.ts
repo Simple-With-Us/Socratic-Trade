@@ -23,7 +23,7 @@ type FakeElement = {
   getAttribute: (name: string) => string | null;
 };
 
-function fakeDocument(options?: { stored?: string | null; throwOnRead?: boolean; systemDark?: boolean; seedSplit?: boolean }) {
+function fakeDocument(options?: { stored?: string | null; throwOnRead?: boolean; systemDark?: boolean; seedSplit?: boolean; noConsole?: boolean; pathname?: string }) {
   const rootClass = { dark: options?.seedSplit === true };
   const root: FakeElement & {
     classList: { toggle: (name: string, force: boolean) => void; remove: (name: string) => void; contains: (name: string) => boolean };
@@ -82,8 +82,9 @@ function fakeDocument(options?: { stored?: string | null; throwOnRead?: boolean;
 
   const doc = {
     documentElement: root,
+    location: { pathname: options?.pathname ?? "/" },
     querySelectorAll(selector: string) {
-      if (selector === ".console-root") return [consoleRoot];
+      if (selector === ".console-root") return options?.noConsole ? [] : [consoleRoot];
       if (selector === 'meta[name="theme-color"]') return [meta];
       return [];
     }
@@ -226,6 +227,74 @@ describe("bindDocumentTheme", () => {
     for (const listener of listeners) listener();
     expect(seen.at(-1)).toBe("dark");
     expectSignalsMatch(root, "dark");
+    unbind();
+  });
+});
+
+describe("theme-color meta", () => {
+  it("uses the surface's light color and the shared dark color", () => {
+    const cases: Array<[{ noConsole?: boolean; pathname?: string }, ResolvedTheme, string]> = [
+      [{ noConsole: true, pathname: "/welcome" }, "light", "#ffffff"],
+      [{ noConsole: true, pathname: "/welcome" }, "dark", "#0a0a0a"],
+      [{}, "light", "#f1f4f6"],
+      [{ noConsole: true, pathname: "/console/strategy" }, "light", "#f1f4f6"],
+      [{ noConsole: true, pathname: "/admin" }, "light", "#f1f4f6"],
+      [{ noConsole: true, pathname: "/consoles" }, "light", "#ffffff"],
+      [{}, "dark", "#0a0a0a"]
+    ];
+    for (const [opts, resolved, color] of cases) {
+      const { doc, meta } = fakeDocument(opts);
+      applyDocumentTheme(doc as unknown as Document, resolved);
+      expect(meta.content, `${opts.pathname ?? "console-root"} ${resolved}`).toBe(color);
+      expect(meta.media).toBe("");
+
+      const booted = fakeDocument(opts);
+      const boot = new Function("document", "localStorage", "window", themeInitScript);
+      boot(booted.doc, { getItem: () => resolved }, { matchMedia: () => ({ matches: false }) });
+      expect(booted.meta.content, `boot ${opts.pathname ?? "console-root"} ${resolved}`).toBe(color);
+    }
+  });
+});
+
+describe("bindDocumentTheme with a readable but unwritable store", () => {
+  it("prefers this session's unsaved pick over the stale stored value", () => {
+    const { doc, root } = fakeDocument();
+    const listeners: Array<() => void> = [];
+    let systemDark = false;
+    const view = {
+      localStorage: {
+        getItem: () => "system"
+      },
+      matchMedia() {
+        return {
+          get matches() {
+            return systemDark;
+          },
+          addEventListener: (_type: string, listener: () => void) => listeners.push(listener),
+          removeEventListener: () => {}
+        };
+      }
+    };
+    let unsaved: ThemeChoice | null = null;
+    const seen: Array<{ choice: ThemeChoice; resolved: ResolvedTheme }> = [];
+    const unbind = bindDocumentTheme(
+      { ...doc, defaultView: view } as unknown as Document,
+      (next) => seen.push(next),
+      () => unsaved
+    );
+    expect(seen.at(-1)).toEqual({ choice: "system", resolved: "light" });
+
+    // The write of "light" threw; storage still reads the stale "system".
+    unsaved = "light";
+    systemDark = true;
+    for (const listener of listeners) listener();
+    expect(seen.at(-1)).toEqual({ choice: "light", resolved: "light" });
+    expectSignalsMatch(root, "light");
+
+    // Once a later write succeeds the provider clears `unsaved`, and storage rules again.
+    unsaved = null;
+    for (const listener of listeners) listener();
+    expect(seen.at(-1)).toEqual({ choice: "system", resolved: "dark" });
     unbind();
   });
 });
