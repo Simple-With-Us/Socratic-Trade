@@ -424,5 +424,30 @@ run_case "npx failure stays in-flight when raw commit age is under threshold" 0 
   "PATH=${WORK}/shim-npx:${PATH}"
 EXPECT_OUTPUT=""
 
+# Historical notification settings must not invoke a client or alter verdicts.
+LEGACY_POST_PROBE="${WORK}/legacy-client-called"
+cat > "${WORK}/retired-post-probe" <<'SH'
+#!/bin/sh
+printf invoked >> "$LEGACY_POST_PROBE"
+exit 99
+SH
+chmod +x "${WORK}/retired-post-probe"
+EXPECT_OUTPUT="DEPLOY_FRESHNESS_NOTIFY is retired and ignored"
+run_case "retired notification flags preserve fresh exit" 0 "$C1" 200 "$(payload "\"${C1}\"" 10)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=failure \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}"
+run_case "retired notification flags preserve missing-sha exit" 2 "$C1" 200 "$(payload null 10)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=success \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}"
+run_case "retired notification flags preserve stale exit" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=success \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW" \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}"
+EXPECT_OUTPUT=""
+if [ -e "$LEGACY_POST_PROBE" ]; then
+  echo "FAIL  retired notification invoked a client"
+  FAILURES=$((FAILURES + 1))
+fi
+
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

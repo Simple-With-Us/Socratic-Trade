@@ -135,13 +135,15 @@ CI: GitHub-hosted `ubuntu-latest` only (no self-hosted Mac/Oracle runner labels)
 
 ## Deploy freshness (silent-freeze watch)
 
+Scheduled results are reported through the existing `sentry-ci-report.yml` pipeline, which already observes the `Deploy freshness` workflow.  `DEPLOY_FRESHNESS_NOTIFY` and `DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION` are retired compatibility settings and do not enable Zulip delivery.  The legacy fleet-post script is a no-network diagnostic shim; manual coordination uses shared `simple-chat` under the caller's verified identity.
+
 `verify-deploy-sha.sh` is the post-merge assertion (polls up to 25 min).  It does
 not watch the pipeline afterwards.  On 2026-08-06 five Coolify deploys died
 mid-build (SSH exec stream exit 255) while webhooks returned 200 and
 `/api/health` stayed green on the old sha for ~14h.
 
 `.github/workflows/deploy-freshness.yml` runs `scripts/alert-deploy-freshness.sh`
-every 20 minutes.  It fails (Sentry fleet-infra + optional `#Work-In-Progress`) when
+every 20 minutes.  It fails (reported by the existing Sentry fleet-infra CI pipeline) when
 the oldest commit on `origin/main` that is not live **and that changed a path
 Coolify watches** is past its deploy-due time by more than
 `DEPLOY_FRESHNESS_STALE_SECONDS` (3600 in the workflow).  The deploy-due time is
@@ -170,8 +172,8 @@ Two edge cases are part of the contract.  A git failure while listing the gap is
 an operational error and exits 1, never a fresh pass:  git exits 0 with an empty
 list for a pathspec that matches nothing, which is the fresh verdict, so the
 exit status is what separates "no watched commit" from "git could not answer".
-And the fresh verdict posts the recovery notification, so the incident the
-watchdog opened is closed when production catches up instead of staying open.
+Scheduled successful verdicts produce an ok Sentry Crons check-in through the
+existing reporting pipeline; this script sends no separate notification.
 
 Manual one-shot:
 
