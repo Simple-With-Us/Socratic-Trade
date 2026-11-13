@@ -882,7 +882,7 @@ Examples: `[UM, Grok] TestFlight first ship` · `[ST, CT, Monet] R2 peer digests
 Acronyms: `UM` `ST` `CT` `CTS` `FLEET`. Multi-app: list each (`[ST, CT, Grok] …`).
 Agent display Title Case (`Grok`/`Monet`/`Claude`/…), not ALL-CAPS chat tags.
 
-**Second body row:** local stamp `Sun, Aug 9, 3:52pm` (create **or** last update —
+**Second body row:** local stamp `Sun, Aug 9, 3:52 PM` (create **or** last update —
 refresh on every change). Helper auto-injects/refreshes it.
 
 **Always** write/update living Completion notes for substantial work; update in place.
