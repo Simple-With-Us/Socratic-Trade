@@ -26,7 +26,7 @@ describe("drilldown native disclosures", () => {
       expect(/\bopen=""/.test(details!)).toBe(initiallyOpen);
       expect(html).toContain("<summary");
       expect(html).toContain('aria-hidden="true" class="con-disclosure-label ml-auto shrink-0 whitespace-nowrap"');
-      expect(html).toContain("<span class=\"con-card-title\">");
+      expect(html).toContain("<h3 class=\"con-card-title\">");
       expect(html).not.toContain("focus:outline-none");
     });
   }

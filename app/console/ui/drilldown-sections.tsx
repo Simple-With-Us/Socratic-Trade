@@ -45,7 +45,7 @@ function Disclosure({ title, titleHint, children, defaultOpen = false }: { title
   return (
     <details className="con-disclosure rounded-control border border-[color:var(--con-line)] px-3" open={defaultOpen}>
       <summary className="flex items-center gap-3 rounded-control py-3">
-        <span className="con-card-title"><Tooltip content={titleHint}>{title}</Tooltip></span>
+        <h3 className="con-card-title"><Tooltip content={titleHint}>{title}</Tooltip></h3>
         <span aria-hidden="true" className="con-disclosure-label ml-auto shrink-0 whitespace-nowrap" />
       </summary>
       <div className="pb-3">{children}</div>
