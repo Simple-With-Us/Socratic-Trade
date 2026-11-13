@@ -445,8 +445,10 @@ function ChromeBar({
           gap-2/px-4 from sm up) claws back a few px so the account scope's mobile
           min-width (chrome.tsx ScopeSelector) has room without overflowing.
           Phones use two rows (account, then actions) so Run Once and Start stay
-          on screen. A single scrolling row hid those controls past the fold. */}
-      <div className="relative mx-auto flex max-w-[1400px] flex-wrap items-center gap-1.5 px-3 py-2 sm:flex-nowrap sm:gap-2 sm:px-4">
+          on screen. A single scrolling row hid those controls past the fold.
+          From sm up the row is one line again, and sm:overflow-x-auto keeps any
+          leftover width inside the bar instead of scrolling the page. */}
+      <div className="relative mx-auto flex max-w-[1400px] flex-wrap items-center gap-1.5 px-3 py-2 sm:flex-nowrap sm:gap-2 sm:overflow-x-auto sm:px-4">
         <BrandReveal />
         <div className="flex min-w-0 basis-full items-center gap-1.5 sm:contents">
           <ScopeSelector snapshot={snapshot} />

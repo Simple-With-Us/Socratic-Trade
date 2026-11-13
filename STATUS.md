@@ -1,3 +1,9 @@
+## 2026-11-13 CURSOR — ST-4627 Kody chrome and chips
+
+**What.**  From the sm breakpoint up, the console bar scrolls inside the header.  The Settings More sections control sits beside the chips and stays mounted while the row overflows.  The iOS login comment no longer claims the last bullet matches the web list.
+
+**Next.**  Replies are on the Kody threads.  Do not merge.  GB-Designer merges.
+
 ## 2026-11-13 CURSOR — ST-4627 checklist title
 
 **What.**  When a model key is already saved and no model is chosen, the readiness row says Choose a model and the button says Choose Model.  A missing key still says Add a model key.  Rollout: `docs/rollouts/2026-11-12-st-4627-ui-polish.md`.

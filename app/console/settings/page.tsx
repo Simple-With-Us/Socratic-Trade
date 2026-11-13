@@ -119,6 +119,7 @@ const EVENT_HINT: Record<NotificationEventType, string> = {
  *  scrolling; mobile overflow-x scrolls the chip row. No policy writes. */
 function SettingsToc() {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
   // Seed from hash on first client paint so deep links highlight without an effect.
   const [activeId, setActiveId] = useState<string | null>(() => {
@@ -128,12 +129,15 @@ function SettingsToc() {
   });
   const [topOffset, setTopOffset] = useState(0);
 
-  // The chip row hides its scrollbar. Without a control, the next label is
-  // cut mid-word ("Lear") and looks like the name of a section.
+  // The chip row hides its scrollbar. The More sections control sits beside
+  // the row, and it stays mounted while the row overflows so the width does
+  // not jump when the user reaches the end.
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const measure = () => {
+      const extra = el.scrollWidth - el.clientWidth;
+      setOverflows(extra > 2);
       setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
     };
     measure();
@@ -207,40 +211,41 @@ function SettingsToc() {
       className="sticky z-30 -mx-4 border-b border-[color:var(--con-line)] bg-[color:var(--con-bg)]/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-[color:var(--con-bg)]/85 lg:-mx-6 lg:px-6"
       style={{ top: topOffset }}
     >
-      <div className="relative">
-      <div
-        ref={scrollerRef}
-        className={`flex gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${canScrollRight ? "pr-10" : ""}`}
-      >
-        {SETTINGS_TOC.map((item) => {
-          const isActive = activeId === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => jump(item.id)}
-              aria-current={isActive ? "true" : undefined}
-              className={`shrink-0 rounded-full border px-2.5 py-1 text-[length:var(--con-fs-xs)] font-semibold transition-colors ${
-                isActive
-                  ? "border-[color:var(--con-accent)] bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
-                  : "border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] text-[color:var(--con-muted)] hover:border-[color:var(--con-accent-border)] hover:text-[color:var(--con-fg)]"
-              }`}
-            >
-              {item.label}
-            </button>
-          );
-        })}
-      </div>
-      {canScrollRight ? (
-        <button
-          type="button"
-          className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm"
-          aria-label="More sections"
-          onClick={() => scrollerRef.current?.scrollBy({ left: 160, behavior: "smooth" })}
+      <div className="flex items-center gap-1.5">
+        <div
+          ref={scrollerRef}
+          className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
-          <ChevronRight size={18} aria-hidden />
-        </button>
-      ) : null}
+          {SETTINGS_TOC.map((item) => {
+            const isActive = activeId === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => jump(item.id)}
+                aria-current={isActive ? "true" : undefined}
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-[length:var(--con-fs-xs)] font-semibold transition-colors ${
+                  isActive
+                    ? "border-[color:var(--con-accent)] bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
+                    : "border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] text-[color:var(--con-muted)] hover:border-[color:var(--con-accent-border)] hover:text-[color:var(--con-fg)]"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+        {overflows ? (
+          <button
+            type="button"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm disabled:opacity-40"
+            aria-label="More sections"
+            disabled={!canScrollRight}
+            onClick={() => scrollerRef.current?.scrollBy({ left: 160, behavior: "smooth" })}
+          >
+            <ChevronRight size={18} aria-hidden />
+          </button>
+        ) : null}
       </div>
     </nav>
   );
