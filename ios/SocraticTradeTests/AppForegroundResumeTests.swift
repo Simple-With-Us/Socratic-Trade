@@ -18,9 +18,11 @@ final class AppForegroundResumeTests: XCTestCase {
 
         try? await Task.sleep(for: .milliseconds(25))
         gate.phase = .background
-        await resumeTask.value
+        _ = await resumeTask.value
 
-        XCTAssertEqual(store.callOrder, ["restore", "stopEvents", "load"])
+        // ST-4605: the stream starts before the reload and is stopped when the
+        // scene leaves the foreground before the reload finishes.
+        XCTAssertEqual(store.callOrder, ["restore", "startEvents", "load", "stopEvents"])
     }
 
     func testResumeStartsEventsWhenStillActiveAfterLoad() async {
@@ -28,19 +30,21 @@ final class AppForegroundResumeTests: XCTestCase {
         let gate = ScenePhaseResumeGate()
         gate.phase = .active
 
-        await AppForegroundResume.resumeAfterBecomingActive(
+        let started = await AppForegroundResume.resumeAfterBecomingActive(
             store: store,
             isScreenshotMode: false,
             shouldContinue: { gate.shouldContinueResume() }
         )
 
-        XCTAssertEqual(store.callOrder, ["restore", "stopEvents", "load", "startEvents"])
+        XCTAssertTrue(started)
+        XCTAssertEqual(store.callOrder, ["restore", "startEvents", "load"])
     }
 }
 
 @MainActor
 private final class ForegroundResumeTestDouble: LiveSessionResuming, SessionRestoreAwaiting {
     var isAuthenticated = true
+    var isLiveStreamConnected = false
     var callOrder: [String] = []
 
     func ensurePersistedSessionRestoredBeforeAuthenticatedRequests() async {
