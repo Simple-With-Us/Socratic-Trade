@@ -135,7 +135,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "o1": [15, 60],
   "gpt-5.5": [5, 30],
   "gpt-5.4": [2.5, 15],
-  "gpt-5.6": [5, 30],
+  "gpt-5.6": [4.4, 22], // catalog alias of retired gpt-5.6-sol, same base rate
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-3.1-pro-preview": [2, 12],
   "gemini-3.5-flash": [1.5, 9],
