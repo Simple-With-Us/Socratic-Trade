@@ -216,12 +216,27 @@ exit 99
   return { root, bin, home, state, fakeRepo, log, installerStub, ascNode, ascKeyP8 };
 }
 
+const ABSOLUTE_APPLE_TOOL = /\/(?:[^\s"']+\/)*(?:xcodebuild|xcrun|security|codesign)\b/;
+
+describe("manual-signing harness absolute-tool guard", () => {
+  it.each([
+    "$(/usr/bin/xcodebuild)",
+    "test -x /usr/bin/codesign;",
+    "/usr/bin/security",
+    "/usr/bin/security\n",
+    "'/usr/bin/xcrun' altool",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version"
+  ])("refuses shell delimiter and end-of-input form %s without execution", (source) => {
+    expect(source).toMatch(ABSOLUTE_APPLE_TOOL);
+  });
+});
+
 function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) {
   const nodeDir = resolve(process.execPath, "..");
   // Absolute calls bypass shell functions. Refuse to run this harness if the
   // production script gains one rather than falling back to a real Apple tool.
   const script = read("scripts/ios-fleet/ship-testflight.sh");
-  expect(script).not.toMatch(/\/(?:[^\s"']+\/)*(?:xcodebuild|xcrun|security|codesign)(?=[\s"'])/);
+  expect(script).not.toMatch(ABSOLUTE_APPLE_TOOL);
   // A function beats ship-testflight.sh's system-first PATH. Fail closed for all
   // other signing/upload tools, even when a future production path calls one.
   const guard = join(sb.root, "bash-guard.sh");
