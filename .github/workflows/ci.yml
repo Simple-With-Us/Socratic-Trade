@@ -394,6 +394,16 @@ jobs:
           bash scripts/verify-deploy-sha.selftest.sh
           bash scripts/alert-deploy-freshness.selftest.sh
           bash scripts/isolate-shared-box-batch.selftest.sh
+      - name: ST Litestream restore drill wrapper (bash)
+        run: |
+          bash -n scripts/litestream-restore-drill.sh
+          bash -n scripts/litestream-restore-drill.selftest.sh
+          bash scripts/litestream-restore-drill.selftest.sh
+          bash -n scripts/ops/st-litestream-restore-drill.sh
+          bash -n scripts/ops/install-st-litestream-restore-drill.sh
+          bash -n scripts/ops/st-litestream-restore-drill.selftest.sh
+          bash -n scripts/ops/st-litestream-restore-drill-start-notify-off.sh
+          bash scripts/ops/st-litestream-restore-drill.selftest.sh
       # Merge shepherd:  stub-gh contract tests (ST-4553 tracking issue, ST-2874 in-flight CI).
       - name: Merge shepherd selftests (bash)
         run: |

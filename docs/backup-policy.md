@@ -136,7 +136,7 @@ about.  Three checks run at different depths:
 |---|---|---|---|
 | **Pre-upload artifact verification** | The file about to become the cold archive is a coherent SQLite database that still contains trading state | `src/lib/r2-cold-snapshot.ts` — `PRAGMA integrity_check` plus non-empty assertions on `audit_events`, `trade_proposals`, `portfolio_snapshots`, `connected_accounts`, `settings`, `llm_usage`, run in the snapshot child before a single byte is uploaded | every weekly run |
 | **Cold-archive restore drill** | The object *in R2* can be downloaded, decompressed, and opened as a working database | `scripts/ops/verify-cold-snapshot-restore.mjs` | monthly, and after any change to the cold-snapshot lane |
-| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` | quarterly, and after any Litestream version or config change |
+| **Continuous-replication restore drill** | The B2 replica can be restored to a scratch file and matches live | `scripts/litestream-restore-drill.sh` (manual); host timer `st-litestream-restore-drill` (weekly) | weekly automated on host (Sunday off-hours) **plus** manual after any Litestream version or config change |
 
 Two design notes that are easy to get wrong:
 
@@ -151,6 +151,44 @@ Two design notes that are easy to get wrong:
 Record every drill result in `docs/rollouts/YYYY-MM-DD-<slug>.md` and on THE BOARD.  A drill
 that was run but not written down is a drill that will be run again next quarter by someone
 who cannot tell whether it ever passed.
+
+### Running the Litestream B2 restore drill
+
+Manual (any time, on the production restore-drill **host** shell — not in the container):
+
+```bash
+# Export AWS_* for the B2 replica from a trusted source first (never log values).
+bash scripts/litestream-restore-drill.sh
+```
+
+Scheduled (after owner install — see `docs/runbooks/st-litestream-restore-drill.md`):
+
+```bash
+bash scripts/ops/install-st-litestream-restore-drill.sh
+# Fill /etc/default/st-litestream-restore-drill with non-secret config (mode 0600).
+# Put an Infisical service token in the file named by INFISICAL_TOKEN_FILE (mode 0600).
+systemctl list-timers st-litestream-restore-drill.timer
+```
+
+The wrapper requires **2.2x** live DB free space on the scratch filesystem; the manual script
+defaults to **1.0x** unless `RESTORE_DRILL_MIN_FREE_TENTHS` is set.  Status JSON:
+`/var/lib/st-ops/litestream-restore-drill-status.json`.
+
+**Credentials (manual vs scheduled):** manual tier-1 drills still follow the rule in section 9
+below — export B2 `AWS_*` into the shell for that run only, never into a file that outlives the
+drill.  The **scheduled** lane reads B2 credentials at run time from Infisical, using a mode-0600
+**service token file** named by `INFISICAL_TOKEN_FILE` in the root-owned env file
+`/etc/default/st-litestream-restore-drill` (mode **0600**).  That env file holds non-secret
+config only (bucket, paths, Infisical project/path/secret *names*).  Never put
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_FLEET_DSN`, or the Infisical token
+itself in the env file.  Use a service token only — never a machine identity or universal
+auth.  Project id, secret path, and secret names are configurable and must be confirmed on
+the host (documented defaults are a starting point, not proof the secrets already exist).
+
+Under systemd, `EnvironmentFile` **is** the process environment and always wins; a shell
+`export` is ignored by the scheduled unit.  Process-environment values win over the env
+file only for **manual** wrapper invocations.  The scheduled timer always uses the env
+file for config and Infisical for secrets (see runbook).
 
 ### Running the cold-archive drill
 
@@ -324,8 +362,12 @@ Add `-timestamp <ISO8601>` for point-in-time recovery inside the 7-day window.
 `litestream` 0.5.16 and `sqlite3` 3.46.1; the runtime image has **neither** — it ships no
 `sqlite3` CLI, and `coolify-prod-start.sh` puts Litestream on PID 1's `PATH` only, which a
 later `docker exec` does not inherit.  Credentials come from Infisical via the running
-Litestream process and are **not** inherited by a fresh shell: export them into the drill
-shell from a trusted source, never into a file that outlives the drill.
+Litestream process and are **not** inherited by a fresh shell: for **manual** drills, export
+them into the drill shell from a trusted source for that run only, never into a file that
+outlives the drill.  The **scheduled** weekly lane uses the root-only env file documented in
+section 5 for non-secret config, and reads B2 credentials from Infisical with a service
+token file (`INFISICAL_TOKEN_FILE`, mode 0600) — never from that env file, and never with
+a machine identity.
 
 The R2 cold-archive drill is the opposite — `verify-cold-snapshot-restore.mjs` uses the
 bundled `better-sqlite3`, needs no `sqlite3` CLI, and does run inside the container —
