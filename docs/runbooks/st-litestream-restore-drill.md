@@ -34,14 +34,18 @@ On the host, after install:
 
 1. Create a mode-0600 token file (suggested path
    `/etc/default/st-litestream-restore-drill.infisical-token`) containing only the service
-   token.  Point `INFISICAL_TOKEN_FILE` at that path in the env file.
+   token.  Point `INFISICAL_TOKEN_FILE` at that path in the env file.  The file must be
+   owned by root (the user the unit runs as); a token file owned by any other uid fails
+   the drill with `token_file_invalid` before the token is read.
 2. Set `INFISICAL_PROJECT_ID` (always required) in the env file at install time.  Supply
    the id of the Infisical project that holds the B2 secrets; this repo does not ship one,
    and the wrapper always passes it as `--projectId` so the CLI never picks a project on
    its own.
 3. Confirm `INFISICAL_DOMAIN` (documented default `https://app.infisical.com`),
    `INFISICAL_ENV` (documented default `prod`), and `INFISICAL_SECRET_PATH` (documented
-   default `/`).  Do not assume a subpath already exists.
+   default `/`).  Do not assume a subpath already exists.  `INFISICAL_DOMAIN` must be an
+   `https://` URL; the wrapper refuses plain HTTP, and its API fallback refuses any
+   redirect to another scheme, host, or port so the token is never forwarded.
 4. Confirm the secret names in that project/env/path.  Documented defaults, which must
    also be confirmed, are:
    - `AWS_ACCESS_KEY_ID` (override with `INFISICAL_SECRET_AWS_ACCESS_KEY_ID`)
@@ -53,7 +57,10 @@ On the host, after install:
    alerts when notify is on.
 
 `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1` is a test/emergency gate that allows process or env-file
-credentials.  Do not set it on the scheduled timer.
+credentials.  Do not set it on the scheduled timer.  The wrapper reads the gate once before
+it parses the env file, so its position in the file does not matter.  When the gate is not
+set, B2 credentials missing from Infisical alert Sentry (`credentials_unavailable`) when a
+DSN is available, then write `pass:false`.
 
 ## Install (owner on host — agents do not deploy)
 
@@ -78,8 +85,11 @@ host crashes, before it cleans up, the drop-in survives until the next reboot an
 scheduled run until then writes `pass:false` without a Sentry alert.  Recover before the
 next Sunday run with `/usr/local/sbin/st-litestream-restore-drill-start-notify-off.sh
 --cleanup` (or rerun the helper, or reboot), then confirm with
-`systemctl show st-litestream-restore-drill.service -p Environment` that
-`ST_RESTORE_DRILL_NOTIFY=0` is gone:
+`systemctl show st-litestream-restore-drill.service -p ExecStart` that
+`ST_RESTORE_DRILL_NOTIFY=0` is gone.  The drop-in overrides `ExecStart` with
+`/usr/bin/env ST_RESTORE_DRILL_NOTIFY=0` rather than adding `Environment=`, because
+systemd lets the `EnvironmentFile=` value (`ST_RESTORE_DRILL_NOTIFY=1`) override
+`Environment=`:
 
 ```bash
 systemctl list-timers st-litestream-restore-drill.timer
@@ -93,7 +103,7 @@ Equivalent manual steps, if you are not using the helper:
 ```bash
 drop_dir=/run/systemd/system/st-litestream-restore-drill.service.d
 mkdir -p "$drop_dir"
-printf '[Service]\nEnvironment=ST_RESTORE_DRILL_NOTIFY=0\n' >"$drop_dir/notify-off.conf"
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/env ST_RESTORE_DRILL_NOTIFY=0 /usr/local/sbin/st-litestream-restore-drill.sh\n' >"$drop_dir/notify-off.conf"
 trap 'rm -f "$drop_dir/notify-off.conf"; rmdir "$drop_dir" 2>/dev/null || true; systemctl daemon-reload' EXIT
 systemctl daemon-reload
 systemctl start st-litestream-restore-drill.service

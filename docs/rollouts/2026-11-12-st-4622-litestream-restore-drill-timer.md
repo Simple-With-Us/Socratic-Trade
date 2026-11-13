@@ -30,7 +30,10 @@ weekly off-hours with disk preflight, bounded timeout, JSON status, and Sentry o
 - `docs/runbooks/st-litestream-restore-drill.md`
 - `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`
 - `.github/workflows/ci.yml`
-- `STATUS.md`
+
+The ST-4622 `STATUS.md` entry ships in the status follow-up PR
+[#5391](https://github.com/Simple-With-Us/Socratic-Trade/pull/5391), not here, so
+this PR does not edit `STATUS.md`.
 
 ## Decisions & Trade-offs
 

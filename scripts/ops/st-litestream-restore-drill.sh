@@ -195,6 +195,44 @@ is_b2_or_sentry_secret() {
   esac
 }
 
+# The env-credential gate is resolved once, before the env file is parsed, so a
+# file that sets ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1 after its credential lines is
+# treated the same as one that sets it first.  A non-empty process value wins
+# (env-first, like every other key); otherwise the file's last assignment applies.
+# Under systemd the env file is already the process environment, so this only
+# matters for a manual run or the selftest.
+env_file_gate_value() {
+  local file="$1" line val out=""
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ST_RESTORE_DRILL_ALLOW_ENV_CREDS=*|ST_RESTORE_DRILL_ALLOW_ENV_CREDS[[:space:]]*=*)
+        val="${line#*=}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+        out="$val"
+        ;;
+    esac
+  done <"$file"
+  printf '%s' "$out"
+}
+
+resolve_env_creds_gate() {
+  local file="$1"
+  if [ -n "${ST_RESTORE_DRILL_ALLOW_ENV_CREDS:-}" ]; then
+    ALLOW_ENV_CREDS="$ST_RESTORE_DRILL_ALLOW_ENV_CREDS"
+  else
+    ALLOW_ENV_CREDS="$(env_file_gate_value "$file")"
+  fi
+  [ "$ALLOW_ENV_CREDS" = "1" ] || ALLOW_ENV_CREDS=0
+  ST_RESTORE_DRILL_ALLOW_ENV_CREDS="$ALLOW_ENV_CREDS"
+  export ST_RESTORE_DRILL_ALLOW_ENV_CREDS
+}
+ALLOW_ENV_CREDS=0
+
 # Assign only keys not already in the environment (env-first for non-secrets).
 # Invalid keys are skipped and reported (never expanded).  Secret values are
 # never logged.  The file accepts bare KEY=VALUE lines only.
@@ -223,7 +261,7 @@ load_env_file_respecting_env_first() {
           continue
         fi
         if is_file_forbidden_secret "$key"; then
-          if is_b2_or_sentry_secret "$key" && [ "${ST_RESTORE_DRILL_ALLOW_ENV_CREDS:-0}" = "1" ]; then
+          if is_b2_or_sentry_secret "$key" && [ "$ALLOW_ENV_CREDS" = "1" ]; then
             if [ -z "${!key:-}" ]; then
               export "$key=$val"
             fi
@@ -248,16 +286,21 @@ load_env_file_respecting_env_first() {
 
 # --- Failure handling is in place.  Now load config, then secrets. ---
 
+ENV_FILE_IN_USE=""
 if [ -n "${ST_RESTORE_DRILL_TEST_ENV:-}" ] && [ -f "${ST_RESTORE_DRILL_TEST_ENV}" ]; then
-  load_env_file_respecting_env_first "${ST_RESTORE_DRILL_TEST_ENV}"
+  ENV_FILE_IN_USE="${ST_RESTORE_DRILL_TEST_ENV}"
 elif [ -f "$DEFAULT_ENV" ]; then
-  load_env_file_respecting_env_first "$DEFAULT_ENV"
+  ENV_FILE_IN_USE="$DEFAULT_ENV"
+fi
+resolve_env_creds_gate "$ENV_FILE_IN_USE"
+if [ -n "$ENV_FILE_IN_USE" ]; then
+  load_env_file_respecting_env_first "$ENV_FILE_IN_USE"
 fi
 
 # Credentials inherited from the process environment (a leftover systemd
 # Environment= line, systemctl set-environment, an operator shell) must not
 # bypass Infisical.  Drop them unless the explicit test/manual gate is set.
-if [ "${ST_RESTORE_DRILL_ALLOW_ENV_CREDS:-0}" != "1" ]; then
+if [ "$ALLOW_ENV_CREDS" != "1" ]; then
   unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SENTRY_FLEET_DSN
 fi
 
@@ -281,6 +324,12 @@ INFISICAL_SECRET_AWS_ACCESS_KEY_ID="${INFISICAL_SECRET_AWS_ACCESS_KEY_ID:-AWS_AC
 INFISICAL_SECRET_AWS_SECRET_ACCESS_KEY="${INFISICAL_SECRET_AWS_SECRET_ACCESS_KEY:-AWS_SECRET_ACCESS_KEY}"
 INFISICAL_SECRET_SENTRY_FLEET_DSN="${INFISICAL_SECRET_SENTRY_FLEET_DSN:-SENTRY_FLEET_DSN}"
 
+# True when INFISICAL_DOMAIN is an https:// origin (scheme and host, optional
+# port and path; no userinfo, query, fragment, or whitespace).
+infisical_domain_ok() {
+  [[ "${INFISICAL_DOMAIN:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]]
+}
+
 # Read a secret's value to stdout.  Never print it to stderr or logs.
 # Prefer the Infisical CLI; fall back to the HTTP API.  Service token only.
 infisical_get_plain() {
@@ -289,6 +338,8 @@ infisical_get_plain() {
   local err out rc=1
   [ -n "$secret_name" ] || return 1
   [ -n "$token_file" ] && [ -f "$token_file" ] || return 1
+  # The service token only ever goes to an https:// Infisical origin.
+  infisical_domain_ok || return 1
   # Always name the project; never let the CLI pick a workspace on its own.
   [ -n "${INFISICAL_PROJECT_ID:-}" ] || return 1
 
@@ -340,6 +391,9 @@ except OSError:
 if not token:
     sys.exit(1)
 domain = os.environ.get("ST_INFISICAL_DOMAIN", "https://app.infisical.com").rstrip("/")
+if urllib.parse.urlsplit(domain).scheme.lower() != "https":
+    print("infisical api: INFISICAL_DOMAIN must use https://", file=sys.stderr)
+    sys.exit(1)
 project = os.environ.get("ST_INFISICAL_PROJECT_ID", "")
 env = os.environ.get("ST_INFISICAL_ENV", "prod")
 path = os.environ.get("ST_INFISICAL_SECRET_PATH") or "/"
@@ -351,9 +405,35 @@ query = urllib.parse.urlencode(
 )
 url = f"{domain}/api/v3/secrets/raw/{urllib.parse.quote(name, safe='')}?{query}"
 req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+
+
+def origin(u):
+    parts = urllib.parse.urlsplit(u)
+    scheme = parts.scheme.lower()
+    port = parts.port or (443 if scheme == "https" else 80)
+    return (scheme, (parts.hostname or "").lower(), port)
+
+
+class RedirectRefused(Exception):
+    pass
+
+
+class SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib copies the Authorization header onto the redirected request, so a
+    # redirect to another scheme, host, or port would hand the token over.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if origin(newurl) != origin(req.full_url):
+            raise RedirectRefused()
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+opener = urllib.request.build_opener(SameOriginRedirect)
 try:
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with opener.open(req, timeout=20) as resp:
         body = resp.read()
+except RedirectRefused:
+    print("infisical api: refused a redirect to another scheme, host, or port", file=sys.stderr)
+    sys.exit(1)
 except urllib.error.HTTPError as exc:
     print(f"infisical api: HTTP {exc.code}", file=sys.stderr)
     sys.exit(1)
@@ -387,6 +467,12 @@ token_file_shape_ok() {
   [ "${#token}" -ge 20 ] && [ "${#token}" -le 2048 ]
 }
 
+token_file_owner_ok() {
+  local owner_uid
+  owner_uid="$(stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1" 2>/dev/null || echo "")"
+  [ -n "$owner_uid" ] && [ "$owner_uid" = "$(id -u)" ]
+}
+
 # Alert, then fail.  The DSN is fetched through Infisical only when the token
 # itself passed validation (fetch=1); otherwise only an already-available DSN
 # can be used, and the pass:false status from fail_op is the remaining signal.
@@ -407,7 +493,18 @@ require_token_file() {
   if [ -L "$token_file" ]; then
     token_file_fail "INFISICAL_TOKEN_FILE must not be a symbolic link."
   fi
-  if [ ! -f "$token_file" ] || [ ! -r "$token_file" ]; then
+  if [ ! -f "$token_file" ]; then
+    token_file_fail "INFISICAL_TOKEN_FILE is missing or unreadable (path configured in the env file)."
+  fi
+  # A token file another user owns could be swapped for a token of their
+  # choosing, so it must belong to the user running the drill (root under systemd).
+  local owner_uid run_uid
+  owner_uid="$(stat -c '%u' "$token_file" 2>/dev/null || stat -f '%u' "$token_file" 2>/dev/null || echo "")"
+  run_uid="$(id -u)"
+  if [ "$owner_uid" != "$run_uid" ]; then
+    token_file_fail "INFISICAL_TOKEN_FILE must be owned by the user running the drill (uid ${run_uid}); it is owned by uid ${owner_uid:-unknown}."
+  fi
+  if [ ! -r "$token_file" ]; then
     token_file_fail "INFISICAL_TOKEN_FILE is missing or unreadable (path configured in the env file)."
   fi
   if [ ! -s "$token_file" ]; then
@@ -430,8 +527,9 @@ fetch_optional_sentry_dsn() {
   if [ -n "${SENTRY_FLEET_DSN:-}" ]; then
     return 0
   fi
-  # Only a valid service token is ever sent to Infisical.
+  # Only a valid service token in a file owned by this user is ever sent to Infisical.
   token_file_shape_ok "${INFISICAL_TOKEN_FILE:-}" || return 1
+  token_file_owner_ok "${INFISICAL_TOKEN_FILE:-}" || return 1
   [ -n "${INFISICAL_PROJECT_ID:-}" ] || return 1
   local value
   value="$(infisical_get_plain "$INFISICAL_SECRET_SENTRY_FLEET_DSN" || true)"
@@ -458,12 +556,15 @@ fetch_required_secret() {
 }
 
 resolve_scheduled_credentials() {
-  local allow="${ST_RESTORE_DRILL_ALLOW_ENV_CREDS:-0}"
-  if [ "$allow" = "1" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  if [ "$ALLOW_ENV_CREDS" = "1" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     fetch_optional_sentry_dsn || true
     return 0
   fi
   require_token_file
+  if ! infisical_domain_ok; then
+    notify_sentry "Litestream restore drill: INFISICAL_DOMAIN is not an https:// URL." "config_invalid" || true
+    fail_op "INFISICAL_DOMAIN must be an https:// URL; the service token is never sent over plain HTTP."
+  fi
   if [ -z "${INFISICAL_PROJECT_ID:-}" ]; then
     notify_sentry "Litestream restore drill: INFISICAL_PROJECT_ID is not set." "config_invalid" || true
     fail_op "INFISICAL_PROJECT_ID is not set.  Supply the Infisical project id at install time; this wrapper does not assume one."
@@ -473,6 +574,7 @@ resolve_scheduled_credentials() {
   fetch_required_secret AWS_SECRET_ACCESS_KEY "$INFISICAL_SECRET_AWS_SECRET_ACCESS_KEY" || missing=1
   fetch_optional_sentry_dsn || true
   if [ "$missing" -ne 0 ]; then
+    notify_sentry "Litestream restore drill: B2 credentials were not available from Infisical." "credentials_unavailable" || true
     fail_op "B2 credentials were not available from Infisical.  Confirm INFISICAL_TOKEN_FILE, INFISICAL_PROJECT_ID, INFISICAL_ENV, INFISICAL_SECRET_PATH, and the secret names (defaults AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY must be confirmed)."
   fi
 }

@@ -117,6 +117,9 @@ if [[ "${1:-}" == "secrets" && "${2:-}" == "get" ]]; then
     echo "infisical stub: forced failure" >&2
     exit 1
   fi
+  case " ${STUB_INFISICAL_MISSING:-} " in
+    *" ${name} "*) echo "infisical stub: secret not found" >&2; exit 1 ;;
+  esac
   case "$name" in
     AWS_ACCESS_KEY_ID) value="${STUB_INFISICAL_ACCESS_KEY:-infisical-key-id}" ;;
     AWS_SECRET_ACCESS_KEY) value="${STUB_INFISICAL_SECRET_KEY:-infisical-secret}" ;;
@@ -207,7 +210,7 @@ run_case() {
   export STUB_ASSERT_BUCKET='' STUB_ASSERT_ACCESS_KEY='' STUB_EXPECTED_ACCESS_KEY=''
   export STUB_EXPECTED_DSN='' STUB_INFISICAL_CALLS=''
   export STUB_DRILL_SKIP_STATUS=0 STUB_DRILL_SLEEP_SECONDS=0
-  export STUB_INFISICAL_FAIL=0
+  export STUB_INFISICAL_FAIL=0 STUB_INFISICAL_MISSING=
   export CASE_ALLOW_ENV_CREDS=1
   export CASE_NOTIFY=0
   export CASE_SENTRY_DSN=
@@ -230,7 +233,7 @@ run_case() {
       ST_RESTORE_DRILL_STATUS_JSON="$ST_RESTORE_DRILL_STATUS_JSON" \
       ST_RESTORE_DRILL_STATE_DIR="$ST_RESTORE_DRILL_STATE_DIR" \
       ST_RESTORE_DRILL_MIN_FREE_TENTHS="${CASE_MIN_FREE_TENTHS:-22}" \
-      ST_RESTORE_DRILL_ALLOW_ENV_CREDS="${CASE_ALLOW_ENV_CREDS:-0}" \
+      ST_RESTORE_DRILL_ALLOW_ENV_CREDS="${CASE_ALLOW_ENV_CREDS-0}" \
       ST_RESTORE_DRILL_SENTRY_HELPER="$SENTRY_HELPER" \
       STUB_SENTRY_OUT="$SENTRY_OUT" \
       SENTRY_FLEET_DSN="${CASE_SENTRY_DSN:-}" \
@@ -249,6 +252,7 @@ run_case() {
       STUB_DRILL_SKIP_STATUS="${STUB_DRILL_SKIP_STATUS:-0}" \
       STUB_DRILL_SLEEP_SECONDS="${STUB_DRILL_SLEEP_SECONDS:-0}" \
       STUB_INFISICAL_FAIL="${STUB_INFISICAL_FAIL:-0}" \
+      STUB_INFISICAL_MISSING="${STUB_INFISICAL_MISSING:-}" \
       STUB_INFISICAL_ACCESS_KEY="${STUB_INFISICAL_ACCESS_KEY:-infisical-key-id}" \
       STUB_INFISICAL_SECRET_KEY="${STUB_INFISICAL_SECRET_KEY:-infisical-secret}" \
       bash "$UNDER_TEST" 2>&1
@@ -376,6 +380,11 @@ run_case invalid_min_free_tenths 1 '
   export CASE_MIN_FREE_TENTHS=abc
   export CASE_ALLOW_ENV_CREDS=1
 '
+# Control: exit 1 alone could come from an arithmetic abort.  Require this
+# run's pass:false record naming the MIN_FREE_TENTHS validation.
+check_failure_status invalid_min_free_tenths
+pass_if invalid_min_free_tenths_names_setting grep -q 'ST_RESTORE_DRILL_MIN_FREE_TENTHS must be an integer' "$STATUS_JSON"
+pass_if invalid_min_free_tenths_status_has_run_id grep -q '"runId":"' "$STATUS_JSON"
 
 # 4: a drill that exits 0 without writing status must not be logged as a pass.
 write_env_creds
@@ -490,6 +499,7 @@ run_case infisical_cli_failure 1 '
   export CASE_SENTRY_DSN=
 '
 check_failure_status infisical_cli_failure
+pass_if infisical_cli_failure_names_infisical grep -q 'B2 credentials were not available from Infisical' "$STATUS_JSON"
 
 # 6: malformed env key must not abort with a raw bash error; must write pass:false and alert.
 write_env_creds
@@ -617,6 +627,8 @@ run_case token_symlink_alerts_with_env_dsn 1 '
   export CASE_NOTIFY=1
   export CASE_SENTRY_DSN=https://test-dsn@example.test/1
 '
+check_failure_status token_symlink_alerts_with_env_dsn
+pass_if token_symlink_alerts_with_env_dsn_names_symlink grep -q 'symbolic link' "$STATUS_JSON"
 pass_if token_symlink_alerts_with_env_dsn_sentry grep -q 'token_file_invalid' "$SENTRY_OUT"
 
 # 11: INFISICAL_PROJECT_ID is required even when the Infisical CLI exists.
@@ -651,9 +663,15 @@ pass_if installer_drops_export_prefix \
   bash -c 'grep -qx "AWS_S3_BUCKET_NAME=fake-bucket" "$1" && ! grep -q "^[[:space:]]*export" "$1" && grep -qx "INFISICAL_PROJECT_ID=fake-project" "$1" && grep -qx "# comment kept" "$1"' _ "$STRIP_ENV"
 write_env_config
 cat "$STRIP_ENV" >>"$ENV_FILE"
+rm -f "${WORK}/access.out"
 run_case installer_output_loads_in_wrapper 0 '
   export CASE_ALLOW_ENV_CREDS=0
+  export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=infisical-key-id
 '
+# Control: rc 0 must come from a real pass that used the Infisical key.
+assert_access_marker installer_output_loads_in_wrapper_uses_infisical_key
+pass_if installer_output_loads_in_wrapper_status_pass_true grep -q '"pass":true' "$STATUS_JSON"
 
 # 7: SIGTERM writes pass:false AND notifies Sentry, then exits 143.
 write_env_creds
@@ -728,13 +746,175 @@ pass_if notify_off_helper_traps_signals_and_has_cleanup \
 
 # Helper script must use a /run drop-in and must not patch the persistent env file.
 HELPER="${SCRIPT_DIR}/st-litestream-restore-drill-start-notify-off.sh"
-if [ -f "$HELPER" ] && grep -q '/run/systemd/system/' "$HELPER" && grep -q 'Environment=ST_RESTORE_DRILL_NOTIFY=0' "$HELPER" && ! grep -qE 'sed |tee ' "$HELPER"; then
+if [ -f "$HELPER" ] && grep -q '/run/systemd/system/' "$HELPER" && grep -qx 'ExecStart=' "$HELPER" && grep -qF 'ExecStart=/usr/bin/env ST_RESTORE_DRILL_NOTIFY=0 ${WRAPPER}' "$HELPER" && ! grep -q '^Environment=ST_RESTORE_DRILL_NOTIFY' "$HELPER" && ! grep -qE 'sed |tee ' "$HELPER"; then
   PASSES=$((PASSES + 1))
   echo "PASS notify_off_helper_uses_runtime_dropin"
 else
   FAILURES=$((FAILURES + 1))
   echo "FAIL notify_off_helper_uses_runtime_dropin" >&2
 fi
+
+# F2: the helper's wrapper path matches the unit's ExecStart, and a
+# process-environment NOTIFY=0 (what `env ST_RESTORE_DRILL_NOTIFY=0` sets) wins
+# over an env file that ships ST_RESTORE_DRILL_NOTIFY=1.
+helper_wrapper="$(sed -n 's/^WRAPPER="\(.*\)"$/\1/p' "$HELPER")"
+unit_exec="$(sed -n 's/^ExecStart=//p' "${SCRIPT_DIR}/st-litestream-restore-drill.service")"
+pass_if notify_off_helper_wrapper_matches_unit_execstart test -n "$helper_wrapper" -a "$helper_wrapper" = "$unit_exec"
+ENV_NOTIFY=1 write_env_config
+run_case notify_off_env_beats_env_file_notify_1 2 '
+  export CASE_ALLOW_ENV_CREDS=1
+  export CASE_AWS_ACCESS_KEY_ID=env-key
+  export CASE_AWS_SECRET_ACCESS_KEY=env-secret
+  export CASE_NOTIFY=0
+  export CASE_SENTRY_DSN=https://test-dsn@example.test/1
+  export STUB_DRILL_RC=1
+'
+pass_if notify_off_env_beats_env_file_no_sentry test ! -e "$SENTRY_OUT"
+pass_if notify_off_env_beats_env_file_logs_skip bash -c 'printf "%s" "$1" | grep -q "notify skipped (ST_RESTORE_DRILL_NOTIFY=0)"' _ "$LAST_OUT"
+# Control: the same run with NOTIFY=1 in the process environment does alert.
+ENV_NOTIFY=1 write_env_config
+run_case notify_on_control 2 '
+  export CASE_ALLOW_ENV_CREDS=1
+  export CASE_AWS_ACCESS_KEY_ID=env-key
+  export CASE_AWS_SECRET_ACCESS_KEY=env-secret
+  export CASE_NOTIFY=1
+  export CASE_SENTRY_DSN=https://test-dsn@example.test/1
+  export STUB_DRILL_RC=1
+'
+pass_if notify_on_control_sentry grep -q 'drill_failed' "$SENTRY_OUT"
+
+# F7: a B2 secret missing from Infisical alerts Sentry before the pass:false write.
+write_env_config
+run_case b2_missing_alerts 1 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export CASE_NOTIFY=1
+  export STUB_INFISICAL_MISSING=AWS_SECRET_ACCESS_KEY
+  export STUB_EXPECTED_DSN=https://infisical-dsn@example.test/9
+'
+check_failure_status b2_missing_alerts
+pass_if b2_missing_alerts_names_infisical grep -q 'B2 credentials were not available from Infisical' "$STATUS_JSON"
+pass_if b2_missing_alerts_sentry grep -q 'credentials_unavailable' "$SENTRY_OUT"
+pass_if b2_missing_alerts_infisical_dsn grep -q 'dsn=matched' "$SENTRY_OUT"
+
+# F8: the env-credential gate does not depend on line order in the env file.
+# Credential lines first, gate last, no process-environment gate.
+write_env_creds
+printf 'ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1\n' >>"$ENV_FILE"
+rm -f "${WORK}/access.out"
+run_case env_gate_after_cred_lines 0 '
+  export CASE_ALLOW_ENV_CREDS=
+  export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=file-key-id
+'
+assert_access_marker env_gate_after_cred_lines_uses_file_key
+# Control: a non-empty process value still wins over the file (env-first).
+write_env_creds
+printf 'ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1\n' >>"$ENV_FILE"
+rm -f "${WORK}/access.out"
+run_case env_gate_process_zero_wins 0 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export STUB_ASSERT_ACCESS_KEY="${WORK}/access.out"
+  export STUB_EXPECTED_ACCESS_KEY=infisical-key-id
+'
+assert_access_marker env_gate_process_zero_wins_uses_infisical_key
+
+# F5: a plain-HTTP INFISICAL_DOMAIN is refused before any Infisical call.
+rm -f "${WORK}/infisical.calls"
+write_env_config
+sed -i 's#^INFISICAL_DOMAIN=.*#INFISICAL_DOMAIN=http://app.infisical.com#' "$ENV_FILE"
+run_case infisical_domain_http_refused 1 '
+  export CASE_ALLOW_ENV_CREDS=0
+  export STUB_INFISICAL_CALLS="${WORK}/infisical.calls"
+'
+check_failure_status infisical_domain_http_refused
+pass_if infisical_domain_http_refused_names_var grep -q 'INFISICAL_DOMAIN must be an https:// URL' "$STATUS_JSON"
+pass_if infisical_domain_http_refused_no_infisical_call infisical_not_called
+
+# F5: the HTTP API fallback refuses a cross-origin redirect and never forwards
+# the token.  Runs the wrapper's own Python block against local TLS servers
+# with a throwaway self-signed certificate.  Fake token only.
+API_PY="${WORK}/infisical-api.py"
+sed -n "/python3 - <<'PY'/,/^PY\$/p" "$UNDER_TEST" | sed '1d;$d' >"$API_PY"
+if command -v openssl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -s "$API_PY" ]; then
+  TLS_DIR="${WORK}/tls"
+  mkdir -p "$TLS_DIR"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=127.0.0.1" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
+    -keyout "${TLS_DIR}/key.pem" -out "${TLS_DIR}/cert.pem" >/dev/null 2>&1
+  cat >"${TLS_DIR}/servers.py" <<'SRV'
+import http.server, ssl, sys, threading, pathlib
+d = pathlib.Path(sys.argv[1])
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(d / "cert.pem", d / "key.pem")
+class Sink(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        (d / "sink.hit").write_text("auth" if self.headers.get("Authorization") else "noauth")
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{"secret":{"secretValue":"leaked"}}')
+    def log_message(self, *a): pass
+sink = http.server.HTTPServer(("127.0.0.1", 0), Sink)
+sink.socket = ctx.wrap_socket(sink.socket, server_side=True)
+class Redir(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", "https://localhost:%d/x" % sink.server_port)
+        self.end_headers()
+    def log_message(self, *a): pass
+redir = http.server.HTTPServer(("127.0.0.1", 0), Redir)
+redir.socket = ctx.wrap_socket(redir.socket, server_side=True)
+for s in (sink, redir):
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+(d / "port").write_text(str(redir.server_port))
+threading.Event().wait(30)
+SRV
+  python3 "${TLS_DIR}/servers.py" "$TLS_DIR" &
+  srv_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "${TLS_DIR}/port" ] && break
+    sleep 0.2
+  done
+  API_OUT="$(
+    env -i PATH="$PATH" SSL_CERT_FILE="${TLS_DIR}/cert.pem" \
+      ST_INFISICAL_SECRET_NAME=AWS_ACCESS_KEY_ID \
+      ST_INFISICAL_TOKEN_FILE="$TOKEN_FILE" \
+      ST_INFISICAL_DOMAIN="https://127.0.0.1:$(cat "${TLS_DIR}/port" 2>/dev/null)" \
+      ST_INFISICAL_PROJECT_ID=test-project-id \
+      ST_INFISICAL_ENV=prod ST_INFISICAL_SECRET_PATH=/ \
+      python3 "$API_PY" 2>&1
+  )"
+  api_rc=$?
+  kill "$srv_pid" 2>/dev/null || true
+  wait "$srv_pid" 2>/dev/null || true
+  pass_if infisical_api_refuses_cross_origin_redirect test "$api_rc" -ne 0
+  pass_if infisical_api_redirect_names_refusal bash -c 'printf "%s" "$1" | grep -q "refused a redirect"' _ "$API_OUT"
+  pass_if infisical_api_redirect_token_not_forwarded test ! -e "${TLS_DIR}/sink.hit"
+  pass_if infisical_api_redirect_no_value_printed bash -c '! printf "%s" "$1" | grep -q leaked' _ "$API_OUT"
+  # Control: the same block refuses a plain-HTTP domain outright.
+  API_HTTP_OUT="$(env -i PATH="$PATH" ST_INFISICAL_SECRET_NAME=AWS_ACCESS_KEY_ID ST_INFISICAL_TOKEN_FILE="$TOKEN_FILE" \
+    ST_INFISICAL_DOMAIN=http://127.0.0.1:9 ST_INFISICAL_PROJECT_ID=test-project-id python3 "$API_PY" 2>&1)"
+  pass_if infisical_api_refuses_http_domain bash -c 'printf "%s" "$1" | grep -q "must use https://"' _ "$API_HTTP_OUT"
+else
+  echo "SKIP infisical_api_redirect (needs openssl and python3)"
+fi
+
+# F6: a token file owned by another uid is refused before it is read or sent.
+OWNER_TOKEN="${TOKEN_DIR}/other-owner.token"
+make_token_file "$OWNER_TOKEN" "st.fake-token-other-owner"
+chown_ok=0
+if [ "$(id -u)" -eq 0 ]; then
+  chown 65534 "$OWNER_TOKEN" 2>/dev/null && chown_ok=1
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  sudo -n chown 65534 "$OWNER_TOKEN" 2>/dev/null && chown_ok=1
+fi
+if [ "$chown_ok" -eq 1 ]; then
+  run_token_case token_rejects_other_owner 1 "$OWNER_TOKEN"
+  check_failure_status token_rejects_other_owner
+  pass_if token_rejects_other_owner_names_owner grep -q 'must be owned by the user running the drill' "$STATUS_JSON"
+  pass_if token_rejects_other_owner_no_infisical_call infisical_not_called
+  if [ "$(id -u)" -eq 0 ]; then rm -f "$OWNER_TOKEN"; else sudo -n rm -f "$OWNER_TOKEN" 2>/dev/null || true; fi
+else
+  echo "SKIP token_rejects_other_owner (needs root or passwordless sudo to chown)"
+fi
+# Control: a token file this user owns passes the owner check (token_shape_accepts_20_chars above).
 
 echo "selftest: ${PASSES} passed, ${FAILURES} failed."
 [ "$FAILURES" -eq 0 ]
