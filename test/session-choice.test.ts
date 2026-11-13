@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSessionChoiceStore } from "../app/console/lib/session-choice";
+import { createSessionChoiceStore, scanTabChoiceKey } from "../app/console/lib/session-choice";
 
 function setup(key: string | null = "scan:a") {
   const values = new Map<string, string>();
@@ -44,5 +44,20 @@ describe("validated account-scoped session choice", () => {
   it("does not touch storage before an account scope exists", () => {
     const { store, storage } = setup(null); expect(store.getSnapshot()).toBe("scan"); store.set("smart");
     expect(storage.getItem).not.toHaveBeenCalled(); expect(storage.setItem).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("scan tab storage identity", () => {
+  it("uses only the opaque account ID even when a brokerage account number is present", () => {
+    const account = { id: "opaque-account-a", accountNumber: "987654321" };
+    expect(scanTabChoiceKey(account)).toBe("console:scan:tab:opaque-account-a");
+    expect(scanTabChoiceKey(account)).not.toContain(account.accountNumber);
+    const changed = { ...account, accountNumber: "another-number" };
+    expect(scanTabChoiceKey(changed)).toBe(scanTabChoiceKey(account));
+  });
+  it("does not persist a legacy or missing account without an opaque ID", () => {
+    expect(scanTabChoiceKey(undefined)).toBeNull();
+    expect(scanTabChoiceKey({ id: "" })).toBeNull();
   });
 });

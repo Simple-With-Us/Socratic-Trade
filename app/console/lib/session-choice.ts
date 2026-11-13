@@ -1,3 +1,8 @@
+/** Persist only an opaque connected-account identity, never brokerage account numbers. */
+export function scanTabChoiceKey(account: { id: string } | undefined): string | null {
+  return account?.id ? `console:scan:tab:${account.id}` : null;
+}
+
 /** A single validated session-only UI choice. No credentials or account data are stored. */
 export function createSessionChoiceStore<T extends string>(options: {
   key: string | null;
