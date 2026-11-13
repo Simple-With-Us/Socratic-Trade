@@ -327,7 +327,9 @@ function planCorpusWideLexicalQuery(
       owner_commit.user_id,
       bm25(document_chunks_fts) AS lexical_score
     FROM document_chunks_fts
-    INNER JOIN chunk_occurrences o
+    -- FTS matches drive indexed hash probes. An issuer-only probe repeats the full
+    -- issuer occurrence set per match on unanalyzed databases (quadratic broad queries).
+    CROSS JOIN chunk_occurrences o INDEXED BY idx_chunk_occurrences_hash
       ON o.content_hash = document_chunks_fts.content_hash
       AND o.symbol = document_chunks_fts.symbol
       AND o.source = document_chunks_fts.source

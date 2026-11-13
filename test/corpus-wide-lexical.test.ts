@@ -581,6 +581,8 @@ describe("filing type resolution query plan", () => {
     const plan = original("EXPLAIN QUERY PLAN " + query!).all(...params) as Array<{detail:string}>;
     const details = plan.map(row => row.detail);
     expect(details.some(line => /SCAN sf(?: |$)/.test(line))).toBe(false);
+    expect(details).toContainEqual(expect.stringMatching(/SEARCH o USING INDEX idx_chunk_occurrences_hash \(content_hash=\?\)/));
+    expect(details.some(line => line.includes("idx_chunk_occurrences_symbol"))).toBe(false);
     expect(details.filter(line => /SEARCH sf USING INDEX.*accession=/.test(line))).toHaveLength(2);
     expect(query!.match(/WITH RECURSIVE boundaries/g)).toHaveLength(1);
     expect(query).toContain("resolved_candidates AS MATERIALIZED");
