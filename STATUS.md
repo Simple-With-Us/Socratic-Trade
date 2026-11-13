@@ -25,7 +25,7 @@
 
 **Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) merges; until then `main` does not have it.
 
-**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+**Next.** [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) is open against main.  Do not merge and do not deploy yet.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
 ## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
 
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
