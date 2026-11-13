@@ -266,7 +266,9 @@ while IFS= read -r out; do
     rec="$(awk -F'\t' -v k="$key" '$1=="CHANGE" && $2==k {print; exit}' "$PLAN")"
     old="$(printf '%s' "$rec" | cut -f3)"
     new="$(printf '%s' "$rec" | cut -f4)"
-    log "wrote $key: $old -> $new"
+    plan="$(printf '%s' "$rec" | cut -f5)"
+    st="$(printf '%s' "$rec" | cut -f6)"
+    log "wrote $key: $old -> $new (plan $plan $st)"
   else
     msg="$(printf '%s' "$out" | cut -f3)"
     log "FAILED $key: $msg"

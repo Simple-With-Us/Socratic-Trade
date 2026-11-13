@@ -90,8 +90,11 @@ esac
     if (mode === "dry-run") {
       expect(result.stdout).toContain("PROVIDER_QUOTA_TEST: 1 -> 2 (plan fixture active)");
       expect(result.stderr).not.toContain("applying");
+    } else if (writeFails) {
+      expect(result.stderr).toContain("FAILED PROVIDER_QUOTA_TEST: fixture write failed");
+      expect(result.stderr).not.toContain("wrote PROVIDER_QUOTA_TEST:");
     } else {
-      expect(result.stderr).toContain(writeFails ? "FAILED PROVIDER_QUOTA_TEST: fixture write failed" : "wrote PROVIDER_QUOTA_TEST: 1 -> 2");
+      expect(result.stderr).toMatch(/^\[knob-sync\] wrote PROVIDER_QUOTA_TEST: 1 -> 2 \(plan fixture active\)$/m);
     }
     expect(existsSync(f.marker)).toBe(false);
   });

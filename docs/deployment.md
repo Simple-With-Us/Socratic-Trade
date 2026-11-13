@@ -135,7 +135,7 @@ CI: GitHub-hosted `ubuntu-latest` only (no self-hosted Mac/Oracle runner labels)
 
 ## Deploy freshness (silent-freeze watch)
 
-Scheduled results are reported through the existing `sentry-ci-report.yml` pipeline, which already observes the `Deploy freshness` workflow.  `DEPLOY_FRESHNESS_NOTIFY` and `DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION` are retired compatibility settings and do not enable Zulip delivery.  The legacy fleet-post script is a no-network diagnostic shim; manual coordination uses shared `simple-chat` under the caller's verified identity.
+Scheduled results are reported through the existing `sentry-ci-report.yml` pipeline, which already observes the `Deploy freshness` workflow.  `DEPLOY_FRESHNESS_NOTIFY` and `DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION` are retired compatibility settings and do not enable Zulip delivery.  The legacy fleet-post script is a retired no-network marker that sends nothing and exits 2; a caller using `set -e` must account for that nonzero exit.  Manual coordination uses shared `simple-chat` under the caller's verified identity.
 
 `verify-deploy-sha.sh` is the post-merge assertion (polls up to 25 min).  It does
 not watch the pipeline afterwards.  On 2026-08-06 five Coolify deploys died
