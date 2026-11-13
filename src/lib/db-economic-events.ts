@@ -10,7 +10,7 @@ export interface EconomicEventRow {
   /** Stable dedupe key: `${eventDate}|${event}` (normalized). */
   id: string;
   event: string;
-  /** FMP calendar timestamp for the release/meeting (e.g. "2026-07-16 08:30:00" or ISO). */
+  /** Calendar timestamp for the release/meeting (e.g. "2026-07-16 08:30:00" or ISO). */
   eventDate: string;
   country: string;
   impact?: string;

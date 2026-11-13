@@ -8,14 +8,16 @@
  * `mango.reachable` genuinely tests the Coolify -> Mango leg, not the
  * watchdog's own network path.
  *
- * Exposes only aggregate proxy-use stats plus the proxy host:port — never
- * credentials, never request URLs or bodies.
+ * Exposes aggregate proxy-use stats, the proxy host:port, and the live
+ * concurrency gate (inFlight, queued, oldestHoldMs).  Never credentials,
+ * never request URLs or bodies.
  */
 
 import "server-only";
 import { Socket } from "node:net";
 import { getProxyUseSnapshot } from "@/lib/proxy-use-log";
-import { proxyProbePort, resolveResidentialProxyUrl, safeProxyHostForLog } from "@/lib/proxy-fetch";
+import { proxyGateSnapshot, proxyProbePort, resolveResidentialProxyUrl, safeProxyHostForLog } from "@/lib/proxy-fetch";
+import { recordProxyGateSnapshot } from "@/lib/sentry-metrics";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +74,8 @@ async function checkProxyReachability(now: number): Promise<MangoProbe> {
 
 export async function GET() {
   const now = Date.now();
+  const gate = proxyGateSnapshot();
+  recordProxyGateSnapshot(gate);
   try {
     let mango = cachedProbe;
     if (!mango || now - cachedAtMs >= PROBE_CACHE_MS) {
@@ -80,13 +84,14 @@ export async function GET() {
       cachedProbe = mango;
       cachedAtMs = now;
     }
-    return Response.json({ ok: true, snapshot: getProxyUseSnapshot(now), mango });
+    return Response.json({ ok: true, snapshot: getProxyUseSnapshot(now), mango, gate });
   } catch {
     // Never throw: a broken snapshot/probe path must still answer reachable:false.
     return Response.json({
       ok: true,
-      snapshot: { latest: null, lastHour: { proxied: 0, direct: 0, fallbacks: 0 }, total: 0 },
-      mango: { host: safeProxyHostForLog(""), reachable: false, latencyMs: null, checkedAt: new Date(now).toISOString() }
+      snapshot: { latest: null, lastHour: { proxied: 0, direct: 0, fallbacks: 0, proxyErrors: 0 }, total: 0 },
+      mango: { host: safeProxyHostForLog(""), reachable: false, latencyMs: null, checkedAt: new Date(now).toISOString() },
+      gate
     });
   }
 }

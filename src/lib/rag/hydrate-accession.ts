@@ -16,6 +16,7 @@ import {
 } from "./corpus-layout";
 import { bareSecAccession, parseItemCodeFromSection } from "./pinecone-write-class";
 import { sqliteAllOffLoop } from "./sqlite-all-offloop";
+import { decodeTextPayload } from "../text-payload-codec";
 
 export const HYDRATE_WALL_MS = 150;
 
@@ -270,6 +271,17 @@ async function hydrateFromFts(
   }
 }
 
+/** Plaintext transcript body. Stored bytes may be gz1:/raw1:. Length is checked
+ *  after decode so a compressed long transcript is not dropped by length(content). */
+function decodeTranscriptBody(stored: string): string | null {
+  try {
+    const text = decodeTextPayload(stored).trim();
+    return text.length > 80 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 async function hydrateTranscript(accession: string, input: HydrateAccessionInput): Promise<HydrateAccessionResult | null> {
   const match = TRANSCRIPT_ACC_RE.exec(accession);
   const symbolFromAcc = match?.[1]?.toUpperCase();
@@ -284,16 +296,17 @@ async function hydrateTranscript(accession: string, input: HydrateAccessionInput
         .prepare(
           `SELECT content FROM earningscalls_transcripts
            WHERE symbol = ? AND fiscal_year = ? AND fiscal_quarter = ?
-             AND content IS NOT NULL AND length(content) > 80
+             AND content IS NOT NULL
            LIMIT 1`
         )
         .get(symbol, year, quarter) as { content?: string } | undefined;
-      if (row?.content) return hit(row.content, "transcript");
+      const decoded = row?.content ? decodeTranscriptBody(row.content) : null;
+      if (decoded) return hit(decoded, "transcript");
     }
     const like = `%${accession}%`;
     const byMetaRows = await sqliteAllOffLoop(
       `SELECT content FROM earningscalls_transcripts
-         WHERE content IS NOT NULL AND length(content) > 80
+         WHERE content IS NOT NULL
            AND (source_meta LIKE ? OR lower(symbol) = lower(?))
          ORDER BY fiscal_year DESC, fiscal_quarter DESC
          LIMIT 1`,
@@ -302,7 +315,8 @@ async function hydrateTranscript(accession: string, input: HydrateAccessionInput
       TranscriptContentRowSchema
     );
     const byMeta = byMetaRows[0] ? { content: byMetaRows[0].content ?? undefined } : undefined;
-    if (byMeta?.content) return hit(byMeta.content, "transcript");
+    const decodedMeta = byMeta?.content ? decodeTranscriptBody(byMeta.content) : null;
+    if (decodedMeta) return hit(decodedMeta, "transcript");
   } catch {
     // table may be absent
   }

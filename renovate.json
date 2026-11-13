@@ -29,12 +29,28 @@
       "enabled": false
     },
     {
+      "description": "ESLint major bumps must refresh eslint-config-next in the same lockfile.  A standalone eslint@10 pin on an older eslint-config-next left verify lint crashing (react/display-name: context.getFilename is not a function; board d428460a / PR #4325).",
+      "matchPackageNames": ["eslint", "eslint-config-next"],
+      "groupName": "eslint-toolchain"
+    },
+    {
       "matchPackagePatterns": ["^next$", "^react$", "^react-dom$"],
       "groupName": "next-react"
     },
     {
       "matchPackagePatterns": ["^@sentry/.*$", "^@langfuse/.*$", "^@opentelemetry/.*$"],
       "groupName": "observability"
+    },
+    {
+      "description": "@langfuse/otel@6 peers @opentelemetry/core and sdk-trace-base at ^2.0.1. OTel core/resources v3 majors fail npm ci (peer + @opentelemetry/api skew) until Langfuse publishes OTel 3 peers. Remove this rule in the same PR that bumps @langfuse/otel's peer range.",
+      "matchPackageNames": ["@opentelemetry/core", "@opentelemetry/resources"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "@opentelemetry/instrumentation 0.300+ peers @opentelemetry/api >=1.10 <1.11, but sdk-trace-node, core, resources and sdk-trace-base 2.x peer api <1.10, so npm ci fails with ERESOLVE (PRs #4963, #5017). Remove this rule once the OTel SDK 2.x line accepts api 1.10.",
+      "matchPackageNames": ["@opentelemetry/instrumentation"],
+      "allowedVersions": "<0.300.0"
     },
     {
       "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],

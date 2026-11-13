@@ -142,7 +142,9 @@ describe("keyless options parsers", () => {
     expect(AlpacaStockSnapshotSchema.safeParse(json).success).toBe(true);
     expect(readAlpacaStockSnapshotPrice(json)).toBe(100);
     expect(readAlpacaStockSnapshotPrice({ latestTrade: { p: 101, s: 10 } })).toBe(101);
-    expect(readAlpacaStockSnapshotPrice({ prevDailyBar: { c: 99 } })).toBe(99);
+    expect(readAlpacaStockSnapshotPrice({ latestTrade: { p: 101, s: 10 } })).not.toBe(10);
+    expect(readAlpacaStockSnapshotPrice({ prevDailyBar: { c: 99 } })).toBeUndefined();
+    expect(readAlpacaStockSnapshotPrice({ dailyBar: { c: 100 }, latestQuote: { bp: 99 } })).toBeUndefined();
   });
 });
 

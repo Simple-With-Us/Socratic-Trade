@@ -6,7 +6,11 @@
 
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
 import { checkAllUserPriceAlerts } from "./alerts";
-import { probeCongressShareTokenIfDue, runCongressDailyShareIfDue } from "./congress-share";
+import {
+  probeCongressShareTokenIfDue,
+  runCongressDailyShareIfDue,
+  runCongressStaleCatchupIfDue
+} from "./congress-share";
 import { secXbrlEnrichmentEnabled } from "./data-providers";
 import { runSecCompanyFactsSweepIfDue } from "./web-sources/sec-companyfacts-sweep";
 import { runMarketScanFreshnessIfDue } from "./market-scan-freshness";
@@ -17,7 +21,7 @@ import { isEarningsCallsRefreshDue, refreshEarningsCallsTranscriptsIfDue } from 
 import { isRoicTranscriptRefreshDue, refreshRoicTranscriptsIfDue } from "./web-sources/roic-transcripts";
 import { runDailyLearningReviewIfDue } from "./learning-review";
 import { isRunAllowedNow } from "./market-hours";
-import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry } from "./sqlite-event-loop";
+import { isRegularTradingHours, shouldDeferRagIngestDuringRth, sqliteYieldRetry, yieldIfDue } from "./sqlite-event-loop";
 import { serverKnobBool } from "./server-knobs";
 import { runProviderTierCheckIfDue } from "./provider-tier";
 import { isRunBackedOff } from "./run-failure-watchdog";
@@ -28,6 +32,7 @@ import { pineconeWuExhaustedUntil } from "./pinecone-wu-breaker";
 import { runWatchlistDigestIfDue } from "./watchlist-digest";
 import { runAuditPruneYieldingIfDue } from "./audit-prune";
 import { runStorageHygieneIfDue } from "./sqlite-storage-hygiene";
+import { backfillCompressedTextPayloadsIfDue } from "./text-payload-backfill";
 import {
   applyBrokerOrderPlacementPause,
   brokerPauseAccountScope,
@@ -937,15 +942,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // close its own now-stale check-in a second time, or worse, clobber a newer tick's still-open
   // in-progress check-in (tickGuardHost.__tickSentryCheckInId by then belongs to that newer tick).
   const myTickGeneration = tickGuardHost.__tickGeneration;
-  // Crashed-run sweep: mark strategy_runs left in status='running' after a process crash/kill,
-  // and close the matching strategy_run_requests row so Manual Run once is not left locked.
-  // Must run BEFORE the single-leader gate so stale rows are always repaired (idempotent: the
-  // UPDATE has a `WHERE status = 'running'` guard, so even two concurrent sweeps won't double-count).
+  // Phase-boundary yields: synchronous DB helpers in the sweeps below can pin
+  // the event loop; yield between phases so /api/live can answer (stall class
+  // behind SOCRATIC-TRADE-2Q). yieldIfDue caps this at one yield per 50ms.
+  const tickYield = { ms: Date.now() };
+  // Crashed-run sweep for rows THIS instance started.  Runs before the leader gate so a process
+  // that lost leadership can still close its own wedged run.  reapUnowned stays false: a follower
+  // must never close the leader's runs (ST-8).  The leader reaps other instances after the gate.
   try {
     await journalLane("stale-run-sweep", {}, () => {
       // Restart-killed runs that provably placed nothing get ONE queued retry (board 687a5fb4);
       // eligibility + idempotency live in strategy-run-retry.ts.
-      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now());
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: false });
       if (repaired > 0) console.log(`[scheduler] marked ${repaired} stale running run(s) as failed`);
       if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for restart-killed run(s)`);
       return {
@@ -956,15 +964,16 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   } catch (err) {
     console.error("[scheduler] stale-run sweep error:", err);
   }
+  await yieldIfDue(tickYield);
 
   // Same repair for the mobile/PWA command queue: claimNextQueuedCommand marks a row 'running' and
   // nothing else in the codebase ever selects that status, so a crash mid-command strands the row
   // forever — which permanently blocks account deletion (activeMobileCommands) and permanently
-  // spins the PWA. Placed here for two reasons: before the single-leader gate (like the run sweep,
-  // so stale rows are repaired even on a follower — its liveness graces are all durable DB
-  // evidence, so a follower cannot misjudge a command the leader is running), and after the run
-  // sweep, so a strategy_runs row that sweep just left alive on this same tick still hands its
-  // grace through to the strategy.run_once command wrapping it. Dynamic import matches the
+  // spins the PWA. Placed here for two reasons: before the single-leader gate (a follower may
+  // repair a command whose liveness graces are all durable DB evidence, so it cannot misjudge a
+  // command the leader is running), and after the own-instance run sweep, so a strategy_runs row
+  // that sweep just left alive on this same tick still hands its grace through to the
+  // strategy.run_once command wrapping it. Dynamic import matches the
   // mobile-command-drain lane below and keeps scheduler -> mobile-api off the static graph.
   try {
     await journalLane("stale-mobile-command-sweep", {}, async () => {
@@ -977,17 +986,22 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     console.error("[scheduler] stale mobile-command sweep error:", err);
   }
 
+  await yieldIfDue(tickYield);
   // Task-journal hook (db-task-journal.ts) — forever retention; no-op delete.
   pruneTaskJournal();
 
   // Daily audit-prune watermark (audit-prune.ts) — forever retention; no row deletes.
+  // The lane's only remaining work is the read-only embed_stage observer (db-embed-stage.ts,
+  // ST-4540): it counts undelivered paid vectors and raises the backlog / over-cap alarms.
   void journalLane("audit-prune", {}, async () => {
     const result = await runAuditPruneYieldingIfDue();
     if (!result) return { status: "skipped" as const, summary: "not due" };
-    const total = result.auditObservability + result.auditDefault + result.providerDispatch +
-      result.providerOutbox + result.embedStageExpired + result.embedStageCapPruned +
-      result.portfolioSnapshotsPruned;
-    return { status: "ok" as const, summary: `deleted=${total}` };
+    // Forever retention: the delete counts are structurally zero, so the lane summary reports
+    // the signal that still matters — undelivered embed_stage rows awaiting delivery (ST-4540).
+    const stageSummary = result.embedStageUndeliveredRetained > 0
+      ? ` embed_stage_undelivered=${result.embedStageUndeliveredRetained}`
+      : " embed_stage_undelivered=0";
+    return { status: "ok" as const, summary: `deleted=0${stageSummary}` };
   }).catch((err) => console.error("[scheduler] audit prune error:", err));
 
   signal?.throwIfAborted();
@@ -998,6 +1012,24 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   if (singleLeaderEnabled() && !acquireOrRenewLeadership(new Date())) {
     return; // not the leader this tick — no side effects
   }
+
+  // Leader-only reap of runs this process did not start (prior leader, or a legacy NULL owner).
+  // Followers returned above.  Boot grace and the drain-adoption skip live in the sweep, so this
+  // does not close a run the drain later in this tick is about to resume.
+  try {
+    await journalLane("stale-run-sweep-unowned", {}, () => {
+      const { repaired, retry } = sweepStaleRunsAndRetry(Date.now(), { reapUnowned: true });
+      if (repaired > 0) console.log(`[scheduler] marked ${repaired} unowned stale running run(s) as failed`);
+      if (retry.enqueued > 0) console.log(`[scheduler] queued ${retry.enqueued} one-time retry(ies) for unowned restart-killed run(s)`);
+      return {
+        status: repaired > 0 ? ("ok" as const) : ("skipped" as const),
+        summary: `repaired=${repaired} retried=${retry.enqueued} retrySkipped=${retry.skipped}`
+      };
+    });
+  } catch (err) {
+    console.error("[scheduler] unowned stale-run sweep error:", err);
+  }
+  await yieldIfDue(tickYield);
 
   // Table sizes, WAL checkpoint, ANALYZE/optimize, and incremental free-page
   // reclaim (no row deletes).  Leader only: every replica checkpointing
@@ -1011,6 +1043,18 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
     };
   }).catch((err) => console.error("[scheduler] storage hygiene error:", err));
 
+  // In-place gzip of transcript bodies and companyfacts JSON cache. Leader only.
+  // The lane probes text_codec / segment_codec (indexed), then reads one body
+  // at a time and yields. It does not scan blob columns and does not delete rows.
+  void journalLane("text-payload-backfill", {}, async () => {
+    const result = await backfillCompressedTextPayloadsIfDue();
+    if (!result) return { status: "skipped" as const, summary: "not due" };
+    return {
+      status: "ok" as const,
+      summary: `transcripts=${result.transcripts} secFacts=${result.secFacts}`
+    };
+  }).catch((err) => console.error("[scheduler] text payload backfill error:", err));
+
   // Open an honest Sentry Crons job after the leader gate: only the process running the tick
   // body reports, so idle followers cannot mask a dead leader. `ok` is sent in `finally` once
   // the body finishes — not here — so a hung await cannot look like a successful tick.
@@ -1019,6 +1063,7 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   let sentryStatus: SentrySchedulerCheckInStatus = "ok";
 
   try {
+  await yieldIfDue(tickYield);
 
   // Drain durable material-event inboxes on every leader tick, independent of SEC ingestion
   // flags. Events may be produced by filings, transcripts, broker state, or operator actions;
@@ -1189,6 +1234,12 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
   // CONGRESS_SHARE_ENABLED are set and the batch hasn't already run today. Fully self-guarded.
   void journalLane("congress-daily-share", {}, () => runCongressDailyShareIfDue(Date.now())).catch((err) =>
     console.error("[scheduler] congress-share daily batch error:", err)
+  );
+
+  // Same-session retry of the tickers the nightly share withheld as stale (late-posting NAVs and
+  // thin names), so they do not wait a whole UTC day.  Bounded retries; no-op when nothing pending.
+  void journalLane("congress-stale-catchup", {}, () => runCongressStaleCatchupIfDue(Date.now())).catch((err) =>
+    console.error("[scheduler] congress-share stale catch-up error:", err)
   );
 
   if (secXbrlEnrichmentEnabled()) {
@@ -1459,7 +1510,20 @@ async function tickInner(signal?: AbortSignal): Promise<void> {
           continue;
         }
         const executionState = deriveExecutionState(policy, account);
-        const brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        let brokerGateway: ReturnType<typeof getBrokerGateway> | undefined;
+        try {
+          brokerGateway = executionState.submitsBrokerOrders ? getBrokerGateway(policy, userId) : undefined;
+        } catch (error) {
+          // One account with unusable stored credentials (e.g. a key saved without its
+          // secret) must not abort the tick for every other account's lanes.
+          audit(
+            "scheduler_broker_gateway_unavailable",
+            { connectedAccountId: account.id, error: error instanceof Error ? error.message.slice(0, 300) : "unknown" },
+            userId,
+            account.id
+          );
+          continue;
+        }
         
         if (account.isDraining) {
           if (brokerGateway && policy.accountNumber) {

@@ -22,17 +22,23 @@
 # TestFlight-spam source, not an edge case.
 #
 # The owner does not want TestFlight spammed, so the scheduled path ships only
-# when the app's own source tree actually changed since its last successful
-# ship. Push and workflow_dispatch bypass this entirely: a push already passed
-# the workflow's `paths:` filter, and a dispatch is an explicit instruction.
+# when one of the workflow's push paths (the app's own source tree or the ship
+# tooling) actually changed since its last successful ship. Push and
+# workflow_dispatch bypass this entirely: a push already passed the workflow's
+# `paths:` filter, and a dispatch is an explicit instruction.
 #
 # Usage:
-#   ios-scheduled-ship-gate.sh --path-prefix <dir/> [options] <key> [key...]
-#   (this repo ships one app: `socratic`, from ios/)
+#   ios-scheduled-ship-gate.sh --path-prefix <pattern> [options] <key> [key...]
+#   (this repo ships one app: `socratic`; the workflow passes its whole
+#   on.push.paths list, one --path-prefix per entry, so a missed push still
+#   ships exactly what the push trigger would have shipped)
 #
 # Options:
-#   --path-prefix P   Repo-relative path prefix that counts as app source
-#                     (required; e.g. clients/ios/ or ios/)
+#   --path-prefix P   Repo-relative push-path pattern that counts as a ship
+#                     reason (required, repeatable; e.g. ios/ or ios/**, an
+#                     exact file, or '!dir/' to exclude). A trailing "/**" is
+#                     a subtree; a leading "!" excludes, as in on.push.paths.
+#                     A lone single --path-prefix call keeps working as before.
 #   --event NAME      GitHub event name (default: $GITHUB_EVENT_NAME).
 #                     Anything other than "schedule" votes ship=1 for every
 #                     app: a push already passed the workflow's paths filter,
@@ -53,7 +59,7 @@
 
 set -uo pipefail
 
-PATH_PREFIX=""
+PATH_PATTERNS=()
 EVENT="${GITHUB_EVENT_NAME:-}"
 REPO_ROOT=""
 STATE_DIR="${IOS_FLEET_STATE_DIR:-${HOME}/.cache/ios-fleet}"
@@ -64,7 +70,11 @@ log() { echo "[ship-gate] $*"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --path-prefix) PATH_PREFIX="${2:-}"; shift 2 ;;
+    --path-prefix)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--path-prefix needs a value"
+      PATH_PATTERNS=(${PATH_PATTERNS[@]+"${PATH_PATTERNS[@]}"} "$2")
+      shift 2
+      ;;
     --event) EVENT="${2:-}"; shift 2 ;;
     --repo-root) REPO_ROOT="${2:-}"; shift 2 ;;
     --state-dir) STATE_DIR="${2:-}"; shift 2 ;;
@@ -74,11 +84,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$PATH_PREFIX" ]] || die "--path-prefix is required"
+[[ "${#PATH_PATTERNS[@]}" -gt 0 ]] || die "--path-prefix is required"
 [[ -n "${APPS// /}" ]] || die "at least one app key is required"
 
 if [[ -z "$REPO_ROOT" ]]; then REPO_ROOT="$(pwd)"; fi
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd)" || die "bad --repo-root"
+
+# Translate push-path patterns to git pathspecs. A trailing "/**" is a subtree
+# in push-filter syntax; git matches that as a plain directory prefix. A
+# leading "!" becomes a git exclusion (":!"). Anything else passes through:
+# git wildmatch treats "*" like the push filter does (never crossing "/").
+GIT_SPECS=()
+HAVE_POSITIVE=0
+for _pat in ${PATH_PATTERNS[@]+"${PATH_PATTERNS[@]}"}; do
+  _neg=0
+  case "$_pat" in
+    '!'*) _neg=1; _pat="${_pat#!}" ;;
+  esac
+  case "$_pat" in
+    */\*\*) _pat="${_pat%/\*\*}/" ;;
+  esac
+  [[ -n "$_pat" ]] || die "empty --path-prefix pattern"
+  if [[ "$_neg" -eq 1 ]]; then
+    GIT_SPECS=(${GIT_SPECS[@]+"${GIT_SPECS[@]}"} ":!${_pat}")
+  else
+    HAVE_POSITIVE=1
+    GIT_SPECS=(${GIT_SPECS[@]+"${GIT_SPECS[@]}"} "$_pat")
+  fi
+done
+PATH_DESC="${PATH_PATTERNS[*]}"
 
 emit() {
   # emit <key> <value>
@@ -141,9 +175,16 @@ for app in $APPS; do
         log "[${app}] last shipped sha ${last_sha} is unreachable from HEAD (shipped from another worktree/branch, or history was rewritten)."
         last_ts="$(awk 'NR==1{print $1}' "$state" 2>/dev/null || true)"
         if [[ "${last_ts:-}" =~ ^[0-9]+$ ]]; then
-          since_changed="$(git -C "$REPO_ROOT" log --since="@${last_ts}" --format= --name-only -- "$PATH_PREFIX" 2>/dev/null | sed '/^$/d' | sort -u | head -20)"
+          if [[ "$HAVE_POSITIVE" -eq 0 ]]; then
+            # Exclusions alone can never satisfy a push filter (nothing
+            # positive to match), while git would read them as
+            # match-almost-everything. Match nothing instead.
+            since_changed=""
+          else
+            since_changed="$(git -C "$REPO_ROOT" log --since="@${last_ts}" --format= --name-only -- ${GIT_SPECS[@]+"${GIT_SPECS[@]}"} 2>/dev/null | sed '/^$/d' | sort -u | head -20)"
+          fi
           if [[ -n "$since_changed" ]]; then
-            log "[${app}] falling back to time: ${PATH_PREFIX} changed after the last ship:"
+            log "[${app}] falling back to time: ${PATH_DESC} changed after the last ship:"
             # Line-by-line, NOT `printf ... $var`: Socratic-Trade's iOS path is
             # "ios/Socratic Trade.xcodeproj/...", and unquoted word-splitting
             # printed that one file as two bogus lines. Decision logic is
@@ -151,7 +192,7 @@ for app in $APPS; do
             printf '%s\n' "$since_changed" | while IFS= read -r f; do echo "  $f"; done
             decision=1
           else
-            log "[${app}] falling back to time: no ${PATH_PREFIX} commits since the last ship; skip."
+            log "[${app}] falling back to time: no ${PATH_DESC} commits since the last ship; skip."
           fi
         else
           log "[${app}] state has no usable timestamp either; letting ship-testflight.sh decide."
@@ -167,13 +208,17 @@ for app in $APPS; do
       # Captured into a variable, not piped into `grep -q`: under pipefail an
       # early-exiting grep SIGPIPEs git and the pipeline reports failure even
       # though it matched.
-      changed="$(git -C "$REPO_ROOT" diff --name-only "$last_sha" HEAD -- "$PATH_PREFIX" 2>/dev/null | head -20)"
+      if [[ "$HAVE_POSITIVE" -eq 0 ]]; then
+        changed=""
+      else
+        changed="$(git -C "$REPO_ROOT" diff --name-only "$last_sha" HEAD -- ${GIT_SPECS[@]+"${GIT_SPECS[@]}"} 2>/dev/null | head -20)"
+      fi
       if [[ -n "$changed" ]]; then
-        log "[${app}] ${PATH_PREFIX} changed since ${last_sha}:"
+        log "[${app}] ${PATH_DESC} changed since ${last_sha}:"
         printf '%s\n' "$changed" | while IFS= read -r f; do echo "  $f"; done
         decision=1
       else
-        log "[${app}] no ${PATH_PREFIX} changes since ${last_sha}; skip (TestFlight is not a commit log)."
+        log "[${app}] no ${PATH_DESC} changes since ${last_sha}; skip (TestFlight is not a commit log)."
         decision=0
       fi
     fi

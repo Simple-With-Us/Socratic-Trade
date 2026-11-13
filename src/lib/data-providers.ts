@@ -16,6 +16,15 @@
 import { dataSourceFetch, resolveDataSourceProxy } from "./data-source-fetch";
 import { enrichmentPlanForDeadline } from "./gather-budget";
 import { fromAlpacaSymbol, normalizeSymbol, toAlpacaSymbol } from "./money";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
+import {
+  ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+  ALPACA_PAPER_DELAYED_FEED,
+  ALPACA_PAPER_EXPECTED_DELAY_SEC,
+  alpacaPaperFeedForAccount,
+  alpacaSnapshotCacheIdentity,
+  type AlpacaMarketDataFeed
+} from "./alpaca-paper-quotes";
 import {
   congressFundamentalsEnabled,
   getCongressTradeClient
@@ -28,19 +37,18 @@ import type { EnrichmentSources } from "./types";
 
 import {
   audit,
-  cancelUndispatchedProviderReservation,
+  getActiveConnectedAccount,
+  getConnectedAccount,
   hasDataPoolConsent,
-  markProviderDispatchStarted,
-  reserveProviderDispatch,
   resolveAlpacaMarketData,
   resolveAlphaVantageKeyPool,
   resolveApiKeyWithSource,
-  settleProviderDispatch,
   type ApiKeySource
 } from "./db";
 import { logApiHealth, getServiceHealthSummaries, HEALTH_REASON_CONSECUTIVE_FAILURES } from "./db-health";
-import { apiCircuitBreakerShouldSkip, CircuitOpenError, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
+import { apiCircuitBreakerDisabled, apiCircuitBreakerShouldSkip, CircuitOpenError, isPaidQuoteBreakerCooling, isPaidQuoteProvider, observePaidQuoteStatus, quoteRetryAfterCapMs, tripApiCircuitBreakerLane } from "./api-circuit-breaker";
 import { isAbortOrTimeoutError, isCallerSignalAborted, isIdempotentRequest, isTransientNetworkError, jitteredBackoffMs, retryAfterDelayMs } from "./network-errors";
+import { cancelResponseBody, detachErrorResponse } from "./response-body";
 import { expiresAtRespectingMarketClose } from "./market-hours";
 import { recordProviderCall } from "./usage-monitor-push";
 import { robinhoodMcpDataEnabled } from "./robinhood";
@@ -53,7 +61,6 @@ import {
   resolveTradierOptionsCredential
 } from "./keyless-options-enrichment";
 import { resolveQuiverApiKey } from "./quiver-provider";
-import { isDirectVendorAccessAllowed } from "./retired-direct-vendors";
 import {
   clearFilingApiKeyRejected,
   isFilingApiAuthStatus,
@@ -64,7 +71,7 @@ import {
 import { NasdaqCalendarEnrichmentProvider } from "./nasdaq-calendar-provider";
 import { WisesheetsEnrichmentProvider, resolveWisesheetsApiKey } from "./wisesheets-provider";
 import { SimFinEnrichmentProvider, resolveSimFinApiKey } from "./simfin-provider";
-import { MarketauxEnrichmentProvider, resolveMarketauxApiKey } from "./marketaux-provider";
+import { MarketauxEnrichmentProvider } from "./marketaux-provider";
 import { scoreHeadlineRelevance } from "./news-relevance";
 import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 import { getStreamedHeadlines } from "./streams/news-store";
@@ -73,7 +80,9 @@ import { loadTickerCikMap } from "./web-sources/sec8k";
 import { readCompanyFactsCache } from "./web-sources/sec-facts";
 import { padCik } from "./web-sources/sec-filings";
 import { readProviderFieldCacheForSymbol, writeProviderFieldCache } from "./provider-field-cache";
-import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, resolveProviderQuota, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
+import { withProviderLimit, admitProviderRequests, refundProviderRequests, resetProviderQuotaState, scrubProviderErrorText, scrubProviderErrorTextForPool, appendErrorCause } from "./provider-rate-limit";
+import type { YahooSessionCreds } from "./yahoo-session";
+import { clearYahooSessionCredsCache, getYahooSessionCreds, YAHOO_SESSION_UA } from "./yahoo-session";
 import { AlphaVantageKeyPool, getPoolForKeys, isAlphaVantageDailyCapMessage, millisUntilNextAlphaVantageDailyReset, tryReserveAlphaVantageCalls, refundAlphaVantageCalls, alphaVantageDailyCallBudget } from "./alpha-vantage-key-pool";
 import { tryReserveRapidApiCalls, refundRapidApiCalls, type RapidApiProviderKey } from "./rapidapi-quota";
 import {
@@ -188,6 +197,34 @@ export interface SymbolEnrichment {
   low?: number;
   vwap?: number;        // session volume-weighted average price (Alpaca dailyBar.vw)
   asOf?: string;
+  /**
+   * Documented publication delay of the tape this enrichment came from, in
+   * seconds (Alpaca PAPER `delayed_sip` ≈ 900s).
+   *
+   * When set, consumers MUST evaluate the observation with the DELAYED-TAPE
+   * rules (`alpaca-paper-quotes.ts`): the expected delay is the venue, not
+   * staleness, but lag beyond `expectedDelaySec + delayToleranceSec` is still
+   * excess delay and fails closed.  Without this flag a ~900s-old `asOf` is
+   * treated as a realtime-stale quote.
+   */
+  expectedDelaySec?: number;
+  /** Tolerance (seconds) on top of `expectedDelaySec` before lag counts as excess. */
+  delayToleranceSec?: number;
+  /**
+   * True when this enrichment came from the ACTIVE execution venue's own tape
+   * (the connected Alpaca PAPER account's `delayed_sip` feed).  Consumers age
+   * the snapshot by its retrieval time instead of the delayed trade print.
+   */
+  venuePriceAuthoritative?: boolean;
+  /**
+   * Wall-clock ISO when this enrichment was RETRIEVED.
+   *
+   * A delayed tape ages by retrieval time, not by the (expected ~900s old)
+   * trade print, so the retrieval stamp has to travel with the enrichment.
+   * Undefined for realtime providers — their observation time is the freshness
+   * signal and must not be replaced by a fetch clock.
+   */
+  fetchedAt?: string;
   sentiment?: number;    // 0–100 news tone (50 = neutral). News-derived only.
   peRatio?: number;
   headlines?: string[];
@@ -231,7 +268,7 @@ export interface SymbolEnrichment {
   nearTheMoneyIv?: number;
   // Put/call open-interest ratio around the money (opt-in Robinhood option-chain tier).
   putCallRatio?: number;
-  // Numeric analyst price targets (FMP price-target-consensus; opt-in FMP_PRICE_TARGETS_ENABLED).
+  // Numeric analyst price targets (from App A or a keyed provider that supplies them).
   targetMean?: number;
   targetHigh?: number;
   targetLow?: number;
@@ -603,22 +640,14 @@ function providerNegativeTtlMs(): number {
 
 // How many outbound requests one enriched symbol costs a quota'd provider — passed to the request
 // quota (which budgets in REQUESTS, not symbols). Only providers in RATE_QUOTAS need this: tiingo
-// fires up to 3 sub-calls/symbol (iex, daily, [news]); twelvedata costs 1 credit/symbol; fmp fires
-// 2 unconditional (profile + insider) plus up to 3 conditional (ratios-ttm, grades-consensus,
-// price-target-consensus). Non-quota'd providers (finnhub, yahoo, alpha-vantage) are paced instead
-// and never consult this.
+// fires up to 3 sub-calls/symbol (iex, daily, [news]); twelvedata costs 1 credit/symbol.
+// Non-quota'd providers (finnhub, yahoo, alpha-vantage) are paced instead and never consult this.
 export function callsPerSymbol(
   provider: string,
-  opts?: { dropExtra?: boolean; skipPe?: boolean; skipConsensus?: boolean; wantTargets?: boolean }
+  opts?: { dropExtra?: boolean }
 ): number {
   switch (provider) {
     case "tiingo": return opts?.dropExtra ? 2 : 3;  // iex, daily, [news]
-    // 2 unconditional (profile + insider) + ratios-ttm (unless skipPe) + grades-consensus (unless
-    // skipConsensus) + price-target-consensus (only when wantTargets). Mirrors the fetch-path
-    // conditions one-for-one; range 2..5. The caller MUST derive skipPe/skipConsensus/wantTargets
-    // from the SAME skipFlagsFor(symbol) + wantTargets formula it dispatches with, so reservation
-    // equals dispatch per symbol.
-    case "fmp": return 2 + (opts?.skipPe ? 0 : 1) + (opts?.skipConsensus ? 0 : 1) + (opts?.wantTargets ? 1 : 0);
     default: return 1;                               // twelvedata (1 credit/symbol)
   }
 }
@@ -694,6 +723,11 @@ export async function fetchWithRetry(
     healthService?: string;
     service?: string;
     keySource?: string;
+    /**
+     * Paid-quote hold identity. A SHA-256 of the API key, never the key itself.
+     * When set, a 429 or 402 parks this credential only.
+     */
+    credentialId?: string;
     userId?: string;
     deferSuccessLog?: boolean;
     /**
@@ -741,8 +775,9 @@ export async function fetchWithRetry(
   // currently backed off (recently stopped working). Thrown BEFORE the fetch so no health row is
   // written for the skip (which would self-perpetuate the trip); providers catch the rejection and
   // degrade to the next tier exactly like a real fetch failure.
+  const laneCredential = options.credentialId ?? null;
   if (healthService) {
-    const breaker = apiCircuitBreakerShouldSkip(healthService, options.keySource ?? null);
+    const breaker = apiCircuitBreakerShouldSkip(healthService, options.keySource ?? null, laneCredential);
     if (breaker.skip) throw new CircuitOpenError(healthService, options.keySource ?? null, breaker.reason);
   }
   const start = Date.now();
@@ -779,7 +814,21 @@ export async function fetchWithRetry(
       // A transport may settle after its caller's durable lease has moved. Fence the response before
       // any health/provider ledger and before deciding whether an internal retry should run.
       assertFetchWithRetryGuard(options.guard);
+      const laneKeySource = options.keySource ?? null;
+      // Health classification stays on the provider. The kill switch only turns
+      // trips and skips off, so a 402 is still a soft quota row when it is set.
+      const paidQuoteProvider = isPaidQuoteProvider(healthService);
+      const paidQuote = paidQuoteProvider && !apiCircuitBreakerDisabled();
+      // Plan-gated paid-quote statuses must not park the rest of that provider.
+      // The same list on a non-quote lane only suppresses the health row. The
+      // older rate-limit hold still opens after retries, when Retry-After is set.
+      const suppressedStatus = (options.suppressHealthStatuses ?? []).includes(response.status);
+      const quoteStatusSuppressed = suppressedStatus && paidQuoteProvider;
       if (response.status === 429 && attempt < retries) {
+        // The body is discarded on retry.  Cancel it before the backoff so a
+        // proxied 429 cannot hold a concurrency slot while we wait.  5xx is
+        // not an internal continue here; it is returned to the caller.
+        await response.body?.cancel().catch(() => undefined);
         // Do NOT write a health row for intermediate 429 retries — each retry would otherwise
         // look like a hard failure and five rapid 429s painted the lane red STOPPED even when
         // the eventual attempt (or the next symbol) succeeded. Final 429 is logged below as soft.
@@ -787,22 +836,36 @@ export async function fetchWithRetry(
         // so `attempt === retries - 1` is still a retry.  Default one-retry lanes (Finnhub,
         // Nasdaq quote) were opening a 60s hold before that retry, which skipped sibling
         // endpoints already waiting on the same pacer.
+        // Cancel before the wait so the proxy gate slot is not held across the backoff.
+        await cancelResponseBody(response);
         const retryAfterMs = retryAfterDelayMs(response);
-        const waitMs = Math.max(
-          jitteredBackoffMs(backoffMs, attempt),
-          retryAfterMs ?? 0
-        );
+        const cappedRetryAfter = retryAfterMs != null && retryAfterMs > 0
+          ? Math.min(retryAfterMs, quoteRetryAfterCapMs())
+          : 0;
+        const waitMs = Math.max(jitteredBackoffMs(backoffMs, attempt), cappedRetryAfter);
         await guardedFetchBackoff(waitMs, options.guard);
         continue;
-      }
-      if (response.status === 429 && healthService) {
+      } else if (response.status === 429 && healthService && !quoteStatusSuppressed) {
         const retryAfterMs = retryAfterDelayMs(response);
         // Retries are exhausted.  A positive Retry-After is the lane hold.  A 429 with no
         // Retry-After already waited the in-call backoff; flooring the hold at 60s skipped
         // the rest of a multi-endpoint provider and the immediate cache-bypass refetch.
         if (retryAfterMs != null && retryAfterMs > 0) {
-          tripApiCircuitBreakerLane(healthService, options.keySource ?? null, retryAfterMs);
+          if (paidQuote) {
+            // Same one-hour cap as history. The raw header can be a day.
+            observePaidQuoteStatus(healthService, laneKeySource, 429, retryAfterMs, Date.now(), laneCredential);
+          } else {
+            tripApiCircuitBreakerLane(healthService, laneKeySource, retryAfterMs, Date.now(), {
+              reason: "rate-limit",
+              status: 429
+            });
+          }
         }
+      }
+      if (response.status === 402 && paidQuote && healthService && !suppressedStatus) {
+        observePaidQuoteStatus(healthService, laneKeySource, 402, undefined, Date.now(), laneCredential);
+      } else if (response.ok && paidQuote && healthService) {
+        observePaidQuoteStatus(healthService, laneKeySource, response.status, undefined, Date.now(), laneCredential);
       }
       // When deferSuccessLog is set, skip the auto-success row so the caller can log
       // after validating the response body (e.g. providers that embed errors in HTTP 200).
@@ -813,6 +876,9 @@ export async function fetchWithRetry(
         // HTTP 429 (and any status the caller opts into via softHealthStatuses) is an expected
         // limit, not a broken integration — soft so consecutive-failure STOPPED / circuit stay off.
         const softStatuses = new Set([429, ...(options.softHealthStatuses ?? [])]);
+        // 402 on a paid quote provider is out of quota, same class as 429: the hours
+        // hold above is the backoff. It must not also paint a hard STOPPED streak.
+        if (paidQuoteProvider && response.status === 402) softStatuses.add(402);
         const soft = !response.ok && softStatuses.has(response.status);
         logApiHealth({
           service: healthService,
@@ -830,6 +896,7 @@ export async function fetchWithRetry(
         assertFetchWithRetryGuard(options.guard);
         recordProviderCall(options.service, { ok: response.ok, keySource: options.keySource, userId: options.userId });
       }
+      if (!response.ok) return detachErrorResponse(response);
       return response;
     }
   } catch (err) {
@@ -1134,7 +1201,10 @@ function withHealthLane(provider: MarketEnrichmentProvider, source: ApiKeySource
   return provider;
 }
 
-export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider {
+export function getEnrichmentProvider(
+  userId?: string,
+  options?: { connectedAccountId?: string }
+): MarketEnrichmentProvider {
   const providers: MarketEnrichmentProvider[] = [];
   const finnhub = resolveApiKeyWithSource("finnhub", userId);
   const alphaVantage = resolveAlphaVantageKeyPool(userId);
@@ -1152,6 +1222,16 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // Alpaca MARKET DATA: own key (individual) → operator's paper key (shared) for background/tenants.
   // Trading is unaffected (alpaca.ts resolves Alpaca strictly per-user).
   const alpacaData = resolveAlpacaMarketData(userId);
+  // ACCOUNT-SCOPED TAPE: when the operating account is the connected Alpaca
+  // PAPER account, the snapshot enrichment must read the SAME `delayed_sip`
+  // tape the broker gateway uses.  The feed is decided by the connected
+  // account row — never by the global `ALPACA_DATA_FEED` env var — and the
+  // cache key folds in the account/feed identity so the delayed tape can
+  // never contaminate another account's snapshot cache.
+  //
+  // The account lookup is INSIDE the Alpaca credential guard: without Alpaca
+  // snapshot credentials there is no snapshot provider to configure, so no
+  // connected-account DB read may run on this path.
   // ── Freshness-tier ordering (first-wins cascade) ──────────────────────────
   // The cascade below is first-wins per field (takeScalar keeps the first non-undefined
   // value). So provider ORDER decides which source wins the price-family fields
@@ -1165,7 +1245,16 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // WITHOUT disturbing fundamentals sourcing (still finnhub/fmp/yahoo below). It
   // self-skips when either Alpaca key is absent — then the delayed sources fill these
   // fields in exactly the same order they would today.
-  if (alpacaData.apiKey && alpacaData.secretKey) providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId), alpacaData.source));
+  if (alpacaData.apiKey && alpacaData.secretKey) {
+    // Connected-account lookup happens ONLY when the Alpaca snapshot provider
+    // is actually registered (credentials present).
+    const scanAccount =
+      (options?.connectedAccountId ? getConnectedAccount(options.connectedAccountId, userId ?? "local") : undefined) ??
+      getActiveConnectedAccount(userId ?? "local");
+    const scanFeed = alpacaSnapshotFeedForAccount(scanAccount);
+    const scanCacheIdentity = alpacaSnapshotCacheIdentity(scanAccount?.id, scanFeed);
+    providers.push(withHealthLane(new AlpacaSnapshotEnrichmentProvider(alpacaData.apiKey, alpacaData.secretKey, alpacaData.source, userId, scanFeed ? { feed: scanFeed, cacheIdentity: scanCacheIdentity } : undefined), alpacaData.source));
+  }
   // Tier 1.5 — Congress.Trade fundamentals/analyst cache-aside (opt-in, default OFF).
   // Owner: fundamentals should come from the multi-source cascade (Finnhub/ROIC/SEC/Yahoo/…),
   // not App A. Enable CONGRESS_TRADE_FUNDAMENTALS_ENABLED only as an extra peer tier.
@@ -1214,13 +1303,12 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   }
   // Marketaux: a genuine per-article sentiment model (not a keyword-scored proxy), so it's seated
   // right after AV's own model-based NEWS_SENTIMENT rather than down with the keyword-proxy tiers.
-  // Key-gated on MARKETAUX_API_KEY (process.env only). Declares quotaScarce (free tier 100 req/day)
+  // Key-gated on a per-user stored key or MARKETAUX_API_KEY env. Declares quotaScarce (free tier 100 req/day)
   // + suppliesFields, so the free-first planner's wave gate only spends it on symbols still
   // missing headlines/sentiment after the free wave resolved.
-  const marketauxKey = resolveMarketauxApiKey();
-  if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), "env"));
-  // FMP EnrichmentProvider deliberately NOT registered (owner 2026-08-04). Class remains for
-  // tests / dead-code reference; requestFmp + enrich() are hard-blocked.
+  const marketaux = resolveApiKeyWithSource("marketaux", userId);
+  const marketauxKey = marketaux.key;
+  if (marketauxKey) providers.push(withHealthLane(new MarketauxEnrichmentProvider(marketauxKey), marketaux.source === "user" ? "user" : "env"));
   if (roic.key) providers.push(withHealthLane(new RoicAiEnrichmentProvider(roic.key, roic.source, userId), roic.source));
   // Massive REST: REAL second short-interest source (FINRA short interest / free float) for the
   // Yahoo-vs-Massive disagreement cross-check. Supplies ONLY the carrier shortPercentOfFloatSecondary
@@ -1231,18 +1319,15 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
   // Positioned after FMP (paid key wins) but before Yahoo (keyless fallback) so SEC authoritative
   // data supersedes Yahoo's scraped values. Set SEC_XBRL_ENRICHMENT_ENABLED=0 to disable.
   if (secXbrlEnrichmentEnabled()) providers.push(new SecXbrlEnrichmentProvider());
-  // FilingAPI.dev (FILINGAPI / FILINGAPI_KEY): optional. Missing / known-401 keys skip
-  // the lane; ROIC + SEC EDGAR cover the same fields. A later valid key registers again.
-  const filingApi = resolveApiKeyWithSource("filingapi", userId);
-  if (shouldUseFilingApiKey(filingApi.key)) {
-    providers.push(withHealthLane(new FilingApiEnrichmentProvider(filingApi.key, filingApi.source, userId), filingApi.source));
-  }
+  // FilingAPI.dev is retired (owner 2026-08-17). Earnings/transcripts are ROIC.ai only.
+  // Do not register even if a dead FILINGAPI key is still in Infisical.
   // Wisesheets + SimFin: two new (2026-08-02) free/keyed fundamentals "second opinions" layered
   // on top of FMP/roic/SEC-XBRL above, both key-gated on their own env var (process.env only,
   // mirror QuiverEnrichmentProvider) and both self-contained (no shared provider-rate-limit.ts
   // budget — each paces itself). Wisesheets declares quotaScarce (launched 2026-07-24, no track
   // record yet, 5,000 req/mo) so the free-first planner only spends it on genuine coverage gaps;
-  // SimFin does not (2 req/sec, no monthly cap) so it stays in the ordinary first-wins wave.
+  // SimFin deliberately stays ungated (docs/market-data-provider-pricing.md) so the wave-B gap
+  // filter cannot skip it before it fills its tracked ratios.
   const wisesheetsKey = resolveWisesheetsApiKey();
   if (wisesheetsKey) providers.push(withHealthLane(new WisesheetsEnrichmentProvider(wisesheetsKey), "env"));
   const simFinKey = resolveSimFinApiKey();
@@ -1312,7 +1397,6 @@ export function getEnrichmentProvider(userId?: string): MarketEnrichmentProvider
       "env"
     ));
     providers.push(withHealthLane(new AlphaVantageRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
-    // FmpRapidApiEnrichmentProvider intentionally not registered — same retirement as native FMP.
     providers.push(withHealthLane(new InsidersRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     providers.push(withHealthLane(new TwelveDataRapidApiEnrichmentProvider(rapidApiKey, "env", userId), "env"));
     // Additional RapidAPI free-tier failover lanes. Working Pricing page (verified):
@@ -1788,6 +1872,19 @@ export class CascadingEnrichmentProvider implements MarketEnrichmentProvider {
         const r = data[symbol];
         if (!r) continue;
         currentRecord = r;
+        // DELAYED-TAPE METADATA (not a sourced scalar): the Alpaca snapshot
+        // provider is seated FIRST (tier 1) and is the only provider that
+        // carries tape metadata, so the first writer wins — exactly like the
+        // price-family scalars above.  These fields are the contract that lets
+        // `applyEnrichment` age a ~900s-old `delayed_sip` print with the
+        // delayed-tape rules instead of the realtime-stale bar.
+        if (base.expectedDelaySec === undefined && typeof r.expectedDelaySec === "number") {
+          base.expectedDelaySec = r.expectedDelaySec;
+          base.delayToleranceSec = r.delayToleranceSec;
+          if (r.venuePriceAuthoritative !== undefined) {
+            base.venuePriceAuthoritative = r.venuePriceAuthoritative;
+          }
+        }
         takeScalar("price", name, r.price);
         takeScalar("bid", name, r.bid);
         takeScalar("ask", name, r.ask);
@@ -2259,9 +2356,12 @@ function webullUnofficialTimeoutMs(): number {
 export function parseWebullUnofficialQuote(payload: unknown): SymbolEnrichment {
   if (!payload || typeof payload !== "object" || "_error" in payload) return {};
   const row = payload as Record<string, unknown>;
-  const price = firstNumber(row, ["pPrice", "close", "price", "lastPrice", "latestPrice", "last"]);
+  // Webull unofficial `close` is the current print.  `preClose` is the prior close and is not a price.
+  const last = firstNumber(row, ["pPrice", "price", "lastPrice", "latestPrice", "last", "close"]);
   const bid = firstNumber(row, ["bid", "bidPrice", "bid_price"]);
   const ask = firstNumber(row, ["ask", "askPrice", "ask_price"]);
+  const selected = selectObservedQuotePrice({ last, bid, ask });
+  const price = selected.price;
   const prevClose = firstNumber(row, ["preClose", "prevClose", "previousClose", "priorClose"]);
   const rawChangePct = firstNumber(row, ["changeRatio", "changePercent", "pctChange", "changePct"]);
   const volume = firstNumber(row, ["volume", "vol", "tradeVolume"]);
@@ -2272,7 +2372,13 @@ export function parseWebullUnofficialQuote(payload: unknown): SymbolEnrichment {
   const fiftyTwoWeekHigh = firstNumber(row, ["fiftyTwoWkHigh", "high52w", "high52wk", "week52High", "fiftyTwoWeekHigh"]);
   const fiftyTwoWeekLow = firstNumber(row, ["fiftyTwoWkLow", "low52w", "low52wk", "week52Low", "fiftyTwoWeekLow"]);
   const companyName = firstString(row, ["name", "companyName", "disSymbolName"]);
-  const asOf = firstString(row, ["timestamp", "tradeTime", "time", "updateTime"]);
+  const asOf = providerObservationIso(
+    selected.basis === "last"
+      ? firstString(row, ["tradeTime", "timestamp", "time", "updateTime"])
+      : selected.basis === "mid"
+        ? firstString(row, ["quoteTime", "timestamp", "time", "updateTime"])
+        : undefined
+  );
   const dividendYield =
     rawDividendYield !== undefined && rawDividendYield >= 0
       ? Math.round((rawDividendYield <= 1 ? rawDividendYield * 100 : rawDividendYield) * 100) / 100
@@ -2613,6 +2719,11 @@ const ALPACA_SNAPSHOT_CHUNK = 100; // Alpaca batch limit per request
 // HTTP 403 ("subscription does not permit querying recent SIP data") unless the
 // account has a paid SIP subscription. Configurable via ALPACA_DATA_FEED; any
 // value outside the allowed set falls back to "iex".
+//
+// `delayed_sip` is deliberately NOT selectable through this global env var:
+// the delayed tape is an ACCOUNT decision (Alpaca PAPER), and a process-wide
+// switch would silently repoint every other account's tape.  Use
+// `alpacaSnapshotFeedForAccount` / the provider's `feed` option instead.
 const ALPACA_ALLOWED_FEEDS = ["iex", "sip", "otc"] as const;
 export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
   const raw = String(process.env.ALPACA_DATA_FEED ?? "").trim().toLowerCase();
@@ -2621,21 +2732,73 @@ export function alpacaDataFeed(): (typeof ALPACA_ALLOWED_FEEDS)[number] {
     : "iex";
 }
 
+/**
+ * Account-scoped feed override for the Alpaca snapshot endpoint.
+ *
+ * Returns `delayed_sip` for the connected Alpaca PAPER account and `undefined`
+ * for every other account (which then uses the global `ALPACA_DATA_FEED`).
+ */
+export function alpacaSnapshotFeedForAccount(
+  account: { broker?: string; environment?: string } | null | undefined
+): AlpacaMarketDataFeed | undefined {
+  return alpacaPaperFeedForAccount(account);
+}
+
 export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "alpaca-snapshot";
   readonly configured = true;
   private readonly base = "https://data.alpaca.markets/v2/stocks/snapshots";
   private readonly scope: CacheScope;
   private readonly keySource: ApiKeySource;
+  /** Account-scoped feed override (e.g. `delayed_sip` for Alpaca PAPER). */
+  private readonly feed?: AlpacaMarketDataFeed;
+  /**
+   * Cache prefix.  Folded with the account/feed identity when an account-scoped
+   * feed is in play so a `delayed_sip` snapshot can never be served to — or
+   * overwrite — an `iex` snapshot of the same symbol.
+   */
+  private readonly cachePrefix: string;
 
   constructor(
     private readonly apiKey: string,
     private readonly apiSecret: string,
     keySource: ApiKeySource = "env",
-    private readonly userId?: string
+    private readonly userId?: string,
+    options?: { feed?: AlpacaMarketDataFeed; cacheIdentity?: string }
   ) {
     this.scope = cacheScopeForKeySource(keySource, userId);
     this.keySource = keySource;
+    this.feed = options?.feed;
+    this.cachePrefix = options?.cacheIdentity
+      ? `alpaca-snapshot:${options.cacheIdentity}`
+      : "alpaca-snapshot";
+  }
+
+  /** The feed this provider actually requests. */
+  effectiveFeed(): AlpacaMarketDataFeed {
+    return this.feed ?? alpacaDataFeed();
+  }
+
+  /**
+   * Delayed-tape metadata for the ACCOUNT-SCOPED `delayed_sip` tape.
+   *
+   * Only the Alpaca PAPER tape carries it.  `effectiveFeed()` can only be
+   * `delayed_sip` when the account-scoped override set it — the global
+   * `ALPACA_DATA_FEED` allowlist (`iex|sip|otc`) rejects it — so this never
+   * leaks onto another account's snapshot.
+   *
+   * `venuePriceAuthoritative` is APPLICABLE here: for the connected Alpaca
+   * PAPER account this tape IS the execution venue's tape, so consumers age
+   * the snapshot by its retrieval time instead of by the ~900s-old print.
+   */
+  tapeMetadata(fetchedAt?: string): AlpacaSnapshotTapeMetadata {
+    if (this.effectiveFeed() !== ALPACA_PAPER_DELAYED_FEED) return {};
+    return {
+      expectedDelaySec: ALPACA_PAPER_EXPECTED_DELAY_SEC,
+      delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+      venuePriceAuthoritative: true,
+      ...(fetchedAt !== undefined && { fetchedAt })
+    };
   }
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
@@ -2648,7 +2811,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
     const misses: string[] = [];
 
     for (const symbol of normalized) {
-      const cached = readEnrichmentCache("alpaca-snapshot", symbol, this.userId, consented, now);
+      const cached = readEnrichmentCache(this.cachePrefix, symbol, this.userId, consented, now);
       if (cached) result[symbol] = cached.data;
       else misses.push(symbol);
     }
@@ -2662,7 +2825,7 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
         // single unconverted hyphenated symbol in the batch gets the whole chunk rejected with
         // HTTP 400 (confirmed in prod: this was silently failing ~97% of snapshot calls whenever
         // the batch included a symbol like BRK-B from the S&P 500 scan universe).
-        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${alpacaDataFeed()}`;
+        const url = `${this.base}?symbols=${encodeURIComponent(chunk.map(toAlpacaSymbol).join(","))}&feed=${this.effectiveFeed()}`;
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 8000);
         let snapshots: Record<string, AlpacaSnapshot>;
@@ -2681,15 +2844,18 @@ export class AlpacaSnapshotEnrichmentProvider implements MarketEnrichmentProvide
         } finally {
           clearTimeout(timeout);
         }
+        // RETRIEVAL STAMP: when this snapshot was actually pulled.  A delayed
+        // tape ages by this stamp, not by its (expected ~900s old) print.
+        const fetchedAt = new Date().toISOString();
 
         for (const symbol of chunk) {
           const snap = snapshots[toAlpacaSymbol(symbol)];
-          const data = parseAlpacaSnapshot(snap);
+          const data = parseAlpacaSnapshot(snap, this.tapeMetadata(fetchedAt));
           const hasData = Object.keys(data).length > 0;
           if (hasData) {
             // Quote-family TTL (~30s default), NOT the blanket 6h fundamentals ttlMs() — see
             // alpacaSnapshotTtlMs() for why real-time price/bid/ask/volume can't share that cadence.
-            writeEnrichmentCache("alpaca-snapshot", symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
+            writeEnrichmentCache(this.cachePrefix, symbol, this.scope, this.userId, data, now + alpacaSnapshotTtlMs());
           }
           result[symbol] = data;
         }
@@ -2709,17 +2875,41 @@ interface AlpacaSnapshot {
   prevDailyBar?: { c?: number };
 }
 
-export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): SymbolEnrichment {
+/**
+ * Tape metadata stamped onto a parsed Alpaca snapshot.
+ *
+ * Only the ACCOUNT-SCOPED `delayed_sip` tape carries these.  Every other feed
+ * (iex / sip / otc) leaves them undefined, so realtime snapshots keep their
+ * ordinary semantics.
+ */
+export interface AlpacaSnapshotTapeMetadata {
+  /** Documented publication delay of the tape (Alpaca PAPER `delayed_sip` ≈ 900s). */
+  expectedDelaySec?: number;
+  /** Tolerance on top of `expectedDelaySec` before lag counts as excess delay. */
+  delayToleranceSec?: number;
+  /** True when the tape is the ACTIVE execution venue's own tape. */
+  venuePriceAuthoritative?: boolean;
+  /** Wall-clock ISO when the snapshot was pulled (retrieval stamp). */
+  fetchedAt?: string;
+}
+
+export function parseAlpacaSnapshot(
+  snap: AlpacaSnapshot | undefined | null,
+  tape?: AlpacaSnapshotTapeMetadata
+): SymbolEnrichment {
   if (!snap) return {};
 
   const tradePrice = typeof snap.latestTrade?.p === "number" && snap.latestTrade.p > 0 ? snap.latestTrade.p : undefined;
   const barClose = typeof snap.dailyBar?.c === "number" && snap.dailyBar.c > 0 ? snap.dailyBar.c : undefined;
-  const price = tradePrice ?? barClose;
 
   const bid = typeof snap.latestQuote?.bp === "number" && snap.latestQuote.bp > 0 ? snap.latestQuote.bp : undefined;
   const ask = typeof snap.latestQuote?.ap === "number" && snap.latestQuote.ap > 0 ? snap.latestQuote.ap : undefined;
   const bidSize = typeof snap.latestQuote?.bs === "number" && snap.latestQuote.bs > 0 ? snap.latestQuote.bs : undefined;
   const askSize = typeof snap.latestQuote?.as === "number" && snap.latestQuote.as > 0 ? snap.latestQuote.as : undefined;
+  // Last print, then the two-sided mid.  Daily-bar close and the previous
+  // close are not the quote, and bid/ask size is not a price.
+  const selected = selectObservedQuotePrice({ last: tradePrice, bid, ask });
+  const price = selected.price;
 
   const volume = typeof snap.dailyBar?.v === "number" && snap.dailyBar.v > 0 ? snap.dailyBar.v : undefined;
 
@@ -2740,18 +2930,11 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
     netChange = Math.round((refPrice - prevClose) * 100) / 100;
   }
 
-  // Stamp asOf from whichever timestamp backs the winning PRICE field, so the staleness gate
-  // (policy.ts maxQuoteAgeSec) sees the quote's true age instead of inheriting a screener/enrichment
-  // asOf from an unrelated field (or none at all — parseAlpacaSnapshot never set asOf before this).
-  // Preference mirrors the price fallback above: latestTrade.t when latestTrade.p won, else
-  // dailyBar.t when dailyBar.c won, falling back to latestQuote.t when both are absent.
-  const asOfRaw =
-    tradePrice !== undefined
-      ? snap.latestTrade?.t
-      : barClose !== undefined
-        ? snap.dailyBar?.t
-        : snap.latestQuote?.t;
-  const asOf = typeof asOfRaw === "string" && !Number.isNaN(new Date(asOfRaw).getTime()) ? asOfRaw : undefined;
+  // The timestamp belongs to the field that won.  A missing observation stays
+  // undefined so the staleness gate does not read the fetch clock.
+  const asOf = providerObservationIso(
+    selected.basis === "last" ? snap.latestTrade?.t : selected.basis === "mid" ? snap.latestQuote?.t : undefined
+  );
 
   return {
     ...(price !== undefined && { price }),
@@ -2767,7 +2950,18 @@ export function parseAlpacaSnapshot(snap: AlpacaSnapshot | undefined | null): Sy
     ...(low !== undefined && { low }),
     ...(netChange !== undefined && { netChange }),
     ...(intradayChangePct !== undefined && { intradayChangePct }),
-    ...(asOf !== undefined && { asOf })
+    ...(asOf !== undefined && { asOf }),
+    // DELAYED-TAPE METADATA: carried through to `applyEnrichment` so the scan
+    // quote is aged by the delayed-tape rules instead of being treated as a
+    // realtime-stale observation.
+    ...(tape?.expectedDelaySec !== undefined && { expectedDelaySec: tape.expectedDelaySec }),
+    ...(tape?.delayToleranceSec !== undefined && { delayToleranceSec: tape.delayToleranceSec }),
+    ...(tape?.venuePriceAuthoritative !== undefined && {
+      venuePriceAuthoritative: tape.venuePriceAuthoritative
+    }),
+    // The RETRIEVAL stamp travels with a delayed tape so consumers age it by
+    // when it was pulled, never by the (expected ~900s old) trade print.
+    ...(tape?.fetchedAt !== undefined && { fetchedAt: tape.fetchedAt })
   };
 }
 
@@ -2933,15 +3127,7 @@ export class NasdaqQuoteEnrichmentProvider implements MarketEnrichmentProvider {
 // Uses Yahoo Finance session-crumb auth to call v10/finance/quoteSummary.
 // Provides: sector, industry, P/E, EPS, dividend yield, and analyst rating.
 
-interface YfCreds { cookie: string; crumb: string; expiresAt: number; }
-// Keyed by effective proxy URL: cookie+crumb are issued to the egress IP, so creds
-// fetched through a user's proxy must not be reused for a different egress path.
-const yfCredsByProxy = new Map<string, YfCreds>();
-const YF_CRUMB_TTL_MS = 55 * 60_000; // 55 min (crumbs expire ~1 hr)
-const YF_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
-// A single failed cookie/crumb handshake otherwise blanks the ENTIRE Yahoo enrichment batch
-// for every symbol this run — retry once after this short backoff before giving up.
-const YF_CREDS_RETRY_BACKOFF_MS = 500;
+type YfCreds = YahooSessionCreds;
 
 class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
   constructor(private readonly userId?: string) {}
@@ -2966,7 +3152,14 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     let creds: YfCreds;
-    try { creds = await this.getCreds(); } catch (err) {
+    try {
+      const resolved = await getYahooSessionCreds(this.userId);
+      if (!resolved) {
+        logApiHealth({ service: this.name, ok: false, errorText: "Yahoo session cancelled" });
+        return result;
+      }
+      creds = resolved;
+    } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
       logApiHealth({ service: this.name, ok: false, errorText: scrubProviderErrorText(appendErrorCause(rawMessage, err)) });
       return result;
@@ -2989,51 +3182,6 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
     return result;
   }
 
-  private proxyCacheKey(): string {
-    return resolveDataSourceProxy(this.userId).proxyUrl ?? "direct";
-  }
-
-  private async getCreds(): Promise<YfCreds> {
-    const now = Date.now();
-    const cacheKey = this.proxyCacheKey();
-    const cached = yfCredsByProxy.get(cacheKey);
-    if (cached && cached.expiresAt > now) return cached;
-
-    try {
-      return await this.fetchCreds(now);
-    } catch {
-      // One retry with a short backoff — a transient network blip or momentary 429 on the
-      // handshake shouldn't blank Yahoo enrichment for every symbol this run.
-      await new Promise((resolve) => setTimeout(resolve, YF_CREDS_RETRY_BACKOFF_MS));
-      return await this.fetchCreds(Date.now());
-    }
-  }
-
-  private async fetchCreds(now: number): Promise<YfCreds> {
-    // Both legs of the handshake go through the same egress path (dataSourceFetch
-    // with this provider's userId) so the cookie and crumb are issued to one IP.
-    const cookieRes = await dataSourceFetch("https://fc.yahoo.com", {
-      headers: { "user-agent": YF_UA },
-      redirect: "follow"
-    }, { userId: this.userId });
-    const rawCookies: string[] =
-      typeof (cookieRes.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === "function"
-        ? (cookieRes.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
-        : [cookieRes.headers.get("set-cookie") ?? ""].filter(Boolean);
-    const cookie = rawCookies.map((c) => c.split(";")[0]).filter(Boolean).join("; ");
-
-    const crumbRes = await dataSourceFetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
-      headers: { "user-agent": YF_UA, "Cookie": cookie, "accept": "text/plain" }
-    }, { userId: this.userId });
-    if (!crumbRes.ok) throw new Error(`Yahoo Finance crumb failed: ${crumbRes.status}`);
-    const crumb = (await crumbRes.text()).trim();
-    if (!crumb || crumb.startsWith("{")) throw new Error("Invalid Yahoo Finance crumb");
-
-    const creds = { cookie, crumb, expiresAt: now + YF_CRUMB_TTL_MS };
-    yfCredsByProxy.set(this.proxyCacheKey(), creds);
-    return creds;
-  }
-
   private async fetchSymbol(symbol: string, creds: YfCreds): Promise<SymbolEnrichment> {
     // calendarEvents → next earnings date (daysToEarnings); institutionOwnership +
     // majorHoldersBreakdown → institutional ownership %. Both ride the SAME authenticated
@@ -3051,7 +3199,7 @@ class YahooFinanceEnrichmentProvider implements MarketEnrichmentProvider {
       const timeout = setTimeout(() => controller.abort(), 8000);
       try {
         return await fetchWithRetry(url, {
-          headers: { "user-agent": YF_UA, "Cookie": creds.cookie, "accept": "application/json" },
+          headers: { "user-agent": YAHOO_SESSION_UA, Cookie: creds.cookie, accept: "application/json" },
           cache: "no-store",
           signal: controller.signal
         }, { service: this.name });
@@ -3683,452 +3831,6 @@ export class FinnhubEnrichmentProvider implements MarketEnrichmentProvider {
   }
 }
 
-// ── FMP stable API provider ───────────────────────────────────────────────────
-// Stable FMP company-data lane. Company profile + insider activity are always
-// requested for a cold symbol; ratios/analyst/targets remain coverage-aware.
-
-/** Opt-in: fetch FMP price-target-consensus (an extra call per symbol; not on every key tier). */
-export function fmpPriceTargetsEnabled(): boolean {
-  const v = (process.env.FMP_PRICE_TARGETS_ENABLED ?? "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
-}
-
-export class FmpEnrichmentProvider implements MarketEnrichmentProvider {
-  readonly name = "fmp";
-  readonly costTier = "paid" as const;
-  readonly configured = true;
-  private readonly base = "https://financialmodelingprep.com/stable";
-  private readonly scope: CacheScope;
-  private readonly keySource: ApiKeySource;
-
-  constructor(
-    private readonly apiKey: string,
-    keySource: ApiKeySource = "env",
-    private readonly userId?: string
-  ) {
-    this.scope = cacheScopeForKeySource(keySource, userId);
-    this.keySource = keySource;
-  }
-
-  async enrich(symbols: string[], context?: EnrichmentContext): Promise<Record<string, SymbolEnrichment>> {
-    // Owner 2026-08-04: never call FMP from this app (even if constructed in tests/scripts).
-    if (!isDirectVendorAccessAllowed("fmp")) return {};
-    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, maxSymbols());
-    if (normalized.length === 0) return {};
-
-    const now = Date.now();
-    const consented = hasDataPoolConsent(this.userId ?? "local");
-    const result: Record<string, SymbolEnrichment> = {};
-    const misses: string[] = [];
-    // Per-symbol coverage-hint skip flags (short-circuit only). Shared by the cache-hit
-    // path AND the fetch path so a cached FMP row is trimmed the same way a fresh fetch is.
-    const skipFlagsFor = (symbol: string) => {
-      const covered = context?.coveredFields?.[symbol];
-      // P/E is first-wins (App A registered first wins anyway); analyst consensus is
-      // blended, so skip it only when App A's analyst genuinely came from FMP; targets
-      // are first-wins but skip the call only when App A covers all four.
-      const skipPe = covered?.has("peRatio") ?? false;
-      const skipConsensus = (covered?.has("analystRating") ?? false) && context?.analystSource?.[symbol] === this.name;
-      const skipTargets = ["targetMean", "targetHigh", "targetLow", "targetMedian"].every((k) => covered?.has(k));
-      return { skipPe, skipConsensus, skipTargets };
-    };
-    for (const symbol of normalized) {
-      const cached = readEnrichmentCache("fmp", symbol, this.userId, consented, now);
-      if (cached) {
-        // A cache hit bypasses the fetch-path skip logic, so apply the hint here too:
-        // if App A covers FMP's OWN consensus with a fresher row, drop the cached FMP
-        // analyst (analystBySource merges last-writer-wins, so a stale cached fmp entry
-        // would otherwise overwrite App A's fresher fmp-keyed analyst in the blend).
-        if (skipFlagsFor(symbol).skipConsensus && cached.data.analystBySource) {
-          const { analystBySource, analystRating, analystScore, ...rest } = cached.data;
-          // A leftover field is only USEFUL if App A doesn't ALSO cover it. A cached
-          // { peRatio, analystBySource } leaves { peRatio } after stripping the consensus,
-          // but App A's first-wins peRatio (or covered targets) makes that contribute
-          // nothing — so the entry is effectively empty and FMP's unique fields
-          // (insider/senate, enabled targets) would never be refetched. Treat it as a MISS
-          // unless a NON-covered field survives, so the fetch path runs.
-          const covered = context?.coveredFields?.[symbol];
-          const usefulKeys = Object.keys(rest).filter((k) => !(covered?.has(k) ?? false));
-          if (usefulKeys.length > 0) result[symbol] = rest;
-          else misses.push(symbol);
-        } else {
-          result[symbol] = cached.data;
-        }
-      } else misses.push(symbol);
-    }
-
-    if (misses.length === 0) return result;
-
-    // UNIFORM request quota (provider-rate-limit.ts RATE_QUOTAS): fmp = 290/min account-wide (Starter
-    // is 300/min; 290 leaves headroom). Unlike tiingo/twelvedata, FMP's per-symbol cost is VARIABLE —
-    // 2..5 requests depending on this symbol's skip flags — so we budget per symbol, not scan-uniform.
-    // Build a plan per miss (same skipFlagsFor + wantTargets formula the fetch path uses, so reservation
-    // == dispatch), admit the total, then greedily take a best-first prefix of WHOLE symbols and defer
-    // the rest best-effort (the cascade + shared 6h cache cover them; coverage accretes across scans).
-    const targetsEnabled = fmpPriceTargetsEnabled(); // read once per scan
-    const plans = misses.map((symbol) => {
-      const { skipPe, skipConsensus, skipTargets } = skipFlagsFor(symbol);
-      const wantTargets = targetsEnabled && !skipTargets;
-      const cost = callsPerSymbol("fmp", { skipPe, skipConsensus, wantTargets });
-      return { symbol, skipPe, skipConsensus, wantTargets, cost };
-    });
-    const credKey = await apiKeyFingerprint(this.apiKey);
-    const totalWanted = plans.reduce((n, p) => n + p.cost, 0);
-    const allowed = admitProviderRequests("fmp", credKey, totalWanted);
-    // Greedy best-first prefix walk: misses arrive best-first, so take whole symbols in order until the
-    // next one doesn't fit, then defer it AND everything after it (preserves priority; mirrors tiingo's
-    // slice tail). `remaining` after the walk is the sub-symbol leftover admit() over-reserved.
-    let remaining = allowed;
-    const toQuery: typeof plans = [];
-    for (const p of plans) {
-      if (p.cost <= remaining) { toQuery.push(p); remaining -= p.cost; }
-      else break;
-    }
-    refundProviderRequests("fmp", credKey, remaining); // hand back the sub-symbol remainder
-    for (const p of plans.slice(toQuery.length)) result[p.symbol] = {}; // deferred; not queried/cached this run
-    if (toQuery.length === 0) return result; // no minute budget left — best-effort only
-
-    for (let i = 0; i < toQuery.length; i += CONCURRENCY) {
-      const chunk = toQuery.slice(i, i + CONCURRENCY);
-      await Promise.all(
-        chunk.map(async (plan) => {
-          // Reuse the reserved plan flags (do NOT recompute) so dispatch == reservation exactly.
-          const { symbol, skipPe, skipConsensus, wantTargets } = plan;
-          // Coverage hint (short-circuit only): when a free upstream (App A) already
-          // supplied P/E, analyst consensus, or price targets for this symbol, skip the
-          // matching FMP SUB-call — but always keep fetching FMP profile + insider data.
-          // (Same flags are
-          // applied to cache hits above.) skipTargets is folded into wantTargets already.
-          const skipTargets = !wantTargets;
-          const [peRaw, consensusRaw, profileRaw, insiderRaw, targetRaw] = await Promise.allSettled([
-            skipPe
-              ? Promise.resolve(undefined)
-              : this.getJson(`${this.base}/ratios-ttm?symbol=${encodeURIComponent(symbol)}`),
-            skipConsensus
-              ? Promise.resolve(undefined)
-              : this.getJson(`${this.base}/grades-consensus?symbol=${encodeURIComponent(symbol)}`),
-            this.getJson(`${this.base}/profile?symbol=${encodeURIComponent(symbol)}`),
-            this.getJson(
-              `${this.base}/insider-trading/search?symbol=${encodeURIComponent(symbol)}&page=0&limit=100`,
-              false,
-              [402, 403]
-            ),
-            wantTargets
-              ? this.getJson(
-                  `${this.base}/price-target-consensus?symbol=${encodeURIComponent(symbol)}`,
-                  false,
-                  [402, 403]
-                )
-              : Promise.resolve(undefined)
-            // NOTE: FMP does NOT provide short interest — there is no /short_interest (or equivalent)
-            // endpoint (verified via FMP's API docs + official MCP surface, 2026-07). A second
-            // short-interest source would need a real provider such as Massive or Finnhub.
-          ]);
-
-          let peRatio: number | undefined;
-          let pbRatio: number | undefined;
-          let debtToEquity: number | undefined;
-          let returnOnEquity: number | undefined;
-          let returnOnAssets: number | undefined;
-          let grossProfitMargin: number | undefined;
-          let ratiosDividendYield: number | undefined;
-          let peDate: string | undefined;
-          if (peRaw.status === "fulfilled" && Array.isArray(peRaw.value)) {
-            const row = (peRaw.value as Array<Record<string, unknown>>)[0];
-            const finite = (value: unknown) => {
-              const parsed = Number(value);
-              return Number.isFinite(parsed) ? parsed : undefined;
-            };
-            const percent = (value: unknown) => {
-              const parsed = finite(value);
-              return parsed === undefined ? undefined : Math.round(parsed * 10_000) / 100;
-            };
-            const pe = finite(row?.priceToEarningsRatioTTM);
-            const pb = finite(row?.priceToBookRatioTTM);
-            if (pe !== undefined && pe > 0) peRatio = pe;
-            if (pb !== undefined && pb > 0) pbRatio = pb;
-            debtToEquity = finite(row?.debtToEquityRatioTTM ?? row?.debtEquityRatioTTM);
-            returnOnEquity = percent(row?.returnOnEquityTTM);
-            returnOnAssets = percent(row?.returnOnAssetsTTM);
-            grossProfitMargin = percent(row?.grossProfitMarginTTM);
-            ratiosDividendYield = percent(row?.dividendYieldTTM);
-            if (typeof row?.date === "string") peDate = row.date;
-          }
-
-          // Stable company profile -> identity + durable operating/market facts. This
-          // replaces the duplicate per-symbol Senate call (Congress.Trade is the
-          // congressional system of record) without increasing the baseline call count.
-          let companyName: string | undefined;
-          let sector: string | undefined;
-          let industry: string | undefined;
-          let beta: number | undefined;
-          let dividendYield: number | undefined = ratiosDividendYield;
-          let fiftyTwoWeekHigh: number | undefined;
-          let fiftyTwoWeekLow: number | undefined;
-          if (profileRaw.status === "fulfilled" && Array.isArray(profileRaw.value)) {
-            const row = (profileRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const clean = (value: unknown) =>
-                typeof value === "string" && value.trim() ? value.trim() : undefined;
-              const finite = (value: unknown) => {
-                const parsed = Number(value);
-                return Number.isFinite(parsed) ? parsed : undefined;
-              };
-              companyName = clean(row.companyName);
-              sector = clean(row.sector);
-              industry = clean(row.industry);
-              beta = finite(row.beta);
-              const lastDividend = finite(row.lastDividend ?? row.lastDiv);
-              const profilePrice = finite(row.price);
-              if (lastDividend !== undefined && lastDividend >= 0 && profilePrice !== undefined && profilePrice > 0) {
-                dividendYield = Math.round((lastDividend / profilePrice) * 10_000) / 100;
-              }
-              const range = clean(row.range)?.match(/^\s*([\d.]+)\s*-\s*([\d.]+)\s*$/);
-              if (range) {
-                fiftyTwoWeekLow = finite(range[1]);
-                fiftyTwoWeekHigh = finite(range[2]);
-              }
-            }
-          }
-
-          // Analyst grades-consensus → 0–100 score + label + counts (blended by the cascade).
-          // FMP does not provide news, so it contributes no sentiment.
-          let analystBySource: Record<string, AnalystRatingDetail> | undefined;
-          if (consensusRaw.status === "fulfilled" && Array.isArray(consensusRaw.value)) {
-            const row = (consensusRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const counts = {
-                strongBuy: num(row.strongBuy),
-                buy: num(row.buy),
-                hold: num(row.hold),
-                sell: num(row.sell),
-                strongSell: num(row.strongSell)
-              };
-              const score = analystScoreFromCounts(counts);
-              if (score !== undefined) {
-                analystBySource = { [this.name]: { score: Math.round(score), label: labelFromAnalystScore(score), counts } };
-              }
-            }
-          }
-
-          let insiderSentiment: number | undefined;
-          if (insiderRaw.status === "fulfilled" && Array.isArray(insiderRaw.value)) {
-            const trades = insiderRaw.value as Array<Record<string, unknown>>;
-            let buys = 0;
-            let sells = 0;
-            for (const trade of trades.slice(0, 100)) {
-              const type = String(trade.transactionType || "").toLowerCase();
-              const acqDisp = String(
-                trade.acquisitionOrDisposition ?? trade.acquistionOrDisposition ?? ""
-              ).toLowerCase();
-              if (type.includes("buy") || type.includes("purchase") || acqDisp === "a") buys++;
-              else if (type.includes("sell") || type.includes("sale") || acqDisp === "d") sells++;
-            }
-            const total = buys + sells;
-            if (total > 0) {
-              insiderSentiment = Math.round((buys / total) * 100);
-            }
-          }
-
-          // Price-target-consensus → numeric targets. FMP stable shape:
-          // [{ symbol, targetHigh, targetLow, targetConsensus, targetMedian }]. Only positive values kept.
-          let targetMean: number | undefined;
-          let targetHigh: number | undefined;
-          let targetLow: number | undefined;
-          let targetMedian: number | undefined;
-          if (wantTargets && targetRaw.status === "fulfilled" && Array.isArray(targetRaw.value)) {
-            const row = (targetRaw.value as Array<Record<string, unknown>>)[0];
-            if (row) {
-              const pos = (v: unknown) => {
-                const n = Number(v);
-                return Number.isFinite(n) && n > 0 ? n : undefined;
-              };
-              targetMean = pos(row.targetConsensus);
-              targetHigh = pos(row.targetHigh);
-              targetLow = pos(row.targetLow);
-              targetMedian = pos(row.targetMedian);
-            }
-          }
-
-          const fieldDates: Partial<Record<keyof EnrichmentSources, string>> = {};
-          if (peDate) {
-            if (peRatio !== undefined) fieldDates.peRatio = peDate;
-            if (pbRatio !== undefined) fieldDates.pbRatio = peDate;
-            if (debtToEquity !== undefined) fieldDates.debtToEquity = peDate;
-            if (returnOnEquity !== undefined) fieldDates.returnOnEquity = peDate;
-            if (returnOnAssets !== undefined) fieldDates.returnOnAssets = peDate;
-            if (grossProfitMargin !== undefined) fieldDates.grossProfitMargin = peDate;
-            if (ratiosDividendYield !== undefined) fieldDates.dividendYield = peDate;
-          }
-
-          const data: SymbolEnrichment = {
-            ...(peRatio !== undefined && { peRatio }),
-            ...(pbRatio !== undefined && { pbRatio }),
-            ...(debtToEquity !== undefined && { debtToEquity }),
-            ...(returnOnEquity !== undefined && { returnOnEquity }),
-            ...(returnOnAssets !== undefined && { returnOnAssets }),
-            ...(grossProfitMargin !== undefined && { grossProfitMargin }),
-            ...(analystBySource !== undefined && { analystBySource }),
-            ...(companyName !== undefined && { companyName }),
-            ...(sector !== undefined && { sector }),
-            ...(industry !== undefined && { industry }),
-            ...(beta !== undefined && { beta }),
-            ...(dividendYield !== undefined && { dividendYield }),
-            ...(fiftyTwoWeekHigh !== undefined && { fiftyTwoWeekHigh }),
-            ...(fiftyTwoWeekLow !== undefined && { fiftyTwoWeekLow }),
-            ...(insiderSentiment !== undefined && { insiderSentiment }),
-            ...(targetMean !== undefined && { targetMean }),
-            ...(targetHigh !== undefined && { targetHigh }),
-            ...(targetLow !== undefined && { targetLow }),
-            ...(targetMedian !== undefined && { targetMedian }),
-            ...(Object.keys(fieldDates).length > 0 && { fieldDates })
-          };
-
-          // Breaker-skip refund: only the sub-calls we ACTUALLY dispatched count (skipped conditional
-          // slots are Promise.resolve(undefined) → "fulfilled", never a real request). When every
-          // dispatched sub-call rejected with CircuitOpenError the breaker threw before any request left
-          // the process — nothing was spent upstream, so hand back this symbol's reservation and don't
-          // cache. The per-service breaker gates all sub-calls of a symbol together, so a partial-symbol
-          // breaker skip can't occur. Mirrors tiingo's `if (breakerSkipped) refund(perSymbol)`.
-          const madeCalls = [
-            ...(skipPe ? [] : [peRaw]),
-            ...(skipConsensus ? [] : [consensusRaw]),
-            profileRaw,
-            insiderRaw,
-            ...(wantTargets ? [targetRaw] : [])
-          ];
-          const breakerSkipped = madeCalls.length > 0 && madeCalls.every(
-            (p) => p.status === "rejected" && p.reason instanceof CircuitOpenError
-          );
-          if (breakerSkipped) {
-            refundProviderRequests("fmp", credKey, plan.cost);
-            result[symbol] = data; // leave a miss to retry once the breaker closes; do NOT cache
-            return;
-          }
-
-          const promises = [peRaw, consensusRaw, profileRaw, insiderRaw];
-          const allRejected = promises.every((p) => p.status === "rejected");
-          const hasTransientError = promises.some((p) => p.status === "rejected" && isTransientError(p.reason));
-          const isEmpty = Object.keys(data).length === 0;
-          // A coverage-trimmed fetch (we skipped ratios-ttm and/or grades-consensus)
-          // yields a PARTIAL row. Don't write it to the normal fmp cache: a later scan
-          // with App A off/stale, or with the short-circuit flag off, would otherwise
-          // treat the partial as a full FMP hit and never refetch P/E/analyst until TTL.
-          // The covered fields come from App A live each scan; FMP refetches its uniques.
-          // A skipped target call only "trims" the result when targets would actually have
-          // been fetched (FMP_PRICE_TARGETS_ENABLED on); otherwise the row is complete and
-          // must still be cached, or FMP's calls would repeat every scan.
-          const trimmed = skipPe || skipConsensus || (skipTargets && fmpPriceTargetsEnabled());
-
-          if (allRejected || hasTransientError || isEmpty || trimmed) {
-            if (!trimmed) {
-              console.warn(
-                `[data-providers] FMP enrichment for ${symbol} skipped caching: ` +
-                `(allRejected=${allRejected}, hasTransientError=${hasTransientError}, isEmpty=${isEmpty})`
-              );
-            }
-          } else {
-            // 14-day TTL to preserve hoarded FMP data and avoid 403s on the free tier.
-            writeEnrichmentCache("fmp", symbol, this.scope, this.userId, data, now + 14 * 24 * 60 * 60 * 1000);
-          }
-          result[symbol] = data;
-        })
-      );
-    }
-    return result;
-  }
-
-  private async getJson(url: string, logHealth = true, suppressStatuses?: number[]): Promise<unknown> {
-    const operation = (() => {
-      try {
-        return new URL(url).pathname.split("/").filter(Boolean).at(-1) ?? "request";
-      } catch {
-        return "request";
-      }
-    })();
-    const reservation = reserveProviderDispatch({
-      provider: "fmp",
-      operation: `enrichment-${operation}`,
-      credentialRef: await apiKeyFingerprint(this.apiKey),
-      userId: this.userId ?? "local",
-      units: 1,
-      estimatedCostUsd: 0,
-      maxEstimatedCostUsdPer24h: 0,
-      windows: (resolveProviderQuota("fmp") ?? []).map((window) => ({
-        maxUnits: window.maxRequests,
-        windowMs: window.windowMs
-      }))
-    });
-    if (!reservation.admitted) throw new Error(`FMP durable ${reservation.reason} reservation denied.`);
-    let dispatched = false;
-    let settled = false;
-    let classificationAttempted = false;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    try {
-      const response = await fetchWithRetry(
-        url,
-        {
-          cache: "no-store",
-          signal: controller.signal,
-          // Header authentication keeps the credential out of URLs, thrown
-          // errors, proxy logs, and upstream diagnostics.
-          headers: { apikey: this.apiKey }
-        },
-        {
-          service: this.name,
-          keySource: this.keySource,
-          userId: this.userId,
-          // retries: 0 — each of the up-to-5 endpoints reserves exactly one request in the quota above;
-          // a built-in 429 retry would emit a second UNCOUNTED call and blow past the 290/min reservation
-          // (headroom is only 10). Same rationale as tiingo/twelvedata's getJson.
-          retries: 0,
-          durableAttempt: {
-            onDispatch: () => {
-              markProviderDispatchStarted(reservation.attemptId);
-              dispatched = true;
-            },
-            onResponse: (received) => {
-              if (!received.ok) {
-                classificationAttempted = true;
-                settleProviderDispatch(reservation.attemptId, "failed", {
-                  outcomeCode: `http-${received.status}`
-                });
-                settled = true;
-              }
-            },
-            onTransportError: (error) => {
-              classificationAttempted = true;
-              settleProviderDispatch(reservation.attemptId, "failed", {
-                outcomeCode: error instanceof Error ? error.name : "transport-error"
-              });
-              settled = true;
-            }
-          },
-          // An explicit suppress list wins; otherwise fall back to the old logHealth behavior (403 only).
-          suppressHealthStatuses: suppressStatuses ?? (logHealth ? undefined : [403])
-        }
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      classificationAttempted = true;
-      settleProviderDispatch(reservation.attemptId, "succeeded", {
-        outcomeCode: "validated-json"
-      });
-      settled = true;
-      return payload;
-    } catch (error) {
-      if (!dispatched) cancelUndispatchedProviderReservation(reservation.attemptId, "pre-dispatch-failure");
-      else if (!settled && !classificationAttempted) settleProviderDispatch(reservation.attemptId, "failed", {
-        outcomeCode: error instanceof SyntaxError ? "invalid-json" : "response-failure"
-      });
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-}
-
 // ── Massive REST provider (second short-interest source) ─────────────────────
 //
 // A REAL second short-interest read for the primary-vs-secondary disagreement cross-check. Massive
@@ -4368,6 +4070,10 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
     if (misses.length === 0) return result;
 
     const credKey = `${this.keySource}:${this.userId ?? ""}`;
+    const breakerKey = await apiKeyFingerprint(this.apiKey);
+    // An open 429/402 hold skips the whole batch before any credit is reserved.
+    // fetchWithRetry still owns the half-open probe once the hold has elapsed.
+    if (isPaidQuoteBreakerCooling("roic", this.keySource, Date.now(), breakerKey)) return result;
     // Profile is the reliable free-tier endpoint; ratios paths currently 404 — reserve 1/symbol
     // for the profile call (ratios are best-effort and do not block admission).
     const allowed = admitProviderRequests("roic", credKey, misses.length);
@@ -4400,14 +4106,14 @@ export class RoicAiEnrichmentProvider implements MarketEnrichmentProvider {
                 ? fetchWithRetry(
                     `${this.base}/company/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
                     {},
-                    { service: "roic", keySource: this.keySource, userId: this.userId, suppressHealthStatuses: [404, 429] }
+                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, retries: 0, suppressHealthStatuses: [404] }
                   )
                 : Promise.resolve(undefined),
               needRatios
                 ? fetchWithRetry(
                     `${this.base}/financial-ratios/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(this.apiKey)}`,
                     {},
-                    { service: "roic", keySource: this.keySource, userId: this.userId, retries: 0, suppressHealthStatuses: [404, 429] }
+                    { service: "roic", keySource: this.keySource, credentialId: breakerKey, userId: this.userId, retries: 0, suppressHealthStatuses: [402, 404, 429] }
                   )
                 : Promise.resolve(undefined),
             ]);
@@ -5719,6 +5425,15 @@ function massiveFirstResult(value: unknown): Record<string, unknown> | undefined
   return undefined;
 }
 
+/** Twelve Data's current quote is `last`, then `close`.  `previous_close` and volume are not the price. */
+export function twelveDataObservedPrice(q: Record<string, unknown>): number | undefined {
+  const last = firstNumber(q, ["last"]);
+  if (typeof last === "number" && last > 0) return last;
+  const close = firstNumber(q, ["close"]);
+  if (typeof close === "number" && close > 0) return close;
+  return undefined;
+}
+
 function firstNumber(row: Record<string, unknown>, keys: string[]): number | undefined {
   for (const key of keys) {
     const value = row[key];
@@ -5766,7 +5481,7 @@ export function scoreHeadlines(headlines: string[]): number {
 
 export function clearEnrichmentCache(): void {
   cache.clear();
-  yfCredsByProxy.clear();
+  clearYahooSessionCredsCache();
   avEarningsCalendarCache = null;
   finnhubEarningsCalendarCache = null;
 }
@@ -5934,6 +5649,10 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     // -10/50 — an unpaced 30-symbol scan fires ~90 requests and 403s.)
     const perSymbol = callsPerSymbol("tiingo", { dropExtra: dropNews });
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling("tiingo", this.keySource, Date.now(), credKey)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const allowedRequests = admitProviderRequests("tiingo", credKey, misses.length * perSymbol);
     const symbolsAllowed = Math.floor(allowedRequests / perSymbol);
     // admit() budgets in REQUESTS but we only dispatch whole symbols — hand back the partial remainder
@@ -5955,10 +5674,10 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
           try {
             const ticker = symbol.toLowerCase();
             const tiingoCalls = [
-              this.getJson(`https://api.tiingo.com/iex/${ticker}?token=${this.apiKey}`, headers),
-              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers)
+              this.getJson(`https://api.tiingo.com/iex/${ticker}?token=${this.apiKey}`, headers, credKey),
+              this.getJson(`https://api.tiingo.com/tiingo/daily/${ticker}?token=${this.apiKey}`, headers, credKey)
             ];
-            if (!dropNews) tiingoCalls.push(this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers));
+            if (!dropNews) tiingoCalls.push(this.getJson(`https://api.tiingo.com/tiingo/news?tickers=${ticker}&limit=5&token=${this.apiKey}`, headers, credKey));
             const [iexRaw, metaRaw, newsRaw = { status: "rejected" as const, reason: new Error("news skipped") }] = await Promise.allSettled(tiingoCalls);
 
             let price: number | undefined;
@@ -6078,13 +5797,13 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
     return result;
   }
 
-  private async getJson(url: string, headers: Record<string, string>): Promise<unknown> {
+  private async getJson(url: string, headers: Record<string, string>, credentialId?: string): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
       // retries: 0 — the quota reserves exactly one request per endpoint, so a built-in 429 retry
       // would emit a second uncounted call and re-break the 50/hour cap this gate enforces.
-      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, userId: this.userId, retries: 0, suppressHealthStatuses: [404] });
+      const response = await fetchWithRetry(url, { cache: "no-store", signal: controller.signal, headers }, { service: this.name, keySource: this.keySource, credentialId, userId: this.userId, retries: 0, suppressHealthStatuses: [404] });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     } finally {
@@ -6096,6 +5815,34 @@ export class TiingoEnrichmentProvider implements MarketEnrichmentProvider {
 // ── Twelve Data provider ──────────────────────────────────────────────────────
 // Rich /quote endpoint: price, % change, volume, company name, sector, industry,
 // P/E, EPS, beta, 52-week range — one batched call for all scan symbols.
+
+const TWELVE_DATA_MINUTE_WINDOW = /\b(?:current|per|this)\s+minutes?\b/i;
+
+/** Credit or quota exhaustion. This opens the six-hour hold. A minute window is a rate limit. */
+export function isTwelveDataCreditExhausted(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message)) return false;
+  return /\b(quota|credits?)\b/i.test(message);
+}
+
+/** A per-minute limit or a rate-limit phrase. The body does not open a 429 hold. */
+export function isTwelveDataRateLimitSignal(message: string): boolean {
+  if (TWELVE_DATA_MINUTE_WINDOW.test(message) && /\b(quota|credits?|limits?|requests?)\b/i.test(message)) {
+    return true;
+  }
+  return /\b(rate limit|too many requests|api limit)\b/i.test(message);
+}
+
+/** Map a Twelve Data error body. Only a 402 credit hold may open the lane. A 429 here is a signal, not a header. */
+export function twelveDataBodyHold(message: string): { status: 402 | 429; retryAfterMs?: number } | null {
+  if (isTwelveDataCreditExhausted(message)) return { status: 402 };
+  if (isTwelveDataRateLimitSignal(message)) return { status: 429, retryAfterMs: 60_000 };
+  return null;
+}
+
+/** Twelve Data reports quota exhaustion as HTTP 200 with status "error". */
+export function isTwelveDataQuotaSignal(message: string): boolean {
+  return isTwelveDataCreditExhausted(message) || isTwelveDataRateLimitSignal(message);
+}
 
 export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
   readonly name = "twelvedata";
@@ -6145,6 +5892,10 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
     // (works for any number of tickers) and per-credential — and the rest defer best-effort (the cascade
     // + shared cache cover them; coverage accretes across scans). Never blocks/stalls the scan.
     const credKey = await apiKeyFingerprint(this.apiKey);
+    if (isPaidQuoteBreakerCooling(this.name, this.keySource, Date.now(), credKey)) {
+      for (const symbol of misses) result[symbol] = {};
+      return result;
+    }
     const symbolsAllowed = admitProviderRequests(this.name, credKey, misses.length);
     const toQuery = misses.slice(0, symbolsAllowed);
     const skipped = misses.length - toQuery.length;
@@ -6173,7 +5924,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             // (e.g. {"status":"error","message":"Invalid API key"}); log only after body validates.
             // retries: 0 — the quota reserved exactly one batch call; a 429 retry would spend a second,
             // uncounted round of credits and re-break the per-minute budget this gate enforces.
-            return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, userId: this.userId, deferSuccessLog: true, retries: 0 });
+            return await fetchWithRetry(url, { cache: "no-store", signal: controller.signal }, { service: this.name, keySource: this.keySource, credentialId: credKey, userId: this.userId, deferSuccessLog: true, retries: 0 });
           } finally {
             clearTimeout(timeout);
           }
@@ -6192,7 +5943,18 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
         // Check for a top-level API error (invalid key, quota exhausted, etc.)
         if (rawObj.status === "error" || (rawObj.message && !rawObj.symbol && !rawObj.data)) {
           const msg = typeof rawObj.message === "string" ? rawObj.message : "TwelveData API error";
-          logApiHealth({ service: this.name, ok: false, errorText: `TwelveData API error: ${msg}`, keySource: this.keySource, userId: this.userId });
+          const hold = twelveDataBodyHold(msg);
+          if (hold?.status === 402) {
+            observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
+          }
+          logApiHealth({
+            service: this.name,
+            ok: false,
+            errorText: `TwelveData API error: ${msg}`,
+            keySource: this.keySource,
+            userId: this.userId,
+            soft: hold != null
+          });
           continue;
         }
         if (typeof rawObj.symbol === "string") {
@@ -6234,6 +5996,11 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
           // with no code) still rotate out via the negative cache so they don't starve the credit budget.
           if (q.code || q.status === "error" || q.message) {
             const code = Number(q.code);
+            const embedded = typeof q.message === "string" ? q.message : "";
+            const hold = twelveDataBodyHold(embedded);
+            if (hold?.status === 402) {
+              observePaidQuoteStatus(this.name, this.keySource, 402, undefined, Date.now(), credKey);
+            }
             if (code === 429 || code >= 500) {
               result[symbol] = {}; // transient — retry next scan, no cache write
               anyEmbeddedTransientError = true;
@@ -6243,7 +6010,7 @@ export class TwelveDataEnrichmentProvider implements MarketEnrichmentProvider {
             continue;
           }
 
-          const price = firstNumber(q, ["close", "last"]);
+          const price = twelveDataObservedPrice(q);
           const volume = firstNumber(q, ["volume"]);
           const companyName = firstString(q, ["name"]);
           const sector = firstString(q, ["sector"]);
@@ -6769,27 +6536,6 @@ export class SecXbrlEnrichmentProvider implements MarketEnrichmentProvider {
     }
 
     return result;
-  }
-}
-
-// ── RapidAPI: Financial Modeling Prep ────────────────────────────────────────
-// RETIRED (owner 2026-08-04): never call FMP (native or RapidAPI-hosted) from
-// Socratic-Trade. Class kept as a no-op so imports/tests that construct it stay stable.
-
-export class FmpRapidApiEnrichmentProvider implements MarketEnrichmentProvider {
-  readonly name = "fmp-rapidapi";
-  readonly costTier = "free" as const;
-  readonly configured = true;
-  readonly quotaScarce = false;
-
-  constructor(
-    _apiKey: string,
-    _keySource: ApiKeySource = "env",
-    _userId?: string
-  ) {}
-
-  async enrich(_symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
-    return {};
   }
 }
 

@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { marketQuoteToAnalyst } from "../src/lib/congress-share";
-import { fmpPriceTargetsEnabled } from "../src/lib/data-providers";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-price-targets-${randomUUID()}.db`)}`;
@@ -48,17 +47,5 @@ describe("marketQuoteToAnalyst — numeric price targets", () => {
     const row = marketQuoteToAnalyst({ symbol: "F", analystRating: "Hold", targetMean: Number.NaN, targetHigh: 14 }, "2026-06-25")!;
     expect(row).not.toHaveProperty("targetMean");
     expect(row.targetHigh).toBe(14);
-  });
-});
-
-describe("fmpPriceTargetsEnabled", () => {
-  it("defaults off and parses truthy values", () => {
-    delete process.env.FMP_PRICE_TARGETS_ENABLED;
-    expect(fmpPriceTargetsEnabled()).toBe(false);
-    process.env.FMP_PRICE_TARGETS_ENABLED = "on";
-    expect(fmpPriceTargetsEnabled()).toBe(true);
-    process.env.FMP_PRICE_TARGETS_ENABLED = "false";
-    expect(fmpPriceTargetsEnabled()).toBe(false);
-    delete process.env.FMP_PRICE_TARGETS_ENABLED;
   });
 });

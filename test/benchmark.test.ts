@@ -377,6 +377,80 @@ describe("normalizeAgainstBenchmark", () => {
     expect(r.accountReturnPct).toBeCloseTo(0, 1);
   });
 
+  it("ST-4589: account TWR and the same-cash shadow agree on a flow day (start-of-day convention)", () => {
+    // $100k in SPY; a $50k deposit lands and is invested the same day; SPY +2%.
+    // End = 150k * 1.02 = 153k. Account: 153k / (100k + 50k) = +2%. Shadow: (100k + 50k) * 1.02.
+    const equity = cashCurve([
+      ["2026-05-01T16:00:00Z", 100_000, 0],
+      ["2026-05-02T16:00:00Z", 153_000, 0]
+    ]);
+    const spy = [
+      { date: "2026-05-01", close: 500 },
+      { date: "2026-05-02", close: 510 }
+    ];
+    const r = normalizeAgainstBenchmark(equity, spy, "SPY", new Map([["2026-05-02", 50_000]]))!;
+    expect(r.accountReturnPct).toBeCloseTo(2, 2);
+    expect(r.benchmarkReturnPct).toBeCloseTo(2, 2);
+    expect(r.excessReturnPct).toBeCloseTo(0, 2);
+    expect(r.shadowValue).toBeCloseTo(153_000, 2);
+    expect(r.dollarExcess).toBeCloseTo(0, 2);
+  });
+
+  it("ST-4589 regression: a deposit onto a tiny starting balance is not graded against the tiny base", () => {
+    const spy = [
+      { date: "2026-05-01", close: 500 },
+      { date: "2026-05-02", close: 505 } // +1%
+    ];
+    // $1,000 + $10,000 deposit, all invested, market +1% -> $11,110: a +1% day, not +11%.
+    const small = normalizeAgainstBenchmark(
+      cashCurve([["2026-05-01T16:00:00Z", 1_000, 0], ["2026-05-02T16:00:00Z", 11_110, 0]]),
+      spy, "SPY", new Map([["2026-05-02", 10_000]])
+    )!;
+    expect(small.accountReturnPct).toBeCloseTo(1, 2);
+    // $1 + $10,000 deposit -> $10,200: about +2% (10,200 / 10,001), never +19,900%.
+    const tiny = normalizeAgainstBenchmark(
+      cashCurve([["2026-05-01T16:00:00Z", 1, 0], ["2026-05-02T16:00:00Z", 10_200, 0]]),
+      spy, "SPY", new Map([["2026-05-02", 10_000]])
+    )!;
+    expect(tiny.accountReturnPct).toBeGreaterThan(1.9);
+    expect(tiny.accountReturnPct).toBeLessThan(2.1);
+  });
+
+  it("ST-4589 regression: end equity equal to the deposit does not pin the index at 0", () => {
+    // $1,000 + $10,000 deposit ends the day at exactly $10,000, then gains 1% the next day.
+    const r = normalizeAgainstBenchmark(
+      cashCurve([
+        ["2026-05-01T16:00:00Z", 1_000, 0],
+        ["2026-05-02T16:00:00Z", 10_000, 0],
+        ["2026-05-03T16:00:00Z", 10_100, 0]
+      ]),
+      [
+        { date: "2026-05-01", close: 500 },
+        { date: "2026-05-02", close: 500 },
+        { date: "2026-05-03", close: 500 }
+      ],
+      "SPY",
+      new Map([["2026-05-02", 10_000]])
+    )!;
+    // Day 1: 10,000 / 11,000 = -9.09%; day 2: +1%. Index ~91.82, not 0.
+    expect(r.equityIndex[1].index).toBeCloseTo(90.91, 1);
+    expect(r.equityIndex[2].index).toBeCloseTo(91.82, 1);
+  });
+
+  it("ST-4589: a withdrawal larger than the shadow floors it at 0 (never negative or NaN)", () => {
+    const r = normalizeAgainstBenchmark(
+      cashCurve([["2026-05-01T16:00:00Z", 10_000, 10_000], ["2026-05-02T16:00:00Z", 1_000, 1_000]]),
+      [
+        { date: "2026-05-01", close: 500 },
+        { date: "2026-05-02", close: 450 }
+      ],
+      "SPY",
+      new Map([["2026-05-02", -12_000]])
+    )!;
+    expect(Number.isFinite(r.shadowValue)).toBe(true);
+    expect(r.shadowValue).toBe(0);
+  });
+
   it("builds a same-cash S&P dollar shadow (deposit is a breakpoint, not a gain)", () => {
     // $100k, SPY +10%, then a $50k deposit with a flat tape. Shadow should earn the 10% on
     // the original $100k, then add $50k at the cutoff — $160k. Account that sat in cash is $150k.
@@ -558,6 +632,23 @@ describe("benchmark series staleness gate (#2557 — SPY 0.00% co-bug)", () => {
     const { assessBenchmarkSeries } = await import("../src/lib/benchmark");
     expect(assessBenchmarkSeries([], "2026-07-29", "2026-08-06")?.reason).toBe("no-bars");
     expect(assessBenchmarkSeries([{ date: "2026-08-01", close: 0 }], "2026-07-29", "2026-08-06")?.reason).toBe("no-bars");
+  });
+
+  it("accepts broker-reported daily equity history (no cash split) as a real curve", async () => {
+    // Alpaca Paper parity: the broker's own EOD equity history has no cash/positions
+    // split, but it is real account equity — it must not be refused as "synthetic"
+    // the way the fabricated $100-base fill curve above is. With SPY unreachable the
+    // honest outcome is a feed verdict, never insufficient-history.
+    const { computeSpyBenchmarkDetailed } = await import("../src/lib/benchmark");
+    const brokerHistory: EquityCurvePoint[] = [
+      { timestamp: "2026-07-01T16:00:00Z", equity: 100_000, source: "paper", brokerHistory: true },
+      { timestamp: "2026-08-05T16:00:00Z", equity: 101_000, source: "paper", brokerHistory: true }
+    ];
+    const result = await computeSpyBenchmarkDetailed(brokerHistory, "local", Date.parse("2026-08-05T16:00:00Z"), []);
+    expect(result.unavailable?.reason).not.toBe("insufficient-history");
+    if (result.comparison) {
+      expect(result.comparison.accountReturnPct).toBeCloseTo(1, 1);
+    }
   });
 
   it("computeSpyBenchmarkDetailed names insufficient-history for a synthetic curve (no fake 0.00%)", async () => {

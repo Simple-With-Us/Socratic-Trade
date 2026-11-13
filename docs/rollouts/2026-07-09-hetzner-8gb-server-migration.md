@@ -28,7 +28,7 @@ via the API recipe would have re-introduced the owner-interactive GitHub App ste
    → restore on new box (fresh `coolify-db` volume so Postgres re-inits with the
    restored `.env` credentials, then `pg_restore --clean`), append the instance's
    `ssh/keys/*` public keys to `/root/.ssh/authorized_keys`.
-3. **Cutover (brief downtime, after market close + #agent-sync announce):**
+3. **Cutover (brief downtime, after market close + #ag***-s**c announce):**
    `docker save | load` of the freshly built prod image (skips a cold ~40-min nixpacks
    rebuild on the new box); stop old app + runners (SIGTERM → litestream final sync;
    single-writer/single-scheduler invariant held — the old app was stopped before the
@@ -43,7 +43,7 @@ via the API recipe would have re-introduced the owner-interactive GitHub App ste
 
 ## Coordination
 
-- #agent-sync claim posted 2026-07-09 ~17:49 CDT with a deploy-hold request; cutover
+- #ag***-s**c claim posted 2026-07-09 ~17:49 CDT with a deploy-hold request; cutover
   waited for the in-flight `c4d1bfa` console-hang-fix deploy (another CLAUDE session)
   to finish, plus the 10-minute objection window. Market closed throughout.
 
@@ -120,16 +120,16 @@ box's `authorized_keys` at decommission time.
   `<HETZNER_OLD_IP_RETIRED>`, Bot Fight Mode bypass, rule id `00ce7036ca114749a31cdcc0bc031503`);
   congress-stream SSE and the health dependency went `ok:true` immediately.
 - **First 8 GB build proven:** AG took the deployer seat (CLAUDE's trigger was
-  permission-blocked; claim withdrawn on #agent-sync); the deploy built main HEAD from
+  permission-blocked; claim withdrawn on #ag***-s**c); the deploy built main HEAD from
   scratch and shipped image `a8b0185b…` healthy — the exact build class the 4 GB box
   OOM-failed on.
 - **DOMAIN RENAME (owner-directed): the Coolify dashboard/API moved from the apex to
   `https://host.jays.services`.** Owner changed the instance FQDN + renamed the DNS
   record; apex `jays.services` now CNAMEs to the Mac Cloudflare tunnel (does NOT reach
   Coolify) and the `*.jays.services` wildcard A record was deleted. References updated:
-  AGENTS.md, STATUS.md, this note, effort logs, `/Users/jay/apps/AGENT-SYNC.md`, Claude
+  AGENTS.md, STATUS.md, this note, effort logs, `/Users/jay/apps/AG***-S**C.md`, Claude
   Desktop `coolify` MCP `COOLIFY_BASE_URL`, agent memory. Fleet broadcast posted on
-  #agent-sync.
+  #ag***-s**c.
 - **Coolify API token rotated:** the previously stored token returns `Unauthenticated`
   everywhere (including loopback) since the owner's UI session — agents need a fresh
   token via the secret-handoff protocol before Coolify API work.
@@ -149,5 +149,5 @@ box's `authorized_keys` at decommission time.
 - Post-migration connections check (prod DB `api_health_log` evidence): all dependencies
   healthy except (a) alpha-vantage — pool works but AV enforces its 25/day cap PER IP, so
   the 6-key rotation yields 25/day total from one box (flagged to MONET's lane on
-  #agent-sync; design decision theirs); (b) tiingo — free-tier hourly 429 burst at the
+  #ag***-s**c; design decision theirs); (b) tiingo — free-tier hourly 429 burst at the
   08:00Z scan, self-heals. Neither is migration-related.

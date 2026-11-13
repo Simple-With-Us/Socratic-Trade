@@ -30,6 +30,12 @@ import {
 import { OrderValidationError } from "./types";
 import { z } from "zod";
 import { fromAlpacaSymbol, normalizeSymbol, roundAlpacaPrice, toAlpacaSymbol } from "./money";
+import {
+  ALPACA_PAPER_DELAY_TOLERANCE_SEC,
+  ALPACA_PAPER_DELAYED_FEED,
+  ALPACA_PAPER_EXPECTED_DELAY_SEC,
+  isAlpacaPaperAccount
+} from "./alpaca-paper-quotes";
 import { mergeAccountCapabilities } from "./venue-contract";
 import { normalizeVenueOrder } from "./venue-normalization";
 
@@ -90,7 +96,7 @@ export function resolveAlpacaTimeInForce(input: {
 import { toBrokerSide, isRejectedOrCanceledState } from "./broker-side";
 import { audit, getActiveConnectedAccount, getConnectedAccount, resolveApiKey } from "./db";
 import { logApiHealth } from "./db-health";
-import { fetchDailyOHLC } from "./history";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { isTransientNetworkError } from "./network-errors";
 import { SESSION_CLOSE_PROVIDER } from "./quote-delayed-fallback";
 import {
@@ -160,6 +166,43 @@ const ALPACA_ACCOUNT_TTL_MS = 15_000;
 export function resetAlpacaAccountCacheForTests(): void {
   alpacaAccountCache.clear();
   alpacaAccountInflight.clear();
+  alpacaProbeCache.clear();
+}
+
+/** Expected Alpaca trading host for an environment. */
+export function alpacaExpectedHost(environment: string | undefined): string {
+  return environment === "live" ? "api.alpaca.markets" : "paper-api.alpaca.markets";
+}
+
+/**
+ * Resolve the REST baseUrl for a stored connected account, mirroring Tradier:
+ * `environment` is the venue authority. A stored baseUrl is honored only when
+ * its host matches that environment; a mismatched or unparseable value is
+ * ignored (undefined lets the SDK derive the host from the paper flag) so a
+ * paper key can never be sent to the live host, or vice versa.
+ */
+export function resolveAlpacaRestBaseUrl(input: {
+  environment?: string;
+  storedBaseUrl?: string;
+}): string | undefined {
+  const stored = input.storedBaseUrl?.trim();
+  if (!stored) return undefined;
+  let host: string | undefined;
+  try {
+    host = new URL(stored).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (host !== alpacaExpectedHost(input.environment)) return undefined;
+  let baseUrl = stored.replace(/\/+$/, "");
+  if (baseUrl.toLowerCase().endsWith("/v2")) baseUrl = baseUrl.slice(0, -3);
+  return baseUrl;
+}
+
+/** Non-reversible credential fingerprint for cache keys. Never the secret itself. */
+export function alpacaCredentialFingerprint(keyId: string, secretKey: string): string {
+  if (!keyId) return "none";
+  return crypto.createHash("sha256").update(`${keyId}:${secretKey}`).digest("hex").slice(0, 16);
 }
 
 // Re-exported for existing callers/tests that import symbol conversion from this module — the
@@ -293,7 +336,16 @@ class AlpacaBrokerGateway implements BrokerGateway {
   private keySource: string;
   /** Stable per-credential cache key.  Never includes the secret. */
   private accountCacheKey: string;
+  private credentialFingerprint: string;
   private hasRestKeys: boolean;
+  /**
+   * Connected-account identity for the quote tape.  Alpaca PAPER trades on
+   * Alpaca's `delayed_sip` feed (expected ~900s delay); every other account
+   * keeps the broker's default feed.  ACCOUNT SCOPED — the connected account
+   * row decides, never a process-global env var.
+   */
+  private connectedAccountBroker?: string;
+  private connectedAccountEnvironment?: string;
 
   constructor(private userId: string, connectedAccountId?: string) {
     const targeted = connectedAccountId ? getConnectedAccount(connectedAccountId, userId) : undefined;
@@ -304,7 +356,13 @@ class AlpacaBrokerGateway implements BrokerGateway {
         ? brokerAccount
         : undefined;
     this.keySource = accountKeys ? "user" : "env";
-    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}`;
+    this.connectedAccountBroker = accountKeys?.broker;
+    this.connectedAccountEnvironment = accountKeys?.environment;
+    this.credentialFingerprint = alpacaCredentialFingerprint(
+      accountKeys?.apiKey?.trim() || "",
+      accountKeys?.apiSecret?.trim() || ""
+    );
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
     this.isMcp = brokerAccount?.broker === "alpaca-mcp";
     this.label = accountKeys?.label || (accountKeys?.environment === "live" ? "Alpaca Brokerage" : "Alpaca Paper");
     // A connected-account key (per-user account data) wins. If an Alpaca account is explicitly
@@ -316,6 +374,9 @@ class AlpacaBrokerGateway implements BrokerGateway {
     const keyId = accountKeys?.apiKey?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_api_key", userId) || "" : "");
     const secretKey = accountKeys?.apiSecret?.trim() || (!accountKeys ? resolveApiKey("alpaca_paper_secret_key", userId) || "" : "");
     this.hasRestKeys = !!keyId;
+    // Recompute with the resolved credentials (covers the operator env fallback).
+    this.credentialFingerprint = alpacaCredentialFingerprint(keyId, secretKey);
+    this.accountCacheKey = `${userId}|${accountKeys?.id ?? connectedAccountId ?? "env"}|${accountKeys?.environment ?? "paper"}|${this.credentialFingerprint}`;
 
     let baseUrl = accountKeys?.baseUrl?.trim();
     if (this.isMcp) {
@@ -332,19 +393,28 @@ class AlpacaBrokerGateway implements BrokerGateway {
         `Alpaca MCP credentials are missing for ${this.label}. Open Connections and re-save the MCP endpoint or API key.`
       );
     }
+    // Alpaca API keys are a key-ID + secret pair. A key ID alone was previously
+    // sent as an OAuth access token, which 401s every run with an opaque auth
+    // failure. Fail at construction with the actionable cause instead. MCP
+    // accounts are exempt: their key may be a genuine OAuth/bearer token.
+    if (!this.isMcp && keyId && !secretKey) {
+      throw new Error(
+        `Alpaca API secret is missing for ${this.label}. Open Connections and re-save both the API key ID and the secret key.`
+      );
+    }
 
-    if (baseUrl && !this.isMcp) {
-      baseUrl = baseUrl.replace(/\/+$/, "");
-      if (baseUrl.toLowerCase().endsWith("/v2")) {
-        baseUrl = baseUrl.slice(0, -3);
-      }
+    if (!this.isMcp) {
+      baseUrl = resolveAlpacaRestBaseUrl({
+        environment: accountKeys?.environment,
+        storedBaseUrl: baseUrl
+      });
     }
 
     const legacyOpts = {
       paper: accountKeys?.environment !== "live",
       keyId: keyId && secretKey ? keyId : undefined,
       secretKey: keyId && secretKey ? secretKey : undefined,
-      oauth: keyId && !secretKey ? keyId : undefined,
+      oauth: this.isMcp && keyId && !secretKey ? keyId : undefined,
       baseUrl: baseUrl && !this.isMcp ? baseUrl : undefined
     };
 
@@ -587,7 +657,7 @@ class AlpacaBrokerGateway implements BrokerGateway {
    * `trading_blocked` / non-ACTIVE status means strategy runs would only mint unplaceable proposals.
    */
   async probeOrderCapability(accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
-    const key = `alpaca|${accountNumber}|${this.keySource}`;
+    const key = `alpaca|${accountNumber}|${this.keySource}|${this.credentialFingerprint}`;
     const cached = alpacaProbeCache.get(key);
     if (cached && Date.now() - cached.at < ALPACA_PROBE_TTL_MS) {
       return { ok: cached.ok, reason: cached.reason };
@@ -828,11 +898,22 @@ class AlpacaBrokerGateway implements BrokerGateway {
     }
     const normalizedSymbols = Array.from(aliasesByCanonical.keys());
     const quotes: Record<string, BrokerQuote> = {};
+    const wireSymbols = normalizedSymbols.map(toAlpacaSymbol);
+    // Alpaca PAPER trades on the `delayed_sip` feed (expected ~900s delay).
+    // ACCOUNT SCOPED: only the connected Alpaca paper account switches feed;
+    // live Alpaca and every other account keep the broker default.
+    const delayedPaper = isAlpacaPaperAccount({
+      broker: this.connectedAccountBroker,
+      environment: this.connectedAccountEnvironment
+    });
+    const feed = delayedPaper ? ALPACA_PAPER_DELAYED_FEED : undefined;
+    let quoteResponse: Record<string, Record<string, unknown>> = {};
+    let tradeResponse: Record<string, Record<string, unknown>> = {};
     try {
       const { firstMs, retryMs } = alpacaAccountReadBudgetMs();
-      const response = await awaitWithFirstCallRetry(
+      quoteResponse = await awaitWithFirstCallRetry(
         ({ signal }) => this.trackHealth(
-          () => this.alpaca.getLatestQuotes(normalizedSymbols.map(toAlpacaSymbol)),
+          () => this.alpaca.getLatestQuotes(wireSymbols, feed ? { feed } : undefined),
           { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS, signal }
         ),
         {
@@ -843,39 +924,53 @@ class AlpacaBrokerGateway implements BrokerGateway {
           }
         }
       );
-      for (const [rawSymbol, q] of Object.entries(response)) {
-        const symbol = fromAlpacaSymbol(rawSymbol);
-        const anyQ = q as Record<string, number | string>;
-        const bid = optionalNumber(anyQ.bp);
-        const ask = optionalNumber(anyQ.ap);
-        // Mid when both sides are numbers.  Ask alone biased the displayed
-        // price, alerts, and stops.  One side falls through; neither stays 0
-        // so the session-close fill can still price the symbol.
-        const price =
-          typeof bid === "number" && typeof ask === "number" ? (bid + ask) / 2 : ask ?? bid ?? 0;
-        quotes[symbol] = {
-          symbol,
-          price,
-          bid,
-          ask,
-          asOf: optionalIso(anyQ.t),
-          provider: "alpaca",
-          fetchedAt: new Date().toISOString()
-        };
-      }
     } catch (error) {
-      // Don't fail silently — a swallowed quote error is what makes the review fall through to an
-      // unusable price. Surface it; the keyless fallback below still tries to price the symbols.
       console.warn(`[alpaca] getLatestQuotes failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
     }
-    // Keyless market-data fallback for any symbol the broker left unpriced (0/empty bid-ask — common
-    // outside market hours and on the free IEX tier). A recent daily close keeps the chat quote and
-    // the pre-trade notional review usable instead of failing closed to the over-cap sentinel.
-    await fillMissingQuotesWithClose(quotes, normalizedSymbols, async (symbol) => {
-      const bars = await fetchDailyOHLC(symbol, Date.now(), this.userId);
-      const last = bars && bars.length ? bars[bars.length - 1] : undefined;
-      return last && typeof last.close === "number" ? { price: last.close, asOf: last.time != null ? String(last.time) : undefined } : undefined;
-    });
+    const latestTrades = this.alpaca.getLatestTrades;
+    if (typeof latestTrades === "function") {
+      try {
+        tradeResponse = await this.trackHealth(
+          () => latestTrades.call(this.alpaca, wireSymbols, feed ? { feed } : undefined),
+          { deadlineMs: ALPACA_BROKER_IO_DEADLINE_MS }
+        );
+      } catch (error) {
+        console.warn(`[alpaca] getLatestTrades failed for ${normalizedSymbols.join(",")}:`, error instanceof Error ? error.message : error);
+      }
+    }
+    const rawSymbols = new Set<string>([...Object.keys(quoteResponse), ...Object.keys(tradeResponse)]);
+    for (const rawSymbol of rawSymbols) {
+      const symbol = fromAlpacaSymbol(rawSymbol);
+      const anyQ = (quoteResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const anyT = (tradeResponse[rawSymbol] ?? {}) as Record<string, unknown>;
+      const bid = optionalNumber(anyQ.bp);
+      const ask = optionalNumber(anyQ.ap);
+      // Last print, then the two-sided mid.  Quote size (`as`/`bs`) and trade
+      // size (`s`) are not prices, and a one-sided book is not a mid.
+      const selected = selectObservedQuotePrice({ last: anyT.p, bid, ask });
+      if (selected.price === undefined) continue;
+      const asOf = providerObservationIso(selected.basis === "last" ? anyT.t : anyQ.t);
+      quotes[symbol] = {
+        symbol,
+        price: selected.price,
+        bid,
+        ask,
+        ...(asOf ? { asOf } : {}),
+        provider: "alpaca",
+        fetchedAt: new Date().toISOString(),
+        // Alpaca PAPER `delayed_sip`: the venue tape is authoritative and the
+        // ~900s publication delay is EXPECTED.  Consumers must age the snapshot
+        // by `fetchedAt`, must not overlay a fresher realtime quote, and must
+        // still flag lag beyond expected + tolerance as excess delay.
+        ...(delayedPaper
+          ? {
+              venuePriceAuthoritative: true,
+              expectedDelaySec: ALPACA_PAPER_EXPECTED_DELAY_SEC,
+              delayToleranceSec: ALPACA_PAPER_DELAY_TOLERANCE_SEC
+            }
+          : {})
+      };
+    }
     for (const [canonical, aliases] of aliasesByCanonical) {
       const quote = quotes[canonical];
       if (!quote) continue;

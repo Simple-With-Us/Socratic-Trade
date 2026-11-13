@@ -1,3 +1,435 @@
+## 2026-11-12 CURSOR — ST-4605 iOS app lock
+
+**What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
+
+**Next.** Hosted `verify-ios` on the review fixes.  A canceled or failed first load reloads, a finished signed-out unlock does not, and a retry of a failed resume stays inside the shared gate.  The cancelled-load flag and that retry now have tests.  The hold that lets that test see a finished handle is compiled only in Debug, and a timed-out wait cancels its waiter.  No TestFlight and no deploy.
+
+## 2026-11-11 CURSOR — ST-4596 Keychain session cookies (#5131)
+
+**What.**  iOS Keychain session persistence (#5131): single-flight restore, cancellable foreground resume, admin WKWebView cookie fingerprint hashes values (SHA-256).  App lock is **ST-4605** on `gb-engineer/st-4596-app-lock`.  Rollout: `docs/rollouts/2026-11-10-st-4596-ios-keychain-app-lock.md`.
+
+**Next.**  One push; green `verify` + `verify-ios`; resolve Kody threads; merge queue.
+## 2026-11-12 gb-trader — ST-4622 scheduled Litestream B2 restore drill
+
+**What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Second Kody round: the token file must be a non-symlink `st.*` service token (20-2048 chars, no whitespace); inherited process-env AWS/Sentry creds are dropped unless `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1`; `INFISICAL_PROJECT_ID` is always required and passed as `--projectId`; token-file failures alert; every status carries a `runId`; the installer strips the `INFISICAL_ST_*` pair and `export ` prefixes; the notify-off helper traps HUP/INT/TERM and has `--cleanup`.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
+
+**Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge (service token file + confirmed secret names).  Do not run against live B2 from the agent.
+## 2026-11-12 [gb-trader] ST-4611 — iOS 5xx Sentry capture and GET retry
+
+**What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
+
+**Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4618 — iOS Dynamic Type chrome + 44pt tap targets
+
+**What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
+
+**Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
+## 2026-11-12 CURSOR — ST-4633 iOS GET transport-timeout retry
+
+**What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once.  A persistent timeout now holds a snapshot refresh for two 45s waits (about 90s) and the Scan screen for two 50s waits (about 100s), down from three 45s waits (about 136s).  The scan runs only from the Scan screen (`ScanView` → `fetchMarketScan`), never inside the snapshot refresh, so the two budgets do not chain.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
+
+**What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
+
+**Next.** Open the PR against main.  Do not merge and do not enable auto-merge.
+## 2026-11-12 [gb-trader] ST-4623 — host systemd timer Sentry Crons dead-man
+
+**What.**  `scripts/ops/sentry-cron-checkin.py` wraps ST host oneshots (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) with Sentry Crons in_progress/ok/error, shared `/etc/default/st-host-cron-sentry`, and installer updates.  Rollout: `docs/rollouts/2026-11-12-st-4623-host-timer-deadman.md`.
+
+**Next.**  PR on `gb-trader/ST-4623-host-timer-deadman`; green `verify`.  Jay re-installs on `<host>` (the dedicated fleet host).  The installers refuse (exit 1, nothing changed) unless `hostname` matches the expected host: `<host>` by default, or `ST_INSTALL_EXPECTED_HOST` / `--expected-host NAME`; `--skip-host-check` is last resort and logs a warning.  Preflight reads only the env files (`/etc/default/st-host-cron-sentry`, and `/etc/default/st-container-restart-monitor` for the restart-monitor installer), so `SENTRY_CRONS_DSN` or `SENTRY_CRONS_DISABLED=1` must be set there, not in the shell.  The installers always pass `--env-file`, so `ST_HOST_CRON_SENTRY_ENV_FILE` applies only to manual `wrap` or `check` runs that omit `--env-file`.  Do not merge or deploy from agent.
+
+## 2026-11-12 [gb-trader] ST-4621 — Litestream L1 trim/heal safety tests
+
+**What.**  Offline tests and backup-tier guards for the L1 suffix-heal and boundary-trim scripts.  Planning is importable, a TXID gap drops the pre-gap L1 even when the count is under the keep window, suffix-heal lists L1/L2/L3 with `b2_list_file_versions` (key capability `listFiles`; every version, so a hide marker cannot unhide an older upload) and counts the never-deleted L0/L9 with `b2_list_file_names` (key capability `listFiles`; current names only), a delete error stops the run, and the fleet shell dry-runs unless `LITESTREAM_L1_TRIM_APPLY=1`.  The fleet selftest fails if the installer's `DST_PY` and the wrapper's default trim path drift apart, or if `DST_FLEET` and the unit's `ExecStart` do.  A failed post-delete listing logs `APPLIED-UNVERIFIED` with the attempted and cleanly issued delete counts and still exits 1.  The fleet wrapper now passes through the first non-zero trim exit, so a scheduled guard abort is visible in `systemctl status`.  Exit 2 and 127 are not unique; the Exit codes section names the journal lines that tell the wrapper's own causes apart from a passed-through trim or exec failure.  A directory or other non-regular `LITESTREAM_L1_TRIM_BIN` is refused as 127 before any trim runs.  A passed-through exec permission failure is exit 126.  Wrapper-only exits 2 (bad `LITESTREAM_L1_TRIM_APPLY`, before any trim) and 127 (missing binary) stay as they are.  `APPLIED-UNVERIFIED` still exits 1 and is passed through unchanged.  The systemd unit opts in so a later install still applies.  Nothing was run against production B2, R2, or the Hetzner host.  Rollout: `docs/rollouts/2026-11-12-st-4621-litestream-l1-safety-tests.md`.
+
+**Next.**  Ready PR against `main`.  Do not merge, do not enable auto-merge, and do not install on the host from this lane.  `verify` is the merge gate.  Jay installs the repo copies when he wants the host behavior to change.
+
+## 2026-11-12 CURSOR — ST-2793 deploy-freshness RTH latch
+
+**What.**  Deploy-freshness now ages undeployed `main` from session close (shared `evaluateRthDeployLatch` / `isMarketOpen` calendar), not raw commit time during weekday RTH.  `DEPLOY_FRESHNESS_STALE_SECONDS` is the post-close grace.  Rollout: `docs/rollouts/2026-11-12-st-2793-deploy-freshness-rth-latch.md`.
+
+**Next.**  PR #5143 — merged `origin/main` at `ba400936` (no conflict markers; ST-2793 paths untouched).  Local gate: selftest 18/18, staleness vitest 7/7, lint/tsc/build green.  Push head and wait for fresh `verify`; do not merge from agent.
+## 2026-11-12 [GB-TRADER] ST-2797 — broker route error honesty
+
+**What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` classifies a thrown provider/gateway failure as 504 `broker_timeout`, 502 `broker_auth_failed`, or 502 `broker_unavailable` (matching other broker-backed GETs).  `fetchDailyOHLC` returns `[]` when any live provider confirms no usable series (200 with `bars: []`); when every attempted tier failed the route gets a payload-free `HistoryProviderError` and classifies it (504/502).  Identity denials stay 401, and local identity or adapter faults stay 500 `internal_error`, never `broker_*`.  PUT `/api/policy` and POST `/api/keys` reject unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
+
+**Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
+## 2026-11-12 [gb-trader] ST-4632 — admin ingest rate limits
+
+**What.**  The expensive admin ingest and backfill routes now call `enforceRateLimit` after the existing admin check.  A caller who already passed that check is still allowed the same way.  Starting a job is capped at 6 calls per 10 minutes per admin per route, and the next call returns 429 without starting OpenRouter, Qdrant, or SEC work.  Status reads on those routes, including the chat transcript, are capped at 30 per minute.  Hourly operation budgets that already covered some of these posts stay in place.  Empty 10-K lists, unknown web-source ids, and an invalid SEC ingest body still return 400 and do not spend the new budget.  A failed SEC ingest body parse is 400 `invalid_payload`.  Quoted numeric offsets and limits are still accepted; empty or non-numeric strings are rejected.  CIKs are padded to 10 digits and deduped.  Rollout: `docs/rollouts/2026-11-12-st-4632-admin-ingest-rate-limits.md`.
+
+**Next.**  The PR is the delivery.  The production-notes bullets stay with the admission section, the test database URL is restored after each test, and admin ingest tests use a localhost origin.  The 400-before-budget tests fill the bucket to one under the cap and expect the next real start to succeed and the one after that to return 429.  Quoted offsets are accepted and coerced.  SEC seed CIKs are asserted after 10-digit padding.  Those allowed starts expect HTTP 200.  An already-full guarded budget returns 429 before the shared lease, and the earnings-call entitlement reset has its own bucket.  Do not merge, do not enable auto-merge, and do not deploy from this lane.
+## 2026-11-12 [gb-trader] ST-4616 — money-path order invariant properties
+
+**What.** Property tests place 1000 seeded Alpaca and Tradier orders through `getBrokerGateway` and check the final payload.  Two money-path bugs were real.  `BRK.B` now matches a `BRK-B` position.  A Tradier partial dollar exit becomes a share quantity from the position value, or is refused when that quantity cannot be priced.  Alpaca partial dollar sells stay notional.  Rollout: `docs/rollouts/2026-11-12-st-4616-money-path-properties.md`.
+
+**Next.** PR #5160 stays open against `main`.  `verify` is the gate.  Do not merge or deploy from this lane.  Jay reviews the money-path behavior change.  Merged `origin/main` through `878d8edf` and kept every STATUS entry.
+## 2026-11-12 CURSOR — ST-4606 paid quote provider circuit breakers
+
+**What.**  Twelve Data, Tiingo, Marketstack, and ROIC retry an HTTP 429 first, honoring the remaining retry budget and `Retry-After`.  Only after that budget is spent, and only when `Retry-After` is a positive duration, do they open a per-credential hold for that duration.  An HTTP 402 opens a six-hour hold.  The hold is the credential fingerprint, so one user's 402 does not park another user's key.  While a hold is cooling, the quote chain skips the lane before any network call, so the skip writes no health row and no failed span.  Open holds are listed on `GET /api/health` (`checks.quoteProviderBreakers`) and `GET /api/ops/snapshot` (`quoteProviderBreakers`) and do not change health `ok`.  A failed breaker read sets `checks.quoteProviderBreakersError` to `unavailable`.  Error response bodies are cancelled so a proxy gate slot can settle.  `src/lib/proxy-fetch.ts` and `src/lib/yahoo-finance.ts` are untouched.  A later review removed the unused 429 strike map, made the cooling check see the plain-lane hold, kept a disabled breaker's 402 row soft, capped the in-call Retry-After wait at one hour, and stopped a minute-scoped Twelve Data credit message from opening the six-hour hold.  Rollout: `docs/rollouts/2026-11-12-st-4606-quote-provider-breakers.md`.
+
+**Next.**  PR #5149 is current with `origin/main`.  A Twelve Data body opens a hold only for a 402.  A ROIC transcript 429 waits outside the limiter.  A header longer than 5 seconds skips the retry and holds later transcript calls for that credential.  A transcript 402 uses the same hold for six hours, and the breaker kill switch turns it off.  The ingest queue stays put while that hold is active, including when the paid-quote lane is already cooling.  The quote-breaker tests restore `API_CIRCUIT_BREAKER_DISABLED` after each case.  Do not merge and do not enable auto-merge.  `verify` is the gate after push.  PagerDuty #611 stays the existing Sentry HTTP trace sample.
+## 2026-11-12 [gb-trader] ST-4630 — stale last-good screener profile
+
+**What.** `GET /api/market/profile/{symbol}` 404ed known tickers when the Nasdaq screener timed out, returned non-OK, or threw, even while the process still held the last successful map.  A failed refresh now serves that map when it has rows no older than 24 hours (`SCREENER_PROFILE_MAX_STALE_MS`) and waits 30 seconds from when the failure returns before the next live attempt.  A refresh that is still running races a 1-second budget and returns the last-good map so the first request does not wait out two 15-second Nasdaq timeouts.  The map, the hold, and the in-flight refresh are one `globalThis` object so route bundles share them.  An empty failure stays out of the 5-minute TTL, so a miss with no prior rows stays null and the next call retries immediately.  `/api/health` timeout classification is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4630-profile-screener-stale-fallback.md`.
+
+**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` is the merge gate.
+## 2026-11-12 CURSOR — ST-3999 proxy gate slot leak
+
+**What.**  An unread proxied body no longer holds a `ProxyConcurrencyGate` slot until process restart.  The gate releases on a 20s max hold, on body idle, and if the response is collected.  Yahoo chart and v7 early returns cancel the body, and `fetchWithRetry` cancels before a 429 retry.  `fetchCancelingErrorBody` is opt-in and is not on the `dataSourceFetch` path, so an unread 5xx there is bounded by the gate.  A max hold that has already delivered a chunk releases the slot without aborting the stream.  The idle timer and the proxy-leg timer stay armed until that stream closes.  `GET /api/proxy-use` exposes `gate.inFlight`, `gate.queued`, and `gate.oldestHoldMs`.  Rollout: `docs/rollouts/2026-11-12-proxy-gate-slot-leak.md`.
+
+**Next.**  PR is open against `main` for Kody review.  Do not merge and do not enable auto-merge.  `yahoo-finance.ts` edits stay minimal because GB-Trader owns that file through PR #5121 (ST-4591).
+## 2026-11-12 [gb-trader] ST-2799 — /api/health heavy I/O guard
+
+**What.**  OpenRouter credits, disk `statfs`, and Litestream IPC/log scans on `GET /api/health` now share a 20s TTL single-flight cache plus a fail-open anonymous per-IP/global limiter that serves stale subsection JSON (with age fields) instead of recomputing.  Container probes remain `/api/live`; runbook updated.  Rollout: `docs/rollouts/2026-11-12-st-2799-health-heavy-io-guard.md`.
+
+**Next.**  PR open; green `verify`; no merge from agent.
+## 2026-11-12 [gb-trader] ST-4610 — admin routes identity 401
+
+**What.**  `x-admin-token` admin callers without verified email now get JSON 401 `verified_identity_required` instead of unhandled 500 under live bootstrap.  Shared helpers in `src/lib/request-user.ts`; routes use `resolveRequestUser*OrResponse`.  Rollout: `docs/rollouts/2026-11-12-st-4610-admin-identity-401.md`.
+## 2026-11-12 [gb-trader] ST-4624 — ops scripts CI workflow
+
+**What.**  New `.github/workflows/ops-scripts.yml` runs `bash -n`, pinned ShellCheck, Python `py_compile`, ops selftests (Coolify anchors-only offline), and `systemd-analyze verify` on ST unit files.  ShellCheck fixes on touched scripts only.  Rollout: `docs/rollouts/2026-11-12-st-4624-ops-scripts-ci.md`.
+
+**Next.**  PR open; `verify` green required.  Jay may add the job to branch protection later.  Do not merge from agent.
+
+## 2026-11-12 [gb-trader] ST-4608 — provider timeouts are transient health blips
+
+**What.**  Keyless and global provider timeouts were paging as hard connection failures.  Nasdaq delayed screener, congress-nasdaq-screener, finnhub, and alpaca-broker (Sentry SOCRATIC-TRADE-3K, 3M, 3R, and 3D) logged a named timeout that matched neither the expected-limit shapes nor the ST-3079 transport-blip shapes.  `db-health` now records AbortError, TimeoutError, undici header and body timeouts, "timed out waiting for", and broker-call timeouts as transient-network.  They warn, use the short transient cooldown, and escalate to error once the streak passes `HEALTH_TRANSIENT_ESCALATION_MS`.  HTTP 401, 403, and 5xx stay hard.  A bare "This operation was aborted" stays an expected limit.  Quote, scan, screener, order, and strategy fetch behavior is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4608-provider-health-timeout-class.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  The budget-cancel test reads the `env` lane it writes, after one success, so five hard rows would show the lane stopped.
+
+## 2026-11-12 CURSOR — ST-4629 retrieval timeouts do not page
+
+**What.** A retrieval deadline or abort no longer opens a Sentry issue.  captureMessage was filing SOCRATIC-TRADE-3Q ("Error: RAG retrieval timed out") even at warning, and an AbortError that left the retrieval slot still captured error-level "RAG retrieval failed".  Those paths log locally and return no chunks.  A real lookup failure still captures "RAG retrieval failed" at error.  A provider message that only contains timeout, such as HTTP 504 Gateway Timeout, still captures at error.  acquireRetrievalSlot stays on the retrieve path.  Ingest-embed classification and order behavior are unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4629-rag-retrieval-timeout-class.md`.
+
+**Next.** PR #5173 is open.   A same-millisecond audit row no longer hides a drawdown breaker.   Do not merge and do not deploy.
+
+## 2026-11-12 CURSOR — ST-4619 minimatch advisory override
+
+**What.**  The automated dependency security-update lane failed 3/3 on main because a minimatch security update cannot leave 10.2.6 while eslint's toolchain still requests ^10.  The override `minimatch@>=7 <11.0.7` installs 11.0.8 and leaves minimatch 3.1.5.  The guard test declares `semver` and `@types/semver`, because semver 7.8.6 has no bundled types.  A range-valued override passes only when it misses `>=7 <11.0.7` and its minimum is at least 11.0.7, and it stays inside `>=11.0.7 <12`.  This repository has no `.github/dependabot.yml`; Renovate owns dependency and vulnerability-alert updates.  Rollout: `docs/rollouts/2026-11-12-dependabot-minimatch-override.md`.
+
+**Next.**  The branch is ready for review and is not merged.  Do not dispatch a deploy.  `verify` is the merge gate.  Repo-local confirmation is a clean `npm audit` plus `test/minimatch-advisory-override.test.ts`.  Weekday RTH latch still applies when this lockfile change reaches `main`.  The next Renovate vulnerability-alert pass should find the vulnerable 10.2.x and 11.0.4 copies gone.
+
+## 2026-11-12 CURSOR — ST-4628 Sentry Deploy observation window
+
+**What.**  `observeProduction` now waits 60 minutes or 180 attempts, 20 seconds apart, and `record-production-deploy` has `timeout-minutes: 65`.  Run 42750773027 stopped at the old 25-minute cap before Coolify was live.  The weekday RTH latch is unchanged.  Rollout: `docs/rollouts/2026-11-12-sentry-deploy-observe-60m.md`.
+
+**Next.**  PR open against `main`.  Do not merge and do not dispatch a deploy.
+
+## 2026-11-12 CURSOR — ST-4617 flaky verify tests
+
+**What.**  The proxy concurrency tests measured an immediate slot grant with wall-clock `Date.now()`.  That synchronous pump can tick 1 to 4 ms on a loaded host, so `onQueueWait` reported `[1]` and reddened `verify` on main (run 42740325870) and in the merge queue (runs 42752664550 and 42393857630).  Those cases now freeze the clock and advance it only while a request is actually queued.  `src/lib/proxy-fetch.ts` is unchanged.  The welcome sentence-gap failure on run 42937502799 came from a temporary async nonce read on `gb-engineer/st-2789-nonce-csp`, already removed on main by 7227e6b1.  Rollout: `docs/rollouts/2026-11-12-st-4617-flaky-verify-tests.md`.
+
+**Next.**  PR #5159 is open against `main`.  The remaining action is to wait until required `verify` is green.  Do not merge, enable auto-merge, rebase, force-push, or deploy from this lane.
+
+## 2026-11-12 [gb-trader] ST-4609 — RAG ingest cap spent on waste
+
+**What.**  The operator daily ingest cap (`RAG_INGEST_MAX_TEXTS_PER_DAY`, default 20,000) was counting retrieval embeds, charging texts that were already in the document cache, content cache, or embed stage, and embedding a managed prefix that then aborted.  The affected production deployment on 2026-11-11 showed 19,981 of 20,000 windows used and a 797-window filing skipped down to 19.  Reusable texts and retrieval embeds no longer spend the cap.  A managed commit that cannot finish is not embedded.  The audit unit is embed windows, and `requested` stays that window sum.  The cap number is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4609-rag-ingest-budget-waste.md`.
+
+**Next.**  PR is open against `main` and is not merged.  `verify` CI is the gate.  Do not enable auto-merge.  Do not raise the cap.
+## 2026-11-12 [gb-trader] ST-4620 — one dashboard request in flight
+
+**What.** The console keeps a single GET /api/dashboard in flight per tab.  A poll tick is skipped while that request is running, the request aborts when the console unmounts, and a slow response backs the next poll off.  The dashboard route shares one getDashboardSnapshot per user and selected account, and it remembers a finished snapshot for 8 seconds.  A thrown compute is not remembered.  A 20s budget shell is not remembered.  Snapshot JSON and order behavior stay the same.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.
+
+**Next.** The PR is open against main and is not merged.  `verify` is the gate.  Do not enable auto-merge.
+
+## 2026-11-12 CURSOR — ST-4598 Pinecone removal plan and dead helpers
+
+**What.** Inventory of the Pinecone surface is `docs/plans/pinecone-removal.md`.  This slice deletes three uncalled write-class helpers (`writesProcessedToPinecone`, `isTranscriptRoleCode`, `filingTextFromParsedSections`).  Live reads, the Pinecone write rollback, admin routes, keys, and evals stay.  Rollout: `docs/rollouts/2026-11-12-pinecone-removal-plan.md`.
+
+**Next.** Ready PR against `main`.  Slice 1 (stop selecting Pinecone for reads) waits until this lands.  Do not deploy from this lane and do not delete `PINECONE_API_KEY`.
+
+## 2026-11-11 [gb-trader] ST-4607 — ingest embed timeout is not a hard outage
+
+**What.**  Production `embed documents` timeouts (`embed provider timed out`, Sentry SOCRATIC-TRADE-1X) now report `RAG embed timed out` at warning with `failureClass: timeout`, not hard `OpenRouter embed connection failed`.  Sustained timeouts escalate after `HEALTH_TRANSIENT_ESCALATION_MS`.  ECONNREFUSED and 5xx stay hard.  No ingest behavior change.  Rollout: `docs/rollouts/2026-11-11-st-4607-rag-ingest-embed-timeout-classification.md`.
+
+**Next.**  PR open; wait for `verify` green; do not merge from agent.
+## 2026-11-12 CURSOR — ST-4595 Cloudflare-only origin lock
+
+**What.** The app can reject traffic that did not come from Cloudflare.  The check stays off until `REQUIRE_CLOUDFLARE_ORIGIN` is set, so merging does not change production.  A Node hook reads the TCP peer and middleware repeats it.  `CF-Connecting-IP` and `X-Forwarded-For` stay as they are while the flag is off, and are removed while it is on unless the peer is Cloudflare or the origin secret matched.  `GET` and `HEAD /api/live`, loopback, and Tailscale `100.64.0.0/10` stay open and do not make those headers trusted.  Rollout: `docs/rollouts/2026-11-12-st-4595-cloudflare-origin-lock.md`.  Runbook: `docs/runbooks/cloudflare-origin-lock.md`.
+
+**Next.** PR is the delivery.  Do not set the flag and do not edit the Hetzner firewall from this change.
+## 2026-11-12 CURSOR — ST-4613 iOS ship PATH, notes clock, and cache key
+
+**What.**  System binaries come first on the TestFlight ship `PATH`, so Homebrew `rsync` 3.5.1 cannot shadow the `rsync` that `xcodebuild -exportArchive` needs.  `centralTimestamp()` renders `1:15am` with no `CT` suffix.  The last-ship cache restores and saves separately, and the key includes `github.run_attempt`.  Rollout: `docs/rollouts/2026-11-12-st-4613-ios-ship-path-notes-cache.md`.
+
+**Next.**  Ready PR against `main`.  Do not dispatch `ios-ship` or a deploy.  `verify` is the merge gate.
+
+## 2026-11-11 CURSOR — ST-4604 Playwright admin server-only collection fix
+
+**What.**  Playwright admin e2e (`playwright-session.ts`) imports `encodeSessionJwtCrypto` instead of `server-only` `session-token.ts`, restoring admin test collection after ST-2599.  Rollout: `docs/rollouts/2026-11-11-st-4604-playwright-admin-server-only.md`.
+
+**Next.**  PR open; wait for Playwright Smoke + `verify` green; do not merge from agent.
+## 2026-11-11 [gb-trader] ST-4601 — deadline Sentry cooldown is its own key
+
+**What.**  A retrieval-timeout warning used the same 15-minute cooldown key as other rag-embed warnings, so it could suppress a later transient-network warning.  A fingerprint that leaves the lane issue now has its own key.{nb} Skipping episodic retrieval after a filings timeout stays intentional: that pass is another RAG wait.
+
+## 2026-11-11 [gb-trader] ST-4601 — RAG deadline is a timeout, not a provider outage
+
+**What.** A strategy-run retrieval deadline (`RAG_QUERY_IO_DEADLINE_MS`, 15s) was filed twice at error level: "RAG retrieval failed" (SOCRATIC-TRADE-2G) and "OpenRouter embed connection failed" with `failureClass` hard (SOCRATIC-TRADE-1X).  The same abort is now a warning timeout.  It does not count as a hard provider outage in api-health or RAG health, and the embed retry loop does not start another backoff after the caller aborts.  After the first deadline in a run, later symbols skip RAG and the run logs the skipped count once.  Empty-chunk continuation is unchanged.  The 15s budget is unchanged.  Order placement, sizing, prompts, and strategy settings are untouched.  Rollout: `docs/rollouts/2026-11-11-st-4601-rag-timeout-classification.md`.
+
+**Next.** PR is open against `main` and is not merged.  `verify` CI is the gate.  Jay merges.  Do not enable auto-merge.
+
+## 2026-11-11 [CURSOR] ST-2789 — strict nonce CSP, still report-only
+
+**What.**  The default CSP is a per-request nonce plus `strict-dynamic`, with no script `unsafe-inline` or `unsafe-eval` (dev still allows `unsafe-eval`).  `CSP_ENABLED` / `CSP_REPORT_ONLY` / `CSP_POLICY` gates are unchanged, and this does not set `CSP_REPORT_ONLY=0`.  The root layout stays cacheable.  `/welcome`, `/privacy-policy`, and `/terms-and-conditions` keep hourly ISR under a hash CSP stamped from that build's HTML.  Rollout: `docs/rollouts/2026-11-10-st-2789-nonce-csp.md`.
+
+**Next.**  Watch `[csp-report]` after deploy.  Enforce only with `CSP_REPORT_ONLY=0` once those reports are clean.
+
+## 2026-11-09 [gb-trader] ST-4591 — Yahoo scan quote hardening
+
+**What.**  Yahoo v7 batch quotes now reuse the shared cookie/crumb session (`src/lib/yahoo-session.ts`), skip v7 without per-chunk timeouts when the handshake fails, break out of v7 waves after repeated chunk aborts, and emit structured `[yahoo-finance]` JSON telemetry for auth wall vs abort vs empty vs session skip.  Chart fallback keeps bounded concurrency with paced retries.  Rollout: `docs/rollouts/2026-11-09-st-4591-yahoo-scan-quotes.md`.
+
+**Next.**  PR #5121 Kody/Sentry review fixes landed on branch; green `verify`, then merge (weekday RTH latch applies).
+
+## 2026-11-07 CURSOR — PR #4998 Kody follow-ups (ST-4574 / MiniMax M3.1 Flash)
+
+**What.**  Stacked branch `cursor/pr-4998-review-fixes-21a3` merges `main` into PR #4998 and closes valid Kody threads: retired-catalog reconciliation (no `minimax/minimax-m3` alias on the M3.1 row), alias-aware rotation-pin validation, OpenRouter availability regression test, rollout doc hygiene (no account ids; predecessor attribution fixed).  Rollouts: `docs/rollouts/2026-11-07-pr-4998-kody-followups.md`, updated `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.## 2026-11-09 draft-PR sweep (ST-4597)  
+44 restore-event drafts triaged: 39 closed with evidence, #5062 merged (autofix token grants), telemetry URL redaction ported from #5046 (this PR), #5098 FilingAPI retirement and #5093 pinecone residual removal queued as fresh branches.  See docs/rollouts/2026-11-09-draft-pr-sweep.md.
+
+**Next.**  Push branch, open stacked PR on `claude/salvage-minimax-m3-1-flash`, green `verify`, resolve review threads, then land #4998.
+
+## 2026-11-11 CURSOR — ST-4594 iOS session hardening
+
+**What.**  The iOS app now prepares a PKCE handoff nonce before Google/GitHub sign-in, fetches the server Apple nonce before native Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out unregisters the push token before clearing cookies.  A replacement sign-in unregisters the previous account only after login succeeds.  A push-register 409 is surfaced once.  The next sign-in gets one attempt, and a fresh 409 holds the token again so callbacks do not loop.  Server `__legacy_compat__` paths stay for older builds.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+
+**Next.**  PR #5132 review threads are resolved.  The account-change DELETE uses an ephemeral session, does not restore the shared jar, and is skipped when there are no previous cookies.  Merge waits on green `verify` and `verify-ios`.  Do not drop the server legacy paths until this build is on TestFlight and the App Store.
+
+## 2026-11-06 [gb-trader] PR #5005 — Kody review fixes (Alpaca PAPER `delayed_sip`)
+
+**What.**  Kody's eight review findings on `gb-trader/alpaca-paper-delayed-quotes` are resolved.  (1) **Vendor payload validated:** `stockLatestQuotes` is Zod-validated before use — `AlpacaLatestQuotesResponseSchema` pins the envelope (a missing/`null`/non-map `quotes` yields no quotes instead of a `TypeError`) and `AlpacaLatestQuoteSchema` is deliberately NON-STRICT (`.passthrough()`) so unknown vendor fields survive verbatim; each row is validated individually so one bad symbol cannot discard a batch.  (2) **Credential guard:** the connected-account lookup that decides the account-scoped tape now lives INSIDE the `alpacaData.apiKey && alpacaData.secretKey` branch, so a scan with no Alpaca credentials no longer pays for a connected-account DB read on a path that has no snapshot provider.  (3) **Delayed-tape metadata reaches the scan:** `expectedDelaySec` / `delayToleranceSec` / `venuePriceAuthoritative` / `fetchedAt` (the RETRIEVAL stamp — a delayed tape ages by when it was pulled, never by its ~900s-old print) now travel `parseAlpacaSnapshot` → `SymbolEnrichment` → cascade merge → `applyEnrichment` → `MarketQuote` (and the cascade's Level-2 `BrokerQuote`); before, the `delayed_sip` snapshot reached the scan as a bare quote whose ~900s-old `asOf` looked realtime-STALE and healthy delayed rows tripped the gate.  The metadata is stamped only for the account-scoped `delayed_sip` feed, so Alpaca LIVE / Tradier / Robinhood are unchanged.  (4) **Server-only boundary:** `src/lib/quotes-cascade.ts` now starts with `import "server-only";` — the module resolves connected accounts, reads the trading policy and calls broker gateways, and every importer is server-side.  (5) **DISPUTED (no change needed):** the lag reason and the closed-session split are already implemented at branch head — the reason is `quote_last_print_beyond_delayed_sla` ("illiquid last print or excess tape lag", never "feed broken"), `delayedTapeStatus` takes `marketOpen` and reports `marketSessionOpen`, a shut market is not excess delay but stays unusable, and the gate blocks it with `quote_delayed_tape_session_closed`; during RTH a print beyond 900±120s is excess delay and fails closed.  (6) **Unusable tapes are not authoritative:** the Level-1a `venueDelayed` accept path now evaluates the delayed-tape usability (`isQuoteFresh` → `delayedTapeStatus`) BEFORE stamping `venuePriceAuthoritative` — a usable tape (fresh retrieval, no lag beyond 900±120s) is accepted as before, an UNUSABLE tape (excess lag, or a stale/future/missing retrieval stamp) is NOT accepted as the authoritative venue price (the observation is kept as non-authoritative so the gate can report why), and a tape with no documented delay (Tradier sandbox) keeps the owner rule; the market-session split stays in the policy gate (`quote_delayed_tape_session_closed`), so the accept path has no wall-clock dependence; the `skipActiveBroker` guard is untouched, and a symbol the delayed tape could not price still stays MISSING (no Yahoo/IEX overlay on the execution path).  (7) **Test hygiene:** the `apiKeyFingerprint` mock no longer echoes the credential it fingerprints (fixed synthetic `"fp:test"`).  (8) **Test hygiene:** the `delayed_sip` test restores `ALPACA_DATA_FEED` in a `try`/`finally`.  No deploy, no orders, no account/DB/credential changes, no merge, no Muse.  Rollout: `docs/rollouts/2026-11-06-pr5005-kody-review-fixes.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run lint` 0 errors (856 grandfathered warnings); the focused suite `npx vitest run test/alpaca-paper-delayed-sip.test.ts test/alpaca-paper-gateway-feed.test.ts test/quotes-cascade.test.ts test/data-providers.test.ts test/staleness-gate.test.ts test/market.test.ts test/alpaca-sdk-client-timeout.test.ts` is **297 passed / 297** across 7 files.  New tests: "does NOT accept an UNUSABLE delayed tape as the authoritative venue price", "Alpaca legacy client — latest quotes validation" (4 cases), "stamps the DELAYED-TAPE metadata on a delayed_sip snapshot", "does NOT stamp delayed-tape metadata on a realtime (iex) snapshot", "stamps the delayed-tape metadata onto the parsed snapshot" / "onto the enriched snapshot", two `getEnrichmentProvider — Alpaca credential guard` tests, and two `applyEnrichment` delayed-tape-metadata tests.  Full `npm test` / `npm run build` are left to CI on this pre-merge branch.
+
+**Next.**  Operator reviews PR #5005 and lets CI run the full gate; merging to `main` auto-deploys under the weekday RTH latch.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).  After deploy, confirm the paper account's scan rows carry `expectedDelaySec ≈ 900` and no longer trip the realtime-stale branch of the gate.
+
+## 2026-11-05 [gb-trader] Alpaca PAPER `delayed_sip` — PR #5005 continue pass
+
+**What.**  Five follow-on review findings on `gb-trader/alpaca-paper-delayed-quotes` are closed.  (1) **Alerts scope:** `checkPriceAlerts` now calls `fetchFreshQuotesCascade(symbols, userId, policy.accountNumber, policy.connectedAccountId)`, so a price alert evaluates against the OPERATING account's tape instead of the process-global path.  (2) **Dashboard paper fill:** the `marketValue / quantity` fallback is now `applyPositionPriceFallback` (`src/lib/dashboard-price-fallback.ts`) and is SKIPPED on a `venue_delayed` tape — a derived cost basis is no longer shown as a live paper price; realtime/venue-locked keep the old behaviour.  (3) **Lag honesty:** the policy reason `quote_feed_excess_delay` became `quote_last_print_beyond_delayed_sla` ("illiquid last print or excess tape lag" — the number cannot tell them apart), and a CLOSED session is now split out: `delayedTapeStatus` takes `marketOpen`, reports `marketSessionOpen`, reports NO excess while the market is shut, stays unusable, and the policy blocks it with `quote_delayed_tape_session_closed` instead of the excess reason.  (4) **Cascade:** `pendingSymbols` is only cleared when L1a actually ran — `if (venueMode !== "realtime" && !options?.skipActiveBroker)` — so the `skipActiveBroker` path keeps its fallbacks (the Sentry `pendingSymbols` empty-result thread) while the execution path keeps its intentional fail-closed overlay protection.  (5) **API scan test:** new `test/scan-route-account-scope.test.ts` proves `GET /api/scan` hands `policy.connectedAccountId` to `scanMarket`.  Docs: the redacted `PA…` value in the sibling rollout note is an Alpaca PAPER ACCOUNT IDENTIFIER, not an API secret (redacted for privacy; no rotation required) — it is not echoed anywhere.  No deploy, no orders, no account/DB/secret changes, no merge, no Muse.
+
+**Next.**  Operator reviews PR #5005 and lets CI run the full gate.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).
+
+## 2026-11-05 [gb-trader] Alpaca PAPER `delayed_sip` — PR #5005 readiness gaps
+
+**What.**  Three pre-merge gaps on `gb-trader/alpaca-paper-delayed-quotes` are closed.  (1) The market-scan paths now forward the operating account into the scan: both `refreshUserMarketScanIfDue` (`src/lib/market-scan-freshness.ts`) and the interactive `app/api/scan/route.ts` pass `connectedAccountId: policy.connectedAccountId` into `scanMarket`, so the full-universe enrichment binds to the Alpaca PAPER `delayed_sip` tape and its account-scoped cache identity instead of running unbound.  (2) Future provider timestamps now FAIL CLOSED instead of being clamped to age 0: a future `asOf` reads as a missing observation and a future `fetchedAt` as a stale retrieval (`delayedTapeStatus`), and `quoteAgeSecForStalenessGate` returns `missing: true` for a future stamp rather than handing the gate a negative age.  (3) The expected-900 ± 120s edge matrix is now pinned by tests, including future `asOf`, future `fetchedAt`, missing `fetchedAt`, and a market-closed post-session print (no carve-out accepts stale session data).  No deploy, no orders, no account/DB/credential changes; live Alpaca and Tradier tape selection, order placement, sizing, risk gates and the global `ALPACA_DATA_FEED` env behavior are untouched.  Rollout: `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip-readiness-gaps.md`.
+
+**Next.**  Operator opens the PR for `gb-trader/alpaca-paper-delayed-quotes` and lets CI run the full gate; merging to `main` auto-deploys under the weekday RTH latch.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).  Known coverage gap: `/api/scan`'s forwarding has no dedicated route-level test.
+
+## 2026-11-05 [gb-trader] Alpaca PAPER — account-scoped `delayed_sip` quote tape
+
+**What.**  The connected Alpaca PAPER account (`broker=alpaca`, `environment=paper`) now trades against Alpaca's `delayed_sip` feed — a tape with an expected ~900s publication delay (measured in prod 2026-11-05: asOf ages 900-902s).  The switch is ACCOUNT SCOPED: it is read from the connected account row, never from the global `ALPACA_DATA_FEED` env var, so Alpaca live, Tradier (live + paper), Robinhood and every other account keep their existing tape.  The broker gateway, the quote cascade, the market-scan enrichment and the sizing/freshness gates all use the same tape; the expected ~900s delay is no longer staleness (the snapshot is aged by `fetchedAt`), while EXCESS lag beyond expected + 120s tolerance is detected independently and fails closed.  No realtime overlay: a symbol the delayed tape priced is never replaced by Yahoo/IEX, and a symbol the delayed feed did not price stays missing instead of silently becoming a realtime quote.  The Alpaca snapshot enrichment cache key now folds in account + feed identity so the delayed tape cannot contaminate another account's cache.  No orders, strategies, DB rows, credentials or learning pending rows were touched, and nothing was deployed.  Rollout: `docs/rollouts/2026-11-05-alpaca-paper-delayed-sip.md`.
+
+**Next.**  Operator opens the PR for `gb-trader/alpaca-paper-delayed-quotes`; merging to `main` auto-deploys under the weekday RTH latch.  After deploy, confirm the paper account's quotes carry ~900s asOf ages and that the staleness gate does not trip on the expected delay.  The Linear team-`ST` issue was not created from this session (no Linear connector reachable here).
+
+## 2026-11-05 CLAUDE — iOS benchmark flow captions (ST-4589)
+
+**What.**  Two iOS caption strings (Results and Home) now say transfers are counted from the start of the day they land, matching the web copy and the benchmark math that merged in #5000.  String literals only.  Rollout: `docs/rollouts/2026-11-05-ios-benchmark-flow-captions.md`.
+
+**Next.**  Lands when the hosted iOS compile finishes inside the merge queue's 60-minute limit.
+
+## 2026-11-05 CLAUDE — Catalog: MiniMax M3.1 Flash only, Muse contributor models only (ST-4589)
+
+**What.**  Owner correction to the ST-4589 catalog: MiniMax is M3.1 Flash only and Muse is the three contributor ids only (the two Wonder contributors are Code CLI only).  MiniMax M3, Muse Spark 1.3, Glimmer and Wonder 1.0 are retired: a seat's stored model keeps working, and they are out of the picker, rotation and failover.  An automatic budget downgrade never lands on a contributor row unless the source is one.  Rollout: `docs/rollouts/2026-11-05-minimax-flash-muse-contributor-only.md`.
+
+**Next.**  Until this merges, production offers the four retired rows (#4999 is live).
+
+## 2026-11-04 CLAUDE — Model classes, rotation selection and catalog refresh (ST-4589)
+
+**What.**  Owner review of the Model Stats view.  Each model's stats are now strictly its own: predecessor figures show only as a labelled same-class estimate, never added into the live count and never chained, so gpt-5.6-terra no longer feeds Sol or Astra.  Alias rows show what `-latest` currently resolves to.  Green and Red each get a Rotation Models checklist (`llmRotationModels`, `redTeamRotationModels`).  Catalog: OpenAI is `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`; Astra Pro and the 5.6 models are retired without migrating stored selections; other providers move to current versions; added MiniMax M3.1 Flash, Muse Wonder 1.0 and the two Muse Wonder contributor ids (Code CLI only); Llama removed.  MiniMax M3.1 Flash and Muse now get an explicit effort (default medium, contributors capped at xhigh).  A model the route cannot serve now fails over instead of aborting the run.  Rollout: `docs/rollouts/2026-11-04-model-classes-rotation-catalog-refresh.md`.
+
+**Next.**  No running Code CLI broker was found on the server, so the Wonder contributor models cannot complete a call yet.  Native Anthropic route needs structured outputs before its Sonnet id can move to 5.5.  Benchmarks are from July and cover none of the new ids.
+
+## 2026-11-03 Muse-Assist — Retired fleet name removed from ops surfaces
+
+**What.**  The retired two-part fleet name is removed from this repository's ops tooling under the owner's fleet-wide directive.  The fleet post helper is now `scripts/simple-tools-fleet-post.sh`, driven by the `FLEET_POST_*` env family and posting through `simple-chat` to Zulip #Work-In-Progress; its callers (the deploy-freshness workflow, the freshness alerter, provider knob sync, the Slack retirement shim, the launchd plist) and the CI syntax check use the new names in the same change.  `scripts/install-fleet-coordination.sh` now installs `simple-chat` and `simple-board` plus `FLEET-PROTOCOL.md` from the current AFC tool-names pin.  Historical prose is masked, including the older entries below.  Two slices stay as documented exceptions: the fail-closed bootstrap stub keeps its path so old setup calls cannot reinstall the Slack engine, and the coordination installer keeps a two-entry legacy-link removal list so pre-rename installs stop resolving the old command names, and the three doc labels for the shared Infisical token pair now carry the fleet's canonical new names (`FLEET_SYNC_TOKEN` / `FLEET_SYNC_POST_TOKEN`) ahead of the centrally sequenced key rename.  No trading logic was touched.  Rollout: `docs/rollouts/2026-11-03-retired-name-sweep.md`.
+
+**Next.**  Land on green verify; the shared token pair's key rename is sequenced centrally after all consumers land, and the AFC pin advances to the tool-names merge commit when that lands.
+
+## 2026-11-04 CLAUDE — Learning-loop wiring fixes and performance evaluation (ST-4589)
+
+**What.**  Owner-requested evaluation of trading performance against the S&P 500 and of the RAG learning loop: `docs/reviews/2026-11-04-performance-and-learning-evaluation.md`.  No demonstrated edge as of the Sep 25 report, and several lesson types were written but never retrieved.  Fixed the small, clearly wrong parts: user-level reflection lessons now reach the decision prompt (approved risk lessons deliberately still do not, pending an owner decision), regime and thesis relevance can score, statistics-only lessons no longer need an LLM key, scorecards stamp excess return against SPY, the benchmark treats cash flows the same on both sides, and the Results card shows a round-trip win rate.  No change to order placement, sizing or risk gates.  Rollout: `docs/rollouts/2026-11-04-learning-loop-wiring-fixes.md`.
+
+**Next.**  Owner decisions in the evaluation (core-satellite, deterministic sizing control, Red Team veto, fixed model arms).  Refresh the Sep 25 numbers from `/api/ops/performance`.
+## 2026-11-03 [Muse-Assist] Mango proxy pacing: concurrency gate + 15s leg timeout
+
+**What.**  Proxied data-source requests now pass through one process-wide concurrency gate in `createProxiedFetch` (`ProxyConcurrencyGate` in `src/lib/proxy-fetch.ts`, default cap 4 via `PROXY_MAX_CONCURRENCY`), so a provider cascade burst can no longer hit the Mango's tinyproxy all at once.  Queue wait never counts against the leg timeout (the timer starts at slot grant) and is logged as `queueWaitMs` on the proxy-use entry.  The leg timeout default rose from 3000ms to 15000ms (`RESIDENTIAL_PROXY_LEG_TIMEOUT_MS` overrides); fail_soft / fail_closed are unchanged.  Rollout: `docs/rollouts/2026-11-03-st-proxy-pacing.md`.
+
+**Verification.**  `npx tsc --noEmit` clean; the 7 proxy-adjacent test files pass 108/108 (15 new tests in `test/proxy-concurrency-gate.test.ts`); full `npm test` is 9,902 passed / 3 failed of 9,947, and all 3 failures are proven environmental against a pristine-main baseline (one real-DNS case that fails on main in this sandbox, two latch-CLI cases that fail only on TMPDIR path-length/disk artifacts of this VM and pass with a short TMPDIR).
+
+**Next.**  Committed on `Muse-Assist/st-proxy-pacing`, not pushed.  MA reviews, pushes via the Mac route, opens the PR, and makes the Linear + #Work-In-Progress claim.  After deploy, watch `/api/proxy-use` for `queueWaitMs` entries replacing fail_soft fallback spikes during scan bursts.
+
+## 2026-11-03 CODEX — Repair Settings Navigation Spec Links (AFC-599)
+
+Corrected 12 broken Markdown navigation targets across the settings-navigation implementation spec so each link opens the canonical parent design.  The link-only update is recorded in `docs/rollouts/2026-11-03-afc-599-document-navigation-links.md`.
+
+## 2026-10-30 CODEX — Repository Report Library (AFC-580)
+
+Adds `docs/reports/README.md` as the report and research entry point while preserving all existing historical paths.  New public-safe reports belong in `docs/reports/`; private operational evidence belongs in private Fleet-OPS.  The shared collector builds the separate `Code/Docs/Socratic-Trade/` collection from published Git revisions.  The approved Docs-only exception is installed; Git integration checkouts remain protected.  Final source publication is tracked in AFC-580.
+
+Rollout: `docs/rollouts/2026-10-30-repository-report-library.md`.
+
+## 2026-10-29 [Cursor] PR #4953 Node 26 toolchain alignment
+
+**What.**  Renovate bumped CI/Docker to Node 26; required verify failed because `.nvmrc`, `@types/node`, `land.sh`, devcontainer, and `test/toolchain-policy.test.ts` still asserted Node 24.  Aligned those pins to 26 (no runtime workaround).  Rollout `docs/rollouts/2026-10-29-node-26-toolchain-alignment.md`.
+
+**Next.**  Hosted verify on PR head; owner Mac seats use Node 26 for `land.sh`.
+
+## 2026-10-29 [Cursor] PR #4938 OpenTelemetry v3 blocked by Langfuse peers
+
+**What.**  Renovate observability major for `@opentelemetry/core` / `@opentelemetry/resources` v3 fails `npm ci`: `@langfuse/otel@6` peers `@opentelemetry/core@^2.0.1`.  Reverted pins to `^2.10.0`, added Renovate rule to skip those majors until Langfuse ships OTel 3 peers.  Rollout `docs/rollouts/2026-10-29-otel-3-langfuse-peer-block.md`.  PR #4935 instrumentation path unchanged.
+
+**Next.**  Merge when `verify` is green; OTel 3 lands with a Langfuse upgrade, not before.
+## 2026-10-28 [MM] The issuer refusal names both variables it needs, not one (ST-4585)
+
+**What.**  The Kody review on pull request #4960 found a real defect in the remedy this change had just added, and it was HIGH severity.  The tier-2 `ASC_ISSUER_ID` refusal told the operator to unset `ASC_KEY_P8`, but an environment `ASC_KEY_ID` still wins in tier 3, so unsetting the ambient key alone does not reliably select the Infisical `/asc` credential.  With a key id that is not the `/asc` one, tier 3 never reaches the `/asc` key and never pairs the `/asc` issuer with it, so the operator lands on the same dead end the change exists to remove.  The remedy now names `unset ASC_KEY_P8 and ASC_KEY_ID`, which makes tier 3 read the key id, the issuer and the `.p8` from `/asc` whatever `/asc`'s own key id is.  The `ASC_KEY_ID` refusal keeps its own remedy, which was already reachable: there the key id is empty, so unsetting the ambient key alone is enough.
+
+**Verification.**  `bash scripts/ios-fleet/test-asc-credentials.sh` is `ok: ASC credential resolution`, exit 0, with a new case **2d-ter** that reaches the issuer path that 2d-bis does not.  A mutation run that reverted only the issuer remedy to name `ASC_KEY_P8` failed with `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8 and ASC_KEY_ID)`, which is what proves the new case tests the defect and not something else.  The credential is handed to the subshell as a shell assignment prefix and never through `env`, so it stays out of the process arguments of every child, which is what the suite's own guard requires.
+
+**Next.**  Land it, reply to the two review findings on #4960 with the commit evidence, and close ST-4585 with the merge evidence.  Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
+
+## 2026-10-28 [MM] The credential refusal names a remedy the operator can reach, and the upload handoff can run (ST-4585)
+
+**What.**  Pull request #4914 (AFC-459) merged on Oct 21, 2026 with six of its review threads unanswered, and an audit of the merged tree found three of them still real.  The missing-identifier refusal told the operator to "add ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8 to Infisical /asc", but the ambient `ASC_KEY_P8` is resolved BEFORE `/asc` is read, so that code is never reached while the ambient key is set and the instruction cannot work; running the real code on this Mac showed the refusal firing with 0 `/asc` lookups made.  The upload path was dead code: `load_secrets required` died with exit 1 one line above the `if [[ "$AUTH_MODE" != "api_key" ]]` branch, and `AUTH_MODE` is only ever "none" or "api_key", so the operator never learned where the built package was.  The refused `/asc` `.p8` carried no masked preview, while the ambient value and the client refusals both carried one.  All three are fixed: the refusal now names `unset ASC_KEY_P8`, which lets `/asc` be selected, the `/asc` refusal carries `; preview: $(key_preview "$key_pem")`, and the upload path reports an ABSENT credential instead of dying, so the package path, the `Upload blocked` line, the owner handoff steps and the exit 3 are reachable.  A REJECTED credential is still fatal inside `load_secrets` in both modes, because a value that is not a key must not be signed with and must not be handed on as if it were.
+
+**Verification.**  `bash scripts/ios-fleet/test-asc-credentials.sh` is `ok: ASC credential resolution`, exit 0.  Three independent mutation runs against the pre-change script, one per change, and each named its own defect: the masked preview reverted gives `FAIL: the refused /asc .p8 carried no masked preview`, the remedy reverted gives `FAIL: the refusal did not name the reachable remedy (unset ASC_KEY_P8)`, and the upload path reverted gives `FAIL: the upload path did not hand off with exit 3 (rc=1)`.  The three new cases are 2c-quater, 2d-bis and 2m, and 2m reads the exit code as `rc=0; out="$(...)" || rc=$?` so `set -euo pipefail` does not abort the suite.
+
+**Next.**  Land it, reply to the six open threads on #4914 with the commit evidence, and close ST-4585 with the merge evidence.  Rollout: `docs/rollouts/2026-10-28-st-4585-asc-credential-handoff-followups.md`.
+
+## 2026-10-25 [Cursor] ST-4580 Kody review on PR #4932 (publisher/remove-fmp)
+
+**What.**  Closed eight unresolved Kody threads: server-only guard on `/api/keys`, Zod query validation, strict PATCH envelope, retired-key `source`/`docsUrl` contract, console copy + delete for retired rows, test env restore and Zod response parsing.  Rollout `docs/rollouts/2026-10-25-st-4580-kody-pr4932-review.md`.
+## 2026-10-26 WISE: ST-4583 public footer logo
+
+Restore bundled transparent theme-aware wordmarks in the shared public footer.  Component previews pass mobile/desktop inspection; current-head hosted verification and review, then automatic deployment/live pixels, remain pending.  No native release or trading changes.  Rollout: `docs/rollouts/2026-10-26-st-4583-public-footer-logo.md`.
+
+## 2026-10-23 [GB-COMPILER] ST-3853 share payload schemaVersion from the shared contract
+
+**What.**  `@jaywedgeworth22/congress-trading-shared` is pinned to v2.9.0 (upstream commit `72febd04`), and the outbound congress.trade share sender now stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every import POST body (`CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION` stays as a deprecated alias);  Congress.Trade gets a paired PR that resolves the received version and warns without rejecting, and Usage-Monitor still pins v2.8.1 so the soft three-repo pin check flags until UM bumps.  Rollout `docs/rollouts/2026-10-23-st-3853-share-schema-version.md`.
+
+## 2026-10-21 [MM] AFC-459 App Store Connect credential hardening (revision 2)
+
+**What.**  The App Store Connect private key is now taken only from the process environment or from Fleet-OPS prod `/asc` through `fleet-secrets`.  `scripts/ios-fleet/asc-key.mjs` is new and never reads a file:  it validates a PEM, writes the mode-600 materialization `altool` and Xcode read, and hands the key to a child in an allowlisted environment.  `scripts/ios-fleet/asc-api.mjs` resolves the credential in the order `APPLE_API_*` trio, then `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_KEY_P8`, then Infisical `/asc`, and validates the PEM with `normalizePrivateKey`.  The `ASC_KEY_PATH` branch and the `readFileSync` of the key path are gone, so a named path on disk can never decide which key signs a request.  `load_secrets` in `scripts/ios-fleet/ship-testflight.sh` resolves an ambient `ASC_KEY_P8` first, then Infisical, writes the staged file and exports the key to the client;  a named `ASC_KEY_PATH` is ignored, and the run says so in a log line.  A missing credential is fatal where it is required, before the upload, and named;  a refused key carries a masked preview of its PEM body.  Two new offline suites (`test-asc-key.test.mjs`, `test-asc-credentials.sh`) and a rewritten `asc-api.credentials.test.mjs` cover it, and the ios-fleet pin carries the new module.
+
+**Fleet alignment pass.**  The masked preview now has the fleet's blessed shape on both sides (the first eight and the last four characters, `(empty)`, `[N chars, withheld]`), the hosted `APPLE_API_*` trio is the first source in the shell layer as well, with its base64 body decoded through a here-string, and the shell test proves the credential handoff with the signed request instead of reading another process's environment.  `scripts/ios-asc-key-env.sh` takes the hosted trio first too, and its refusal names the key's source (for example `Infisical prod (Fleet-OPS /asc)`), the error class and the same masked first-eight/last-four preview, never the whole value and never the key ID.  Jay decided on 2026-10-25 to keep that preview (ST-4579), and its test asserts the exact refusal line.  The hosted handoff test now uses a real key generated at test time.
+
+**Open review findings closed in the same pass.**  The hosted helper read the key from the Infisical root folder while every other reader asks for `/asc`, and the root has no `ASC_KEY_ID` and no `ASC_ISSUER_ID` at all, so the workflow published no key id and the ship step had nothing to publish;  the helper, the workflow's load step and the staged key now all read the `/asc` folder, and the fake Infisical CLI in the test answers the key only from that folder, so a wrong folder fails the suite.  The client now names the missing secret (`ASC_KEY_P8 in Infisical /asc`, or `AUTHKEY_<id> in Infisical /authkey-<id>-p8`) instead of a generic refusal, and the rollout note carries an install-time placeholder instead of a machine path.
+
+**Verification.**  `node --test scripts/ios-fleet/test-asc-key.test.mjs` 21 pass, 0 fail;  `bash scripts/ios-fleet/test-asc-credentials.sh` ok;  `node --test scripts/ios-fleet/asc-api.credentials.test.mjs` 17 pass, 0 fail;  `node --test scripts/ios-fleet/*.test.mjs` 42 pass, 0 fail;  `bash scripts/ios-fleet/test-ship-seq.sh` 71 pass, 0 fail;  `bash scripts/ios-fleet/test-scheduled-ship-gate.sh` 13 pass, 0 fail;  `bash scripts/test-ios-stage-asc-key.sh`, `bash scripts/test-ios-asc-key-env.sh` and `bash scripts/test-ios-scheduled-ship-gate.sh` pass;  `npm run lint` 0 errors;  `bash scripts/ios-fleet-pin.sh --check` OK;  gitleaks reports nothing in the changed files.  Every fixture key is generated at test time, and no key, `.p8` or secret value is committed.
+
+**Next.**  The hosted `ios-ship.yml` now fetches the key in the step that calls the client, through the new `scripts/ios-asc-key-env.sh`, and hands it over in the environment, so no key material crosses a step boundary and the environment file never holds it.  The other eight fleet copies of this client need the same handoff;  the shape is posted in the AFC-459 topic so one lands across the copies.
+
+**One finding to carry.**  The client only runs when the path it was started with is the path its own module reports, because node resolves a symlinked directory to its real path.  A lane behind a symlink starts the client to a silent no-op:  exit 0, no output, no request.  The test harness starts it by its real path now;  the product behaviour is unchanged and is a fleet-wide item.
+## 2026-10-21 CLAUDE — ST-4574 in-app MiniMax model moves to MiniMax-M3.1-Flash
+
+**What.**  The catalog row `minimax-m3` is now `minimax-m3.1-flash` (OpenRouter `minimax/minimax-m3.1-flash`, native `MiniMax-M3.1-Flash`, $0.15 in and $0.60 out per 1M).  `minimax-m3` stays an alias, so a stored selection resolves to the new row with no database change.  Production has `llm_route_minimax=native`, so Sandbox Green and Alpaca Paper Red (both stored as `minimax-m3`) reach `api.minimax.io` with exactly `MiniMax-M3.1-Flash` after deploy.
+
+**Verified.**  The native slug returned HTTP 200 live.  OpenRouter lists only the retired `:free` variant and 404s on the paid id until MiniMax publishes it there, so OpenRouter-routed MiniMax calls fail until then.
+
+**Next.**  Merge after CI, confirm the deploy SHA, then watch whether Sandbox's six-run failure streak clears.
+
+Rollout: `docs/rollouts/2026-10-21-minimax-m3-1-flash.md`.
+
+## 2026-10-18 CLAUDE — OPS-818 bootstrap identity moves to the Keychain
+
+**What.**  Per the owner's 2026-10-18 ruling that nothing may read the flat global key file, the Infisical bootstrap resolver (`scripts/infisical-bootstrap-env.mjs`) now reads `process.env`, then `.env.local` runner controls, then the macOS login Keychain (service `socratic-trade-bootstrap`, account = env var name).  The flat-file layer and the `db-api-keys.ts` dev loader are deleted;  `predev-check.mjs` checks Keychain presence;  AGENTS.md's strict-Infisical rule carries the 2026-10-18 update.  The Mac's Keychain was seeded with `INFISICAL_ST_CLIENT_ID` and `INFISICAL_ST_CLIENT_SECRET` (read-back matched).  Rollout `docs/rollouts/2026-10-18-ops-818-bootstrap-keychain.md`.
+
+**Next.**  Merge after CI.  The owner may delete the flat file once no other consumer reads it.
+## 2026-10-19 JET — ST-4562 Sentry Claude Autofix Admission
+
+Sentry/Seer joins the exact review actor allowlist and fixer prompt in the existing Claude caller.  Same-repository, concurrency, verification, permissions, secrets and money-path review boundaries remain unchanged.  Isolated YAML contracts and 15 caller-expression scenarios passed; full hosted CI and runtime observation remain pending.  No merge, auto-merge or deployment from this lane.  Rollout: `docs/rollouts/2026-10-19-sentry-claude-autofix.md`.
+
+## 2026-10-18 [MM] Previous Trades rows rendered with no card surface
+
+**What.**  Owner reported the autonomy desk's Previous Trades section drawing its rows with no background color.  `ProposalRow` hard-coded `bg-[color:var(--con-surface-2)]` = `#f4f6fa` against a page background of `--con-bg` = `#f1f4f6` (`app/console/console.css:25-27`) — a 3-RGB-step collision, so the rows were invisible against the page.  The value was correct for the row's OTHER caller (inside a white `.con-card`, "Latest Strategy Run") and wrong for a page-level card.  Fixed at the component rather than the token: recoloring `--con-surface-2` would restyle every other consumer as collateral.  `ProposalRow` gained `surface?: "inset" | "raised"`, defaulting to `"inset"` so the in-card caller is untouched; `"raised"` picks `--con-surface` (the token `.con-card` uses) and the focus-ring offset follows the same choice.  No CSS token changed.
+
+**Follow-up, not blocking.**  `console-autonomy-desk-chromium-linux.png` is a linux-generated Playwright baseline; regeneration is CI-only by the workflow's own instruction and Playwright Smoke is not a required check on this path.  Dispatch `Playwright Smoke` with `update-visual-baselines=true` and commit the artifact.
+
+**Also reported, deliberately not in this change.**  (1) A transient `Snapshot failed (500)` first-load card — self-heals on the console's retry.  (2) `APNs HTTP 403: InvalidProviderToken` on all three iPhone device tokens and a `run_failure_streak` liveness episode at 56h on Sandbox — separate live incidents, investigated separately.
+
+Rollout: `docs/rollouts/2026-10-18-previous-trades-card-surface.md`.
+
+## 2026-10-18 CLAUDE — OPS-818 stop reading the flat global-api-keys file
+
+**What.**  Non-identity readers (`scripts/ios-fleet/ship-testflight.sh`, `scripts/massive-hoard.ts`, `scripts/cascade-audit.ts` usage, `.claude/skills/deploy-verify/SKILL.md`) now use env first, then `fleet-secrets get`.  The bootstrap-identity readers are unchanged because `AGENTS.md` keeps the handoff path as the documented owner-side identity store;  the owner decides whether to override that rule.  Rollout: `docs/rollouts/2026-10-18-ops-818-no-global-api-keys.md`.
+
+## 2026-10-16 CLAUDE (PR sweep) — ST-4545 PR #4789 conflicts, CI and review threads
+
+**What.**  Merged origin/main into `instinct/st-4545` (no conflicts).  Fixed the red `verify-hosted` job, which was this PR's own copy: `test/copy-rules-lint.test.ts` flagged three single-space sentence gaps in the new route `title` strings (`app/console/settings/api-keys.tsx`, `app/console/settings/llm-route-select.tsx`); they now use U+00A0 plus a space, as main does.  `src/lib/code-cli.ts` now parses the inbound body and the broker reply with Zod instead of `as` assertions, keeping both rejection messages.  The request schema is deliberately not `.strict()`, because red-team sends `temperature` and the broker payload is rebuilt from an allowlist anyway.  `CodeCliChatResponseSchema` in `src/lib/chat/llm.ts` is now strict and exact (`role: "assistant"`, `finish_reason`), matching what `fetchCodeCli` emits.  The broker doc's stale "independent 60-second cap" line now describes the forwarded caller deadline and the 150-second default.
+
+**Verification.**  `npm run lint` 0 errors; `npx tsc --noEmit` clean; `npm run build` green; 143 focused tests pass across code-cli, routing, chat-llm, llm-request, llm-reasoning, both failover suites and copy-rules-lint, and the full `npm test` suite passed in CI verify-hosted on 20b5dd54d.
+
+**Held for the owner.**  This PR changes request identity, API-key routing and a broker bearer token, so auto-merge was disarmed and the PR waits for owner review.  Still open: a CI-generated `toHaveScreenshot` baseline for the API-key chips, and Kody's sentinel-key finding (disputed: the sentinel is only issued to a `codeCliReady` owner, for whom an LLM really is usable).
+
+## 2026-10-16 [ECHO] ST-4545 review follow-up
+
+PR #4789: split pure model/reasoning helpers into `llm-reasoning.ts`, moved client imports there, and marked the credential-bearing Code CLI module server-only. Caller abort signal is preserved; fallback cap is 150s. Fallback planning skips/audits only the known unavailable Code CLI configuration error; other errors propagate. Integrated Connections/ApiKeysCard browser fixture shows API-key, ready CLI and unavailable CLI chips, with desktop/mobile pixels inspected.  97 targeted tests, tsc, production build and 1 integrated Playwright test pass. Focused lint 0 errors, 49 existing warnings. Sentinel/schema semantics unchanged. Broker staging remains unpublished and inactive; no production settings, workflow approvals or review replies. Rollout `docs/rollouts/2026-10-16-st4545-review-boundary.md`.
+
+## 2026-10-16 CLAUDE (autofix) — ST-4545 review round, PR #4789 code-cli route
+
+**What.**  Addressed the actionable review-bot findings on PR #4789 (`instinct/st-4545`, the owner-only server Code CLI route).  Three fixes, all correctness: (1) `proposeTrades`' fallback-model loop (`src/lib/strategy.ts:6522`) called `resolveLlmEndpoint` unguarded — a fallback model routed to a code-cli provider that is disabled or unconfigured THROWS from `codeCliUrl`, and that escaped `proposeTrades` entirely, so the run finished the proposal phase with zero proposals instead of skipping the unusable fallback the way the adjacent `if (!ep.key) continue` already does.  The call is now wrapped in try/catch + `continue`.  (2) `fetchCodeCli` parsed the caller body with a bare `JSON.parse` (`src/lib/code-cli.ts:40`), so a malformed request threw a raw `SyntaxError` whose message embeds the offending string, bypassing the module's documented `Invalid Code CLI broker response` envelope and pushing partial request data into logs/Sentry breadcrumbs; it now throws a typed `Code CLI requires a JSON request body`.  (3) The chat code-cli branch in `llmForModel` (`src/lib/chat/llm.ts`) indexed `result.choices[0].message.content` off an unvalidated `res.json()`, and recorded usage with a possibly-undefined `userId` that `recordChatUsage` early-returns on — silently dropping the metered row for an env-default `getLLM()` call.  Added `CodeCliChatResponseSchema` (zod) at the trust boundary and pass `userId ?? "local"`.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm test` exit 0; `npm run build` green.  Focused re-run of the four affected files (`test/code-cli.test.ts`, `test/code-cli-routing.test.ts`, `test/strategy-llm-failover.test.ts`, `test/red-team-empty-failover.test.ts`) — 32/32 pass.  `next-env.d.ts`/`tsconfig.json` restored from `origin/main` after the build.
+
+**Left open deliberately (flagged to the maintainer).**  Three findings were not fixed in this round.  Kody's `import "server-only"` on `src/lib/code-cli.ts` was attempted then reverted, because at the time `app/console/strategy/page.tsx` (a `"use client"` page) imported `@/lib/llm-request`, which imports `code-cli.ts`, so the marker broke the build.  **Superseded 2026-10-17:** that chain no longer exists and the marker is in place.  0c7e6c19e moved the browser-safe helpers into `src/lib/llm-reasoning.ts`, which imports only `./llm-model-catalog` and `./types`, pointed the strategy page and the other console pages at it, and added `import "server-only"` as line 1 of `code-cli.ts`.  The build is green with it.  Keep the marker: it is the forward guard that fails the build if any future `"use client"` import pulls `code-cli.ts` and its `CODE_CLI_BROKER_URL` / `CODE_CLI_BROKER_TOKEN` handling toward the browser.  Two Kody threads ask for committed Playwright `toHaveScreenshot()` baselines for the new route chip/`<LlmRouteSelect />`; not actionable from a code seat (baselines are generated by the CI browser and committed as an artifact — no browsers in this environment, and an assertion without its PNG fails CI).  Kody's suggestion to move the hand-written `fetchCodeCli` body validation onto a schema was skipped in this round; 20b5dd54d later did move it onto Zod (deliberately not `.strict()`), keeping both rejection messages.
+## 2026-10-17 CLAUDE — PR #4697 main merge (hold)
+
+PR #4697 went `CONFLICTING` after #4727 (the same gate fix, reached from a parallel branch) squash-merged to `main` at `1cbe9f06`.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Two add/add conflicts, both resolved by keeping both sides: `docs/rollouts/2026-10-15-automerge-codeowners-globs.md` (main's text, plus this branch's CI-follow-up and port sections) and `test/disable-pr-automerge.test.ts` (main's file, plus this branch's `unreadable` read case).  The workflow, `scripts/disable-pr-automerge.sh`, and the other gate tests already matched `main`, so #4697 now adds only that one test and the history in the note.  `do-not-automerge` stays on and auto-merge is not armed.  Next: Jay squash-merges the small remainder or closes #4697 as superseded by #4727.
+## 2026-10-16 CLAUDE (PR sweep) — PR #4661 merge-main and the last literal key prefix
+
+**What.**  Merged `origin/main` (`d1053ad69`, #4784 and #4739) into `cursor/free-data-gaps-55d1` with no conflicts; the main side touched only `db.ts`, `strategy.ts` and `sqlite-slow-timing`, none of which this PR changes.  Two prose sentences in this file and in `docs/rollouts/2026-10-14-free-data-gaps.md` still printed the literal key prefix inside "a full-repo search for ... returns zero hits", which repeated the defect and made the claim false.  Both now say "the key prefix", and `git grep` for it over the merged tree returns nothing.  No code change.
+
+**Verification.**  On `e40696cd1`, hosted CI run 38993685733 (`verify-hosted`): `npm run lint` pass, `npx tsc --noEmit` pass, `npm test` pass, `npm run build` pass; required `verify` and `gitleaks` pass.  The local lane has no `node_modules`, so the trio was not run locally.
+
+**Left open.**  Kody's 2026-10-16 `CHANGES_REQUESTED` review stands; Kody has re-reviewed this head as "no issues" but has never submitted an approval on this repo, and `dismiss_stale_reviews_on_push` is false.  Clearing it needs the owner.
+
+## 2026-10-16 CLAUDE (autofix) — PR #4661 review round, last API-key prefix in the rollout note
+
+**What.**  Third autofix round on PR #4661 (`cursor/free-data-gaps-55d1`).  Kody's re-review confirmed the two previously-open threads as addressed with no further code change: the `.passthrough()` justification on `TwelveDataTimeSeriesSchema` (the rule's "justified passthrough" limb is met — rationale recorded above both schemas and the known `meta` block modelled explicitly, so `.strict()` was correctly declined rather than omitted) and the `PLAN.md` Tradier sandbox entry naming PR #4685 plus `no board reservation on file`.
+
+It surfaced one genuinely new item, and it is the same defect class already fixed in `STATUS.md` last round: the verification block in `docs/rollouts/2026-10-14-free-data-gaps.md:181` still printed the literal prefix of the sandbox `OPENROUTER_API_KEY`.  A prefix is still secret material — it identifies the issuer and credential family and is permanent once merged.  That line now reads `(value redacted)`, matching `STATUS.md:73`, which also removes the internal inconsistency Kody flagged (the rollout note's own follow-up section already claimed `STATUS.md` was redacted).  A full-repo search for the key prefix now returns zero hits.
+
+**Rotation note for the maintainer.**  This branch is squash-merged per repo protocol, so clearing the working tree collapses away the intermediate commits that carried the prefix.  If it is ever merged with history preserved, the prefix stays reachable in branch commits and the key should be treated as exposed and rotated.
+
+**Verification.**  `npx tsc --noEmit` clean.  Environment note for the next seat: `node_modules` started empty in this checkout, and a bare `npx tsc --noEmit` against it reports several hundred false `TS2591`/`TS2307` errors (`Cannot find name 'process'`, `Cannot find module 'vitest'`) — run `npm install` before the trio.  Full `npm test` and `npm run build` via hosted `verify` on push.
+
+**Left open deliberately.**  Nothing.  Both previously-open threads are resolved by Kody's own confirmation; the one new item was a mechanical one-word redaction.
+
+## 2026-10-17 CLAUDE — PR #4727 main merge (hold)
+
+PR #4727 was BEHIND `main` (four commits, through `b39ed8a7d`, #4805) with no conflicts and no review threads.  Merged `origin/main` with a merge commit (no rebase, no force-push).  Main moved only `.github/workflows/e2e.yml` among workflow files, and none of the ten files this PR owns.  Focused Vitest (`automerge-gate-dry-run`, `branch-protection-gate`, `disable-pr-automerge`) passed 21 tests locally; the repo-wide `tsc` and build gates run in hosted CI, because this lane has no access to the private `@jaywedgeworth22/congress-trading-shared` package.  The `do-not-automerge` label stays on and auto-merge is not armed; Jay merges.
+
+## 2026-10-15 CODEX — PR #4727 current-main conflict sweep
+
+Merged fresh `origin/main` at `7bfb84ef193196f1b77c9bfe0573c012e656c8c0` with merge commit `a80b3564a77f428930eea5fd138f0038a9c49cf4`.  The current PR head before this merge was `c116c6738f14b0cb3c8d787b4e6285915e1fd6d1`; no newer Cursor commit was present.  Merge completed without conflicts.  The unique PR diff remains the workflow, two scripts, three tests, and PLAN/STATUS/rollout paths.  The three disable jobs retain `contents: write` and `pull-requests: write`; the arm job remains read-only.
+
+Local verification passed: lint (0 errors, 866 warnings), TypeScript, 21 focused tests, and production build.  The `do-not-automerge` label remains; auto-merge is not armed.  Next: push the merge and docs, wait for final-head required CI, then post that the PR is ready for Jay's review.  Keep the PR open.
+## 2026-10-16 CLAUDE (autofix) — ST-4544 review round, use-anchored-menu timing/perf
+
+**What.**  Addressed the review-bot findings on PR #4761 (`muse-code/proxy-safari-dropdown`).  `app/console/ui/use-anchored-menu.ts` had three real timing/perf defects, all fixed: (1) the first render after `open` flips to true returned `CLOSED` (the effect had not run yet), while the click-away backdrop was already mounted — a click in that ~16ms window dismissed the menu the user just opened; the hook now measures synchronously in the effect body before scheduling any rAF, so the panel portals in the same commit as the trigger toggle.  (2) the capture-phase `window` scroll listener dispatched a fresh `setMeasured` object literal on every scroll tick — including scrolls inside the notification panel's own `overflow-auto` list, where the trigger rect is unchanged — re-rendering the whole portal subtree per tick; `setMeasured` now returns the previous object when the anchor and container are unchanged.  (3) resize/scroll listeners are gated through a single `requestAnimationFrame` so burst events coalesce to one measurement per frame.  Also reset `measured` to `CLOSED` when the menu closes, so a reopen cannot paint one frame at the previous open's stale coordinates.  Net effect: same rendered output, no dismiss-on-open race, no per-scroll-tick re-render.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run build` green; console test files pass (`test/console-a11y.test.ts` 11/11).  Full `npm test` is red in this seat for a reason unrelated to this change: 4 files (`test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/openrouter-credits.test.ts`, `test/framework-review.test.ts`) fail because this cloud seat injects ambient LLM provider env vars, so the routing tests resolve to OpenRouter instead of their mocked native endpoints.  Proven pre-existing by re-running exactly those 4 files with this diff stashed — identical failures on the clean baseline.  Two environment notes for the next seat: `node_modules` started empty, and a bare `npx tsc --noEmit` against an empty tree reports several hundred false `TS2591`/`TS2307` errors, so run `npm ci` before the trio.
+
+**Left open deliberately.**  Two Kody threads ask for committed `toHaveScreenshot()` baselines for the three header dropdowns.  Not actionable from a code seat: Playwright baselines are generated by the CI browser against the production build (`e2e.yml` `workflow_dispatch` input `update-visual-baselines`, which uploads them as an artifact to download and commit), and no browsers are installed here.  Adding a `toHaveScreenshot()` assertion without its baseline PNG fails CI rather than self-generating.  Flagged to the maintainer on the PR.  Rollout `docs/rollouts/2026-10-15-header-dropdown-clipped.md`.
+
+## 2026-10-15 MC — header account dropdown never opened (ST-4544)
+
+**What.**  Owner report (Safari): the console header account dropdown did not open.  Root cause: the ChromeBar row is `overflow-x: auto` (320px guard), which computes `overflow-y: auto` and clips every absolutely positioned dropdown panel in the bar to ~46px — menu state opened, panel never showed (reproduced in WebKit + Chromium harnesses; not Safari-specific).  All three header menus fixed: account scope (`ScopeSelector`), profile (`UserMenu`), notifications.  Panels now portal into `.console-root` with fixed anchoring via new `app/console/ui/use-anchored-menu.ts`; the overflow guard itself is unchanged.  Regression coverage: `test/e2e/header-menus.spec.ts` asserts each panel is visible and hit-testable at its center.
+
+**Branch.**  `muse-code/proxy-safari-dropdown` — Fixes ST-4544.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npm run lint` 0 errors (867 warnings, grandfathered backlog; changed files clean).  `npx playwright test test/e2e/header-menus.spec.ts --project=chromium` 3/3 on the built app.  WebKit probe on the same build: all three panels fixed, inside `.console-root`, center-hittable; account panel screenshot opaque and correctly anchored.  Full `npm test` + `npm run build` via the `scripts/land.sh` gate at landing.  Rollout `docs/rollouts/2026-10-15-header-dropdown-clipped.md`.
+
+**Also verified, no code change.**  The pasted 502 (2026-10-15 23:29:43 UTC) was the deploy-restart window of sha `fad904bcd` (live health `processStartedAt` 23:29:54 UTC); prod healthy on live URLs.  The per-user Data Source Proxy feature already exists and is unrelated.
+
+**Review round.**  Bot review findings fixed in a second commit: focus moves into each panel on open (portal changed DOM tab order), first measurement is synchronous (no backdrop-without-panel frame), scroll/resize updates are rAF-throttled and skip unchanged positions, close resets the measurement, `anchoredMenuPosition` is extracted pure with `test/use-anchored-menu.test.ts` (5/5), and `test/e2e/visual.spec.ts` gained an open-dropdown screenshot test (baseline regenerated in CI per repo flow).
+
+**Next.**  Land, confirm auto-deploy on live health URLs, close ST-4544.
+
 ## 2026-10-15 CODEX — PR #4662 takeover
 
 Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `cursor/embed-context-retrieval-pressure-3d40` with merge commit `f433f89057262a1b28428d6d91f549b501371d2c`.  No conflicts; no unresolved review threads.  Lint (0 errors), TypeScript, 34 focused tests, and production build pass locally.  Next: compare the reported full-suite failures with main CI, push the merge, drive required checks green, arm auto-merge, and confirm merge.  Leave Sentry 2G and 2E open until live-open validation.
@@ -5,6 +437,197 @@ Merged fresh `origin/main` at `8914af2621b790a3c657c746d991bddc057c435d` into `c
 # Current Status
 
 ## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 Cursor Cloud — restart sweep instance grace (ST-8)
+
+**What.**  The restart arm of `sweepStaleRunningRuns` was closing runs another instance still owned, and it ran before drain could adopt them.  Boot grace is two minutes.  Followers only sweep rows stamped with this process's `owner_instance`.  The leader reaps other instances after the lease, and a running non-retry request is left for drain adoption.  The 30-minute stall arm for this instance's own wedged runs is unchanged.
+
+**Branch.**  `cursor/restart-sweep-boot-grace-ab92`  (PR #4701, ready, `do-not-automerge`, auto-merge off)
+
+**MM takeover (2026-10-16).**  Cursor's agents hit their quota; MM is landing this branch.  `origin/main` (`a5d45401e`) is merged with a merge commit — no rebase, no force-push.  Two conflicts, both resolved keeping both sides:
+
+- `src/lib/db.ts` — `main` spent migration 95 on `strategy_runs_user_started_index`; ST-8's `strategy_runs_owner_instance` also claimed 95.  Both are kept and ST-8's is renumbered **96** (later renumbered again to **97** — see above), with the twelve `getSchemaVersion` / `applyVersionedMigrations` assertions in `test/persistence-hardening.test.ts` moved to match.  The price-value `toBe(95)` assertions in `strategy-hardening`, `conviction-size-cap`, `broker-protective-stops`, `synthetic-stops` and `proposal-data-adjustments` are unrelated and untouched.
+- `test/e2e/visual.spec.ts` — `main`'s three console header dropdown specs and this branch's ST-3854 retired-lanes footnote spec both survive.  The login spec keeps its `installPlaywrightSession`: `/login` is in `PUBLIC_PREFIXES` (`middleware.ts:68`) and `app/login/page.tsx:43` documents that there is deliberately no "already signed in → redirect" branch, so the cookie cannot change that render and the committed `login.png` baseline stays valid.
+
+Gate after the merge: `npm run lint` exit 0 (871 warnings, 0 errors).  `npx tsc --noEmit` exit 0.  Focused vitest over the 11 files this branch touches — 106 passed.  `npm run build` exit 0.
+
+**Linear.**  ST-8 claimed by CURSOR (idle CLUTCH claim since Sep 15).  Agent: https://cursor.com/agents/bc-8c14e8f0-27ae-5255-ab13-ac52f6cfab92
+
+**Verification.**  After merging `origin/main` (`df7e6d10`) and the check-pin token-order fix: `npm run lint` exit 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exit 0.  `npx vitest run test/shared-package-pin-check.test.ts` 6 passed.  `node scripts/check-shared-package-pin.mjs` with `GH_PACKAGES_TOKEN` unset printed `OK` for `@2.7.1`.  `npm test` 9366 passed, 51 skipped, 26 failed, all outside this diff (sandbox LLM and notify credentials, provider fixtures, cpuprofile Node loader, server-metrics host flag).  `npm run build` exit 0.  check-pin was red on this PR and on every other PR in the 07:32-07:55Z burst because the script preferred `GH_PACKAGES_TOKEN` (user 12656028) for the public Congress.Trade repo and reported the rate limit as a missing token.  The Actions `GITHUB_TOKEN` is now first.
+
+**Migration renumbered again (2026-10-16).**  A second `main` merge brought #4720, which spent 96 on its `text_payload_codec_columns` migration.  ST-8's `strategy_runs_owner_instance` had already moved 95 -> 96 for `strategy_runs_user_started_index`, so it is now **97**, and the twelve `getSchemaVersion` / `applyVersionedMigrations` assertions in `test/persistence-hardening.test.ts` moved with it.  The clean textual merge is precisely what hid the collision; see the rollout note.
+
+**Gate (2026-10-16, renumber to 97).**  `npm run lint` exit 0 (871 warnings, 0 errors).  `npx tsc --noEmit` exit 0.  `npm test` 13 failures, every one in a file outside this diff and every one reproduced identically on an unmodified `origin/main` checkout (`llm-provider`, `openrouter-credits`, `framework-review`, `chat-llm` — provider tests asserting an absent key that this sandbox supplies).  Not a regression from the renumber; `test/persistence-hardening.test.ts` and `test/text-payload-codec.test.ts` pass.  `npm run build` exit 0.
+
+**Merge-main round 4 (CLAUDE, 2026-10-17).**  `origin/main` (`b39ed8a7d`) merged with a merge commit.  #4707 landed the ST-3854 half of this branch with its final design (separate `playwright.admin.config.ts` admin suite, auth-unconfigured smoke harness).  The three conflicts (`playwright.config.ts`, `test/e2e/playwright-session.ts`, the ST-3854 rollout note) and the rest of this branch's ST-3854 e2e scaffolding take `main`'s version, and the superseded helpers are removed.  The PR diff against `main` is now ST-8 only.  A second merge of `main` at `1eb6f3bed` brought #4736, which spends migration 97 on `st4541_dedup_isolation_columns`, so ST-8's `strategy_runs_owner_instance` is renumbered a third time to **98**.  The twelve `test/persistence-hardening.test.ts` version assertions now expect 98.  Detail in `docs/rollouts/2026-10-15-restart-sweep-instance-grace.md`.
+
+**Merge-main round 5 (CLAUDE PR sweep, 2026-10-17).**  `origin/main` (`838f9764c`: #4794, #4727, #4661, #4718) merged with a merge commit and no conflicts; `PLAN.md` and `STATUS.md` keep both sides' entries.  No new migration on `main`, so ST-8 stays **98** and no migration version repeats.  The `// Ops snapshot:` comment above migration 95 in `src/lib/db.ts` gets back the indentation an earlier merge dropped.  Owner ruling 2026-10-17 (merge unless the owner is needed): this PR lands by squash merge once `verify` and `gitleaks` pass; `needs-human-merge` only stops auto-merge.  Local gate on the merge: `npm run lint` exit 0 (0 errors, 873 warnings), `npx tsc --noEmit` exit 0, `npx vitest run` on `persistence-hardening`, `restart-sweep-instance-scope`, `stale-running-runs`, `stale-running-runs-adoption-grace`, `strategy-run-restart-retry` and `scheduler-leader-heartbeat` 72/72 pass, `npm run build` exit 0.  Full `npm test` is left to hosted `verify`, which passed lint, tsc and `npm test` on `f2c3fc071`.  A second merge of `main` at `d425910eb` (#4815, `Dockerfile` only) followed, and the rollout note's round-5 entry now carries the full verification block and next steps.
+
+**Next.**  MM squash-merges with auto-merge armed at Jay's direction (2026-10-16); the `do-not-automerge` hold Jay applied on 2026-10-15 is being lifted for this PR only, not for #4727.  Note for the owner: this diff does touch two CODEOWNERS live-money paths — `src/lib/db-execution.ts` and `src/lib/scheduler.ts` — which is why it was held.  Kody re-review previously failed on provider (MiniMax-M3 HTTP 404), so `reviewDecision` stays `CHANGES_REQUESTED` until Kody posts a review on the current head.  `dismiss_stale_reviews_on_push` is false on ruleset 21771270, so pushing alone will not clear it; the review must be re-run, not dismissed.  The two screenshot threads are substantively satisfied by the committed spec and baseline and are resolved on that basis.
+## 2026-10-15 Cursor Cloud — auto-merge CODEOWNERS globs (ST-3326)
+
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments (`accepts 1 arg(s), received 2`).  The CODEOWNERS money-path globs never ran.  The fetch is now one `--jq` expression.  A documented glob list is locked to CODEOWNERS.  The dry run disarms money-path diffs and `do-not-automerge`, and still arms a docs diff.  Merged `origin/main` (`df7e6d10`, then `3f4ef5e5` / #4698, then `2075c857` / #4696, then `e3ba1507` / #4716, then `49a76da4` / #4695) with merge commits.  `check-pin` was failing because it preferred `GH_PACKAGES_TOKEN` (user 12656028) over the Actions token, then reported that user's HTTP 403 rate limit as a missing token.  #4698 landed that token order on main.  This merge keeps main's copy.  `disable-on-*` jobs have `contents: write` and `pull-requests: write` (ported from #4727).  After a rejected disable, `gh pr view --jq` reports `off`, `armed`, or `unreadable`.  `off` exits 0.  `armed` or `unreadable` exits 1.  The arm job stays read-only.
+
+**Branch.**  `cursor/automerge-money-path-globs-2a65`
+
+**Verification.**  Earlier full gate: `npm run lint` exit 0 (0 errors, 854 warnings).  `npm test` 9378 passed, 51 skipped, 25 failed in 12 unrelated files.  `npm run build` exit 0.  After the CI follow-up: `npx tsc --noEmit` exit 0.  `npx vitest run test/disable-pr-automerge.test.ts test/shared-package-pin-check.test.ts test/automerge-gate-dry-run.test.ts test/branch-protection-gate.test.ts test/pr-touches-codeowners-paths.test.ts` 32 passed.  `npx eslint` on the touched JS and tests: 0 errors.
+
+**Next.**  PR #4697 stays ready for review with `do-not-automerge`.  Do not enable auto-merge.  Owner squash-merges.  #4727's disable permissions and jq reader are on this branch.  Jay can close #4727.  Leave ST-3326 In Progress until the fix has shipped.
+## 2026-10-15 MM — Coolify st-pull-guard (board `2c6a6a53` / ST-3707)
+
+**What.**  Fixed the latent cause of the 2026-09-25 5.3-minute P0 on the box.  ST/UM use the Dockerfile build pack, so the image is built on the box and tagged `{application_uuid}:{commit}`, with no copy in any registry.  Compose's default `pull_policy` is `missing`, so when that tag is not local `docker compose up` itself resolves it as `docker.io/library/<uuid>` and fails.  Coolify stops the old container before that, so prod was already down when the registry said no.  (Corrected 2026-10-15: ST goes through `deploy_dockerfile_buildpack()`, which never calls `pull_docker_compose_images()`, so that pre-flight pull was not the cause.)
+
+**Fix.**  Two minimal edits to the vendor job.  **`pull_policy: never` for a local-only tag (Dockerfile pack, no registry image, no `/` in the tag) is the one that protects ST**, verified on deploy #4587's generated compose.  The companion edit skips `pull_docker_compose_images()` for the Dockerfile pack but is inert: that method is reached only from the `dockercompose` path, where the condition cannot be true, and ST/UM never reach it.  `congress-trade` uses the `dockercompose` pack and is deliberately unchanged.  Shipped as `scripts/ops/coolify-st-pull-guard.sh` (idempotent `apply`/`verify`/`revert`) plus `scripts/ops/coolify-st-pull-guard.selftest.sh`.
+
+**Applied live on `fleet-hetzner-nbg1` at 08:17Z.**  Pristine replay produces post-patch sha256 `1226ed9ccd47daa3`, identical to the installed file.  Congress deploy #4584 at 08:18Z exercised the patched path and correctly stood the guard down.  `/api/live` and `/login` both 200 throughout; no prod container was stopped or bounced, only the Coolify `horizon` worker was reloaded.
+
+**⚠ Re-apply after ANY Coolify version change.**  This patches a vendor file inside the container and is wiped by any upgrade/recreate.  The scheduled 4.3.23 → 4.4.6 upgrade FAILED at 2026-10-15T00:00:19Z (containerd `lease does not exist`) and is still pending, so it will wipe this.  Run `scripts/ops/coolify-st-pull-guard.sh verify` after upgrading.
+
+**Do NOT "fix" this by adding a Docker Hub credential or setting `pull_policy` to pull.**  There is no `/root/.docker/config.json` by design; an authenticated pull of a nonexistent repo returns `pull access denied, insufficient_scope`, the exact outage signature, and fixes nothing.
+
+**Open, needs owner action:** (1) fix the Coolify 4.4.6 upgrade, then re-apply the guard; (2) mint a new `COOLIFY_AGENTS` token — it returns `Unauthenticated` on every endpoint, so fleet tooling that drives Coolify by API is dead.
+
+**Branch.**  `minimax/st-pull-guard`  ·  Rollout `docs/rollouts/2026-10-15-coolify-st-pull-guard.md`
+
+## 2026-10-15 Cursor Cloud — quote observation and unknown-age gate (ST-2584)
+
+**What.**  Each provider keeps its own quote timestamp.  The price is last, then a two-sided mid.  A size, a one-sided book, and a prior close are not the price.  Unknown age blocks an opening.  Known-old quotes still convert to a limit.  Tradier paper and live both trade off Tradier quotes, with no Alpaca or Yahoo overlay.  Alpaca last prints use Alpaca's own latest-trades call.  No new vendor.
+
+**Branch.**  `cursor/quote-observation-staleness-99f5`
+
+**Verification.**  Merged `origin/main` through `2a2fb150` (clean, no quote-path conflict; lint 0 errors, `tsc --noEmit` clean, 16 focused vitest files 446 passed and 9 skipped).  Earlier, merged through `d1053ad6`: the three broker-call-bound conflicts (eToro, Kalshi, Public quote reads) kept main's chunked, abort-signalled fetches and this lane's observation helpers.  The four fail-closed review threads are explained on the PR and resolved.  Detail: `docs/rollouts/2026-10-15-quote-observation-staleness.md`.
+
+**Next.**  Owner ruling 2026-10-17: merge unless the owner is needed.  `do-not-automerge` only stops auto-merge, so the sweep squash-merges directly once CI is green.
+
+## 2026-10-15 Cursor Cloud — auto-merge money-path gate (ST-3326)
+
+**What.**  `auto-merge-prs.yml` was fail-closing every PR because `gh api --jq -r` is two arguments, so CODEOWNERS money-path globs never ran.  The fetch is one `--jq` expression.  Money-path diffs and `do-not-automerge` are not armed.  Disable retries a rejected PAT with the Actions token.  If that mutation is forbidden (`Resource not accessible by integration`) the job still succeeds when `autoMergeRequest` is already null, and fails when the PR is still armed.  Disable jobs grant `contents: write` so the Actions token can call the disable mutation.  The arm job stays read-only.
+
+**Branch.**  `cursor/automerge-money-path-gate-c050` (PR #4727).  Parallel to PR #4697; this lane keeps per-job `contents: write` on disable jobs and the `confirm_disarmed_or_fail` read path in `scripts/disable-pr-automerge.sh`.  Merged `origin/main` at `3f4ef5e5` (2026-10-15 conflict sweep).
+
+**Verification.**  Targeted vitest 25/25 (`disable-pr-automerge`, dry run, branch-protection gate, CODEOWNERS classifier).  Dry run: `src/lib/broker.ts` and `do-not-automerge` print `arm=false` `disarm=true`; `README.md` prints `arm=true`.  `npx tsc --noEmit` exit 0.
+
+**Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  GB-Deployer merges.  Rotating the rejected `GH_PAT` / `SHEPHERD_TOKEN` stays ST-4393.  Until that token works, non-money-path arming still no-ops with an error, and an already-armed money-path PR fails the disable job instead of landing.
+## 2026-10-15 Cursor Cloud — ST-3988 congress-share dependency DB health
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd (reconcile + #4716)
+
+**What.**  Merged `origin/main` at `e3ba1507` (#4716) locally (`b235b08f`), then merged remote `dc81c55a` (prior shepherd merge of `49a76da4` / #4695) so parallel pushes stay one line.  No source conflicts; GitHub was `DIRTY` until both tips were integrated.  Zero unresolved review threads.  `needs-human-merge` for Jay.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  Six PR-touched vitest files: 215 passed.  Full `npm test` in cloud shell: 25 failed (environmental; not in PR diff vs `origin/main`).  `npm run build` pass (43/43 static pages).  Pushing for hosted `verify`.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Hosted `verify` green on pushed HEAD.  Jay squash-merges when ready.
+
+## 2026-10-15 CURSOR — PR #4661 merge main #4695
+
+**What.**  GitHub `CONFLICTING` / `DIRTY`: `main` advanced to `49a76da4` (#4695 Congress push receipt ST-3846) while PR base was `e3ba1507`.  Merged `origin/main` clean (auto-merge `STATUS.md` only).  Zero unresolved review threads.  `needs-human-merge` — Jay merges.
+
+**Verification.**  Head `dc81c55a`.  Hosted `verify` green.  `mergeable: MERGEABLE`.
+
+**Traceability.**  PR #4661.  Linear ST-4538.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for `verify` green.
+
+## 2026-10-15 CURSOR — PR #4661 merge main #4716
+
+**What.**  GitHub showed `mergeable: CONFLICTING` / `DIRTY` because `origin/main` advanced to `e3ba1507` (#4716 iOS ASC credentials) while PR base was `2075c857`.  Merged `origin/main` with no conflicts (auto-merge PLAN/STATUS only).  Zero unresolved review threads.  PR ready; `needs-human-merge` for Jay.
+
+**Verification.**  Head `9423d228`.  Hosted `verify` green (run `38739241980`).  `mergeable: MERGEABLE`.
+
+**Traceability.**  PR #4661.  Linear ST-4538 (claimed CURSOR).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for `verify` on new merge commit.  Jay squash-merges.
+
+## 2026-10-15 CURSOR — PR #4661 GB-Deployer merge main
+
+**What.**  Merged `origin/main` (`3f4ef5e5`, then `2075c857` / #4696) into `cursor/free-data-gaps-55d1` with no conflicts.  Integrated remote autofix merge and resolved rollout doc conflict (`559b213c`).  Cleared recurring GitHub `DIRTY` state by keeping branch at latest `main`.  Zero unresolved review threads.  Did not enable auto-merge (`needs-human-merge` for Jay).
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass.  Local `npm test` environmental failures only.  Head `96780798`.  Hosted `verify` green (run `38733904557`).
+
+**Traceability.**  PR #4661.  Linear **ST-4538** (filed this pass).  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Wait for hosted `verify` green.  Jay squash-merges when ready (`needs-human-merge`).
+## 2026-10-15 Codex Autofix — PR #4661 merge `origin/main`, no new bot findings
+
+**What.**  No new review items to fix.  All 16 review threads are already resolved.  The three most recent `kody-ai` comments (2026-10-15 01:48, 02:53, 03:31) are empty "review completed" summaries with zero findings, and there are no `cursor[bot]` or Codex review comments at all.  The branch was 1 commit behind `origin/main` and GitHub reported `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY`, which blocked the required `verify` gate and therefore auto-merge.  Merged `origin/main` (`3f4ef5e5`, PR #4698 honest approve) with no conflicts; `git merge-tree` and a trial merge both confirmed the merge is clean, so the GitHub `CONFLICTING` flag was stale.  Both sides' `STATUS.md` and `PLAN.md` entries survived the auto-merge.  No code changes were needed.
+
+**Verification.**  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 13 failed, 9400 passed, 51 skipped, 835 files.  All 13 are in `test/llm-provider.test.ts`, `test/chat-llm.test.ts`, `test/framework-review.test.ts`, and `test/openrouter-credits.test.ts`, which assert "no LLM key configured" but this sandbox exports an `OPENROUTER_API_KEY` (value redacted).  Re-running those same 4 files against pristine `origin/main` in a separate worktree reproduces exactly 13 failed / 47 passed, so the failures are environmental and pre-existing.  None of the 4 files is in the PR diff.  `npm run build` pass (compiled, finished TypeScript, 43/43 static pages).  `npm run lint` not re-run in this shell; hosted `verify` is the merge gate.
+
+**Traceability.**  PR #4661, branch `cursor/free-data-gaps-55d1`.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Auto-merge re-enabled so the PR lands once hosted `verify` is green on the merged HEAD.  Round cap is 7 of 10 `[codex-autofix]` commits.
+
+## 2026-10-15 CURSOR — PR #4661 GB-Trader shepherd
+
+**What.**  `origin/main` at `df7e6d10` is already merged.  Pushed local merge commits `1dc39c4e` and `5ee168ce`.  Fixed Kody Rule 35 on `docs/rollouts/2026-10-14-free-data-gaps.md` (verification block now records `npm run build` pass).  Replied on open review threads and resolved them after written explanations for merged-main `PLAN.md` rows without inventing board hashes.
+
+**Verification.**  `npm run lint` pass (0 errors).  `npx tsc --noEmit` pass.  `npm run build` pass (43/43 static pages).  Hosted `verify` green on `4c54d236` (run `38724409519`, job `verify-hosted` + required `verify`).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  GraphQL shows 0 unresolved review threads on the PR.  Deployer or Jay merges when satisfied.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  `git merge origin/main` was already up to date at `2656320f`.  No conflicts and no migration renumber.  Two unresolved Kody threads remain.  `PRRT_kwDOS7mOVM6sl4tA` asks for a board hash on the SQLite hygiene row (`cursor/sqlite-storage-hygiene-181a`, PR #4666).  `board list --app socratic-trade --search "storage hygiene"` returns nothing, and the hygiene rollout records that the fleet board claim was blocked.  `PRRT_kwDOS7mOVM6sms8E` asks for a board hash and a PR id on the Tradier sandbox rows.  Those rows now cite PR #4668 and state that no board reservation is on file.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later #4668 shepherd note, so it was not used as the feature reservation.  No hash was invented.  Neither thread was resolved.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.  `.github/workflows/autofix.yml` still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` was not re-run.  Hosted `verify` on `d4a22063` passed lint, tsc, `npm test`, and build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on both open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4668
+
+**What.**  Merged `origin/main` (`2656320f`, PR #4668 Tradier sandbox HTTP 400) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  One unresolved review thread, `PRRT_kwDOS7mOVM6sl4tA` (kody-ai), on the SQLite storage hygiene `PLAN.md` row.  The same note names the hygiene section in `STATUS.md`.  Those rows already match `origin/main`.  `board list` finds no reservation for that effort.  The hygiene rollout records that the fleet board claim was blocked.  This pass did not invent a hash and did not resolve the thread.  Required checks on `a45a2b60` were green.  `.github/workflows/autofix.yml` matches `origin/main` and still fails before any job on review events.  `gh run view --log-failed` has no job log.  Review events read that workflow from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9392 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass.  It compiled, finished TypeScript, and generated 43/43 static pages.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Reply on the open thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4666
+
+**What.**  Merged `origin/main` (`a3d21b73`, PR #4666 SQLite storage hygiene) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  GraphQL review threads were 12 resolved, then Kody opened one new thread on `PLAN.md` (`PRRT_kwDOS7mOVM6sljq3`).  That thread asks for a board reservation on the five PR #4665 rows.  Those rows match `origin/main` and this branch did not author them.  STATUS, the XBRL rollout, and the #4665 squash message cite no authorizing reservation.  The only board row for that PR is `cce9cf96`, a review-finding filed during the review, so it was not attached.  This pass did not resolve the thread.  This PR's own PLAN rows now cite board `b53cc5f8970c469e8f561767c35fc334`.  Hosted `verify` on `22d87ce1` finished lint, tsc, `npm test`, and build green and was in post steps when the merge landed.  PR Autofix still fails before any job on review events.  The caller matches `origin/main`.  Review events read the workflow from the default branch.  Coordinator `main` (`6833ed42`) still has `secrets` in the step `if` at `pr-autofix-reusable.yml` line 163.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9368 passed, 51 skipped, 831 files.  `test/egress-guard.test.ts` rejects discord.com because this sandbox resolves it to `198.18.0.1`, which the guard treats as benchmark space.  `test/data-catalog-completeness.test.ts` sees `peRatio` completeness 1 from the local database.  Neither file is in the diff against `origin/main`.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Reply on the open thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4665
+
+**What.**  Merged `origin/main` (`e80386d7`, PR #4665 SEC XBRL companyfacts cache) into `cursor/free-data-gaps-55d1` with no conflicts and no migration renumber.  Shared files kept the Form 4 User-Agent and the 90-day insider window together with the companyfacts cache.  GraphQL review threads: 12 total, 0 unresolved.  No thread was replied to or resolved on this pass.  Hosted `verify` on `403e0be7` passed, including lint, tsc, `npm test`, and build.  PR Autofix workflow runs still fail before any job on review events.  The caller matches `origin/main`, and review events read it from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 854 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 1 failed, 9355 passed, 51 skipped, 830 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  That file is not in the diff against `origin/main`.  `npm run build` pass (compiled, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Push the merge.  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4658 and verification order
+
+**What.**  Merged `origin/main` (`1588bae8`, PR #4658 keyless options enrichment) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  All 12 review threads were already resolved.  The newest Kody note still flagged the rollout verification block: an extra test command sat between `npm test` and `npm run build`, and two build lines were not labeled pass or fail.  Every block is now lint, tsc, `npm test`, and build, each with pass or fail in that order.  This pass did not resolve any thread.  PR Autofix still fails before any job on review events.  `pr-autofix-reusable.yml` line 163 still uses `secrets` in a step `if` on coordinator `main` (`7508b399`) and on the pin `2e671004`.  The caller matches `origin/main`, and review events read it from the default branch.
+
+**Verification.**  `npm run lint` pass (0 errors, 866 warnings).  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9342 passed, 51 skipped, 829 files.  Failures are `test/egress-guard.test.ts` (this sandbox resolves discord.com to a private or internal address) and `test/data-catalog-completeness.test.ts` (`peRatio` completeness 1 from the local database; 4 passed on an empty database).  Neither file is in the diff against `origin/main`.  Hosted `verify` passed on `7f3ff8fa`.  `npm run build` pass.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the verification thread and do not resolve it.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 merge #4663 and review follow-up
+
+**What.**  Merged `origin/main` (`82162336`, PR #4663 halt-cause batch) into `cursor/free-data-gaps-55d1` with no conflicts.  No migration renumber.  The two open Kody threads are real.  Rollout verification blocks now list `npm run lint`, `npx tsc --noEmit`, `npm test`, and `npm run build` in that order, each with a pass or fail.  `parseInsiderBulkTables` tests assert every returned filing passes `BulkInsiderFilingSchema`, and a rejected strict parse (undeclared key) is dropped.  Earlier review threads were already resolved.  This pass did not resolve any thread.  PR Autofix still fails before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163 at `2e671004`).  Later coordinator commits keep that line.  The caller matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` pass (0 errors, 866 warnings, before the test edit).  `npx eslint test/web-sources-sec.test.ts` pass.  `npx tsc --noEmit` pass.  `npm test` fail in this shell: 2 failed, 9318 passed, 51 skipped, 827 files.  Failures are `test/egress-guard.test.ts` (discord.com DNS) and `test/data-catalog-completeness.test.ts` (`peRatio` completeness 1).  Neither file is in this diff.  Hosted `verify` passed on `9b61310b`.  Targeted history, web-source, liveness, and halt-cause tests: 91 passed.  `npm run build` pass (compiled with the existing Edge warnings, TypeScript finished, 43/43 static pages).
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the two open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
 
 **What.**  Congress.Trade D1 `SQLITE_BUSY` import rejections no longer page as `congress-share connection failed`.  `alertConnectionFailure` routes them to `dependency-db-contention` (warning Sentry, no `provider_degraded` push).  Ops-token `/api/health` exposes `lastFailure` + `failureClass` on dependencies.
 
@@ -32,6 +655,15 @@ in `llm-provider` / `chat-llm` / `framework-review` / `openrouter-credits`, none
 PR touches.  Reproduced identically on an unmodified `origin/main` worktree — the runner has live
 LLM provider keys in its env, so the "no key configured" assertions fail there too.  Pre-existing
 environment issue, not this PR; left untouched.  All three threads resolved.  Auto-merge enabled.
+## 2026-10-15 Cursor Cloud — run-failure watchdog re-arm flake (ST-4521)
+
+**What.**  Halt marker `since` used the watchdog tick entry `now`, which could precede the halt `policy_change` audit.  `resolveRearmTimestamp` then picked an older active `policy_change` as `rearmedAt`, disagreeing with the real re-arm receipt by a few ms (flaky CI on `test/run-failure-watchdog.test.ts:298`).
+
+**Branch.**  `cursor/flaky-run-failure-watchdog-rearm-58b5`
+
+**Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  `npx vitest run test/run-failure-watchdog.test.ts` 23/23.  Targeted re-arm test 30/30.  `npm run build` ok.
+
+**Next.**  Open PR ready for review; merge via Deployer when `verify` is green.
 ## 2026-10-15 Codex Autofix — PR #4662 merge main at 3f4ef5e5, no review finding open
 
 **What.**  `origin/main` advanced to `3f4ef5e5` (ST-2582 "Approve succeeds only when the broker order is placed", #4698) while PR #4662 was open, and GitHub moved it from BLOCKED to `CONFLICTING`.  Merged main in.  One content conflict in `docs/phase-7-strategy.md` — main added the 2026-10-15 approve entry directly above this PR's 2026-10-14 embed entry — resolved by keeping both, newest first.  `PLAN.md` and `STATUS.md` auto-merged with both entries intact.
@@ -136,6 +768,8 @@ PR #4713 is merged with `origin/main` through `3b8e3e4b`.  The shared URL-cache 
 **Branch.**  `cursor/ct-fundamentals-nightly-push-bb23`
 
 **Next.**  Verify gate, open ready PR, deploy; confirm CT stream freshness after nightly run.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` through `49a76da4` (#4695 Congress push receipt, #4716 iOS ASC).  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
+**Next.**  PR #4720 ready for review.  Branch contains `origin/main` at `49a76da4`.  #4722 is still open (`needs-human-merge`); auto-merge stays off until Jay merges it.  Kody PLAN.md thread fixed (ST-2916, PR #4716 on line 2).  Compression review fixes remain in `a938fd2a`.
 ## 2026-10-15 CURSOR — Congress push delivery/consumption receipt (ST-3846)
 
 **What.**  App B webhook responses now emit `receiptVersion: 1` with explicit `delivered` + `consumed` fields; batch failures return `422` instead of silent `200`.  Congress.Trade PR parses the receipt before marking `deliveries` rows delivered.
@@ -171,6 +805,60 @@ clean, `npx vitest run test/congress-push-receipt.test.ts test/congress-trade-ev
 `origin/main` worktree — this runner has a live `OPENROUTER_API_KEY` that those tests assume
 is absent.  Pre-existing, outside this diff, left untouched.  Both remaining open threads
 resolved (Sentry's index-alignment finding verified fixed in `93da2abb`).
+## 2026-10-15 codex-autofix — PR #4707 (AUTH_SECRET literal finding)
+
+**What.**  Round 1 on `cursor/st-quiver-coverage-sanitize-8696`.  The two Kody visual-coverage threads were
+already handled in a prior round (asked, not guessed).  This round the only new threads were two instances of
+one finding: a hardcoded `PLAYWRIGHT_AUTH_SECRET` fallback string (length and value deliberately not
+recorded here per rule 35) duplicated at `playwright.config.ts:19` and `test/e2e/playwright-session.ts:6` — removed from the tree in
+concurrent-agent follow-ups (`playwright-admin-auth.ts` + CI `openssl rand`).
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Fixed by a concurrent agent while this round was in flight.**  I had intended to escalate rather than fix:
+Kody's suggested hard-throw could not be applied from a fixer seat without also setting the secret in
+`e2e.yml` (a `.github/workflows` edit), and unset it would fire on every smoke run including push-to-main.
+Another agent landed a superset fix instead — the literal is gone from the tree entirely.  The admin suite
+reads `PLAYWRIGHT_AUTH_SECRET` from env, **hard-throws under `CI`**, and falls back to a per-worktree
+`0600` random secret file locally (`test/e2e/playwright-admin-auth.ts`); the throwaway `ENCRYPTION_KEY` is
+likewise derived via sha256 instead of a literal (`test/e2e/playwright-throwaway-fixtures.ts`).  That is
+better than the suggestion: it keeps the fail-closed posture Kody wanted without a repo literal at all.
+Note it also edits `e2e.yml` (generates the secret with `openssl rand -hex 32`) — legitimate for that agent,
+out of bounds for this fixer role.
+
+**This round's own change.**  None to production source.  A local merge of `origin/main` turned out redundant
+(`main` was already merged by the concurrent work) and was dropped; the commit carries only these docs.
+
+**Thread state.**  Both AUTH_SECRET threads anchored to code that no longer exists and are outdated;
+resolved this round per protocol.
+
+**Verification.**  `npx tsc --noEmit` clean; `npm run build` clean.  `npm test` exits 1 with 13 failures across
+4 LLM-routing suites (`llm-provider`, `chat-llm`, `framework-review`, `openrouter-credits`) that reproduce
+identically on a clean `origin/main` worktree — this sandbox has provider keys injected, and those suites
+assume none.  The PR's own suites are green (28/28).  Full detail in the rollout note.
+
+## 2026-10-15 codex-autofix — PR #4707 round 2 (char-count metadata in redacted docs)
+
+**What.**  Round 2 on `cursor/st-quiver-coverage-sanitize-8696`.  All 7 threads from round 1 were
+already resolved, and each finding was confirmed addressed in the tree: the AUTH_SECRET /
+ENCRYPTION_KEY literals are gone (`test/e2e/playwright-admin-auth.ts` env-read with a hard throw
+under `CI`, per-worktree `0600` fallback locally; `playwrightThrowawayEncryptionKey()` sha256-derived),
+and the enrichment-coverage footnote has real Playwright screenshot coverage in
+`test/e2e/admin-enrichment-coverage-visual.spec.ts`.  Kody's review reports success on the head.
+
+**The one new item.**  A low-severity Kody thread flagged that the redacted-fallback description still
+recorded the literal's character count, which it read as 36 rather than the 38 the doc claimed.  Fixed by
+**dropping the count entirely** rather than correcting it — Kody's own primary recommendation, and the
+right call: the length is itself metadata about the secret, so publishing an accurate number is no better
+than publishing a wrong one.  Applied to both `STATUS.md` and the rollout note.
+
+**Verification.**  `npx tsc --noEmit` clean.  `npm test` and `npm run build` carried no source change
+this round (docs only), so CI's `verify-hosted` on the head is the authoritative gate.
+
+**Thread state.**  That single thread resolved this round per protocol; no other review-bot thread was
+left open and none was left unfixed.
+
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `e3ba1507` (#4716 iOS ASC credentials).  #4722 had not landed, so its retention rewrite is not in this branch.  Stripped accidental conflict markers from `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` that were already on main.  Review follow-up is in `a938fd2a` (codec columns, watermark after pass, framed `raw1:`, decode retry list, indexed `hasLocalFilingCopy`).
 ## 2026-10-15 CURSOR — Board 512444e3 iOS / Playwright / deploy-freshness CI
 
 **What.**  Sign-out and account switch drop the snapshot UserDefaults row, the shared URL cache, and in-memory account stores.  Device preferences stay.  Approve, reject, and cancel each report success, failed, or retryable.  The shell rebuilds on `sessionEpoch` so Coach, scan, and the other view stores do not keep the previous account.
@@ -188,7 +876,7 @@ after sourcing the handoff file.  The profile installer does the same for a stan
 local run when the file exists and the variable is unset.  Kody confirmed the rule 33
 fix on the review thread.
 
-**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Agent-Sync).
+**Linear.**  **ST-2916** (`512444e3-f147-4bca-9c03-a51e53b109cd`) — claimed **CURSOR**, status **addressed**, PR #4716 linked in issue comment (Ag***-S**c).
 
 **Next.**  PR #4716: rule-33 fix (no implicit ~/.secrets in resolveAscCredentials; ASC_SECRETS_ENV).  The profile installer exports ASC_SECRETS_ENV for standalone local runs.  GB-Deployer squash-merge when `verify` green; ST-2916 **completed** on merge.
 
@@ -227,13 +915,15 @@ this sandbox's ambient env, not this PR.  `node --test scripts/ios-fleet/asc-api
 belongs in its own PR spanning `ship-testflight.sh`, `appstore-connect.env.example`,
 `check-drift.sh`, the `ios-fleet.sha256` pin, and `test-ship-seq.sh` (tracked as OPS-13).
 GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on merge.
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — ST-4531 retire Slack callers
 
-**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `agent-sync-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
+**What.**  PR #4696 merged to `main` (Slack ops callers → Zulip / `ag***-s**c-fleet-post.sh`; Infisical Zulip triple via `infisical-secrets-safe.sh get` in Actions).  Follow-up branch fixes rollout merge-conflict markers left on `main`, adds regression tests, and answers post-merge Kody threads on #4696.
 
 **Branch.**  `cursor/st-4531-retire-slack-callers-89ad` (post-merge follow-up).
 
-**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
+**Verification.**  `vitest run test/github-actions-infisical-zulip-ops.test.ts test/ag***-s**c-fleet-post.test.ts test/infisical-secrets-safe.test.ts`; `npm run lint`; `npx tsc --noEmit`; `npm run build`.
 
 **Next.**  PR #4733 ready for merge after its required checks are green; Refs ST-4531.
 
@@ -242,6 +932,10 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 
 **Next.**  PR #4696 — Kody CHANGES_REQUESTED cleared on branch; Deployer merge when `verify` green; Refs ST-4531.
 
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
+
+**Autofix round.**  Last open review item was the empty-string branch of the codec (`if (!plain) return plain`), which no test covered.  Added a case asserting all four entry points return `""` and that the sync and async encoders agree.  `npx tsc --noEmit` clean.  `npm run build` exit 0.  `npm test` 13 failures, all in the pre-existing LLM-key suites (chat-llm, framework-review, llm-provider, openrouter-credits); none import the codec.
 ## 2026-10-15 Cursor Cloud — check-pin token order (ST-2582 PR #4698)
 
 **What.**  Merged `origin/main` (`df7e6d10`) with a merge commit.  `check-pin` was failing because it read public Congress.Trade with `GH_PACKAGES_TOKEN` first.  That secret is one user's PAT, so a burst of pull requests shares one rate limit and the job reports a missing token.  The script now tries the Actions installation token first and keeps the PAT as a fallback.  A rate-limit failure is no longer labeled as a missing token.
@@ -259,6 +953,15 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  Targeted vitest 64/64.  `npm run lint` 0 errors, 854 warnings.  `npx tsc --noEmit` ok.  `npm test` 9385 passed, 51 skipped, 24 failed, all outside this diff (sandbox LLM keys and host checks).  `npm run build` ok.  Detail: `docs/rollouts/2026-10-15-honest-approve-retryable.md`.
 
 **Next.**  Ready PR with `do-not-automerge`.  Do not enable auto-merge.  Jay squash-merges.
+**Next.**  PR #4720 ready for review.  Merged `origin/main` at `df7e6d10`.  #4722 had not landed, so its retention rewrite is not in this branch.  Review follow-up: codec columns so the backfill does not scan blobs, watermark after a successful pass, framed `raw1:` lengths, re-embed keeps a decode retry list, and `hasLocalFilingCopy` is one indexed length check.
+## 2026-10-15 Cursor Cloud — withhold stale EOD on the Congress.Trade wire (ST-3845)
+
+**What.**  A price series or the S&P series whose newest close is behind `latestCompletedTradingSessionEtKey` is no longer pushed to Congress.Trade.  `GET /api/market/prices` and `GET /api/market/spx` return 502 `{ ok: false, error: "stale" }` for that tail so Congress.Trade falls back.  A confirmed empty series stays HTTP 200.  The push writes `congress_share_stale_price_withheld`.  PR #4009 still only stops a stale import from beating a live source.
+
+**Branch.**  `cursor/stale-eod-wire-ed52`.  Linear ST-3845.  Claim moved from GROK (2026-09-30, no implementation) under the sweep rule.
+
+**Next.**  Ready for review.  Deployer ships.  Do not mark completed until merge.
+
 ## 2026-10-15 Cursor Cloud — Congress.Trade push receipt (ST-3846)
 
 **What.**  Congress.Trade gap-fill pushes to `POST /api/admin/securities/import` now carry a push id.  The response is an idempotent receipt: delivered ack, consumed ack, and `health`.  A replay of an ok receipt with the same payload does not write the cache again.  The same ok id with a different payload is 409.  A non-ok receipt is replaced on retry.  A missing ack is audited, written to the `congress-inbound-push` health lane, and paged on the first occurrence.  `GET /api/ops/snapshot` reports `congressInboundPush`.  Congress.Trade alerts when the receipt is missing either ack.
@@ -276,6 +979,35 @@ GB-Deployer squash-merge once the thread is resolved; ST-2916 **completed** on m
 **Verification.**  `npm run lint` 0 errors.  `npx tsc --noEmit` ok.  Scheduler startup tests 21/21.  `npm run build` ok.  Full `npm test`: 24 failures pre-existing in this sandbox (unchanged vs unrelated suites).
 
 **Next.**  Open ready PR, `@kody start-review`.
+## 2026-10-15 CURSOR — ST-3854 Quiver coverage board (sanitize legacy reports)
+
+**What.**  #4217 already excluded five retired Quiver lanes from `COVERAGE_TRACKED_FIELDS`.  Follow-up: `sanitizeEnrichmentCoverageReport` on `resolveEnrichmentCoverageReport` so durable pre-merge rows no longer show 0% Quiver fields; `retiredLaneFields` on reports + admin footnote.
+
+**Branch.**  `cursor/st-quiver-coverage-sanitize-8696`
+
+**Verification.**  Rebased on `main`; Playwright visual baseline for retired-lanes footnote; `verify` CI green after push.
+
+**Next.**  Deployer merges #4707; then CURSOR marks ST-3854 Done via Ag***-S**c (not before merge).
+## 2026-10-15 Cursor Cloud — transcript and companyfacts gzip, RAG review
+
+**What.**  `earningscalls_transcripts.content` and the companyfacts JSON cache in `sec_facts.segment` now store `gz1:` (base64 gzip) or `raw1:` when gzip does not shrink the text.  Every reader of those bodies decodes first.  FTS still indexes plaintext.  A leader lane backfills in place and does not delete.  `audit_events.payload` stays plaintext because the hash chain and `json_extract` readers are not one path.  `post_mortem_reflection` is no longer age-pruned.  Review: `docs/reviews/2026-10-15-rag-storage-expert-panel.md`.
+
+**Branch.**  `cursor/text-payload-compression-3897`
+
+**Verification.**  Targeted vitest 22/22 plus transcript/reembed/hydrate/local-complete/memory-decay 75/75.  `npx tsc --noEmit` clean.  eslint on touched files 0 errors.  `npm test` 9379 passed, 51 skipped, 25 failed in unrelated suites (llm keys, notify, server-metrics, cpuprofile, alpha-vantage, data-providers).  None import the new codec.
+
+**Next.**  PR #4720 ready for review.  `npm run build` exited 0.
+## 2026-10-15 Cursor Cloud — ESLint 10 verify unblock (board d428460a)
+
+**What.**  Renovate `eslint` v10 failed `verify` when the lockfile left `eslint-config-next@16.3.8` (PR #4325).  Rebased lock with `eslint-config-next@16.4.0` passes lint; grouped `eslint` + `eslint-config-next` in Renovate to avoid stale-preset repeats.
+
+**Branch.**  `cursor/block-eslint-10-renovate-5081` — PR #4710 (ready; supersedes #4691)
+
+**Verification.**  Branch contains `origin/main` at `308cdcec` (2026-10-16 GB-Deployer follow-up).  Head `708ea785`.  `npm run lint` 0 errors; `npx tsc --noEmit` ok.  CI run 38870215394: `verify` + `verify-hosted` + gitleaks + Kody green.
+
+**Next.**  Jay human squash-merge (`needs-human-merge`); close #4691.  Auto-merge disarmed.
+
+**Linear.**  ST-4535 (claimed CURSOR, **Addressed** / In Review) — board `d428460a`.
 
 ## 2026-10-15 Cursor Cloud — storage hygiene keep market history
 
@@ -314,7 +1046,7 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **What.**  PR #4668 merged a 15-minute sandbox order deferral.  Sandbox quotes are 15 minutes delayed, and Tradier orders price off those quotes, so the window is now 16 minutes after the regular open (9:46am ET).  `checkBrokerHealth` skips the strategy run before any broker read.  Equity, bracket, and option posts still throw before any POST.  Live Tradier is unchanged.  This follow-up is branched from current `main` so the merged tag-lookup work stays.
 
-**Branch.**  `cursor/tradier-sandbox-open-16-cea2`
+**Branch.**  `cursor/tradier-sandbox-open-16-cea2`  (PR #4685, merged as `174cc06eb`, no board reservation on file)
 
 **Verification.**  `npm run lint` exited 0 (0 errors, 854 warnings).  `npx tsc --noEmit` exited 0.  Targeted vitest on `test/tradier.test.ts`, `test/placement-outcome.test.ts`, and `test/broker-health-auto-pause.test.ts` was 116 passed.  Full `npm test` was 9372 passed, 51 skipped, and 25 failed.  None of the failures are in the Tradier, placement, or broker-health files.  `npm run build` exited 0.
 
@@ -436,6 +1168,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 
 **Docs.**  `docs/rollouts/2026-10-14-tradier-sandbox-open-400.md`, `STATUS.md`, `PLAN.md`, `docs/phase-7-strategy.md`.
 
+**Traceability.**  PR #4668.  No board reservation is on file for this effort.  Sweep report `f5bdb15c09cf44cb903df6364d56c406` is a later shepherd note and is not the feature reservation.
+
 **Next.**  `do-not-automerge`.  Jay squash-merges.  Do not merge from this lane.  Linear team `ST` was not updated: this seat has no Fleet Linear credentials.
 ## 2026-10-14 GROK — SQLite storage hygiene
 
@@ -444,6 +1178,8 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  `npm test` was 1 failed, 9341 passed, 51 skipped.  The failure is sandbox DNS for discord.com in `test/egress-guard.test.ts`, outside this diff.  Targeted `test/sqlite-storage-hygiene.test.ts` was 14 passed.  `npm run build` ok.
 
 **Docs.**  `docs/rollouts/2026-10-14-sqlite-storage-hygiene.md`, `STATUS.md`, `PLAN.md`.
+
+**Traceability.**  PR #4666.  No board reservation is on file.  The hygiene rollout records that the fleet board claim was blocked.
 
 **Next.**  Label `do-not-automerge`.  Jay squashes.  Do not merge from this lane.  Linear team ST was not updated: this cloud seat has no Fleet Linear or Zulip credentials.
 ## 2026-10-14 Grok — PR #4665 merge #4658
@@ -596,6 +1332,35 @@ all pre-existing (reproduced identically with these changes stashed; this sandbo
 **Docs.**  `docs/rollouts/2026-10-14-fleet-fully-dark-detector.md`, `STATUS.md`.
 
 **Next.**  Land PR; after deploy watch SOCRATIC-TRADE-2S for new events.
+## 2026-10-14 GROK — PR #4661 main merge and Form 4 schema
+
+**What.**  Merged `origin/main` (`79df823d`, motion lockfile only) with no conflicts.  `BulkInsiderFiling` is now `z.infer` of the exported strict `BulkInsiderFilingSchema`, and the handwritten interface is gone.  An extra key fails the parse.  The earlier review fixes stay: the current-quarter ZIP is the only bulk coverage flag, Yahoo's abort timer starts after the pacer slot, a confirmed listing start stops the 30-minute refetch, and the 1825-day default stays.  PR Autofix runs still fail before any job.  The pinned reusable workflow uses `secrets` inside a step `if` (`pr-autofix-reusable.yml` line 163).  That caller file matches `origin/main`, and review events read it from the default branch, so a pin change on this branch does not clear those runs.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 68 passed.  Full `npm test`: 1 failed, 9311 passed, 51 skipped, 826 files.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334`.  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Reply on the open threads and do not resolve them.  Ask Kody to re-review.  Do not merge from this lane.
+
+## 2026-10-14 GROK — PR #4661 review follow-up
+
+**What.**  Merged `origin/main` (already contained; branch was not behind).  The current-quarter Form 4 ZIP is the only bulk coverage flag, so a previous quarter no longer skips the watchlist.  The same accession keeps the larger bulk or XML dollar, share, and transaction totals.  Yahoo chart timeouts start after the pacer slot is acquired.  A fresh series whose listing starts inside the five-year window is not refetched every memory-cache TTL.  Twelve Data and the Form 345 rows are Zod-checked before they are stored.  The 1825-day default stays.  It was already the start date on main, and shortening it would let Massive's two-year series win again.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings).  `npx tsc --noEmit` ok.  Targeted history and web-source tests: 67 passed.  Full `npm test`: 1 failed, 9310 passed, 51 skipped.  The failure is `test/egress-guard.test.ts` resolving discord.com.  This shell has no DNS for that host, and the file is not in this diff.  Follow-up `npm run build` compiled with warnings in 82s, then the process was killed (exit 137) during Next.js "Running TypeScript".  Standalone `tsc --noEmit` had already passed.  Hosted `verify` runs the real build.
+
+**Traceability.**  PR #4661.  Board `b53cc5f8970c469e8f561767c35fc334` (claimed, in progress).  Rollout: `docs/rollouts/2026-10-14-free-data-gaps.md`.
+
+**Next.**  Ask Kody to re-review.  Do not merge from this lane.  Do not resolve review threads from this lane.
+
+## 2026-10-14 GROK — Free data gaps (history, Form 4, Senate eFD)
+
+**What.**  Requests longer than 730 days skip Massive and try Yahoo chart `range=max` (paced), then Tradier, then Twelve Data.  `history_cache_eod` stays a permanent upsert; a fresh series is served offline only when it covers the requested start.  Nightly insider refresh loads the SEC quarterly Form 4 ZIP plus the atom delta, scores dollar-weighted open-market buys and sells over 90 days, and no longer caps the atom feed at 60 or the watchlist at 20.  When Congress.Trade fails or returns no trades, the congress source falls back to Senate eFD.  Quiver is not called.
+
+**Verification.**  `npm run lint` ok (0 errors, 866 warnings on the first pass).  `npx tsc --noEmit` ok.  Full `npm test`: 29 failed, 9278 passed, 51 skipped.  Six failures were this diff (share-weighted insider score, and `secUserAgent` missing from two HTTP mocks) and those three files re-ran at 144 passed.  The other 23 are this shell (OpenRouter key, notify credentials, Node 22 `.ts` load, local-host metrics, Alpha Vantage fetch count).  `npm run build` ok.
+
+**Docs.**  `docs/rollouts/2026-10-14-free-data-gaps.md`, `docs/phase-4-market-data-scoring.md`, `docs/phase-9-web-sources.md`, `STATUS.md`, `PLAN.md`.
+
+**Next.**  Ready for review.  Do not merge from this lane.  Linear team ST was not updated if fleet credentials are missing on this cloud seat; that blocker is in the rollout.
 
 ## 2026-10-14 GROK — PR #4609 verification order
 
@@ -1006,7 +1771,7 @@ rollout note and the schema file.
 
 **Verification.**  Touched files: `npm run lint` 0 errors; `npx tsc --noEmit` clean.  CI `verify` then runs full `npm test` and `npm run build` (no "Attempted import error", no Edge `Module not found` for `@sentry/node`).
 
-**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, agent-sync claim) until Jay or a Mac seat clears them.
+**Next.**  Tip `8425497f` (`608ae672` rebase onto `origin/main` with `--force-with-lease`, plus fleet-recall citations).  `verify` + `verify-hosted` green on `608ae672`; CI re-running on `8425497f` (docs-only).  Remaining merge blockers: unresolved Kody defer threads (Mac live ledger mirror, GitHub issue reservation, ag***-s**c claim) until Jay or a Mac seat clears them.
 ## 2026-10-05 CURSOR — EOD close plausibility (board feab5c88, branch `cursor/eod-close-plausibility-4676`)
 
 **What.**  Congress-share export schemas now reject `close <= 0` on `spx` and nested `prices[].closes` before CT import (`CongressSharePriceCloseSchema` / `CongressSharePriceSeriesSchema`).  `ohlcBarsToCloses` already filtered non-positive closes on `main`.
@@ -1053,7 +1818,7 @@ rollout note and the schema file.
 
 **What.**  Board `77590d59` (GROK in_progress), issue #3888 / PR #4212: harden `isTradierOrderNotFound` — `^Tradier HTTP 404`, or `^Tradier HTTP 422:` with body-prefix order not-found / bare `not found`; reject incidental or echoed 422 prose on other statuses (incl. 502 echo fixture); lookup tests + stale `cancelBracketSiblingLegs` comment only.
 
-**Coordination.**  AGENT-SYNC.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#agent-sync` post is recorded from this cloud follow-up pass.
+**Coordination.**  AG***-S**C.md applies to new effort claims; this row tracks board/issue scope only (reservation already on live board).  No retroactive `#ag***-s**c` post is recorded from this cloud follow-up pass.
 
 **Verification.**  CI `verify` on PR #4212 is the merge gate.
 
@@ -1086,7 +1851,7 @@ rollout note and the schema file.
 
 ## 2026-10-06 CURSOR — PR #4164 Kody tip-fix (branch `grok/lexical-fts-off-event-loop`)
 
-**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #agent-sync post from this cloud VM.
+**Claim.**  `repo: Simple-With-Us/Socratic-Trade`  `issue: #4213`  `board: f50c66930a124233b28563e7967b9ac7`  `pr: #4164`.  No Slack #ag***-s**c post from this cloud VM.
 
 **What.**  Merged `origin/main` (#4218 RTH stall bounds, #4241 effort sync).  Kody: interpolate `WORKER_BIND_UNION_SOURCE` into `WORKER_SOURCE` so worker bind validation cannot drift from `SqliteBindSchema`.  Kody: malformed terminal worker replies call `settleReject` with `terminalWorkerReply` so execution reclaim does not kill an idle worker after 15s.
 
@@ -1500,7 +2265,7 @@ Rollout: `docs/rollouts/2026-09-25-st-rh-min-and-hold-reasons.md`.
 Independent review of merged PR #3786 raised one finding (P2): the report published dollar-level
 realized P&L and balance/drawdown history for the owner's real live accounts (Roth IRA, Agentic,
 Sandbox/Tradier) into `docs/reviews/2026-09-25-trading-performance-report.md`, and this repo
-(`jaywedgeworth22/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
+(`Simple-With-Us/Socratic-Trade`) is public.  Verified real: `gh repo view` confirms
 `isPrivate: false`, and every dollar figure the finding cited is present verbatim in the merged
 doc.  Declined as a code/content defect — this exact unchanged copy was the lane's own explicit
 instruction, it matches existing published precedent (Roth IRA dollar caps already public in
@@ -2098,7 +2863,7 @@ the narrative round label and the cap count are off by one here, and the rollout
 that explicitly.  **5 of 10** against the cap.
 
 Also recorded: Codex cited commit `22efe659` as its fresh evidence for (a).  That SHA resolves
-nowhere (`gh api repos/jaywedgeworth22/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
+nowhere (`gh api repos/Simple-With-Us/Socratic-Trade/commits/22efe659` => HTTP 422 "No commit
 found for SHA") and is not one of the PR's six commits.  The finding was still correct on its
 merits, verified independently against the repo's squash settings and the PR's commit subjects,
 so it was fixed rather than disputed.  Documentation only — no source, dependency, or lockfile
@@ -3245,7 +4010,7 @@ COMPLETED (merged to `main`) #3103 squash `64a06e78`.  #3102 squash `df75ca6f` l
 
 ## 2026-08-25 CURSOR — AppUpdatePrompt Apple IDs off Swift (live DealDex net.dealdex)
 
-COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` and the local `ios-app-versions.json` mirror.  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
+COMPLETED (merged to `main`) #3102 squash `df75ca6f`.  One pinned `AppUpdatePrompt.swift` stays the ios-fleet copy.  Dropped `knownAppleIds` (stale `online.dealdex`).  Prompt reads versions / `appleId` from `jaywedgeworth22/ios-app-versions` at that date and the local `ios-app-versions.json` mirror (manifest later moved to `Simple-With-Us/AI-Fleet-Coordinator` `site/ios-versions.json` on 2026-09-03 per `docs/rollouts/2026-09-03-ios-versions-home.md`).  `apps.json` live DealDex is `net.dealdex` 6802474288.  Do not treat `online.dealdex` as live.  Do not upload `me.grok.dealdex`.  No Swift package.  No `testers.json`.  No `--force-ship`.  No spend.  Hosted `ios-build` `32808123472` ** TEST SUCCEEDED ** (242/0).  Generated pbxproj leftover is the stanza above.  Rollout: `docs/rollouts/2026-08-25-app-update-prompt-apple-ids.md`.
 
 ## 2026-08-25 CURSOR — Playwright smoke: dismiss ConsentGate before More
 
@@ -3886,7 +4651,7 @@ Branch `cursor/deploy-freshness-ocr-isolate-d4cf`.  PR #2796.  Rollout:
 P0 silent-freeze class from 2026-08-06: Coolify SSH exec died mid-build while
 webhooks stayed 200 and `/api/health` stayed green on the old sha.  This branch
 adds a 20-minute freshness cron (oldest undeployed main commit >1h pages
-Sentry / optional `#agent-sync`) and a dry-run-default `docker update` CPU cap
+Sentry / optional `#ag***-s**c`) and a dry-run-default `docker update` CPU cap
 for CT OCR/scan workers that never restarts and never touches ST.  Remaining
 host constraint: durable isolation is Coolify/CT-repo; this repo cannot set
 those or a Coolify retry-on-255.  Did not touch prod.
@@ -4747,7 +5512,7 @@ Fix on `grok/stop-ghost-native-keys`, issue #2728 / PR #2729: never remigrate a 
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -5179,7 +5944,7 @@ Branch `grok/fleet-alerts-aug13`.  Rollout: `docs/rollouts/2026-08-13-fleet-aler
 Owner: change agent rules so nobody dumps `~/.secrets/global-api-keys` into a
 transcript.  Rotation is already done; do not re-litigate it.
 
-Added the handoff-file grep trap to AGENT-SYNC, TEMPLATE-AGENTS, this
+Added the handoff-file grep trap to AG***-S**C, TEMPLATE-AGENTS, this
 `AGENTS.md`, and the secret-safety skill.  Names only: `grep -oE`.
 Branch `grok/secret-file-grep-ban`.
 
@@ -6453,7 +7218,7 @@ tests, build clean. Rollout: `docs/rollouts/2026-08-02-data-provider-round2.md`.
    Also fixed forward: `allowScripts` git-dep keys in tag form (`#vX.Y.Z`) can never match
    (npm compares against the resolved 40-char SHA), which npm 12 escalates from a warning
    to a hard block on the dep's `prepare` — the key is now committish-free
-   (`"github:jaywedgeworth22/congress-trading-shared": true`, verified: coverage warning
+   (`"github:Simple-With-Us/congress-trading-shared": true`, verified: coverage warning
    gone). #2345's lockfile regen also fixed a real silent bug: the old lockfile pinned the
    v2.3.0 commit while package.json said v2.4.x, so `npm ci` was silently shipping the old
    shared package. Verified 2026-08-02: plain `npm ci` = exit 0, 575 packages, clean shell.
@@ -6715,3 +7480,668 @@ reported UI carriers, `history.ts` provider-error text, and `/api/policy` persis
 `rotationPin` as follow-ups outside their file ownership.
 
 Rollout: `docs/rollouts/2026-09-27-review-ranks-4-6-7-9.md`.
+
+## 2026-10-19 — Green Team reasoning budget widened; production APNs push restored
+
+**Two separate problems, both closed in one session.**
+
+**APNs push (production, no code change).** All three device tokens were failing with
+`403 InvalidProviderToken`. The owner observed that "some app is using those credentials, more than 1
+probably", which was the thread to pull: the Apple keys are shared across HogHunter, Clutch,
+Congress.Trade, BotFleet and Socratic-Trade. Matching the stored private key by SHA-256 against the
+local `.p8` files showed `APNS_P8` was Socratic-Trade's **old** key
+(`ST_AuthKey_SYV2VT3PQ6.p8`), which pairs with a different Key ID. `APNS_TEAM_ID` (`CC8UTF7ATG`) was
+already correct. Rewrote `APNS_P8` + `APNS_PRIVATE_KEY_B64` with `AuthKey_A3R6Z489GA.p8`, confirmed
+`APNS_KEY_ID=A3R6Z489GA` and `APNS_BUNDLE_ID=com.socratictrade.ios`, verified against **both** APNs
+endpoints with a fake device token and fake topic (so nothing is ever delivered), and restarted the
+production container. Credential-level auth now succeeds.  A delivered push is not yet confirmed —
+that needs the next natural notification or a test from the app's own UI.
+
+**Green Team LLM (code change).** Sandbox had a 5-run failure streak, all in the Green proposer.
+Owner said trace before changing anything, so the trace ran through the app's own request path via
+`scripts/benchmark-llm-models.ts`. Result: minimax-m3 at 57.2s and 72.0s returning valid proposals
+(4,339 and 5,961 completion tokens), and `--effort none` at 90.9s returning **unparseable** output.
+Bounding reasoning is therefore harmful, not merely insufficient. Both production errors
+(`timed out after 150s`, `Empty response returned from LLM API`) are one mechanism: unbounded
+reasoning length against a fixed 8,000-token cap and a fixed 150s wall. Changed
+`src/lib/llm-request.ts` to reserve a dedicated, env-tunable 8,000-token reasoning headroom for the
+`minimax-*` / `muse-*` families (was `REASONING_TOKEN_BUDGET.medium` = 4,000, giving the Green proposer
+a 12,000-token completion cap) and raised the thinking-timeout default 150s → 360s. Also raised the
+truncation retry ceiling in `src/lib/strategy.ts` from a hardcoded `Math.min(wireOutputCap*2, 16_000)`
+to an env-tunable `STRATEGY_BULL_TRUNCATION_RETRY_MAX_CAP` default 24,000 — **the full suite caught an
+intermediate pass that had left this ceiling BELOW the base cap, silently disabling the retry net for the
+calls it protects**. Final shape is one measurement held by an invariant test: base 12,000 < retry
+ceiling 24,000 < wall 360s (24,000 × ~13ms ≈ 312s). Muse measured clean at both caps and was never the
+token problem; its production failure was a Code-CLI broker reachability error.
+
+Verified in the lane: `tsc --noEmit` clean (exit 0), `npm run lint` 0 errors (870 pre-existing
+warnings), `test/llm-request.test.ts` + `test/persistence-notification.test.ts` 55/55, and the 8-file
+bounds batch 169/169. Four new tests, and 2 pre-existing tests that had encoded the old starved values
+(`1500 + 4000` headroom, and the literal `timed out after 150s` message) corrected.
+
+Rollout: `docs/rollouts/2026-10-19-minimax-muse-reasoning-budget.md`.
+
+## 2026-10-19 [MM] Public Framework pages: /framework expanded, /how-it-works retired, shared animated shell
+
+**What.**  The owner's four-part ask landed as one change.  (1) `/framework` is expanded: the
+content module grew from 270 to 425 lines with seven decision questions, a plain-language
+Observe/Argue/Decide/Act/Explain/Learn loop mapped to pipeline stages, the decision case file, the
+authority list, four outcome-review lenses, and an operational-resilience section drawn from
+`docs/trading-framework.md`; the viewer grew from 240 to 369 lines and gained an "On This Page"
+table of contents.  (2) `/how-it-works` is retired — its content is fully superseded (loop → `plainLoop`,
+case file → `caseFile`, authority → `authority`, lenses → `outcomeLenses`) and the route is now a
+308 to `/framework` so inbound links still land on the content; `/strategy` points straight at
+`/framework` in one hop.  (3) The Welcome page's button now reads **"Framework"** and links
+`/framework`; the apex `/` sends an anonymous visitor to `/welcome` and a signed-in operator to
+`/console`; `socratic.trade` 308s to `socratictrade.com`, exempting `/api/*` (machine callers must
+not be handed a redirect they may not follow) and the Apple associated-domain file (the `applinks` +
+`webcredentials` entitlements on that domain need the AASA served there).  (4) The animated
+candlestick wordmark and the console's candle-flight splash now live on the public pages.
+
+**How the "same place on every public page" requirement is actually guaranteed.**  Not by
+convention — by construction.  Every public page (`/welcome`, `/framework`, `/terms-and-conditions`,
+`/privacy-policy`) renders through one `PublicShell`, and a source-level test in
+`test/public-site-routing.test.ts` fails the build if a page grows its own header.  The console's
+intro canvas moved to `app/ui/brand/intro-canvas.tsx` and was **parameterized, not duplicated**:
+`variant: "console" | "public"`, each with its own module state and its own `sessionStorage` key, so
+the public splash never consumes the console's one-shot splash.  The header's geometry comes from
+shared constants in `app/ui/brand/public-geometry.ts` rather than Tailwind classes, because the
+loading animation computes its landing box in JavaScript from those same constants — a CSS class and
+a JS number that drift would put the candles beside the wordmark instead of on it.
+
+**Two traps found and closed.**  (1) The header row was a `min-h-8` inside a vertical pad, so a page
+with no header action would collapse the row to the wordmark's 22px and shift the wordmark 5px off
+the position the animation aims at; the row is now pinned to `PUBLIC_ROW_H`, with a test holding
+that invariant.  (2) The public brand is CSS-sized (`width: 100%` + `aspect-ratio`) rather than
+canvas-sized on mount, so the first paint is already correct — the animation measures
+`[data-brand-logo]` every frame, and a canvas that resized on mount would have made the candles land
+beside the wordmark.
+
+**One real gate failure, fixed before landing.**  Parameterizing the intro canvas put the
+per-variant state behind a render-scope `const state = VARIANT_STATE[variant]`, and the effect then
+mutated it — which the React Compiler rejects as an **error** ("Cannot modify local variables after
+render completes"), not a warning.  The console's original module-level `let introDone` / `let
+MODEL` had never been subject to that rule.  Every write now goes through module-scope functions
+(`markIntroDone`, `setIntroModel`, `setIntroStart`, `setIntroCurHeader`), so the effect holds
+read-only access to the per-variant state.
+
+**Deliberately unchanged.**  `/framework` keeps its anti-scraping architecture — server-only content
+module, UA gate on the page and on the content API, `noindex`/`noai`/`TDMRep`, sitemap exclusion,
+and the edge WAF rule.  Linking it from the Welcome page does not require un-gating it, and
+`/welcome` remains the indexable SEO surface.
+
+**Verification.**  In the lane: `npx tsc --noEmit` clean (exit 0); `npx eslint` 0 errors on every
+changed file (1 grandfathered `react-hooks/set-state-in-effect` warning); the nine affected vitest
+files green (80 tests, exit 0): `public-site-routing` (22), `copy-rules-lint` (17),
+`candle-ticker-raf-resilience` (9), `framework-page` (9), `framework-hash-target` (6),
+`security-headers` (6), `public-sentence-gap` (4), `middleware-auth-secret` (4),
+`how-it-works-redirect` (3).  The **full** suite was not run locally — a local full run was
+impractical in this seat's working environment, so it is not claimed; the hosted
+`verify-hosted` job is the gate of record.  The **production build** was run
+locally after the fourth review round and succeeded (`npm run build`, `next build --webpack`),
+which is what proves the `server-only` guard in `middleware.ts` compiles.  New
+`test/public-site-routing.test.ts` (22 tests) covers the marketing-host routing, the alt-domain
+forward and both its exemptions, subdomain isolation, the shared-shell guard, the header-geometry
+invariant, the `LANDING_PAGE_ENABLED` off-switch, the alt-domain session and security-header
+behavior, and the single shared host module.  New `test/public-sentence-gap.test.ts`
+(4 tests) renders the Welcome page to static markup and proves the sentence gap survives the
+browser's whitespace collapse.  New `test/framework-hash-target.test.ts` (6 tests) covers the
+deep-link id lookup and pins the viewer's scroll-to-hash behavior.  New
+`test/middleware-auth-secret.test.ts` (4 tests) proves the middleware never hands the session
+verifier a placeholder credential.
+
+**Two review findings, both accepted as real and both fixed.**
+
+1. **The apex redirect 404'd with the marketing pages off.**  The marketing-host root redirect to
+   `/welcome` was unconditional, but `LANDING_PAGE_ENABLED=off` is the documented "private deploy /
+   go-public off-switch" — with it set, `/welcome` 404s, so the apex became a dead end instead of
+   the login page.  The middleware and `app/page.tsx` now consult `landingPageEnabled()` before
+   redirecting, and the off-switch is covered by tests.  `/framework` inherited the same gate,
+   because it absorbed `/how-it-works`, which was gated.
+2. **The public copy's sentence gap collapsed.**  The new public copy used two literal ASCII
+   spaces, which HTML collapses to one — and the repo's own copy-rule lint fails on exactly that
+   construct, so the first hosted `verify-hosted` run failed with 22 violations.  Fixed with the
+   repo's established idiom: the content module stores NBSP + space, and the Welcome page uses a
+   `SENTENCE_GAP` marker with no space in front of it (a space before the marker survives JSX's
+   text-node trimming and becomes an extra space in the rendered gap).  A render-level test now
+   proves the gap in the server-rendered markup.
+
+**Six more review threads came back on the second round.**  Five were real and are fixed; the sixth
+had already been fixed by the first round and needed only an explanation.
+
+3. **The alt-domain 308 dropped a live session.**  The redirect from `socratic.trade` to
+   `socratictrade.com` fired before identity resolution.  The Auth.js session cookie is host-only
+   by default (`AUTH_COOKIE_DOMAIN` is unset), and the two domains are unrelated, so no cookie
+   domain can span them and the canonical host never receives the cookie.  An operator following a
+   link to the alt domain landed on the public landing page instead of the console.  The redirect
+   now resolves the session first and forwards **only anonymous traffic**; a verified session keeps
+   the request on the alt host, where its cookie still applies.
+4. **The alt-domain 308 skipped the security headers.**  It was the one redirect in `middleware.ts`
+   that did not go out through `withSecurityHeaders`, so the G4 contract did not hold for it.  It
+   does now, and a test asserts the header set on that response.
+5. **The public host sets were written out twice.**  `MARKETING_HOSTS` was defined in
+   `middleware.ts` and again in `app/page.tsx`; two copies compile and type-check fine, so the only
+   way they fail is by drifting.  The sets now live in one place, `src/lib/marketing-hosts.ts`, and
+   both callers read them from there.
+6. **A framework deep link did not scroll.**  The sections render only after an async content fetch,
+   so the browser's fragment handling at load found no target and the page sat at the top.  The
+   viewer now scrolls to the hash target once the content is ready; the id lookup is a pure
+   function in `app/framework/hash-target.ts` with its own tests.
+7. **This rollout doc named a lane path.**  A lane is per-seat and per-run, so the path was stale
+   the moment another seat picked the work up.  The document names the branch and the base commit
+   instead.
+
+**A third review round came back with two threads.  Both were real and both are fixed.**
+
+8. **The two verification records contradicted each other.**  The first review round recorded "the
+   six affected vitest files green (60 tests)" and the second recorded "the affected vitest files
+   green (47 tests)", with different file lists: the first included `copy-rules-lint`, and the
+   second dropped `copy-rules-lint`, `candle-ticker-raf-resilience`, and `how-it-works-redirect`
+   while adding `framework-hash-target` and `security-headers`.  Neither total covered the whole
+   affected set, so neither was ever a claim about all of it, and reading the two together made
+   the suite look *smaller* in the second round than in the first.  The complete set is nine
+   files; it has been re-run together and one file at a time, and every file exits 0.
+9. **The middleware passed an empty string to the session verifier.**  The alt-domain
+   canonicalization hop read `process.env.AUTH_SECRET ?? ""`, so a deployment with no secret
+   handed the verifier an empty string and read the answer as "the cookie did not verify" —
+   the same answer as a real cookie failure.  That is how a missing secret turns into a silent
+   redirect of every operator instead of a surfaced configuration error.  The secret is now read
+   once and used only when it is set, and an empty string is never handed to the verifier.  A
+   missing secret in a live boot is surfaced where it belongs, by
+   `assertAuthSecretConfiguredInLiveBootstrap()` at startup, and a Cloudflare-Access-only
+   deployment has no `AUTH_SECRET` by design and is not an error.  New
+   `test/middleware-auth-secret.test.ts` (4 tests) proves the verifier is never called with a
+   placeholder credential, and it fails against the old code.
+
+**A fourth review round came back with two threads.  Both were real and both are fixed.**
+
+10. **The middleware read a credential without the server-only guard.**  `middleware.ts` reads
+    `AUTH_SECRET` and had no `import "server-only";`, so nothing stopped the module from
+    reaching a client bundle.  The guard was added as the first import in the file, the same way
+    the other credential-reading modules in `src/lib` carry it, and a later review round reversed
+    that: the guard is deliberately taken back out of `middleware.ts`, with the rationale
+    recorded in the file itself.  Middleware is a server entry point compiled only for the edge
+    runtime, so no Client Component can import it; the guard stays on the credential-reading
+    modules under `src/lib` and `app/api/*/route.ts` that a client bundle could genuinely pull
+    in.  The build recorded in the rollout note was run against the file with the guard, so it
+    describes that state and not the file this change ships.
+11. **The secret was read two different ways in the same file.**  The alt-domain hop trimmed
+    `AUTH_SECRET` before deciding whether it was set, while `isAuthConfigured()` and the
+    canonical-host path read the raw value.  A whitespace-only secret therefore read as
+    "configured" everywhere except in that one hop, which then forwarded the operator to the
+    canonical host — where the host-only Auth.js cookie does not apply — and dropped the
+    session.  That is the session-loss regression the second round closed, in a narrower form.  The raw value is now the single source of truth, matching the rest of the file, so an empty
+    string is still never handed to the verifier and a configured secret is passed through
+    unchanged.
+
+**Next.**  Merge to `main` (auto-deploys; weekday RTH latch applies — this touches runtime paths, so
+the image build is a real deploy).  Swift compilation is CI-only (`ios-build`); the only Swift
+changes are comments.
+
+Rollout: `docs/rollouts/2026-10-19-public-framework-pages.md`.
+
+## 2026-10-21 [MM] Public Framework pages: branch reconciled, one finding withdrawn, Autofix sweep landed
+
+**The branch was reconciled with another seat's work and with the newest `main`.**  Two commits
+were pushed to `minimax/st-4565-public-framework-pages` by another seat while this effort was in
+flight: a docs correction to the rollout note (`504af8dc5`) and a merge of `origin/main`
+(`343a8ff1c`).  Both were adopted rather than rewritten, because the docs correction was right and
+a merge commit is a merge commit.  The seat's own redundant merge was dropped in their favour —
+its content was already contained in the other seat's merge — and `origin/main` was merged again
+on top, so the branch carries the current `main` plus the Autofix pin bump.  Head is `f6949bea9`.
+
+**One finding from this effort was wrong, and it is withdrawn.**  This seat reported that
+`ci.yml`'s `classify` job gates both `verify-hosted` and the `verify` gate behind
+`docs-only != 'true'`, so a docs-only head can never report the required `verify` check, and
+filed that as ST-4568.  Only `verify-hosted` and `verify-ios` carry that gate; the `verify` gate
+itself runs on `if: ${{ !cancelled() }}` and exits 0 on the docs-only path.  The check that settles
+it is empirical, not a reading of the workflow's comment: PR #4875 changed exactly one file
+(`AGENTS.md`), and the check-runs on that head report `verify` → success, `verify-hosted` →
+skipped, `verify-ios` → skipped.  ST-4568 is closed as wontfix with that evidence, and the same
+correction is in the rollout note, the Linear comment on ST-4565, the Zulip post, and the Apple
+Note.  The `workflow_dispatch` lever is real, but it covers a different edge: cloud-proxy pushes
+that generate no `pull_request` event at all.
+
+**The fleet-wide PR Autofix failure has landed.**  Every pull request in this repository was
+carrying a failing `autofix / autofix` check, because `autofix.yml` pinned
+`pr-autofix-reusable.yml@b634b511`, and at that SHA the reusable invokes the Claude CLI as
+`claude --print --dangerously-skip-permissions ... --output-format stream-json`, which the CLI
+rejects ("When using --print, --output-format=stream-json requires --verbose").  The pin was the
+defect, not the CLI.  The good reusable SHA is `c97a2dae96762eb9ffc122c753f0dfb0a7840650`, and
+every consumer pin was checked by reading the reusable at the pinned SHA rather than by trusting
+the pin string.  The Socratic-Trade half landed through the repository's own Autofix path, as PR
+#4905, merged as `308d3f256`; the coordinator half was reported as AFC-451 and belongs to another
+seat.  Both issues are closed as already-landed.
+
+**Two merge-mechanics facts worth keeping.**  The `auto-merge / arm` workflow passed
+`--delete-branch`, which GitHub rejects under a merge queue; that was fixed in PR #4893 and the
+check is green.  And the `org-default-main-protection` ruleset sets
+`require_extra_approval_for_unattributed_changes: true`, so the three commits on this branch that
+GitHub cannot attribute to an account — this seat's own `21d5c58d7` and the two another seat
+contributed — require an approval from someone with write access.  No author was rewritten: a
+rule that puts a human in front of unattributed code is doing its job.
+
+**Next.**  The only remaining gate is Jay's APPROVED review on PR #4889.  Auto-merge is armed, so
+the merge fires as soon as the approval lands and the required checks are green on the pushed
+head.  After the merge: verify the deployed SHA against production, close ST-4565 out, and delete
+the remote branch.
+
+## 2026-10-21 [MM] The full local gate, and the org-secret fix that unblocked the Autofix job
+
+**The full local gate has been run, end to end, on the pre-`origin/main`-merge tree.**  `npx tsc
+--noEmit` exits 0, `npx eslint app src test middleware.ts` exits 0, `npm test` reports 1 failed /
+9,726 passed / 51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The single
+failure is `test/event-loop-stall-hot-path.test.ts`, a wall-clock assertion that a no-op prune
+stays under 100ms; it measures 162s in the local execution environment and times out when re-run
+on its own.  Neither that test nor `src/lib/db.ts` is touched by this diff, so it is an
+environment-dependent artifact and not a regression from this change.  It is reported as it
+stands, and the hosted `verify-hosted` job is the gate of record.  A second pass on the merged head
+is recorded below, in this same file.
+
+**The Autofix job's fleet-wide failure had a second, org-configuration cause, and it is fixed.**
+The org variables `SWU_AUTOFIX_MODEL_BASE_URL=https://api.meta.ai` and
+`SWU_AUTOFIX_MODEL=muse-spark-1.3-contributor` apply to every repository at once, but the org
+secret `META_MODEL_API_TOKEN` has `selected` visibility and was on only four repositories, so
+every other consumer resolved it to an empty string and the reusable's own guard exited 1 with
+`token_set=no`.  The secret's repository selection was widened to the sixteen consumer
+repositories that consume the reusable — a selection change, with no credential value touched.
+It is confirmed in this repository: PR Autofix run 39608488565, on PR #4908, concluded
+`success` with `META_TOKEN` populated on the Meta route, and every failing run predates the
+secret's last change.
+
+**One correction to the record above.**  The Autofix job cannot be re-kicked by a human comment:
+`.github/workflows/autofix.yml` gates it on the comment author's user type being bot or Bot, so
+a human comment dispatches a run that concludes `skipped` rather than `failed`, and a skipped
+run reads as a pass in the run list.  The levers that work are bot-authored events, and a push to
+the branch is enough, because a review bot re-reviews on every push.
+
+**Next.**  Unchanged: Jay's APPROVED review on PR #4889 is the one gate that no agent can clear.
+The `verify` check on the head is in flight.  After the merge: verify the deployed SHA against
+production, close ST-4565 out, and delete the remote branch.
+
+## 2026-10-21 [MM] The second full gate found a second failure, and the first account of it was wrong
+
+**The second full local gate ran on the merged head, `2d63d77e7`.**  `npx tsc --noEmit` exits 0,
+`npx eslint app src test middleware.ts` exits 0, `npm test` reports 2 failed / 9,731 passed /
+51 skipped across 865 files and exits 1, and `npm run build` succeeds.  The first failure is the
+same `test/event-loop-stall-hot-path.test.ts` wall-clock assertion as before, measured at 205630 ms
+this time; the time a wall-clock assertion measures varies with the execution environment.  It is
+reported as it stands, and the hosted `verify-hosted` job is the gate of record.
+
+**The second failure was new, and it is not this diff.**  `test/data-catalog-completeness.test.ts`
+expected `pe!.completeness` to be 0 and received 1.  The cause is the shared, untracked local
+database — but not in the way the first account of it said.  `src/lib/enrichment-coverage.ts:293-303`
+persists an enrichment coverage report on every call to `setLastEnrichmentCoverageReport`,
+fire-and-forget through a dynamic import, into `file:./data/app.db` whenever `DATABASE_URL` is not
+overridden (`src/lib/db.ts:85`), and `src/lib/data-completeness.ts:231` reads the newest persisted
+report back, where the field loop at `src/lib/data-completeness.ts:293-313` uses that row's
+`fillRate` as the field's completeness instead of the empty-universe 0.  `data/` is gitignored, so
+that file is never committed and never shared between machines.
+
+**A third gate pass is what corrected the first account of it.**  That account said the residue of
+earlier runs was the trigger, and that a clean checkout could not see the failure at all.  A third
+full pass against a database that did not exist when the suite started falsified it: the same test
+failed again, and the new file had collected seventeen coverage rows by the end of that one run.
+The writer is `test/enrichment-coverage.test.ts`, the repo's vitest config runs with
+`maxWorkers: 1`, so the files run sequentially in one worker process while `process.env.DATABASE_URL`
+leaks from one file to the next inside it, and because the persist is fire-and-forget, whether the
+row lands before the next file starts is a race.  Whether the reader sees a populated universe
+therefore depends on ordering inside the run: it is a within-run ordering flake, not merely
+leftover state, and a clean checkout can hit it.  The hosted run has not, but it has not been shown
+to be immune, so "CI is green" is not evidence against this class of failure.  The code itself is
+sound — with a fresh database the file passes 4 of 4 on its own — and
+`git diff --name-only origin/main...HEAD` lists none of the implicated files.  Filed as ST-4570
+with the root cause and a recommended fix, raised from P2 to P1 on the corrected evidence, and
+claimed by this seat.  The fix is deliberately kept out of this diff rather than widening a
+public-pages change into shared test infrastructure: it is on its own branch off `origin/main` as
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), where it carries no
+unattributed commit and needs no owner approval to land.  Three files could reach the persistence
+path without owning a database, and they are the ones changed there — the reader owns its database
+per test, and the two writers own theirs for the whole file, because the persist is a
+fire-and-forget dynamic import that can resolve after the test that triggered it has finished.
+
+**Two of the checks that were outstanding are now green on this head.**  PR Autofix run 39617911851
+concluded `success` on PR #4889 itself, with `META_TOKEN` populated on the Meta route, so the
+org-secret fix is confirmed in this repository and not only in the two control repositories.
+Claude Code Autofix run 39618102908 concluded `success`.  Kody's re-review on this head reported
+no issues matching its current configuration, and the hosted `verify-hosted` job is green.
+
+**Next.**  No human action is outstanding.  The ruleset requires 0 approving reviews, and Jay armed
+auto-merge on PR #4889 at 11:17am with a merge commit, so the merge fires as soon as the required
+`verify` and `gitleaks` checks are green on the head.  After the merge: verify the deployed SHA
+against production, close ST-4565 out, and delete the remote branch.
+## 2026-10-21 [MM] The suite no longer poisons its own database (ST-4570)
+
+**The local vitest suite no longer writes enrichment coverage rows into the checkout's own
+untracked `data/app.db`,** and `test/data-catalog-completeness.test.ts` now passes whatever order
+the test files run in.  The defect behind it was ST-4570, raised from P2 to P1 while this was in
+flight.  The change itself is not in this diff: it is
+[PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911), merged to `main` as
+`a947fa125` on 2026-10-21, so the repository state this entry describes is the state of `main`
+after that merge and not something this branch carries.
+
+The reader asserts an empty-database universe, but `buildDataCompletenessReport` reads the newest
+persisted enrichment coverage report back and uses its `fillRate` as a field's `completeness`
+whenever one exists, and the suite's own writers create that report.  The first account of the
+failure said the residue of earlier runs was the trigger and that hosted CI could not see it at
+all;  a third full pass against a database that did not exist when the suite started falsified
+both halves of that, because the same test failed again and the new file had collected seventeen
+coverage rows by the end of that one run.  It is a within-run ordering flake, not leftover state.
+
+Three files could reach the persistence path without owning a database, and the repo already has
+the convention that settles it:  `test/reindex-all.test.ts:8` says every test file points
+`DATABASE_URL` at its own temporary SQLite database, and 458 of the 854 do.
+
+- `test/data-catalog-completeness.test.ts` — the reader.  It owns its database now, so its
+  empty-universe premise is true by construction.
+- `test/enrichment-coverage.test.ts` — the writer.  It owns its database, and holds that path for
+  the whole file rather than for each test, because the persist is a fire-and-forget dynamic import
+  that can resolve after the test that triggered it has finished.
+- `test/enrichment-abort.test.ts` — also a writer, because one of its cases completes a gather.
+
+Measured:  a three-file probe over the changed files finishes with zero rows in the shared
+`DATABASE_URL` path, where the same probe wrote twelve before.  `npx tsc --noEmit` exits 0 and
+`npx eslint` over the three files exits 0.  No production code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4570-suite-db-isolation.md`.
+
+## 2026-10-21 [MM] The stall test stops timing a function that reads nothing (ST-4550)
+
+**What.**  `test/event-loop-stall-hot-path.test.ts` inserted 2,000,000 rows per run so that an unindexed scan would exceed 100ms, then asserted that `pruneTaskJournal` stayed under 100ms.  The function under that assertion has been a permanent no-op since Jay's 2026-10-15 retention policy (`src/lib/db-task-journal.ts:272` returns 0 and issues no DELETE), so the wall-clock half of the assertion was decided by the machine and not by the code.  The insert loop alone took about 60 seconds against a 60-second vitest timeout, so the case failed by timing out rather than by asserting, and it reddened the required `verify` gate on PR #4720 and on PR #4701, neither of which has this file in its diff.  The case now asserts the invariant that still has a subject:  the retention hook never deletes a row, not even one the retired 24-hour skipped-row policy would have aged out.  1,000 rows aged 90 days, milliseconds, and it can fail.  Both counts are scoped to the rows this case inserts, so an unrelated writer in the suite's shared database cannot move them, and a control assertion proves the aged fixture is present before the hook runs, so the guard cannot pass vacuously on an empty table.  The rest of the guard was already elsewhere and was left there:  the source-level no-DELETE check in `test/forever-retention-no-age-delete.test.ts`, the keep-all-rows contract in `test/task-journal.test.ts:118`, and the scheduler still calling the hook in `test/scheduler-tick-reentrancy.test.ts`.  No production code changed.
+
+**Verification.**  Fails-first proof by mutant, one mutant per assertion: re-enabling the retired aged-row DELETE inside `pruneTaskJournal` made the new case fail with `AssertionError: expected 1000 to be +0` at the return assertion, and a mutant that deleted the same aged rows while reporting zero failed at the row-count assertion with `AssertionError: expected +0 to be 1000`.  Neither failed by timing out.  Both mutants were reverted and `src/lib/db-task-journal.ts` was confirmed byte-identical to `HEAD`.  The two findings the automated review opened on this case on 2026-10-21 were correct, and both are fixed in the same commit: the guard had no control proving the aged fixture was present, and it counted the whole shared table instead of its own rows.  Local gate on the branch `minimax/st-4550-stall-test-guard`: `npm run lint` 866 warnings and 0 errors, `npx tsc --noEmit` exit 0 and `npm run build` exit 0 in both full-suite runs, with the test counts differing: the first run passed 860 test files and 1 skipped with 9,696 tests passed and 51 skipped and 0 failed, and the second, run after the review fix and after the branch merged main forward, passed 859 files and 1 skipped and failed 2 cases in `test/sqlite-all-offloop.test.ts`, which is not this pull request's file, is byte-identical to main's copy, passes in isolation and passes on the hosted runner, and is filed as **ST-4573** with its measurements.  The machine was at a load average of 79 to 91 on 10 cores during the second run, so the host decided those two cases.
+
+**Landed.**  PR #4913 merged on 2026-10-21 at 22:22:23Z as `273defb963968167c61fa3e9c64fd041d54d99b1`, and `origin/main` carries it.  The required `verify` gate and `gitleaks` passed on the merge commit, there was no outstanding changes-requested review and no unresolved thread, and the merge queue built and merged it on its own once the gate was green.  The board row is closed with the same evidence.  ST-4564 is already closed as a duplicate of this row, because the two described the same file and the same defect.  `origin/main` advanced under the branch while the hosted suite was running, which left the pull request reporting `mergeStateStatus: DIRTY`, so the branch merged the base forward before pushing again, and the three-way merge was proved clean with `git merge-tree --write-tree` first.  Rollout: `docs/rollouts/2026-10-21-st-4550-stall-test-guard.md`.
+## 2026-10-21 [MM] Kody's eighth round found a bullet that repeated the falsified account (PR #4889)
+
+**Kody's review comment 4339304110 on the rollout note was right, and the finding is taken rather
+than filed as accepted risk.**  The Zero-Code Findings bullet in
+`docs/rollouts/2026-10-19-public-framework-pages.md` still attributed the enrichment-coverage
+failure to residue carried between runs and still asserted that hosted CI never sees the condition
+because a CI checkout has no `data/` directory.  That is the exact account this PR's own
+Verification State section falsifies, so the bullet handed a reader the opposite of the corrected
+root cause while telling them a green hosted run cannot reproduce the failure — the claim that was
+used to treat the hosted `verify-hosted` job as sufficient.
+
+**The bullet now matches the corrected account.**  The fire-and-forget persist in
+`src/lib/enrichment-coverage.ts` poisons the shared database *within a single run*, because the
+persist can resolve after the test that triggered it has finished; the trigger is the order in
+which the files run inside one worker process rather than leftover state; and the hosted run has
+not been shown to be immune, so a green hosted run is not evidence against this class of failure.
+The bullet also names the fix, [PR #4911](https://github.com/Simple-With-Us/Socratic-Trade/pull/4911).
+
+**A sweep of the same claim across every markdown file in the repository found exactly one site.**
+The bullet was the only one still carrying the falsified account; `STATUS.md` and the rollout note's
+Verification State section already carried the corrected one.
+
+**The house gap rules were repaired on the same pass.**  The rollout note carried five whitespace
+defects of its own — three colons and one dash followed by two spaces, and one sentence end with a
+single space — and the lines this branch added to `STATUS.md` and `PLAN.md` carried thirty-six more
+of the same class: thirty-five colons, semicolons, commas or dashes followed by two spaces, and one
+sentence end with a single space.  Those are the owner's scope rule, where a colon, a semicolon, a
+comma or a dash takes one ordinary space and the gap belongs after `.`, `!` and `?`.  Of the
+forty-one, the thirty-nine scope sites are now one space and the two sentence ends are now two
+spaces, so that pass closed those two rules by different edits.  That pass did not close either
+class: the ninth round found twenty-eight more sites in the rollout note and three more in
+`PLAN.md`, all one space, and a third pass found two more, one colon site and one sentence-gap
+site, which take one space and two spaces respectively.
+
+## 2026-10-21 [MM] ST-4571 — the suite's shared database stays clean, and no test file clears the run's path
+
+**What.**  The residual of ST-4570 is closed.  A full local suite run no longer leaves enrichment
+coverage rows in the run's shared database, and `test/enrichment-coverage-persistence.test.ts`
+saves and restores the run's database path instead of deleting it.
+
+**The two offenders are named, not inferred.**  The first account of the residual read the row
+payloads and concluded that provider tests were responsible.  Running each candidate file on its
+own against a fresh database and counting the rows names them exactly: `test/market-dynamic-universe.test.ts`
+writes three and `test/provenance-stamps.test.ts` writes one, which is the four a full run leaves.
+Neither is a provider test.  The first reaches the cascade through `scanMarket()`, which calls
+`getEnrichmentProvider()` and then `provider.enrich()`; the second constructs a
+`CascadingEnrichmentProvider` directly.
+
+**Why deleting the path is the worse half.**  `databasePath()` falls back to `file:./data/app.db`
+when `DATABASE_URL` is unset, so a cleanup that deletes the variable does not merely fail to own a
+database — it hands the next file in the worker the checkout's own application database, and a
+late fire-and-forget persist lands there.
+
+Both writer files hold their database path for the whole file, the shape ST-4570 established.
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed.
+
+Rollout: `docs/rollouts/2026-10-21-st-4571-suite-db-hygiene.md`.
+
+## 2026-10-21 [MM] ST-4572 — the fixture override moves into a hook, and the isolation gets a control assertion
+
+**What.**  The two follow-ups PR #4912 named in its own body are closed.  The `DATABASE_URL`
+override in the three cascade-reaching writer files moves from module scope into `beforeAll`, and
+the isolation is now asserted rather than assumed.
+
+**The structural hole.**  A module-scope assignment leaves the worker pointed at the file's
+database for the whole time the module is being evaluated, so a throw between the assignment and
+the registration of the `afterAll` hook carries the override into the next file in the worker.
+Applying it in `beforeAll` means the environment is only mutated once the file's tests are about to
+run, and the mutation is always undone by the `afterAll` below it.
+
+**The path stays file-scoped.**  The persist is a fire-and-forget dynamic import, so it can resolve
+after the test that triggered it has finished, and a per-test path hands that late write back to
+the shared database.  The measurement is in the ST-4571 rollout note: the three files together
+against a fresh database finish with no `enrichment_coverage_runs` table at all, where a per-test
+version of the same fix wrote twelve rows in a two-file probe.
+
+**The control assertion is proved to fail.**  A temporary copy of `test/provenance-stamps.test.ts`
+with the override removed was run against the same database, and the control test failed with the
+active path reported as the run's shared database.  A control that cannot fail is not a control.
+The copy was deleted and was never committed.
+
+`npx tsc --noEmit` exits 0 and `npx eslint` over the three changed files exits 0.  No production
+code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 - the control now proves the write stayed out of the shared database
+
+**What.**  The isolation control in the two cascade-reaching files grows a third assertion and a
+new helper module.  The control already proved the file was pointed at its own database and that
+the cascade coverage row landed there.  It now also proves the row did NOT land in the run's
+shared database, which is the one condition the first two assertions cannot see.
+
+**The helper.**  `test/helpers/db-isolation-control.ts` opens the shared database READ-ONLY with
+`fileMustExist: true` and never creates it.  A database that is not there reads as holding no
+rows, and a missing table is the same fact; any other error is rethrown rather than folded into a
+zero, so a broken probe cannot masquerade as a clean one.
+
+**The assertion was proved non-vacuous, in three parts.**  The counter was measured against a
+database holding three real rows and returned three.  A temporary copy of
+`test/provenance-stamps.test.ts` with the override removed was run against a shared database that
+held no rows, and the shared database held one coverage row afterwards - the leak is real and it
+reaches the shared database.  The unmodified file was then run against a shared database seeded
+with one row, and the new assertion failed with `expected 1 to be +0`.  A control that cannot fail
+is not a control, so this one was shown failing.
+
+The temporary files were deleted and were never committed.  `npx tsc --noEmit` exits 0, `npx eslint`
+over the changed files exits 0, and the three files together against a fresh database pass 17 of
+17.  No production code changed and no existing assertion was weakened.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the teardown stops racing the pending coverage write
+
+**What.**  The three Kody threads on PR #4911 that carried no reply are now answered, and two
+defects behind them are fixed.  The `DATABASE_URL` override in the two files PR #4911 gave a
+database to moves from module scope into `beforeAll`, the same remedy ST-4572 applied to the
+PR #4912 files, and the teardown of each of the six files that restore the shared path at file
+scope waits for the pending coverage write before it restores anything.
+
+**The race is real.**  The persist is scheduled as a fire-and-forget dynamic import and
+`persistEnrichmentCoverageReport` resolves the database it writes to when the write lands, not
+when it was scheduled.  A probe that scheduled a persist and then ran the production teardown
+ordering watched the write land 5,745 ms later in the shared database, with the file's own
+database deleted and never recreated.
+
+**The window is closed today by something else, and the fix stops it depending on that.**  In each
+of the five files something already waits for the write to land, so the leak was not observed in
+them.  The teardown no longer relies on that.  The wait is for the actual write rather than for a
+duration, because the module load time is exactly what decides the width of the window.
+
+**The new test carries a control assertion.**  `test/coverage-persist-isolation.test.ts` holds the
+ordering down in two halves that differ only in where the wait sits, and the control half restores
+first, which is the order the finding names.
+
+One production module changed, additively.  `src/lib/enrichment-coverage.ts` gains the pending-write
+handle and the `__awaitPendingEnrichmentCoveragePersist()` export, and the persist itself is
+untouched.  `npx tsc --noEmit` exits 0, `npx eslint` over the seven changed files exits 0, the six
+files this diff touches pass 42 of 42 together against a fresh database, and the checkout's
+`data/app.db` was absent afterwards.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the ST-4570 rollout note stops claiming it shipped no regression guard
+
+The ST-4570 note said in its decisions list that no regression guard was added, which was true when
+it was written and is false now that this branch ships one.  The bullet is corrected in place, the
+follow-up list names the guard that exists, and the repo-level double-run guard the note also asks
+for is still recorded as the part that is missing.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-21 [MM] ST-4572 — the control now tells the old fixture from the new one
+
+A second review round found that the control assertion could not tell the two apart, because it
+only looked at the environment after the fixture had installed it, so the old module-scope
+implementation passed it too.  The two files that carry the control now assert, ahead of the
+override and inside their `beforeAll`, that `process.env.DATABASE_URL` is not this file's own path.
+Under the old implementation that path was already installed when the hook ran, so the assertion
+fails; under the new one the run's shared path is still in place, so it passes.  A copy of
+`test/provenance-stamps.test.ts` with the override moved back to module scope was run to prove it,
+and it failed at that assertion.
+
+The same round found the count row read off an untyped result, so it is now parsed with a zod schema
+at that boundary, and a row that does not match is surfaced as a fault rather than folded into a
+count.  The fourth finding, about collection-time capture, was checked in the source and does not
+hold: the database path is never captured at module scope, and the nested blocks capture this
+file's own path because they run after the file's `beforeAll`.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 — [MM] The guard reaches all five files, and the fault paths are separated (ST-4572)
+
+A third review round confirmed all five findings on PR #4915 and raised no new ones, but two of
+its notes were worth acting on rather than acknowledging.  The first named a real latent defect in
+code this branch had just added: the count row's shape fault was thrown inside the try whose catch
+matched `/no such table/i` on the message, so a real fault and a missing table were separated only
+by a string.  The catch is now narrowed to `err instanceof Database.SqliteError`, and the shape is
+checked outside it, so a fault that merely looks like a missing table is a fault and not a zero.
+The read moved into an exported `readCountRow(handle)` so the narrowing can be covered from both
+sides, and a new case covers it: the driver's own missing-table error reads as no rows, and a
+plain error carrying the same words is surfaced.
+
+The second note asked whether the other three cascade-reaching files carry the same differential
+assertion, and they did not.  It had been added only to the two files that also carry a control
+test, which left the other three able to regress to the module-scope override with no test failing
+anywhere.  All five files that restore `DATABASE_URL` carry the assertion now.
+
+The schema stays non-strict, because the helper wants the count rather than the row, and a widened
+count query would add columns to the row rather than fault the database.
+
+## 2026-10-22 — [MM] The shared path is captured where no hook can skip it (ST-4572)
+
+A fourth review round found a real defect in the fixture this branch had just added.  The
+differential assertion was the first statement of `beforeAll`, ahead of the capture of the run's
+shared path, so an assertion that failed left the capture unset, and the teardown read that unset
+capture as "the run had no `DATABASE_URL`" and deleted the variable instead of restoring it.
+
+The capture is now a module-scope constant in all five files that restore `DATABASE_URL`, where no
+hook can skip it.  A new guard, `test/db-isolation-fixture-shape.test.ts`, pins the shape of those
+five fixtures, and it fails against the pre-fix arrangement.
+
+Two claims were checked and did not hold as stated.  The regression test in
+`test/coverage-persist-isolation.test.ts` does fail against the pre-fix behaviour, measured with
+the await helper turned into the no-op the pre-fix code amounted to.  And the persist is
+synchronous, so the tracked promise cannot settle before the write has landed; the comment in
+`src/lib/enrichment-coverage.ts` now says so.
+
+A comment in the five fixtures claimed that a module-scope override would carry into the next file
+in the worker.  A two-file probe measured the process id of each file and the ids differed, so
+each test file runs in its own process.  The comment is corrected.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+## 2026-10-21 [MM] The off-loop follow-up query stops being measured against the host (ST-4573)
+
+**What.**  Two cases in `test/sqlite-all-offloop.test.ts` asserted that a follow-up query finishes inside 200ms and 300ms.  That clock was measuring the host and not the pool: `selectSlot()` starts a fresh slot whenever the live slots are fewer than `SQLITE_OFF_LOOP_POOL_SIZE` and none of them is idle, and `killSlot` removes the retired slot synchronously, so after a retire or a reclaim the pool is empty and the follow-up always starts a brand new worker.  The follow-up therefore cannot queue behind the wedged statement, and all that is left in its elapsed time is the cost of creating a worker, which is a property of this machine.  The two wall-clock assertions are gone, and the state they stood for is now asserted directly: the pool has to dispatch exactly one new query for the follow-up, and the live slot count has to move up by exactly one, which says the wedged worker was retired and the follow-up was served by a fresh one.  The reclaim wait in the first case stopped being a fixed 200ms window and became a poll with a generous ceiling, because the reclaim is driven by a timer and a busy host delays the callback and not the reclaim.  It is a test file, so no production code changed.
+
+**Verification.**  Clean on a free machine at 26 of 26 in 15.57s, and 26 of 26 under a synthetic load of 30 spinners at a settled load average of 157 rising to 184, where `main`'s own copy of the file was run back to back and also passed 26 of 26.  The guard still fails when it should: a mutant that makes the execution budget report the timeout without retiring the slot fails 3 cases of 26, and both of the cases this change touches fail by asserting with `AssertionError: expected 1 to be +0`, not by timing out.  The mutant was reverted and the source file is byte-identical to `HEAD`.  The automated review opened two findings on the pull request on 2026-10-22 at 01:40Z and both were taken:  the live slot count assertion was redundant, because the count was already 0 and a query that resolves has to have been served by a live slot, so the case now asserts the dispatch count and the live slot count separately, and a mutant that retires a slot as soon as a query succeeds fails the live slot count assertion with `AssertionError: expected +0 to be 1` while the dispatch assertion on the line above it passes;  and the ST-4550 rollout note still described the abandoned first design, which is fixed there.  `npm run lint` exits 0 with 867 warnings and 0 errors, and `npx tsc --noEmit` exits 0.
+
+**Next.**  Land it on its own pull request, then close ST-4573 with the merge evidence.  Rollout: `docs/rollouts/2026-10-21-st-4573-offloop-wall-clock-budget.md`.
+
+## 2026-10-22 [MM] The watchdog decides image impact with the allow list (ST-4575)
+
+**What.**  The deploy-freshness watchdog paged on four consecutive scheduled runs while production was correctly still.  It decided image impact with an exclusion list that named only `docs`, so a commit that changed just a CI workflow file was aged like a runtime change, and the guard reported production stale while production was exactly where it should be.  The image-affecting set is Coolify's allow list, and the repo already had it: `src/lib/deploy-image-impact.ts` exports `COOLIFY_WATCH_PATHS_LIVE`, and `scripts/rth-deploy-drain.sh` already implements the same rule through `CHANGED_FILES` and `scripts/assert-rth-deploy-latch.ts`.  The watchdog was the one place that had re-derived the question with a weaker rule.  The fix mirrors the allow list into the shell script and applies one rule to the whole gap: a deployment is owed only if some commit in the gap changed a watched path.  The "newest image-affecting commit" narrowing is gone, because it compared production against a commit that might never deploy, and the expected sha is no longer narrowed at all.  An empty watched-commit list is now a verdict, `image-noop` and exit 0, rather than an operational error through `fail_usage` that would have masked a real usage error.  The classification uses `--first-parent`, which is load-bearing: without it a merge commit is compared against its branch tip, so a docs-only pull request looks like it changed every path `main` gained since the branch point.  The guard still pages on a real gap, because the selftest keeps a case where the gap does change a watched path and the verdict is still stale.
+
+**Verification.**  The selftest is 12 passed, 0 failed, and the drift guard that fails if the shell `WATCH_PATHS` and `COOLIFY_WATCH_PATHS_LIVE` disagree is 4 passed, 0 failed.  A negative control against the pre-fix script on `origin/main` shows the two false-positive cases fail as intended with exit 3 where 0 was wanted, and the still-stale case passes, so the new cases detect the old behaviour and the guard is not merely quieter.  `npx tsc --noEmit` exits 0, `npx eslint` over the changed files exits 0, and `npm test` is 9737 passed, 51 skipped, 0 failed, across 865 test files passed and 1 skipped.
+
+**Review round.**  A review on the pull request raised four findings against the first version of this change, and three were real defects that are fixed here.  The `git rev-list` exit status was swallowed, so a git failure became a green `image-noop` pass, and the status is captured separately now and raised through `fail_usage`.  The watched pathspecs were resolved against the caller's working directory, so a run from a subdirectory matched nothing and took the `image-noop` branch, and the script now anchors itself to the repository root.  The `image-noop` branch never posted the recovery notification, so the incidents this fix resolves would have stayed open forever, and it posts `maybe_notify recovered` now.  The fourth finding asked for `docs/benchmarks` in the watched set and was not applied:  the watched set is the TRIGGER list, the list that decides whether Coolify creates a deployment, and `test/rth-deploy-latch.test.ts` already asserts both halves of the difference, that `docs/**` is omitted from the trigger and that `docs/benchmarks` is image-relevant for the build-time latch.  The selftest is 14 passed, 0 failed after the review round, and a negative control against this branch's own first version shows the two new cases fail with exit 0 where 1 and 3 were wanted.  A second review round made both new cases prove what they claim:  the subdirectory case now carries a control that records the directory the script under test started in, so a broken handoff fails the case instead of passing it vacuously, and the git-failure case pins the failure to the rev-list branch with the expected-output mechanism instead of relying on exit 1 alone, which several unrelated guards also produce.  Each control has a negative control of its own.  A third review round caught the fix for the swallowed git failure introducing a second defect:  capturing stderr into the same value would let a git warning on stderr with a zero exit become the first "commit" of the list, and the next `git log` would then kill the script with git's own exit 128, which is outside the exit-code contract.  The captured value is stdout only now, and the selftest covers it with a second `git` shim that warns on stderr and exits 0;  the selftest is 15 passed, 0 failed, and the negative control against the `2>&1` version fails with exactly that exit 128.  A fourth review round found the warning case could pass without exercising its own fixture:  the watchdog sends git's stderr to /dev/null, so the warning the shim writes never reached the captured output, and the case asserted only the stale exit code, which a run without the shim produced just the same.  The shim now records the warning it emitted, the case fails unless that record is there, and the same shim is probed again after the case so a broken or replaced shim cannot pass either.  The selftest is 15 passed, 0 failed, and both negative controls show it:  with the shim off PATH the verdict is still a normal stale and the case fails on the control, and with the shim on PATH but emitting nothing the case fails the same way.
+
+**Next.**  Land it, then close ST-4575 with the merge evidence.  Rollout: `docs/rollouts/2026-10-22-st-4575-deploy-freshness-watch-paths.md`.
+## 2026-10-22 [MM] The shape guard stops matching fixture text outside the hook body (ST-4572)
+
+**What.**  A fifth review round found two real weaknesses in the shape guard the fourth round added, and three errors in this branch's own audit trail.  The guard searched the whole span between the `beforeAll` and the `afterAll`, which also holds any helper declared between them, so a fixture that moved the differential assertion and the override into such a helper satisfied both string checks and the order comparison, and the regression the file exists to catch passed unnoticed; the hook body is now located by brace depth.  The guard also resolved its repo root from the runner's working directory, so a run from anywhere other than the repository root failed every case with an opaque ENOENT; the root now comes from the module's own path, in the same form `test/ci-workflow-queue-safety.test.ts` already uses.  The audit trail said nine files changed and two were new when the diff is thirteen changed and four new, it described five files as restoring `DATABASE_URL` when nine do, and the ST-4570 note pointed the shared-database differential at the miniature reproduction in `test/coverage-persist-isolation.test.ts`, which never reads the run's shared database, rather than at the two files that assert `sharedCoverageRowCount(prevDb)` is zero.  All three are corrected in place.
+
+**Verification.**  Two negative controls, both reverted byte-for-byte.  A fixture mutated so that the assertion and the override moved into a helper between the two hooks passed the old guard 11 of 11 and failed the new one with `AssertionError: expected '\n  installThisFilesDatabase();\n  re…' to contain 'expect(process.env.DATABASE_URL).not.…'`.  The same suite run from `/tmp` with the project root passed to Vitest explicitly failed on the old guard with ENOENT and passed the new one 11 of 11.  The seven files this diff touches pass together at 56 of 56 against a fresh database, with the checkout's `data/app.db` absent afterwards.  `npx tsc --noEmit` exits 0 and `npx eslint` over the changed files exits 0 with the same one pre-existing `any` warning in `test/provenance-stamps.test.ts`.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The audit trail counts the files it claims to count (ST-4572)
+
+**What.**  A sixth review round raised two findings against this branch's own audit trail, and both were taken.  The rollout note claimed that twenty-three test files already resolve their repository root with `fileURLToPath(new URL("..", import.meta.url))`; twenty-three is the number of test files that reference `import.meta.url` at all, which is a weaker claim, and the exact expression is in eight, with this branch's own shape guard as the ninth in the tree.  The note also counted eight files that restore `DATABASE_URL` when nine do: `test/coverage-persist-isolation.test.ts` captures the shared path at module scope on line 30 and restores it in its `afterAll` on lines 45 and 46, which makes it a sixth restorer at file scope.  The tenth candidate was checked and is not one, because `test/sqlite-storage-hygiene.test.ts` installs its own path in a `beforeAll` and the `previous` it captures inside the test is that own path rather than the shared one, so it never puts the shared path back.  Both counts are corrected in the note and in the fifth-round rows above, and the note now carries a sixth-round section with the measurement.
+
+**Verification.**  The counts come from the tree rather than from the note.  `grep -rlE 'fileURLToPath\(\s*new URL\("\.\.",\s*import\.meta\.url\)\s*\)' test/` returns nine files, eight of them pre-existing, and `grep -rl 'import\.meta\.url' test/` returns the twenty-three the note had been counting.  The restorer inventory was read one file at a time: the five guard fixtures capture at module scope and restore in their teardown, the isolation fixture does the same, and the three named files capture inside `beforeEach`.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The bound names every file that restores the shared path (ST-4572)
+
+**What.**  A seventh review round raised two findings against this branch's own audit trail, and both were taken.  The note's bound paragraph said only six files restore the path and that every other file that sets `DATABASE_URL` leaves it installed, but three more files restore the shared path: `test/data-catalog-completeness.test.ts`, `test/health-lane-reprobe.test.ts` and `test/symbol-field-latest.test.ts` each capture it inside `beforeEach` and put it back in their `afterEach`.  The sentence hid three restorers and overstated the set of files whose late write can reach the shared database, because a late write in one of those three lands in the shared database rather than in that file's own.  The bound paragraph now names all nine, separates the six that restore at file scope from the three that restore per test, and scopes the "leaves it installed" clause to the files that genuinely never put the shared path back.  The second finding said the note described `test/sqlite-storage-hygiene.test.ts` as never restoring `DATABASE_URL`, and it does: the `previous` it captures at line 745 is the file's own path and not the shared one, and the restore at line 790 puts its own database back.  Saying it "never restores it" was wrong, and the sixth-round section now says what the file actually does.  The inventory stays at nine either way, because that file never puts the shared path back.
+
+**Verification.**  The counts come from the tree rather than from the note.  The shared-path restorers were read one file at a time: the five guard fixtures and `test/coverage-persist-isolation.test.ts` capture `DATABASE_URL` at module scope and restore it in their teardown, and the three named files capture it inside `beforeEach` and restore it in their `afterEach`.  The six file-scope restorers are also the six that import `__awaitPendingEnrichmentCoveragePersist`, and each of them waits for the pending write before it restores the path.  The five guard fixtures wait while their own database is still the target, and `test/coverage-persist-isolation.test.ts` waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The shape guard pins the wait and its order for all six, so this is a property of the tree rather than a claim in the note.  The pending-write handles live on `globalThis`, so the wait covers every write still in flight in that worker and not only the calling file's.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] The sixth file waits too (ST-4572)
+
+**What.**  An eighth review round raised one finding against this branch's own audit trail, and it was taken.  The note claimed that the six files which restore the shared path at file scope each wait for the pending write before they restore, and that was true of the five guard fixtures and false of the sixth: `test/coverage-persist-isolation.test.ts` restored the shared path in a synchronous `afterAll` with no wait at all.  Two remedies were taken.  The file's `afterAll` now awaits `__awaitPendingEnrichmentCoveragePersist()` before `resetDbForTesting()` and before the restore, which makes the six-file property uniform and true, and the wording now says where the wait sits, because the two groups are not the same — the five guard fixtures wait while their own database is still the target, and the isolation fixture waits with one of the two temporary databases it installed still the target, because it points the run at two temporary databases rather than at a database of its own for the whole file.  The claim was prose, so it is now pinned: `test/db-isolation-fixture-shape.test.ts` gained a case for each of the six that the file imports the helper, that the wait is inside the `afterAll` body rather than in a test, and that the wait comes before the restore.
+
+**Verification.**  The claims come from the tree rather than from the note.  The await sits ahead of the restore in each of the six `afterAll` bodies, and the shape guard proves that rather than trusting a grep to see it.  Two negative controls were run and both bit: removing the wait from the isolation fixture's `afterAll` failed the guard with `AssertionError: expected '\n  // The coverage persist is schedu…' to contain 'await __awaitPendingEnrichmentCoverag…'`, and moving that wait after the restore failed it with `AssertionError: expected 698 to be less than 661`.  The fixture was restored byte-for-byte after each control, and its checksum after both controls matched the checksum before them.  The two files this round touches pass together: 22 tests passed across 2 files.
+
+**Next.**  Land it, then close ST-4572 with the merge and the deploy evidence.  The pull request carrying the seventh round merged as `bbd6c43cb` while this round was in flight, so this round lands as its own pull request against `main` rather than inside that one, and the claim this round corrects was still true in `main` when it was written.  Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.
+
+## 2026-10-22 [MM] ST-4572 — the ninth round: a rejected wait could skip the restore, and the guard passed on a commented-out wait
+
+**What.**  Four more Kody threads on PR #4919, two against the teardown wait the eighth round added
+to the sixth restorer and two against the three shape-guard checks the same round added.  All four
+were checked against the tree and all four were real.
+
+**A rejected await skipped the restore.**  `__awaitPendingEnrichmentCoveragePersist()` ends in
+`await Promise.all(handles)`, so a persist that rejects rejects the teardown, and everything after
+the wait — the reset, the restore of `prevDb`, and the `rmSync` that deletes the fixture's own
+temporary directory — was skipped on that path.  The file owns the run's `DATABASE_URL` from module
+scope onward, so the skipped restore carried a temporary path into the rest of the worker and the
+next statement deleted the file that path points at.  The reset, the restore and the cleanup now sit
+in a `finally`, pinned by a new guard so it cannot go back to the unwrapped shape.
+
+**The guard's own three checks were substring matches.**  A wait disabled by commenting the line out
+carries the same literal as a comment, so it satisfied every check while the race was fully back —
+the eighth round's two documented controls only proved the deleted and misordered variants bite.
+Both patterns are anchored to a line of their own now, the order check asserts both offsets were
+found before comparing them, and the import assertion matches the import statement rather than the
+call it claimed to check.
+
+**Four negative controls, each proved to bite, fixture restored byte-for-byte after each.**  The
+commented-out wait, the wait placed after the restore, the call with the import removed, and the
+`try`/`finally` removed.  The two files this diff touches pass 28 of 28 together, up from 22.
+
+**Left open on purpose.**  The same rejected-await shape is real in the five guard fixtures this
+branch inherited from earlier merged rounds.  They were not fixed here, because this PR's diff is
+the sixth restorer, and the new guard does not forbid them from having the same fix later.
+
+Rollout: `docs/rollouts/2026-10-21-st-4572-suite-db-followups.md`.

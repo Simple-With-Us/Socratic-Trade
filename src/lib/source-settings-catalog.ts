@@ -9,7 +9,6 @@
 export type SourceSettingType = "boolean" | "number" | "string";
 
 export type SourceSettingGroup =
-  | "fmp"
   | "sec"
   | "web_sources"
   | "rag"
@@ -38,11 +37,6 @@ export const SOURCE_SETTING_GROUPS: Record<
   SourceSettingGroup,
   { title: string; blurb: string }
 > = {
-  fmp: {
-    title: "Financial Modeling Prep (FMP)",
-    blurb:
-      "Legacy module toggles. Direct FMP HTTP is still blocked in product code until/unless that ban is lifted — toggles persist so you can pre-select intent and so CT-class features stay visible."
-  },
   sec: {
     title: "SEC EDGAR & filings RAG",
     blurb: "10-K/10-Q ingest cadence, 8-K depth, rate limits, and background backfill worker."
@@ -57,7 +51,7 @@ export const SOURCE_SETTING_GROUPS: Record<
   },
   transcripts: {
     title: "Earnings transcripts",
-    blurb: "ROIC, EarningsCalls.dev, and FMP transcript producers (quotas + entitlement)."
+    blurb: "ROIC and EarningsCalls.dev transcript producers (quotas + entitlement)."
   },
   enrichment: {
     title: "Enrichment cascade",
@@ -67,63 +61,6 @@ export const SOURCE_SETTING_GROUPS: Record<
 
 /** All knobs the Settings UI may show and the API may write. */
 export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
-  // ── FMP product modules (policy-backed historically; also in source map) ──
-  {
-    id: "fmpRealTimeDataEnabled",
-    group: "fmp",
-    label: "Real-time & index data",
-    description: "FMP real-time quotes / index modules when product path is allowed.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpMacroDataEnabled",
-    group: "fmp",
-    label: "Macro & commodities",
-    description: "FMP macro / commodity series.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpEventsDataEnabled",
-    group: "fmp",
-    label: "Events & news",
-    description: "FMP calendar / events modules.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; toggle stores intent only until unblock."
-  },
-  {
-    id: "fmpFundamentalsDataEnabled",
-    group: "fmp",
-    label: "Deep fundamentals",
-    description: "FMP ratios / statements modules.",
-    type: "boolean",
-    defaultValue: false,
-    caveat: "ST hard-blocks direct FMP network calls today; multi-source cascade is the live path."
-  },
-  {
-    id: "WEB_SOURCE_FMP_TRANSCRIPTS",
-    group: "fmp",
-    label: "FMP earnings transcripts (feature)",
-    description: "Allow FMP transcript producer when storage rights are also confirmed.",
-    type: "boolean",
-    defaultValue: false,
-    advanced: true
-  },
-  {
-    id: "FMP_TRANSCRIPT_STORAGE_RIGHTS_CONFIRMED",
-    group: "fmp",
-    label: "FMP transcript storage rights confirmed",
-    description: "Owner confirms commercial rights to store/redistribute FMP transcript text.",
-    type: "boolean",
-    defaultValue: false,
-    advanced: true,
-    caveat: "Do not enable without a real rights agreement."
-  },
-
   // ── SEC ───────────────────────────────────────────────────────────────────
   {
     id: "WEB_SOURCE_SEC8K",
@@ -248,9 +185,9 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "WEB_SOURCE_INSIDER_WINDOW_DAYS",
     group: "web_sources",
     label: "Form 4 window (days)",
-    description: "How long an open-market Form 4 stays in the rolling sentiment window.",
+    description: "How long an open-market Form 4 stays in the dollar-weighted sentiment window.",
     type: "number",
-    defaultValue: 30,
+    defaultValue: 90,
     min: 7,
     max: 180
   },
@@ -258,10 +195,10 @@ export const SOURCE_SETTINGS_CATALOG: readonly SourceSettingSpec[] = [
     id: "WEB_SOURCE_INSIDER_MAX_FILINGS",
     group: "web_sources",
     label: "Form 4 filings per refresh",
-    description: "Ownership XMLs parsed each daily refresh (current feed + watchlist).",
+    description: "Cap on atom-feed ownership XMLs. 0 means no cap. Quarterly bulk rows are never capped.",
     type: "number",
-    defaultValue: 60,
-    min: 10,
+    defaultValue: 0,
+    min: 0,
     max: 200,
     advanced: true
   },

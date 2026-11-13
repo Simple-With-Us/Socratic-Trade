@@ -1,5 +1,9 @@
 # Phase 4 - Market Data And Multi-Factor Scoring
 
+## Daily history beyond two years (2026-10-14)
+
+`fetchDailyOHLC` (`src/lib/history.ts`) defaults to about five years.  Massive free aggregates stop near two years, and Stooq stays out of the cascade (bot wall).  A lookback longer than 730 days skips Massive and tries Yahoo chart `range=max` (paced), then Tradier history, then Twelve Data, then the remaining broker and keyed tiers.  A shorter lookback keeps Massive and uses Yahoo `range=1y`.  Both Yahoo ranges share the chart-host pacer, and the abort timer starts after a slot is acquired.  Twelve Data JSON is parsed with `TwelveDataTimeSeriesSchema` before any bar is stored.  SQLite `history_cache_eod` rows are permanent.  A fresh series is served with no network when its oldest bar reaches the requested start, or when a prior `range=max` response recorded that the listing starts later.  A two-year cache with no marker cannot block `range=max`.
+
 ## Goals
 
 - Introduce a provider abstraction without removing the current delayed Nasdaq fallback.
@@ -299,12 +303,12 @@ not a broken cascade:
 
 See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
 
-## Quote observation time (2026-10-05, board `009b99f0de754dff`)
+## Quote observation time (2026-10-15, ST-2584)
 
-Three stamps that were still fabricating "now" or using the ask as the price:
+The price is the provider's last print, then the mid of a two-sided book.  A size, a one-sided bid or ask, a prior close, and a fabricated 0 are not the price.  `asOf` is the provider's own observation time.  The wall clock is never substituted.  A quote with no parseable observation time is unknown age.  The staleness gate blocks that opening.  A known-old observation still converts to a limit and stays approved.  Exits stay ungated.  `maxQuoteAgeSec` 0 still turns the gate off.  A chat draft preview has no scan, so a draft blocked only by `quote_age_unknown` still stages.  Approve time re-runs the gate and blocks the order if the fresh scan is still undated.
 
-- Yahoo quote-only rows (`toQuoteOnlyMarketQuote`) keep `quote.asOf` (`regularMarketTime`).  A missing observation time stays undefined.
-- ROIC company-profile prices have no observation timestamp (`parseRoicProfile`).  The cascade leaves `asOf` unset so `isQuoteFresh` returns false.  The end-of-cascade fallback may still return the price.
-- Alpaca `getEquityQuotes` sets `price` to `(bid + ask) / 2` when both sides are numbers, otherwise `ask ?? bid`.
+Tradier paper stays `venue_delayed` (age the fetch when `asOf` parses, no Alpaca or Yahoo overlay).  Tradier live is `venue_locked`: the Tradier quote is the price, later cascade levels do not replace it, and the real `asOf` still hits the 120s gate.  Alpaca last prints come from Alpaca's own latest-trades call on the existing market-data client.  No new vendor was added.  `fillMissingQuotesWithClose` remains exported and is no longer called from Alpaca or Tradier quote reads.
 
-`takeScalar`'s wall-clock `cascadeFetchedAt` and the field-store `nowIso` fallback are deferred.  See `docs/rollouts/2026-10-05-quote-asof-anchors.md`.
+Price, bid, and ask rows in `symbol_field_latest` are skipped when they have no provider observation.  `stampFieldObservation` still falls back to `fetchedAt` for non-quote evidence.
+
+See `docs/rollouts/2026-10-15-quote-observation-staleness.md`.  The 2026-10-05 anchors (Yahoo `asOf`, ROIC unset `asOf`) still hold.  The earlier Alpaca mid-then-ask rule does not.

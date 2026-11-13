@@ -62,7 +62,23 @@ describe("POST /api/mobile/push/register", () => {
     expect(listActiveDeviceTokens(userIdForEmail(email))).toHaveLength(1);
   });
 
-  it("REASSIGNS a token registered by a second account (shared device switching users)", async () => {
+  it("allows reclaim when the other account's row is disabled", async () => {
+    const { POST, DELETE } = await import("../app/api/mobile/push/register/route");
+    const { userIdForEmail } = await import("../src/lib/auth/identity");
+    const { listActiveDeviceTokens } = await import("../src/lib/db");
+    const first = `first-disabled-${randomUUID()}@example.com`;
+    const second = `second-disabled-${randomUUID()}@example.com`;
+    const token = hexToken("route-disabled-reclaim");
+
+    await POST(request(first, "POST", { token, environment: "production" }));
+    await DELETE(request(first, "DELETE", { token }));
+    const res = await POST(request(second, "POST", { token, environment: "production" }));
+    expect(res.status).toBe(200);
+    expect(listActiveDeviceTokens(userIdForEmail(second)).map((d) => d.token)).toEqual([token]);
+    expect(listActiveDeviceTokens(userIdForEmail(first))).toHaveLength(0);
+  });
+
+  it("refuses to register a token that already belongs to another account", async () => {
     const { POST } = await import("../app/api/mobile/push/register/route");
     const { userIdForEmail } = await import("../src/lib/auth/identity");
     const { listActiveDeviceTokens } = await import("../src/lib/db");
@@ -71,10 +87,11 @@ describe("POST /api/mobile/push/register", () => {
     const token = hexToken("route-shared-device");
 
     await POST(request(first, "POST", { token, environment: "production" }));
-    await POST(request(second, "POST", { token, environment: "production" }));
+    const blocked = await POST(request(second, "POST", { token, environment: "production" }));
 
-    expect(listActiveDeviceTokens(userIdForEmail(first))).toHaveLength(0);
-    expect(listActiveDeviceTokens(userIdForEmail(second)).map((d) => d.token)).toEqual([token]);
+    expect(blocked.status).toBe(409);
+    expect(listActiveDeviceTokens(userIdForEmail(first)).map((d) => d.token)).toEqual([token]);
+    expect(listActiveDeviceTokens(userIdForEmail(second))).toHaveLength(0);
   });
 
   it("does NOT re-enable the apns channel a user turned off (the app re-registers every launch)", async () => {

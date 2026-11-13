@@ -389,27 +389,34 @@ describe("Tradier adapter — envelope normalization", () => {
 });
 
 describe("Tradier adapter — quotes", () => {
-  it("batches /markets/quotes and follows last->close->ask->bid precedence", async () => {
+  it("batches /markets/quotes and prices last, then the two-sided mid", async () => {
     await seedTradier();
     const { records } = installFetchMock([
       {
         match: (u) => u.includes("/markets/quotes"),
         body: { quotes: { quote: [
-          { symbol: "AAPL", last: 190, close: 188, ask: 191, bid: 189, volume: 1000, trade_date: 1751000000000 },
-          { symbol: "MSFT", close: 400 } // no last -> close
+          { symbol: "AAPL", last: 190, close: 188, ask: 191, bid: 189, volume: 1000, trade_date: 1751000000000, bidsize: 190 },
+          { symbol: "MSFT", close: 400, prevclose: 399, bidsize: 400 },
+          { symbol: "XOM", ask: 110, asksize: 110 },
+          { symbol: "IBM", bid: 10, ask: 12, bid_date: 1751000001000, close: 9 }
         ] } }
       }
     ]);
     const { getTradierGateway } = await import("../src/lib/tradier");
-    const quotes = await getTradierGateway("local").getEquityQuotes(ACCT, ["AAPL", "MSFT"]);
+    const quotes = await getTradierGateway("local").getEquityQuotes(ACCT, ["AAPL", "MSFT", "XOM", "IBM"]);
     expect(quotes.AAPL.price).toBe(190);
-    expect(quotes.MSFT.price).toBe(400);
+    expect(quotes.AAPL.price).not.toBe(188);
+    expect(quotes.AAPL.asOf).toBe(new Date(1751000000000).toISOString());
+    expect(quotes.MSFT).toBeUndefined();
+    expect(quotes.XOM).toBeUndefined();
+    expect(quotes.IBM.price).toBe(11);
+    expect(quotes.IBM.asOf).toBe(new Date(1751000001000).toISOString());
     const call = records.find((r) => r.url.includes("/markets/quotes"))!;
-    expect(call.url).toContain("symbols=AAPL%2CMSFT");
+    expect(call.url).toContain("symbols=AAPL%2CMSFT%2CXOM%2CIBM");
     expect(call.authorization).toBe(`Bearer ${SANDBOX_TOKEN}`);
   });
 
-  it("a quote-fetch error warns and does NOT throw (falls through to Yahoo floor -> no data -> price 0)", async () => {
+  it("a quote-fetch error warns and does NOT throw (no Yahoo close floor)", async () => {
     await seedTradier();
     installFetchMock([
       { match: (u) => u.includes("/markets/quotes"), body: { error: "boom" }, status: 500 }
@@ -842,10 +849,51 @@ describe("Tradier adapter — OTOCO/OCO equity legs surface for coverage (codex-
     expect(orders.find((o) => o.id === "500")?.clientOrderId).toBe("bracket");
     expect(orders.find((o) => o.id === "501")?.clientOrderId).toBeUndefined();
     expect(orders.find((o) => o.id === "502")?.clientOrderId).toBeUndefined();
+    expect(orders.find((o) => o.id === "501")?.parentClientOrderId).toBe("bracket");
+    expect(orders.find((o) => o.id === "501")?.orderClass).toBe("otoco");
     const stopLeg = orders.find((o) => o.type === "stop_market")!;
     expect(stopLeg).toMatchObject({ id: "502", symbol: "AAPL", side: "sell", type: "stop_market", state: "open", stopPrice: 180 });
     const { isLiveOrderState } = await import("../src/lib/broker-side");
     expect(isLiveOrderState(stopLeg.state)).toBe(true); // a long-side coverage check sees the resting exit
+  });
+
+  it("leg-entry OTOCO lists the container as the lone entry row plus exit legs only (no duplicate entry leg)", async () => {
+    await seedTradier();
+    installFetchMock([
+      {
+        match: (u, m) => m === "GET" && u.includes(`/accounts/${ACCT}/orders`),
+        body: {
+          orders: {
+            order: {
+              id: 880,
+              symbol: "MPC",
+              type: "otoco",
+              class: "otoco",
+              status: "open",
+              create_date: "2026-07-10",
+              tag: "st-ref-three-leg",
+              leg: [
+                { id: 881, class: "equity", side: "buy", type: "limit", status: "open", quantity: 5, price: 100 },
+                { id: 882, class: "equity", side: "sell", type: "limit", status: "open", quantity: 5, price: 110 },
+                { id: 883, class: "equity", side: "sell", type: "stop", status: "open", quantity: 5, stop_price: 90 }
+              ]
+            }
+          }
+        }
+      }
+    ]);
+    const { getTradierGateway } = await import("../src/lib/tradier");
+    const orders = await getTradierGateway("local").getEquityOrders(ACCT);
+    expect(orders.map((o) => o.id).sort()).toEqual(["880", "882", "883"]);
+    const entry = orders.find((o) => o.id === "880")!;
+    expect(entry).toMatchObject({
+      clientOrderId: "st-ref-three-leg",
+      side: "buy",
+      type: "limit",
+      limitPrice: 100
+    });
+    expect(entry.orderClass).toBeUndefined();
+    expect(orders.find((o) => o.id === "882")?.orderClass).toBe("otoco");
   });
 
   it("a lone option order (container class not equity, no equity legs) is still dropped", async () => {

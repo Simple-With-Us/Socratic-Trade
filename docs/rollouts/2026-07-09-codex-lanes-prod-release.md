@@ -34,7 +34,7 @@ Results:
 - PR #1174 merged to `main` as `8bc0967f`; required `verify` and smoke checks passed.
 - `origin/main` is `8bc0967f`.
 - External production health returned HTTP 200 with `ok:true`, `db:"ok"`, and a recent scheduler tick.
-- MONET posted terminal release proof in `#agent-sync`: Coolify deploy `krk1db6x`
+- MONET posted terminal release proof in `#ag***-s**c`: Coolify deploy `krk1db6x`
   finished and production equals `main@8bc0967f` exactly.
 
 ## Follow-ups

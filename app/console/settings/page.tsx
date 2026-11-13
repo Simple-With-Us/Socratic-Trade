@@ -30,6 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
+import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
 import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
@@ -684,6 +685,43 @@ function BootBehaviorCard() {
 
 // ── You ──────────────────────────────────────────────────────────────────────
 
+function SignOutEverywhereButton() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (
+      !window.confirm(
+        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
+      if (!res.ok) throw new Error(`Request failed (${res.status}).`);
+      window.location.href = "/login";
+    } catch (err) {
+      toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="con-btn con-btn-outline"
+      disabled={busy}
+      onClick={() => void run()}
+      title="Revoke every server session for this account, then return to sign in."
+    >
+      Sign out everywhere
+    </button>
+  );
+}
+
 function YouCard() {
   const { snapshot } = useConsoleData();
   if (!snapshot?.currentUser) return null;
@@ -706,13 +744,16 @@ function YouCard() {
           </span>
         )}
       </div>
+      <div className="mt-3">
+        <SignOutEverywhereButton />
+      </div>
     </Card>
   );
 }
 
 // ── All accounts: Data sources + per-user feature knobs ──────────────────────
 
-const GROUP_ORDER = ["fmp", "sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
+const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
 
 /** Decides what a "Data sources" number row's blur should persist, given the
  *  raw text just typed and the row's last committed value. Returns null when

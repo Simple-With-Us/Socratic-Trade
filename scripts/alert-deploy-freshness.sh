@@ -7,21 +7,30 @@
 # polls up to 25 min). This script is the standing watchdog: one probe, then
 # decide whether the lag is still a legitimate in-flight build or a freeze.
 #
-# Predicate: the OLDEST commit on expected that is not an ancestor of live is
-# older than STALE_SECONDS (default 3600). Tip-age alone is wrong - a second
-# merge 10 min ago would hide a first merge that has been stuck for hours.
+# Predicate: the OLDEST commit on expected that is not an ancestor of live AND
+# that can change the running image is more than STALE_SECONDS (default 3600)
+# past its deploy-due time.  That is the commit time, except that a weekday RTH
+# merge without HOTFIX=1 / RTH_DEPLOY_OVERRIDE=1 is due at the later of the
+# session close and the 21:20 UTC after-close drain (rth-deploy-latch.yml).
+# Tip-age alone is wrong - a second merge 10 min ago would hide a first merge
+# that has been stuck for hours.  Ageing a commit that cannot change the image
+# is just as wrong, and it was the false positive behind ST-4575: this script
+# excluded only `docs`, so a CI-only commit counted as image-affecting and the
+# watchdog paged on four consecutive runs while production was correctly still.
 #
 # It VERIFIES ONLY. It never triggers a deploy, never touches Coolify, and never
 # posts a deploy claim. A stale verdict means investigate the webhook / build
 # queue (see .claude/skills/deploy-verify/SKILL.md), not hand-deploy.
 #
 # Exit codes:
-#   0  fresh enough (live contains expected, OR oldest undeployed is <1h)
+#   0  fresh enough (live contains expected, OR oldest image-affecting
+#      undeployed commit is <1h, OR no commit in the gap can change the image)
 #      Unreachable health is also 0 by default - UptimeRobot already pages
 #      site-down; this watchdog is for the silent-green-on-old-sha class.
 #   1  operational error (bad usage, missing git object, unexpected probe)
 #   2  live release sha is null/absent
-#   3  STALE: oldest undeployed commit is >= STALE_SECONDS old
+#   3  STALE: oldest undeployed commit exceeds DEPLOY_FRESHNESS_STALE_SECONDS
+#      after any weekday RTH latch window (see deploy-freshness-staleness-cli.ts)
 #   4  live commit is divergent from expected
 #   5  live commit id is not an object in this repo
 #
@@ -29,26 +38,31 @@
 #   bash scripts/alert-deploy-freshness.sh
 #   bash scripts/alert-deploy-freshness.sh origin/main
 #   DEPLOY_FRESHNESS_STALE_SECONDS=3600 bash scripts/alert-deploy-freshness.sh
-#   DEPLOY_FRESHNESS_NOTIFY=1 bash scripts/alert-deploy-freshness.sh
+#   DEPLOY_FRESHNESS_NOTIFY is retired and ignored.
+# Scheduled verdicts feed the existing sentry-ci-report.yml pipeline.
 #
 # Keep this file pure ASCII (AGENTS.md: operator shell scripts, Apple bash 3.2).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STALENESS_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERIFY="${SCRIPT_DIR}/verify-deploy-sha.sh"
-FLEET_POST="${SCRIPT_DIR}/agent-sync-fleet-post.sh"
 
 HOST="${DEPLOY_VERIFY_HOST:-https://socratictrade.com}"
 EXPECTED_REF="${1:-${DEPLOY_VERIFY_EXPECTED_SHA:-origin/main}}"
 STALE_SECONDS="${DEPLOY_FRESHNESS_STALE_SECONDS:-3600}"
-NOTIFY="${DEPLOY_FRESHNESS_NOTIFY:-0}"
-# success|failure|none - previous cron tick, used to de-dupe optional Zulip pages.
-PREVIOUS="${DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION:-none}"
+STALENESS_CLI="${SCRIPT_DIR}/deploy-freshness-staleness-cli.ts"
+STALENESS_TSX_VERSION="${DEPLOY_FRESHNESS_TSX_VERSION:-4.23.15}"
 TREAT_UNREACHABLE_OK="${DEPLOY_FRESHNESS_TREAT_UNREACHABLE:-1}"
 NO_FETCH="${DEPLOY_VERIFY_NO_FETCH:-0}"
 CURL_TIMEOUT_SECONDS="${DEPLOY_VERIFY_CURL_TIMEOUT_SECONDS:-20}"
 
 log() { printf '[deploy-freshness] %s\n' "$*" >&2; }
+
+# Historical workflow flags no longer enable a second notification client.
+if [ "${DEPLOY_FRESHNESS_NOTIFY:-0}" != "0" ]; then
+  log "DEPLOY_FRESHNESS_NOTIFY is retired and ignored; scheduled reporting uses Sentry CI."
+fi
 
 fail_usage() {
   log "error: $*"
@@ -56,10 +70,25 @@ fail_usage() {
 }
 
 [ -f "$VERIFY" ] || fail_usage "missing ${VERIFY}"
+[ -f "$STALENESS_CLI" ] || fail_usage "missing ${STALENESS_CLI}"
 command -v git >/dev/null 2>&1 || fail_usage "git is required."
 command -v jq >/dev/null 2>&1 || fail_usage "jq is required."
+command -v npx >/dev/null 2>&1 || fail_usage "npx is required (RTH latch staleness predicate)."
 printf '%s' "$STALE_SECONDS" | grep -Eq '^[0-9]+$' || fail_usage "STALE_SECONDS must be an integer."
 git rev-parse --git-dir >/dev/null 2>&1 || fail_usage "must run inside the Socratic-Trade git repo."
+
+# Anchor to the repository root before any git call that names a path.  Git
+# resolves a command-line pathspec against the current working directory, so a
+# run started from a subdirectory resolves every WATCH_PATHS entry to
+# <cwd>/<entry>, matches nothing, and drives the gap classification into the
+# image-noop branch.  Git exits 0 with an empty list for a pathspec that
+# matches nothing, so that run would report a fresh image-noop pass and the
+# watchdog would be permanently silent - the exact failure class this script
+# exists to detect.  The root is resolved once, here, and every later git call
+# runs from it.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_ROOT" ] || fail_usage "cannot resolve the repository root."
+cd "$REPO_ROOT"
 
 resolve_commit() {
   git rev-parse --verify --quiet "${1}^{commit}" 2>/dev/null || true
@@ -72,12 +101,46 @@ fi
 EXPECTED_SHA="$(resolve_commit "$EXPECTED_REF")"
 [ -n "$EXPECTED_SHA" ] || fail_usage "cannot resolve expected ref '${EXPECTED_REF}' to a commit in this repo."
 
-# watch_paths in Coolify skips docs/**, so a docs-only commit never deploys.
-# Compare against the newest image-affecting commit instead.
-IMAGE_AFFECTING_SHA="$(git log -1 --format="%H" "$EXPECTED_SHA" -- . ":(exclude)docs" 2>/dev/null || true)"
-if [ -n "$IMAGE_AFFECTING_SHA" ]; then
-  EXPECTED_SHA="$IMAGE_AFFECTING_SHA"
-fi
+# Coolify `watch_paths` on socratic-app is an ALLOW list: a push that touches
+# none of these paths never creates a deployment, so no deployment is owed for
+# it and the watchdog must not age it.  This mirrors
+# COOLIFY_WATCH_PATHS_LIVE in src/lib/deploy-image-impact.ts, which records the
+# live value; test/deploy-freshness-watch-paths.test.ts fails if the two drift.
+# Do not PATCH the live list from a PR - it is applied out of band.
+#
+# A git pathspec names a directory and everything under it, so `src` covers
+# `src/**` and `app` covers `app/**`, exactly as the live list pairs them.
+WATCH_PATHS="Dockerfile .dockerignore package.json package-lock.json next.config.mjs postcss.config.mjs tsconfig.json middleware.ts instrumentation.ts instrumentation-client.ts sentry.server.config.ts sentry.edge.config.ts litestream.coolify.yml src app public scripts"
+
+# This is the TRIGGER list, not the image-difference list.  The repo has a
+# second list, isImageNoopPath in src/lib/deploy-image-impact.ts, which answers
+# a different question:  "if a build happens, would the image differ?"  It
+# treats docs/benchmarks as image-relevant, because Next imports those JSON
+# files at build time.  The two lists differ on purpose and
+# test/rth-deploy-latch.test.ts asserts both halves of the difference:
+# docs/** is OMITTED from the trigger, so a push that touches only
+# docs/benchmarks never creates a deployment and none is owed, while the
+# build-time latch still refuses to skip a build that some other watched path
+# triggered, because the benchmark JSON is in that image.  The watchdog asks
+# whether a deployment was OWED, so it must use the trigger list.  Adding
+# docs/benchmarks here would make it wait for a deployment Coolify never
+# creates, which is the false-positive class ST-4575 removes.
+
+# The gap between live and expected is classified below, once, against this
+# list.  There is deliberately no separate "newest image-affecting commit"
+# narrowing here any more: it used to compare production against a commit
+# that may never deploy, and it excluded only `docs`, so every other
+# non-runtime tree counted as image-affecting and the watchdog paged on CI
+# commits (ST-4575).  One rule, applied to the whole gap: a deployment is owed
+# only if some commit in the gap changed a watched path.
+#
+# `--first-parent` is load-bearing wherever the list is used.  Without it a
+# merge commit is compared against its first parent, which for a PR merge is
+# the PR branch tip, so the merge looks like it changed every path main gained
+# since the branch point and a docs-only PR is classified as image-affecting.
+# On the first-parent chain each commit is a state of main and its own diff is
+# what landed on main, which is exactly what decides whether Coolify owes a
+# build.
 
 # Single-shot reuse of the existing gate. Capture both streams; the gate logs to stderr.
 set +e
@@ -99,7 +162,7 @@ LIVE_FULL=""
 OLDEST_UNDEPLOYED=""
 OLDEST_AGE=""
 VERDICT="ok"
-NOTIFY_REASON=""
+export VERDICT
 
 extract_live_sha() {
   # Prefer a live probe so we do not depend on log-line wording.
@@ -108,47 +171,10 @@ extract_live_sha() {
   printf '%s' "$body" | jq -r '.checks.release.sha // empty' 2>/dev/null || true
 }
 
-maybe_notify() {
-  # $1 reason tag, $2 message
-  if [ "$NOTIFY" != "1" ]; then
-    log "notify skipped (DEPLOY_FRESHNESS_NOTIFY=${NOTIFY})."
-    return 0
-  fi
-  case "$PREVIOUS" in
-    failure)
-      if [ "$1" != "recovered" ]; then
-        log "notify skipped (same incident as previous failure; de-dupe)."
-        return 0
-      fi
-      ;;
-    success|none)
-      if [ "$1" = "recovered" ]; then
-        log "notify skipped (no prior failure to recover from)."
-        return 0
-      fi
-      ;;
-    *)
-      log "warn: unknown PREVIOUS_CONCLUSION '${PREVIOUS}' - treating as none."
-      if [ "$1" = "recovered" ]; then
-        return 0
-      fi
-      ;;
-  esac
-  if [ ! -f "$FLEET_POST" ]; then
-    log "notify skipped (agent-sync-fleet-post.sh not present)."
-    return 0
-  fi
-  AGENT_SYNC_SEAT="${AGENT_SYNC_SEAT:-ST}" \
-  AGENT_SYNC_REPO="${AGENT_SYNC_REPO:-Socratic-Trade}" \
-  AGENT_SYNC_TOPIC="${AGENT_SYNC_TOPIC:-fleet}" \
-    bash "$FLEET_POST" "$2" || log "warn: agent-sync fleet post failed (no Zulip creds?)."
-}
-
 case "$VERIFY_CODE" in
   0)
     VERDICT="fresh"
     log "PASS: live contains ${EXPECTED_SHA}."
-    maybe_notify recovered "deploy freshness recovered: prod contains ${EXPECTED_SHA:0:12}.  Silent-freeze watch is clear.  #2545"
     exit 0
     ;;
   1)
@@ -162,21 +188,18 @@ case "$VERIFY_CODE" in
   2)
     VERDICT="no-sha"
     log "FAIL: production publishes no release sha."
-    maybe_notify no-sha "deploy freshness: prod /api/health has no .checks.release.sha so drift cannot be verified.  Check Coolify SOURCE_COMMIT injection.  #2545"
     exit 2
     ;;
   4)
     VERDICT="divergent"
     LIVE_SHA="$(extract_live_sha)"
     log "FAIL: production is on a divergent commit (live ${LIVE_SHA:-unknown}, expected ${EXPECTED_SHA})."
-    maybe_notify divergent "deploy freshness DIVERGENT: prod ${LIVE_SHA:-unknown} neither contains nor is contained by origin/main ${EXPECTED_SHA:0:12}.  Escalate before anything touches production.  #2545"
     exit 4
     ;;
   5)
     VERDICT="unknown-live"
     LIVE_SHA="$(extract_live_sha)"
     log "FAIL: live ${LIVE_SHA:-unknown} is not a commit in this repo."
-    maybe_notify unknown "deploy freshness: prod is running ${LIVE_SHA:-unknown}, which is not in this repo.  Fetch and re-check; if it persists, escalate.  #2545"
     exit 5
     ;;
   3)
@@ -199,9 +222,43 @@ LIVE_FULL="$(resolve_commit "$LIVE_SHA")"
 # has written when head exits, so it fired intermittently in CI and took the whole
 # `verify-hosted` lane -- and therefore the required `verify` gate -- down with it
 # (FLEET-INFRA-BH). Take the first line with parameter expansion; no pipe, no race.
-UNDEPLOYED_LIST="$(git rev-list --reverse "${LIVE_FULL}..${EXPECTED_SHA}")"
+#
+# The pathspec is the point: only a commit that changed a watched path is owed
+# a deployment, so only such a commit may age the verdict.  An old CI-only
+# commit earlier in the gap must not make a fresh runtime commit look stale.
+#
+# A git failure here is NOT an empty list.  Git exits 0 with empty output for a
+# pathspec that matches nothing, which is the image-noop verdict, and it exits
+# non-zero when it cannot do the job at all:  a missing object, a corrupt repo,
+# a killed git.  Swallowing that exit status would turn an operational failure
+# into a green image-noop pass, so the status is captured and the error is
+# raised.  "git errored" has to stay distinct from "no watched commit".
+#
+# stderr is dropped rather than merged into the captured value, and that is
+# load-bearing.  Git can write a WARNING to stderr and still exit 0 - an
+# unreadable $HOME is enough - and merging the two streams would make that
+# warning line the first "commit" of the list.  The next git log would then
+# fail on a non-sha argument and kill the script with git's own exit 128,
+# which is outside the exit-code contract documented at the top of this file.
+# stdout stays pure, and the failure is still loud through the exit status.
+set +e
+UNDEPLOYED_LIST="$(git rev-list --first-parent --reverse "${LIVE_FULL}..${EXPECTED_SHA}" -- $WATCH_PATHS 2>/dev/null)"
+REV_RC=$?
+set -e
+[ "$REV_RC" -eq 0 ] || fail_usage "git rev-list failed (exit ${REV_RC}) on ${LIVE_FULL:0:12}..${EXPECTED_SHA:0:12}; no watched-commit list could be computed."
+
 OLDEST_UNDEPLOYED="${UNDEPLOYED_LIST%%$'\n'*}"
-[ -n "$OLDEST_UNDEPLOYED" ] || fail_usage "live is behind expected but git log ${LIVE_FULL}..${EXPECTED_SHA} is empty."
+if [ -z "$OLDEST_UNDEPLOYED" ]; then
+  # Live is behind, but nothing in the gap can change the image, so Coolify
+  # never owed a deployment for it.  Not the silent-freeze class, and this is
+  # the case ST-4575 was about: a CI-only commit must never age the verdict.
+  #
+  # Scheduled recovery reporting belongs to the existing Sentry CI pipeline.
+  VERDICT="image-noop"
+  log "PASS: live is behind ${EXPECTED_SHA}, but no commit in the gap touches a watched path."
+  log "  no deployment was owed for this gap, so there is nothing to wait for."
+  exit 0
+fi
 
 OLDEST_CT="$(git log -1 --format=%ct "$OLDEST_UNDEPLOYED")"
 NOW_EPOCH="$(date +%s)"
@@ -211,22 +268,65 @@ if [ "$OLDEST_AGE" -lt 0 ]; then
 fi
 
 OLDEST_ISO="$(git log -1 --format=%cI "$OLDEST_UNDEPLOYED")"
-log "oldest undeployed ${OLDEST_UNDEPLOYED} (${OLDEST_ISO}) age ${OLDEST_AGE}s (threshold ${STALE_SECONDS}s)"
+OLDEST_MSG="$(git log -1 --format=%B "$OLDEST_UNDEPLOYED" 2>/dev/null || true)"
+# The deployed latch reads HOTFIX=1 from the built HEAD, so pass the expected
+# tip's message too: a tip-only HOTFIX ships at once and ages from commit.
+TIP_MSG="$(git log -1 --format=%B "$EXPECTED_SHA" 2>/dev/null || true)"
+log "oldest image-affecting undeployed ${OLDEST_UNDEPLOYED} (${OLDEST_ISO}) raw age ${OLDEST_AGE}s (threshold ${STALE_SECONDS}s after latch)"
 log "  live ${LIVE_FULL}  expected ${EXPECTED_SHA}"
 
-if [ "$OLDEST_AGE" -lt "$STALE_SECONDS" ]; then
+# Share the weekday RTH deploy latch calendar (src/lib/rth-deploy-latch.ts).  A
+# merge during cash hours is legitimately undeployed until session close; age the
+# gap only after close plus DEPLOY_FRESHNESS_STALE_SECONDS.  Off-hours merges,
+# holidays, early-close days, and HOTFIX=1 commits keep commit-timestamp aging.
+set +e
+STALENESS_JSON="$(
+  export DEPLOY_FRESHNESS_OLDEST_EPOCH="${OLDEST_CT}"
+  export DEPLOY_FRESHNESS_STALE_SECONDS="${STALE_SECONDS}"
+  export DEPLOY_FRESHNESS_OLDEST_MESSAGE="${OLDEST_MSG}"
+  export DEPLOY_FRESHNESS_TIP_MESSAGE="${TIP_MSG}"
+  if [ -n "${DEPLOY_FRESHNESS_LATCH_NOW:-}" ]; then
+    export DEPLOY_FRESHNESS_LATCH_NOW="${DEPLOY_FRESHNESS_LATCH_NOW}"
+  fi
+  # Pinned to the lockfile's tsx so the job never runs whatever is latest.
+  cd "${STALENESS_REPO_ROOT}" && npx --yes "tsx@${STALENESS_TSX_VERSION}" "$STALENESS_CLI" 2>/dev/null
+)"
+STALENESS_RC=$?
+set -e
+EFFECTIVE_VERDICT=""
+EFFECTIVE_AGE=""
+STALENESS_DETAIL=""
+if [ "$STALENESS_RC" -eq 0 ]; then
+  EFFECTIVE_VERDICT="$(printf '%s' "$STALENESS_JSON" | jq -r '.verdict // empty' 2>/dev/null || true)"
+  EFFECTIVE_AGE="$(printf '%s' "$STALENESS_JSON" | jq -r '.effectiveAgeSeconds // empty' 2>/dev/null || true)"
+  STALENESS_DETAIL="$(printf '%s' "$STALENESS_JSON" | jq -r '.detail // empty' 2>/dev/null || true)"
+fi
+if [ -z "$EFFECTIVE_VERDICT" ] || [ -z "$EFFECTIVE_AGE" ]; then
+  # A registry outage or a broken CLI must not mute a genuinely stale deploy.
+  # Fall back to plain commit-timestamp aging (the pre-latch rule).
+  log "WARN: deploy freshness staleness CLI unavailable (exit ${STALENESS_RC}); falling back to raw commit aging."
+  EFFECTIVE_AGE="$OLDEST_AGE"
+  if [ "$OLDEST_AGE" -ge "$STALE_SECONDS" ]; then
+    EFFECTIVE_VERDICT="stale"
+  else
+    EFFECTIVE_VERDICT="in-flight"
+  fi
+  STALENESS_DETAIL="staleness CLI unavailable; aged from the commit timestamp."
+fi
+
+log "staleness decision: ${EFFECTIVE_VERDICT} (effective ${EFFECTIVE_AGE}s, raw ${OLDEST_AGE}s). ${STALENESS_DETAIL}"
+
+if [ "$EFFECTIVE_VERDICT" = "in-flight" ]; then
   VERDICT="in-flight"
-  log "PASS: main is ahead but the oldest undeployed commit is still inside the ${STALE_SECONDS}s deploy window."
+  log "PASS: main is ahead but the deploy gap is still inside the allowed window (${STALENESS_DETAIL})."
   exit 0
 fi
 
 VERDICT="stale"
-HOURS=$((OLDEST_AGE / 3600))
-MINS=$(((OLDEST_AGE % 3600) / 60))
-log "FAIL: production is STALE - oldest undeployed commit is ${HOURS}h${MINS}m old."
+HOURS=$((EFFECTIVE_AGE / 3600))
+MINS=$(((EFFECTIVE_AGE % 3600) / 60))
+log "FAIL: production is STALE - deploy gap is ${HOURS}h${MINS}m past the latch-adjusted due anchor (raw commit age ${OLDEST_AGE}s)."
 log "  this is the silent-freeze class (webhook 200s, health green on an old sha)."
 log "  do NOT hand-trigger a deploy - investigate the webhook and Coolify build queue."
-
-maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${HOURS}h${MINS}m old.  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
 
 exit 3

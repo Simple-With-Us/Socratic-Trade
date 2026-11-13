@@ -9,6 +9,7 @@
 import crypto from "crypto";
 import { audit, getDb } from "./db";
 import { apiKeyEnvVarForService, DELETED_KEY_TOMBSTONE, getUserApiKey, keyFingerprint, LOCAL_USER, maskApiKeyPreview, type LlmKeySource } from "./db-api-keys";
+import { isCodeCliOnlyModel } from "./llm-model-catalog";
 import { canonicalModelId } from "./model-identity";
 import { setGenAiUsageOnActiveSpan } from "./sentry-gen-ai";
 import { pushLlmUsage } from "./usage-monitor-push";
@@ -35,6 +36,20 @@ export interface LlmUsageEntry {
   cachedPromptTokens?: number;
   /** Anthropic-only: tokens WRITTEN to the cache this call (bill at ~1.25× input). */
   cacheCreationTokens?: number;
+  /** Anthropic/OpenRouter: the share of `cacheCreationTokens` written to the 1-hour cache
+   *  (`usage.cache_creation.ephemeral_1h_input_tokens`).  The remainder is the 5-minute (or
+   *  TTL-unknown) write.  Subset of `cacheCreationTokens`. */
+  cacheCreation1hTokens?: number;
+  /** The reasoning/thinking share of `completionTokens`
+   *  (`usage.completion_tokens_details.reasoning_tokens`).  Informational: already inside
+   *  `completionTokens`, never added again. */
+  reasoningTokens?: number;
+  /** The model the provider says actually served the call (response `model`), when it differs
+   *  from or refines the requested `model` (aliases, OpenRouter routing, `-latest` pins). */
+  servedModel?: string;
+  /** How many provider requests this one ledger row covers.  A chat tool loop records ONE row for
+   *  several model calls; absent means exactly one call. */
+  requestCount?: number;
   /** OpenRouter's per-generation id (response `id`), so the monitor can call GET
    *  /api/v1/generation?id=... to verify reported cost against the provider's own ledger. Only
    *  meaningful when `provider === "openrouter"` — see `providerRequestIdFromPayload`. */
@@ -72,6 +87,14 @@ export interface LlmTokenUsage {
   /** Anthropic-only: usage.cache_creation_input_tokens (cache-write premium tokens).
    *  Subset of promptTokens (which is normalized to the FULL prompt across providers). */
   cacheCreationTokens?: number;
+  /** Subset of `cacheCreationTokens` written to the 1-hour cache
+   *  (Anthropic `usage.cache_creation.ephemeral_1h_input_tokens`). */
+  cacheCreation1hTokens?: number;
+  /** `usage.completion_tokens_details.reasoning_tokens` (or the Responses-API
+   *  `output_tokens_details`).  A subset of `completionTokens`. */
+  reasoningTokens?: number;
+  /** The response's own `model` field: what the provider says served the call. */
+  servedModel?: string;
   /**
    * `usage.cost` — the exact amount the transport charged for this call, in USD.  OpenRouter is
    * the only provider in this app that reports one (credits are 1:1 with USD), and it reports it
@@ -133,11 +156,14 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "claude-fable-5": [10, 50],
   "claude-opus-4-8": [5, 25],
 
-  // --- Curated catalog rows (LLM_MODEL_CATALOG, 21 rows as of 2026-09-18) ---
-  "gpt-6-astra-pro": [10, 50],
+  // --- Curated catalog rows (LLM_MODEL_CATALOG, 26 rows as of 2026-11-04) ---
+  // 2026-11-04 rows below are OpenRouter list prices for the exact wire slug each row uses
+  // (public model list, fetched 2026-11-04).
   "gpt-6-astra": [10, 50],
-  "gpt-5.6-sol": [2, 10], // was [5, 30] — real price is $2/$10 (verified 2026-09-18)
-  "gpt-5.6-luna": [0.2, 1.2], // was [1, 6] — real price is $0.20/$1.20 (verified 2026-09-18)
+  "gpt-6.1-sol": [2, 10],
+  "gpt-6.1-terra": [1, 5],
+  "gpt-6-luna": [0.1, 0.5],
+  "grok-4.7": [2, 6],
   "grok-4.6": [2, 6],
   "grok-latest": [2, 6],
   "claude-fable-latest": [10, 50],
@@ -148,28 +174,55 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "claude-sonnet-5": [2, 10], // was [3, 15] — real price is $2/$10 (verified 2026-09-18)
   "claude-sonnet-4-6": [2, 10], // was [3, 15] — kept in sync with claude-sonnet-5 above
   "claude-sonnet-latest": [2, 10], // was [3, 15] — real price is $2/$10 (verified 2026-09-18)
-  "claude-haiku-4-5": [1, 5],
+  "claude-sonnet-5-5": [2, 10], // anthropic/claude-sonnet-5.5, 2026-11-04
+  "claude-sonnet-5.5": [2, 10],
+  "claude-haiku-4-5": [1, 5], // Haiku 4.5 (historical usage)
   "claude-haiku-4.5": [1, 5],
-  "claude-haiku-latest": [1, 5],
+  // ~anthropic/claude-haiku-latest now targets Haiku 5.5 at $0.10/$0.50 (2026-11-04).
+  "claude-haiku-latest": [0.1, 0.5],
+  "claude-haiku-5-5": [0.1, 0.5],
+  "claude-haiku-5.5": [0.1, 0.5],
   "gemini-flash-lite-latest": [0.3, 2.5], // was [0.25, 1.5] — now serves 3.5, not 3.1 (verified 2026-09-18)
   "gemini-3.8-flash": [0.75, 3.75],
   "gemini-flash-latest": [0.75, 3.75],
-  "gemini-pro-latest": [2, 12],
-  "mistral-large-2512": [0.5, 1.5],
-  "mistral-large-latest": [0.5, 1.5],
+  // ~google/gemini-pro-latest now targets Gemini 4 Argon at $2/$10 (was 3.1 Pro at $2/$12).
+  "gemini-pro-latest": [2, 10],
+  "gemini-4-argon": [2, 10],
+  "mistral-large-2512": [0.5, 1.5], // Large 3, deprecated 2026-10-31 (historical usage)
+  "mistral-large-4-0": [0.7, 2.1],
+  "mistral-large-latest": [0.7, 2.1], // now Mistral Large 4 (mistralai/mistral-large-4-0)
   "mistral-medium-3-5": [1.5, 7.5],
   "mistral-medium-latest": [1.5, 7.5],
   "mistral-small-latest": [0.15, 0.6],
   "deepseek-v4-flash-0731": [0.06, 0.12], // was [0.065, 0.18] — real price is $0.06/$0.12 (verified 2026-09-18)
-  "deepseek-flash-latest": [0.06, 0.12], // was [0.065, 0.18] — kept in sync with deepseek-v4-flash-0731 above
+  // The Flash row now uses ~deepseek/deepseek-flash-latest.  OpenRouter's listed price for that
+  // alias row ($0.006 in / $0.50 out) is its cache-read rate, not a list price; the alias targets
+  // deepseek/deepseek-v4.1-flash-1017, whose list price is $0.30/$1.20 (2026-11-04).
+  "deepseek-v4.1-flash-1017": [0.3, 1.2],
+  "deepseek-flash-latest": [0.3, 1.2],
   "deepseek-v4-pro-0813": [0.57816, 1.73448], // was [0.57948, 1.73844] — exact JSON figures (verified 2026-09-18)
   "deepseek-pro-latest": [0.57816, 1.73448], // was [0.57948, 1.73844] — kept in sync with deepseek-v4-pro-0813 above
   "minimax-m3": [0.3, 1.2],
+  "minimax-m3.1-flash": [0.15, 0.6],
+  "muse-wonder-1.0": [4, 20], // meta/muse-wonder, 2026-11-04
+  "muse-wonder": [4, 20],
+  // muse-wonder-1.0-contributor / muse-wonder-full-1.0-contributor: deliberately UNPRICED.  They run
+  // only through the Code CLI route, whose cost is unknown (not zero); estimateLlmCostUsd returns
+  // undefined for them instead of borrowing Wonder's price through the prefix match below.
   "muse-spark-1.3": [1.25, 4.25],
   "muse-spark-1.3-contributor": [0.1, 0.2], // verified 2026-10-12 on OpenRouter and dev.meta.ai pricing
   "muse-glimmer-30b": [0.35, 1.5], // was [0.3, 1.1] — real (live OpenRouter) price is $0.35/$1.50 (verified 2026-09-18)
-  "kimi-latest": [1.95, 10.92], // was [0.3, 1.2] — the old figure was Kimi's cache-HIT input price, not the
-  "kimi-k3": [1.95, 10.92], //     real cache-miss rate; real price is $1.95/$10.92 (verified 2026-09-18)
+  // kimi-latest now pins moonshotai/kimi-k3.1-pro ($2/$10, 2026-11-04).
+  "kimi-latest": [2, 10],
+  "kimi-k3.1-pro": [2, 10],
+  "kimi-k3": [1.95, 10.92], // was [0.3, 1.2] — the old figure was Kimi's cache-HIT input price, not the
+  //     real cache-miss rate; real price is $1.95/$10.92 (verified 2026-09-18)
+
+  // --- Retired from the picker 2026-11-04 (RETIRED_LLM_MODEL_CATALOG) ---
+  // A stored selection of these is still served, so they keep a live price.
+  "gpt-6-astra-pro": [10, 50],
+  "gpt-5.6-sol": [4, 20], // was [2, 10]; OpenRouter lists openai/gpt-5.6-sol at $4/$20 (2026-11-04)
+  "gpt-5.6-luna": [0.2, 1.2], // was [1, 6] — real price is $0.20/$1.20 (verified 2026-09-18)
 
   // --- Retired from the curated catalog 2026-09-18 (model-catalog cleanup) ---
   // Kept ONLY so any historical usage row still recorded under one of these ids still
@@ -243,6 +296,8 @@ export function estimateLlmCostUsd(
   cachedPromptTokens?: number,
   cacheCreationTokens?: number
 ): number | undefined {
+  // Code CLI-only models have no API price: their cost is unknown, never a borrowed estimate.
+  if (isCodeCliOnlyModel(model)) return undefined;
   const price = priceForModel(model);
   const inTok = promptTokens ?? 0;
   const outTok = completionTokens ?? 0;
@@ -266,7 +321,15 @@ export function extractLlmUsage(responseJson: unknown): LlmTokenUsage {
   const details = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
   // Cache reads: OpenAI/Gemini-compat nest under prompt_tokens_details; DeepSeek and Anthropic are top-level.
   const cachedPromptTokens = num(details.cached_tokens) ?? num(u.prompt_cache_hit_tokens) ?? num(u.cache_read_input_tokens);
-  const cacheCreationTokens = num(u.cache_creation_input_tokens);
+  // Anthropic reports cache writes top-level; OpenRouter nests them under prompt_tokens_details.
+  const cacheCreationTokens = num(u.cache_creation_input_tokens) ?? num(details.cache_write_tokens);
+  const creationBreakdown = (u.cache_creation ?? {}) as Record<string, unknown>;
+  const cacheCreation1hTokens = num(creationBreakdown.ephemeral_1h_input_tokens);
+  const reasoningTokens =
+    num(((u.completion_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens) ??
+    num(((u.output_tokens_details ?? {}) as Record<string, unknown>).reasoning_tokens);
+  const rawModel = (responseJson as { model?: unknown }).model;
+  const servedModel = typeof rawModel === "string" && rawModel.trim() ? rawModel.trim().slice(0, 160) : undefined;
   const anthropicIn = num(u.input_tokens);
   const promptTokens =
     num(u.prompt_tokens) ??
@@ -284,6 +347,9 @@ export function extractLlmUsage(responseJson: unknown): LlmTokenUsage {
     totalTokens,
     ...(cachedPromptTokens !== undefined ? { cachedPromptTokens } : {}),
     ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(cacheCreation1hTokens !== undefined ? { cacheCreation1hTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(servedModel !== undefined ? { servedModel } : {}),
     ...(billedCostUsd !== undefined ? { billedCostUsd } : {})
   };
 }
@@ -328,6 +394,11 @@ export function remapOpenRouterTelemetry(provider: string, model: string | undef
   return { provider, model: family ?? model };
 }
 
+/** A finite, non-negative integer, else null (the column stays NULL). */
+function nonNegativeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+}
+
 /** Record one LLM call against a user. Never throws — usage accounting must not break an LLM run. */
 export function recordLlmUsage(entry: LlmUsageEntry): void {
   try {
@@ -353,7 +424,7 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
       entry.provider === "openrouter" && typeof entry.billedCostUsd === "number" && Number.isFinite(entry.billedCostUsd) && entry.billedCostUsd >= 0
         ? entry.billedCostUsd
         : undefined;
-    const estimatedCostUsd = estimateLlmCostUsd(entry.model ?? canonical.model, entry.promptTokens, entry.completionTokens, entry.cachedPromptTokens, entry.cacheCreationTokens);
+    const estimatedCostUsd = entry.keyRef === "code-cli" ? undefined : estimateLlmCostUsd(entry.model ?? canonical.model, entry.promptTokens, entry.completionTokens, entry.cachedPromptTokens, entry.cacheCreationTokens);
     const cost = billedCostUsd ?? estimatedCostUsd;
     // Provenance travels with the row so the Usage page can label an estimate as an estimate
     // instead of mixing it into a "billed" total.  Null only when there is no cost at all.
@@ -390,10 +461,20 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
     // hands us an unexpected enum value.
     const allowedStatus = new Set(["success", "error", "timeout", "canceled"]);
     const status = entry.status && allowedStatus.has(entry.status) ? entry.status : null;
+    // Detail columns (migration #99).  Sanitised like latency: a non-finite or negative figure is
+    // dropped to NULL rather than persisted, so a malformed provider block can never poison replay.
+    const cachedPromptTokens = nonNegativeInt(entry.cachedPromptTokens);
+    const cacheCreationTokens = nonNegativeInt(entry.cacheCreationTokens);
+    const cacheCreation1hTokens =
+      cacheCreationTokens === null ? null : Math.min(nonNegativeInt(entry.cacheCreation1hTokens) ?? 0, cacheCreationTokens) || null;
+    const reasoningTokens = nonNegativeInt(entry.reasoningTokens);
+    const servedModel = typeof entry.servedModel === "string" && entry.servedModel.trim() ? entry.servedModel.trim().slice(0, 160) : null;
+    const requestCountRaw = nonNegativeInt(entry.requestCount);
+    const requestCount = requestCountRaw !== null && requestCountRaw > 1 ? requestCountRaw : null;
     getDb()
       .prepare(
-        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, connected_account_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_source, latency_ms, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO llm_usage (id, user_id, provider, model, context, key_source, key_ref, connected_account_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_source, latency_ms, status, cached_prompt_tokens, cache_creation_tokens, cache_creation_1h_tokens, reasoning_tokens, served_model, request_count, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         usageId,
@@ -411,6 +492,12 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
         costSource,
         latencyMs,
         status,
+        cachedPromptTokens,
+        cacheCreationTokens,
+        cacheCreation1hTokens,
+        reasoningTokens,
+        servedModel,
+        requestCount,
         occurredAt
       );
     setGenAiUsageOnActiveSpan({
@@ -433,7 +520,16 @@ export function recordLlmUsage(entry: LlmUsageEntry): void {
       completionTokens: entry.completionTokens,
       totalTokens: total,
       costUsd: cost,
+      costSource,
       providerRequestId: entry.providerRequestId,
+      cachedPromptTokens: cachedPromptTokens ?? undefined,
+      cacheCreationTokens: cacheCreationTokens ?? undefined,
+      cacheCreation1hTokens: cacheCreation1hTokens ?? undefined,
+      reasoningTokens: reasoningTokens ?? undefined,
+      servedModel: servedModel ?? undefined,
+      latencyMs: latencyMs ?? undefined,
+      status: status ?? undefined,
+      requestCount: requestCount ?? undefined,
     });
   } catch {
     /* ledger is best-effort; never break the caller */

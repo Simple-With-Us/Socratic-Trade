@@ -64,7 +64,7 @@ The `app` tag + fingerprint component are required: fleet-infra is shared
 across repos, and this repo shares workflow names ("CI", "Security",
 "Effort Issues Sync") with Socratic-Trade / Congress.Trade, so without `app`
 a "CI" failure here would dedup into the same Sentry issue as one there.
-Per AGENT-SYNC.md "Observability", every event is tagged with `app:<repo>`.
+Per FLEET-PROTOCOL.md "Observability", every event is tagged with `app:<repo>`.
 
 Secrets: SENTRY_FLEET_DSN is read only from the environment (set by the
 workflow from the repo secret) and is NEVER printed or logged in any form,

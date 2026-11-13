@@ -364,6 +364,13 @@ describe("storage hygiene against a database", () => {
       `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at)
        VALUES ('old-hash', 'm', 'r', 1, ?, ?)`
     ).run(Buffer.from([1, 2, 3, 4]), isoDaysBefore(50));
+    // ST-4540: this row carries a durable delivery receipt (vector is already in the store).
+    // The hygiene lane must still not touch it — embed_stage clears ONLY via
+    // deleteStagedEmbeddings after delivery, never by calendar retention.
+    db.prepare(
+      `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at, delivered_at, delivered_store)
+       VALUES ('old-delivered', 'm', 'r', 1, ?, ?, ?, 'pinecone')`
+    ).run(Buffer.from([1, 2, 3, 4]), isoDaysBefore(50), isoDaysBefore(49));
     db.prepare(
       `INSERT INTO embed_stage (content_hash, model, revision, dims, vector, created_at)
        VALUES ('new-hash', 'm', 'r', 1, ?, ?)`
@@ -465,7 +472,7 @@ describe("storage hygiene against a database", () => {
       (db.prepare("SELECT content_hash FROM embed_stage ORDER BY content_hash").all() as Array<{ content_hash: string }>).map(
         (row) => row.content_hash
       )
-    ).toEqual(["new-hash", "old-hash"]);
+    ).toEqual(["new-hash", "old-delivered", "old-hash"]);
     expect((db.prepare("SELECT id FROM api_health_log ORDER BY id").all() as Array<{ id: string }>).map((row) => row.id)).toEqual([
       "h-new",
       "h-old"

@@ -11,12 +11,14 @@
  *  Optional market-data keys also carry a declared plan tier (free / power / …)
  *  so quotas and endpoint expectations match what you actually pay for. */
 
+import { LlmRouteSelect } from "./llm-route-select";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ConsoleApiError } from "../lib/api";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Field, Select, TextInput } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import type { AutoSaveStatus } from "../lib/useAutoSave";
+import { runRemoveKey } from "./remove-key";
 import {
   deleteApiKey,
   listApiKeys,
@@ -28,6 +30,12 @@ import {
 
 const getSourceCopy = (source: ApiKeyEntry["source"], credName: string) => {
   switch (source) {
+    case "retired":
+      return {
+        chip: "stored key (unused)",
+        title: `A ${credName} is still stored for this retired provider.  Product code never uses it — delete it when you are done rotating.`,
+        tone: "muted" as const
+      };
     case "user":
       return {
         chip: `your ${credName}`,
@@ -84,20 +92,14 @@ export function ApiKeysCard() {
 
   const removeKey = async (entry: ApiKeyEntry) => {
     setBusy(entry.service);
-    const credName = entry.credentialName ?? "key";
     try {
-      await deleteApiKey(entry.service);
-      await load();
-      setConfirmingDelete(null);
-      toast.push("pos", `${entry.label} ${credName} removed`, "Features it unlocked fall back to the server key if one exists, otherwise turn off.");
-    } catch (error) {
-      toast.push("neg", `Could not remove ${credName}`, error instanceof ConsoleApiError ? error.message : String(error));
+      await runRemoveKey(entry, { deleteApiKey, reload: load, push: toast.push, onSettled: () => setConfirmingDelete(null) });
     } finally {
       setBusy(null);
     }
   };
 
-  const onRouteChange = async (entry: ApiKeyEntry, route: "openrouter" | "native") => {
+  const onRouteChange = async (entry: ApiKeyEntry, route: "openrouter" | "native" | "code-cli") => {
     const previous = entry.route;
     setBusy(entry.service);
     setSaveStatus("saving");
@@ -146,7 +148,7 @@ export function ApiKeysCard() {
         an LLM key (OpenRouter is the production path) so Green/Red team models can propose and debate.{" "}
         <strong className="font-semibold text-[color:var(--con-muted)]">Optional enrichment:</strong> Finnhub, Tiingo, FRED,
         and similar data providers deepen the scan — without them the app still uses free floors (e.g. Yahoo).{" "}
-        <strong className="font-semibold text-[color:var(--con-muted)]">Direct FMP and QuiverQuant are retired</strong>{" "}
+        <strong className="font-semibold text-[color:var(--con-muted)]">Direct QuiverQuant is retired</strong>{" "}
         here (Congress.Trade owns that class of data). Market data, positions, and guardrails work without optional
         keys; autonomous proposals do not. For <strong className="font-semibold text-[color:var(--con-muted)]">every
         market-data / data-platform key</strong> (Tiingo, Massive, ROIC, Twelve, Finnhub, Marketstack, FilingAPI,
@@ -178,7 +180,11 @@ export function ApiKeysCard() {
             <div className="flex flex-col divide-y divide-[color:var(--con-line)] rounded-control border border-[color:var(--con-line)]">
               {list.map((entry) => {
                 const credName = entry.credentialName ?? "key";
-                const source = getSourceCopy(entry.source, credName);
+                const source = entry.route === "code-cli"
+                  ? { chip: entry.codeCliAvailable ? "server CLI selected" : "server CLI unavailable",
+                      title: "This route uses the server CLI broker, not an API key.  Server setup and CLI availability are required.",
+                      tone: "muted" as const }
+                  : getSourceCopy(entry.source, credName);
                 const isEditing = editing === entry.service;
                 const isConfirmingDelete = confirmingDelete === entry.service;
                 const showTier = Boolean(entry.planTierOptions && entry.planTierOptions.length > 0);
@@ -213,7 +219,7 @@ export function ApiKeysCard() {
                             {entry.preview}
                           </code>
                         )}
-                        {entry.source === "user" && entry.updatedAt && (
+                        {(entry.source === "user" || entry.source === "retired") && entry.updatedAt && (
                           <span
                             className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
                             title="When you last saved a key for this service."
@@ -222,24 +228,8 @@ export function ApiKeysCard() {
                           </span>
                         )}
                         {entry.routeToggle && (
-                          <label
-                            className="flex items-center gap-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
-                            title="OpenRouter is the default.  Pick Direct to send this provider's models straight to its own API with your key above."
-                          >
-                            <span className="whitespace-nowrap">Route</span>
-                            <Select
-                              className="min-w-[8.5rem] py-0.5 text-[length:var(--con-fs-xs)]"
-                              value={entry.route ?? "openrouter"}
-                              disabled={busy !== null || retired || entry.source === "none"}
-                              title={entry.source === "none" ? "Add a key first.  Direct only works once this provider has a key." : undefined}
-                              aria-busy={busy === entry.service}
-                              onChange={(e) => void onRouteChange(entry, e.target.value === "native" ? "native" : "openrouter")}
-                              aria-label={`${entry.label} route`}
-                            >
-                              <option value="openrouter">OpenRouter (default)</option>
-                              <option value="native">Direct (own key)</option>
-                            </Select>
-                          </label>
+                          <LlmRouteSelect entry={entry} busy={busy !== null} retired={retired}
+                            onChange={(route) => void onRouteChange(entry, route)} />
                         )}
                         {showTier && (
                           <label
@@ -303,7 +293,7 @@ export function ApiKeysCard() {
                             {isEditing ? "Close" : entry.source === "user" ? "Replace" : `Add ${credName}`}
                           </Btn>
                         )}
-                        {entry.source === "user" && !retired && (
+                        {(entry.source === "user" && !retired) || entry.source === "retired" ? (
                           <Btn
                             size="sm"
                             variant="dangerOutline"
@@ -312,11 +302,15 @@ export function ApiKeysCard() {
                               setConfirmingDelete(isConfirmingDelete ? null : entry.service);
                               setEditing(null);
                             }}
-                            title={`Delete your stored ${credName} from the server.  Falls back to the server ${credName} if one exists.`}
+                            title={
+                              entry.source === "retired"
+                                ? `Delete the stored ${credName} for this retired provider.  It is never used by Socratic-Trade.`
+                                : `Delete your stored ${credName} from the server.  Falls back to the server ${credName} if one exists.`
+                            }
                           >
                             Remove
                           </Btn>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                     <p className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]" title={entry.envVar ? `Server-side env var for this service: ${entry.envVar}` : undefined}>
@@ -325,7 +319,9 @@ export function ApiKeysCard() {
                     {isConfirmingDelete && (
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-control border border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] p-2.5">
                         <span className="text-[length:var(--con-fs-xs)]">
-                          Remove your {entry.label} {credName}? This can&apos;t be undone — you&apos;d have to paste a new {credName}.
+                          {entry.source === "retired"
+                            ? `Remove your stored ${entry.label} ${credName}?  This can't be undone — ${entry.label} is retired on Socratic-Trade, so a ${credName} for it cannot be added again.`
+                            : `Remove your ${entry.label} ${credName}?  This can't be undone — you'd have to paste a new ${credName}.`}
                         </span>
                         <div className="flex gap-2">
                           <Btn size="sm" variant="ghost" onClick={() => setConfirmingDelete(null)} title={`Keep the ${credName}.`}>

@@ -16,11 +16,15 @@ beforeAll(() => {
   applyVersionedMigrations(db);
 });
 
-vi.mock("../src/lib/web-sources/http", () => ({
-  politeFetchText: vi.fn(),
-  politeFetch: vi.fn(),
-  BROWSER_UA: "Mozilla/5.0 test"
-}));
+vi.mock("../src/lib/web-sources/http", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/web-sources/http")>();
+  return {
+    ...actual,
+    politeFetchText: vi.fn(),
+    politeFetch: vi.fn(),
+    BROWSER_UA: "Mozilla/5.0 test"
+  };
+});
 
 vi.mock("../src/lib/vector-db", async (importOriginal) => {
   // classifyEmbedFailure is a pure classifier the worker now calls directly to decide

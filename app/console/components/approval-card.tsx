@@ -9,7 +9,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, CircleAlert, Database, Ruler, ShieldCheck, Swords, TrendingUp } from "lucide-react";
 import { requestedExitQuantity } from "@/lib/broker-held-orders";
-import { isModelRotationSentinel } from "@/lib/llm-request";
+import { isModelRotationSentinel } from "@/lib/llm-reasoning";
 import { canonicalModelId } from "@/lib/model-identity";
 import { normalizeSymbol } from "@/lib/money";
 import { resolveDailyOpeningCap } from "@/lib/policy-caps";

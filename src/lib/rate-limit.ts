@@ -11,6 +11,7 @@
 //     itself threw. `rateLimit()` swallows its own errors and allows the request.
 
 import { z } from "zod";
+import { clientIpTrustMarkerMatches, originLockEnabled, ORIGIN_CLIENT_IP_TRUST_HEADER } from "./cloudflare-origin-lock";
 
 export interface RateLimitOptions {
   /** Max number of allowed requests within the window. */
@@ -119,20 +120,74 @@ export function rateLimit(key: string, options: RateLimitOptions, now: number = 
   }
 }
 
+/**
+ * Same sliding window as `rateLimit`, without recording a hit.
+ * A denied peek still drops expired timestamps. An allowed peek leaves the bucket unchanged,
+ * so a caller can shed an already-full budget before taking a shared lease and record only
+ * after that claim succeeds.
+ */
+export function peekRateLimit(key: string, options: RateLimitOptions, now: number = Date.now()): RateLimitResult {
+  try {
+    const limit = Math.max(1, Math.floor(options.limit));
+    const windowMs = Math.max(1, Math.floor(options.windowMs));
+    const cutoff = now - windowMs;
+
+    sweepExpiredBuckets(now);
+    const existing = buckets.get(key);
+    const recent = existing ? existing.hits.filter((t) => t > cutoff) : [];
+
+    if (recent.length >= limit) {
+      const oldest = recent[0] ?? now;
+      const resetAt = oldest + windowMs;
+      const retryAfterSeconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
+      storeBucket(key, { hits: recent, expiresAt: (recent.at(-1) ?? now) + windowMs });
+      return { allowed: false, remaining: 0, resetAt, retryAfterSeconds };
+    }
+
+    return {
+      allowed: true,
+      remaining: Math.max(0, limit - recent.length),
+      resetAt: (recent[0] ?? now) + windowMs,
+      retryAfterSeconds: 0
+    };
+  } catch {
+    return { allowed: true, remaining: 0, resetAt: now, retryAfterSeconds: 0 };
+  }
+}
+
+function rateLimitExceededResponse(result: RateLimitResult): Response | null {
+  if (result.allowed) return null;
+  return new Response(JSON.stringify({ ok: false, error: "Rate limit exceeded. Please retry shortly." }), {
+    status: 429,
+    headers: {
+      "content-type": "application/json",
+      "retry-after": String(result.retryAfterSeconds)
+    }
+  });
+}
+
 /** Zod schema for Cloudflare's overwritten connecting-IP header (IPv4 or IPv6). */
 export const TrustedCloudflareClientIpSchema = z.union([z.ipv4(), z.ipv6()]);
 export type TrustedCloudflareClientIp = z.infer<typeof TrustedCloudflareClientIpSchema>;
 
 /**
- * Production is Cloudflare-fronted; only the overwritten connecting-IP header is a trusted
- * client address. Returns null when the header is missing or fails Zod IP validation so
- * callers can answer HTTP 400 rather than keying the limiter on a forged / fallback string.
+ * Client address from CF-Connecting-IP.
+ * With REQUIRE_CLOUDFLARE_ORIGIN off (the default), a parseable header is returned.
+ * With the lock on, the header counts only when the Node hook has marked this
+ * request as Cloudflare-fronted. A direct caller cannot forge that mark, and
+ * health, loopback, and Tailscale admissions do not set it.
+ * Returns null when the header is missing, fails validation, or is untrusted,
+ * so callers can answer HTTP 400 rather than keying a limiter on a forged string.
  */
 export function trustedCloudflareClientIp(req: Request): TrustedCloudflareClientIp | null {
   const parsed = TrustedCloudflareClientIpSchema.safeParse(
     req.headers.get("cf-connecting-ip")?.trim()
   );
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  if (originLockEnabled() && !clientIpTrustMarkerMatches(req.headers.get(ORIGIN_CLIENT_IP_TRUST_HEADER))) {
+    return null;
+  }
+  return parsed.data;
 }
 
 /** Sensible defaults for the route classes we guard. Override per-route as needed. */
@@ -162,7 +217,16 @@ export const RATE_LIMITS = {
   /** Failed bearer on securities import — cap audit rows from internet credential stuffing. */
   securitiesImportUnauth: { limit: 30, windowMs: 60_000 },
   /** Failed HMAC/bearer on congress webhook — cap audit rows after junk signatures force body+HMAC. */
-  congressWebhookUnauth: { limit: 60, windowMs: 60_000 }
+  congressWebhookUnauth: { limit: 60, windowMs: 60_000 },
+  /**
+   * Admin ingest/backfill starts (corpus reembed, SEC reindex/seed/requeue, forced web-source
+   * refresh, earnings-call probe/burst). Per admin, per route. Tighter than interactive chat/scan.
+   * Routes that already have an hourly operation budget keep that budget; this stops the burst
+   * before the job starts, including paths the operation guard does not wrap.
+   */
+  adminIngest: { limit: 6, windowMs: 10 * 60_000 },
+  /** Status reads on those same admin routes (vector stats, ingest receipts, chat transcript). */
+  adminIngestRead: { limit: 30, windowMs: 60_000 }
 } as const satisfies Record<string, RateLimitOptions>;
 
 /**
@@ -175,13 +239,19 @@ export function enforceRateLimit(
   options: RateLimitOptions,
   now: number = Date.now()
 ): Response | null {
-  const result = rateLimit(`${userId}:${route}`, options, now);
-  if (result.allowed) return null;
-  return new Response(JSON.stringify({ ok: false, error: "Rate limit exceeded. Please retry shortly." }), {
-    status: 429,
-    headers: {
-      "content-type": "application/json",
-      "retry-after": String(result.retryAfterSeconds)
-    }
-  });
+  return rateLimitExceededResponse(rateLimit(`${userId}:${route}`, options, now));
+}
+
+/**
+ * 429 when the next hit would be denied, without recording that hit.
+ * Pair with `enforceRateLimit` after a lease claim so a 409 duplicate stays free and an
+ * already-full budget never takes the lease.
+ */
+export function previewRateLimit(
+  userId: string,
+  route: string,
+  options: RateLimitOptions,
+  now: number = Date.now()
+): Response | null {
+  return rateLimitExceededResponse(peekRateLimit(`${userId}:${route}`, options, now));
 }

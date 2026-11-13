@@ -1,6 +1,6 @@
 // One-off cascade audit: enrich a few symbols with the current provider registration and
 // print which provider won each field + which fields nothing filled. Run:
-//   source ~/.secrets/global-api-keys.env && DATABASE_URL=file:/tmp/cascade-audit.db npx tsx scripts/cascade-audit.ts
+//   DATABASE_URL=file:/tmp/cascade-audit.db fleet-secrets run -- npx tsx scripts/cascade-audit.ts
 import { getEnrichmentProvider } from "../src/lib/data-providers";
 import { resolveEnrichmentCoverageReport } from "../src/lib/db-enrichment-coverage";
 

@@ -129,7 +129,7 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
   return {
     ...actual,
     loadApprovalQuoteScan: async () =>
-      actual.buildApprovalQuoteScan({ BAC: { symbol: "BAC", price: 50, bid: 49.99, ask: 50, provider: "test-scan" } }, [])
+      actual.buildApprovalQuoteScan({ BAC: { symbol: "BAC", price: 50, bid: 49.99, ask: 50, provider: "test-scan", asOf: new Date().toISOString() } }, [])
   };
 });
 

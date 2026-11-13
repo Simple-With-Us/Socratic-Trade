@@ -9,6 +9,11 @@ hooks in `src/lib/market.ts` (after-scan) and `src/lib/scheduler.ts` (nightly).
 and runtime Zod schemas are imported from `@jaywedgeworth22/congress-trading-shared`, with local App B
 code retaining only mapping logic and operational gates.
 
+**Share envelope version (2026-10-23, ST-3853):** since `@jaywedgeworth22/congress-trading-shared`
+v2.9.0 the sender stamps the shared `SHARE_PAYLOAD_SCHEMA_VERSION` on every outbound import POST body
+(and App A resolves it with `resolveSharePayloadSchemaVersion`, warning on unsupported versions
+without rejecting the payload).
+
 **2026-06-25 additions (all default-OFF):**
 - **Numeric analyst price targets** — `fundamentals[]`/`analyst[]` already ride the
   push via `marketQuoteToFundamentals`/`marketQuoteToAnalyst` (sourced from the scan's
@@ -213,10 +218,15 @@ the same `APP_B_INGEST_TOKEN` bearer as `/api/admin/securities/import`
   `PriceSeries` envelope: `{ ticker, closes: [{date, close, volume?}, ...], currentPrice,
   currentPriceDate }`. Closes are DESCENDING (closes[0] = latest); `from`/`to` optional, inclusive
   (default ~1y back → today); `currentPrice` is the newest close of the FULL series
-  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }` — never an
-  error status, so App A only treats genuine non-200s as "try the fallback provider".
+  (range-independent). Unknown symbol / empty range → 200 with `{ ticker, closes: [] }`.
+  App A treats that 200 as "this source has nothing" and only tries the next provider on non-200.
+  A series whose newest close is older than the latest completed US equity session is HTTP 502
+  `{ ok: false, error: "stale" }`.  An empty 200 would suppress that fallback.  The nightly push
+  drops that ticker and the S&P series instead of POSTing them, and writes a
+  `congress_share_stale_price_withheld` audit row.
 - `GET /api/market/spx?from=&to=` → `{ closes: [...] }` DESCENDING, from SPY daily bars (the
-  benchmark convention App A already uses).
+  benchmark convention App A already uses).  No bars is 200 `{ closes: [] }`.  A stale SPY tail
+  is the same 502.
 
 Bars come from the canonical `fetchDailyOHLC` cascade (Massive keyed first, ~30min in-process
 cache) — see `src/lib/market-read.ts` and `docs/rollouts/2026-07-31-market-read-routes.md`.

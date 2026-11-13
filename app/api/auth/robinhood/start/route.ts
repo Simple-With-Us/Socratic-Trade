@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildMcpAuthorizationUrl, resolveMcpOAuthRedirectUri } from "@/lib/mcp-oauth";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "auth/robinhood/start", RATE_LIMITS.oauth);
     if (limited) return limited;
     return NextResponse.redirect(await buildMcpAuthorizationUrl(userId, { redirectUri: resolveMcpOAuthRedirectUri(request) }));

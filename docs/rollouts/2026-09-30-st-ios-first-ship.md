@@ -116,7 +116,7 @@ Connect app `6815511597` now lists build **1.0.102 (202610010114)**, `VALID`, id
 ## 5. Next Steps & Blockers
 
 - Owner, optional: assign `group.com.socratictrade` to the `com.socratictrade.ios` App ID in the
-  Developer Portal, regenerate "Socratic Trade App Store (API)", then re-add the entitlement in
+  Developer Portal, regenerate the profile named in `ios/appstore-profiles.json` (since 2026-10-20 "Socratic Trade App Store (API) 2", see ST-4567), then re-add the entitlement in
   `ios/project.yml` and regenerate.  Only needed when a feature actually shares a container.
 - Fleet, optional: if the developerservices2 401 is a property of the key's role, an Admin key
   would restore automatic signing.  Do not mint one; owner's call.

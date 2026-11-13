@@ -203,11 +203,11 @@ describe("runFailureWatchdogTick", () => {
     const w = await watchdog();
     const d = await db();
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak")).toBeDefined();
+    expect(d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak:${USER}:${ACCT}`)).toBeDefined();
     await addCompletedRun();
     await w.runFailureWatchdogTick();
     // The next episode must start its escalation clock fresh.
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak")).toBeUndefined();
+    expect(d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak:${USER}:${ACCT}`)).toBeUndefined();
   });
 
   it("ends the halted liveness episode when the owner re-arms the account", async () => {
@@ -215,10 +215,14 @@ describe("runFailureWatchdogTick", () => {
     const w = await watchdog();
     const d = await db();
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak_halted")).toBeDefined();
+    expect(
+      d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak_halted:${USER}:${ACCT}`)
+    ).toBeDefined();
     d.setPolicy({ ...d.getPolicy(USER, ACCT), systemState: "active" }, USER, ACCT);
     await w.runFailureWatchdogTick();
-    expect(d.getInternalSetting<string>("livenessDegradedSince:run_failure_streak_halted")).toBeUndefined();
+    expect(
+      d.getInternalSetting<string>(`livenessDegradedSince:run_failure_streak_halted:${USER}:${ACCT}`)
+    ).toBeUndefined();
   });
 
   it("clears the halt marker when the owner re-arms the account", async () => {
@@ -274,6 +278,8 @@ describe("runFailureWatchdogTick", () => {
     const d = await db();
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("halted");
+    const haltMarker = w.getRunFailureHaltMarker(USER, ACCT);
+    expect(haltMarker?.since).toBeTruthy();
 
     const inflightId = randomUUID();
     d.getDb()
@@ -290,11 +296,24 @@ describe("runFailureWatchdogTick", () => {
       .getDb()
       .prepare(
         `SELECT created_at FROM audit_events
-         WHERE user_id = ? AND connected_account_id = ? AND kind = 'policy_change'
-         ORDER BY created_at DESC LIMIT 1`
+         WHERE user_id = ? AND connected_account_id = ? AND created_at >= ?
+           AND (
+             (kind = 'policy_change'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.value.systemState') = 'active')
+             OR (kind = 'ops_account_control'
+               AND json_valid(payload)
+               AND json_extract(payload, '$.action') = 'set_system_state'
+               AND CAST(json_extract(payload, '$.dryRun') AS INTEGER) = 0
+               AND CAST(json_extract(payload, '$.ok') AS INTEGER) = 1
+               AND json_extract(payload, '$.to') = 'active')
+           )
+         ORDER BY created_at ASC
+         LIMIT 1`
       )
-      .get(USER, ACCT) as { created_at: string };
+      .get(USER, ACCT, haltMarker!.since) as { created_at: string };
     const saved = d.getInternalSetting<{ rearmedAt?: string }>(`runFailureWatch:${USER}:${ACCT}`);
+    // Same receipt the watchdog reads (audit time, not tick `Date.now()`).
     expect(saved?.rearmedAt).toBe(rearmAudit.created_at);
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
@@ -307,7 +326,7 @@ describe("runFailureWatchdogTick", () => {
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
 
     const liveness = await import("../src/lib/trading-liveness");
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     const row = summary?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(0);
     expect(liveness.toPublicTradingLiveness(summary).maxConsecutiveFailedRuns).toBe(0);
@@ -331,7 +350,7 @@ describe("runFailureWatchdogTick", () => {
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     expect(w.getRunFailureHaltMarker(USER, ACCT)).toBeNull();
     const liveness = await import("../src/lib/trading-liveness");
-    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const row = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(0);
   });
 
@@ -350,7 +369,7 @@ describe("runFailureWatchdogTick", () => {
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     const liveness = await import("../src/lib/trading-liveness");
-    const mid = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const mid = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(mid?.consecutiveFailedRuns).toBe(4);
 
     await addFailedRuns(1);
@@ -375,7 +394,7 @@ describe("runFailureWatchdogTick", () => {
     await w.runFailureWatchdogTick();
     expect(d.peekPolicy(USER, ACCT).systemState).toBe("active");
     const liveness = await import("../src/lib/trading-liveness");
-    const row = liveness.getTradingLivenessSummary()?.accounts.find((a) => a.connectedAccountId === ACCT);
+    const row = (await liveness.getTradingLivenessSummary())?.accounts.find((a) => a.connectedAccountId === ACCT);
     expect(row?.consecutiveFailedRuns).toBe(1);
   });
 

@@ -18,7 +18,7 @@
 // (see docs/litestream.md).
 //
 // Skip-prune (opt-in only): `R2_COLD_SNAPSHOT_SKIP_PRUNE=1` bypasses the entire
-// retention pass — leave it UNSET for normal Sunday jobs.  Default retain is 4
+// retention pass — leave it UNSET for normal Sunday jobs.  Default retain is 2
 // (`R2_COLD_SNAPSHOT_DEFAULT_RETAIN`); the prune pass then keeps the newest N
 // across `.db` + `.db.gz`.  Agents must never DeleteObject against this bucket
 // outside the automated retention pass without Jay approval.
@@ -26,7 +26,7 @@
 // Budget stance: stays reliably far under the R2 free tier. One weekly run costs roughly
 // 30-45 Class A ops (create + ~25-40 compressed parts at 100 MB + complete + list + up to
 // a couple deletes) ≈ 200/month vs the 1M free-tier allowance; storage is
-// retain×compressed-size.  Default retain is 4 (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
+// retain×compressed-size.  Default retain is 2 (ceiling `R2_COLD_SNAPSHOT_MAX_RETAIN`).
 // The retention pass counts + prunes both `.db` and `.db.gz`.  Host-verified notes
 // from 2026-08-18 (pre-gzip, retain=1) are historical.  `R2_ARCHIVE_KEEP_GENERATIONS`
 // is unused leftover (empty `weekly/` prefix) and must not drive this lane.
@@ -117,10 +117,20 @@ export const R2_COLD_SNAPSHOT_UTC_MINUTE = 17;
  * `objectCount=1`, `payloadSize=9679310848`, sole key `cold-snapshots/app-2026-08-30.db`.
  *
  * The 1 was a FREE-TIER cap and that constraint no longer applies: paid R2 is enabled on
- * the SocraticTrade.com account (`r2_paid`, state `Paid`).  Four gzipped weeklies at
- * ~3 GB each is ~12 GB — about a month of archive history.
+ * the SocraticTrade.com account (`r2_paid`, state `Paid`).  Jay 2026-10-29: keep the
+ * newest two gzipped weeklies (~3 GB each, ~6 GB) — at most two weeks of archive history,
+ * matching the privacy-policy copy (`WEEKLY_BACKUP_RETENTION_WEEKS` in legal-notice.ts).
+ * Two still keeps the archive tier above depth one.
  */
-export const R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 4;
+export const R2_COLD_SNAPSHOT_DEFAULT_RETAIN = 2;
+/**
+ * Hard maximum age (calendar days, UTC) of any cold-archive object after a prune pass,
+ * independent of `retain`.  Jay 2026-10-30: "the 2 weeks counts from day 1" — nothing
+ * older than 14 days measured from when the backup was made, even if
+ * `R2_COLD_SNAPSHOT_RETAIN` is raised (ceiling 12) or a run lands late.  Matches the
+ * "at most 2 weeks" copy (`WEEKLY_BACKUP_RETENTION_WEEKS` × 7 in legal-notice.ts).
+ */
+export const R2_COLD_SNAPSHOT_MAX_AGE_DAYS = 14;
 /**
  * Ceiling on `R2_COLD_SNAPSHOT_RETAIN`.  Before 2026-09-09 the clamp was
  * `min(env, DEFAULT_RETAIN)` — the env var could only ever LOWER retention and any
@@ -306,7 +316,7 @@ export interface R2ColdSnapshotConfig {
  * active replica moved to B2 live as AWS_R2_HISTORIC_* (Infisical + .env.example).
  * Default ON only when the full credential set exists; R2_COLD_SNAPSHOT_ENABLED is the
  * explicit kill switch (off/false/0/no).
- * Weekly retain reads only `R2_COLD_SNAPSHOT_RETAIN` (unset → default 4).
+ * Weekly retain reads only `R2_COLD_SNAPSHOT_RETAIN` (unset → default 2).
  * `R2_ARCHIVE_KEEP_GENERATIONS` is unused leftover and is not consulted.
  * `R2_COLD_SNAPSHOT_SKIP_PRUNE` is opt-in (1/true/on/yes); default is prune.
  */
@@ -402,11 +412,35 @@ export function nextR2ColdSnapshotDueAt(nowMs: number): { dueAtISO: string; dedu
  * litestream objects (different prefix/shape) can never be pruned by this lane. Snapshot
  * keys embed the ISO date, so lexical sort == chronological sort (a same-date `.db.gz`
  * sorts after its `.db` twin, i.e. the gzipped upload is treated as newer). This is what
- * prunes the last legacy raw `.db` object after the first successful `.gz` upload. Pure.
+ * prunes the last legacy raw `.db` object after the first successful `.gz` upload.  Also
+ * applies the `R2_COLD_SNAPSHOT_MAX_AGE_DAYS` (14) cap, measured at the next scheduled
+ * run after `nowMs` (the next time prune can act). Pure.
  */
-export function selectColdSnapshotsToPrune(keys: readonly string[], retain: number): string[] {
+export function selectColdSnapshotsToPrune(keys: readonly string[], retain: number, nowMs: number): string[] {
   const snapshots = keys.filter((k) => KEY_PATTERN.test(k)).sort().reverse();
-  return snapshots.slice(Math.max(1, retain));
+  const keepCount = Math.max(1, retain);
+  // 14-day cap (R2_COLD_SNAPSHOT_MAX_AGE_DAYS).  This pass only runs weekly, so a
+  // snapshot kept now survives until the NEXT scheduled run; prune any kept snapshot
+  // that would be more than 14 days old (by UTC key date) by then.  Sunday run:
+  // keeps this week + last week (14d at next run), drops two weeks ago (21d).  The
+  // newest snapshot (the one this run just uploaded) is never age-pruned, so the
+  // archive never drops to zero.
+  const nextDueMs = Date.parse(nextR2ColdSnapshotDueAt(nowMs).dueAtISO);
+  const nextDue = new Date(nextDueMs);
+  const nextDueDayMs = Date.UTC(nextDue.getUTCFullYear(), nextDue.getUTCMonth(), nextDue.getUTCDate());
+  const cutoffMs = nextDueDayMs - R2_COLD_SNAPSHOT_MAX_AGE_DAYS * 86_400_000;
+  return snapshots.filter((k, i) => {
+    if (i >= keepCount) return true;
+    if (i === 0) return false;
+    return coldSnapshotKeyDateMs(k) < cutoffMs;
+  });
+}
+
+/** UTC midnight of the ISO date embedded in a cold-snapshot key (KEY_PATTERN-matched). */
+function coldSnapshotKeyDateMs(key: string): number {
+  const m = /app-(\d{4})-(\d{2})-(\d{2})\.db/.exec(key);
+  if (!m) return Number.POSITIVE_INFINITY;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 
 /** The r2-usage monitor's latest month-to-date Class A percentage for the Socratic
@@ -1362,7 +1396,8 @@ export async function performR2ColdSnapshot(
     });
     uploadId = undefined; // completed — nothing to abort from here on
 
-    // Retention: keep the newest `retain` snapshots, delete the rest — unless
+    // Retention: keep the newest `retain` snapshots (none older than 14 days,
+    // R2_COLD_SNAPSHOT_MAX_AGE_DAYS), delete the rest — unless
     // skipPrune is on (first gzip land: do not delete the legacy 9 GiB `.db`
     // until Jay approves).  A prune failure does not fail the run — the snapshot
     // IS uploaded; next week's prune catches up.
@@ -1370,7 +1405,7 @@ export async function performR2ColdSnapshot(
     let wouldPrune: string[] = [];
     try {
       const keys = await listColdSnapshotKeys(cfg, runDeps);
-      wouldPrune = selectColdSnapshotsToPrune(keys, cfg.retain);
+      wouldPrune = selectColdSnapshotsToPrune(keys, cfg.retain, now);
       if (cfg.skipPrune) {
         audit("r2_cold_snapshot.prune_skipped", {
           key,

@@ -98,7 +98,7 @@ describe("keyed options vendor fetches", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toContain("feed=iex");
   });
 
-  it("uses Alpaca dailyBar close when latestTrade is omitted", async () => {
+  it("uses the Alpaca last print for the underlying and ignores a daily bar close", async () => {
     fetchMock
       .mockResolvedValueOnce(
         jsonResponse({
@@ -110,8 +110,10 @@ describe("keyed options vendor fetches", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
+          latestTrade: { p: 100, s: 12 },
           latestQuote: { ap: 101 },
-          dailyBar: { c: 100, v: 12_000, o: 99 }
+          dailyBar: { c: 50, v: 12_000, o: 99 },
+          prevDailyBar: { c: 40 }
         })
       );
     const out = await new AlpacaOptionsEnrichmentProvider("key", "secret").enrich(["AAPL"]);
