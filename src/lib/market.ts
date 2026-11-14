@@ -24,6 +24,7 @@ import type {
   EquityPosition,
   IndexUniverse,
   MarketDataProvider,
+  MarketDataProviderOptions,
   MarketFactor,
   MarketFactorBreakdown,
   MarketQuote,
@@ -43,6 +44,12 @@ import {
 import { fetchFallbackUniverseRows } from "./nasdaq-universe-fallback";
 import { parseNasdaqScreenerPayload, type NasdaqScreenerRow } from "./nasdaq-screener-schema";
 import { recoverUniverseQuotesFromBroker } from "./scan-broker-universe-recovery";
+import {
+  LIVE_QUOTE_RECOVERY_BUDGET_MS,
+  registerScanRecovery,
+  resolveSeedPricesAsOf,
+  type LiveQuoteRecoveryResult
+} from "./scan-seed-preview";
 
 export { NASDAQ_SCREENER_TIMEOUT_MESSAGE, NASDAQ_SCREENER_TIMEOUT_MS };
 
@@ -253,6 +260,9 @@ function uniqueQuotesBySymbol(quotes: MarketQuote[]): MarketQuote[] {
 
 export const SCAN_QUOTES_UNAVAILABLE_CODE = "scan_quotes_unavailable";
 
+const STALE_SCAN_SNAPSHOT_WARNING =
+  "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback.";
+
 /** Thrown when the live screener and quote fallback both return nothing for a
  *  non-empty universe and no usable audit seed remains. Callers must not turn
  *  this into a 200 empty candidate table — that looks like "no names today." */
@@ -295,6 +305,12 @@ export async function scanMarket(
     deadlineAt?: number;
     /** Connected account the scan operates for (account-scoped market-data tape). */
     connectedAccountId?: string;
+    /** False disables the whole-set Yahoo fallback (freshness lane fail-fast). Default true. */
+    allowWholeSetYahooFallback?: boolean;
+    /** Interactive only: show a usable seed before Yahoo/broker recovery finishes. */
+    previewSeedBeforeLiveRecovery?: boolean;
+    /** Audit timestamp for the seed, used when seed rows have no asOf. */
+    seedAsOf?: string;
   } = {}
 ): Promise<MarketScan> {
   const scan = await nasdaqDelayedProvider.scan(symbols, positions, {
@@ -310,7 +326,10 @@ export async function scanMarket(
     enrichmentMode: scanOptions.enrichmentMode,
     seedEnrichment: scanOptions.seedEnrichment,
     deadlineAt: scanOptions.deadlineAt,
-    connectedAccountId: scanOptions.connectedAccountId
+    connectedAccountId: scanOptions.connectedAccountId,
+    allowWholeSetYahooFallback: scanOptions.allowWholeSetYahooFallback,
+    previewSeedBeforeLiveRecovery: scanOptions.previewSeedBeforeLiveRecovery,
+    seedAsOf: scanOptions.seedAsOf
   });
   // Forward the candidate company refs to congress.trade (App A) so it can avoid spending the shared
   // FMP quota. No-op unless CONGRESS_TRADE_TOKEN + CONGRESS_SHARE_ENABLED are set; per-symbol
@@ -333,6 +352,7 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     const weights = options?.scoringWeights ?? DEFAULT_SCORING_WEIGHTS;
     // Item 2: congressional gate multiplier (1 = no change / default; 0 = go/no-go verdict zeroed it).
     const congressMultiplier = typeof options?.congressMultiplier === "number" ? options.congressMultiplier : 1;
+    const allowWholeSetYahooFallback = options?.allowWholeSetYahooFallback ?? true;
     const warnings: string[] = [];
     let quotes: MarketQuote[] = [];
     let cached = false;
@@ -345,13 +365,15 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
       // 15s header budget + one transport retry live in the helper.  The scan
       // deadline signal aborts that wait and the JSON body.  A deadline abort
       // throws; it must not become a silent empty table.
-      const result = await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs(), undefined, options?.signal);
+      const result = options?.skipNasdaqScreener === true
+        ? { rows: [], cached: false }
+        : await fetchNasdaqScreener(options?.ttlMs ?? marketCacheTtlMs(), undefined, options?.signal);
       cached = result.cached;
       const allQuotes = result.rows.flatMap((row) => toMarketQuote(row, positions, this.name, result.asOf));
       quotes = allQuotes.filter((quote) => allowed.has(quote.symbol));
 
       const dynamicResult = await loadDynamicUniverseQuotes({
-        dynamicUniverses,
+        dynamicUniverses: options?.skipNasdaqScreener === true ? [] : dynamicUniverses,
         allQuotes,
         positions,
         providerName: this.name,
@@ -367,11 +389,34 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
         // Yahoo whole-set pricing, then broker universe recovery, then last-good
         // seed (ST-4590).  Live Refresh of a 5k-name universe used to start
         // Yahoo-only fallback and miss the interactive budget / edge 503.
+        // Interactive scans with a usable seed return that snapshot first when
+        // the screener itself is down (no rows). A live screener that simply
+        // missed this universe still prices through Yahoo below.
+        if (result.rows.length === 0 && options?.skipNasdaqScreener !== true) {
+          const preview = beginInteractiveSeedPreview({
+            symbols,
+            positions,
+            allowed,
+            seed: options?.seedEnrichment,
+            seedAsOf: options?.seedAsOf,
+            weights,
+            warnings,
+            options,
+            allowWholeSetYahooFallback
+          });
+          if (preview) return preview;
+        }
         quoteFallbackAttempted = true;
         const recovered = await recoverQuotesWhenScreenerEmpty({
           allowed,
           positions,
           seed: options?.seedEnrichment,
+          // The fail-fast opt-out targets a DOWN screener.  This branch only
+          // runs when no priced screener row intersects `allowed` (quotes is
+          // empty), so overlap cannot reach here.  Any raw row (priced or not)
+          // means the screener is live and the universe is custom-only: not an
+          // outage, so keep the Yahoo fallback.
+          allowWholeSetYahooFallback: allowWholeSetYahooFallback || result.rows.length > 0,
           userId: options?.userId,
           connectedAccountId: options?.connectedAccountId,
           signal: options?.signal,
@@ -409,11 +454,28 @@ export const nasdaqDelayedProvider: MarketDataProvider = {
     }
 
     if (quotes.length === 0 && allowed.size > 0 && !quoteFallbackAttempted) {
-      // Fetch throw / empty payload: seed first, Yahoo whole-set only if no seed.
+      // Fetch throw / empty payload. Same order as the empty-rows branch:
+      // Yahoo whole-set, then broker, then seed. An interactive seed preview
+      // returns before this call and finishes live recovery on the side.
+      if (options?.skipNasdaqScreener !== true) {
+        const preview = beginInteractiveSeedPreview({
+          symbols,
+          positions,
+          allowed,
+          seed: options?.seedEnrichment,
+          seedAsOf: options?.seedAsOf,
+          weights,
+          warnings,
+          options,
+          allowWholeSetYahooFallback
+        });
+        if (preview) return preview;
+      }
       const recovered = await recoverQuotesWhenScreenerEmpty({
         allowed,
         positions,
         seed: options?.seedEnrichment,
+        allowWholeSetYahooFallback,
         userId: options?.userId,
         connectedAccountId: options?.connectedAccountId,
         signal: options?.signal,
@@ -1664,10 +1726,101 @@ function normalizeMarketDataSymbol(value: string): string {
   return normalizeSymbol(value).replace(/\//g, "-");
 }
 
+function beginInteractiveSeedPreview(input: {
+  symbols: string[];
+  positions: EquityPosition[];
+  allowed: Set<string>;
+  seed?: Record<string, MarketQuoteSummary>;
+  seedAsOf?: string;
+  weights: ScoringWeights;
+  warnings: string[];
+  options?: MarketDataProviderOptions;
+  allowWholeSetYahooFallback: boolean;
+}): MarketScan | undefined {
+  if (input.options?.previewSeedBeforeLiveRecovery !== true) return undefined;
+  const pricesAsOf = resolveSeedPricesAsOf(input.seed, input.seedAsOf);
+  if (!pricesAsOf || !input.seed) return undefined;
+  const seeded = persistedMarketQuotes(input.seed, input.positions).filter((quote) =>
+    input.allowed.has(normalizeSymbol(quote.symbol))
+  );
+  if (seeded.length === 0) return undefined;
+
+  const recoveryId = globalThis.crypto.randomUUID();
+  const controller = new AbortController();
+  const outerSignal = input.options?.signal;
+  if (outerSignal?.aborted) {
+    controller.abort(outerSignal.reason);
+  } else if (outerSignal) {
+    outerSignal.addEventListener("abort", () => controller.abort(outerSignal.reason), { once: true });
+  }
+  const timer = setTimeout(() => {
+    controller.abort(new Error("Live quote recovery deadline exceeded."));
+  }, LIVE_QUOTE_RECOVERY_BUDGET_MS);
+  timer.unref?.();
+  const userId = input.options?.userId;
+  const promise = (async (): Promise<LiveQuoteRecoveryResult> => {
+    try {
+      return await nasdaqDelayedProvider.scan(input.symbols, input.positions, {
+        scoringWeights: input.weights,
+        ttlMs: input.options?.ttlMs,
+        signal: controller.signal,
+        userId,
+        dynamicUniverses: input.options?.dynamicUniverses,
+        candidateLimit: input.options?.candidateLimit,
+        outlierReserve: input.options?.outlierReserve,
+        universeFloor: input.options?.universeFloor,
+        congressMultiplier: input.options?.congressMultiplier,
+        enrichmentMode: input.options?.enrichmentMode,
+        deadlineAt: Date.now() + LIVE_QUOTE_RECOVERY_BUDGET_MS,
+        connectedAccountId: input.options?.connectedAccountId,
+        allowWholeSetYahooFallback: input.allowWholeSetYahooFallback,
+        skipNasdaqScreener: true,
+        previewSeedBeforeLiveRecovery: false
+      });
+    } catch {
+      return { keptSnapshot: true, pricesAsOf, refreshPending: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  registerScanRecovery(recoveryId, userId, promise, controller);
+
+  const candidateLimit = normalizeMarketScanCandidateLimit(
+    input.options?.candidateLimit,
+    envNumber("MARKET_SCAN_LIMIT", DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT)
+  );
+  const ranked = rankMarketQuotes(seeded, input.weights);
+  const held = new Set(input.positions.map((position) => normalizeSymbol(position.symbol)).filter(Boolean));
+  const top = ranked.slice(0, candidateLimit);
+  const topCandidates = uniqueQuotes([
+    ...top,
+    ...ranked.filter((quote) => held.has(quote.symbol))
+  ]);
+  const previewWarnings = input.warnings.includes(STALE_SCAN_SNAPSHOT_WARNING)
+    ? [...input.warnings]
+    : [...input.warnings, STALE_SCAN_SNAPSHOT_WARNING];
+  return {
+    source: "persisted-strategy-scan",
+    generatedAt: pricesAsOf,
+    scannedSymbols: input.allowed.size,
+    returnedQuotes: seeded.length,
+    candidateLimit,
+    topCandidates,
+    sectorBySymbol: sectorBySymbol(topCandidates),
+    quotesBySymbol: quotesBySymbol(seeded),
+    cached: true,
+    warnings: previewWarnings,
+    pricesAsOf,
+    refreshPending: true,
+    recoveryId
+  };
+}
+
 async function recoverQuotesWhenScreenerEmpty(input: {
   allowed: Set<string>;
   positions: EquityPosition[];
   seed?: Record<string, MarketQuoteSummary>;
+  allowWholeSetYahooFallback?: boolean;
   userId?: string;
   connectedAccountId?: string;
   signal?: AbortSignal;
@@ -1679,14 +1832,25 @@ async function recoverQuotesWhenScreenerEmpty(input: {
   recoverySource?: string;
 }> {
   const requested = Array.from(input.allowed);
-  const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
-    signal: input.signal,
-    deadlineAt: input.deadlineAt,
-    userId: input.userId
-  });
-  let quotes = quoteOnly.quotes;
-  const warnings = [...quoteOnly.warnings];
+  let quotes: MarketQuote[] = [];
+  let warnings: string[] = [];
   let recoverySource: string | undefined;
+
+  // ST-3999 fail-fast opt-out: a DOWN screener with the whole-set Yahoo
+  // fallback disabled skips the Yahoo step; broker and seed recovery still run.
+  if (input.allowWholeSetYahooFallback === false) {
+    warnings.push(
+      "Live Nasdaq screener data was unavailable; the whole-set Yahoo fallback is disabled for this scan."
+    );
+  } else {
+    const quoteOnly = await fetchAllowedSetMarketQuotes(requested, input.positions, {
+      signal: input.signal,
+      deadlineAt: input.deadlineAt,
+      userId: input.userId
+    });
+    quotes = quoteOnly.quotes;
+    warnings = [...quoteOnly.warnings];
+  }
 
   if (quotes.length === 0 && input.userId && !input.signal?.aborted) {
     const brokerRecovery = await recoverUniverseQuotesFromBroker({
@@ -1711,7 +1875,7 @@ async function recoverQuotesWhenScreenerEmpty(input: {
         quotes: seeded,
         warnings: [
           ...warnings,
-          "Live Nasdaq screener data was unavailable; showing the latest completed strategy scan as a stale fallback."
+          STALE_SCAN_SNAPSHOT_WARNING
         ],
         usedSeed: true,
         recoverySource
