@@ -293,7 +293,11 @@ const CACHE_WRITE_INPUT_MULTIPLIER = 1.25;
  * cache read $0.20 per million / base input $4 per million = 0.05. */
 function cacheReadInputMultiplier(model: string | undefined): number {
   const id = model?.trim().toLowerCase().replace(/^openrouter\//, "").replace(/^~/, "").replace(/^anthropic\//, "").replace(/^~/, "");
-  return id === "claude-opus-latest" || id === "claude-opus-5-5" || id === "claude-opus-5.5"
+  // The catalog's unversioned claude-opus alias targets the current 5.5 row.
+  // Explicit 5.5 dated snapshots keep the same model rate. Do not use a broad
+  // canonical family or numeric price equality: older Opus and Muse Wonder
+  // can otherwise inherit this discount without being the verified model.
+  return id === "claude-opus-latest" || id === "claude-opus" || /^claude-opus-(?:5-5|5\.5)(?:-\d{8})?$/.test(id ?? "")
     ? 0.05
     : CACHE_READ_INPUT_MULTIPLIER;
 }

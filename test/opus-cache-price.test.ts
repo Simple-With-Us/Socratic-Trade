@@ -25,7 +25,10 @@ describe("Opus 5.5 cache-read estimate", () => {
     "claude-opus-5-5", "claude-opus-5.5", "claude-opus-latest",
     "anthropic/claude-opus-5-5", "anthropic/claude-opus-5.5", "~anthropic/claude-opus-latest",
     "openrouter/anthropic/claude-opus-5.5", "CLAUDE-OPUS-5-5",
-    "openrouter/~anthropic/claude-opus-latest"
+    "openrouter/~anthropic/claude-opus-latest",
+    "claude-opus", "anthropic/claude-opus", "openrouter/anthropic/claude-opus",
+    "claude-opus-5-5-20261001", "claude-opus-5.5-20261020",
+    "anthropic/claude-opus-5-5-20261020", "openrouter/anthropic/claude-opus-5-5-20261020"
   ])("prices one million cache reads at $0.20, not $0.40: %s", (model) => {
     expect(estimateLlmCostUsd(model, 1_000_000, 0, 1_000_000)).toBeCloseTo(0.2, 10);
   });
@@ -42,14 +45,16 @@ describe("Opus 5.5 cache-read estimate", () => {
   it("does not change uncached base rates, other model caches, unknown estimates or CLI unknown cost", () => {
     expect(estimateLlmCostUsd("claude-opus-5-5", 1_000_000, 1_000_000)).toBe(24);
     expect(estimateLlmCostUsd("gpt-5.5", 1_000_000, 0, 1_000_000)).toBe(0.5);
+    // Same 4/20 base price is not evidence of an Opus cache discount.
     expect(estimateLlmCostUsd("muse-wonder", 1_000_000, 0, 1_000_000)).toBe(0.4);
+    expect(estimateLlmCostUsd("muse-wonder-1.0", 1_000_000, 0, 1_000_000)).toBe(0.4);
     expect(estimateLlmCostUsd("muse-wonder-1.0-contributor", 1_000_000, 0, 1_000_000)).toBeUndefined();
     expect(estimateLlmCostUsd("claude-opus-5-5", 0, 0, 0)).toBeUndefined();
   });
   it("does not apply the new multiplier to a dated/unknown historical family identity", () => {
     // Test only the multiplier against that identity's existing base estimate.
     // Broad canonical fallback for unlisted snapshots is a separate existing caveat.
-    for (const model of ["claude-opus-4-8-20260315", "claude-opus-unknown-future"]) {
+    for (const model of ["claude-opus-4-8-20260315", "claude-opus-unknown-future", "claude-opus-5-5-unknown", "claude-opus-5.5-contributor"]) {
       const base = estimateLlmCostUsd(model, 1_000_000, 0)!;
       expect(estimateLlmCostUsd(model, 1_000_000, 0, 1_000_000)).toBeCloseTo(base * 0.1, 10);
     }
