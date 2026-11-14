@@ -31,8 +31,8 @@ describe("drilldown native disclosures", () => {
       const summary = html.match(/<summary[\s\S]*?<\/summary>/)?.[0] ?? "";
       expect(summary).not.toContain("tabindex");
       expect(summary).not.toContain("cursor-pointer");
-      expect(summary).toContain('class="sr-only group-focus:not-sr-only');
-      expect(summary).toContain('group-focus:basis-full');
+      expect(summary).toContain('class="sr-only group-focus-visible:not-sr-only');
+      expect(summary).toContain('group-focus-visible:basis-full');
       expect(summary).not.toMatch(/<(button|a|input|select)\b/);
       expect(html).toContain('aria-hidden="true" class="con-disclosure-label ml-auto shrink-0 whitespace-nowrap"');
       expect(html).toContain("<h3 class=\"con-card-title\">");

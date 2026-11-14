@@ -48,7 +48,7 @@ function Disclosure({ title, titleHint, children, defaultOpen = false }: { title
       <summary aria-label={title} aria-describedby={hintId} title={titleHint} className="group flex flex-wrap items-center gap-3 rounded-control py-3">
         <h3 className="con-card-title">{title}</h3>
         <span aria-hidden="true" className="con-disclosure-label ml-auto shrink-0 whitespace-nowrap" />
-        <span id={hintId} className="sr-only group-focus:not-sr-only group-focus:basis-full group-focus:text-[length:var(--con-fs-sm)] group-focus:text-[color:var(--con-muted)]">{titleHint}</span>
+        <span id={hintId} className="sr-only group-focus-visible:not-sr-only group-focus-visible:basis-full group-focus-visible:text-[length:var(--con-fs-sm)] group-focus-visible:text-[color:var(--con-muted)]">{titleHint}</span>
       </summary>
       <div className="pb-3">{children}</div>
     </details>
