@@ -20,6 +20,7 @@ import { useToast } from "../ui/toast";
 import { openSymbolDetails } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
 import { DEFAULT_VISIBLE_SCAN_COLUMN_IDS, SCAN_COLUMNS, type ScanColumn } from "./columns";
+import { cellTitleWithReceived, ScanValueDetails } from "./value-details";
 
 /** Approx row height for virtualized height budgeting (con-table cells). */
 const SCAN_ROW_PX = 40;
@@ -89,13 +90,6 @@ function sameScanColumns(a: string[], b: string[]): boolean {
 async function watchlistErrorMessage(res: Response, fallback: string): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   return body?.error || fallback;
-}
-
-/** Same "own tooltip, else stamp the scan-level Received line" rule the table
- *  body uses — shared with the mobile card list so both surfaces agree. */
-function cellTitleWithReceived(column: ScanColumn, q: MarketQuote, received: string): string | undefined {
-  const own = column.cellTitle?.(q);
-  return [own, own?.includes("Received ") ? undefined : received].filter(Boolean).join("\n") || undefined;
 }
 
 /** Watch/unwatch toggle for a scan row — posts straight to the same
@@ -489,15 +483,18 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
             {visibleColumns.length} shown
           </p>
         </Tooltip>
-        <ScanColumnsMenu
-          open={columnsOpen}
-          onOpenChange={setColumnsOpen}
-          visible={visible}
-          columnChooserRows={columnChooserRows}
-          onReset={resetScanColumns}
-          onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
-          onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
-        />
+        <div className="flex items-center gap-2">
+          <ScanValueDetails rows={rows} columns={visibleColumns} received={received} />
+          <ScanColumnsMenu
+            open={columnsOpen}
+            onOpenChange={setColumnsOpen}
+            visible={visible}
+            columnChooserRows={columnChooserRows}
+            onReset={resetScanColumns}
+            onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
+            onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
+          />
+        </div>
       </div>
       {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS. */}
       <div className="hidden overflow-x-auto lg:block">
