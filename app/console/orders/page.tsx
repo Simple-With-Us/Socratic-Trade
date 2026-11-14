@@ -113,7 +113,7 @@ function deriveOrderRowView(
     : halted
       ? "Start the system first — replacing places a NEW order, which the server refuses while everything is stopped.  Cancelling stays available."
       : noAccount
-        ? "Market replacement needs a broker-backed Paper or Live account; no account is connected."
+        ? `Market replacement needs a connected broker account.${SENTENCE_GAP}None is connected.`
         : `Cancel this stale ${orderTypeLabel(order.type)} order and submit the remaining ${fmtQty(row.remaining)} shares as a market order${live ? " — typed broker confirmation required" : ""}.`;
   // Only rows that would CLOSE/REDUCE a held position (sell-of-long, cover-of-short, a
   // bracket "held" exit leg that matches) get an estimate; opening orders never do.
@@ -396,7 +396,7 @@ function OrdersPageInner() {
         {rows.length === 0 ? (
           <Empty>
             {noAccount
-              ? "No working orders — connect a broker Paper or Live account first. Working orders appear once an account is active."
+              ? `No working orders.${SENTENCE_GAP}Connect a broker account first.${SENTENCE_GAP}Working orders show up once that account is active.`
               : "No working orders at the broker.  When you or the strategy place a limit or stop order, it appears here until it fills, expires, or is cancelled."}
           </Empty>
         ) : (

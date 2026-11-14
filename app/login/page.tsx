@@ -22,12 +22,12 @@ const twitterConfigured = !!(process.env.AUTH_TWITTER_ID && process.env.AUTH_TWI
 const appleConfigured = isAppleWebAuthConfigured();
 const anyProviderConfigured = googleConfigured || githubConfigured || twitterConfigured || appleConfigured;
 
-/** Value props — keep in sync with iOS LoginView feature bullets. */
+/** Value props. The iOS login card uses its own last line. */
 const LOGIN_VALUE_BULLETS = [
   "Configure framework and guardrails",
   "Review and approve proposals",
   "Track positions, orders, and performance",
-  "Control the backend agent without moving credentials onto the device"
+  "Broker passwords stay with the broker"
 ] as const;
 
 export default async function LoginPage(props: {
@@ -150,16 +150,9 @@ export default async function LoginPage(props: {
           </div>
         ) : (
           <div className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-muted">
-            <p>Auth provider not configured.</p>
+            <p>Sign-in is not set up on this server.</p>
             <p className="mt-1 text-xs">
-              Set <code className="font-mono">AUTH_GOOGLE_ID</code> /{" "}
-              <code className="font-mono">AUTH_GOOGLE_SECRET</code> for Google,{" "}
-              <code className="font-mono">AUTH_GITHUB_ID</code> /{" "}
-              <code className="font-mono">AUTH_GITHUB_SECRET</code> for GitHub,{" "}
-              <code className="font-mono">AUTH_TWITTER_ID</code> /{" "}
-              <code className="font-mono">AUTH_TWITTER_SECRET</code> for X, or{" "}
-              <code className="font-mono">AUTH_APPLE_ID</code> /{" "}
-              <code className="font-mono">AUTH_APPLE_SECRET</code> for Apple sign-in.
+              Ask the person who runs this site to turn on Google, GitHub, X, or Apple sign-in.
             </p>
           </div>
         )}
