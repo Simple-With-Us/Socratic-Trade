@@ -474,26 +474,30 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
 
   return (
     <div>
-      {/* Column picker only applies to the desktop table — the mobile card
-          list below always shows the same fixed load-bearing fields. */}
-      <div className="hidden items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2 lg:flex">
-        <Tooltip
-          content="Visible columns are saved per browser for the console scan table.">
-          <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {visibleColumns.length} shown
-          </p>
-        </Tooltip>
-        <div className="flex items-center gap-2">
-          <ScanValueDetails rows={rows} columns={visibleColumns} received={received} />
-          <ScanColumnsMenu
-            open={columnsOpen}
-            onOpenChange={setColumnsOpen}
-            visible={visible}
-            columnChooserRows={columnChooserRows}
-            onReset={resetScanColumns}
-            onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
-            onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
-          />
+      {/* Value details is shared by keyboard and touch layouts. Only the column
+          picker/count are desktop-only; mobile cards keep their fixed fields. */}
+      <div className="flex items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2">
+        <div className="hidden lg:block">
+          <Tooltip
+            content="Visible columns are saved per browser for the console scan table.">
+            <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {visibleColumns.length} shown
+            </p>
+          </Tooltip>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <ScanValueDetails rows={rows} columns={SCAN_COLUMNS} received={received} />
+          <div className="hidden lg:block">
+            <ScanColumnsMenu
+              open={columnsOpen}
+              onOpenChange={setColumnsOpen}
+              visible={visible}
+              columnChooserRows={columnChooserRows}
+              onReset={resetScanColumns}
+              onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
+              onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
+            />
+          </div>
         </div>
       </div>
       {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS. */}

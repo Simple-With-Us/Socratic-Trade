@@ -67,7 +67,7 @@ function ValueDetailsSheet({ rows, columns, received, onClose }: {
   return (
     <Sheet open onClose={onClose} title="Scan value details">
       <p className="mb-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
-        Choose a symbol and visible column to read its value, meaning and recorded source. This does not place a trade or change your watchlist.
+        Choose a symbol and column to read its value, meaning and recorded source. This does not place a trade or change your watchlist.
       </p>
       <div className="grid grid-cols-2 gap-3">
         <label htmlFor={symbolId} className="flex min-w-0 flex-col gap-1 text-[length:var(--con-fs-sm)]">
