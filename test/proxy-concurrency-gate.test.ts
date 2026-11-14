@@ -169,6 +169,130 @@ describe("ProxyConcurrencyGate", () => {
   });
 });
 
+describe("ProxyConcurrencyGate priority lane (ST-3999 screener starvation)", () => {
+  it("grants a priority waiter ahead of queued normal waiters, keeping normal FIFO", async () => {
+    const gate = new ProxyConcurrencyGate(() => 1);
+    const held = await gate.acquire();
+    // Occupy the reserved slot too so the priority waiter genuinely queues.
+    const heldPriority = await gate.acquire(undefined, { priority: true });
+    const order: string[] = [];
+    const pN1 = gate.acquire().then((slot) => {
+      order.push("n1");
+      return slot;
+    });
+    const pN2 = gate.acquire().then((slot) => {
+      order.push("n2");
+      return slot;
+    });
+    const pP = gate.acquire(undefined, { priority: true }).then((slot) => {
+      order.push("p");
+      return slot;
+    });
+    expect(gate.queued).toBe(3);
+    held.release();
+    const p = await pP;
+    expect(order).toEqual(["p"]);
+    p.release();
+    heldPriority.release();
+    const n1 = await pN1;
+    expect(order).toEqual(["p", "n1"]);
+    n1.release();
+    const n2 = await pN2;
+    expect(order).toEqual(["p", "n1", "n2"]);
+    n2.release();
+    expect(gate.inFlight).toBe(0);
+    expect(gate.queued).toBe(0);
+  });
+
+  it("grants priority the reserved slot above the cap while normal waiters keep waiting", async () => {
+    const gate = new ProxyConcurrencyGate(() => 2);
+    const a = await gate.acquire();
+    const b = await gate.acquire();
+    expect(gate.inFlight).toBe(2);
+
+    // Cap is full, but the priority waiter takes the reserved extra slot at once.
+    const p = await gate.acquire(undefined, { priority: true });
+    expect(gate.inFlight).toBe(3);
+
+    // A normal waiter queued now must NOT take a slot while inFlight >= cap …
+    let normalGranted = false;
+    const pN = gate.acquire().then((slot) => {
+      normalGranted = true;
+      return slot;
+    });
+    await sleep(20);
+    expect(normalGranted).toBe(false);
+    expect(gate.queued).toBe(1);
+
+    // … and a second priority waiter queues once the reserved slot is taken.
+    let p2Granted = false;
+    const pP2 = gate.acquire(undefined, { priority: true }).then((slot) => {
+      p2Granted = true;
+      return slot;
+    });
+    await sleep(20);
+    expect(p2Granted).toBe(false);
+    expect(gate.queued).toBe(2);
+
+    // A freed normal slot goes to the queued priority waiter first (2 < 2+1).
+    b.release();
+    const p2 = await pP2;
+    expect(p2Granted).toBe(true);
+    expect(gate.inFlight).toBe(3);
+    expect(gate.queued).toBe(1);
+
+    // Freeing another normal slot still does not admit the normal waiter:
+    // inFlight (2) is at cap, and the reserved slot is priority-only.
+    a.release();
+    await sleep(20);
+    expect(normalGranted).toBe(false);
+    expect(gate.queued).toBe(1);
+    expect(gate.inFlight).toBe(2);
+
+    // Only when a priority holder releases below cap does the normal proceed.
+    p.release();
+    const n = await pN;
+    expect(normalGranted).toBe(true);
+    p2.release();
+    n.release();
+    expect(gate.inFlight).toBe(0);
+    expect(gate.queued).toBe(0);
+  });
+
+  it("caps priority holders at cap+1 under parallel load", async () => {
+    const gate = new ProxyConcurrencyGate(() => 1);
+    let maxSeen = 0;
+    await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const slot = await gate.acquire(undefined, { priority: true });
+        maxSeen = Math.max(maxSeen, gate.inFlight);
+        await sleep(10);
+        slot.release();
+      })
+    );
+    expect(maxSeen).toBe(2);
+    expect(gate.inFlight).toBe(0);
+  });
+
+  it("rejects a priority waiter whose signal aborts while queued", async () => {
+    const gate = new ProxyConcurrencyGate(() => 1);
+    const held = await gate.acquire();
+    // Occupy the reserved slot too so the priority waiter genuinely queues.
+    const reserved = await gate.acquire(undefined, { priority: true });
+    const controller = new AbortController();
+    const waiting = gate.acquire(controller.signal, { priority: true });
+    expect(gate.queued).toBe(1);
+    controller.abort();
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(gate.queued).toBe(0);
+    reserved.release();
+    held.release();
+    const next = await gate.acquire(undefined, { priority: true });
+    expect(gate.inFlight).toBe(1);
+    next.release();
+  });
+});
+
 describe("createProxiedFetch concurrency gate", () => {
   const savedCap = process.env.PROXY_MAX_CONCURRENCY;
 
@@ -233,6 +357,26 @@ describe("createProxiedFetch concurrency gate", () => {
       expect(sharedProxyConcurrencyGate.inFlight).toBe(0);
     } finally {
       restoreClock();
+    }
+  });
+
+  it("reports zero wait for an immediate grant even if the clock ticks during acquire (ST-4634)", async () => {
+    const gate = new ProxyConcurrencyGate(() => 1);
+    let t = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => (t += 5));
+    try {
+      // Control: the mocked clock is active and advances on every read.
+      expect(Date.now()).toBe(1_005);
+      t = 1_000;
+      const slot = await gate.acquire();
+      // Control: the slot was granted immediately (no queue), while the clock still ticked.
+      expect(gate.inFlight).toBe(1);
+      expect(t).toBeGreaterThan(1_000);
+      expect(slot.waitMs).toBe(0);
+      slot.release();
+      expect(gate.inFlight).toBe(0);
+    } finally {
+      spy.mockRestore();
     }
   });
 

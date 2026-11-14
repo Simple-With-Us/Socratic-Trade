@@ -4,10 +4,12 @@
 #
 # This workflow does NOT deploy, does NOT call the Coolify API, and does NOT
 # post a deploy claim. It compares public /api/health .checks.release.sha to
-# origin/main. A stale verdict (oldest undeployed commit >= 1h) fails the job
-# so Sentry fleet-infra pages (sentry-ci-report.yml) and optionally posts
-# to Zulip #Work-In-Progress when ST ops Zulip credentials are configured (Infisical prod
-# in Actions, or env on other hosts).
+# origin/main. A stale verdict (oldest undeployed commit more than
+# DEPLOY_FRESHNESS_STALE_SECONDS past its deploy-due time: commit time, or for
+# a weekday RTH merge the later of session close and the 21:20 UTC drain; see
+# docs/deployment.md) fails the job
+# so the existing Sentry fleet-infra observer reports the verdict.
+# It needs no notification client or Zulip credentials.
 #
 # Unreachable health is treated as OK here: UptimeRobot already pages site-down.
 # This cron exists for the silent-green-on-old-sha class.
@@ -25,7 +27,6 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   check:
@@ -38,51 +39,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: false
 
-      - name: Install fleet coordination CLI
-        run: bash scripts/install-fleet-coordination.sh
-
-      - name: Load ST ops Zulip credentials from Infisical
-        env:
-          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_ID: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_ID }}
-          INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET: ${{ secrets.INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET }}
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-        shell: bash
-        run: |
-          set +o xtrace
-          bash -n scripts/github-actions-infisical-zulip-ops.sh
-          bash scripts/github-actions-infisical-zulip-ops.sh
-
-      - name: Previous freshness conclusion (notify de-dupe)
-        id: prev
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          THIS_RUN_ID: ${{ github.run_id }}
-        shell: bash
-        run: |
-          set -uo pipefail
-          prev="$(gh api "repos/${REPO}/actions/workflows/deploy-freshness.yml/runs?per_page=10" \
-            --jq "[.workflow_runs[]
-                   | select((.id|tostring) != \"${THIS_RUN_ID}\")
-                   | select(.status == \"completed\")
-                   | .conclusion] | .[0] // \"none\"" 2>/dev/null || echo "none")"
-          if ! printf '%s' "$prev" | grep -Eq '^(success|failure|cancelled|skipped|none)$'; then
-            prev="none"
-          fi
-          echo "conclusion=${prev}" >> "$GITHUB_OUTPUT"
-          echo "previous completed conclusion: ${prev}"
-
       - name: Check production release freshness
         env:
           DEPLOY_FRESHNESS_STALE_SECONDS: "3600"
-          DEPLOY_FRESHNESS_NOTIFY: "1"
-          DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION: ${{ steps.prev.outputs.conclusion }}
           DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
-          FLEET_POST_SEAT: ST
-          FLEET_POST_REPO: Socratic-Trade
-          FLEET_POST_TOPIC: fleet
         shell: bash
         run: |
           set -euo pipefail

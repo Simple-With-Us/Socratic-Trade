@@ -105,14 +105,16 @@ struct SSEFrameAccumulator {
 struct MobileAPIClient {
     /// The one origin this app talks to.  Shared so the push coordinator (which cannot be
     /// handed the store's client) targets the same host — and therefore the same
-    /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
+    /// in-memory cookie jar — instead of a second hardcoded string that can drift.
     static let productionBaseURL = URL(string: "https://socratictrade.com")!
     /// Sent on mobile auth requests so the server applies ST-2599 strict checks.
     static let sessionHardeningHeaderField = "x-socratic-mobile-session-hardening"
     static let sessionHardeningHeaderValue = "1"
 
     let baseURL: URL
-    var session: URLSession = .shared
+    var session: URLSession
+    /// Stable in-memory jar — do not read `session.configuration.httpCookieStorage` (configuration is a copy).
+    let sessionCookieJar: HTTPCookieStorage
     /// Custom URL protocols for the account-change DELETE session. A live
     /// URLSession does not return `configuration.protocolClasses`, so a stub
     /// installed on `session` has to be repeated here.
@@ -121,6 +123,51 @@ struct MobileAPIClient {
     var eventsOutageLatch: OutageReportLatch = .events
     /// Dedups the manual 502-504 Sentry report on /api/mobile/snapshot to one per outage.
     var snapshotOutageLatch: OutageReportLatch = .snapshot
+
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        cookieJar: HTTPCookieStorage? = nil,
+        isolatedProtocolClasses: [AnyClass]? = nil
+    ) {
+        self.baseURL = baseURL
+        self.isolatedProtocolClasses = isolatedProtocolClasses
+        if let session {
+            if let cookieJar {
+                self.sessionCookieJar = cookieJar
+                self.session = session
+            } else if let existingJar = session.configuration.httpCookieStorage {
+                self.sessionCookieJar = existingJar
+                self.session = session
+            } else {
+                let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
+                let configuration = session.configuration.copy() as? URLSessionConfiguration
+                    ?? session.configuration
+                configuration.httpShouldSetCookies = true
+                configuration.httpCookieAcceptPolicy = .always
+                configuration.httpCookieStorage = jar
+                self.sessionCookieJar = jar
+                self.session = URLSession(
+                    configuration: configuration,
+                    delegate: session.delegate,
+                    delegateQueue: session.delegateQueue
+                )
+            }
+        } else {
+            let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
+            self.sessionCookieJar = jar
+            self.session = Self.makeURLSession(cookieJar: jar)
+        }
+    }
+
+    /// In-memory cookie storage only — the durable session lives in the Keychain via `SessionCookieCoordinator`.
+    static func makeURLSession(cookieJar: HTTPCookieStorage = SessionCookiePersistence.makeInMemoryCookieStorage()) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpCookieStorage = cookieJar
+        return URLSession(configuration: configuration)
+    }
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
@@ -215,8 +262,8 @@ struct MobileAPIClient {
     /// so Scan can show the abort instead of "No Candidates."
     static let marketScanTimeout: TimeInterval = 50
 
-    func marketScan() async throws -> MarketScanResponse {
-        var req = request(path: "/api/scan")
+    func marketScan(recoveryId: String? = nil) async throws -> MarketScanResponse {
+        var req = marketScanRequest(recoveryId: recoveryId)
         req.timeoutInterval = Self.marketScanTimeout
         let endpoint = "/api/scan"
         let (data, response) = try await marketScanAttempts(for: req, endpoint: endpoint)
@@ -298,8 +345,16 @@ struct MobileAPIClient {
         }
     }
 
-    func marketScanRequest() -> URLRequest {
+    func marketScanRequest(recoveryId: String? = nil) -> URLRequest {
         var req = request(path: "/api/scan")
+        if let recoveryId, !recoveryId.isEmpty,
+           let url = req.url,
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "recovery", value: recoveryId)]
+            if let next = components.url {
+                req.url = next
+            }
+        }
         req.timeoutInterval = Self.marketScanTimeout
         return req
     }
@@ -586,11 +641,12 @@ struct MobileAPIClient {
     }
 
     func ownsCookie(_ cookie: HTTPCookie) -> Bool {
-        guard let host = baseURL.host?.lowercased() else { return false }
-        let domain = cookie.domain
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        return host == domain || host.hasSuffix(".\(domain)")
+        guard let host = baseURL.host else { return false }
+        return SessionCookiePersistence.ownsDomain(cookie, host: host)
+    }
+
+    func authSessionCookies() -> [HTTPCookie] {
+        SessionCookiePersistence.authSessionCookies(in: sessionCookieJar, owningHost: baseURL.host)
     }
 
     private func request(path: String, method: String = "GET") -> URLRequest {

@@ -32,10 +32,13 @@ struct SocraticTradeApp: App {
         AppAppearance.applyFonts()
     }
 
+    @State private var appLock = AppLockController()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environment(appLock)
                 .environmentObject(PushNotificationCoordinator.shared)
                 // Owner 2026-08-10: light is the product default (no theme
                 // picker on this app yet — do not follow OS dark by default).
@@ -51,6 +54,7 @@ struct SocraticTradeApp: App {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var store: MobileStore
+    @Environment(AppLockController.self) private var appLock
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The splash's own floor, independent of the network. Without it a warm launch (cached
@@ -58,8 +62,27 @@ struct ContentView: View {
     /// a flicker rather than a brand moment. With it, a fast launch still gets the full
     /// animation and a slow one is never held back — the splash leaves when BOTH are done.
     @State private var minimumSplashElapsed = false
+    @State private var didConfigurePush = false
 
     private var showSplash: Bool { !store.hasInitialized || !minimumSplashElapsed }
+
+    /// Screenshot runs stay unlocked. Otherwise the lock covers the session until Face ID,
+    /// Touch ID, or the device passcode succeeds.
+    private var showsAppLock: Bool {
+        !SocraticTradeApp.isScreenshotMode && appLock.requiresLockScreen
+    }
+
+    /// Blank cover while Require App Lock is on and the scene is not active, so the
+    /// app-switcher snapshot is not the open session. The prompt stays on `showsAppLock`.
+    private var showsSessionCover: Bool {
+        !SocraticTradeApp.isScreenshotMode && AppLockPolicy.shouldCoverSession(
+            isEnabled: appLock.isEnabled,
+            requiresLockScreen: appLock.requiresLockScreen,
+            sceneIsActive: scenePhase == .active
+        )
+    }
+
+    @State private var liveResumeGate = LiveResumeGate()
 
     /// Set by `onOpenURL` AND by a tapped push notification, consumed (and cleared) by the tab
     /// shell.  Held here rather than inside the shell so a link that arrives before sign-in
@@ -67,24 +90,10 @@ struct ContentView: View {
     /// destination as soon as it is set, so the right screen is already showing when
     /// authentication completes.
     @State private var pendingDeepLink: DeepLinkDestination?
+    @State private var foregroundResumeTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
-            // BUILT conditionally, not held at opacity 0.
-            //
-            // Both screens used to sit here permanently with an opacity switch.  That is
-            // invisible on iOS, but not on Mac Catalyst: a TabView's bar and a
-            // NavigationStack's title are promoted into the WINDOW's own chrome, which an
-            // opacity modifier inside the scene never reaches.  So the Mac login screen
-            // shipped with a live "Home · Proposals · Assets · Activity · More" bar across
-            // the top of it and "Home" in the title bar, for an app you were not signed in
-            // to.  It also meant the login wordmark's TimelineView kept ticking behind the
-            // whole app for the entire session.
-            //
-            // The deep-link guarantee the opacity switch was protecting still holds:
-            // `pendingDeepLink` lives in THIS view, not in the shell, so a link that
-            // arrives before sign-in survives, and the shell applies it from `onAppear`
-            // the moment it is created.
             if store.hasInitialized && !store.isAuthenticated {
                 LoginView()
                     .transition(.opacity)
@@ -106,24 +115,53 @@ struct ContentView: View {
 
             if showSplash {
                 LaunchStateView()
-                    // Slides up and off, uncovering the app behind it — the native counterpart
-                    // of the web console's MobileBrandRow, which holds the same candlestick
-                    // wordmark at the top of the screen and then slides it away. Reduced motion
-                    // gets a plain cross-fade instead of travel.
                     .transition(
                         reduceMotion
                             ? .opacity
                             : .move(edge: .top).combined(with: .opacity)
                     )
-                    // Above the app content, so the reveal is the splash leaving rather than
-                    // the content fading up through it.
                     .zIndex(1)
             }
+
+            if showsSessionCover {
+                // Covers this stack while the lock window attaches. Presented sheets
+                // live above this stack, so AppLockCoverHost covers those.
+                AppPalette.background
+                    .ignoresSafeArea()
+                    .zIndex(2)
+                    .accessibilityHidden(true)
+            }
         }
+        .accessibilityHidden(showsSessionCover)
         .animation(.easeInOut(duration: reduceMotion ? 0.2 : 0.55), value: showSplash)
         .animation(.easeInOut(duration: 0.2), value: store.isAuthenticated)
+        .background {
+            AppLockCoverHost(
+                isPresented: showsSessionCover,
+                requiresAuthentication: showsAppLock,
+                controller: appLock
+            )
+        }
+        .onChange(of: store.isAuthenticated) { _, authenticated in
+            if !authenticated {
+                store.stopEvents()
+            }
+        }
         .task {
-            await bootstrap()
+            // Push routing is wired before unlock so a tapped notification still lands
+            // in `pendingDeepLink`. Session network work waits for the unlock task below.
+            guard !didConfigurePush else { return }
+            didConfigurePush = true
+            PushNotificationCoordinator.shared.rebindAPIClient(store.client)
+            PushNotificationCoordinator.shared.configure(
+                route: { destination in pendingDeepLink = destination },
+                isLiveStreamConnected: { store.isStreamConnected }
+            )
+        }
+        .task(id: appLock.isUnlocked) {
+            guard SocraticTradeApp.isScreenshotMode || appLock.isUnlocked else { return }
+            await store.restorePersistedSessionFromKeychainIfNeeded()
+            await bootstrapIfNeeded()
         }
         .task {
             try? await Task.sleep(for: .seconds(1.2))
@@ -132,43 +170,94 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             handleScenePhase(phase)
         }
-        // The ONE router: `DeepLink.destination(for:)` decides what a URL means, and the
-        // answer lands in `pendingDeepLink`.  A tapped notification is routed through the
-        // same two lines below (`configure(route:)`), never through a parser of its own.
-        // Universal links only reach here for paths the AASA file claims; anything else
-        // (including the auth-callback scheme) maps to nil and is ignored.
         .onOpenURL { url in
             guard let destination = DeepLink.destination(for: url) else { return }
             pendingDeepLink = destination
         }
     }
 
-    private func bootstrap() async {
-        PushNotificationCoordinator.shared.configure(
-            route: { destination in pendingDeepLink = destination },
-            isLiveStreamConnected: { store.isStreamConnected }
+    private func bootstrapIfNeeded() async {
+        let action = AppLockSessionBootstrap.action(
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+            hasInitialized: store.hasInitialized,
+            isAuthenticated: store.isAuthenticated,
+            initializationCancelled: store.initializationCancelled,
+            snapshotLoadFailed: store.snapshotLoadFailed
         )
-        if SocraticTradeApp.isScreenshotMode { return }
-        guard !store.hasInitialized else { return }
-        await store.load()
-        if store.isAuthenticated {
-            store.startEvents()
-            // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
-            // new device token after a restore or reinstall, and asking each launch is the
-            // only way to notice.
-            await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+        switch action {
+        case .skip:
+            return
+        case .loadSession:
+            await store.load()
+            if store.isAuthenticated {
+                store.startEvents()
+                // Re-asserts an existing grant only — this never prompts.  APNs can hand out a
+                // new device token after a restore or reinstall, and asking each launch is the
+                // only way to notice.
+                await PushNotificationCoordinator.shared.registerIfAlreadyAuthorized()
+            }
+        case .resumeLiveSession:
+            await resumeLiveSessionIfNeeded()
         }
+    }
+
+    private func resumeLiveSessionIfNeeded() async {
+        await AppLiveSessionResume.resumeThroughGate(
+            gate: liveResumeGate,
+            sceneIsActive: { appLock.sceneIsActive },
+            isUnlocked: { appLock.isUnlocked },
+            isAuthenticated: { store.isAuthenticated }
+        ) { [appLock, store] in
+            await Self.performForegroundResume(appLock: appLock, store: store)
+        }
+    }
+
+    @MainActor
+    private static func performForegroundResume(
+        appLock: AppLockController,
+        store: MobileStore
+    ) async -> Bool {
+        let resumeID = appLock.beginForegroundResume()
+        // Waits for the Keychain restore (ST-4596) before any authenticated request,
+        // then resumes only while the scene is active, unlocked, and this resume is current.
+        // `appLock.sceneIsActive` replaces ScenePhaseResumeGate here: it defaults to active,
+        // so the first unlock can resume before SwiftUI delivers a scene phase.
+        return await AppForegroundResume.resumeAfterBecomingActive(
+            store: store,
+            isScreenshotMode: SocraticTradeApp.isScreenshotMode,
+            shouldContinue: {
+                appLock.sceneIsActive
+                    && appLock.isUnlocked
+                    && appLock.foregroundResumeID == resumeID
+            }
+        )
     }
 
     private func handleScenePhase(_ phase: ScenePhase) {
         if SocraticTradeApp.isScreenshotMode { return }
         switch phase {
-        case .active where store.isAuthenticated:
-            store.startEvents()
-            Task { await store.load() }
         case .background:
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = nil
+            appLock.noteSceneIsActive(false)
+            appLock.invalidateForegroundResume()
             store.stopEvents()
-        default:
+            if appLock.isEnabled {
+                appLock.recordDidEnterBackground()
+            }
+        case .inactive:
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = nil
+        case .active:
+            appLock.noteSceneIsActive(true)
+            appLock.evaluateForegroundEntry()
+            guard appLock.isUnlocked else { return }
+            guard store.hasInitialized, store.isAuthenticated else { return }
+            foregroundResumeTask?.cancel()
+            foregroundResumeTask = Task { @MainActor in
+                await resumeLiveSessionIfNeeded()
+            }
+        @unknown default:
             break
         }
     }
@@ -177,10 +266,6 @@ struct ContentView: View {
 /// Launch screen: the candlestick "SOCRATIC TRADE" wordmark sitting at the top of the screen,
 /// ticking, until the app is ready — then the whole thing slides up and away (see the
 /// transition on the caller).
-///
-/// Replaces the previous icon-in-a-rounded-square + spinner + "Socratic-Trade" placeholder,
-/// which shared nothing with the web console's load screen and repeated back the app name the
-/// user had just tapped.
 private struct LaunchStateView: View {
     var body: some View {
         GeometryReader { geo in
@@ -193,29 +278,17 @@ private struct LaunchStateView: View {
             }
         }
         .ignoresSafeArea(edges: .bottom)
-        // One announcement for the whole screen; CandleWordmarkView already labels itself, and
-        // a spinner-less splash otherwise says nothing at all to VoiceOver.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Socratic Trade")
         .accessibilityAddTraits(.isHeader)
     }
 
-    /// Same formula as the web console's MobileBrandRow (`app/console/components/shell.tsx`):
-    /// the wordmark spans 88% of the width, height falls out of the aspect ratio, clamped so it
-    /// neither disappears on a small phone nor bloats on an iPad. Keeping the two in sync is
-    /// what makes the native splash and the web load screen read as the same product.
     private func wordmarkHeight(forWidth width: CGFloat) -> CGFloat {
         let aspect: CGFloat = CandleWordmarkModel.shared.wm.ar
-        // Stacked wordmark has a smaller aspect ratio (e.g., ~4.0 instead of ~13.1).
-        // A height of 16-34 is too small for a stacked logo.
-        // We allow it to be larger (e.g. 40 to 80).
         return max(40, min(80, (width * 0.88) / aspect))
     }
 }
 
-/// Blocking first-use clickwrap, compiled in this file so XcodeGen / pbxproj
-/// does not need a new source entry.  Accepting the current version dismisses
-/// it until Terms / data-pool versions bump.  There is no decline path.
 struct LegalConsentSheet: View {
     @EnvironmentObject private var store: MobileStore
 

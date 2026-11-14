@@ -21,7 +21,7 @@ import { z } from "zod";
 import { audit, getDb, getPolicy, latestAuditByKind, listUsers, newerAuditEntry, type AuditEventRow, latestAuditStampByKind } from "./db";
 import { dynamicIndexUniversesForPolicy } from "./index-universes";
 import { isTradingDay } from "./market-calendar";
-import { scanMarket } from "./market";
+import { isScanQuotesUnavailableError, scanMarket } from "./market";
 import { allowedSymbolsForPolicy } from "./policy";
 import { interactiveScanKey, isUnusableEmptyMarketScan, marketScanQuotesFromAudit, runScanSingleFlight, withScanDeadline } from "./scan-singleflight";
 import type { MarketScan } from "./types";
@@ -219,14 +219,59 @@ export const FRESHNESS_SCAN_DEADLINE_MS = 6 * 60_000;
  *  other user once `local` was fresh, which is why signed-in scans stopped moving. */
 const lastUsableAuditRowId = new Map<string, string>();
 
+/** First backoff after a quote outage, doubling per consecutive outage to the cap below. */
+export const FRESHNESS_QUOTE_OUTAGE_BASE_BACKOFF_MS = 60_000;
+/** Quote-outage backoff never exceeds 15 minutes. */
+export const FRESHNESS_QUOTE_OUTAGE_MAX_BACKOFF_MS = 15 * 60_000;
+
+/**
+ * Per-user consecutive screener/quote-outage failures.  While the screener is
+ * down the lane must not re-run a doomed scan every tick: each outage failure
+ * doubles the wait (1m → 2m → 4m → 8m → 15m cap) until a scan succeeds or data
+ * reads fresh again.  Prod 2026-11-09: without this, the per-minute failures
+ * kept re-saturating the proxy gate via the whole-set Yahoo fallback in a
+ * self-sustaining loop.
+ */
+const freshnessQuoteOutageByUser = new Map<string, { consecutiveFailures: number; nextAllowedAt: number }>();
+
 /** Test-only (per-file temp DBs make cached row ids stale across tests). */
 export function resetFreshnessGateForTests(): void {
   lastUsableAuditRowId.clear();
+  freshnessQuoteOutageByUser.clear();
 }
 
 /** Test-only.  The success path must prime this so the next tick can skip the payload read. */
 export function freshnessFastGateRowIdForTests(userId: string): string | undefined {
   return lastUsableAuditRowId.get(userId);
+}
+
+/** Test-only.  Current quote-outage backoff state for a user, if any. */
+export function freshnessQuoteOutageForTests(userId: string): { consecutiveFailures: number; nextAllowedAt: number } | undefined {
+  return freshnessQuoteOutageByUser.get(userId);
+}
+
+/**
+ * True when a freshness failure is a screener/quote outage (the class that
+ * backs off) rather than an unrelated error: the typed quotes-unavailable
+ * error, or a message naming the quote feed.  Generic failures (audit write,
+ * deadline wedge, unexpected throws) keep today's every-tick retry.
+ */
+function isFreshnessQuoteOutage(error: unknown): boolean {
+  if (isScanQuotesUnavailableError(error)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  // Outage signals only (Kody review): the typed error above, the screener's
+  // own timeout message, or an explicit unavailable/outage phrase.  A generic
+  // error that merely mentions "quote" or "nasdaq" keeps the every-tick retry.
+  return /quotes?\s+(?:were\s+)?unavailable|screener timed out|(?:quotes?|screener|nasdaq)[\s_-]+(?:feed\s+)?(?:unavailable|outage)/i.test(message);
+}
+
+function noteFreshnessQuoteOutage(userId: string, now: number): void {
+  const consecutiveFailures = (freshnessQuoteOutageByUser.get(userId)?.consecutiveFailures ?? 0) + 1;
+  const delayMs = Math.min(
+    FRESHNESS_QUOTE_OUTAGE_BASE_BACKOFF_MS * 2 ** (consecutiveFailures - 1),
+    FRESHNESS_QUOTE_OUTAGE_MAX_BACKOFF_MS
+  );
+  freshnessQuoteOutageByUser.set(userId, { consecutiveFailures, nextAllowedAt: now + delayMs });
 }
 
 /** How many users may refresh at once.  A hung singleflight must not stall the rest of the lane,
@@ -311,7 +356,7 @@ async function mapWithConcurrency<T>(
 
 /** One user.  Not market-hours gated: weekends still refresh in skip-enrichment mode.
  *  A usable strategy_run scan counts as fresh.  A bounded `omitted` run does not. */
-async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs: number): Promise<"refreshed" | "failed" | "fresh"> {
+async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs: number): Promise<"refreshed" | "failed" | "fresh" | "backed_off"> {
   const policy = getPolicy(userId);
   const stampOf = (kind: string) =>
     latestAuditStampByKind(kind, userId, policy.connectedAccountId) ??
@@ -324,10 +369,14 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
       ? scanStamp
       : runStamp;
   if (newestStamp && now - Date.parse(newestStamp.createdAt) < maxAgeMs) {
-    if (newestStamp.id === lastUsableAuditRowId.get(userId)) return "fresh";
+    if (newestStamp.id === lastUsableAuditRowId.get(userId)) {
+      freshnessQuoteOutageByUser.delete(userId);
+      return "fresh";
+    }
     const freshCheck = newestPersistedMarketScan(userId, policy.connectedAccountId);
     if (freshCheck && now - Date.parse(freshCheck.entry.createdAt) < maxAgeMs) {
       lastUsableAuditRowId.set(userId, freshCheck.entry.id);
+      freshnessQuoteOutageByUser.delete(userId);
       return "fresh";
     }
   }
@@ -336,7 +385,20 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
   const ageMs = newest ? now - Date.parse(newest.entry.createdAt) : Number.POSITIVE_INFINITY;
   if (Number.isFinite(ageMs) && ageMs < maxAgeMs) {
     lastUsableAuditRowId.set(userId, newest!.entry.id);
+    freshnessQuoteOutageByUser.delete(userId);
     return "fresh";
+  }
+
+  // Fresh data proves the feed works, so every "fresh" return above resets the
+  // outage count.  Here the data is stale AND a recent outage backs this user
+  // off: skip the scan (one concise line, no audit row) instead of re-running
+  // a doomed scan every tick.
+  const outage = freshnessQuoteOutageByUser.get(userId);
+  if (outage && now < outage.nextAllowedAt) {
+    console.info(
+      `[market-scan-freshness] ${userId}: backing off after ${outage.consecutiveFailures} consecutive quote outage(s); next scan in ${Math.ceil((outage.nextAllowedAt - now) / 1000)}s`
+    );
+    return "backed_off";
   }
 
   const symbols = allowedSymbolsForPolicy(policy);
@@ -367,7 +429,13 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
           // Account-scoped market-data tape: the enrichment must bind to the
           // operating account's feed (Alpaca PAPER `delayed_sip`) and its
           // account-scoped cache identity — same as strategy-gather.ts.
-          connectedAccountId: policy.connectedAccountId
+          connectedAccountId: policy.connectedAccountId,
+          // While the screener is down this lane must fail fast: Yahoo-pricing
+          // the whole allowed set here re-saturates the proxy gate and starves
+          // the screener itself (prod 2026-11-09 self-sustaining loop). The
+          // seed fallback still applies; without a seed the scan reports
+          // quotes unavailable, which backs off below.
+          allowWholeSetYahooFallback: false
         }),
         "Market scan freshness deadline exceeded."
       );
@@ -375,11 +443,13 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[market-scan-freshness] ${userId}:`, message);
+    if (isFreshnessQuoteOutage(err)) noteFreshnessQuoteOutage(userId, now);
     recordScanFailure(userId, policy.connectedAccountId, message, maxAgeMs);
     return "failed";
   }
 
   if (isUnusableEmptyMarketScan(scan)) {
+    noteFreshnessQuoteOutage(userId, now);
     recordScanFailure(userId, policy.connectedAccountId, "Scan finished with zero quotes.", maxAgeMs);
     return "failed";
   }
@@ -397,6 +467,7 @@ async function refreshUserMarketScanIfDue(userId: string, now: number, maxAgeMs:
   }
   const confirmed = newestPersistedMarketScan(userId, policy.connectedAccountId);
   if (confirmed) lastUsableAuditRowId.set(userId, confirmed.entry.id);
+  freshnessQuoteOutageByUser.delete(userId);
   return "refreshed";
 }
 
@@ -423,13 +494,16 @@ export async function runMarketScanFreshnessIfDue(now: number = Date.now(), upti
     });
     let refreshed = 0;
     let failed = 0;
+    let backedOff = 0;
     for (const result of settled) {
       if (result.status === "fulfilled" && result.value === "refreshed") refreshed += 1;
       if (result.status === "fulfilled" && result.value === "failed") failed += 1;
+      // Backed-off users skipped a doomed scan: neither a refresh nor a new failure.
+      if (result.status === "fulfilled" && result.value === "backed_off") backedOff += 1;
       if (result.status === "rejected") failed += 1;
     }
     if (refreshed > 0 || failed > 0) {
-      console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed}`);
+      console.info(`[market-scan-freshness] users=${users.length} refreshed=${refreshed} failed=${failed} backed_off=${backedOff}`);
     }
   } catch (err) {
     console.error("[market-scan-freshness] error:", err instanceof Error ? err.message : err);

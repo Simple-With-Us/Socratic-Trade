@@ -273,7 +273,7 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     /// `foregroundPresentationOptions`.
     var isLiveStreamConnected: () -> Bool = { false }
 
-    private let client: MobileAPIClient
+    private var client: MobileAPIClient
     private var registeredToken: String?
     private var registrationGate = PushRegistrationGate()
     /// Guards the one-time prompt so re-entering Proposals does not re-ask.
@@ -283,6 +283,11 @@ final class PushNotificationCoordinator: NSObject, ObservableObject, PushTokenRe
     init(client: MobileAPIClient = MobileAPIClient(baseURL: MobileAPIClient.productionBaseURL)) {
         self.client = client
         super.init()
+    }
+
+    /// Keep push registration on the same URLSession + cookie jar as `MobileStore`.
+    func rebindAPIClient(_ client: MobileAPIClient) {
+        self.client = client
     }
 
     // MARK: - Foreground presentation

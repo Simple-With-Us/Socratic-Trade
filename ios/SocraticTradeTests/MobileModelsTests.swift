@@ -466,7 +466,11 @@ final class MobileModelsTests: XCTestCase {
         let request = client.marketScanRequest()
 
         XCTAssertEqual(request.url?.path, "/api/scan")
+        XCTAssertNil(request.url?.query)
         XCTAssertEqual(request.httpMethod, "GET")
+        let recovery = client.marketScanRequest(recoveryId: "11111111-1111-1111-1111-111111111111")
+        XCTAssertEqual(recovery.url?.path, "/api/scan")
+        XCTAssertEqual(recovery.url?.query, "recovery=11111111-1111-1111-1111-111111111111")
         XCTAssertGreaterThan(request.timeoutInterval, 20)
         XCTAssertGreaterThanOrEqual(request.timeoutInterval, MobileAPIClient.marketScanTimeout)
         XCTAssertEqual(MobileAPIClient.marketScanTimeout, 50)
@@ -935,10 +939,15 @@ final class MobileModelsTests: XCTestCase {
             )!
             return (response, Data(self.minimalSnapshotJSON.utf8))
         }
+        // Keep the test off the simulator Keychain: an unsigned test host gets
+        // errSecMissingEntitlement there, and the post-load save would set store.error.
         let store = MobileStore(
             client: MobileAPIClient(
                 baseURL: URL(string: "https://socratictrade.com")!,
                 session: session
+            ),
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
             )
         )
         await store.load()
@@ -946,6 +955,39 @@ final class MobileModelsTests: XCTestCase {
         XCTAssertNotNil(store.snapshot)
         XCTAssertFalse(store.snapshotLoadFailed)
         XCTAssertNil(store.error)
+    }
+
+    @MainActor
+    func testCancelledLoadMarksCancelledInitializationWithoutFailingTheSnapshot() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MobileTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MobileTestURLProtocol.handler = nil
+            session.invalidateAndCancel()
+        }
+        // URLSession reports task cancellation as URLError.cancelled, which the
+        // client wraps as a network error. The retry waits 1.5s, then load()
+        // must flag the cancel and leave the snapshot unmarked as failed.
+        MobileTestURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            throw URLError(.cancelled)
+        }
+        // Keychain restore runs before load(); keep it off the simulator Keychain.
+        let store = MobileStore(
+            client: MobileAPIClient(
+                baseURL: URL(string: "https://socratictrade.com")!,
+                session: session
+            ),
+            sessionCookieCoordinator: SessionCookieCoordinator(
+                credentialStore: InMemorySessionCredentialStore()
+            )
+        )
+        await store.load()
+        XCTAssertTrue(store.hasInitialized)
+        XCTAssertFalse(store.isAuthenticated)
+        XCTAssertTrue(store.initializationCancelled)
+        XCTAssertFalse(store.snapshotLoadFailed)
     }
 
     private let minimalSnapshotJSON = #"""
