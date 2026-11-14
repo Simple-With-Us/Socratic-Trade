@@ -45,10 +45,10 @@ function Disclosure({ title, titleHint, children, defaultOpen = false }: { title
   const hintId = useId();
   return (
     <details className="con-disclosure rounded-control border border-[color:var(--con-line)] px-3" open={defaultOpen}>
-      <summary aria-label={title} aria-describedby={hintId} title={titleHint} className="flex items-center gap-3 rounded-control py-3">
+      <summary aria-label={title} aria-describedby={hintId} title={titleHint} className="group flex flex-wrap items-center gap-3 rounded-control py-3">
         <h3 className="con-card-title">{title}</h3>
-        <span id={hintId} className="sr-only">{titleHint}</span>
         <span aria-hidden="true" className="con-disclosure-label ml-auto shrink-0 whitespace-nowrap" />
+        <span id={hintId} className="sr-only group-focus:not-sr-only group-focus:basis-full group-focus:text-[length:var(--con-fs-sm)] group-focus:text-[color:var(--con-muted)]">{titleHint}</span>
       </summary>
       <div className="pb-3">{children}</div>
     </details>
