@@ -244,8 +244,8 @@ struct MobileAPIClient {
     /// so Scan can show the abort instead of "No Candidates."
     static let marketScanTimeout: TimeInterval = 50
 
-    func marketScan() async throws -> MarketScanResponse {
-        var req = request(path: "/api/scan")
+    func marketScan(recoveryId: String? = nil) async throws -> MarketScanResponse {
+        var req = marketScanRequest(recoveryId: recoveryId)
         req.timeoutInterval = Self.marketScanTimeout
         let data: Data
         let response: URLResponse
@@ -271,8 +271,16 @@ struct MobileAPIClient {
         }
     }
 
-    func marketScanRequest() -> URLRequest {
+    func marketScanRequest(recoveryId: String? = nil) -> URLRequest {
         var req = request(path: "/api/scan")
+        if let recoveryId, !recoveryId.isEmpty,
+           let url = req.url,
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "recovery", value: recoveryId)]
+            if let next = components.url {
+                req.url = next
+            }
+        }
         req.timeoutInterval = Self.marketScanTimeout
         return req
     }
