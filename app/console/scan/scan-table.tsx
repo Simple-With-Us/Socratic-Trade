@@ -20,6 +20,7 @@ import { useToast } from "../ui/toast";
 import { openSymbolDetails } from "../ui/symbol-drilldown";
 import { useSymbolDrawer } from "../ui/symbol-drawer";
 import { DEFAULT_VISIBLE_SCAN_COLUMN_IDS, SCAN_COLUMNS, type ScanColumn } from "./columns";
+import { cellTitleWithReceived, ScanValueDetails } from "./value-details";
 
 /** Approx row height for virtualized height budgeting (con-table cells). */
 const SCAN_ROW_PX = 40;
@@ -89,13 +90,6 @@ function sameScanColumns(a: string[], b: string[]): boolean {
 async function watchlistErrorMessage(res: Response, fallback: string): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   return body?.error || fallback;
-}
-
-/** Same "own tooltip, else stamp the scan-level Received line" rule the table
- *  body uses — shared with the mobile card list so both surfaces agree. */
-function cellTitleWithReceived(column: ScanColumn, q: MarketQuote, received: string): string | undefined {
-  const own = column.cellTitle?.(q);
-  return [own, own?.includes("Received ") ? undefined : received].filter(Boolean).join("\n") || undefined;
 }
 
 /** Watch/unwatch toggle for a scan row — posts straight to the same
@@ -480,24 +474,31 @@ export const ScanTable = memo(function ScanTable({ scan }: { scan: MarketScan })
 
   return (
     <div>
-      {/* Column picker only applies to the desktop table — the mobile card
-          list below always shows the same fixed load-bearing fields. */}
-      <div className="hidden items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2 lg:flex">
-        <Tooltip
-          content="Visible columns are saved per browser for the console scan table.">
-          <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {visibleColumns.length} shown
-          </p>
-        </Tooltip>
-        <ScanColumnsMenu
-          open={columnsOpen}
-          onOpenChange={setColumnsOpen}
-          visible={visible}
-          columnChooserRows={columnChooserRows}
-          onReset={resetScanColumns}
-          onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
-          onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
-        />
+      {/* Value details is shared by keyboard and touch layouts. Only the column
+          picker/count are desktop-only; mobile cards keep their fixed fields. */}
+      <div className="flex items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-4 py-2">
+        <div className="hidden lg:block">
+          <Tooltip
+            content="Visible columns are saved per browser for the console scan table.">
+            <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+              {visibleColumns.length} shown
+            </p>
+          </Tooltip>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <ScanValueDetails rows={rows} columns={SCAN_COLUMNS} received={received} />
+          <div className="hidden lg:block">
+            <ScanColumnsMenu
+              open={columnsOpen}
+              onOpenChange={setColumnsOpen}
+              visible={visible}
+              columnChooserRows={columnChooserRows}
+              onReset={resetScanColumns}
+              onToggle={(id) => saveVisibleColumns(toggleVisibleScanColumn(visible, id))}
+              onMove={(id, delta) => saveVisibleColumns(moveVisibleScanColumn(visible, id, delta))}
+            />
+          </div>
+        </div>
       </div>
       {/* Desktop: TableVirtuoso (C3) — only visible rows mount; sticky symbol via CSS. */}
       <div className="hidden overflow-x-auto lg:block">
