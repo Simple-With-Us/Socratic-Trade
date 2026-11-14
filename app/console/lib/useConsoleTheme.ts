@@ -6,16 +6,16 @@ export type ConsoleTheme = "system" | "light" | "dark";
 
 export function useConsoleTheme(): {
   theme: ConsoleTheme;
-  /** Value for the console root's data-theme attribute (undefined = follow system). */
-  dataTheme: "light" | "dark" | undefined;
+  /** Resolved light or dark. Same value written to `<html>` by applyDocumentTheme. */
+  dataTheme: "light" | "dark";
   cycle: () => void;
   set: (next: ConsoleTheme) => void;
 } {
-  const { theme, toggle, set } = useTheme();
+  const { theme, resolvedTheme, toggle, set } = useTheme();
 
   return {
     theme,
-    dataTheme: theme === "system" ? undefined : theme,
+    dataTheme: resolvedTheme,
     cycle: toggle,
     set,
   };
