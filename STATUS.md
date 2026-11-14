@@ -18,27 +18,37 @@
 
 **What.**  Weekly host systemd timer + wrapper for `litestream-restore-drill.sh`: 2.2x disk preflight, 6h timeout, `/var/lib/st-ops/litestream-restore-drill-status.json`, Sentry on failure.  Installer, runbook, and hermetic selftest.  Kody follow-up: scheduled B2 creds come from Infisical via a service token file (not the env file, not machine identities); notify-disabled starts use a `/run` drop-in; status writes fail the run if the file is not refreshed; malformed env lines and SIGTERM write `pass:false` and alert.  Second Kody round: the token file must be a non-symlink `st.*` service token (20-2048 chars, no whitespace); inherited process-env AWS/Sentry creds are dropped unless `ST_RESTORE_DRILL_ALLOW_ENV_CREDS=1`; `INFISICAL_PROJECT_ID` is always required and passed as `--projectId`; token-file failures alert; every status carries a `runId`; the installer strips the `INFISICAL_ST_*` pair and `export ` prefixes; the notify-off helper traps HUP/INT/TERM and has `--cleanup`.  Rollout: `docs/rollouts/2026-11-12-st-4622-litestream-restore-drill-timer.md`.
 
+**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5158](https://github.com/Simple-With-Us/Socratic-Trade/pull/5158) merges; until then `main` does not have it.
+
 **Next.**  PR on `gb-trader/ST-4622-scheduled-restore-drill`; owner installs on the production restore-drill host after merge (service token file + confirmed secret names).  Do not run against live B2 from the agent.
 ## 2026-11-12 [gb-trader] ST-4611 — iOS 5xx Sentry capture and GET retry
 
 **What.**  iOS no longer auto-captures 502/503/504 as Sentry `HTTPClientError`; idempotent GETs retry those codes with backoff and optional `Retry-After` (capped at 30s), and exhausted failures report once with fingerprint `["mobile-api", path, status]`.  `/api/scan` `scan_quotes_unavailable` 503 handling is unchanged.  Rollout: `docs/rollouts/2026-11-12-st-4611-ios-5xx-sentry-retry.md`.
+
+**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5142](https://github.com/Simple-With-Us/Socratic-Trade/pull/5142) merges; until then `main` does not have it.
 
 **Next.**  PR open; green `verify` and `ios-build`; do not merge from agent.
 ## 2026-11-12 [gb-trader] ST-4618 — iOS Dynamic Type chrome + 44pt tap targets
 
 **What.**  UIKit nav/tab/segmented chrome now scales via `AppChromeFontScaling` (`UIFontMetrics` + ceilings) and re-applies on content-size changes.  Activity filter capsules and More-tab pin buttons meet a 44×44pt hit target.  Rollout: `docs/rollouts/2026-11-12-st-4618-ios-dynamic-type-chrome.md`.
 
+**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5155](https://github.com/Simple-With-Us/Socratic-Trade/pull/5155) merges; until then `main` does not have it.
+
 **Next.**  PR open; green `verify` + `ios-build`; Jay merges.  Do not merge or auto-merge from agent.
 ## 2026-11-12 CURSOR — ST-4633 iOS GET transport-timeout retry
 
 **What.** Idempotent iOS GETs and HEADs retry after NSURLError -1001 (`URLError.timedOut`).  A request under 45s retries twice.  Snapshot load (45s) and market scan (50s) retry once.  A persistent timeout now holds a snapshot refresh for two 45s waits (about 90s) and the Scan screen for two 50s waits (about 100s), down from three 45s waits (about 136s).  The scan runs only from the Scan screen (`ScanView` → `fetchMarketScan`), never inside the snapshot refresh, so the two budgets do not chain.  `get` uses one shared attempt counter for timeouts and HTTP 5xx, so those retries cannot multiply.  POST, PUT, PATCH, and DELETE stay single-shot.  Sentry's failed-request status filter is untouched.  Snapshot load does not run that timeout budget a second time.  Rollout: `docs/rollouts/2026-11-12-st-4633-ios-get-timeout-retry.md`.
 
-**Next.** Ready PR against `main`.  Do not merge and do not deploy.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
+**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) merges; until then `main` does not have it.
+
+**Next.** [#5175](https://github.com/Simple-With-Us/Socratic-Trade/pull/5175) is open against main.  Do not merge and do not deploy yet.  `verify` plus hosted `ios-build` are the gates.  Swift tests do not run on this Linux seat.
 ## 2026-11-12 [gb-trader] ST-4631 — flatfile session auth and rate limit
 
 **What.** `GET /api/market/flatfile` now returns 401 when the request has no session, including a valid `APP_B_INGEST_TOKEN` bearer.  An authenticated session is limited to 6 whole-market pulls per minute before Massive REST or S3.  The path stays off `isPeerMarketReadPath`.  No trading change.  Rollout: `docs/rollouts/2026-11-12-st-4631-flatfile-rate-limit-auth.md`.
 
-**Next.** Open the PR against main.  Do not merge and do not enable auto-merge.
+**Pending.**  Proposed, not yet on `main`.  The handler-level session-provenance guard and the six-per-minute `enforceRateLimit` cap described in **What.** above land only when [#5172](https://github.com/Simple-With-Us/Socratic-Trade/pull/5172) merges.  Already on `main`: the middleware session gate and the peer-path exclusion (`/api/market/flatfile` stays off `isPeerMarketReadPath`; see `middleware.ts`).  The route handler on `main` does not yet carry its own session guard or rate cap.
+
+**Next.** [#5172](https://github.com/Simple-With-Us/Socratic-Trade/pull/5172) is open against main.  Do not merge and do not enable auto-merge.
 ## 2026-11-12 [gb-trader] ST-4623 — host systemd timer Sentry Crons dead-man
 
 **What.**  `scripts/ops/sentry-cron-checkin.py` wraps ST host oneshots (`litestream-l1-boundary-trim`, `st-container-restart-monitor`) with Sentry Crons in_progress/ok/error, shared `/etc/default/st-host-cron-sentry`, and installer updates.  Rollout: `docs/rollouts/2026-11-12-st-4623-host-timer-deadman.md`.
@@ -59,6 +69,8 @@
 ## 2026-11-12 [GB-TRADER] ST-2797 — broker route error honesty
 
 **What.**  Broker-backed GET routes (`/api/positions`, `/api/orders`, `/api/portfolio`, `/api/accounts`) now return `{ ok: false, error, message }` on broker failure (502/504).  GET `/api/history` classifies a thrown provider/gateway failure as 504 `broker_timeout`, 502 `broker_auth_failed`, or 502 `broker_unavailable` (matching other broker-backed GETs).  `fetchDailyOHLC` returns `[]` when any live provider confirms no usable series (200 with `bars: []`); when every attempted tier failed the route gets a payload-free `HistoryProviderError` and classifies it (504/502).  Identity denials stay 401, and local identity or adapter faults stay 500 `internal_error`, never `broker_*`.  PUT `/api/policy` and POST `/api/keys` reject unknown keys and wrong field types with 400 `invalid_payload`.  Malformed JSON on policy/keys/orders cancel returns 400 `invalid_json`.  Rollout: `docs/rollouts/2026-11-12-st-2797-broker-route-error-honesty.md`.
+
+**Pending.**  Proposed, not on `main`.  The behavior described in **What.** above lands only when [#5157](https://github.com/Simple-With-Us/Socratic-Trade/pull/5157) merges; until then `main` does not have it.
 
 **Next.**  PR open on `gb-trader/ST-2797-broker-route-error-honesty`; wait for green `verify`; do not merge from agent.
 ## 2026-11-12 [gb-trader] ST-4632 — admin ingest rate limits
