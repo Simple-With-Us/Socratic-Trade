@@ -22,6 +22,11 @@
 
 **Next.**  Draft PR against `main`.  Do not merge or deploy.  `verify` is the merge gate.  Visual baselines were not regenerated against the dev server.
 
+## 2026-11-11 CURSOR — ST-4599 snapshot first, then live quotes (PR #5125)
+
+**What.**  When the Nasdaq screener is down and a saved snapshot is available, the interactive scan shows that snapshot immediately, labeled with its age in Central time (for example `Prices as of 2:14 PM, 23 min old`), and then replaces those prices when Yahoo or broker recovery returns.  If recovery fails, the snapshot stays on screen with its age.  The blocking recovery order is unchanged: Yahoo, then broker, then seed.  Freshness still passes `allowWholeSetYahooFallback: false`, and the priority proxy lane and quote-outage backoff stay as they are.  Rollout: `docs/rollouts/2026-11-11-st-4599-snapshot-first-scan.md`.
+
+**Next.**  PR #5125 stays open on `fix/st-3999-screener-gate-priority`.  ST-4599 stays In Progress until that PR merges.  iOS compile is the hosted `ios-build` job.
 ## 2026-11-12 CURSOR — ST-4605 iOS app lock
 
 **What.** Optional iOS app lock, off by default, split from ST-4596.  Face ID, Touch ID, or the device passcode is required after launch and after one minute in the background.  This does not include the Keychain session cookies from PR #5131.  Rollout: `docs/rollouts/2026-11-12-st-4605-ios-app-lock.md`.
