@@ -1,10 +1,17 @@
 import { NextResponse } from "next/server";
-import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
+import {
+  brokerReadError,
+  brokerReadOrInternalError,
+  isBrokerGatewayError,
+  jsonError,
+  reportHandledErrorThrottled,
+  resolveRequestUserIdOrApiError
+} from "@/lib/api-error";
+import { fetchDailyOHLC, HistoryProviderError, toBusinessDay } from "@/lib/history";
 import { isMarketOpen } from "@/lib/market-calendar";
 import { paperPricePolicyForUser } from "@/lib/paper-delayed-price-account";
 import { choosePaperPrice } from "@/lib/paper-delayed-price-policy";
 import { fetchFreshQuotesCascade } from "@/lib/quotes-cascade";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +29,8 @@ interface ChartBar {
   vwap?: number; // only present when the source supplies it (e.g. Massive `vw`)
 }
 
+const HISTORY_PROVIDER_ERROR_KEY = "history-provider";
+
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("symbol") ?? "";
   const symbol = raw.trim().toUpperCase();
@@ -29,15 +38,27 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
+  const userId = resolveRequestUserIdOrApiError(req);
+  if (userId instanceof Response) return userId;
+
   try {
-    const userId = resolveRequestUserIdOrResponse(req);
-    if (userId instanceof Response) return userId;
     const paperPolicy = paperPricePolicyForUser(userId);
     const priceDelay = paperPolicy.active && paperPolicy.asOf
       ? { label: paperPolicy.label, asOf: paperPolicy.asOf }
       : undefined;
-    const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
-    if (!bars || bars.length === 0) {
+    // A cascade where every attempted tier failed throws its last payload-free provider error,
+    // so a timeout or rejected key is classified below instead of collapsing to null.
+    const bars = await fetchDailyOHLC(symbol, Date.now(), userId, { throwOnProviderFailure: true });
+    // null means no tier could answer (all skipped); an empty array is a confirmed "no usable series".
+    if (bars == null) {
+      reportHandledErrorThrottled(
+        HISTORY_PROVIDER_ERROR_KEY,
+        "Price history fetch failed",
+        new Error("History provider returned no series")
+      );
+      return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
+    }
+    if (bars.length === 0) {
       return NextResponse.json({ symbol, bars: [], note: "no price history available", ...(priceDelay ? { priceDelay } : {}) });
     }
 
@@ -72,8 +93,12 @@ export async function GET(req: Request) {
       bars: chartBars,
       ...(priceDelay ? { priceDelay } : {})
     });
-  } catch {
-    return NextResponse.json({ symbol, bars: [], note: "price history fetch failed" });
+  } catch (error) {
+    if (error instanceof HistoryProviderError || isBrokerGatewayError(error)) {
+      reportHandledErrorThrottled(HISTORY_PROVIDER_ERROR_KEY, "Price history fetch failed", error);
+      return brokerReadError(error);
+    }
+    return brokerReadOrInternalError(error);
   }
 }
 
