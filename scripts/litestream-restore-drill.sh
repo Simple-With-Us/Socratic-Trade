@@ -16,7 +16,7 @@
 # therefore unrunnable as written, which is part of why the continuous tier has exactly one
 # recorded restore proof (2026-08-18) and none since.
 #
-# WHERE TO RUN IT: on the HOST (fleet-hetzner-nbg1), NOT inside the app container.  Verified
+# WHERE TO RUN IT: on the production restore-drill HOST, NOT inside the app container.  Verified
 # 2026-09-09: the host has `litestream` 0.5.16 at /usr/local/bin and `sqlite3` 3.46.1 at
 # /usr/bin, both of which this script needs.  The runtime image has NEITHER — it ships no
 # `sqlite3` CLI at all, and `coolify-prod-start.sh` downloads Litestream into
@@ -41,10 +41,14 @@
 #   AWS_S3_BUCKET_NAME  AWS_S3_ENDPOINT  AWS_REGION
 #   AWS_ACCESS_KEY_ID   AWS_SECRET_ACCESS_KEY
 # Optional:
-#   LIVE_DB                  default /app/data/app.db
-#   LITESTREAM_CONFIG        default /app/litestream.coolify.yml
-#   SCRATCH_DIR              default /data/scratch  (needs ~1x the DB size; NOT a tmpfs)
-#   RESTORE_PITR_TIMESTAMP   ISO 8601 point-in-time target, inside the 72h retention window
+#   LIVE_DB                       default /app/data/app.db
+#   LITESTREAM_CONFIG             default /app/litestream.coolify.yml
+#   SCRATCH_DIR                   default /data/scratch  (needs ~1x the DB size; NOT a tmpfs)
+#   RESTORE_PITR_TIMESTAMP        ISO 8601 point-in-time target, inside the 72h retention window
+#   RESTORE_DRILL_MIN_FREE_TENTHS default 10 (1.0x live DB size); scheduled wrapper uses 22 (2.2x)
+#   RESTORE_DRILL_STATUS_JSON     when set, write machine-readable status on exit (pass or fail)
+#   RESTORE_DRILL_RUN_ID          when set, included in the status JSON so the wrapper can
+#                                 confirm the file was refreshed for this run
 set -euo pipefail
 
 LIVE_DB="${LIVE_DB:-/app/data/app.db}"
@@ -52,6 +56,18 @@ LITESTREAM_CONFIG="${LITESTREAM_CONFIG:-/app/litestream.coolify.yml}"
 SCRATCH_DIR="${SCRATCH_DIR:-/data/scratch}"
 SCRATCH_DB="${SCRATCH_DIR}/app.db.restore-drill-$(date -u +%Y%m%dT%H%M%SZ)"
 TIMESTAMP_FLAG=""
+START_EPOCH="$(date +%s)"
+START_ISO="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+MIN_FREE_TENTHS="${RESTORE_DRILL_MIN_FREE_TENTHS:-10}"
+if ! printf '%s' "$MIN_FREE_TENTHS" | grep -Eq '^[0-9]+$'; then
+  echo "ERROR: RESTORE_DRILL_MIN_FREE_TENTHS must be an integer." >&2
+  exit 1
+fi
+RESTORED_BYTES=0
+INTEGRITY_RESULT=""
+DRILL_PASS="false"
+ROW_JSON_FILE=""
+declare -A ROW_RESTORED ROW_LIVE ROW_DELTA
 
 # Always drop the scratch copy, including when `set -e` fires mid-script.
 # `PRAGMA integrity_check` can emit many rows; piping it to `head -1` under
@@ -62,7 +78,109 @@ cleanup_scratch() {
     echo "  Removed: ${SCRATCH_DB}"
   fi
 }
-trap cleanup_scratch EXIT
+write_status_json() {
+  local status_path="${RESTORE_DRILL_STATUS_JSON:-}"
+  [[ -n "$status_path" ]] || return 0
+  local duration=$(( $(date +%s) - START_EPOCH ))
+  local pass_literal="false"
+  [[ "$DRILL_PASS" == "true" ]] && pass_literal="true"
+  local run_json=""
+  if [[ -n "${RESTORE_DRILL_RUN_ID:-}" ]]; then
+    run_json="$(printf ',"runId":"%s"' "$(printf '%s' "$RESTORE_DRILL_RUN_ID" | tr -d '"\\')")"
+  fi
+  if ! mkdir -p "$(dirname "$status_path")" 2>/dev/null; then
+    echo "ERROR: status JSON not written: ${status_path} (cannot create parent directory)" >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    if {
+      printf '{"timestamp":"%s","durationSeconds":%s,"restoredSizeBytes":%s,"integrity":"%s","pass":%s,"rowCountDeltas":{}%s}\n' \
+        "$START_ISO" "$duration" "$RESTORED_BYTES" "${INTEGRITY_RESULT:-}" "$pass_literal" "$run_json"
+    } >"${status_path}.tmp" && mv "${status_path}.tmp" "$status_path"; then
+      return 0
+    fi
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
+  fi
+  ROW_JSON_FILE="${ROW_JSON_FILE:-$(mktemp "${TMPDIR:-/tmp}/restore-drill-rows.XXXXXX")}"
+  : >"$ROW_JSON_FILE"
+  local table
+  for table in "${TABLES[@]:-}"; do
+    [[ -n "${table:-}" ]] || continue
+    printf '%s %s %s %s\n' \
+      "$table" "${ROW_RESTORED[$table]:-}" "${ROW_LIVE[$table]:-}" "${ROW_DELTA[$table]:-n/a}" >>"$ROW_JSON_FILE"
+  done
+  RESTORE_DRILL_STATUS_JSON="$status_path" \
+  RESTORE_DRILL_START_ISO="$START_ISO" \
+  RESTORE_DRILL_DURATION="$duration" \
+  RESTORE_DRILL_RESTORED_BYTES="$RESTORED_BYTES" \
+  RESTORE_DRILL_INTEGRITY="${INTEGRITY_RESULT:-}" \
+  RESTORE_DRILL_PASS="$pass_literal" \
+  RESTORE_DRILL_ROWS_FILE="$ROW_JSON_FILE" \
+  RESTORE_DRILL_RUN_ID="${RESTORE_DRILL_RUN_ID:-}" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+rows = {}
+path = os.environ.get("RESTORE_DRILL_ROWS_FILE", "")
+if path and Path(path).is_file():
+    for line in Path(path).read_text().splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            table, restored, live, delta = parts[0], parts[1], parts[2], parts[3]
+            rows[table] = {"restored": restored, "live": live, "delta": delta}
+
+payload = {
+    "timestamp": os.environ["RESTORE_DRILL_START_ISO"],
+    "durationSeconds": int(os.environ["RESTORE_DRILL_DURATION"]),
+    "restoredSizeBytes": int(os.environ.get("RESTORE_DRILL_RESTORED_BYTES") or 0),
+    "integrity": os.environ.get("RESTORE_DRILL_INTEGRITY") or "",
+    "rowCountDeltas": rows,
+    "pass": os.environ.get("RESTORE_DRILL_PASS") == "true",
+}
+run_id = os.environ.get("RESTORE_DRILL_RUN_ID") or ""
+if run_id:
+    payload["runId"] = run_id
+out = os.environ["RESTORE_DRILL_STATUS_JSON"]
+tmp = out + ".tmp"
+Path(tmp).write_text(json.dumps(payload, separators=(",", ":")) + "\n")
+Path(tmp).replace(out)
+PY
+  local py_rc=$?
+  if [ "$py_rc" -ne 0 ]; then
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
+  fi
+  if [ ! -f "$status_path" ]; then
+    echo "ERROR: status JSON not written: ${status_path}" >&2
+    return 1
+  fi
+  return 0
+}
+
+finalize_exit() {
+  local rc="${1:-1}"
+  local status_rc=0
+  write_status_json || status_rc=$?
+  cleanup_scratch
+  trap - EXIT
+  if [ "$status_rc" -ne 0 ]; then
+    exit 1
+  fi
+  exit "$rc"
+}
+
+on_exit_write_status() {
+  local status_rc=0
+  write_status_json || status_rc=$?
+  cleanup_scratch
+  if [ "$status_rc" -ne 0 ]; then
+    exit 1
+  fi
+}
+trap on_exit_write_status EXIT
 
 if [[ -n "${RESTORE_PITR_TIMESTAMP:-}" ]]; then
   TIMESTAMP_FLAG="-timestamp ${RESTORE_PITR_TIMESTAMP}"
@@ -97,11 +215,15 @@ fi
 
 mkdir -p "${SCRATCH_DIR}"
 
-# Free space: the restore needs roughly one full copy of the database.
+# Free space: the restore needs roughly one full copy of the database (scale via tenths).
 DB_BYTES=$(stat -c %s "${LIVE_DB}" 2>/dev/null || echo 0)
 AVAIL_BYTES=$(( $(df -Pk "${SCRATCH_DIR}" | awk 'NR==2 {print $4}') * 1024 ))
-if [[ "${DB_BYTES}" -gt 0 && "${AVAIL_BYTES}" -lt "${DB_BYTES}" ]]; then
-  echo "ERROR: ${SCRATCH_DIR} has ${AVAIL_BYTES} bytes free; the restore needs ~${DB_BYTES}." >&2
+REQUIRED_BYTES=0
+if [[ "${DB_BYTES}" -gt 0 ]]; then
+  REQUIRED_BYTES=$(( (DB_BYTES * MIN_FREE_TENTHS) / 10 ))
+fi
+if [[ "${DB_BYTES}" -gt 0 && "${AVAIL_BYTES}" -lt "${REQUIRED_BYTES}" ]]; then
+  echo "ERROR: ${SCRATCH_DIR} has ${AVAIL_BYTES} bytes free; need >= ${REQUIRED_BYTES} (${MIN_FREE_TENTHS}/10 x live ${DB_BYTES})." >&2
   exit 1
 fi
 
@@ -120,7 +242,8 @@ echo ""
 echo "--- Step 3: restore to scratch ---"
 # shellcheck disable=SC2086
 litestream restore -config "${LITESTREAM_CONFIG}" -o "${SCRATCH_DB}" ${TIMESTAMP_FLAG} "${LIVE_DB}"
-echo "Restore complete: ${SCRATCH_DB} ($(stat -c %s "${SCRATCH_DB}") bytes)"
+RESTORED_BYTES=$(stat -c %s "${SCRATCH_DB}")
+echo "Restore complete: ${SCRATCH_DB} (${RESTORED_BYTES} bytes)"
 
 echo ""
 echo "--- Step 4: integrity check ---"
@@ -128,6 +251,7 @@ echo "--- Step 4: integrity check ---"
 # sqlite3 and, without the EXIT trap, would skip cleanup.
 INTEGRITY=$(sqlite3 "${SCRATCH_DB}" 'PRAGMA integrity_check;')
 INTEGRITY="${INTEGRITY%%$'\n'*}"
+INTEGRITY_RESULT="$INTEGRITY"
 echo "  Result: ${INTEGRITY}"
 if [[ "${INTEGRITY}" != "ok" ]]; then
   echo "  FAILED: restored database is not structurally sound." >&2
@@ -147,6 +271,8 @@ for table in "${TABLES[@]}"; do
   # `-readonly` plus a mode=ro URI: the live DB is real trading state and this drill must not
   # be able to write to it even by accident.
   LIVE_COUNT=$(sqlite3 -readonly "file:${LIVE_DB}?mode=ro" "SELECT count(*) FROM ${table};" 2>/dev/null || echo "N/A")
+  ROW_RESTORED["$table"]="$RESTORED_COUNT"
+  ROW_LIVE["$table"]="$LIVE_COUNT"
   if [[ "${RESTORED_COUNT}" == "N/A" ]]; then
     echo "  ${table}: MISSING from the restored copy"
     PASS=false
@@ -171,6 +297,7 @@ for table in "${TABLES[@]}"; do
   # backups (flagged in review of PR #3204).
   if [[ "${LIVE_COUNT}" != "N/A" ]]; then
     DELTA=$((LIVE_COUNT - RESTORED_COUNT))
+    ROW_DELTA["$table"]="$DELTA"
     echo "  ${table}: restored=${RESTORED_COUNT} live=${LIVE_COUNT} delta=${DELTA} (informational)"
     if [[ ${DELTA} -lt 0 ]]; then
       echo "    NOTE: restored holds more rows than live — expected where rows are deleted."
@@ -182,12 +309,11 @@ done
 
 echo ""
 echo "--- Step 6: cleanup ---"
-cleanup_scratch
-trap - EXIT
 
 echo ""
 echo "=== Drill complete ==="
 if [[ "${PASS}" == "true" ]]; then
+  DRILL_PASS="true"
   cat <<EOF
 Result: PASS — restore from the B2 replica verified end to end.
 
@@ -199,7 +325,8 @@ Record it:
     - Integrity check: ${INTEGRITY}
     - Key tables: populated, deltas within expected range
 EOF
-  exit 0
+  finalize_exit 0
 fi
 echo "Result: FAIL — see the findings above.  Do NOT record this tier as verified." >&2
-exit 1
+DRILL_PASS="false"
+finalize_exit 1

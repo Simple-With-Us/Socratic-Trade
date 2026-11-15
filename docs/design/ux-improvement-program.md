@@ -136,7 +136,7 @@ Claiming agents should stop and ask only when blocked on these:
 | **Depends** | Optional after A2 (can land independent) |
 | **Suggested branch** | `*/ux-first-run-checklist` |
 | **Touches** | `app/console/lib/derive.ts` (export structured checklist), `app/console/page.tsx` (hero when incomplete), possibly shell banner; iOS Home later in D-wave |
-| **Steps (canonical)** | (1) Connect broker (2) Select active account (3) Universe/index (4) LLM key + Green model (5) Run once → open Proposals |
+| **Steps (canonical)** | (1) Connect a broker (2) Select an active account (3) Choose what to scan (4) Add a model key (5) Run Once, then review Proposals.  Step ids stay `universe` and `llm`. |
 | **Acceptance** | Incomplete readiness → checklist is the dominant Thesis surface; each step one CTA; complete readiness → checklist gone (or collapsed “You’re set”) |
 | **Verify** | Unit tests for checklist derivation; no false “ready” when `hasAccount`/`hasUniverse`/LLM false |
 
