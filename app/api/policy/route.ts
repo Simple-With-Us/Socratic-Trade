@@ -1,3 +1,5 @@
+import { brokerReadOrInternalError, jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
+import { PolicyUpdateSchema } from "@/lib/policy-update-schema";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
   getActiveConnectedAccount,
@@ -15,7 +17,6 @@ import { isIndexUniverse, normalizeIncludedIndices } from "@/lib/index-universes
 import { getBrokerGateway } from "@/lib/broker";
 import { stripNullsDeep } from "@/lib/policy-null-stripping";
 import { normalizeExclusivePolicyCaps } from "@/lib/policy-normalization";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import {
   invalidSymbolMessage,
   newlyAddedInvalidSymbols,
@@ -40,19 +41,26 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
-  return NextResponse.json(getPolicy(userId));
+  try {
+    return NextResponse.json(getPolicy(userId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 export async function PUT(request: Request) {
-  const rawBody: unknown = await request.json();
-  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-    return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
+  const parsed = await parseRequestJson(request);
+  if (!parsed.ok) return parsed.response;
+  const validation = PolicyUpdateSchema.safeParse(parsed.body);
+  if (!validation.success) {
+    return jsonError(400, "invalid_payload", "Invalid policy update payload.");
   }
-  const body = rawBody as Record<string, unknown>;
-  const userId = resolveRequestUserIdOrResponse(request);
+  const body = validation.data as Record<string, unknown>;
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
+  try {
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {
     return new NextResponse("targetConnectedAccountId must be a non-empty string.", { status: 400 });
@@ -236,6 +244,9 @@ export async function PUT(request: Request) {
     return new NextResponse("The target connected account changed before this update could be saved.", { status: 409 });
   }
   return NextResponse.json(getPolicy(userId, targetConnectedAccountId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 async function validatePolicy(
