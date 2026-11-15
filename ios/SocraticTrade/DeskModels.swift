@@ -221,6 +221,10 @@ struct MarketScanResponse: Decodable {
     let stale: Bool?
     let staleReason: String?
     let priceDelay: PaperPriceDelay?
+    let pricesAsOf: String?
+    let refreshPending: Bool?
+    let recoveryId: String?
+    let keptSnapshot: Bool?
 
     var hasUsableUniverse: Bool { !topCandidates.isEmpty }
 
@@ -238,6 +242,10 @@ struct MarketScanResponse: Decodable {
         case stale
         case staleReason
         case priceDelay
+        case pricesAsOf
+        case refreshPending
+        case recoveryId
+        case keptSnapshot
     }
 
     init(
@@ -249,7 +257,11 @@ struct MarketScanResponse: Decodable {
         warnings: [String] = [],
         stale: Bool? = nil,
         staleReason: String? = nil,
-        priceDelay: PaperPriceDelay? = nil
+        priceDelay: PaperPriceDelay? = nil,
+        pricesAsOf: String? = nil,
+        refreshPending: Bool? = nil,
+        recoveryId: String? = nil,
+        keptSnapshot: Bool? = nil
     ) {
         self.topCandidates = topCandidates
         self.asOf = asOf ?? generatedAt
@@ -260,6 +272,10 @@ struct MarketScanResponse: Decodable {
         self.stale = stale
         self.staleReason = staleReason
         self.priceDelay = priceDelay
+        self.pricesAsOf = pricesAsOf
+        self.refreshPending = refreshPending
+        self.recoveryId = recoveryId
+        self.keptSnapshot = keptSnapshot
     }
 
     init(from decoder: Decoder) throws {
@@ -276,6 +292,10 @@ struct MarketScanResponse: Decodable {
         stale = try values.decodeIfPresent(Bool.self, forKey: .stale)
         staleReason = try values.decodeIfPresent(String.self, forKey: .staleReason)
         priceDelay = try values.decodeIfPresent(PaperPriceDelay.self, forKey: .priceDelay)
+        pricesAsOf = try values.decodeIfPresent(String.self, forKey: .pricesAsOf)
+        refreshPending = try values.decodeIfPresent(Bool.self, forKey: .refreshPending)
+        recoveryId = try values.decodeIfPresent(String.self, forKey: .recoveryId)
+        keptSnapshot = try values.decodeIfPresent(Bool.self, forKey: .keptSnapshot)
     }
 
     /// Same rule as `/console/scan`: a failed refresh never blanks a last-good table.
@@ -736,6 +756,44 @@ enum DeskCopy {
             return "Couldn’t refresh the market scan.  Check your connection."
         }
         return trimmed
+    }
+
+    /// Saved snapshot while the screener is down. Central time, same sentence as the website.
+    static func scanPriceAgeNote(pricesAsOf: String?, refreshPending: Bool, now: Date = Date()) -> String? {
+        let raw = pricesAsOf?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty, let date = Self.parseISO8601(raw) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "America/Chicago")
+        formatter.dateFormat = "h:mm a"
+        let clock = formatter.string(from: date)
+        let minutes = max(0, Int((now.timeIntervalSince(date) / 60).rounded()))
+        let age: String
+        if minutes < 1 {
+            age = "under 1 min old"
+        } else if minutes == 1 {
+            age = "1 min old"
+        } else if minutes < 60 {
+            age = "\(minutes) min old"
+        } else {
+            let hours = minutes / 60
+            let remainder = minutes % 60
+            let hoursLabel = hours == 1 ? "1 hr" : "\(hours) hr"
+            age = remainder == 0 ? "\(hoursLabel) old" : "\(hoursLabel) \(remainder) min old"
+        }
+        let line = "Prices as of \(clock), \(age)"
+        if refreshPending {
+            return "\(line).\u{00A0} Updating with live prices."
+        }
+        return line
+    }
+
+    private static func parseISO8601(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     /// Last-good scan served with HTTP 200 `stale: true` (PR #4609) — informational, not a failure banner.

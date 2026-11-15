@@ -52,6 +52,16 @@ export default function ScanPage() {
   // strategy_run audits can carry a partial shape the table can't render.
   const runScan = asFullMarketScan(snapshot?.latestScan);
   const scan: MarketScan | null = newestScan(live.scan, runScan);
+  // The age line belongs to the saved snapshot this refresh put on screen.
+  // A newer completed strategy scan keeps its own clock.
+  const priceAgeLabel =
+    live.priceAgeLabel &&
+    scan &&
+    live.scan &&
+    scan.generatedAt === live.scan.generatedAt &&
+    scan.source === live.scan.source
+      ? live.priceAgeLabel
+      : null;
   const smartCount = (snapshot?.smartMoney?.congress?.length ?? 0) + (snapshot?.smartMoney?.insider?.length ?? 0);
 
   if (!snapshot) return null;
@@ -117,6 +127,11 @@ export default function ScanPage() {
             {scan.cached ? " · cached" : ""}
           </Chip>
         )}
+        {priceAgeLabel && (
+          <span role="status" className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
+            {priceAgeLabel}
+          </span>
+        )}
         {scan && (
           <span
             className="cursor-default text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
@@ -177,6 +192,7 @@ export default function ScanPage() {
             scan={scan}
             refreshing={live.refreshing}
             error={live.error}
+            priceAgeLabel={priceAgeLabel}
             onRefresh={() => void onRefresh()}
             policyLimit={snapshot.policy.marketScanCandidateLimit}
             congressScoreVerdict={snapshot.smartMoney?.congressScoreVerdict}
@@ -194,6 +210,7 @@ function MarketScanTab({
   scan,
   refreshing,
   error,
+  priceAgeLabel,
   onRefresh,
   policyLimit,
   congressScoreVerdict,
@@ -202,6 +219,7 @@ function MarketScanTab({
   scan: MarketScan | null;
   refreshing: boolean;
   error: string | null;
+  priceAgeLabel: string | null;
   onRefresh: () => void;
   policyLimit?: number;
   congressScoreVerdict?: CongressScoreVerdictRead | null;
@@ -387,6 +405,11 @@ function MarketScanTab({
         }
         padded={false}
       >
+        {priceAgeLabel && (
+          <p role="status" className="px-4 pb-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
+            {priceAgeLabel}
+          </p>
+        )}
         <p
           className="cursor-default px-4 pb-2 pt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]"
           title={`Scanned ${typeof scan.scannedSymbols === "number" ? scan.scannedSymbols : "an unrecorded number of"} symbols; ${typeof scan.returnedQuotes === "number" ? scan.returnedQuotes : "an unrecorded number of"} returned quotes${sources ? ` from ${sources}` : ""}; ${scan.topCandidates.length} candidates total (cap ${limit}) decomposed as ${formatScanCandidateBreakdown(breakdown)}${breakdown.hasHeldBreakdown ? " — held positions are never hidden regardless of rank, so the total can exceed the cap" : ""}.`}

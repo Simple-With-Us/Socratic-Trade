@@ -466,7 +466,11 @@ final class MobileModelsTests: XCTestCase {
         let request = client.marketScanRequest()
 
         XCTAssertEqual(request.url?.path, "/api/scan")
+        XCTAssertNil(request.url?.query)
         XCTAssertEqual(request.httpMethod, "GET")
+        let recovery = client.marketScanRequest(recoveryId: "11111111-1111-1111-1111-111111111111")
+        XCTAssertEqual(recovery.url?.path, "/api/scan")
+        XCTAssertEqual(recovery.url?.query, "recovery=11111111-1111-1111-1111-111111111111")
         XCTAssertGreaterThan(request.timeoutInterval, 20)
         XCTAssertGreaterThanOrEqual(request.timeoutInterval, MobileAPIClient.marketScanTimeout)
         XCTAssertEqual(MobileAPIClient.marketScanTimeout, 50)
