@@ -24,7 +24,7 @@ Three attempts at 3s plus two 250 ms pauses bounds one check at ~9.5s worst case
 - `npx tsc --noEmit` — exit 0.
 - `npx eslint src/lib/mango-probe.ts app/api/proxy-use/route.ts test/mango-probe.test.ts` — exit 0.
 - `npm run build` with `NODE_OPTIONS=--max-old-space-size=4096` — exit 0, including `stamp-csp-static-hashes` (one pre-existing Sentry Edge Runtime warning, unrelated to this diff).
-- Live evidence gathered Nov 14, 19:49–20:04 UTC from the VM via the tailnet proxy: 34 fetches of `https://socratictrade.com/api/proxy-use` — 33 HTTP 200 (not one carried `reachable: false`) and one curl timeout at 30s behind the 29,260 ms probe; healthy `latencyMs` samples 117–2,008 ms; `lastHour` steady at 65 proxied / 2 proxy errors.  Direct checks in the same window: `GET /api/live` 200, Coolify app `running:healthy`, and 20/20 timed TCP connects from inside the app container to 10.99.0.2:8888 at ~140 ms.
+- Live evidence gathered Nov 14, 19:49–20:04 UTC from the VM via the tailnet proxy: 34 fetches of `https://socratictrade.com/api/proxy-use` — 33 HTTP 200 (not one carried `reachable: false`) and one curl timeout at 30s behind the 29,260 ms probe; healthy `latencyMs` samples 117–2,008 ms; `lastHour` steady at 65 proxied / 2 proxy errors.  Direct checks in the same window: `GET /api/live` 200, Coolify app `running:healthy`, and 20/20 timed TCP connects from inside the app container to <proxy-ip>:8888 at ~140 ms.
 
 ## Next Steps & Blockers
 

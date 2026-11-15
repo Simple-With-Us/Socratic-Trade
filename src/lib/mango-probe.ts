@@ -159,11 +159,13 @@ async function runMangoProbe(now: number): Promise<MangoProbe> {
 
 let cachedProbe: MangoProbe | null = null;
 let cachedAtMs = 0;
+let inFlightProbe: Promise<MangoProbe> | null = null;
 
 /** Test hook: drop the cached verdict so tests are isolated. */
 export function __resetMangoProbeForTests(): void {
   cachedProbe = null;
   cachedAtMs = 0;
+  inFlightProbe = null;
 }
 
 /**
@@ -176,8 +178,17 @@ export async function getMangoProbe(now: number = Date.now()): Promise<MangoProb
     const ttlMs = cachedProbe.reachable ? MANGO_PROBE_SUCCESS_CACHE_MS : MANGO_PROBE_FAILURE_CACHE_MS;
     if (now - cachedAtMs < ttlMs) return cachedProbe;
   }
-  const probe = await runMangoProbe(now);
-  cachedProbe = probe;
-  cachedAtMs = now;
-  return probe;
+  // Share one running check across concurrent callers whose cache has
+  // expired, so a burst of simultaneous reads cannot each open their own
+  // set of connect attempts against the proxy.
+  if (inFlightProbe) return inFlightProbe;
+  inFlightProbe = (async () => {
+    const probe = await runMangoProbe(now);
+    cachedProbe = probe;
+    cachedAtMs = now;
+    return probe;
+  })().finally(() => {
+    inFlightProbe = null;
+  });
+  return inFlightProbe;
 }
