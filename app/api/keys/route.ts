@@ -1,9 +1,11 @@
 import "server-only";
 import { z } from "zod";
+import { jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
+import { KeyUpsertSchema } from "@/lib/key-upsert-schema";
 import { codeCliReady } from "@/lib/code-cli";
 import { isPrimaryEmail } from "@/lib/auth/identity";
 import { isVerifiedIdentitySource, AUTHENTICATED_IDENTITY_SOURCE_HEADER } from "@/lib/auth/strip-identity";
-import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserIdOrResponse } from "@/lib/request-user";
+import { AUTHENTICATED_EMAIL_HEADER } from "@/lib/request-user";
 import { NextRequest, NextResponse } from "next/server";
 import {
   apiKeyEnvVarForService,
@@ -298,7 +300,7 @@ function canSelectCodeCli(request: NextRequest, userId: string): boolean {
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   const rawService = searchParams.get("service");
   let service: string | undefined;
@@ -405,20 +407,18 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const parsed = await parseRequestJson(request);
+  if (!parsed.ok) return parsed.response;
+  const parsedBody = KeyUpsertSchema.safeParse(parsed.body);
+  if (!parsedBody.success) {
+    return jsonError(400, "invalid_payload", "Invalid key upsert payload.");
+  }
   try {
-    const body = (await request.json()) as {
-      userId?: string;
-      service?: string;
-      apiKey?: string;
-      label?: string;
-      planTier?: string | null;
-      route?: string;
-    };
-    const { service, apiKey, label, planTier, route } = body;
+    const { service, apiKey, label, planTier, route } = parsedBody.data;
     if (route === "code-cli" && !isVerifiedIdentitySource(request.headers.get(AUTHENTICATED_IDENTITY_SOURCE_HEADER))) {
       return NextResponse.json({ error: "Code CLI requires the verified owner" }, { status: 403 });
     }
-    const userId = resolveRequestUserIdOrResponse(request);
+    const userId = resolveRequestUserIdOrApiError(request);
     if (userId instanceof Response) return userId;
 
     const canonical = service ? normalizeApiKeyService(service) : "";
@@ -507,7 +507,7 @@ export async function POST(request: NextRequest) {
       userId,
       canonical,
       apiKey!.trim(),
-      label,
+      label ?? undefined,
       planTier === undefined ? undefined : planTier === "" ? null : planTier
     );
     return NextResponse.json({
@@ -528,7 +528,7 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const userId = resolveRequestUserIdOrResponse(request);
+  const userId = resolveRequestUserIdOrApiError(request);
   if (userId instanceof Response) return userId;
   const parsedService = ServiceQueryParamSchema.safeParse(searchParams.get("service"));
   if (!parsedService.success) {

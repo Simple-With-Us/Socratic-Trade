@@ -1,3 +1,27 @@
+## 2026-11-13 CURSOR — ST-4627 settings strip height
+
+**What.**  The Settings More sections control keeps a 44px target and a negative margin so the sticky strip stays the height the section list already assumes.  August login notes stay dated records.
+
+**Next.**  Replies are on the new Kody threads.  Do not merge.  GB-Designer merges.
+
+## 2026-11-13 CURSOR — ST-4627 Kody chrome and chips
+
+**What.**  From the sm breakpoint up, the console bar scrolls inside the header.  The Settings More sections control sits beside the chips and stays mounted while the row overflows.  The iOS login comment no longer claims the last bullet matches the web list.
+
+**Next.**  Replies are on the Kody threads.  Do not merge.  GB-Designer merges.
+
+## 2026-11-13 CURSOR — ST-4627 checklist title
+
+**What.**  When a model key is already saved and no model is chosen, the readiness row says Choose a model and the button says Choose Model.  A missing key still says Add a model key.  Rollout: `docs/rollouts/2026-11-12-st-4627-ui-polish.md`.
+
+**Next.**  Kody business-logic lines are answered on the pull request.  Do not merge.  GB-Designer merges.
+
+## 2026-11-12 CURSOR — ST-4627 UI polish
+
+**What.**  Phone chrome is two rows so Run Once and Start stay on screen.  Settings chips are Title Case, and a More sections control stops the next label being cut mid-word.  Orders, scan, connections, the home checklist, and the unconfigured login state use plain copy.  No trading, order, risk, auth, or theme-switch change.  Rollout: `docs/rollouts/2026-11-12-st-4627-ui-polish.md`.
+
+**Next.**  Draft PR against `main`.  Do not merge or deploy.  `verify` is the merge gate.  Visual baselines were not regenerated against the dev server.
+
 ## 2026-11-11 CURSOR — ST-4599 snapshot first, then live quotes (PR #5125)
 
 **What.**  When the Nasdaq screener is down and a saved snapshot is available, the interactive scan shows that snapshot immediately, labeled with its age in Central time (for example `Prices as of 2:14 PM, 23 min old`), and then replaces those prices when Yahoo or broker recovery returns.  If recovery fails, the snapshot stays on screen with its age.  The blocking recovery order is unchanged: Yahoo, then broker, then seed.  Freshness still passes `allowWholeSetYahooFallback: false`, and the priority proxy lane and quote-outage backoff stay as they are.  Rollout: `docs/rollouts/2026-11-11-st-4599-snapshot-first-scan.md`.
