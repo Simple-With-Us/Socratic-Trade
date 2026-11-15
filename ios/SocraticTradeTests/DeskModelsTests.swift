@@ -149,6 +149,15 @@ final class DeskModelsTests: XCTestCase {
         XCTAssertTrue(note?.contains("Live Nasdaq screener timed out.") == true)
     }
 
+    func testScanPriceAgeNoteMatchesCentralClock() {
+        let asOf = "2026-11-11T20:14:00.000Z"
+        let now = ISO8601DateFormatter().date(from: "2026-11-11T20:37:00Z")!
+        let pending = DeskCopy.scanPriceAgeNote(pricesAsOf: asOf, refreshPending: true, now: now)
+        XCTAssertEqual(pending, "Prices as of 2:14 PM, 23 min old.\u{00A0} Updating with live prices.")
+        let kept = DeskCopy.scanPriceAgeNote(pricesAsOf: asOf, refreshPending: false, now: now)
+        XCTAssertEqual(kept, "Prices as of 2:14 PM, 23 min old")
+    }
+
     func testFailedRefreshKeepsLastGoodUniverse() {
         let lastGood = MarketScanResponse(
             topCandidates: [

@@ -58,6 +58,20 @@ enum MobileAPITransportTimeoutRetry {
         return maxRetries
     }
 
+    /// Caps the shared network-retry budget when the error is a transport timeout.
+    /// `maxNetworkRetries` of 0 (snapshot's client path) stays 0.  A request at or
+    /// above `singleRetryTimeout` gets at most one extra try.
+    static func networkRetryBudget(
+        for error: Error,
+        requestTimeout: TimeInterval,
+        maxNetworkRetries: Int?,
+        maxTransientRetries: Int
+    ) -> Int {
+        let networkBudget = maxNetworkRetries ?? maxTransientRetries
+        guard isTransportTimeout(error) else { return networkBudget }
+        return min(networkBudget, maxRetries(forTimeout: requestTimeout))
+    }
+
     /// 300ms, then 600ms.  Matches the existing GET backoff and stays under one second.
     static func backoffNanoseconds(attemptIndex: Int) -> UInt64 {
         let bounded = min(max(attemptIndex, 0), 1)

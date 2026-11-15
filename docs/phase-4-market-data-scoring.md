@@ -135,6 +135,9 @@ not 200 `cached=true`.  iOS Scan seeds from compact `latestScan` on
 `/api/mobile/snapshot` and keeps that universe when live Refresh 503s,
 same as the website.  It does not blame Guardrails or the watchlist.
 
+**Interactive snapshot first (2026-11-11, ST-4599):** the paragraph above records the 2026-08-18 incident and the recovery that followed.  On the interactive path (`GET /api/scan`, `previewSeedBeforeLiveRecovery`), a down screener with a usable saved snapshot now returns that snapshot immediately, with `pricesAsOf` and `refreshPending`, and the website and iOS Scan label the age.  Yahoo whole-set pricing, then broker recovery, still runs afterward and replaces the snapshot when it returns quotes.  If that live recovery fails, the snapshot stays, with the age and without the updating sentence.  The blocking helper `recoverQuotesWhenScreenerEmpty` is still Yahoo, then broker, then seed.  Freshness does not set the preview flag and still passes `allowWholeSetYahooFallback: false`.  A live screener that simply misses the allowed universe does not preview a snapshot.
+
+
 **Expanded dynamic universes (2026-06-23):** Base universe selection now covers
 small and broad indexes without sending the whole market to the LLM. Static
 embedded lists still cover S&P 500, Nasdaq 100, and Dow 30. Dynamic universes

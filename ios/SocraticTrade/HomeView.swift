@@ -881,6 +881,7 @@ struct AccountSettingsView: View {
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var store: MobileStore
     @EnvironmentObject private var push: PushNotificationCoordinator
+    @Environment(AppLockController.self) private var appLock
 
     @State private var deleteIdentity = ""
     @State private var deletePhrase = ""
@@ -895,6 +896,7 @@ struct AccountSettingsView: View {
                 GuardrailTighteningSection()
                 LlmBudgetSection()
                 DataSourcesSection()
+                securitySection
                 legalSection
                 sessionSection
                 deletionSection
@@ -1028,6 +1030,24 @@ struct AccountSettingsView: View {
             Text(push.state.summary)
         }
         .task { await push.refreshState() }
+    }
+
+    @ViewBuilder
+    private var securitySection: some View {
+        Section {
+            Toggle("Require App Lock", isOn: Binding(
+                get: { appLock.isEnabled },
+                set: { appLock.isEnabled = $0 }
+            ))
+        } header: {
+            Text("Security")
+        } footer: {
+            if !appLock.isEnabled, let message = appLock.lastErrorMessage {
+                Text(message)
+            } else {
+                Text("When on, Face ID, Touch ID, or your device passcode is required after launch and after the app has been in the background for more than one minute.")
+            }
+        }
     }
 
     @ViewBuilder

@@ -169,6 +169,53 @@ describe("dataSourceFetch", () => {
     expect(calls.proxied).toBe(0);
     expect(calls.direct).toBe(1);
   });
+
+  it("bypassProxy goes direct without touching the proxied factory (screener final fallback)", async () => {
+    const { deps, calls } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" } });
+    const res = await dataSourceFetch(
+      "https://api.nasdaq.com/api/screener/stocks",
+      undefined,
+      { service: "nasdaq-delayed-screener", bypassProxy: true },
+      deps
+    );
+    expect(await res.text()).toBe("direct");
+    expect(calls.proxied).toBe(0);
+    expect(calls.proxiedUrls).toEqual([]);
+    expect(calls.direct).toBe(1);
+  });
+
+  it("bypassProxy is refused under fail_closed", async () => {
+    const { deps, calls } = makeDeps({
+      env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888", RESIDENTIAL_PROXY_FAILURE_MODE: "fail_closed" }
+    });
+    await expect(
+      dataSourceFetch("https://api.nasdaq.com/api/screener/stocks", undefined, { bypassProxy: true }, deps)
+    ).rejects.toThrow(/fail_closed/);
+    expect(calls.direct).toBe(0);
+    expect(calls.proxied).toBe(0);
+  });
+
+  it("bypassProxy records a direct fallback entry for the watchdog", async () => {
+    __resetProxyUseLogForTests();
+    const { deps } = makeDeps({ env: { RESIDENTIAL_PROXY_URL: "http://proxy.test:8888" } });
+    await dataSourceFetch(
+      "https://api.nasdaq.com/api/screener/stocks?tableonly=true",
+      undefined,
+      { service: "nasdaq-delayed-screener", bypassProxy: true },
+      deps
+    );
+    const snapshot = getProxyUseSnapshot();
+    expect(snapshot.total).toBe(1);
+    expect(snapshot.latest).toMatchObject({
+      usedProxy: false,
+      source: "env",
+      host: "proxy.test:8888",
+      fallback: true,
+      service: "nasdaq-delayed-screener",
+      destination: "api.nasdaq.com"
+    });
+    expect(snapshot.lastHour).toMatchObject({ proxied: 0, direct: 1, fallbacks: 1 });
+  });
 });
 
 describe("isInternalFetchTarget", () => {

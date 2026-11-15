@@ -4,7 +4,7 @@ Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/ru
 
 [Timer]
 # Off the :00/:13/:33/:53 deploy-freshness cluster.
-OnCalendar=*:02,17,32,47
+OnCalendar=*:02,17,32,47 UTC
 Persistent=true
 AccuracySec=1min
 

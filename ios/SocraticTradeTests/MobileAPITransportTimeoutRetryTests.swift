@@ -87,24 +87,64 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         XCTAssertEqual(MobileAPITransportTimeoutRetry.maxRetries(forTimeout: 44), 2)
         XCTAssertEqual(MobileAPITransportTimeoutRetry.maxRetries(forTimeout: 45), 1)
         XCTAssertEqual(MobileAPITransportTimeoutRetry.maxRetries(forTimeout: 50), 1)
+
+        let lost = URLError(.networkConnectionLost)
+        XCTAssertEqual(
+            MobileAPITransportTimeoutRetry.networkRetryBudget(
+                for: timeout,
+                requestTimeout: 30,
+                maxNetworkRetries: nil,
+                maxTransientRetries: 2
+            ),
+            2
+        )
+        XCTAssertEqual(
+            MobileAPITransportTimeoutRetry.networkRetryBudget(
+                for: timeout,
+                requestTimeout: 45,
+                maxNetworkRetries: nil,
+                maxTransientRetries: 2
+            ),
+            1
+        )
+        XCTAssertEqual(
+            MobileAPITransportTimeoutRetry.networkRetryBudget(
+                for: timeout,
+                requestTimeout: 45,
+                maxNetworkRetries: 0,
+                maxTransientRetries: 2
+            ),
+            0
+        )
+        XCTAssertEqual(
+            MobileAPITransportTimeoutRetry.networkRetryBudget(
+                for: lost,
+                requestTimeout: 45,
+                maxNetworkRetries: nil,
+                maxTransientRetries: 2
+            ),
+            2
+        )
     }
 
-    func testSnapshotGetRetriesNSURLErrorTimedOutThenSucceeds() async throws {
+    func testPolicyGetRetriesNSURLErrorTimedOutThenSucceeds() async throws {
         install { [counter] request in
             let attempt = counter.next()
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
+            XCTAssertEqual(request.url?.path, "/api/policy")
             if attempt < 3 {
                 throw NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
             }
-            return (200, Data(Self.minimalSnapshotJSON.utf8))
+            return (200, Data("{}".utf8))
         }
-        let (snapshot, _) = try await makeClient().snapshotData()
+        let policy = try await makeClient().fullPolicy()
         XCTAssertEqual(counter.count, 3)
-        XCTAssertEqual(snapshot.readiness.systemState, "halted")
+        XCTAssertNil(policy.systemState)
     }
 
-    func testSnapshotGetStopsAfterTwoTransportTimeoutRetries() async throws {
+    func testSnapshotDataDoesNotRetryTransportTimeout() async throws {
+        // snapshotData sets maxNetworkRetries to 0.  MobileStore owns the
+        // network/timeout budget so generation can be checked between attempts.
         install { [counter] request in
             _ = counter.next()
             XCTAssertEqual(request.url?.path, "/api/mobile/snapshot")
@@ -112,14 +152,14 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         }
         do {
             _ = try await makeClient().snapshotData()
-            XCTFail("expected the third timeout to surface")
+            XCTFail("expected the timeout to surface")
         } catch let error as MobileAPIError {
             guard case .network(let underlying) = error else {
                 return XCTFail("expected a network error")
             }
             XCTAssertTrue(MobileAPITransportTimeoutRetry.isTransportTimeout(underlying))
         }
-        XCTAssertEqual(counter.count, 3)
+        XCTAssertEqual(counter.count, 1)
     }
 
     func testMarketScanGetRetriesTransportTimeout() async throws {
@@ -138,7 +178,9 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         XCTAssertTrue(scan.topCandidates.isEmpty)
     }
 
-    func testLongSnapshotTimeoutRetriesOnce() async throws {
+    func testLongSnapshotTimeoutIsNotRetriedInsideSnapshotData() async throws {
+        // A 45s snapshot still does not retry -1001 inside the client.  The
+        // store's two-attempt loop already matches the ST-4633 single-retry cap.
         install { [counter] request in
             _ = counter.next()
             XCTAssertEqual(request.timeoutInterval, 45)
@@ -147,14 +189,14 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         }
         do {
             _ = try await makeClient().snapshotData(timeout: 45)
-            XCTFail("expected the second timeout to surface")
+            XCTFail("expected the timeout to surface")
         } catch let error as MobileAPIError {
             guard case .network(let underlying) = error else {
                 return XCTFail("expected a network error")
             }
             XCTAssertTrue(MobileAPITransportTimeoutRetry.isTransportTimeout(underlying))
         }
-        XCTAssertEqual(counter.count, 2)
+        XCTAssertEqual(counter.count, 1)
     }
 
     func testCommandPostDoesNotRetryTransportTimeout() async throws {
@@ -279,8 +321,8 @@ final class MobileAPITransportTimeoutRetryTests: XCTestCase {
         }
         let store = MobileStore(client: makeClient())
         await store.load()
-        // load() uses a 45s timeout, so the client takes one extra try.
-        // The store does not start another pass after that budget is spent.
+        // load() uses a 45s timeout.  snapshotData does not retry network
+        // errors; the store's two-attempt loop is the ST-4633 single-retry cap.
         XCTAssertEqual(counter.count, 2)
         XCTAssertNil(store.snapshot)
         XCTAssertTrue(store.snapshotLoadFailed)

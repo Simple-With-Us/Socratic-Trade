@@ -13,6 +13,7 @@
 // READ only. There is deliberately no POST/DELETE here — see the header of
 // app/api/chat-history/route.ts for why a free-form transcript writer must never come back.
 import { NextResponse } from "next/server";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { listAllTurns, MAX_ADMIN_TURNS } from "@/lib/chat-history";
 
@@ -21,6 +22,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "transcript", "read");
+  if (limited) return limited;
 
   const limit = Number(new URL(request.url).searchParams.get("limit") ?? MAX_ADMIN_TURNS);
   return NextResponse.json({ turns: listAllTurns(limit) });

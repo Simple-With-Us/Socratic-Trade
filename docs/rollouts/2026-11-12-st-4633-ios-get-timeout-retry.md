@@ -6,7 +6,7 @@ Sentry SOCRATIC-TRADE-2W is `NSURLErrorDomain` code -1001 on `GET /api/mobile/sn
 
 ## Changes Made
 
-Idempotent GET and HEAD calls through `MobileAPIClient` retry after `URLError.timedOut` or `NSURLErrorTimedOut` (-1001), with a 300ms then 600ms backoff.  A per-attempt timeout under 45s gets two extra tries.  Snapshot load is 45s and market scan is 50s, so those get one extra try.  Three full snapshot waits were about 136s with `isRefreshing` left on.  Two waits plus the 300ms backoff stay near the store loop that already existed for other network errors.  POST, PUT, PATCH, and DELETE return the first timeout.  `get` retries a timeout, another transport failure, or an HTTP status at or above 500 on one shared counter, at most two extras.  A 5xx no longer starts a fresh timeout budget.  Snapshot load no longer starts a second timeout budget after the client budget is spent.  The long-lived events stream is left to its existing reconnect loop.
+Idempotent GET and HEAD calls through `MobileAPIClient.transientAwareData` retry after `URLError.timedOut` or `NSURLErrorTimedOut` (-1001).  `#5142` already retried every network error on that path; this change caps a transport timeout so a per-attempt wait at or above 45s gets one extra try, not two.  Short GETs still retry twice.  Timeouts and 5xx share one attempt counter.  POST, PUT, PATCH, and DELETE return the first timeout.  `/api/scan` stays on `#5142`'s `marketScanAttempts` loop (`marketScanMaxRetries` is already one extra try, matching the 50s cap) so a second timeout helper cannot double-retry that 50s path.  Snapshot network errors stay with `MobileStore.fetchSnapshotWithNetworkRetry` (`snapshotStoreMaxAttempts` is already two, matching the 45s cap); `snapshotData` still sets `maxNetworkRetries` to 0.  The long-lived events stream is left to its existing reconnect loop.
 
 - `ios/SocraticTrade/MobileAPITransportTimeoutRetry.swift`
 - `ios/SocraticTrade/MobileAPIClient.swift`
@@ -17,7 +17,7 @@ Idempotent GET and HEAD calls through `MobileAPIClient` retry after `URLError.ti
 
 ## Decisions & Trade-offs
 
-The retry lives next to `URLSession.data` so snapshot, scan, quote, and the other idempotent reads share one rule.  HEAD is included because it is safe to repeat.  OPTIONS is unused.  `maxRetries(forTimeout:)` caps a 45s-or-longer request at one extra try.  Short GETs still retry twice.  `shouldRetry` names `MobileAPITransportTimeoutRetry.maxRetries` so the parameter does not shadow the constant.  The load test restores the snapshot cache keys it clears.  The events stream stays out: its idle timeout is 120s and `MobileStore.startEvents` already reconnects.  `AppUpdatePrompt` talks to the App Store lookup host on `URLSession.shared`, not this client.  Sentry still records the timeout after the budget is spent.  Per-attempt timeouts are not captured.  No phase doc owns this helper.  ST-4611's `MobileAPIHTTPRetryPolicy` is a separate open branch.  If that branch lands first, keep a single network-retry loop so a timeout is not retried by both helpers.
+`#5142` landed first and already retries network errors, including -1001, inside `transientAwareData` and `marketScanAttempts`.  This branch now only caps that shared budget for transport timeouts (`networkRetryBudget`) instead of wrapping a second loop.  Market scan is left on `marketScanAttempts` alone.  Snapshot timeouts stay in the store loop so `generation` can be checked between attempts.  HEAD is included because it is safe to repeat.  OPTIONS is unused.  The load test restores the snapshot cache keys it clears.  The events stream stays out: its idle timeout is 120s and `MobileStore.startEvents` already reconnects.  `AppUpdatePrompt` talks to the App Store lookup host on `URLSession.shared`, not this client.  Sentry still records the timeout after the budget is spent.  Per-attempt timeouts are not captured.
 
 ## Verification State
 
@@ -36,4 +36,4 @@ PR #5175 is open.  Do not merge, do not enable auto-merge, and do not deploy. 
 
 ## Zero-Code Findings
 
-PR #5142 already retries every network error on idempotent reads inside `transientAwareData`, including -1001, but that pull request is still open and is not the base of this branch.  `main` retries timeouts only for `get` and for the store's snapshot loop.  `marketScan` and `successfulResponseData` did not.
+PR #5142 has merged.  `transientAwareData` already retries every network error on idempotent reads, including -1001, and `marketScanAttempts` already retries network errors once.  The remaining ST-4633 work is the 45s timeout cap on that shared budget, not a second retry loop.
