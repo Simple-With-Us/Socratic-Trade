@@ -18,7 +18,7 @@ describe("API security hardening & defensive JSON parsing", () => {
       const response = await POST(request);
       expect(response.status).toBe(400);
       const json = await response.json();
-      expect(json.error).toBe("Invalid JSON body");
+      expect(json).toMatchObject({ ok: false, error: "invalid_json" });
     });
   });
 
