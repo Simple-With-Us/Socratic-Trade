@@ -159,13 +159,22 @@ async function runMangoProbe(now: number): Promise<MangoProbe> {
 
 let cachedProbe: MangoProbe | null = null;
 let cachedAtMs = 0;
-let inFlightProbe: Promise<MangoProbe> | null = null;
+
+/**
+ * The one running check, shared across concurrent callers.  Pinned on
+ * globalThis because Next.js can load separate copies of this module per
+ * bundle, and module-local state would let each copy run its own probe.
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __mangoProbeInFlight: Promise<MangoProbe> | null | undefined;
+}
 
 /** Test hook: drop the cached verdict so tests are isolated. */
 export function __resetMangoProbeForTests(): void {
   cachedProbe = null;
   cachedAtMs = 0;
-  inFlightProbe = null;
+  globalThis.__mangoProbeInFlight = null;
 }
 
 /**
@@ -181,14 +190,15 @@ export async function getMangoProbe(now: number = Date.now()): Promise<MangoProb
   // Share one running check across concurrent callers whose cache has
   // expired, so a burst of simultaneous reads cannot each open their own
   // set of connect attempts against the proxy.
-  if (inFlightProbe) return inFlightProbe;
-  inFlightProbe = (async () => {
+  if (globalThis.__mangoProbeInFlight) return globalThis.__mangoProbeInFlight;
+  const running = (async () => {
     const probe = await runMangoProbe(now);
     cachedProbe = probe;
     cachedAtMs = now;
     return probe;
   })().finally(() => {
-    inFlightProbe = null;
+    globalThis.__mangoProbeInFlight = null;
   });
-  return inFlightProbe;
+  globalThis.__mangoProbeInFlight = running;
+  return running;
 }

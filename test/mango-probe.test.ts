@@ -130,6 +130,21 @@ describe("mango-probe", () => {
     expect(connectCalls).toHaveLength(MANGO_PROBE_MAX_ATTEMPTS + 1);
   });
 
+  it("shares one running check across concurrent callers, then probes fresh after it settles", async () => {
+    scriptConnect([ok(140), ok(150)]);
+    const t0 = 1_000_000;
+    const [first, second] = await Promise.all([getMangoProbe(t0), getMangoProbe(t0)]);
+    expect(first).toEqual(second);
+    expect(first.latencyMs).toBe(140);
+    expect(connectCalls).toHaveLength(1);
+
+    // After settlement and cache expiry, a later call runs a fresh check
+    // instead of joining the settled one.
+    const later = await getMangoProbe(t0 + MANGO_PROBE_SUCCESS_CACHE_MS + 1);
+    expect(later.latencyMs).toBe(150);
+    expect(connectCalls).toHaveLength(2);
+  });
+
   it("reports failureKind error with zero attempts when the proxy URL cannot be resolved, and never throws", async () => {
     process.env.RESIDENTIAL_PROXY_URL = "off";
     scriptConnect([ok(140)]);
