@@ -3,6 +3,11 @@
 **What.**  An Alpaca PAPER account prefers Alpaca's own `delayed_sip` quote and keeps Alpaca's timestamp.  When Alpaca returns no price, the existing other source is kept and is not stamped with a synthetic 15-minute as-of.  Live accounts, Tradier paper, and `alpaca-mcp` are unchanged.  The console and iOS say "Prices are generally 15-min delayed." for that account, with no per-price as-of.  Portfolio equity totals are unchanged.  Rollout: `docs/rollouts/2026-11-11-st-4600-paper-delayed-prices.md`.
 
 **Next.**  PR is open for review.  This lane does not merge.  CI runs the full gate.
+## 2026-11-14 MA — /api/proxy-use Mango probe false-alert fix
+
+**What.**  The Mango reachability probe behind `GET /api/proxy-use` moved to `src/lib/mango-probe.ts`: up to 3 wall-clock-bounded connect attempts per check (the old probe's `Socket.setTimeout` never bounded the connect phase — it recorded a 29,260 ms connect under a 3,000 ms "timeout"), successes cached 60s, failures cached only 5s so the watchdog's 10s-later confirmation read re-probes instead of re-reading one failed sample, and the payload gains `mango.attempts` and `mango.failureKind` (timeout / refused / error).  A genuinely dead proxy still fails every attempt and reports unreachable.  Rollout: `docs/rollouts/2026-11-14-leg2-proxy-use-probe.md`.
+
+**Next.**  PR on `Muse-Assist/leg2-proxy-use-fix`; do not merge from the agent.  The watchdog's own alert text has a separate formatter defect (its proxy-use summary line throws on a format-string argument mismatch and prints "proxy-use parse failed" on every confirmed alert) — that lives in the watchdog script outside this repo and is reported separately.  Merging to `main` still follows the weekday RTH latch.
 ## 2026-11-13 CURSOR — ST-4627 settings strip height
 
 **What.**  The Settings More sections control keeps a 44px target and a negative margin so the sticky strip stays the height the section list already assumes.  August login notes stay dated records.
