@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
-import { fetchDailyOHLC, toBusinessDay } from "@/lib/history";
-import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
+import {
+  brokerReadError,
+  brokerReadOrInternalError,
+  isBrokerGatewayError,
+  jsonError,
+  reportHandledErrorThrottled,
+  resolveRequestUserIdOrApiError
+} from "@/lib/api-error";
+import { fetchDailyOHLC, HistoryProviderError, toBusinessDay } from "@/lib/history";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +25,8 @@ interface ChartBar {
   vwap?: number; // only present when the source supplies it (e.g. Massive `vw`)
 }
 
+const HISTORY_PROVIDER_ERROR_KEY = "history-provider";
+
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("symbol") ?? "";
   const symbol = raw.trim().toUpperCase();
@@ -25,11 +34,23 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "invalid or missing symbol" }, { status: 400 });
   }
 
+  const userId = resolveRequestUserIdOrApiError(req);
+  if (userId instanceof Response) return userId;
+
   try {
-    const userId = resolveRequestUserIdOrResponse(req);
-    if (userId instanceof Response) return userId;
-    const bars = await fetchDailyOHLC(symbol, Date.now(), userId);
-    if (!bars || bars.length === 0) {
+    // A cascade where every attempted tier failed throws its last payload-free provider error,
+    // so a timeout or rejected key is classified below instead of collapsing to null.
+    const bars = await fetchDailyOHLC(symbol, Date.now(), userId, { throwOnProviderFailure: true });
+    // null means no tier could answer (all skipped); an empty array is a confirmed "no usable series".
+    if (bars == null) {
+      reportHandledErrorThrottled(
+        HISTORY_PROVIDER_ERROR_KEY,
+        "Price history fetch failed",
+        new Error("History provider returned no series")
+      );
+      return jsonError(502, "broker_unavailable", "Price history is temporarily unavailable.");
+    }
+    if (bars.length === 0) {
       return NextResponse.json({ symbol, bars: [], note: "no price history available" });
     }
 
@@ -45,8 +66,12 @@ export async function GET(req: Request) {
     }
     const chartBars = [...byDay.values()].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
     return NextResponse.json({ symbol, bars: chartBars });
-  } catch {
-    return NextResponse.json({ symbol, bars: [], note: "price history fetch failed" });
+  } catch (error) {
+    if (error instanceof HistoryProviderError || isBrokerGatewayError(error)) {
+      reportHandledErrorThrottled(HISTORY_PROVIDER_ERROR_KEY, "Price history fetch failed", error);
+      return brokerReadError(error);
+    }
+    return brokerReadOrInternalError(error);
   }
 }
 

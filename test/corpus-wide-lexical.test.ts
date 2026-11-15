@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyVersionedMigrations,
   beginVectorCommit,
@@ -521,5 +521,94 @@ describe("searchCorpusWideLexicalCandidates", () => {
     const offloopRows = await searchCorpusWideLexicalCandidatesOffLoop(options);
     expect(offloopRows).toEqual(syncRows);
     expect(offloopRows.map((row) => row.id)).toEqual(["vec-offloop"]);
+  });
+});
+describe("PR 5282 managed accession resolution", () => {
+  for (const accession of ["managed:0000320193-25-000090:v1", "0000320193-25-000090:v1"]) {
+    it(`resolves raw filing type for ${accession} before doc-type filtering`, async () => {
+      seed({vectorId: "vec-managed-form", hash: "hash-managed-form", accession,
+        acceptedAt: "2025-11-01T18:00:00.000Z", text: "material agreement revenue", form: "10-Q"});
+      getDb().prepare("UPDATE sec_filings SET accession = ? WHERE accession = ?")
+        .run("0000320193-25-000090", accession);
+      const options = {symbol: "AAPL", query: "material agreement", docTypes: ["10-q"]};
+      expect(searchCorpusWideLexicalCandidates(options)).toMatchObject([{id:"vec-managed-form",doc_type:"10-q"}]);
+      expect(await searchCorpusWideLexicalCandidatesOffLoop(options)).toMatchObject([{id:"vec-managed-form",doc_type:"10-q"}]);
+      expect(searchCorpusWideLexicalCandidates({...options,docTypes:["10-k"]})).toEqual([]);
+    });
+  }
+  it("keeps an unjoined occurrence visible without a doc-type filter but fails that filter closed", () => {
+    seed({vectorId:"vec-no-filing",hash:"hash-no-filing",accession:"0000320193-25-000091",
+      acceptedAt:"2025-11-01T18:00:00.000Z",text:"material agreement revenue"});
+    getDb().prepare("DELETE FROM sec_filings").run();
+    const options={symbol:"AAPL",query:"material agreement"};
+    expect(searchCorpusWideLexicalCandidates(options)).toMatchObject([{id:"vec-no-filing"}]);
+    expect(searchCorpusWideLexicalCandidates({...options,docTypes:["10-k"]})).toEqual([]);
+  });
+  it("prefers exact filing type over a coincidental embedded match", () => {
+    const accession="managed:0000320193-25-000090:v1";
+    seed({vectorId:"vec-exact-form",hash:"hash-exact-form",accession,
+      acceptedAt:"2025-11-01T18:00:00.000Z",text:"material agreement revenue",form:"10-Q"});
+    insertSecFiling({accession:"0000320193-25-000090",cik:"0000320193",ticker:"AAPL",form:"10-K",
+      filedAt:NOW,acceptedAt:NOW,status:"complete",chunkCount:1});
+    expect(searchCorpusWideLexicalCandidates({symbol:"AAPL",query:"material agreement",docTypes:["10-q"]}))
+      .toMatchObject([{id:"vec-exact-form",doc_type:"10-q"}]);
+  });
+});
+
+describe("filing type resolution query plan", () => {
+  it("uses indexed filing probes for managed keys and resolves each row only once", () => {
+    seed({vectorId:"vec-plan",hash:"hash-plan",accession:"AAPL:0000320193-25-000090:10-K:section:1A",
+      acceptedAt:"2025-11-01T18:00:00.000Z",text:"plan covenant evidence",form:"10-K"});
+    const db = getDb();
+    db.prepare("UPDATE sec_filings SET accession = ?").run("0000320193-25-000090");
+    let query: string | undefined;
+    let params: unknown[] = [];
+    const original = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+      const statement = original(sql);
+      if (sql.includes("FROM document_chunks_fts")) {
+        query = sql;
+        const all = statement.all.bind(statement);
+        statement.all = ((...values: unknown[]) => { params = values; return all(...values); }) as typeof statement.all;
+      }
+      return statement;
+    }) as typeof db.prepare);
+    try {
+      expect(searchCorpusWideLexicalCandidates({symbol:"AAPL",query:"plan covenant",docTypes:["10-k"]}))
+        .toMatchObject([{id:"vec-plan",doc_type:"10-k"}]);
+    } finally { spy.mockRestore(); }
+    expect(query).toBeDefined();
+    const plan = original("EXPLAIN QUERY PLAN " + query!).all(...params) as Array<{detail:string}>;
+    const details = plan.map(row => row.detail);
+    expect(details.some(line => /SCAN sf(?: |$)/.test(line))).toBe(false);
+    expect(details).toContainEqual(expect.stringMatching(/SEARCH o USING INDEX idx_chunk_occurrences_hash \(content_hash=\?\)/));
+    expect(details.some(line => line.includes("idx_chunk_occurrences_symbol"))).toBe(false);
+    expect(details.filter(line => /SEARCH sf USING INDEX.*accession=/.test(line))).toHaveLength(2);
+    expect(query!.match(/WITH RECURSIVE boundaries/g)).toHaveLength(1);
+    expect(query).toContain("resolved_candidates AS MATERIALIZED");
+    const legacyExpression = `COALESCE(
+      (SELECT sf.form FROM sec_filings sf WHERE sf.accession = o.accession),
+      CASE WHEN instr(o.accession, ':') > 0 THEN (
+        SELECT sf.form FROM sec_filings sf
+        WHERE o.accession GLOB ('*:' || sf.accession || ':*')
+          OR o.accession GLOB (sf.accession || ':*') LIMIT 1
+      ) END)`;
+    const resolvedExpression = query!.slice(query!.indexOf("COALESCE("), query!.indexOf(" AS doc_type"));
+    // Compare the old PR resolver and repaired resolver, not just row counts.
+    const resolve = (expression: string, accession: string) => original(
+      `SELECT ${expression} AS form FROM (SELECT ? AS accession) o`
+    ).get(accession) as {form: string | null};
+    for (const accession of ["0000320193-25-000090", "AAPL:0000320193-25-000090:10-K:section:1A",
+      "0000320193-25-000090:1:main.html", "missing", "prefix:missing:suffix"]) {
+      expect(resolve(resolvedExpression, accession)).toEqual(resolve(legacyExpression, accession));
+    }
+
+  });
+  it("keeps colon-bearing legacy filing identities eligible inside managed keys", () => {
+    seed({vectorId:"vec-colon",hash:"hash-colon",accession:"prefix:legacy:filing:key:suffix",
+      acceptedAt:"2025-11-01T18:00:00.000Z",text:"colon covenant evidence",form:"10-Q"});
+    getDb().prepare("UPDATE sec_filings SET accession = ?").run("legacy:filing:key");
+    expect(searchCorpusWideLexicalCandidates({symbol:"AAPL",query:"colon covenant",docTypes:["10-q"]}))
+      .toMatchObject([{id:"vec-colon",doc_type:"10-q"}]);
   });
 });
