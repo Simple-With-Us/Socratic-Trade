@@ -1,8 +1,8 @@
 import { getDb, getSymbolLatestPrices, listConnectedAccounts, listUsers, peekPolicy, listFillEvents, resolveAlpacaMarketData } from "./db";
 import { AlpacaSnapshotEnrichmentProvider } from "./data-providers";
 import {
-  aggregateRoundTrip,
   calculatePnl,
+  completedRoundTrips,
   getPerformanceSummary,
   getThesisScorecard,
   getRedTeamEfficacy,
@@ -369,16 +369,6 @@ function computeTradeStats(closedLots: ClosedLot[], sinceIso: string, windowDays
   };
 }
 
-/** Round-trip identity of one OPENING fill: symbol + the timestamp `calculatePnl` stamps onto
- *  every exit it books against that lot. Deliberately the same pair, so grouping exits here lines
- *  up with the FIFO match `calculatePnl` already performed — this never re-derives lot matching. */
-function roundTripKey(symbol: string | undefined, entryAt: string | undefined): string {
-  // A legacy lot with no symbol and no entryAt cannot be attributed to an opening fill at all;
-  // give it a stable singleton key so it forms its own group and is reported as incomplete
-  // rather than silently merged into some other position's round trip.
-  return `${symbol ? normalizeSymbol(symbol) : "?"}|${entryAt ?? ""}`;
-}
-
 /** Grade the window on ROUND TRIPS rather than on individual FIFO lots.
  *
  * `computeTradeStats` above counts one entry per `ClosedLot`, and a scaled-out position produces
@@ -401,33 +391,12 @@ function buildRoundTripStats(
   sinceIso: string,
   windowDays: number
 ): OpsRoundTripStats {
-  const entrySize = new Map<string, number>();
-  for (const fill of fills) {
-    if (fill.side !== "buy" && fill.side !== "short") continue; // closing side
-    const key = roundTripKey(fill.symbol, fill.filledAt);
-    entrySize.set(key, (entrySize.get(key) ?? 0) + Number(fill.quantity));
-  }
-
-  const groups = new Map<string, ClosedLot[]>();
-  for (const lot of closedLots) {
-    const key = roundTripKey(lot.symbol, lot.entryAt);
-    const bucket = groups.get(key);
-    if (bucket) bucket.push(lot);
-    else groups.set(key, [lot]);
-  }
-
+  // Grouping + completeness grading is shared with the console win rate (performance.ts).
+  const grouped = completedRoundTrips(closedLots, fills);
+  const incompleteRoundTrips = grouped.incompleteRoundTrips;
   const trips: ClosedLot[] = [];
   let lotsGraded = 0;
-  let incompleteRoundTrips = 0;
-  for (const [key, lots] of groups) {
-    // Terminal ordering matters: `aggregateRoundTrip` takes exitAt/mae/mfe from the LAST exit,
-    // so a group read out of order would stamp the wrong holding period.
-    lots.sort((a, b) => String(a.exitAt ?? "").localeCompare(String(b.exitAt ?? "")));
-    const trip = aggregateRoundTrip(lots, entrySize.get(key) ?? 0);
-    if (!trip) {
-      incompleteRoundTrips += 1;
-      continue;
-    }
+  for (const { trip, lots } of grouped.trips) {
     trips.push(trip);
     // Count the lots only when the trip they belong to is actually IN the window. `computeTradeStats`
     // windows on `exitAt >= sinceIso`, so counting unconditionally here would let a 200-day-old

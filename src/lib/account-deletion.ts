@@ -48,6 +48,8 @@ const DELETE_TABLES_BY_USER_ID = [
   // Added 2026-08-12: registered APNs device tokens (native iOS push). A deleted account must not
   // leave a live token behind that would keep delivering to that person's phone.
   "device_push_tokens",
+  // Added 2026-11-09 (ST-2599): server-backed Auth.js session rows (migration 102).
+  "auth_sessions",
   "chat_turns",
   "llm_usage",
   "user_memory",

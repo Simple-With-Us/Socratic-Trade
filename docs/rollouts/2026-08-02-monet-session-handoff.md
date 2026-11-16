@@ -83,7 +83,7 @@ at stop time — auto-merge handles it, no babysitting needed.
   `monet/connections-route-skeleton`; impl + adversarial-review fixes done, `land.sh`
   full test+build NOT run; its own closeout gives the pickup command). `~/apps/trading-monet`
   is free again. The other MONET seat is on Congress.Trade applying the webhook-repair
-  recipe there (relayed via #agent-sync).
+  recipe there (relayed via #ag***-s**c).
 - **Branches safe to delete** (both fully landed; deletion left to the owner per repo
   rule): `monet/codex-review-remediation` (landed as #2341),
   `monet/deploy-webhook-repair` (superseded by #2348/#2349).

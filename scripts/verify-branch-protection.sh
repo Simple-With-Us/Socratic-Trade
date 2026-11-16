@@ -112,6 +112,7 @@ print("[verify-branch-protection] allow force pushes:        " + flag(d.get("all
 print("[verify-branch-protection] allow deletions:           " + flag(d.get("allow_deletions")))
 ' 2>/dev/null || true
 
+echo "[verify-branch-protection] expected contexts (doc anchor): ${EXPECTED_CONTEXTS[*]}"
 echo "[verify-branch-protection] PASS: $BRANCH protection present, and every required context is a job CI defines."
 echo "[verify-branch-protection] reminder: the WORKFLOW side of this pairing is pinned by"
 echo "[verify-branch-protection]          test/branch-protection-gate.test.ts (no network). Run both."

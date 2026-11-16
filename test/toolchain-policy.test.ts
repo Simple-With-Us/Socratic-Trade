@@ -174,20 +174,20 @@ describe("supported TypeScript toolchain policy", () => {
     expect(findForbiddenToolchainContent("next.config.mjs", nextConfig)).toEqual([]);
   });
 
-  it("pins the runtime, CI lanes, landing gate, and Node declarations to Node 24", () => {
-    expect(readFileSync(".nvmrc", "utf8").trim()).toBe("24");
-    expect(packageJson.devDependencies?.["@types/node"]).toMatch(/^\^24\./);
+  it("pins the runtime, CI lanes, landing gate, and Node declarations to Node 26", () => {
+    expect(readFileSync(".nvmrc", "utf8").trim()).toBe("26");
+    expect(packageJson.devDependencies?.["@types/node"]).toMatch(/^\^26\./);
 
     const workflow = parseYaml<WorkflowConfig>(".github/workflows/ci.yml");
     const hostedSetup = workflow.jobs?.["verify-hosted"]?.steps?.find(
       (step) => step.uses?.startsWith("actions/setup-node"),
     );
-    expect(String(hostedSetup?.with?.["node-version"])).toBe("24");
+    expect(String(hostedSetup?.with?.["node-version"])).toBe("26");
 
     const landScript = readFileSync("scripts/land.sh", "utf8");
-    expect(landScript).toContain("Node 24.x is required");
+    expect(landScript).toContain("Node 26.x is required");
     expect(landScript).toContain('case "$NODE_VERSION" in');
-    expect(landScript).toContain("24.*)");
+    expect(landScript).toContain("26.*)");
   });
 
   it("structurally blocks unsupported automated compiler and Node-type upgrades", () => {

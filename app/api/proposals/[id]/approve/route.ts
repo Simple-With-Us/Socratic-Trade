@@ -1,7 +1,7 @@
 import { getPolicy } from "@/lib/db";
 import { invalidateDashboardSnapshotCache } from "@/lib/dashboard-snapshot-cache";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { httpStatusForPlacement, resolvePlacementOutcome } from "@/lib/placement-outcome";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
@@ -15,7 +15,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       liveConfirmation?: LiveApprovalConfirmation;
       userId?: unknown;
     };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const limited = enforceRateLimit(userId, "proposals/approve", RATE_LIMITS.orders);
     if (limited) return limited;
     if (isProposalActionStopped(getPolicy(userId))) {

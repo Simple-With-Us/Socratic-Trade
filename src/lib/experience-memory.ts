@@ -27,6 +27,10 @@
  *     never enters the prompt. One COUNTEREXAMPLE slot is reserved from the over-ask set when
  *     any opposite-sign neighbor exists.
  *
+ *     ST-4539 added the missing same-symbol/strategy/setup weighting: because the pass is
+ *     cross-symbol by design, the fetched set is re-ranked boost-only by
+ *     `past-decision-cases.ts`'s `applyPastCaseAffinityWeighting` before the top-k slice.
+ *
  * Product philosophy: everything here is ADVISORY evidence for the Bull AND Bear prompts
  * (evidence parity). Nothing in this module gates, blocks, or sizes anything, and every failure
  * degrades to "no analogs block" rather than breaking a run or a fill record.
@@ -808,6 +812,11 @@ export interface RetrieveDecisionExperiencesInput {
   runId: string;
   regime: string;
   candidates: SituationCandidate[];
+  /**
+   * Thesis tags the candidates would be tagged with (deterministic scorer), for the ST-4539
+   * past-case affinity re-rank's thesis boost.  Optional; omitted means no thesis boost.
+   */
+  thesisTags?: string[];
   connectedAccountId?: string;
   /** As-of stamp; defaults to now. Chunks dated after this are never admitted (no lookahead). */
   asOf?: string;
@@ -860,7 +869,9 @@ export async function retrieveDecisionExperiences(
         asOf,
         minScore: defaultMinScore(),
         connectedAccountId: input.connectedAccountId,
-        accountScope: "exact",
+        // Account-scoped episodic memory PLUS this user's pooled user-level lessons (post-mortem
+        // thesis x regime vectors carry memory_scope "user" and no connected_account_id).
+        accountScope: "exact-or-user",
         runId: input.runId,
         ...(input.signal ? { signal: input.signal } : {}),
         onStatus: (s) => {
@@ -888,6 +899,22 @@ export async function retrieveDecisionExperiences(
     } catch {
       ordered = eligible;
     }
+    // Past-decision case affinity (ST-4539): the pass above is deliberately CROSS-SYMBOL
+    // (`matchAllSymbols: true`), so before ST-4539 a prior on the very ticker being decided —
+    // same thesis, same regime — ranked no better than an unrelated name that merely embedded
+    // nearby. This BOOST-ONLY, rank-stable re-rank over the chunks ALREADY fetched (no extra
+    // query/embed/DB read, so the caller's retrieval deadline is unchanged) lifts those. It only
+    // reorders; nothing is excluded, demoted, or written, and every failure falls open to the
+    // incoming order. READ-side only, so it cannot reach the learned-context semantic gate or the
+    // human approval queue (ST-3843 / ST-4448). Off-switch PAST_DECISION_CASE_AFFINITY=off.
+    try {
+      const { applyPastCaseAffinityWeighting, caseAffinityContextFromCandidates } = await import(
+        "./past-decision-cases"
+      );
+      ordered = applyPastCaseAffinityWeighting(ordered, caseAffinityContextFromCandidates(input));
+    } catch {
+      // Fail open to the incoming order — `ordered` is already the usefulness-weighted order.
+    }
     chunks = ordered.slice(0, k);
 
     const coachingChunks = chunks.filter((chunk) => chunk.doc_type === "coach-note");
@@ -911,9 +938,21 @@ export async function retrieveDecisionExperiences(
       }))
     ];
 
-    const top = analogChunks[0];
-    const topAnalogSimilarity =
-      typeof top?.relevanceScore === "number" ? top.relevanceScore : typeof top?.score === "number" ? top.score : undefined;
+    // "Top-analog similarity" is the CLOSEST shown analog's similarity, not the first card's: the
+    // usefulness and ST-4539 affinity re-ranks (and the reserved COUNTEREXAMPLE slot) can place a
+    // lower-similarity chunk first, so read the maximum across the analogs actually shown.
+    let topAnalogSimilarity: number | undefined;
+    for (const chunk of analogChunks) {
+      const similarity =
+        typeof chunk.relevanceScore === "number"
+          ? chunk.relevanceScore
+          : typeof chunk.score === "number"
+            ? chunk.score
+            : undefined;
+      if (similarity !== undefined && (topAnalogSimilarity === undefined || similarity > topAnalogSimilarity)) {
+        topAnalogSimilarity = similarity;
+      }
+    }
 
     const analogsBlock = packAnalogsBlock(asOf, topAnalogSimilarity, analogChunks);
 

@@ -166,6 +166,20 @@ describe("resolveRotationSeatPin (validation — never trusted, never starves)",
     expect(ineligible.rejected.join(" ")).toContain("gpt-5.5");
   });
 
+  it("accepts a retired display slug (minimax-m3) even when it left the live rotation pool", async () => {
+    const { resolveRotationSeatPin } = await import("../src/lib/model-rotation-pin");
+    const livePool = ["minimax-m3.1-flash", "gpt-6.1-sol"];
+    const pin = resolveRotationSeatPin({
+      pin: { green: "minimax-m3" },
+      seat: "green",
+      pool: livePool,
+      knownModels: livePool
+    });
+    expect(pin.rejected.join(" ")).not.toContain("not in the rotation catalog");
+    expect(pin.ignored).not.toBe("malformed_pin");
+    expect(pin.ignored).toBe("model_not_eligible");
+  });
+
   it("rejects an unknown model id and an out-of-range weight with receipts instead of throwing", async () => {
     const { resolveRotationSeatPin, ROTATION_PIN_MAX_WEIGHT } = await import("../src/lib/model-rotation-pin");
     const pool = ["gpt-6-astra", "gpt-5.5", "gpt-5.4-nano", "gemini-flash-latest"];

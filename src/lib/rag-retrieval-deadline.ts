@@ -10,6 +10,30 @@ export const RAG_QUERY_IO_DEADLINE_MS = 15_000;
 
 export const STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE = "strategy RAG retrieval timed out";
 
+/** True when `text` is the strategy-run retrieval deadline, including a wrapped "Error …" form. */
+export function isStrategyRagRetrievalTimeoutText(text: string | null | undefined): boolean {
+  return typeof text === "string" && text.includes(STRATEGY_RAG_RETRIEVAL_TIMEOUT_MESSAGE);
+}
+
+/**
+ * Caller-side retrieval deadline. The manufactured error keeps `name: "Error"`, so it is not an
+ * AbortError / TimeoutError and it is not an OpenRouter or Qdrant outage.
+ */
+export function isStrategyRagRetrievalTimeout(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current != null; depth++) {
+    if (isDeadlineTimeoutError(current)) return true;
+    if (typeof current === "string" && isStrategyRagRetrievalTimeoutText(current)) return true;
+    if (typeof current === "object" && "message" in current) {
+      const message = (current as { message?: unknown }).message;
+      if (typeof message === "string" && isStrategyRagRetrievalTimeoutText(message)) return true;
+    }
+    current =
+      typeof current === "object" && "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
 export function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => signal != null);
   if (active.length === 0) return undefined;

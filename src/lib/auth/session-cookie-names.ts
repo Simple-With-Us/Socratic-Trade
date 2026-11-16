@@ -1,4 +1,5 @@
 import type { JWTPayload } from "jose";
+import type { NextResponse } from "next/server";
 import { decodeSessionToken, encodeSessionToken } from "./session-token";
 
 /** Auth.js v5 session cookie names, in preference order. */
@@ -30,6 +31,14 @@ export function currentAuthjsSessionCookieName(
 
 export function isKnownSessionCookieName(name: string): name is KnownSessionCookieName {
   return (KNOWN_SESSION_COOKIE_NAMES as readonly string[]).includes(name);
+}
+
+/** Clear Auth.js v5 and legacy NextAuth session cookies (including chunked variants). */
+export function appendClearAllSessionCookies(response: NextResponse): void {
+  for (const name of KNOWN_SESSION_COOKIE_NAMES) {
+    response.cookies.delete(name);
+    for (let i = 0; i < 8; i += 1) response.cookies.delete(`${name}.${i}`);
+  }
 }
 
 /**

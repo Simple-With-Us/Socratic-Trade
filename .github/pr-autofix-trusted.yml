@@ -2,7 +2,7 @@
 # PR-branch .autofix.yml may still narrow allowed_bots; it must not change model,
 # turn budget, iteration cap, or verify commands.
 
-model: MiniMax-M3.1-Flash-Preview
+model: MiniMax-M3.1-Flash
 max_turns: 60
 max_iterations: 5
 verify_command: |

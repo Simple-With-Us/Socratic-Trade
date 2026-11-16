@@ -157,6 +157,34 @@ describe("applyEnrichment", () => {
     expect(enriched.netChange).toBe(2.5);
   });
 
+  it("carries the delayed-tape metadata onto the quote so a ~900s print is not realtime-stale", () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` enrichment must
+    // reach the scan quote with its tape metadata, otherwise the staleness
+    // gate reads the ~900s-old print as a stale realtime observation.
+    const extra: SymbolEnrichment = {
+      price: 195.5,
+      asOf: "2026-11-05T19:45:00.000Z",
+      expectedDelaySec: 900,
+      delayToleranceSec: 120,
+      venuePriceAuthoritative: true,
+      fetchedAt: "2026-11-05T20:00:00.000Z"
+    };
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), extra);
+    expect(enriched.expectedDelaySec).toBe(900);
+    expect(enriched.delayToleranceSec).toBe(120);
+    expect(enriched.venuePriceAuthoritative).toBe(true);
+    // The RETRIEVAL stamp travels with it so the quote ages by fetch time.
+    expect(enriched.fetchedAt).toBe("2026-11-05T20:00:00.000Z");
+  });
+
+  it("leaves a realtime enrichment without tape metadata", () => {
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), { price: 195.5 });
+    expect(enriched.expectedDelaySec).toBeUndefined();
+    expect(enriched.delayToleranceSec).toBeUndefined();
+    expect(enriched.venuePriceAuthoritative).toBeUndefined();
+    expect(enriched.fetchedAt).toBeUndefined();
+  });
+
   it("keeps the existing quote value when enrichment omits a field", () => {
     const enriched = applyEnrichment(quote({ symbol: "AAPL", senateTrades: 2 }), { peRatio: 30 });
     expect(enriched.senateTrades).toBe(2); // not clobbered by undefined

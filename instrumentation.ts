@@ -40,6 +40,14 @@ export async function register() {
   const dns = await import(/* webpackIgnore: true */ "node:dns");
   dns.setDefaultResultOrder("ipv4first");
 
+  // ST-4595. Stamps the TCP peer and, when REQUIRE_CLOUDFLARE_ORIGIN is on,
+  // rejects ingress that did not come from Cloudflare. Default off, so this
+  // install changes nothing until the flag is set. webpackIgnore: instrumentation
+  // is also compiled for the edge runtime, which has no node:http.
+  const http = await import(/* webpackIgnore: true */ "node:http");
+  const { installOriginLock } = await import("./src/lib/cloudflare-origin-lock");
+  installOriginLock(http);
+
   // Process-exit receipts + the "no spontaneous exit 0" tripwire (production-gated;
   // no-op in dev/tests). Installed before anything below can exit or receive a stop
   // signal. See src/lib/exit-guard.ts and docs/rollouts/2026-08-02-exit0-outage-audit.md.

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "path";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST as importRoute } from "../app/api/admin/securities/import/route";
 import { getDb } from "../src/lib/db";
@@ -217,6 +217,44 @@ describe("Congress.Trade push receipt end to end", () => {
       })
     ).toBe(true);
     expect(getImportedPriceCloses("IBM")).toEqual([expect.objectContaining({ date: "2024-06-03", close: 12.5 })]);
+  });
+
+  it("503 on sqlite busy still finalizes the peer push receipt", async () => {
+    const pushId = "ct-push-sqlite-busy";
+    const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    const persistSpy = vi.spyOn(await import("../src/lib/db-securities-import"), "persistSecuritiesImport");
+    try {
+      persistSpy.mockImplementation(() => {
+        throw busy;
+      });
+      const res = await importRoute(
+        postPush(
+          {
+            origin: "app-a",
+            prices: [{ ticker: "AAPL", closes: seqCloses(2) }],
+          },
+          pushId
+        )
+      );
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("2");
+      const json = await res.json();
+      expect(json).toMatchObject({
+        ok: false,
+        error: "database temporarily unavailable",
+        pushId,
+        health: expect.any(String),
+      });
+      const row = getDb()
+        .prepare("SELECT health, body_json FROM peer_push_receipts WHERE push_id = ?")
+        .get(pushId) as { health: string; body_json: string } | undefined;
+      expect(row).toBeDefined();
+      expect(row?.health).not.toBe("ok");
+      const body = JSON.parse(row!.body_json) as { ok?: boolean; error?: string };
+      expect(body.error).toBe("database temporarily unavailable");
+    } finally {
+      persistSpy.mockRestore();
+    }
   });
 
   it("processes a push again when the stored receipt is not ok", async () => {

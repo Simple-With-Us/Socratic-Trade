@@ -19,10 +19,14 @@ beforeAll(() => {
   applyVersionedMigrations(db);
 });
 
-vi.mock("../src/lib/web-sources/http", () => ({
-  politeFetch: vi.fn(),
-  BROWSER_UA: "Mozilla/5.0 test"
-}));
+vi.mock("../src/lib/web-sources/http", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/web-sources/http")>();
+  return {
+    ...actual,
+    politeFetch: vi.fn(),
+    BROWSER_UA: "Mozilla/5.0 test"
+  };
+});
 
 describe("SEC Facts and Insider Transactions Ingestion (P4)", () => {
   it("should parse and save Form 4 XML insider transactions correctly", () => {

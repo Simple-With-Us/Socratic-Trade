@@ -85,11 +85,18 @@ vi.mock("@sentry/nextjs", () => ({
   }
 }));
 
-function context() {
-  return [{
-    text: "Management discussed revenue growth and customer demand.",
-    metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
-  }];
+function contexts() {
+  // Two distinct texts. Identical copies are one embed window and would not trip a cap of 1.
+  return [
+    {
+      text: "Management discussed revenue growth and customer demand.",
+      metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
+    },
+    {
+      text: "Management discussed margin pressure and supply constraints.",
+      metadata: { symbol: "AAPL", source: "fmp-earnings-transcript", timestamp: "2026-04-20" }
+    }
+  ];
 }
 
 /** storeContextsImpl fires captureRagSentryMessage through settleRagSideEffect, which — with no
@@ -136,9 +143,9 @@ describe("RAG ingest budget Sentry rollup", () => {
   it("captures the budget warning once, not once per throttled batch, inside the cooldown window", async () => {
     const { storeContexts } = await import("../src/lib/vector-db");
 
-    const first = await storeContexts([...context(), ...context()], "local", {});
-    const second = await storeContexts([...context(), ...context()], "local", {});
-    const third = await storeContexts([...context(), ...context()], "local", {});
+    const first = await storeContexts(contexts(), "local", {});
+    const second = await storeContexts(contexts(), "local", {});
+    const third = await storeContexts(contexts(), "local", {});
 
     expect(first.budgetSkipped).toBeGreaterThan(0);
     expect(second.budgetSkipped).toBeGreaterThan(0);
@@ -154,7 +161,7 @@ describe("RAG ingest budget Sentry rollup", () => {
   it("carries the skip count and remaining budget on the one event that does fire", async () => {
     const { storeContexts } = await import("../src/lib/vector-db");
 
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
 
     await waitForCaptureCount(1);
     expect(mocks.scopes).toHaveLength(1);
@@ -177,9 +184,9 @@ describe("RAG ingest budget Sentry rollup", () => {
     const { storeContexts } = await import("../src/lib/vector-db");
     const { getDb } = await import("../src/lib/db");
 
-    await storeContexts([...context(), ...context()], "local", {});
-    await storeContexts([...context(), ...context()], "local", {});
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
+    await storeContexts(contexts(), "local", {});
+    await storeContexts(contexts(), "local", {});
 
     const row = getDb()
       .prepare("SELECT count(*) as c FROM audit_events WHERE user_id = 'local' AND kind = 'vector_ingest_budget'")
@@ -192,32 +199,37 @@ describe("RAG ingest budget Sentry rollup", () => {
   }, 90_000); // 3 sequential storeContexts calls — see timeout note above.
 
   it("resumes emitting once the cooldown window has elapsed", async () => {
-    const { storeContexts, __ragIngestBudgetAlertCooldownTestHandle__ } = await import("../src/lib/vector-db");
+    const { storeContexts, __ragIngestBudgetAlertCooldownTestHandle__, __ragSentryCooldownTestHandle__ } = await import("../src/lib/vector-db");
     const { getInternalSetting, setInternalSetting } = await import("../src/lib/db");
 
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
     await waitForCaptureCount(1);
 
-    // Immediately retrying stays inside the (now 6h) window: still suppressed. The gate itself
+    // Immediately retrying stays inside the (now 24h, global) window: still suppressed. The gate itself
     // (unlike the fire-and-forget Sentry capture) runs synchronously inside storeContexts, so
     // this negative check needs no waitFor — there is nothing in flight left to resolve.
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
     expect(mocks.captureMessage).toHaveBeenCalledTimes(1);
 
-    const key = "vectorStore:ingestBudgetAlert:local";
+    // Global lane key, not per-user: a second user's throttled batch must not re-mint an event.
+    const key = "vectorStore:ingestBudgetAlert:rag-ingest-budget";
     expect(getInternalSetting<string>(key)).toBeTruthy();
+    expect(getInternalSetting<string>("vectorStore:ingestBudgetAlert:local")).toBeFalsy();
     // Rewind the persisted cooldown marker past the window instead of mocking the clock —
     // shouldEmitRagIngestBudgetSentry reads/writes this exact key via getInternalSetting/
     // setInternalSetting (vector-db.ts), so this simulates the window having elapsed without
     // needing fake timers around better-sqlite3's synchronous calls.
-    setInternalSetting(key, new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString());
+    setInternalSetting(key, new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
 
     // Rewind the in-memory cooldown too — shouldEmitRagIngestBudgetSentry
     // short-circuits on the in-memory map BEFORE the persisted key, so a
     // persisted rewind alone is not enough to make the next call fire.
-    __ragIngestBudgetAlertCooldownTestHandle__.delete("local");
+    __ragIngestBudgetAlertCooldownTestHandle__.delete(key);
+    // Also rewind PR #4971's volatile 15-min capture layer, or it (correctly)
+    // suppresses the resumed emission this test is simulating.
+    __ragSentryCooldownTestHandle__.clear();
 
-    await storeContexts([...context(), ...context()], "local", {});
+    await storeContexts(contexts(), "local", {});
     await waitForCaptureCount(2);
   }, 90_000); // 3 sequential storeContexts calls — see timeout note above.
 });

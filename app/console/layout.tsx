@@ -11,8 +11,10 @@ export const viewport: Viewport = {
   initialScale: 1,
   viewportFit: "cover",
   interactiveWidget: "resizes-content",
-  // Keep in lockstep with --con-bg in console.css (light :root / dark override) —
-  // a mismatched themeColor tints the phone status bar a different shade than the app.
+  // Keep in lockstep with --con-bg in console.css and THEME_COLOR_* in
+  // app/ui/theme.tsx. The media variants are the no-JS / pre-repaint fallback.
+  // applyDocumentTheme collapses them to the resolved color (explicit picks
+  // included) at boot, on a theme change, and after each client navigation.
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#f1f4f6" },
     { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" }

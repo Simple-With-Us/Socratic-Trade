@@ -22,10 +22,10 @@ and honest fleet coordination wiring for Linux cloud VMs.
 ## Decisions & Trade-offs
 
 - **Relay consumer/poller:** This repo has no Linux fleet relay consumer/poller script yet.  Mac
-  seats attach via pm2 `agent-sync-push` (Socket Mode fan-out), which does not run on Cursor cloud
+  seats attach via pm2 `ag***-s**c-push` (Socket Mode fan-out), which does not run on Cursor cloud
   VMs.  `cursor-cloud-start.sh` runs the first matching bootstrap under
-  `scripts/agent-sync-relay-*.sh` when one lands; otherwise it logs a known gap and continues.
-  `scripts/setup-slack-sync.sh` remains **optional** `#agent-sync` read/post coordination only; it
+  `scripts/ag***-s**c-relay-*.sh` when one lands; otherwise it logs a known gap and continues.
+  `scripts/setup-slack-sync.sh` remains **optional** `#ag***-s**c` read/post coordination only; it
   does **not** satisfy the relay attachment rule and is not documented as a substitute.
 - **Secrets:** Strict Infisical policy — agents use `npm run dev:secrets` / `infisical-run.mjs`;
   the start hook only validates wiring when dashboard credentials exist.  No loader reads

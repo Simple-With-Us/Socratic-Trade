@@ -29,3 +29,13 @@ export const marketDataDemands = sqliteTable("market_data_demands", {
 }, (t) => [
   unique().on(t.kind, t.symbol, t.user_id)
 ]);
+
+/** Revocable Auth.js session rows; JWT `sid` must match an active row. */
+export const authSessions = sqliteTable("auth_sessions", {
+  id: text("id").primaryKey(),
+  user_id: text("user_id").notNull(),
+  created_at: text("created_at").notNull(),
+  absolute_expires_at: text("absolute_expires_at").notNull(),
+  revoked_at: text("revoked_at"),
+  last_seen_at: text("last_seen_at").notNull(),
+});

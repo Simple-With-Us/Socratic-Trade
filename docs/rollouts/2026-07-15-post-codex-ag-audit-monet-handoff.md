@@ -46,7 +46,7 @@ trading system.
 - Congress.Trade `Shared package pin check` false-positive: PR #450 (MERGED). `git+ssh` vs
   `git+https` transport for the same shared commit; fixed by normalizing the ref after `#`.
   See `Congress.Trade/docs/rollouts/2026-07-15-pin-check-transport-normalize.md`.
-- `agent-sync-push` pm2 crash-loop (`MODULE_NOT_FOUND: ws`, ~877k restarts) repaired: reinstalled
+- `ag***-s**c-push` pm2 crash-loop (`MODULE_NOT_FOUND: ws`, ~877k restarts) repaired: reinstalled
   deps, added `.janitor-keep` to stop the disk-janitor reaping its `node_modules`, restarted.
 
 ## Files

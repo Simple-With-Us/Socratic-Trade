@@ -9,7 +9,7 @@
 //  On the first scene of a cold launch the app:
 //    1. Detects Xcode / TestFlight / App Store (StoreKit AppTransaction).
 //    2. Reads marketing version + appleId from the public fleet manifest
-//       (jaywedgeworth22/ai-fleet-coordinator site/ios-versions.json) and the iTunes
+//       (Simple-With-Us/AI-Fleet-Coordinator site/ios-versions.json) and the iTunes
 //       Lookup API (App Store).  Apple IDs live in that manifest and in
 //       scripts/ios-fleet/apps.json — not in this file.
 //    3. If the installed version is older, asks whether to update.
@@ -26,7 +26,7 @@ import SwiftUI
 enum AppUpdatePrompt {
 
     static let defaultManifestURL = URL(
-        string: "https://raw.githubusercontent.com/jaywedgeworth22/ai-fleet-coordinator/main/site/ios-versions.json"
+        string: "https://raw.githubusercontent.com/Simple-With-Us/AI-Fleet-Coordinator/main/site/ios-versions.json"
     )!
 
     private static let skippedVersionKeyPrefix = "appUpdatePrompt.skippedVersion."

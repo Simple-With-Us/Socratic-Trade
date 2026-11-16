@@ -537,12 +537,15 @@ describe("WS1 gap #3: search-fusion fetchAlternativeEmbedding meters + enriches"
     expect(trace.feature).toBe("search-fusion-mmr");
     expect(req.body.user).toBe("local");
 
+    // Metering still lands in the local ledger, but RAG rows are no longer live-pushed: they reach
+    // the monitor only as closed-window rollups from the replay lane (usage-monitor-replay.ts).
     await push.flushUsageMonitor();
     const events = monitorCaptured.flatMap((c) => c.body.events);
-    const rag = events.find((e) => e.service === "rag");
-    expect(rag).toBeDefined();
-    expect(rag!.provider).toBe("openrouter");
-    expect(rag!.providerRequestId).toBe("gen-fusion-embed-1");
-    expect((rag!.metadata as Record<string, unknown>).feature).toBe("embed");
+    expect(events.find((e) => e.service === "rag")).toBeUndefined();
+    const { getDb } = await import("../src/lib/db");
+    const row = getDb()
+      .prepare("SELECT provider, operation FROM rag_usage WHERE provider = 'openrouter' ORDER BY created_at DESC LIMIT 1")
+      .get() as { provider: string; operation: string } | undefined;
+    expect(row).toEqual({ provider: "openrouter", operation: "embed" });
   });
 });

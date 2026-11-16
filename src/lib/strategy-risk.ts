@@ -627,7 +627,9 @@ export function applyDeterministicSizing(
     );
   }
 
-  // Volatility-targeting sizing (opt-in, default off): taper the Kelly-lite multiplier by
+  // Volatility-targeting sizing (default ON since the 2026-07-28 owner-approved guard enablement:
+  // DEFAULT_POLICY.tuning.volTargeting = true, targetPortfolioVolPct = 25; a per-account
+  // `volTargeting: false` turns it off): taper the Kelly-lite multiplier by
   // targetVol/realizedVol (never up, floored at 0.25) BEFORE the floor/ceiling clamp below, so it
   // composes with (and stays bounded by) the existing sizingFloorPct/sizingCeilingPct clamps exactly
   // like every other input to `multiplier`. The realized-vol number itself is surfaced in the

@@ -19,6 +19,7 @@ import {
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { ConsoleApiError, fetchDashboard } from "./api";
 import { deriveConsoleLoadState } from "./console-load-state";
+import { refreshWaitersReadyForAttempt, shouldSkipDashboardPoll } from "./dashboard-request";
 import { SENTENCE_GAP } from "./format";
 
 // Shown the instant a 401 is detected, replacing whatever freshness copy would otherwise
@@ -133,6 +134,15 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // consumed for the no-snapshot case, where it separates "still fetching" from "stopped trying".
   const [fetching, setFetching] = useState(false);
   const [stream, setStream] = useState<ConsoleStreamHealth>(UNSUPPORTED_STREAM);
+  const [isVisible, setIsVisible] = useState(
+    typeof document !== "undefined" ? document.visibilityState === "visible" : true
+  );
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handleVis = () => setIsVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", handleVis);
+    return () => document.removeEventListener("visibilitychange", handleVis);
+  }, []);
   const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const inFlight = useRef<AbortController | null>(null);
   const mounted = useRef(true);
@@ -141,6 +151,21 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   // fetch is already in flight. Consumed once that fetch settles, to run exactly one more
   // (coalesced) fetch instead of a fresh abort-and-refetch per trigger — see backgroundRefresh below.
   const pendingBackgroundRefresh = useRef(false);
+  // Explicit refresh() calls that arrived while a fetch was already running. Released when that
+  // fetch (and the one follow-up it queued) settles, so await refresh() still sees the new snapshot
+  // without aborting the request that is already on the wire.
+  const refreshWaiters = useRef<Array<{ resolve: () => void; seenAttempt: number }>>([]);
+  const attemptRef = useRef(0);
+  const releaseRefreshWaiters = useCallback((finishedAttempt?: number) => {
+    if (finishedAttempt == null) {
+      const waiters = refreshWaiters.current.splice(0);
+      for (const waiter of waiters) waiter.resolve();
+      return;
+    }
+    const split = refreshWaitersReadyForAttempt(refreshWaiters.current, finishedAttempt);
+    refreshWaiters.current = split.waiting;
+    for (const waiter of split.ready) waiter.resolve();
+  }, []);
 
   // Returns "deadline" when THIS attempt was killed by our own FETCH_DEADLINE_MS timer (distinct
   // from "aborted", which means something else — an explicit refresh() — superseded it). Callers
@@ -182,10 +207,9 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Shared retry loop used by BOTH refresh() and backgroundRefresh() (the caller is responsible for
-  // aborting whatever was previously in flight, and for the "already in flight → just mark pending"
-  // short-circuit — see below). Each iteration runs one attempt with a fresh AbortController and
-  // then decides whether to run another:
+  // Shared retry loop used by BOTH refresh() and backgroundRefresh(). A caller that finds a request
+  // already in flight marks one follow-up instead of aborting it. Each iteration runs one attempt
+  // with a fresh AbortController and then decides whether to run another:
   //  - "deadline": THIS attempt hung past FETCH_DEADLINE_MS and was self-aborted — retry immediately
   //    with a fresh connection. This fires once per attempt (never once per SSE event), so it cannot
   //    resurrect the abort-storm that queueRefresh/pendingBackgroundRefresh exist to prevent.
@@ -203,16 +227,29 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     // result so the backoff only applies to repeated hung attempts.
     let consecutiveDeadlines = 0;
     for (;;) {
-      if (!mounted.current) return;
+      if (!mounted.current) {
+        releaseRefreshWaiters();
+        return;
+      }
       // If a 401 was detected mid-iteration (sessionExpiredRef set to true by runFetch), halt
       // immediately — there is nothing left to poll for against a dead session.
-      if (sessionExpiredRef.current) { stop(); return; }
+      if (sessionExpiredRef.current) {
+        stop();
+        releaseRefreshWaiters();
+        return;
+      }
+      attemptRef.current += 1;
+      const finishedAttempt = attemptRef.current;
       const controller = new AbortController();
       inFlight.current = controller;
       const result = await runFetch(controller);
-      if (inFlight.current !== controller) return; // superseded by a newer refresh()/backgroundRefresh()
+      if (inFlight.current !== controller) {
+        releaseRefreshWaiters();
+        return; // superseded by a newer refresh()/backgroundRefresh()
+      }
       inFlight.current = null;
       if (result === "deadline") {
+        releaseRefreshWaiters();
         consecutiveDeadlines += 1;
         // An AWAITED foreground refresh() must not stay pending across retries: several mutation
         // flows `await refresh()` before clearing their busy state, and a persistently hung
@@ -234,19 +271,37 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
         continue;
       }
       consecutiveDeadlines = 0;
-      if (!pendingBackgroundRefresh.current) { stop(); return; }
-      pendingBackgroundRefresh.current = false;
+      // A refresh() that joined an earlier attempt is ready now. One that joined this
+      // attempt waits for the follow-up, so it does not resolve on the pre-mutation snapshot.
+      releaseRefreshWaiters(finishedAttempt);
+      if (pendingBackgroundRefresh.current) {
+        pendingBackgroundRefresh.current = false;
+        continue;
+      }
+      stop();
+      releaseRefreshWaiters();
+      return;
     }
-  }, [runFetch, sessionExpiredRef]);
+  }, [releaseRefreshWaiters, runFetch, sessionExpiredRef]);
 
   // Explicit foreground refresh: the initial load and every user action/mutation (approve/reject,
   // place/cancel an order, save a setting, etc. — everything callers pull `refresh` from
-  // useConsoleData() for). The caller wants strictly fresh data right now, so this aborts and
-  // replaces whatever is in flight (background or foreground).
+  // useConsoleData() for). A second call while a request is already running does not abort it.
+  // Aborting here used to leave the server working on the cancelled request and start another,
+  // so one page load stacked overlapping snapshot computes. The in-flight response is kept, one
+  // follow-up is queued, and this promise resolves when that follow-up settles. A deadline still
+  // resolves it immediately so a hung snapshot cannot wedge the caller.
   const refresh = useCallback(async () => {
     if (sessionExpiredRef.current) return;
+    if (inFlight.current) {
+      pendingBackgroundRefresh.current = true;
+      const seenAttempt = attemptRef.current;
+      await new Promise<void>((resolve) => {
+        refreshWaiters.current.push({ resolve, seenAttempt });
+      });
+      return;
+    }
     pendingBackgroundRefresh.current = false;
-    inFlight.current?.abort();
     await runLoop(true);
   }, [runLoop]);
 
@@ -282,6 +337,9 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
     void refresh();
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      // Skip the tick while a request is in flight, and after a slow response, instead of
+      // queueing another snapshot on top of the one the browser is still waiting for.
+      if (shouldSkipDashboardPoll()) return;
       void backgroundRefresh();
     }, POLL_MS);
     const onVisible = () => {
@@ -294,8 +352,9 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       document.removeEventListener("visibilitychange", onVisible);
       if (queuedRefresh.current) clearTimeout(queuedRefresh.current);
       inFlight.current?.abort();
+      releaseRefreshWaiters();
     };
-  }, [refresh, backgroundRefresh]);
+  }, [backgroundRefresh, refresh, releaseRefreshWaiters]);
 
   // First-load slow notice: while no snapshot has arrived, arm a timer; if it fires the load is
   // running long, so let the shell say so UNDER the animation. This deliberately does not touch
@@ -322,6 +381,13 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (typeof window === "undefined" || typeof EventSource === "undefined") {
       setStream(UNSUPPORTED_STREAM);
+      return;
+    }
+    if (!isVisible) {
+      // Prevent background tabs from exhausting the HTTP connection pool. The cleanup of the
+      // previous run already closed the EventSource; reflect that in the stream health instead
+      // of leaving it stuck at "live" while disconnected.
+      setStream((prev) => (prev.status === "unsupported" ? prev : { ...prev, status: "reconnecting" }));
       return;
     }
     setStream((prev) => ({ ...prev, status: "connecting" }));
@@ -373,7 +439,7 @@ export function ConsoleDataProvider({ children }: { children: ReactNode }) {
       for (const { type, handler } of handlers) events.removeEventListener(type, handler);
       events.close();
     };
-  }, [queueRefresh]);
+  }, [queueRefresh, isVisible]);
 
   const value = useMemo<ConsoleData>(() => {
     // The loading/slow/failed decision lives in a pure module so it is actually covered by tests

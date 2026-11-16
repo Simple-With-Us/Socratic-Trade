@@ -70,7 +70,7 @@ export const CATALOG_SOURCES: CatalogSource[] = [
   { id: "sec-edgar-13f", label: "SEC 13F-HR superinvestor holdings", status: "keyless", notes: "Official EDGAR 13F books for a curated filer set. Observe only." },
   { id: "ark-funds-holdings", label: "ARK official daily holdings CSVs", status: "keyless", notes: "ARKK/Q/W/G/F/X from assets.ark-funds.com. Observe only." },
   { id: "sec-filings-rag", label: "SEC 10-K/10-Q/8-K ingest → vector DB", status: "active", notes: "RAG corpus; presented as retrievedFinancialContext (not full corpus dump)." },
-  { id: "filingapi", label: "FilingAPI.dev", status: "scarce", notes: "Optional key; ~50/day; skip on missing/401. Sector/earnings/insider." },
+  { id: "filingapi", label: "FilingAPI.dev", status: "retired", notes: "Retired 2026-08-17. Earnings/transcripts are ROIC.ai only." },
   { id: "congress.trade", label: "Congress.Trade peer", status: "peer", notes: "Disclosures/analytics default ON; fundamentals peer default OFF." },
   { id: "congress-web", label: "Congressional trade web cache", status: "active", notes: "senateTrades / congress composite from local web-source cache." },
   { id: "finra", label: "FINRA short volume", status: "keyless", notes: "Short volume ratio signals." },

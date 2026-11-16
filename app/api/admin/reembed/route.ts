@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { enforceAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { operationLeaseBusyResponse } from "@/lib/operation-guard-response";
 import {
@@ -49,6 +50,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "reembed", "read");
+  if (limited) return limited;
   const progress = getCorpusReembedProgress();
   return NextResponse.json({ ok: true, ...progress });
 }
@@ -69,6 +72,8 @@ function parseSymbols(raw: unknown): string[] | undefined {
 export async function POST(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "reembed", "job");
+  if (limited) return limited;
 
   let body: Record<string, unknown> = {};
   try {

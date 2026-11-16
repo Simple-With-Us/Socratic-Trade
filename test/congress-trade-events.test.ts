@@ -5,10 +5,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import {
   applyCongressEvent,
   applyCongressEvents,
-  resetCongressEventDedupe
+  resetCongressEventDedupe,
+  type TradeRetractEvent
 } from "../src/lib/congress-trade-events";
 import { getServiceHealthSummaries } from "../src/lib/db-health";
-import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, fetchAppACongressTrades, getCongressSignals, refreshCongress, upsertCongressTrades } from "../src/lib/web-sources/congress";
+import { coerceCongressTrade, CONGRESS_CURSOR_SETTING_KEY, CONGRESS_RETRACT_CURSOR_SETTING_KEY, fetchAppACongressTrades, getCongressSignals, refreshCongress, upsertCongressTrades } from "../src/lib/web-sources/congress";
+import { applySseMessage } from "../src/lib/congress-stream";
 import { deleteInternalSetting, getInternalSetting, setInternalSetting } from "../src/lib/db";
 import { getCongressDataset, getInsiderSignals, getSymbolWebSignals } from "../src/lib/web-sources";
 import { POST as postCongressWebhook } from "../app/api/webhooks/congress/route";
@@ -308,6 +310,133 @@ describe("applyCongressEvent — dedupe + other types", () => {
   });
 });
 
+describe("upsert latest-wins and trade.retract", () => {
+  beforeEach(() => {
+    deleteInternalSetting("webSource:congress:dataset");
+  });
+
+  it("keeps the latest copy of a re-sent id", () => {
+    upsertCongressTrades([{ id: "lw-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4), amountLow: 1000 }]);
+    upsertCongressTrades([{ id: "lw-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4), amountLow: 1001 }]);
+    const rows = (getCongressDataset()?.trades ?? []).filter((t) => t.id === "lw-1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountLow).toBe(1001);
+  });
+
+  it("removes rows named by a trade.retract event and leaves others", () => {
+    upsertCongressTrades([
+      { id: "rt-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "rt-2", symbol: "MSFT", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "rt-3", symbol: "NVDA", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }
+    ]);
+    const event = {
+      type: "trade.retract",
+      id: `evt-${randomUUID()}`,
+      data: { txId: "rt-1", docId: "d1", retractedAt: new Date().toISOString(), transaction: { id: "rt-2" } }
+    } satisfies TradeRetractEvent;
+    const res = applyCongressEvent(event);
+    expect(res).toMatchObject({ ok: true, type: "trade.retract", applied: 2 });
+    expect((getCongressDataset()?.trades ?? []).map((t) => t.id)).toEqual(["rt-3"]);
+  });
+
+  it("does not treat the event id as a transaction id", () => {
+    upsertCongressTrades([{ id: "evt-same", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }]);
+    const res = applyCongressEvent({ type: "trade.retract", id: "evt-same", data: {} } satisfies TradeRetractEvent);
+    // No transaction id: rejected (the webhook answers 422), nothing removed.
+    expect(res).toMatchObject({ ok: false, applied: 0, reason: "no-ids" });
+    expect(getCongressDataset()?.trades.some((t) => t.id === "evt-same")).toBe(true);
+  });
+
+  it("accepts the legacy event-keyed webhook shape and a bare SSE retract frame", () => {
+    upsertCongressTrades([
+      { id: "lg-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) },
+      { id: "lg-2", symbol: "MSFT", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }
+    ]);
+    const legacy = { event: "trade.retract", id: `evt-${randomUUID()}`, transaction: { id: "lg-1" } } satisfies TradeRetractEvent;
+    expect(applyCongressEvent(legacy).applied).toBe(1);
+    expect(applySseMessage({ event: "trade.retract", id: `evt-${randomUUID()}`, data: JSON.stringify({ txId: "lg-2", docId: "d1", retractedAt: new Date().toISOString() }) })).toBe(true);
+    expect(getCongressDataset()?.trades ?? []).toHaveLength(0);
+  });
+});
+
+describe("trade.retract validation, channels and dedupe", () => {
+  const row = (id: string, symbol = "AAPL") =>
+    ({ id, symbol, member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }) as const;
+  const ids = () => (getCongressDataset()?.trades ?? []).map((t) => t.id).sort();
+
+  beforeEach(() => {
+    deleteInternalSetting("webSource:congress:dataset");
+  });
+
+  it("applies Congress.Trade's webhook body (retraction wrapper)", () => {
+    upsertCongressTrades([row("wh-1"), row("wh-2", "MSFT")]);
+    const body = {
+      type: "trade.retract",
+      id: `ct-retract-${Date.now()}`,
+      event: "trade.retract",
+      retraction: { retractSeq: 7, txId: "wh-1", docId: "H-2026-1", retractedAt: new Date().toISOString() },
+      deliveredAt: new Date().toISOString()
+    } satisfies TradeRetractEvent;
+    expect(applyCongressEvent(body)).toMatchObject({ ok: true, applied: 1 });
+    expect(ids()).toEqual(["wh-2"]);
+  });
+
+  it("rejects a payload that fails the strict schema, touches nothing, and lets a fixed retry apply", () => {
+    upsertCongressTrades([row("bad-1")]);
+    const id = `evt-${randomUUID()}`;
+    const raw: unknown = { type: "trade.retract", id, txId: "bad-1", surprise: true };
+    expect(applyCongressEvent(raw)).toMatchObject({ ok: false, reason: "invalid-retract" });
+    expect(applyCongressEvent({ type: "trade.retract", id, txId: 42 })).toMatchObject({ ok: false });
+    expect(ids()).toEqual(["bad-1"]);
+    // Not marked seen: the corrected retry with the same event id applies.
+    expect(applyCongressEvent({ type: "trade.retract", id, txId: "bad-1" } satisfies TradeRetractEvent)).toMatchObject({ ok: true, applied: 1 });
+  });
+
+  it("SSE: a bare row whose type is a trade side, and a bare transaction wrapper, both retract", () => {
+    upsertCongressTrades([row("sse-p"), row("sse-w", "MSFT")]);
+    expect(applySseMessage({ event: "trade.retract", data: JSON.stringify({ id: "sse-p", type: "P", ticker: "AAPL" }) })).toBe(true);
+    expect(applySseMessage({ event: "trade.retract", data: JSON.stringify({ transaction: { id: "sse-w", type: "S" } }) })).toBe(true);
+    expect(ids()).toEqual([]);
+  });
+
+  it("SSE: Congress.Trade's frame dedupes with the webhook for the same retraction", () => {
+    upsertCongressTrades([row("dd-1"), row("dd-2", "MSFT")]);
+    const seq = 900_000 + Math.floor(Math.random() * 1000);
+    expect(applySseMessage({
+      event: "trade.retract",
+      data: JSON.stringify({ type: "trade.retract", retractSeq: seq, txId: "dd-1", docId: "d", retractedAt: new Date().toISOString() })
+    })).toBe(true);
+    expect(ids()).toEqual(["dd-2"]);
+    // The webhook copy of the same retraction (id ct-retract-<seq>) is a duplicate.
+    upsertCongressTrades([row("dd-1")]);
+    const dup = applyCongressEvent({ type: "trade.retract", id: `ct-retract-${seq}`, retraction: { txId: "dd-1", retractSeq: seq } } satisfies TradeRetractEvent);
+    expect(dup).toMatchObject({ ok: true, duplicate: true });
+  });
+
+  it("SSE: a frame that fails the schema is reported dropped", () => {
+    expect(applySseMessage({ event: "trade.retract", data: JSON.stringify({ type: "trade.retract", txId: "", extra: 1 }) })).toBe(false);
+  });
+
+  it("keyless rows keep the first copy (source preference); id rows keep the latest", () => {
+    const keyless = { symbol: "AAPL", member: "Jane Doe", chamber: "senate", side: "buy", tradedAt: recent(4), amountLow: 1001 } as const;
+    upsertCongressTrades([{ ...keyless, source: "senate-efd" }]);
+    upsertCongressTrades([{ ...keyless, source: "capitol-trades" }]);
+    const rows = (getCongressDataset()?.trades ?? []).filter((t) => !t.id);
+    expect(rows.map((t) => t.source)).toEqual(["senate-efd"]);
+  });
+
+  it("counts a changed re-sent id as applied", () => {
+    const ev = (amountLow: number) => ({
+      type: "congress.trade" as const,
+      id: `evt-${randomUUID()}`,
+      data: { trades: [{ ...row("ap-1"), amountLow }] }
+    });
+    expect(applyCongressEvent(ev(1000)).applied).toBe(1);
+    expect(applyCongressEvent(ev(1001)).applied).toBe(1); // replaced
+    expect(applyCongressEvent(ev(1001)).applied).toBe(0); // identical: nothing written
+  });
+});
+
 describe("fetchAppACongressTrades — public feed with rolling from= window", () => {
   beforeEach(() => {
     deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
@@ -415,6 +544,244 @@ describe("fetchAppACongressTrades — public feed with rolling from= window", ()
     expect(second.ok).toBe(true);
     expect(getCongressDataset()?.trades.some((t) => t.id === "keep-1")).toBe(true);
     expect(getCongressDataset()?.fetchedAt).not.toBe(fetchedAt);
+  });
+
+  it("merges a non-empty incremental poll into the prior window instead of replacing it", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", chamber: "house", txType: "P", confidence: 1, isOption: false, owner: "self" };
+    const old1 = { ...base, id: "old-1", memberName: "Jane Doe", txDate: recent(10), cursorSeq: 10 };
+    const old2 = { ...base, id: "old-2", ticker: "MSFT", memberName: "John Roe", txDate: recent(9), cursorSeq: 11 };
+    const fresh = { ...base, id: "new-1", ticker: "NVDA", memberName: "Ann Poe", txDate: recent(2), cursorSeq: 12 };
+    let phase: "backfill" | "incremental" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 11 }), { status: 200 });
+        return new Response(JSON.stringify({ transactions: [old1, old2], cursor: 11 }), { status: 200 });
+      }
+      if (u.includes("since=12")) return new Response(JSON.stringify({ transactions: [], cursor: 12 }), { status: 200 });
+      expect(u).toContain("since=11");
+      return new Response(JSON.stringify({ transactions: [fresh], cursor: 12 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["old-1", "old-2"]);
+    phase = "incremental";
+    const second = await refreshCongress(Date.now() + 1000, true);
+    expect(second.ok).toBe(true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["new-1", "old-1", "old-2"]);
+    expect(second.recordCount).toBe(3);
+    expect(getInternalSetting<number>(CONGRESS_CURSOR_SETTING_KEY)).toBe(12);
+  });
+
+  it("lets a corrected copy from an incremental poll replace the stale row", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const row = { id: "fix-1", ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false, amountMin: 1000, amountMax: 15000 };
+    // Sentinel only in the backfill: it must survive the incremental poll (merge, not replace).
+    const keep = { ...row, id: "fix-keep", ticker: "MSFT", cursorSeq: 19 };
+    let phase: "backfill" | "incremental" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 20 }), { status: 200 });
+        return new Response(JSON.stringify({ transactions: [keep, { ...row, cursorSeq: 20 }], cursor: 20 }), { status: 200 });
+      }
+      if (u.includes("since=21")) return new Response(JSON.stringify({ transactions: [], cursor: 21 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...row, amountMin: 1001, cursorSeq: 21 }], cursor: 21 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect((getCongressDataset()?.trades ?? []).find((t) => t.id === "fix-1")?.amountLow).toBe(1000);
+    phase = "incremental";
+    await refreshCongress(Date.now() + 1000, true);
+    const rows = (getCongressDataset()?.trades ?? []).filter((t) => t.id === "fix-1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amountLow).toBe(1001);
+    expect(getCongressDataset()?.trades.some((t) => t.id === "fix-keep")).toBe(true);
+  });
+
+  it("drops rows the retractions endpoint names, even when read live earlier in the same poll", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    let phase: "backfill" | "incremental" = "backfill";
+    const retractUrls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        retractUrls.push(u);
+        if (phase === "backfill") return new Response("not found", { status: 404 });
+        if (u.includes("since=5")) return new Response(JSON.stringify({ retractions: [], cursor: 5 }), { status: 200 });
+        return new Response(JSON.stringify({
+          retractions: [
+            { txId: "gone-1", docId: "d1", retractedAt: new Date().toISOString() },
+            { txId: "back-1", docId: "d1", retractedAt: new Date().toISOString() }
+          ],
+          cursor: 5
+        }), { status: 200 });
+      }
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 31 }), { status: 200 });
+        return new Response(JSON.stringify({
+          transactions: [{ ...base, id: "gone-1", cursorSeq: 30 }, { ...base, id: "back-1", ticker: "MSFT", cursorSeq: 31 }],
+          cursor: 31
+        }), { status: 200 });
+      }
+      if (u.includes("since=32")) return new Response(JSON.stringify({ transactions: [], cursor: 32 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "back-1", ticker: "MSFT", cursorSeq: 32 }], cursor: 32 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["back-1", "gone-1"]);
+    expect(getInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBeUndefined(); // 404: endpoint not deployed yet
+    phase = "incremental";
+    const res = await refreshCongress(Date.now() + 1000, true);
+    expect(res.ok).toBe(true);
+    // CT serves only open retractions, so one read after the transactions page
+    // is newer than the copy of back-1 read before it: retraction wins.
+    expect(getCongressDataset()?.trades ?? []).toHaveLength(0);
+    expect(getInternalSetting<number>(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBe(5);
+    expect(retractUrls.at(-1)).toContain("since=5");
+  });
+
+  it("re-adds a revived row on the next poll (its retraction is closed and no longer served)", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    let phase: "backfill" | "retracted" | "revived" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        if (phase === "retracted" && !u.includes("since=3")) {
+          return new Response(JSON.stringify({ retractions: [{ retractSeq: 3, txId: "rv-1" }], cursor: 3 }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ retractions: [], cursor: phase === "backfill" ? 0 : 3 }), { status: 200 });
+      }
+      if (phase === "backfill") {
+        if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 40 }), { status: 200 });
+        return new Response(JSON.stringify({ transactions: [{ ...base, id: "rv-1", cursorSeq: 40 }, { ...base, id: "rv-keep", ticker: "MSFT", cursorSeq: 39 }], cursor: 40 }), { status: 200 });
+      }
+      if (phase === "retracted") return new Response(JSON.stringify({ transactions: [], cursor: 40 }), { status: 200 });
+      if (u.includes("since=41")) return new Response(JSON.stringify({ transactions: [], cursor: 41 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "rv-1", cursorSeq: 41 }], cursor: 41 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    phase = "retracted";
+    await refreshCongress(Date.now() + 1000, true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["rv-keep"]);
+    phase = "revived";
+    await refreshCongress(Date.now() + 2000, true);
+    expect(getCongressDataset()?.trades.map((t) => t.id).sort()).toEqual(["rv-1", "rv-keep"]);
+  });
+
+  it("backfill path: a retraction read in the same poll drops the row and the cursor advances", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        if (u.includes("since=8")) return new Response(JSON.stringify({ retractions: [], cursor: 8 }), { status: 200 });
+        return new Response(JSON.stringify({ retractions: [{ retractSeq: 8, txId: "bf-gone" }], cursor: 8 }), { status: 200 });
+      }
+      if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 51 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "bf-gone", cursorSeq: 50 }, { ...base, id: "bf-keep", ticker: "MSFT", cursorSeq: 51 }], cursor: 51 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["bf-keep"]);
+    expect(getInternalSetting<number>(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBe(8);
+  });
+
+  it("an empty poll that read retractions still applies them to the stored dataset", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    // A prior row that the retractions page will name; the poll itself brings no
+    // new transactions, so the retraction has to be applied to the kept dataset.
+    upsertCongressTrades([{ id: "seed-1", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(6) }]);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        return new Response(JSON.stringify({ retractions: [{ retractSeq: 1, txId: "seed-1" }], cursor: 1 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ transactions: [], cursor: 5 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.some((t) => t.id === "seed-1")).toBe(false);
+    // The cursor advanced only because the retraction really was applied.
+    expect(getInternalSetting<number>(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBe(1);
+  });
+
+  it("a retraction read in one poll does not leak into the next poll", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    let phase: "backfill" | "retracted" | "revived" = "backfill";
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) {
+        if (phase === "retracted") return new Response(JSON.stringify({ retractions: [{ retractSeq: 9, txId: "lk-1" }], cursor: 9 }), { status: 200 });
+        return new Response(JSON.stringify({ retractions: [], cursor: phase === "backfill" ? 0 : 9 }), { status: 200 });
+      }
+      if (phase === "backfill") return new Response(JSON.stringify({ transactions: [{ ...base, id: "lk-1", cursorSeq: 80 }], cursor: 80 }), { status: 200 });
+      if (phase === "retracted") return new Response(JSON.stringify({ transactions: [], cursor: 81 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "lk-1", cursorSeq: 82 }], cursor: 82 }), { status: 200 });
+    }));
+    await refreshCongress(Date.now(), true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["lk-1"]);
+    phase = "retracted";
+    await refreshCongress(Date.now() + 1000, true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual([]);
+    // Next poll: the retraction is closed, so the row may come back.  A leaked
+    // id set from the previous poll would drop it forever.
+    phase = "revived";
+    await refreshCongress(Date.now() + 2000, true);
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["lk-1"]);
+  });
+
+  it("a rejected read token (401) fails loudly, names the variable, and never advances the retract cursor", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) return new Response("nope", { status: 401 });
+      if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 61 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "au-1", cursorSeq: 61 }], cursor: 61 }), { status: 200 });
+    }));
+    // A rejected credential is a configuration failure, not a degraded refresh:
+    // it is re-thrown (after the dataset write) instead of a soft warning.
+    await expect(refreshCongress(Date.now(), true)).rejects.toThrow(/CONGRESS_TRADE_READ_TOKEN/);
+    // The new disclosures still landed — the retractions outage does not block them.
+    expect(getCongressDataset()?.trades.map((t) => t.id)).toEqual(["au-1"]);
+    // The retraction cursor never advanced past rows that were never applied.
+    expect(getInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBeUndefined();
+  });
+
+  it("a 5xx on retractions is a warning that never advances the retract cursor", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    deleteInternalSetting(CONGRESS_CURSOR_SETTING_KEY);
+    deleteInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY);
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const base = { ticker: "AAPL", memberName: "Jane Doe", chamber: "house", txType: "P", txDate: recent(5), confidence: 1, isOption: false };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/transactions/retractions")) return new Response("nope", { status: 500 });
+      if (u.includes("since=")) return new Response(JSON.stringify({ transactions: [], cursor: 61 }), { status: 200 });
+      return new Response(JSON.stringify({ transactions: [{ ...base, id: "au-1", cursorSeq: 61 }], cursor: 61 }), { status: 200 });
+    }));
+    const res = await refreshCongress(Date.now(), true);
+    expect(res.ok).toBe(true); // new trades still land
+    expect(res.warning ?? "").toContain("HTTP 500");
+    expect(getInternalSetting(CONGRESS_RETRACT_CURSOR_SETTING_KEY)).toBeUndefined();
   });
 
   it("does not store a cursor when the feed errors", async () => {
@@ -609,5 +976,27 @@ describe("webhook endpoint (POST)", () => {
       eventId: id,
       applied: 1,
     });
+  });
+});
+
+describe("webhook endpoint (POST) — trade.retract", () => {
+  it("answers 422 for an invalid retract and 200 for a valid one", async () => {
+    deleteInternalSetting("webSource:congress:dataset");
+    upsertCongressTrades([{ id: "rt-route", symbol: "AAPL", member: "Jane Doe", chamber: "house", side: "buy", source: "congress.trade", tradedAt: recent(4) }]);
+    const secret = useCongressWebhookSecret();
+    const send = (payload: unknown) => {
+      const body = JSON.stringify(payload);
+      return postCongressWebhook(new Request("https://b.example/api/webhooks/congress", {
+        method: "POST",
+        headers: { "cf-connecting-ip": "203.0.113.41", "x-signature": sign(secret, body), "content-type": "application/json" },
+        body
+      }));
+    };
+    const bad = await send({ type: "trade.retract", id: `evt-${randomUUID()}`, data: { nope: true } });
+    expect(bad.status).toBe(422);
+    expect(await bad.json()).toMatchObject({ consumed: false, reason: "invalid-retract" });
+    const good = await send({ type: "trade.retract", id: `evt-${randomUUID()}`, txId: "rt-route" });
+    expect(good.status).toBe(200);
+    expect(getCongressDataset()?.trades.some((t) => t.id === "rt-route")).toBe(false);
   });
 });

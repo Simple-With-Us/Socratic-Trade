@@ -40,7 +40,7 @@ and the console mount (`/console/usage`), which share this client.
 Interacts with PR #1703 (Antigravity, universal OpenRouter routing — the change that will
 create the split). Kept strictly client-side (new module + the client), touching NO server
 aggregation (`src/lib/llm-usage.ts`) to avoid conflict with #1703's edits there. Posted a
-heads-up to #agent-sync; correct whether #1703 is merged or not (no-op today since ≈no
+heads-up to #ag***-s**c; correct whether #1703 is merged or not (no-op today since ≈no
 OpenRouter rows exist yet, correct automatically once #1703 lands).
 
 ## Files
@@ -78,7 +78,7 @@ files) is currently CONFLICTING against a fast-moving main and the owner wants t
 fix in production NOW, AG's model-stats canonicalization + its test changes
 (`test/model-stats.test.ts`, `test/performance.test.ts`) are landed here — AG's exact,
 verified code, credited — independent of the big routing PR. It is a no-op today (bare names)
-and correct once routing lands. Coordinated on #agent-sync: AG drops the now-redundant
+and correct once routing lands. Coordinated on #ag***-s**c: AG drops the now-redundant
 model-stats piece from #1703 on their next rebase and keeps the routing/recording changes.
 
 Result: the model performance benchmark stays continuous across the OpenRouter cutover (no lost

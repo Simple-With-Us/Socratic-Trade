@@ -6,7 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error - plain ESM operator helper, intentionally dependency-free (single-line so the directive covers the specifier)
-import { DEFAULT_APP_PROJECT_ID, DEFAULT_SHARED_PROJECT_ID, INFISICAL_BOOTSTRAP_CREDENTIAL_KEYS, INFISICAL_FINAL_APP_MASK_KEYS, InfisicalBootstrapError, prepareInfisicalBootstrapEnvironment, resolveInfisicalBootstrap } from "../scripts/infisical-bootstrap-env.mjs";
+import { DEFAULT_APP_PROJECT_ID, DEFAULT_SHARED_PROJECT_ID, INFISICAL_BOOTSTRAP_CREDENTIAL_KEYS, INFISICAL_FINAL_APP_MASK_KEYS, InfisicalBootstrapError, KEYCHAIN_BOOTSTRAP_KEYS, KEYCHAIN_SERVICE, prepareInfisicalBootstrapEnvironment, readKeychainItem, resolveInfisicalBootstrap } from "../scripts/infisical-bootstrap-env.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nextEnvEntry = createRequire(import.meta.url).resolve("@next/env");
@@ -55,8 +55,16 @@ function isolatedProcessEnv(extra: Partial<NodeJS.ProcessEnv> = {}): NodeJS.Proc
     if (key.startsWith("INFISICAL") || key.startsWith("INFIISICAL")) delete env[key];
   }
   delete env.GLOBAL_API_KEYS_FILE;
+  // Never touch the real login Keychain from a test.
+  env.SOCRATIC_BOOTSTRAP_KEYCHAIN = "off";
   Object.assign(env, extra);
   return env;
+}
+
+// For the injected-Keychain unit tests: hermetic env, but with the Keychain switch left on
+// (platform and readItem are injected, so the real Keychain is still never touched).
+function kcEnv(extra: Partial<NodeJS.ProcessEnv> = {}): NodeJS.ProcessEnv {
+  return isolatedProcessEnv({ SOCRATIC_BOOTSTRAP_KEYCHAIN: undefined, ...extra });
 }
 
 function nextEnvironmentReloadProbe(root: string, extra: Record<string, string> = {}) {
@@ -97,7 +105,7 @@ describe("Infisical bootstrap resolver", () => {
 
   it("maps the owner-provided INFIISICAL_ST and CT_SHARED aliases with safe project defaults", () => {
     const result = resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFIISICAL_ST_CLIENT_ID: "st-id",
         INFIISICAL_ST_CLIENT_SECRET: "st-secret",
         INFISICAL_CT_SHARED_CLIENT_ID: "shared-id",
@@ -115,9 +123,9 @@ describe("Infisical bootstrap resolver", () => {
     });
   });
 
-  it("accepts the corrected global ST spelling and generic shared names in local scopes", () => {
+  it("accepts the corrected Keychain ST spelling and generic shared names in local scopes", () => {
     const result = resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_ST_CLIENT_ID: "corrected-id",
         INFISICAL_ST_CLIENT_SECRET: "corrected-secret",
       },
@@ -131,7 +139,7 @@ describe("Infisical bootstrap resolver", () => {
     expect(result.updates.INFISICAL_SHARED_CLIENT_ID).toBe("generic-shared-id");
   });
 
-  it("preserves process-environment precedence over .env.local and the global file", () => {
+  it("preserves process-environment precedence over .env.local and the Keychain", () => {
     const result = resolveInfisicalBootstrap({
       explicitEnv: {
         INFISICAL_CLIENT_ID: "explicit-id",
@@ -143,7 +151,7 @@ describe("Infisical bootstrap resolver", () => {
         INFISICAL_CLIENT_SECRET: "local-secret",
         INFISICAL_PROJECT_ID: "local-project",
       },
-      globalEnv: {
+      keychainEnv: {
         INFIISICAL_ST_CLIENT_ID: "global-id",
         INFIISICAL_ST_CLIENT_SECRET: "global-secret",
       },
@@ -220,9 +228,9 @@ describe("Infisical bootstrap resolver", () => {
     })).toThrow("Conflicting complete app credential aliases");
   });
 
-  it("narrows the global file to ST app and CT-shared aliases", () => {
+  it("narrows the Keychain to ST app and CT-shared aliases", () => {
     const result = resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_CLIENT_ID: "wrong-generic-app-id",
         INFISICAL_CLIENT_SECRET: "wrong-generic-app-secret",
         INFISICAL_TOKEN: "wrong-global-token",
@@ -242,11 +250,11 @@ describe("Infisical bootstrap resolver", () => {
     expect(result.updates.INFISICAL_ENV).toBeUndefined();
 
     const genericSharedOnly = resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_ST_CLIENT_ID: "scoped-app-id",
         INFISICAL_ST_CLIENT_SECRET: "scoped-app-secret",
-        INFISICAL_SHARED_CLIENT_ID: "must-not-cross-global-boundary",
-        INFISICAL_SHARED_CLIENT_SECRET: "must-not-cross-global-boundary",
+        INFISICAL_SHARED_CLIENT_ID: "must-not-cross-keychain-boundary",
+        INFISICAL_SHARED_CLIENT_SECRET: "must-not-cross-keychain-boundary",
       },
     });
     expect(genericSharedOnly.sharedAuthConfigured).toBe(false);
@@ -257,7 +265,7 @@ describe("Infisical bootstrap resolver", () => {
     let caught: unknown;
     try {
       resolveInfisicalBootstrap({
-        globalEnv: { INFIISICAL_ST_CLIENT_SECRET: "never-echo-this-secret" },
+        keychainEnv: { INFIISICAL_ST_CLIENT_SECRET: "never-echo-this-secret" },
       });
     } catch (error) {
       caught = error;
@@ -272,7 +280,7 @@ describe("Infisical bootstrap resolver", () => {
     expect(() => resolveInfisicalBootstrap({
       explicitEnv: { INFISICAL_CLIENT_ID: "explicit-id-only" },
       localEnv: { INFISICAL_CLIENT_SECRET: "local-secret-only" },
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_ST_CLIENT_ID: "global-id",
         INFISICAL_ST_CLIENT_SECRET: "global-secret",
       },
@@ -281,7 +289,7 @@ describe("Infisical bootstrap resolver", () => {
 
   it("does not enable the shared overlay until shared auth or an explicit project is present", () => {
     const appOnly = resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_ST_CLIENT_ID: "app-id",
         INFISICAL_ST_CLIENT_SECRET: "app-secret",
       },
@@ -299,234 +307,196 @@ describe("Infisical bootstrap resolver", () => {
 
   it("rejects a shared-only overlay before any runner can call Infisical", () => {
     expect(() => resolveInfisicalBootstrap({
-      globalEnv: {
+      keychainEnv: {
         INFISICAL_CT_SHARED_CLIENT_ID: "shared-id",
         INFISICAL_CT_SHARED_CLIENT_SECRET: "shared-secret",
       },
     })).toThrow("Shared overlay requires an explicit app identity/token");
   });
 
-  it("imports only recognized global bootstrap keys and normalizes aliases in process memory", () => {
+  it("normalizes Keychain aliases into the generic names in process memory and loads nothing else", () => {
     const root = tempRoot();
-    const globalFile = join(root, "global-api-keys");
-    writeFileSync(globalFile, [
-      "INFISICAL_ST_CLIENT_ID=global-app-id",
-      "INFISICAL_ST_CLIENT_SECRET=global-app-secret",
-      "OPENROUTER_API_KEY=must-not-be-loaded",
-      "",
-    ].join("\n"), { mode: 0o600 });
-    const env = isolatedProcessEnv();
+    const asked: string[] = [];
+    const store: Record<string, string> = {
+      INFISICAL_ST_CLIENT_ID: "keychain-app-id",
+      INFISICAL_ST_CLIENT_SECRET: "keychain-app-secret",
+      OPENROUTER_API_KEY: "must-not-be-loaded",
+    };
+    const env = kcEnv();
 
-    const result = prepareInfisicalBootstrapEnvironment({ env, cwd: root, globalFile });
+    const result = prepareInfisicalBootstrapEnvironment({
+      env,
+      cwd: root,
+      platform: "darwin",
+      readItem: (account: string) => {
+        asked.push(account);
+        return store[account];
+      },
+    });
 
     expect(result.appAuthConfigured).toBe(true);
-    expect(env.INFISICAL_CLIENT_ID).toBe("global-app-id");
+    expect(result.sharedAuthConfigured).toBe(false);
+    expect(result.keychainChecked).toBe(true);
+    expect(result.keychainItemCount).toBe(2);
+    expect(env.INFISICAL_CLIENT_ID).toBe("keychain-app-id");
+    expect(env.INFISICAL_CLIENT_SECRET).toBe("keychain-app-secret");
     expect(env.INFISICAL_ST_CLIENT_ID).toBeUndefined();
     expect(env.OPENROUTER_API_KEY).not.toBe("must-not-be-loaded");
+    // Only the documented bootstrap account names are ever requested.
+    expect(asked.sort()).toEqual([...KEYCHAIN_BOOTSTRAP_KEYS].sort());
+    expect(asked).not.toContain("OPENROUTER_API_KEY");
   });
 
-  it("ignores unrelated shell syntax and malformed assignments in the broad global file", () => {
+  it("lets process.env win over the Keychain", () => {
     const root = tempRoot();
-    const globalFile = join(root, "global-api-keys");
-    writeFileSync(globalFile, [
-      "function unrelated_helper() { echo this-is-not-dotenv; }",
-      "UNRELATED_MALFORMED value-without-equals",
-      "ANOTHER_PROVIDER_SECRET=$(printf never-execute-this)",
-      "INFISICAL_ST_CLIENT_ID=managed-app-id",
-      "INFISICAL_ST_CLIENT_SECRET=managed-app-secret",
-      "",
-    ].join("\n"), { mode: 0o600 });
-    const env = isolatedProcessEnv();
+    const env = kcEnv({
+      INFISICAL_CLIENT_ID: "env-id",
+      INFISICAL_CLIENT_SECRET: "env-secret",
+    });
 
-    prepareInfisicalBootstrapEnvironment({ env, cwd: root, globalFile });
-
-    expect(env.INFISICAL_CLIENT_ID).toBe("managed-app-id");
-    expect(env.INFISICAL_CLIENT_SECRET).toBe("managed-app-secret");
-    expect(env.ANOTHER_PROVIDER_SECRET).toBeUndefined();
-  });
-
-  it("does not import managed-looking lines inside unrelated quoted or indented data", () => {
-    const root = tempRoot();
-    const globalFile = join(root, "global-api-keys");
-    writeFileSync(globalFile, [
-      "UNRELATED_MULTILINE=\"line one",
-      "INFISICAL_ST_CLIENT_ID=multiline-data-trap",
-      "line three\"",
-      "INFISICAL_ST_CLIENT_ID=real-managed-id",
-      "INFISICAL_ST_CLIENT_SECRET=real-managed-secret",
-      "  INFISICAL_ST_CLIENT_SECRET=indented-shell-trap",
-      "",
-    ].join("\n"), { mode: 0o600 });
-    const env = isolatedProcessEnv();
-
-    prepareInfisicalBootstrapEnvironment({ env, cwd: root, globalFile });
-
-    expect(env.INFISICAL_CLIENT_ID).toBe("real-managed-id");
-    expect(env.INFISICAL_CLIENT_SECRET).toBe("real-managed-secret");
-  });
-
-  it("fails closed on multiline shell blocks and heredocs instead of parsing nested data", () => {
-    for (const [name, lines] of [
-      ["nested-shell", [
-        "if true; then",
-        "if false; then",
-        "fi",
-        "INFISICAL_ST_CLIENT_ID=nested-shell-trap",
-        "fi",
-      ]],
-      ["hyphen-heredoc", [
-        "cat <<'END-DATA'",
-        "INFISICAL_ST_CLIENT_SECRET=heredoc-data-trap",
-        "END-DATA",
-      ]],
-    ] as const) {
-      const root = tempRoot();
-      const globalFile = join(root, name);
-      writeFileSync(globalFile, [
-        "INFISICAL_ST_CLIENT_ID=real-id",
-        "INFISICAL_ST_CLIENT_SECRET=real-secret-never-print",
-        ...lines,
-        "",
-      ].join("\n"), { mode: 0o600 });
-
-      let caught: unknown;
-      try {
-        prepareInfisicalBootstrapEnvironment({
-          env: isolatedProcessEnv(),
-          cwd: root,
-          globalFile,
-        });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(InfisicalBootstrapError);
-      expect((caught as Error).message).toContain("Could not safely parse");
-      expect((caught as Error).message).not.toContain("real-secret-never-print");
-    }
-  });
-
-  it("rejects NUL-bearing bootstrap data without echoing its value", () => {
-    let caught: unknown;
-    try {
-      resolveInfisicalBootstrap({
-        localEnv: {
-          INFISICAL_CLIENT_ID: "nul-id",
-          INFISICAL_CLIENT_SECRET: "prefix\0secret-never-print",
-        },
-      });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(InfisicalBootstrapError);
-    expect((caught as Error).message).toContain("Invalid NUL byte");
-    expect((caught as Error).message).not.toContain("secret-never-print");
-  });
-
-  it("rejects a live or broken global-file symlink without reading its target", () => {
-    const root = tempRoot();
-    const realFile = join(root, "real-global-api-keys");
-    writeFileSync(realFile, [
-      "INFISICAL_ST_CLIENT_ID=target-id",
-      "INFISICAL_ST_CLIENT_SECRET=target-secret-never-read",
-      "",
-    ].join("\n"), { mode: 0o600 });
-
-    for (const [name, target] of [
-      ["live-link", realFile],
-      ["broken-link", join(root, "missing-target")],
-    ] as const) {
-      const link = join(root, name);
-      symlinkSync(target, link);
-      let caught: unknown;
-      try {
-        prepareInfisicalBootstrapEnvironment({ env: isolatedProcessEnv(), cwd: root, globalFile: link });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(InfisicalBootstrapError);
-      expect((caught as Error).message).toContain("regular, non-symlink file");
-      expect((caught as Error).message).not.toContain("target-secret-never-read");
-    }
-  });
-
-  it("rejects a non-regular global-file path", () => {
-    const root = tempRoot();
-    const directoryPath = join(root, "global-api-keys-directory");
-    mkdirSync(directoryPath);
-
-    expect(() => prepareInfisicalBootstrapEnvironment({
-      env: isolatedProcessEnv(),
+    const result = prepareInfisicalBootstrapEnvironment({
+      env,
       cwd: root,
-      globalFile: directoryPath,
-    })).toThrow("regular, non-symlink file");
+      platform: "darwin",
+      readItem: (account: string) => (account.startsWith("INFISICAL_ST_") ? "keychain-value" : undefined),
+    });
+
+    expect(result.appAuthSource).toBe("process environment:INFISICAL_CLIENT_ID");
+    expect(env.INFISICAL_CLIENT_ID).toBe("env-id");
+    expect(env.INFISICAL_CLIENT_SECRET).toBe("env-secret");
   });
 
-  it("rejects group/other-readable or writable global-file modes without exposing values", () => {
-    for (const mode of [0o640, 0o602]) {
-      const root = tempRoot();
-      const globalFile = join(root, `global-api-keys-${mode.toString(8)}`);
-      writeFileSync(globalFile, [
-        "INFISICAL_ST_CLIENT_ID=mode-id",
-        "INFISICAL_ST_CLIENT_SECRET=mode-secret-never-print",
-        "",
-      ].join("\n"), { mode: 0o600 });
-      chmodSync(globalFile, mode);
-
-      let caught: unknown;
-      try {
-        prepareInfisicalBootstrapEnvironment({ env: isolatedProcessEnv(), cwd: root, globalFile });
-      } catch (error) {
-        caught = error;
-      }
-      expect(caught).toBeInstanceOf(InfisicalBootstrapError);
-      expect((caught as Error).message).toContain("must not grant group/other permissions");
-      expect((caught as Error).message).not.toContain("mode-secret-never-print");
-    }
-  });
-
-  it("rejects duplicate managed assignments instead of silently changing identity", () => {
+  it("falls back to the Keychain for a shared identity beside an env app identity", () => {
     const root = tempRoot();
-    const globalFile = join(root, "global-api-keys");
-    writeFileSync(globalFile, [
-      "INFISICAL_ST_CLIENT_ID=first-id",
-      "INFISICAL_ST_CLIENT_ID=second-id",
-      "INFISICAL_ST_CLIENT_SECRET=secret-never-print",
-      "",
-    ].join("\n"), { mode: 0o600 });
+    const env = kcEnv({ INFISICAL_TOKEN: "env-app-token" });
 
+    const result = prepareInfisicalBootstrapEnvironment({
+      env,
+      cwd: root,
+      platform: "darwin",
+      readItem: (account: string) => ({
+        INFISICAL_CT_SHARED_CLIENT_ID: "kc-shared-id",
+        INFISICAL_CT_SHARED_CLIENT_SECRET: "kc-shared-secret",
+      } as Record<string, string>)[account],
+    });
+
+    expect(result.appAuthSource).toBe("process environment:INFISICAL_TOKEN");
+    expect(result.sharedAuthConfigured).toBe(true);
+    expect(env.INFISICAL_SHARED_CLIENT_ID).toBe("kc-shared-id");
+  });
+
+  it("resolves nothing, without error, when the Keychain has no items", () => {
+    const root = tempRoot();
+    const env = kcEnv();
+
+    const result = prepareInfisicalBootstrapEnvironment({
+      env,
+      cwd: root,
+      platform: "darwin",
+      readItem: () => undefined,
+    });
+
+    expect(result.appAuthConfigured).toBe(false);
+    expect(result.sharedAuthConfigured).toBe(false);
+    expect(result.keychainItemCount).toBe(0);
+    expect(env.INFISICAL_CLIENT_ID).toBeUndefined();
+  });
+
+  it("never queries the Keychain off macOS or when SOCRATIC_BOOTSTRAP_KEYCHAIN=off", () => {
+    const root = tempRoot();
+    const readItem = () => {
+      throw new Error("Keychain must not be queried");
+    };
+
+    const linux = prepareInfisicalBootstrapEnvironment({
+      env: kcEnv(),
+      cwd: root,
+      platform: "linux",
+      readItem,
+    });
+    expect(linux.keychainChecked).toBe(false);
+
+    const off = prepareInfisicalBootstrapEnvironment({
+      env: kcEnv({ SOCRATIC_BOOTSTRAP_KEYCHAIN: "off" }),
+      cwd: root,
+      platform: "darwin",
+      readItem,
+    });
+    expect(off.keychainChecked).toBe(false);
+  });
+
+  it("names the Keychain service and account, never a value, when a Keychain pair is partial", () => {
+    const root = tempRoot();
     let caught: unknown;
     try {
       prepareInfisicalBootstrapEnvironment({
-        env: isolatedProcessEnv(),
+        env: kcEnv(),
         cwd: root,
-        globalFile,
+        platform: "darwin",
+        readItem: (account: string) => (
+          account === "INFISICAL_ST_CLIENT_SECRET" ? "never-echo-this-secret" : undefined
+        ),
       });
     } catch (error) {
       caught = error;
     }
 
     expect(caught).toBeInstanceOf(InfisicalBootstrapError);
-    expect((caught as Error).message).toContain("Could not safely parse");
-    expect((caught as Error).message).not.toContain("secret-never-print");
+    const message = (caught as Error).message;
+    expect(message).toContain("macOS Keychain");
+    expect(message).toContain("socratic-trade-bootstrap");
+    expect(message).toContain("security add-generic-password -U -s socratic-trade-bootstrap -a INFISICAL_ST_CLIENT_ID -w");
+    expect(message).not.toContain("never-echo-this-secret");
   });
 
-  it("parses shell-looking global values as inert dotenv data", () => {
+  it("does not read ~/.secrets/global-api-keys even when it exists under HOME", () => {
     const root = tempRoot();
-    const marker = join(root, "shell-expression-ran");
-    const shellLooking = `$(touch ${marker})`;
-    const globalFile = join(root, "global-api-keys");
-    writeFileSync(globalFile, [
-      "INFISICAL_ST_CLIENT_ID=shell-test-id",
-      `INFISICAL_ST_CLIENT_SECRET=${JSON.stringify(shellLooking)}`,
+    mkdirSync(join(root, ".secrets"), { recursive: true });
+    writeFileSync(join(root, ".secrets/global-api-keys"), [
+      "INFISICAL_ST_CLIENT_ID=flat-file-id",
+      "INFISICAL_ST_CLIENT_SECRET=flat-file-secret",
       "",
     ].join("\n"), { mode: 0o600 });
-    const env = isolatedProcessEnv();
+    const env = kcEnv({ HOME: root });
 
-    prepareInfisicalBootstrapEnvironment({ env, cwd: root, globalFile });
+    const result = prepareInfisicalBootstrapEnvironment({
+      env,
+      cwd: root,
+      platform: "darwin",
+      readItem: () => undefined,
+    });
 
-    expect(env.INFISICAL_CLIENT_SECRET).toBe(shellLooking);
-    expect(existsSync(marker)).toBe(false);
+    expect(result.appAuthConfigured).toBe(false);
+    expect(env.INFISICAL_CLIENT_ID).toBeUndefined();
   });
+
+  it("reads one Keychain item through a list-argv security call with no shell and captures stdout", () => {
+    const calls: Array<{ file: string; args: string[]; options: Record<string, unknown> }> = [];
+    const run = (file: string, args: string[], options: Record<string, unknown>) => {
+      calls.push({ file, args, options });
+      return { status: 0, stdout: "kc-secret-value\n" };
+    };
+
+    const value = readKeychainItem("INFISICAL_ST_CLIENT_SECRET", { run });
+
+    expect(value).toBe("kc-secret-value");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].file).toBe("/usr/bin/security");
+    expect(calls[0].args).toEqual([
+      "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "INFISICAL_ST_CLIENT_SECRET", "-w",
+    ]);
+    expect(calls[0].options.shell).toBeUndefined();
+    // stderr is discarded so no diagnostic can carry a value.
+    expect(calls[0].options.stdio).toEqual(["ignore", "pipe", "ignore"]);
+  });
+
+  it("treats a missing item, a failed lookup, or a thrown spawn as absent", () => {
+    expect(readKeychainItem("X", { run: () => ({ status: 44, stdout: "" }) })).toBeUndefined();
+    expect(readKeychainItem("X", { run: () => ({ status: 0, stdout: "\n" }) })).toBeUndefined();
+    expect(readKeychainItem("X", { run: () => ({ error: new Error("ENOENT"), status: null, stdout: null }) })).toBeUndefined();
+    expect(readKeychainItem("X", { run: () => { throw new Error("boom"); } })).toBeUndefined();
+  });
+
 });
 
 describe("infisical-run bootstrap integration", () => {

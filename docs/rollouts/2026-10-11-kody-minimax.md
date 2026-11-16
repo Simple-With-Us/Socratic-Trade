@@ -11,11 +11,11 @@ Jay requested that the Muse-backed autofix use MiniMax.  CTS-330 tracks the flee
 - `AGENTS.md`: align the coordination instructions with Linear and archive the retired effort-log and Slack mechanisms.
 - `scripts/claude-hooks/board-check.sh`: retain the installed hook path as a no-op so the retired effort-log gate cannot block pushes.
 - `scripts/cloud-setup.sh`, `scripts/cursor-cloud-start.sh`, and `scripts/cursor-cloud-install.sh`: stop installing the retired Slack coordination hook in cloud sessions.
-- `scripts/install-fleet-coordination.sh`: install the pinned Agent-Sync and Linear clients and protocol for cloud sessions after retiring persisted Slack hooks.
+- `scripts/install-fleet-coordination.sh`: install the pinned Ag***-S**c and Linear clients and protocol for cloud sessions after retiring persisted Slack hooks.
 - `scripts/setup-slack-sync.sh`: retain the old entry point as a cleanup-only helper that removes copied Slack hooks and engine files.
-- `scripts/agent-sync-bootstrap.sh`: replace the self-contained Slack installer with a failing retirement marker so stale callers cannot recreate the hook.
+- `scripts/ag***-s**c-bootstrap.sh`: replace the self-contained Slack installer with a failing retirement marker so stale callers cannot recreate the hook.
 - `scripts/test-cloud-coordination-bootstrap.py`: cover isolated cloud installation, safe cleanup, cache replacement, and the retired bootstrap path.
-- `docs/slack-coordination.md`: replace active Slack setup steps with current Agent-Sync and Linear setup guidance.
+- `docs/slack-coordination.md`: replace active Slack setup steps with current Ag***-S**c and Linear setup guidance.
 - `docs/market-data-provider-pricing.md`: remove its stale reference to the former Slack topic table.
 - `STATUS.md`: record verification and landing status.
 - `PLAN.md`: record the model-selection approach and unchanged product roadmap.
@@ -99,7 +99,7 @@ PY
 
 ## Cloud Setup Review Follow-up (2026-10-12)
 
-- `scripts/install-fleet-coordination.sh` includes `AGENT-SYNC.md`, `fleet-apps.json`, and protocol documents from the pinned AFC revision alongside both stdlib-only clients.  It checks Python 3.11 and CLI imports before marking the cache installed.
+- `scripts/install-fleet-coordination.sh` includes `AG***-S**C.md`, `fleet-apps.json`, and protocol documents from the pinned AFC revision alongside both stdlib-only clients.  It checks Python 3.11 and CLI imports before marking the cache installed.
 - `scripts/setup-slack-sync.sh` is now an idempotent retirement helper.  It removes only Slack entries inside SessionStart groups and the copied Slack engine; unrelated hooks and settings remain intact.  Malformed settings or symlinks fail without replacement.
 - `scripts/cloud-setup.sh`, `scripts/cursor-cloud-install.sh`, and `scripts/cursor-cloud-start.sh` report coordination failure as a fleet-work blocker.  Cursor no longer probes retired relay entry points.
 - `AGENTS.md` documents the Linux protocol location, PATH, runtime credential names, identity checks, and authorized Linear write switch.  Credentials are provisioned separately; no personal-owner token is allowed.
@@ -114,7 +114,7 @@ bash -n scripts/install-fleet-coordination.sh scripts/setup-slack-sync.sh script
 git diff --check
 ```
 
-All five isolated tests and shell/diff checks passed.  A real pinned-source install used isolated `FLEET_COORD_CACHE`, `FLEET_COORD_BIN`, and `CLAUDE_CONFIG_DIR` directories plus a test `uname` reporting Linux.  Both installed `--help` commands and `agent_sync.identity.strict_seat("CODEX")` passed without credentials or service calls.  The archive download is the only network action in this smoke test.  Runtime authentication remains an operator prerequisite, not a claimed test result.
+All five isolated tests and shell/diff checks passed.  A real pinned-source install used isolated `FLEET_COORD_CACHE`, `FLEET_COORD_BIN`, and `CLAUDE_CONFIG_DIR` directories plus a test `uname` reporting Linux.  Both installed `--help` commands and `ag***_s**c.identity.strict_seat("CODEX")` passed without credentials or service calls.  The archive download is the only network action in this smoke test.  Runtime authentication remains an operator prerequisite, not a claimed test result.
 
 ## Cache Review Follow-up (2026-10-12)
 
@@ -126,7 +126,7 @@ Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes nine
 
 ## Final Slack Bootstrap Review Follow-up (2026-10-12)
 
-The separate self-contained `scripts/agent-sync-bootstrap.sh` remained able to recreate the retired Slack engine and global `SessionStart` hook.  It now fails without writing files or reading credentials.  `docs/slack-coordination.md` points to the current pinned fleet installer and protocol instead of giving Slack installation commands.  The exact-file inventory above now covers every file unique to this PR, including the cloud installer and its tests.
+The separate self-contained `scripts/ag***-s**c-bootstrap.sh` remained able to recreate the retired Slack engine and global `SessionStart` hook.  It now fails without writing files or reading credentials.  `docs/slack-coordination.md` points to the current pinned fleet installer and protocol instead of giving Slack installation commands.  The exact-file inventory above now covers every file unique to this PR, including the cloud installer and its tests.
 
 Verification: `python3 scripts/test-cloud-coordination-bootstrap.py` passes nine tests, including the final retired-bootstrap regression.  The counts above were corrected to match this command's actual result; only the cloud setup follow-up still records the five-test count that was accurate when that section was written.
 

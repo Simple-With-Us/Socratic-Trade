@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { refreshCongress, getCongressDataset } from "@/lib/web-sources/congress";
 import { refreshEightK, getEightKDataset } from "@/lib/web-sources/sec8k";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy, OPERATION_LEASE_GROUPS } from "@/lib/operation-lease";
@@ -29,7 +30,13 @@ export async function POST(request: Request) {
   const durableGroup = id === "congress"
     ? OPERATION_LEASE_GROUPS.CONGRESS_WEB_SOURCE
     : OPERATION_LEASE_GROUPS.SEC8K_WEB_SOURCE;
+  const blocked = previewAdminIngestRateLimit(request, "refresh-websource", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "refresh-websource", async (operationLeaseClaim) => {
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "refresh-websource", "job");
+    if (limited) return limited;
     if (id === "congress") {
       const result = await refreshCongress(Date.now(), true, operationLeaseClaim);
       const busy = getOperationLeaseBusy(result);

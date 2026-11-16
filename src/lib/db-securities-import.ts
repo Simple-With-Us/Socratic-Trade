@@ -113,7 +113,7 @@ export function upsertImportedRefs(refs: ImportedRefInput[], origin: string = DE
       count++;
     }
   });
-  run(refs);
+  run.immediate(refs);
   return count;
 }
 
@@ -147,7 +147,7 @@ export function upsertImportedPrices(prices: ImportedPriceInput[], origin: strin
       if (wroteForTicker) tickers++;
     }
   });
-  run(prices);
+  run.immediate(prices);
   return { tickers, rows };
 }
 
@@ -173,7 +173,7 @@ export function upsertImportedSpx(closes: ImportedCloseInput[], origin: string =
       count++;
     }
   });
-  run(closes);
+  run.immediate(closes);
   return count;
 }
 

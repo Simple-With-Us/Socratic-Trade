@@ -224,7 +224,10 @@ export async function ingestLearned(
     transferState,
     assertedAt: nowIso,
     supersededBy: null,
-    expiresAt: null
+    expiresAt: null,
+    // Conditioning keys for retrieveLearnedContextDetailed's regime / thesis relevance scoring.
+    regime: candidate.regime ?? null,
+    thesisTag: candidate.thesisTag ?? null
   };
   insertLearnedContext(row);
   if (existing) supersedeLearnedContext(existing.id, row.id);
@@ -423,8 +426,11 @@ export function mergeStrategyDirectiveBlock(
  *     always carries a provenance line, and its value is containment-scanned UNLESS the owner typed
  *     it themselves (isOwnerAuthoredLearnedSource) — owner text is never altered.
  *   - 'risk'               → PROMOTE to an advisory learned_context row via insertLearnedContext
- *     (scope 'private', riskTier 'risk', origin preserved). It becomes soft DATA the LLM reads; the
- *     human approval IS the gate. NEVER calls setPolicy.
+ *     (scope 'private', riskTier 'risk', origin preserved). The row is STORED (visible and
+ *     deletable in the console) but is NOT read into the trading prompt: listLearnedContextForDecision
+ *     returns fact-tier rows only.  Approval can come from a human (console route) OR the daily
+ *     Learning Review LLM in "decide" mode (learning-review.ts), and the row does not record which,
+ *     so reading these rows into the prompt is an owner decision, not a default. NEVER calls setPolicy.
  * The caller is responsible for the status transition + 'learned_context.approve' audit so ownership
  * is enforced once at the route layer.
  */
@@ -470,7 +476,8 @@ export function applyApprovedPending(pending: LearnedContextPendingRow, asserted
     return;
   }
 
-  // tier 'risk' → advisory promote. Lives in the learned_context store as soft DATA only.
+  // tier 'risk' → advisory promote. Lives in the learned_context store only; it is not read into the
+  // trading prompt (fact-tier retrieval only — see the doc comment above).
   // assertedAt is caller-controllable: the daily learning review passes its run-start timestamp
   // (the same value it persists as lastReviewedAt) so a row it JUST approved is stamped at ==
   // lastReviewedAt and excluded by evaluateLearningReviewTrigger's strict `> lastReviewedAt` — it

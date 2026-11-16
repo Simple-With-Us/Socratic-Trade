@@ -34,6 +34,7 @@ function insertRunAt(
     status: "completed" | "failed" | "skipped" | "skipped_budget" | "skipped_market_closed" | "skipped_broker_unhealthy";
     startedAt: string;
     finishedAt: string;
+    summary?: string;
   }
 ): void {
   db.getDb()
@@ -41,7 +42,7 @@ function insertRunAt(
       `INSERT INTO strategy_runs (id, user_id, connected_account_id, started_at, finished_at, status, summary)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.status);
+    .run(randomUUID(), opts.userId, opts.connectedAccountId, opts.startedAt, opts.finishedAt, opts.status, opts.summary ?? opts.status);
 }
 
 async function makeAccount(db: Awaited<ReturnType<typeof load>>["db"], label: string, systemState: "active" | "halted" = "active"): Promise<{ userId: string; accountId: string }> {
@@ -96,7 +97,7 @@ describe("trading-liveness", () => {
     // NOR autopilot-eligible-but-halted (a halted non-autopilot account is expected to be quiet).
     await makeAccount(db, "Halted Account", "halted");
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).toBeNull();
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.degraded).toBe(0);
@@ -113,7 +114,7 @@ describe("trading-liveness", () => {
       accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).toBeNull();
     const publicAgg = liveness.toPublicTradingLiveness(summary);
     expect(publicAgg.autonomyFullyDark).toBe(false);
@@ -127,7 +128,7 @@ describe("trading-liveness", () => {
       userId,
       accountId
     );
-    expect(liveness.getTradingLivenessSummary()).toBeNull();
+    expect(await liveness.getTradingLivenessSummary()).toBeNull();
     expect(liveness.isDeliberateAutonomyIdleState("close_only")).toBe(true);
   });
 
@@ -145,7 +146,7 @@ describe("trading-liveness", () => {
       from: "active"
     });
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.darkness?.fullyDark).toBe(true);
     expect(summary!.darkness?.fleetActiveAccounts).toBe(0);
@@ -181,7 +182,7 @@ describe("trading-liveness", () => {
       running.accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.accounts.length).toBe(1);
     expect(summary!.darkness?.fullyDark).toBe(false);
@@ -220,7 +221,7 @@ describe("trading-liveness", () => {
       running.accountId
     );
 
-    const summary = liveness.getTradingLivenessSummary();
+    const summary = await liveness.getTradingLivenessSummary();
     expect(summary).not.toBeNull();
     expect(summary!.darkness?.fullyDark).toBe(false);
     expect(summary!.darkness?.fleetActiveAccounts).toBeGreaterThan(0);
@@ -246,6 +247,7 @@ describe("trading-liveness", () => {
         darkAccountLabels: [],
         fleetActiveAccounts: 0,
         eligibleDeliberatelyIdle: 0,
+        haltCauseUnknown: 0,
         fullyDark: true
       }
     });
@@ -372,6 +374,23 @@ describe("trading-liveness", () => {
     expect(result.degraded).toBe(false); // 1 < default threshold (3) and last completed run is recent
   });
 
+  it("surfaces the newest failed run summary for alerts and clears it after a completion", async () => {
+    const { db, liveness } = await load();
+    const { userId, accountId } = await makeAccount(db, "Summary Account");
+    const now = Date.parse("2026-07-15T12:00:00.000Z");
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 10 * 60_000).toISOString(), finishedAt: new Date(now - 9 * 60_000).toISOString(), summary: "older broker failure" });
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "failed", startedAt: new Date(now - 2 * 60_000).toISOString(), finishedAt: new Date(now - 1 * 60_000).toISOString(), summary: "Alpaca 401:  secret missing" });
+
+    const failing = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(failing.latestFailedRunSummary).toBe("Alpaca 401: secret missing");
+    expect(failing.latestFailedRunAt).toBe(new Date(now - 2 * 60_000).toISOString());
+
+    insertRunAt(db, { userId, connectedAccountId: accountId, status: "completed", startedAt: new Date(now - 30_000).toISOString(), finishedAt: new Date(now).toISOString() });
+    const recovered = liveness.computeAccountTradingLiveness(userId, accountId, "Summary Account", now);
+    expect(recovered.latestFailedRunSummary).toBeNull();
+    expect(recovered.latestFailedRunAt).toBeNull();
+  });
+
   it("keeps app stalls in the failure streak and drops them from the auto-halt streak", async () => {
     process.env.TRADING_LIVENESS_MAX_CONSECUTIVE_FAILURES = "3";
     const { db, liveness } = await load();
@@ -496,7 +515,7 @@ describe("trading-liveness", () => {
       finishedAt: new Date(now - 60_000).toISOString()
     });
 
-    const summary = liveness.getTradingLivenessSummary(now);
+    const summary = await liveness.getTradingLivenessSummary(now);
     expect(summary).not.toBeNull();
     expect(summary!.degraded).toBe(true);
     const row = summary!.accounts.find((a) => a.connectedAccountId === accountId);
@@ -537,6 +556,8 @@ describe("trading-liveness", () => {
         "autonomyActiveAccounts",
         "autonomyEligibleAccounts",
         "autonomyFullyDark",
+        "autonomyHaltCauseReadFailures",
+        "autonomyHaltCauseUnknown",
         "autopilotAccounts",
         "degraded",
         "degradedReasons",

@@ -5,7 +5,10 @@ const mocks = vi.hoisted(() => ({
   isOverLlmBudget: vi.fn(() => true)
 }));
 
-vi.mock("@/lib/request-user", () => ({ resolveRequestUserId: () => "tenant-chat" }));
+vi.mock("@/lib/request-user", () => ({
+  resolveRequestUserId: () => "tenant-chat",
+  resolveRequestUserIdOrResponse: () => "tenant-chat"
+}));
 vi.mock("@/lib/db", () => ({
   resolveLlmCredential: mocks.resolveLlmCredential,
   getPolicy: () => ({})
@@ -82,7 +85,7 @@ describe("POST /api/chat model credential gate", () => {
   it("accepts MiniMax through an OpenRouter key", async () => {
     credentials({ minimax: false, openrouter: true });
 
-    const response = await POST(request("minimax-m3"));
+    const response = await POST(request("minimax-m3.1-flash"));
 
     expect(response.status).toBe(429);
     expect(await response.json()).toMatchObject({ error: "llm_budget_exceeded" });
@@ -92,7 +95,7 @@ describe("POST /api/chat model credential gate", () => {
   it("falls back to a native MiniMax key when OpenRouter is unavailable", async () => {
     credentials({ minimax: true, openrouter: false });
 
-    const response = await POST(request("minimax-m3"));
+    const response = await POST(request("minimax-m3.1-flash"));
 
     expect(response.status).toBe(429);
     expect(await response.json()).toMatchObject({ error: "llm_budget_exceeded" });
@@ -103,7 +106,7 @@ describe("POST /api/chat model credential gate", () => {
   it("requires OpenRouter for an explicitly OpenRouter-routed MiniMax id", async () => {
     credentials({ minimax: true, openrouter: false });
 
-    const response = await POST(request("openrouter/minimax/minimax-m3"));
+    const response = await POST(request("openrouter/minimax/minimax-m3.1-flash"));
 
     expect(response.status).toBe(412);
     expect(mocks.resolveLlmCredential).toHaveBeenLastCalledWith("openrouter", "tenant-chat");
@@ -112,7 +115,7 @@ describe("POST /api/chat model credential gate", () => {
   it("preserves the fail-loud response when neither route has a key", async () => {
     credentials({ minimax: false, openrouter: false });
 
-    const response = await POST(request("minimax-m3"));
+    const response = await POST(request("minimax-m3.1-flash"));
 
     expect(response.status).toBe(412);
     expect(await response.json()).toMatchObject({ error: "llm_credential_required" });
@@ -122,7 +125,7 @@ describe("POST /api/chat model credential gate", () => {
     const savedProvider = process.env.CHAT_LLM;
     const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "openrouter";
-    process.env.CHAT_LLM_MODEL = "minimax-m3";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
     credentials({ openrouter: true });
     try {
       const response = await POST(request());
@@ -141,7 +144,7 @@ describe("POST /api/chat model credential gate", () => {
     const savedProvider = process.env.CHAT_LLM;
     const savedModel = process.env.CHAT_LLM_MODEL;
     process.env.CHAT_LLM = "minimax";
-    process.env.CHAT_LLM_MODEL = "minimax-m3";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
     credentials({ minimax: true, openrouter: false });
     try {
       const response = await POST(request());

@@ -323,12 +323,9 @@ const MONTH = 30 * DAY;
 const RATE_QUOTAS: Record<string, RateWindow[]> = {
   twelvedata: [{ maxRequests: 8, windowMs: MINUTE }, { maxRequests: 800, windowMs: DAY }], // 1 credit/symbol
   tiingo: [{ maxRequests: 50, windowMs: HOUR }, { maxRequests: 1000, windowMs: DAY }],     // up to 3 req/symbol
-  // FMP Starter plan = 300 requests/min account-wide; 290 leaves headroom so the fetchWithRetry
-  // 429 backoff isn't racing the reservation. Each miss symbol costs 2–5 requests (insider + senate
-  // always, plus ratios-ttm/grades-consensus/price-target-consensus when not skipped) — callers pass
-  // the request count via callsPerSymbol("fmp", …), not the symbol count. NO day window by default
-  // (no daily cap on Starter); PROVIDER_QUOTA_FMP_PER_DAY opts one in (e.g. 240 for the free 250/day
-  // tier) via the generic env path in resolveProviderQuota.
+  // Kept only for the dormant fmp-transcripts rights/budget machinery, which never opens a
+  // socket to FMP (retired-direct-vendors blocks the host).  PROVIDER_QUOTA_FMP_PER_DAY can add a
+  // day window via the generic env path in resolveProviderQuota.
   fmp: [{ maxRequests: 290, windowMs: MINUTE }],
   // FilingAPI.dev free tier is documented as ~50 req/day (see data-providers.ts's
   // FilingApiEnrichmentProvider doc comment); 45 leaves headroom. The provider already calls

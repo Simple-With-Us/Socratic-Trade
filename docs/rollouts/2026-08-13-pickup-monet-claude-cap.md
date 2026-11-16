@@ -11,7 +11,7 @@ Key Stats dashes plus tappable fill/position cards.
 Inventory-only at orchestration time; implementation is in sibling agent lanes.
 
 - Claimed on live boards (`TRADING-EFFORT-LOG.md`, `CONGRESS-TRADE-EFFORT-LOG.md`,
-  `API-USAGE-MONITOR-EFFORT-LOG.md`) and `#agent-sync`.
+  `API-USAGE-MONITOR-EFFORT-LOG.md`) and `#ag***-s**c`.
 - Spawned a six-lane team (plus one audit-hygiene explorer).
 
 **Already merged today — not re-done:**
@@ -53,7 +53,7 @@ Pickup inventory + closeout:
 gh pr list --state open
 git merge-tree --write-tree origin/main origin/monet/compaction-visibility   # exit 0
 git merge-tree --write-tree origin/main origin/monet/durable-inventory-cache # exit 0
-AGENT_TAG=GROK /usr/bin/python3 /Users/jay/apps/agent-sync-poll.py
+AGENT_TAG=GROK /usr/bin/python3 /Users/jay/apps/ag***-s**c-poll.py
 ```
 
 Lane gates (each ran `scripts/land.sh` locally):

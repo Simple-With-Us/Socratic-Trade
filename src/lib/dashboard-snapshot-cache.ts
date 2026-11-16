@@ -27,6 +27,19 @@ type CacheEntry<T> = {
 const cache = new Map<string, CacheEntry<unknown>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
+type DashboardSnapshotInvalidation = (userId?: string, accountNumber?: string | null) => void;
+const invalidationListeners = new Set<DashboardSnapshotInvalidation>();
+
+/** Side caches (the route coalescer) subscribe so a policy or proposal write drops them too. */
+export function onDashboardSnapshotInvalidated(listener: DashboardSnapshotInvalidation): () => void {
+  invalidationListeners.add(listener);
+  return () => invalidationListeners.delete(listener);
+}
+
+function notifyDashboardSnapshotInvalidated(userId?: string, accountNumber?: string | null): void {
+  for (const listener of invalidationListeners) listener(userId, accountNumber);
+}
+
 /** Last value for `key`, including after the soft TTL.  The happy path must not serve it. */
 export function peekDashboardSnapshot<T>(key: string, now = Date.now()): { value: T; fresh: boolean } | undefined {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
@@ -93,12 +106,14 @@ export function invalidateDashboardSnapshotCache(
   if (userId == null) {
     cache.clear();
     inFlight.clear();
+    notifyDashboardSnapshotInvalidated();
     return;
   }
   if (accountNumber !== undefined) {
     const key = dashboardSnapshotCacheKey(userId, accountNumber);
     cache.delete(key);
     inFlight.delete(key);
+    notifyDashboardSnapshotInvalidated(userId, accountNumber);
     return;
   }
   const prefix = `${userId}\0`;
@@ -108,6 +123,7 @@ export function invalidateDashboardSnapshotCache(
   for (const key of [...inFlight.keys()]) {
     if (key.startsWith(prefix)) inFlight.delete(key);
   }
+  notifyDashboardSnapshotInvalidated(userId);
 }
 
 /** Test-only: full reset. */

@@ -4,27 +4,29 @@
 // the honest "are we beating the market net of cost" readout. Two series share the same knots:
 //   - TWR indexes (both start at 100) for manager-skill % tiles.
 //   - Same-cash dollars: a shadow S&P book that starts with the same equity, grows with SPY
-//     each sub-period, then applies that day's verified deposit/withdrawal at the daily cutoff.
+//     each sub-period, with that day's verified deposit/withdrawal applied at the START of the
+//     sub-period (the same convention the account TWR uses).
 // SPY daily closes come from the same key-free history cascade every chart uses (fetchDailyOHLC).
 // Never fabricates: if there isn't enough history or SPY can't be fetched, returns null and the
 // UI degrades to "—".
 //
 // Deposits/withdrawals: prefer the broker transfer ledger when present; otherwise INFERRED per
 // snapshot gap (deposits +, withdrawals −, paper resets, ACH). See cash-flows.ts.
-// Same-day additions and withdrawals are treated as landing at that day's cutoff (the last
-// snapshot of the calendar day).
+// A transfer is recorded on that day's snapshot (the last snapshot of the calendar day) and is
+// treated as arriving at the START of that day's sub-period by both the account TWR and the shadow.
 //
 // Multi-period time-weighted return (TWR) — the GIPS-style method:
 //   Split the overall window into back-to-back sub-periods at each deposit/withdrawal.
-//   Sub-period account growth = V_end / (V_start + flow_at_end)  (flow is the external cash
-//   that lands on the end snapshot; 0 when no transfer that day).
+//   Sub-period account growth = V_end / (V_start + flow)  (flow is the external cash recorded on
+//   the end snapshot, treated as arriving at the START of the sub-period; 0 when no transfer
+//   that day).  The shadow below uses the same start-of-day convention (ST-4589).
 //   Sub-period SPY growth = SPY_end / SPY_start over the same calendar dates.
 //   Chain: overall = ∏(1 + r_i) − 1 for account and for SPY independently.
 // So "$100 for 10 days then $10 for 100 days" weights each regime's market performance by
 // geometric linking, not by simple (end−start−flows)/start which overweights the big balance.
 //
 // Same-cash shadow (dollars):
-//   shadow_0 = first equity.  Each later day: shadow *= SPY_factor, then += verified flow.
+//   shadow_0 = first equity.  Each later day: shadow = (shadow + verified flow) * SPY_factor.
 //   dollarExcess = last account equity − last shadow.  That is "what you would have had if
 //   the same cash had tracked the S&P."
 //
@@ -148,8 +150,9 @@ export function normalizeAgainstBenchmark(
     }
 
     // ── Account sub-period (flow-neutral TWR) ──────────────────────────────
-    // V_end / (V_start + external_flow_at_end). Deposit (+): larger denominator so the
-    // injected cash is not counted as a gain. Withdrawal (−): smaller denominator so the
+    // V_end / (V_start + external_flow): the flow is treated as arriving at the START of the
+    // sub-period, the same convention the shadow uses below. Deposit (+): larger denominator so
+    // the injected cash is not counted as a gain. Withdrawal (−): smaller denominator so the
     // cash leaving is not counted as a loss.
     let accountFactor = 1;
     if (flow !== 0) {
@@ -181,9 +184,11 @@ export function normalizeAgainstBenchmark(
     equityIndex.push({ date: cur.date, index: round2(accountIndex) });
     benchmarkIndex.push({ date: cur.date, index: round2(spyIndex) });
 
-    // Grow previously invested dollars with this sub-period's SPY return, then apply today's
-    // verified flow at the daily cutoff. Unverified inferred transfers are already zeroed.
-    shadow = shadow * spyFactor + flow;
+    // Apply today's verified flow at the START of the sub-period, then grow it with SPY — the
+    // same convention as the account factor above, so a flow day is graded consistently on both
+    // sides (ST-4589). Unverified inferred transfers are already zeroed. A withdrawal larger than
+    // the shadow floors at 0 below (never negative / NaN).
+    shadow = (shadow + flow) * spyFactor;
     if (!Number.isFinite(shadow) || shadow < 0) shadow = 0;
     accountEquitySeries.push({ date: cur.date, value: round2(cur.equity) });
     shadowBenchmarkSeries.push({ date: cur.date, value: round2(shadow) });
@@ -482,7 +487,7 @@ export async function computeSpyBenchmarkDetailed(
   // TWR — that made $100-base fill curves + $100k tip read as +tens of % "account return" on
   // paper/sandbox accounts. Require ≥2 real snapshot points.
   const realCurve = equityCurve.filter(
-    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number"
+    (p) => typeof p.cash === "number" || typeof p.positionsValue === "number" || p.brokerHistory === true
   );
   if (realCurve.length < 2) {
     return { comparison: null, unavailable: { reason: "insufficient-history" }, status: "unavailable", stale: false };

@@ -125,7 +125,7 @@ Will fill in after the run.
 
 - Open PR (no merge), reference `docs/secrets.md` + this rollout.
 - Once merged, every cloud-agent seat's `npm run dev` will refuse to start; seats must switch
-  to `npm run dev:secrets`. Slack #agent-sync notice will be sent at PR-open.
+  to `npm run dev:secrets`. Slack #ag***-s**c notice will be sent at PR-open.
 - Owner-side follow-up (NOT this PR): the existing per-account `~/.config/agentic-trading/
   deploy.env` and `~/.secrets/global-api-keys` files on the Mac do not change. They were never
   `.env.local`.

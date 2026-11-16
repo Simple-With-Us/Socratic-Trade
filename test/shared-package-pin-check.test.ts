@@ -4,8 +4,8 @@ import { comparePins, ctHasNpmDep, ctReadTokens, gitRef, isGithubRateLimit, lock
 
 describe("shared-package pin check (vendor-era triangle)", () => {
   it("normalizes git tag specs and lock SHAs", () => {
-    expect(normVersion("github:jaywedgeworth22/congress-trading-shared#v2.5.2")).toBe("2.5.2");
-    expect(gitRef("git+ssh://git@github.com/jaywedgeworth22/congress-trading-shared.git#b2847eb9b7839ad1241ee455a688ef0eec4ccdd6"))
+    expect(normVersion("github:Simple-With-Us/congress-trading-shared#v2.5.2")).toBe("2.5.2");
+    expect(gitRef("git+ssh://git@github.com/Simple-With-Us/congress-trading-shared.git#b2847eb9b7839ad1241ee455a688ef0eec4ccdd6"))
       .toBe("b2847eb9b7839ad1241ee455a688ef0eec4ccdd6");
     expect(
       lockResolvedSha({
@@ -42,8 +42,8 @@ describe("shared-package pin check (vendor-era triangle)", () => {
 
   it("does not call a rate limit a missing token", () => {
     const { problems } = comparePins({
-      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      stSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
+      umSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
       ctRateLimited: true,
     });
     expect(problems.some((p: string) => /rate limited/i.test(p))).toBe(true);
@@ -53,8 +53,8 @@ describe("shared-package pin check (vendor-era triangle)", () => {
   it("fails when CT is unreadable or reintroduces an npm dep", () => {
     expect(
       comparePins({
-        stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-        umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+        stSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
+        umSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
         ctUnreadable: true,
       }).problems.some((p: string) => p.includes("GH_PACKAGES_TOKEN"))
     ).toBe(true);
@@ -66,8 +66,8 @@ describe("shared-package pin check (vendor-era triangle)", () => {
 
   it("fails when ST/UM/CT versions diverge", () => {
     const { problems } = comparePins({
-      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.4.1",
+      stSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
+      umSpec: "github:Simple-With-Us/congress-trading-shared#v2.4.1",
       ctUnreadable: false,
       ctRelease: "v2.5.2",
       ctVendorVersion: "2.5.2",
@@ -79,8 +79,8 @@ describe("shared-package pin check (vendor-era triangle)", () => {
   it("accepts a matched triangle", () => {
     const sha = "b2847eb9b7839ad1241ee455a688ef0eec4ccdd6";
     const { problems } = comparePins({
-      stSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
-      umSpec: "github:jaywedgeworth22/congress-trading-shared#v2.5.2",
+      stSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
+      umSpec: "github:Simple-With-Us/congress-trading-shared#v2.5.2",
       stLockSha: sha,
       umLockSha: sha,
       ctUnreadable: false,

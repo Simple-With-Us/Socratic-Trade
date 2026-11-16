@@ -2,6 +2,7 @@
   "teamId": "CC8UTF7ATG",
   "apps": {
     "socratic": {
+      "fixedMarketingVersion": "0.1.0",
       "displayName": "Socratic-Trade",
       "bundleId": "com.socratictrade.ios",
       "appleId": 6815511597,

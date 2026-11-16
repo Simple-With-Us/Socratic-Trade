@@ -43,8 +43,11 @@ export function isSqliteBusy(err: unknown): boolean {
  * Run a sync sqlite call. On SQLITE_BUSY, yield and retry until SQLITE_BUSY_RETRY_BUDGET_MS.
  * Non-busy errors throw immediately.
  */
-export async function sqliteYieldRetry<T>(fn: () => T): Promise<T> {
-  const deadline = Date.now() + SQLITE_BUSY_RETRY_BUDGET_MS;
+export async function sqliteYieldRetry<T>(
+  fn: () => T,
+  budgetMs: number = SQLITE_BUSY_RETRY_BUDGET_MS
+): Promise<T> {
+  const deadline = Date.now() + budgetMs;
   for (;;) {
     try {
       return fn();

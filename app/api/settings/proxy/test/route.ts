@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { dataSourceFetch, resolveDataSourceProxy } from "@/lib/data-source-fetch";
 import { safeProxyHostForLog } from "@/lib/proxy-fetch";
 import { enforceRateLimit } from "@/lib/rate-limit";
@@ -18,7 +18,8 @@ const CANARY_TIMEOUT_MS = 8_000;
  * Rate-limited: it performs a real outbound request.
  */
 export async function POST(request: NextRequest) {
-  const userId = resolveRequestUserId(request, {});
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "settings-proxy-test", { limit: 10, windowMs: 60_000 });
   if (limited) return limited;
 

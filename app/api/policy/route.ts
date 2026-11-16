@@ -1,3 +1,5 @@
+import { brokerReadOrInternalError, jsonError, parseRequestJson, resolveRequestUserIdOrApiError } from "@/lib/api-error";
+import { PolicyUpdateSchema } from "@/lib/policy-update-schema";
 import { DEFAULT_POLICY, DEFAULT_TAX_SETTINGS } from "@/lib/defaults";
 import {
   getActiveConnectedAccount,
@@ -8,13 +10,13 @@ import {
   setPolicy,
   setStrategyPrompt
 } from "@/lib/db";
-import { llmModelFamily, modelCredentialService } from "@/lib/llm-provider";
+import { codeCliOnlyModelServable, llmModelFamily, modelCredentialService } from "@/lib/llm-provider";
 import { isModelRotationSentinel } from "@/lib/llm-request";
+import { normalizeRotationModelSelection } from "@/lib/model-rotation-selection";
 import { isIndexUniverse, normalizeIncludedIndices } from "@/lib/index-universes";
 import { getBrokerGateway } from "@/lib/broker";
 import { stripNullsDeep } from "@/lib/policy-null-stripping";
 import { normalizeExclusivePolicyCaps } from "@/lib/policy-normalization";
-import { resolveRequestUserId } from "@/lib/request-user";
 import {
   invalidSymbolMessage,
   newlyAddedInvalidSymbols,
@@ -39,16 +41,26 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  return NextResponse.json(getPolicy(resolveRequestUserId(request)));
+  const userId = resolveRequestUserIdOrApiError(request);
+  if (userId instanceof Response) return userId;
+  try {
+    return NextResponse.json(getPolicy(userId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 export async function PUT(request: Request) {
-  const rawBody: unknown = await request.json();
-  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-    return new NextResponse("Policy update body must be a JSON object.", { status: 400 });
+  const parsed = await parseRequestJson(request);
+  if (!parsed.ok) return parsed.response;
+  const validation = PolicyUpdateSchema.safeParse(parsed.body);
+  if (!validation.success) {
+    return jsonError(400, "invalid_payload", "Invalid policy update payload.");
   }
-  const body = rawBody as Record<string, unknown>;
-  const userId = resolveRequestUserId(request, body);
+  const body = validation.data as Record<string, unknown>;
+  const userId = resolveRequestUserIdOrApiError(request);
+  if (userId instanceof Response) return userId;
+  try {
   const requestedTarget = body.targetConnectedAccountId;
   if (requestedTarget !== undefined && (typeof requestedTarget !== "string" || requestedTarget.trim().length === 0)) {
     return new NextResponse("targetConnectedAccountId must be a non-empty string.", { status: 400 });
@@ -158,6 +170,14 @@ export async function PUT(request: Request) {
   if (body.learningReviewModel === null) {
     return new NextResponse("learningReviewModel must be a non-empty model id.", { status: 400 });
   }
+  // ST-4589 rotation sets: validate + canonicalise only what THIS request sends (a `null` clears
+  // via stripNullsDeep below, exactly like the fallback lists).
+  for (const field of ["llmRotationModels", "redTeamRotationModels"] as const) {
+    if (!Object.prototype.hasOwnProperty.call(body, field) || body[field] === null) continue;
+    const normalized = normalizeRotationModelSelection(field, body[field]);
+    if (!normalized.ok) return new NextResponse(normalized.error, { status: 400 });
+    policy[field] = normalized.value;
+  }
   stripNullsDeep(policy as unknown as Record<string, unknown>);
   const capFields = ["maxOrderNotional", "maxOrderPctOfNav", "maxDailyNotional", "maxDailyPctOfNav"] as const;
   const capPreference = capFields.some((key) => Object.prototype.hasOwnProperty.call(body, key))
@@ -224,6 +244,9 @@ export async function PUT(request: Request) {
     return new NextResponse("The target connected account changed before this update could be saved.", { status: 409 });
   }
   return NextResponse.json(getPolicy(userId, targetConnectedAccountId));
+  } catch (error) {
+    return brokerReadOrInternalError(error);
+  }
 }
 
 async function validatePolicy(
@@ -273,6 +296,9 @@ async function validatePolicy(
   // from credential-resolvable models (src/lib/model-rotation.ts), so the keyed guarantee is upheld
   // at serve time, not save time.
   if ((options.enforceKeyedGreenModelRule ?? true) && typeof policy.llmModel === "string" && policy.llmModel.trim() && !isModelRotationSentinel(policy.llmModel)) {
+    if (!codeCliOnlyModelServable(policy.llmModel, userId)) {
+      return `${policy.llmModel.trim()} runs only through the Code CLI route; choose Code CLI for Meta in Settings before selecting it as your strategist (green team) model.`;
+    }
     // Match the user's actual OpenRouter-first/native-fallback execution path.
     const provider = modelCredentialService(policy.llmModel, userId);
     if (!resolveLlmCredential(provider, userId).key) {
@@ -282,6 +308,9 @@ async function validatePolicy(
     }
   }
   if ((options.enforceKeyedRedModelRule ?? true) && typeof policy.redTeamLlmModel === "string" && policy.redTeamLlmModel.trim() && !isModelRotationSentinel(policy.redTeamLlmModel)) {
+    if (!codeCliOnlyModelServable(policy.redTeamLlmModel, userId)) {
+      return `${policy.redTeamLlmModel.trim()} runs only through the Code CLI route; choose Code CLI for Meta in Settings before selecting it as your reviewer (red team) model.`;
+    }
     const provider = modelCredentialService(policy.redTeamLlmModel, userId);
     if (!resolveLlmCredential(provider, userId).key) {
       return provider === "openrouter"

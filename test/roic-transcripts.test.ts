@@ -1,10 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { shouldDeferBackgroundRagForStrategy, shouldSkipWholeIndexInventory } from "../src/lib/db-execution";
 import {
+  fetchRoicCallIndex,
+  readRoicCursor,
+  refreshRoicTranscriptsIfDue,
   parseRoicEarningsCallList,
   parseRoicTranscriptResponse,
   publishedAtIso,
   recentFiscalPeriods,
+  resetRoicTranscriptRateHold,
   roleOfSpeaker,
   roicRefreshDueFromState,
   roicTranscriptAccession,
@@ -12,9 +19,243 @@ import {
   speakerTurnsFromRoicPayload,
   transcriptTextFromRoicPayload
 } from "../src/lib/web-sources/roic-transcripts";
+import { listOpenApiCircuitBreakers, observePaidQuoteStatus, quoteProvider402HoldMs, resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
+import { apiKeyFingerprint } from "../src/lib/data-providers";
 import { roicTranscriptQuartersForPlan } from "../src/lib/provider-tier-plan";
+import { resetProviderQuotaState, resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 
 describe("roic-transcripts", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetProviderRateLimiterState("roic");
+    resetProviderQuotaState("roic");
+    resetRoicTranscriptRateHold();
+    resetApiCircuitBreaker();
+  });
+
+  it("retries one ROIC list 429 with a second reserved call", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-retry-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response("slow", { status: 429, headers: { "Retry-After": "0" } });
+      return new Response(JSON.stringify({
+        data: [{ symbol: "AAPL", fiscal_year: 2024, fiscal_quarter: 1, date: "2024-02-01" }]
+      }), { status: 200 });
+    }));
+    try {
+      const started = Date.now();
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+      expect(result.rows).toHaveLength(1);
+      expect(calls).toBe(2);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("skips a ROIC list retry when Retry-After exceeds the transcript ceiling", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-skip-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "120" } });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBe(1);
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBe(1);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
+      const currentTime = Date.now();
+      const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(currentTime + 120_001);
+      try {
+        const afterHold = await fetchRoicCallIndex("MSFT");
+        expect(afterHold.rows).toEqual([]);
+        expect(calls).toBe(2);
+      } finally {
+        dateNowSpy.mockRestore();
+      }
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("holds later ROIC transcript calls after a 402 without opening the quote lane", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-402-${randomUUID()}.db`)}`;
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("no credit", { status: 402 });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBe(1);
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBe(1);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
+      const currentTime = Date.now();
+      const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(currentTime + quoteProvider402HoldMs() + 1);
+      try {
+        const afterHold = await fetchRoicCallIndex("MSFT");
+        expect(afterHold.rows).toEqual([]);
+        expect(calls).toBe(2);
+      } finally {
+        dateNowSpy.mockRestore();
+      }
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+    }
+  });
+
+  it("does not hold ROIC transcripts when the circuit breaker is disabled", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-breaker-off-${randomUUID()}.db`)}`;
+    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
+    resetProviderQuotaState("roic");
+    resetProviderRateLimiterState("roic");
+    resetRoicTranscriptRateHold();
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("slow", { status: 429, headers: { "Retry-After": "120" } });
+    }));
+    try {
+      const result = await fetchRoicCallIndex("AAPL");
+      expect(result.rows).toEqual([]);
+      expect(calls).toBeGreaterThan(1);
+      const callsAfterAapl = calls;
+      const again = await fetchRoicCallIndex("MSFT");
+      expect(again.rows).toEqual([]);
+      expect(calls).toBeGreaterThan(callsAfterAapl);
+      expect(listOpenApiCircuitBreakers()).toEqual([]);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
+    }
+  });
+
+  it("keeps queued symbols when a transcript 402 holds the credential", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-queue-${randomUUID()}.db`)}`;
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response("no credit", { status: 402 });
+    }));
+    try {
+      delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      resetProviderQuotaState("roic");
+      resetProviderRateLimiterState("roic");
+      resetRoicTranscriptRateHold();
+      const result = await refreshRoicTranscriptsIfDue({
+        force: true,
+        symbols: ["AAPL", "MSFT"],
+        phase: "latest"
+      });
+      expect(result.pausedForProviderHold).toBe(true);
+      expect(result.skippedNoContent).toBe(0);
+      expect(result.remaining).toBe(2);
+      expect(readRoicCursor()?.queue).toEqual(["AAPL", "MSFT"]);
+      expect(calls).toBe(1);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
+      if (originalTranscripts === undefined) delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      else process.env.ROIC_TRANSCRIPTS_DISABLED = originalTranscripts;
+    }
+  });
+
+  it("keeps queued symbols while the paid-quote lane is cooling", async () => {
+    const originalKey = process.env.ROIC_API_KEY;
+    const originalDb = process.env.DATABASE_URL;
+    const originalBreaker = process.env.API_CIRCUIT_BREAKER_DISABLED;
+    const originalTranscripts = process.env.ROIC_TRANSCRIPTS_DISABLED;
+    process.env.ROIC_API_KEY = "roic-transcript-test";
+    process.env.DATABASE_URL = `file:${join(tmpdir(), `roic-transcript-quote-hold-${randomUUID()}.db`)}`;
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }));
+    try {
+      delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      resetProviderQuotaState("roic");
+      resetProviderRateLimiterState("roic");
+      resetRoicTranscriptRateHold();
+      resetApiCircuitBreaker();
+      const credentialId = await apiKeyFingerprint("roic-transcript-test");
+      observePaidQuoteStatus("roic", "env", 402, undefined, Date.now(), credentialId);
+      const result = await refreshRoicTranscriptsIfDue({
+        force: true,
+        symbols: ["AAPL", "MSFT"],
+        phase: "latest"
+      });
+      expect(result.pausedForProviderHold).toBe(true);
+      expect(result.skippedNoContent).toBe(0);
+      expect(result.remaining).toBe(2);
+      expect(readRoicCursor()?.queue).toEqual(["AAPL", "MSFT"]);
+      expect(calls).toBe(0);
+    } finally {
+      if (originalKey === undefined) delete process.env.ROIC_API_KEY;
+      else process.env.ROIC_API_KEY = originalKey;
+      if (originalDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDb;
+      if (originalBreaker === undefined) delete process.env.API_CIRCUIT_BREAKER_DISABLED;
+      else process.env.API_CIRCUIT_BREAKER_DISABLED = originalBreaker;
+      if (originalTranscripts === undefined) delete process.env.ROIC_TRANSCRIPTS_DISABLED;
+      else process.env.ROIC_TRANSCRIPTS_DISABLED = originalTranscripts;
+    }
+  });
+
   it("parses valid transcript JSON response with content string", () => {
     const raw = {
       symbol: "AAPL",

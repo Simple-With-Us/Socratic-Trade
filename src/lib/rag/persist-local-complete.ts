@@ -117,7 +117,11 @@ export function hasLocalFilingCopy(accession: string): boolean {
   try {
     const call = db.prepare(`
       SELECT 1 FROM earningscalls_transcripts
-      WHERE content IS NOT NULL AND length(content) > 80
+      WHERE content IS NOT NULL
+        AND (
+          plaintext_length > 80
+          OR (plaintext_length IS NULL AND length(content) > 80)
+        )
         AND (
           lower(symbol) = lower(?)
           OR source_meta LIKE ?

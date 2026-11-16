@@ -1151,7 +1151,10 @@ async function generatePostMortemLessons(
           // nightly Learning Review. That made the single highest-quality artifact the system produces
           // effectively unreadable to the system. The marker skips the LLM layer only; the keyword
           // layer still runs, so a lesson naming an actual risk knob is still queued for approval.
-          provenance: "system-postmortem"
+          provenance: "system-postmortem",
+          // Conditioning keys so regime / thesis relevance scoring can rank this lesson (ST-4589 B4).
+          regime: decisionCase.regime ?? null,
+          thesisTag: decisionCase.thesisTag ?? null
         },
         "autonomous",
         {

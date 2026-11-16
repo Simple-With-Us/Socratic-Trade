@@ -1,12 +1,13 @@
 [Unit]
 Description=Socratic-Trade Docker container restart monitor (oneshot sample)
-Documentation=https://github.com/jaywedgeworth22/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
+Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/runbooks/st-container-restart-monitor.md
 After=docker.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 Nice=10
+EnvironmentFile=-/etc/default/st-host-cron-sentry
 EnvironmentFile=-/etc/default/st-container-restart-monitor
-ExecStart=/usr/local/sbin/st-container-restart-monitor.sh
+ExecStart=/usr/local/sbin/sentry-cron-checkin.py wrap --monitor-slug st-host-st-container-restart-monitor --schedule "2,17,32,47 * * * *" --checkin-margin 20 --max-runtime 15 -- /usr/local/sbin/st-container-restart-monitor.sh
 SyslogIdentifier=st-restart-monitor

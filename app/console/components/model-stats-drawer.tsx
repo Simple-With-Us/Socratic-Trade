@@ -73,14 +73,31 @@ interface ModelRoleStats {
   avgTokensPerCall?: number | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
+  callsWithTokens?: number;
+  // Same-class predecessor ESTIMATES (src/lib/model-stats.ts). Every figure above is this model's
+  // own data; these are separate, labelled "est." in the UI and never counted as live.
   inheritedFrom?: string | null;
   isInherited?: boolean;
-  inheritedClosedTrades?: number;
   costInheritedFrom?: string | null;
   latencyInheritedFrom?: string | null;
   perfInheritedFrom?: string | null;
   vetoInheritedFrom?: string | null;
-  callsWithTokens?: number;
+  inheritedCalls?: number;
+  inheritedCostPerCall?: number | null;
+  inheritedAvgTokensPerCall?: number | null;
+  inheritedPromptTokensPerCall?: number | null;
+  inheritedCompletionTokensPerCall?: number | null;
+  inheritedP50LatencyMs?: number | null;
+  inheritedLatencySamples?: number;
+  inheritedPerf?: ModelPerf | null;
+  inheritedClosedTrades?: number;
+  inheritedReviewerPerf?: ReviewerPerf | null;
+  modelClass?: string | null;
+  modelClassLabel?: string | null;
+  /** Concrete model an alias row last resolved to (llm_usage.served_model). */
+  servedModel?: string;
+  /** Catalog native slug an alias row is expected to resolve to, when nothing is recorded yet. */
+  expectedModel?: string;
   p50LatencyMs: number | null;
   latencySamples: number;
   benchmarkCostUsd: number | null;
@@ -121,6 +138,18 @@ function fmtTokens(v: number): string {
   return Math.round(v).toLocaleString();
 }
 
+/** Chip for a same-class predecessor estimate. Never shown next to a live chip for the same number. */
+function EstimateChip({ from, n, what }: { from: string; n?: number; what?: string }) {
+  return (
+    <Chip
+      tone="muted"
+      title={`Estimated from predecessor model ${from} (same class); not this model's own calls.${n ? `${SENTENCE_GAP}Based on its ${n} ${what ?? "live calls"}.` : ""}`}
+    >
+      est. from {from}
+    </Chip>
+  );
+}
+
 function CostCell({ s }: { s: ModelRoleStats | undefined }) {
   if (s && s.liveCalls >= LIVE_MIN_SAMPLES && s.avgCostUsd !== null) {
     return (
@@ -129,11 +158,14 @@ function CostCell({ s }: { s: ModelRoleStats | undefined }) {
         <Chip tone="accent" title={`Average cost per call over your last ${s.liveCalls} real calls in this role.`}>
           live · n={s.liveCalls}
         </Chip>
-        {s.costInheritedFrom && (
-          <Chip tone="muted" title={`Cost rolled forward from predecessor model ${s.costInheritedFrom}`}>
-            from {s.costInheritedFrom}
-          </Chip>
-        )}
+      </span>
+    );
+  }
+  if (s && s.costInheritedFrom && s.inheritedCostPerCall != null) {
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span className="con-num">{fmtCost(s.inheritedCostPerCall)}</span>
+        <EstimateChip from={s.costInheritedFrom} n={s.inheritedCalls} />
       </span>
     );
   }
@@ -149,6 +181,21 @@ function CostCell({ s }: { s: ModelRoleStats | undefined }) {
 }
 
 function TokensCell({ s }: { s: ModelRoleStats | undefined }) {
+  if (s && !(s.avgTokensPerCall != null && s.avgTokensPerCall > 0) && s.costInheritedFrom && s.inheritedAvgTokensPerCall) {
+    const prompt = s.inheritedPromptTokensPerCall;
+    const comp = s.inheritedCompletionTokensPerCall;
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span className="con-num">{fmtTokens(s.inheritedAvgTokensPerCall)}</span>
+        {prompt != null && comp != null && (
+          <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            ({fmtTokens(prompt)}/{fmtTokens(comp)})
+          </span>
+        )}
+        <EstimateChip from={s.costInheritedFrom} n={s.inheritedCalls} />
+      </span>
+    );
+  }
   if (s && s.avgTokensPerCall != null && s.avgTokensPerCall > 0) {
     const tokenCalls = s.callsWithTokens && s.callsWithTokens > 0 ? s.callsWithTokens : s.liveCalls;
     const prompt = s.promptTokens != null && tokenCalls > 0 ? Math.round(s.promptTokens / tokenCalls) : null;
@@ -193,11 +240,14 @@ function LatencyCell({ s }: { s: ModelRoleStats | undefined }) {
         <Chip tone="accent" title={`Median (p50) of your last ${s.latencySamples} successful real calls in this role.`}>
           live · n={s.latencySamples}
         </Chip>
-        {s.latencyInheritedFrom && (
-          <Chip tone="muted" title={`Latency rolled forward from predecessor model ${s.latencyInheritedFrom}`}>
-            from {s.latencyInheritedFrom}
-          </Chip>
-        )}
+      </span>
+    );
+  }
+  if (s && s.latencyInheritedFrom && s.inheritedP50LatencyMs != null) {
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span className="con-num">{fmtLatency(s.inheritedP50LatencyMs)}</span>
+        <EstimateChip from={s.latencyInheritedFrom} n={s.inheritedLatencySamples} what="successful live calls" />
       </span>
     );
   }
@@ -212,37 +262,69 @@ function LatencyCell({ s }: { s: ModelRoleStats | undefined }) {
   return <Dash />;
 }
 
+/** Which figure a performance cell shows: the model's OWN results whenever it has any (even a
+ *  small sample, flagged as an early read), the same-class predecessor ESTIMATE only when it has
+ *  none of its own, else nothing.  Real own results are never hidden behind an estimate.  Pure so
+ *  it is unit-testable without rendering (test/model-stats-drawer.test.ts). */
+export type PerfSource = "own" | "estimate" | "none";
+
+export function greenPerfSource(
+  s: Pick<ModelRoleStats, "closedTrades" | "perf" | "inheritedPerf" | "perfInheritedFrom"> | undefined
+): PerfSource {
+  if (s && (s.closedTrades ?? 0) > 0 && s.perf) return "own";
+  if (s && s.inheritedPerf && s.perfInheritedFrom) return "estimate";
+  return "none";
+}
+
+export function vetoPerfSource(
+  s: Pick<ModelRoleStats, "reviewerPerf" | "inheritedReviewerPerf" | "vetoInheritedFrom"> | undefined
+): PerfSource {
+  if (s?.reviewerPerf && s.reviewerPerf.maturedVetoes > 0) return "own";
+  if (s?.inheritedReviewerPerf && s.vetoInheritedFrom) return "estimate";
+  return "none";
+}
+
 /** Reviewer (Red Team) veto value-add — the RED-role 4th column. NOT win-rate: it reports the
  *  counterfactual outcome of the proposals this model vetoed. HIGHER good-veto % is better, and
  *  a NEGATIVE avg counterfactual return is GOOD (the veto avoided losses), so the avg is toned
- *  via redTeamReturnTone (negative → the positive/"pos" tone). Gated on 20/50 matured vetoes
- *  with the same helpers as the Results page 'Red Team veto efficacy' scorecard. */
+ *  via redTeamReturnTone (negative → the positive/"pos" tone).  Below the 20 matured-veto gate the
+ *  model's own figure still shows, flagged as an early read; the predecessor estimate shows only
+ *  when the model has no matured vetoes of its own. */
 function ReviewerPerfCell({ s }: { s: ModelRoleStats | undefined }) {
+  const source = vetoPerfSource(s);
   const n = s?.reviewerPerf?.maturedVetoes ?? 0;
-  if (!s || !s.reviewerPerf || n < RED_TEAM_EFFICACY_MIN_RESOLVED) {
+  if (source === "estimate" && s?.inheritedReviewerPerf && s.vetoInheritedFrom) {
+    const est = s.inheritedReviewerPerf;
+    const estTone = redTeamReturnTone(est.avgReturnPct);
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span className="con-num">
+          {est.vetoValueAddRate.toFixed(0)}% good vetoes · avg{" "}
+          <span style={estTone === "muted" ? undefined : { color: TONE_VAR[estTone] }}>{fmtSignedPct(est.avgReturnPct)}</span>
+        </span>
+        <EstimateChip from={s.vetoInheritedFrom} n={est.maturedVetoes} what="matured vetoes" />
+      </span>
+    );
+  }
+  if (source !== "own" || !s?.reviewerPerf) {
     return <span className="whitespace-nowrap text-[color:var(--con-faint)]">— {redTeamSampleGate(n)}</span>;
   }
   const { vetoValueAddRate, avgReturnPct } = s.reviewerPerf;
   const avgTone = redTeamReturnTone(avgReturnPct);
   const tier = redTeamSampleTier(n);
-  const vetoFrom = s.vetoInheritedFrom;
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <span className="con-num">
         {vetoValueAddRate.toFixed(0)}% good vetoes · avg{" "}
         <span style={avgTone === "muted" ? undefined : { color: TONE_VAR[avgTone] }}>{fmtSignedPct(avgReturnPct)}</span>
       </span>
-      {vetoFrom ? (
-        <Chip tone="accent" title={`Veto efficacy rolled forward from predecessor model ${vetoFrom} (${n} matured vetoes).`}>
-          from {vetoFrom} (n={n})
-        </Chip>
-      ) : tier === "caution" ? (
-        <Chip tone="warn" title={`Only ${n} matured vetoes — treat this as an early read, not an established edge.`}>
+      {tier === "ready" ? (
+        <Chip title={`${n} matured blocking vetoes attributed to this reviewer model; negative avg = losses avoided.`}>
           {redTeamSampleGate(n)}
         </Chip>
       ) : (
-        <Chip title={`${n} matured blocking vetoes attributed to this reviewer model; negative avg = losses avoided.`}>
-          {redTeamSampleGate(n)}
+        <Chip tone="warn" title={`Only ${n} matured vetoes — treat this as an early read, not an established edge.`}>
+          small sample (n={n})
         </Chip>
       )}
     </span>
@@ -251,8 +333,19 @@ function ReviewerPerfCell({ s }: { s: ModelRoleStats | undefined }) {
 
 function PerfCell({ s, role }: { s: ModelRoleStats | undefined; role: Exclude<PickerRole, "strategist"> }) {
   if (role === "red-team") return <ReviewerPerfCell s={s} />;
+  const source = greenPerfSource(s);
   const n = s?.closedTrades ?? 0;
-  if (!s || n < PERF_MIN_TRADES || !s.perf) {
+  if (source === "estimate" && s?.inheritedPerf && s.perfInheritedFrom) {
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <span className="con-num">
+          {s.inheritedPerf.winRate.toFixed(0)}% win · avg {fmtSignedPct(s.inheritedPerf.avgPnlPct)}
+        </span>
+        <EstimateChip from={s.perfInheritedFrom} n={s.inheritedClosedTrades} what="closed trades" />
+      </span>
+    );
+  }
+  if (source !== "own" || !s?.perf) {
     return (
       <span className="whitespace-nowrap text-[color:var(--con-faint)]">
         — needs ≥{PERF_MIN_TRADES} closed trades (n={n})
@@ -260,17 +353,12 @@ function PerfCell({ s, role }: { s: ModelRoleStats | undefined; role: Exclude<Pi
     );
   }
   const { winRate, avgPnlPct } = s.perf;
-  const perfFrom = s.perfInheritedFrom;
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <span className="con-num">
         {winRate.toFixed(0)}% win · avg {fmtSignedPct(avgPnlPct)}
       </span>
-      {perfFrom && s.inheritedClosedTrades ? (
-        <Chip tone="accent" title={`Realized performance rolled forward from predecessor model ${perfFrom} (${s.inheritedClosedTrades} closed trades) because this model has ${s.closedTrades} closed trades.`}>
-          from {perfFrom} (n={s.inheritedClosedTrades})
-        </Chip>
-      ) : n < PERF_SOLID_TRADES ? (
+      {n < PERF_SOLID_TRADES ? (
         <Chip tone="warn" title={`Only ${n} closed trades — treat this as an early read, not an established edge.`}>
           small sample (n={n})
         </Chip>
@@ -376,9 +464,9 @@ export function ModelStatsButton({ role }: { role: PickerRole }) {
               </>
             ) : (
               <>
-                Cost, latency, token usage, and realized performance per call for every model in this picker.  Figures marked <strong>live</strong> come from your own
-                recent calls in this role{data ? (data.sinceDays > 0 ? ` (last ${data.sinceDays} days)` : " (all time)") : ""}; models without enough live traffic fall
-                back to predecessor lineage or a standardized offline <strong>benchmark</strong> run{data ? ` (most recently updated ${new Date(data.benchmark.runAt).toLocaleDateString(undefined, { timeZone: "America/Chicago" })})` : ""}.
+                Cost, latency, token usage, and realized performance per call for every model in this picker.{SENTENCE_GAP}Figures marked <strong>live</strong> come from your own
+                recent calls in this role{data ? (data.sinceDays > 0 ? ` (last ${data.sinceDays} days)` : " (all time)") : ""}; models without enough live traffic show an
+                estimate from their same-class predecessor (labelled <strong>est.</strong>) or a standardized offline <strong>benchmark</strong> run{data ? ` (most recently updated ${new Date(data.benchmark.runAt).toLocaleDateString(undefined, { timeZone: "America/Chicago" })})` : ""}.
               </>
             )}
           </p>
@@ -494,9 +582,14 @@ function ProviderRows({
             )}
             <td className="whitespace-nowrap font-medium">
               <span>{model}</span>
-              {s?.isInherited && s.inheritedFrom && (
+              {s?.modelClassLabel && (
                 <span className="block text-[length:10px] text-[color:var(--con-muted)] font-normal">
-                  lineage: {s.inheritedFrom}
+                  class: {s.modelClassLabel}
+                </span>
+              )}
+              {(s?.servedModel || s?.expectedModel) && (
+                <span className="block text-[length:10px] text-[color:var(--con-muted)] font-normal">
+                  {s.servedModel ? `currently → ${s.servedModel}` : `expected → ${s.expectedModel}`}
                 </span>
               )}
             </td>

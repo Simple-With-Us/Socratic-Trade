@@ -27,6 +27,16 @@ export function __resetHealthSnapshotForTests(): void {
   healthRefreshInFlight = false;
 }
 
+export type { HeavyRecomputePermission, HeavySectionResult } from "@/lib/health-heavy-probe";
+export {
+  __resetHeavyHealthSectionsForTests,
+  admitAnonymousHeavyHealthProbe,
+  heavyHealthClientKey,
+  heavyHealthSectionTtlMs,
+  onceHeavyRecomputePermission,
+  runHeavyHealthSection
+} from "@/lib/health-heavy-probe";
+
 /**
  * Production keeps a short memory snapshot so Sentry's ~8s uptime GET does not
  * wait on SQLite or OpenRouter.  Vitest defaults to 0 (always assemble) unless

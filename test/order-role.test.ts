@@ -311,6 +311,28 @@ describe("loadOrderRoleContexts — DB-backed", () => {
     expect(ctx?.protectiveStop).toEqual({ kind: "fixed", stopPrice: 38.5, trailPercent: undefined });
   });
 
+  it("matches a synthetic_trailing_stops row by parentClientOrderId when clientOrderId is absent", () => {
+    const accountNumber = freshAccountNumber();
+    db.upsertSyntheticStop({
+      id: randomUUID(),
+      userId: "local",
+      accountNumber,
+      symbol: "T",
+      side: "long",
+      quantity: 10,
+      entryPrice: 20,
+      extremePrice: 22,
+      trailPercent: 6,
+      status: "triggered",
+      lastAttemptRefId: "sstop-parent-ref"
+    });
+    const contexts = orderRoleContext.loadOrderRoleContexts(
+      [{ id: "leg-only-parent", clientOrderId: undefined, parentClientOrderId: "sstop-parent-ref", symbol: "T" }],
+      { userId: "local", accountNumber }
+    );
+    expect(contexts.get("leg-only-parent")?.syntheticStop).toEqual({ trailPercent: 6 });
+  });
+
   it("matches a synthetic_trailing_stops row by last_attempt_ref_id", () => {
     const accountNumber = freshAccountNumber();
     db.upsertSyntheticStop({

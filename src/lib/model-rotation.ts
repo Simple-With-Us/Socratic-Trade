@@ -41,8 +41,8 @@
 // pointer rows are no longer read or written (account-deletion cleanup still recognizes the
 // prefix for old rows).
 import { audit, getDb, resolveLlmCredential } from "./db";
-import { CATALOG_ROTATION_POOL } from "./llm-model-catalog";
-import { modelCredentialService, normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
+import { CATALOG_ROTATION_POOL, isCodeCliOnlyModel } from "./llm-model-catalog";
+import { codeCliOnlyModelServable, modelCredentialService, modelServableOnUserRoute,normalizeOpenRouterModelId, stripOpenRouterTilde } from "./llm-provider";
 import { isModelRotationSentinel, LLM_MODEL_ROTATION_SENTINEL } from "./llm-request";
 import { isSameModelLine } from "./model-identity";
 import {
@@ -52,6 +52,7 @@ import {
   type RotationSeatPinResolution
 } from "./model-rotation-pin";
 import { recommendedReasoningEffortForModel } from "./model-reasoning-recommendations";
+import { catalogRotationSelection } from "./model-rotation-selection";
 import { getOpenRouterUserModelAvailability, isOpenRouterModelAvailable } from "./openrouter-model-availability";
 import type { LlmReasoningEffort } from "./types";
 
@@ -368,30 +369,35 @@ export function planRotationImplicitFallbacks(input: {
   redPrimary?: string | null;
   explicitGreenFallbacks?: readonly string[];
   explicitRedFallbacks?: readonly string[];
+  /** ST-4589: when a seat rotates over the owner's selection, its rotation pool above is that
+   *  selection and this is the whole default pool.  The chain tries the selected models first,
+   *  then the ordinary implicit chain from this pool, so a run still completes if every selected
+   *  model is down.  Absent = no selection (chain unchanged). */
+  greenRotationBackupPool?: readonly string[];
+  redRotationBackupPool?: readonly string[];
   now?: number;
 }): { green: string[]; red: string[] } {
   const now = input.now ?? Date.now();
   const without = (pool: readonly string[], others: Array<string | null | undefined>): string[] =>
     pool.filter((model) => !others.some((other) => isSameModelLine(model, other)));
+  const chain = (
+    pool: readonly string[],
+    backup: readonly string[] | undefined,
+    pick: string,
+    others: Array<string | null | undefined>
+  ): string[] => {
+    const selected = implicitGreenRotationFallbacks(without(pool, others), pick, [], now, input.userId);
+    if (!backup) return selected;
+    const rest = implicitGreenRotationFallbacks(without(backup, others), pick, selected, now, input.userId);
+    return [...selected, ...rest].slice(0, Math.min(ROTATION_IMPLICIT_GREEN_FAILOVERS, ROTATION_IMPLICIT_FAILOVER_HARD_CAP));
+  };
   const green =
     input.greenRotationPool && input.greenPick && (input.explicitGreenFallbacks ?? []).length === 0
-      ? implicitGreenRotationFallbacks(
-          without(input.greenRotationPool, [input.redPrimary, input.redPick]),
-          input.greenPick,
-          [],
-          now,
-          input.userId
-        )
+      ? chain(input.greenRotationPool, input.greenRotationBackupPool, input.greenPick, [input.redPrimary, input.redPick])
       : [];
   const red =
     input.redRotationPool && input.redPick && (input.explicitRedFallbacks ?? []).length === 0
-      ? implicitGreenRotationFallbacks(
-          without(input.redRotationPool, [input.greenPrimary, input.greenPick]),
-          input.redPick,
-          [],
-          now,
-          input.userId
-        )
+      ? chain(input.redRotationPool, input.redRotationBackupPool, input.redPick, [input.greenPrimary, input.greenPick])
       : [];
   return { green, red };
 }
@@ -515,11 +521,38 @@ export interface EligibleRotationPool {
   availabilityError?: string;
 }
 
-export async function eligibleRotationPool(userId: string): Promise<EligibleRotationPool> {
+export async function eligibleRotationPool(
+  userId: string,
+  /** ST-4589: catalog models the owner ticked that are NOT in the default pool (e.g. a model
+   *  excluded for cost).  They go through the same credential + availability checks; callers keep
+   *  them out of the default pool themselves.  Empty = the pre-ST-4589 candidate list exactly. */
+  extraCandidates: readonly string[] = []
+): Promise<EligibleRotationPool> {
+  const candidates = [...MODEL_ROTATION_POOL, ...extraCandidates.filter((model) => !MODEL_ROTATION_POOL.includes(model))];
+  // Code CLI-only models run nowhere else: eligible only while this user's Meta route is a ready
+  // Code CLI route, so neither a pick nor an implicit failover can land on an unservable id.  When
+  // they ARE servable they bypass the OpenRouter /models/user allowlist below (OpenRouter never
+  // lists them; the Code CLI broker serves them).
+  const cliOnly = candidates.filter((model) => isCodeCliOnlyModel(model));
+  const cliOnlyReady = cliOnly.filter((model) => codeCliOnlyModelServable(model, userId));
+  const cliOnlyBlocked = cliOnly.filter((model) => !cliOnlyReady.includes(model));
+  // A Meta model the Code CLI broker cannot serve (Glimmer) is unservable while this user's Meta
+  // route is Code CLI: resolveLlmEndpoint would refuse it, so it is neither picked nor a failover.
+  const others = candidates.filter((model) => !isCodeCliOnlyModel(model));
+  const routeBlocked = others.filter((model) => !modelServableOnUserRoute(model, userId));
+  const rest = await eligibleApiRotationPool(userId, others.filter((model) => !routeBlocked.includes(model)));
+  return {
+    ...rest,
+    pool: [...rest.pool, ...cliOnlyReady],
+    skipped: [...rest.skipped, ...routeBlocked, ...cliOnlyBlocked]
+  };
+}
+
+async function eligibleApiRotationPool(userId: string, candidates: readonly string[]): Promise<EligibleRotationPool> {
   const skipped: string[] = [];
   const isTest = process.env.NODE_ENV === "test";
   const credentialPool: string[] = [];
-  for (const model of MODEL_ROTATION_POOL) {
+  for (const model of candidates) {
     // Match execution: prefer this user's OpenRouter key, then the native family credential.
     if (resolveLlmCredential(modelCredentialService(model, userId), userId).key) credentialPool.push(model);
     else skipped.push(model);
@@ -635,7 +668,14 @@ export async function resolveModelRotationForRun(input: {
   // The pin rides on the policy beside the sentinel (review "rank 6" controlled model test). The
   // narrow structural type here is what lets the full TradingPolicy flow through without a cast:
   // the owner of types.ts adds the same optional field to TradingPolicy and no call site changes.
-  policy: { llmModel?: string | null; redTeamLlmModel?: string | null; rotationPin?: ModelRotationPin | null };
+  policy: {
+    llmModel?: string | null;
+    redTeamLlmModel?: string | null;
+    rotationPin?: ModelRotationPin | null;
+    /** ST-4589 owner-chosen rotation sets (catalog display slugs); empty/absent = whole pool. */
+    llmRotationModels?: string[] | null;
+    redTeamRotationModels?: string[] | null;
+  };
   random?: () => number;
 }): Promise<{
   llmModel?: string;
@@ -659,6 +699,10 @@ export async function resolveModelRotationForRun(input: {
    *  not hold every opening for human approval under Autopilot (2026-09-24 fix), and never offers
    *  Green's own model as Red's fallback (review round 2026-09-25). */
   redRotationPool?: string[];
+  /** ST-4589: present only when a seat rotated over the owner's selection — the whole default
+   *  pool, for `planRotationImplicitFallbacks` to append after the selected models. */
+  greenRotationBackupPool?: string[];
+  redRotationBackupPool?: string[];
   /** The controlled-experiment pin in force for this run (review "rank 6", 2026-09-25): what was
    *  forced, which weights were overridden, and every receipt. Present ONLY when a pin is
    *  configured on the policy — an unpinned run is byte-identical to the pre-pin behavior, which
@@ -670,9 +714,47 @@ export async function resolveModelRotationForRun(input: {
   const rotateRed = isModelRotationSentinel(input.policy.redTeamLlmModel);
   if (!rotateGreen && !rotateRed) return { commit: () => {} };
   try {
-    const { pool: credentialPool, skipped, availability, availabilityError } = await eligibleRotationPool(input.userId);
-    const pool = rotationPoolExcludingCooldown(credentialPool, input.userId);
-    if (pool.length === 0) {
+    // ST-4589: each rotating seat may carry the owner's own rotation set.  Ticked models outside
+    // the default pool (excluded for cost) are checked for eligibility too — the owner's explicit
+    // tick overrides the default exclusion — but never leak into the default pool below.
+    const greenSelection = rotateGreen ? seatRotationSelection(input.policy.llmRotationModels) : undefined;
+    const redSelection = rotateRed ? seatRotationSelection(input.policy.redTeamRotationModels) : undefined;
+    const extraCandidates = [...(greenSelection?.models ?? []), ...(redSelection?.models ?? [])].filter(
+      (model) => !MODEL_ROTATION_POOL.includes(model)
+    );
+    const { pool: credentialPool, skipped, availability, availabilityError } = await eligibleRotationPool(
+      input.userId,
+      extraCandidates
+    );
+    // Identical to the pre-ST-4589 pool when no selection adds extra candidates.
+    const pool = rotationPoolExcludingCooldown(
+      extraCandidates.length > 0 ? credentialPool.filter((model) => MODEL_ROTATION_POOL.includes(model)) : credentialPool,
+      input.userId
+    );
+    // A seat's base pool: its selection ∩ eligible (credentials + availability + cooldown), or the
+    // whole pool when nothing is selected — or when the selection filters down to nothing eligible
+    // (`selectionFallback`, recorded on the pick audit, never thrown).
+    const now = Date.now();
+    const selectionPool = (selection: SeatRotationSelection | undefined): string[] =>
+      selection
+        ? selection.models.filter(
+            (model) => credentialPool.includes(model) && !isOpenRouterModelCoolingDown(model, now, input.userId)
+          )
+        : [];
+    const greenSelected = selectionPool(greenSelection);
+    const redSelected = selectionPool(redSelection);
+    const greenBase = greenSelected.length > 0 ? greenSelected : pool;
+    const redBase = redSelected.length > 0 ? redSelected : pool;
+    const selectionReceipt = (selection: SeatRotationSelection | undefined, selected: string[]) =>
+      selection?.configured
+        ? {
+            selection: selection.models,
+            ...(selection.ignored.length > 0 ? { selectionIgnored: selection.ignored } : {}),
+            selectionPoolSize: selected.length,
+            selectionFallback: selected.length === 0
+          }
+        : {};
+    if ((!rotateGreen || greenBase.length === 0) && (!rotateRed || redBase.length === 0)) {
       // No provider credential resolves at all — no eligible model to rotate to. Under no-defaults
       // (owner 2026-07-07: DEFAULT_OPENAI_MODEL removed) there is nothing to substitute, so resolve
       // the rotating seat(s) to "" — the SAME unconfigured/fail-closed state any model-less policy
@@ -707,7 +789,7 @@ export async function resolveModelRotationForRun(input: {
     // rotation exactly.  A pin that is present but wholly invalid is NOT a reason to serve nothing
     // — it degrades to learned rotation and leaves a receipt (see model-rotation-pin.ts).
     const pinConfigured = input.policy.rotationPin !== null && input.policy.rotationPin !== undefined;
-    const greenCandidates = greenFirstPickPool(pool);
+    const greenCandidates = greenFirstPickPool(greenBase);
     const greenPin = rotateGreen
       ? resolveRotationSeatPin({
           pin: input.policy.rotationPin,
@@ -739,8 +821,12 @@ export async function resolveModelRotationForRun(input: {
     // any spelling of it matches) — and this reduced pool is what `redRotationPool` exposes, so
     // Red's implicit failover chain is built from it too.
     const greenSeatModel = greenPick?.model ?? (rotateGreen ? undefined : input.policy.llmModel?.trim() || undefined);
-    const poolWithoutGreen = greenSeatModel ? pool.filter((model) => !isSameModelLine(model, greenSeatModel)) : pool;
-    const redPoolCandidates = poolWithoutGreen.length > 0 ? poolWithoutGreen : pool;
+    // ST-4589: with an owner selection, Red's base is that selection; if it holds ONLY Green's
+    // model, the same 1-model degenerate rule applies (Red serves it) — unchanged edge behaviour.
+    const poolWithoutGreen = greenSeatModel
+      ? redBase.filter((model) => !isSameModelLine(model, greenSeatModel))
+      : redBase;
+    const redPoolCandidates = poolWithoutGreen.length > 0 ? poolWithoutGreen : redBase;
     // Red's pin is validated against the RED seat's pool (already minus Green's model) and is told
     // which model Green serves, so a pin can never route around the same-model guarantee.
     const redPin = rotateRed
@@ -812,6 +898,11 @@ export async function resolveModelRotationForRun(input: {
             weight: pick.weight,
             representation: pick.representation,
             poolSize: pool.length,
+            // ST-4589 receipts — absent when the seat has no owner selection, so an unselected
+            // pick audit is byte-identical to the pre-ST-4589 payload.
+            ...(seat === "green"
+              ? selectionReceipt(greenSelection, greenSelected)
+              : selectionReceipt(redSelection, redSelected)),
             // Controlled-experiment receipts (review "rank 6").  `pinned: true` is what lets a
             // later per-model report separate experiment runs from learned rotation — and what
             // keeps them out of the representation ledger (rotationSeatRepresentation).
@@ -839,10 +930,20 @@ export async function resolveModelRotationForRun(input: {
         out.redTeamReasoningEffort = reasoningEffort;
       }
     }
+    // A rotating seat whose own pool came up empty (possible only when a selection made the other
+    // seat's pool non-empty) fails closed to "" like the empty-pool path — never the sentinel.
+    const seatEmpty = (rotateGreen && !greenPick) || (rotateRed && !redPick);
+    if (rotateGreen && !greenPick) out.llmModel = "";
+    if (rotateRed && !redPick) out.redTeamLlmModel = "";
     return {
       ...out,
-      ...(rotateGreen && pool.length > 0 ? { greenRotationPool: greenPool } : {}),
-      ...(rotateRed && redPool.length > 0 ? { redRotationPool: redPool } : {}),
+      ...(seatEmpty ? { emptyReason: "empty_pool" as const } : {}),
+      ...(rotateGreen && greenPick && greenPool.length > 0 ? { greenRotationPool: greenPool } : {}),
+      ...(rotateRed && redPick && redPool.length > 0 ? { redRotationPool: redPool } : {}),
+      // The backup pool feeds the implicit failover chain too, so a model a pin weighted to 0 for
+      // this seat must stay out of it exactly as it stays out of the seat pool.
+      ...(rotateGreen && greenPick && greenSelected.length > 0 ? { greenRotationBackupPool: excludeZeroWeighted(pool, greenPin?.weightOverrides) } : {}),
+      ...(rotateRed && redPick && redSelected.length > 0 ? { redRotationBackupPool: excludeZeroWeighted(pool, redPin?.weightOverrides) } : {}),
       ...(pinReport ? { rotationPin: pinReport } : {}),
       commit: () => {
         for (const runCommit of commits) runCommit();
@@ -860,6 +961,21 @@ export async function resolveModelRotationForRun(input: {
       commit: () => {}
     };
   }
+}
+
+/** One seat's owner rotation set (ST-4589), read from the stored policy. */
+interface SeatRotationSelection {
+  /** True when the stored list is a non-empty array — the owner asked for a restricted rotation. */
+  configured: boolean;
+  /** Catalog display slugs, catalog order. */
+  models: string[];
+  /** Stored entries rotation cannot serve (not catalog models). */
+  ignored: string[];
+}
+
+function seatRotationSelection(raw: unknown): SeatRotationSelection {
+  const { models, ignored } = catalogRotationSelection(raw);
+  return { configured: Array.isArray(raw) && raw.length > 0, models, ignored };
 }
 
 /** Drop the models a pin weighted to 0 from a seat's candidates (and from the pool handed to the

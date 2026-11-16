@@ -5,7 +5,7 @@
 **Date:** 2026-07-20  
 **Branch / worktree:** `agent/ios-phase-5` @ `code-socratictrade/grok`  
 **Mode:** Read-only multi-agent panel (12 specialists). No production mutations.  
-**Identity:** GROK4 (Slack / agent-sync)  
+**Identity:** GROK4 (Slack / ag***-s**c)  
 **Prior baseline:** `docs/reviews/2026-07-04-composite-expert-review.md` (Fable + Monet) — this review re-validates open items and adds post–July-4 surface area (iOS, Coolify/Hetzner, OpenRouter universal routing, dual-embed cutover, mobile).
 
 ---
@@ -306,6 +306,6 @@ Highest ROI is not more features: **honest run outcomes**, **finish embed cutove
 
 - This document: `docs/reviews/2026-07-20-grok4-multi-expert-full-app-review.md`
 - Effort board: `/Users/jay/apps/TRADING-EFFORT-LOG.md` + `docs/EFFORT-LOG.md` (GROK4 full multi-expert review)
-- Slack: #agent-sync as **GROK4**
+- Slack: #ag***-s**c as **GROK4**
 
 **Bottom line:** The product’s *decision quality stack* advanced materially since July 4; the next ceiling is **honest operational truth** (budget/RAG/protection state), **finishing the embed cutover**, and **shipping-grade mobile/iOS + security residuals** — not more strategy features.

@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
-import { audit } from "@/lib/db";
 import { fetchRealtimeQuotes } from "@/lib/market-realtime";
 import { verifySecuritiesImportToken } from "@/lib/securities-import-auth";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
+import {
+  bestEffortAudit,
+  isSqliteBusyErrorCode,
+  peerReadRouteSqliteRetry,
+  peerReadSqliteContentionResponse
+} from "@/lib/sqlite-peer-read";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +27,7 @@ const MAX_SYMBOLS = 200;
 
 export async function GET(req: Request) {
   if (!verifySecuritiesImportToken(req)) {
-    audit("market_read_rejected", { reason: "token", route: "quotes" });
+    bestEffortAudit("market_read_rejected", { reason: "token", route: "quotes" });
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const rateLimitResp = enforceRateLimit("peer-app", "peer-read", RATE_LIMITS.peerRead);
@@ -39,7 +44,13 @@ export async function GET(req: Request) {
   }
 
   const allowDelayed = ["1", "true", "yes"].includes((sp.get("allowDelayed") ?? "").toLowerCase());
-  const quotes = await fetchRealtimeQuotes(symbols, undefined, { allowDelayed });
+  let quotes;
+  try {
+    quotes = await peerReadRouteSqliteRetry(() => fetchRealtimeQuotes(symbols, undefined, { allowDelayed }));
+  } catch (err) {
+    if (isSqliteBusyErrorCode(err)) return peerReadSqliteContentionResponse();
+    throw err;
+  }
   // The top-level field is the moment we SERVED the response — not the freshness of
   // any quote inside it (per-quote freshness lives on each quote's own `at` field;
   // see /api/market/quotes peer routes that already use `servedAt`).  Older code
