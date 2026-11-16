@@ -17,6 +17,8 @@
 .env*.local
 **/.env.local
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
 .next/
 node_modules/
 .npm-cache/
