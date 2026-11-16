@@ -5,11 +5,13 @@ import { getTradierGateway } from "./tradier";
 import { getEToroGateway } from "./etoro";
 import { getPublicGateway } from "./public-broker";
 import { getWebullGateway } from "./webull";
+import { getKalshiGateway } from "./kalshi-broker";
 import { audit, getActiveConnectedAccount, getConnectedAccount } from "./db";
 import { deriveExecutionState } from "./execution-mode";
 import { assertLivePreflight } from "./preflight-live-guard";
 import { applyOrderConstraints, OrderConstraintBlockedError, toConstraintBrokerId } from "./broker-order-constraints";
 import { accountMutationSerializationEnabled, hasActiveLocalBrokerMutationClaim } from "./account-mutation";
+import { withPositionInvariant } from "./order-position-invariant";
 
 function resolveGateway(policy: TradingPolicy, userId: string): BrokerGateway {
   if (policy.activeBroker === "alpaca" || policy.activeBroker === "alpaca-mcp") {
@@ -35,6 +37,9 @@ function resolveGateway(policy: TradingPolicy, userId: string): BrokerGateway {
   }
   if (policy.activeBroker === "webull") {
     return getWebullGateway(userId, policy.connectedAccountId);
+  }
+  if (policy.activeBroker === "kalshi") {
+    return getKalshiGateway(userId, policy.connectedAccountId);
   }
   // No connected account: an account is an account, and with none connected the app cannot
   // place orders. There is no local-simulation fallback.
@@ -193,11 +198,17 @@ function withMutationLeaseReceipt(gateway: BrokerGateway, policy: TradingPolicy,
 }
 
 export function getBrokerGateway(policy: TradingPolicy, userId: string = "local"): BrokerGateway {
-  // Composition order: the live preflight (outermost) authorizes the attempt, then the
-  // constraint tables validate/reshape the order, then the mutation-lease receipt backstop
-  // observes, then the adapter runs its own checks.
+  // Composition order: the live preflight (outermost) authorizes the attempt, then the position
+  // invariant (order-position-invariant.ts) reads the FRESH broker position and refuses/clamps/
+  // re-verbs closing orders (a sell only ever reduces a long; a cover only ever reduces a short),
+  // then the constraint tables validate/reshape the order shape, then the mutation-lease receipt
+  // backstop observes, then the adapter runs its own checks.
   return withLivePreflight(
-    withOrderConstraints(withMutationLeaseReceipt(resolveGateway(policy, userId), policy, userId), policy, userId),
+    withPositionInvariant(
+      withOrderConstraints(withMutationLeaseReceipt(resolveGateway(policy, userId), policy, userId), policy, userId),
+      policy,
+      userId
+    ),
     policy,
     userId
   );

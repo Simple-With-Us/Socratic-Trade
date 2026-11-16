@@ -30,7 +30,7 @@ opened PR, and this fleet's PR volume already OOM-wedged (2026-07-07) and disk-f
 
 - `prod.jays.services` A record — an alias of PRODUCTION (same Coolify app), useful for
   origin testing without touching the apex. Not a preview.
-- Tunnel CNAMEs for non-trading Mac services: `agent-sync`, `remote`, `ssh`.
+- Tunnel CNAMEs for non-trading Mac services: `ag***-s**c`, `remote`, `ssh`.
 - The per-agent worktrees and `agent/*` branches — the editing/landing workflow is
   unchanged; only the public preview hosting is gone.
 

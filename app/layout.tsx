@@ -2,11 +2,18 @@ import "./globals.css";
 import type { Metadata, Viewport } from "next";
 import { lato } from "./fonts/lato";
 import { ThemeProvider, themeInitScript } from "./ui/theme";
-import { Toaster } from "sonner";
+import { ThemedToaster } from "./ui/toaster";
 import { GlobalErrorToasts } from "./ui/global-error-toasts";
 import { pwaUnregisterScript } from "@/lib/pwa-unregister";
 import { resolvePublicRumConfig } from "@/lib/datadog-env";
 import { DatadogRumBoot } from "./ui/datadog-rum-boot";
+
+// This layout does not read headers() and does not force dynamic rendering.
+// The theme and PWA scripts below are constant, so the nonce policy allows them
+// by sha256 (LAYOUT_SCRIPT_HASHES).  /welcome, /privacy-policy, and
+// /terms-and-conditions keep hourly ISR.  Their full inline-script hashes are
+// stamped into the middleware bundle from that build's HTML.  See
+// docs/rollouts/2026-11-10-st-2789-nonce-csp.md.
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://socratictrade.com"),
@@ -68,6 +75,11 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   // lato.variable puts --font-lato on <html>, so both globals.css (--font-sans) and console.css
   // (--con-font-lato) can resolve it — the console mounts deep inside <body>, not here.
+  // Theme bootstrap and the PWA kill-switch are the only inline scripts in this layout.
+  // They are allowed by sha256, not by a per-request nonce, so this shell can stay static.
+  // Sentry and Datadog ship inside the Next bundle.  On dynamic routes Next nonces those
+  // scripts from the request CSP.  Cloudflare Web Analytics is not in this repo; an
+  // edge-injected beacon cannot receive a nonce or one of these hashes.
   return (
     <html lang="en" className={lato.variable} suppressHydrationWarning>
       <head>
@@ -79,7 +91,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {children}
           <DatadogRumBoot config={resolvePublicRumConfig()} />
           <GlobalErrorToasts />
-          <Toaster theme="system" position="bottom-right" />
+          <ThemedToaster />
         </ThemeProvider>
       </body>
     </html>

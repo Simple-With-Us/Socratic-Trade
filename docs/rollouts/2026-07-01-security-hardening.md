@@ -73,6 +73,8 @@ CSP/X-Frame-Options/Referrer-Policy existed anywhere.
   `CSP_ENABLED` is truthy, and defaults to `Content-Security-Policy-Report-Only`
   unless `CSP_REPORT_ONLY` is explicitly off (then enforcing). `CSP_POLICY`
   overrides the built-in conservative starter policy.
+  Superseded for the directive string by ST-2789 (`docs/rollouts/2026-11-10-st-2789-nonce-csp.md`):
+  the default policy is now a per-request nonce.  The CSP_ENABLED / CSP_REPORT_ONLY / CSP_POLICY gates are unchanged.
 
 ### New env flags introduced
 - `CSP_ENABLED` (default off) — turn CSP header emission on.

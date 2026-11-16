@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer as createHangServer, type Server as HangServer, type Socket as HangSocket } from "node:net";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
-import { getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
+import { resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
+import { __resetProxyFetchForTests, sharedProxyConcurrencyGate } from "../src/lib/proxy-fetch";
+import { audit, getDb, getPolicy, latestAuditByKind, resetDbForTesting, setPolicy, upsertConnectedAccount } from "../src/lib/db";
+import { userIdForEmail } from "../src/lib/auth/identity";
+import { AUTHENTICATED_IDENTITY_SOURCE_HEADER, AUTHENTICATED_IDENTITY_SOURCES } from "../src/lib/auth/strip-identity";
+import { markAccountIdentityDeleted } from "../src/lib/user-write-fence";
 import { isUnusableEmptyMarketScan } from "../src/lib/scan-singleflight";
 import {
   clearMarketCache,
@@ -20,6 +27,7 @@ import {
 } from "../src/lib/nasdaq-screener-fetch";
 import { AUTHENTICATED_EMAIL_HEADER, resolveRequestUserFromEmail } from "../src/lib/request-user";
 import { BROWSER_UA } from "../src/lib/web-sources/http";
+import { resetProviderRateLimiterState } from "../src/lib/provider-rate-limit";
 import { marketScanQuotesFromAudit } from "../src/lib/scan-singleflight";
 import { GET as scanGet } from "../app/api/scan/route";
 
@@ -30,6 +38,9 @@ beforeAll(() => {
 
 beforeEach(() => {
   clearMarketCache();
+  // Fake-timer tests stamp the shared pacer with a clock that is not wall time.
+  // A leftover lastDispatchAt makes the next real scan sleep until its deadline.
+  resetProviderRateLimiterState();
 });
 
 afterEach(() => {
@@ -47,6 +58,25 @@ describe("empty screener + expired seed", () => {
       returnedQuotes: 0
     });
     await expect(scanMarket(["AAPL"], [])).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+  });
+
+  it("forwards userId into Yahoo chart fallback when v7 misses on empty screener", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "miss" });
+    const yahoo = await import("../src/lib/yahoo-finance");
+    const chartSpy = vi.spyOn(yahoo, "fetchYahooFinanceChartQuotes");
+    const userId = "empty-screener-chart-user";
+
+    try {
+      await expect(
+        scanMarket(["AAPL"], [], undefined, userId, [], { enrichmentMode: "skip" })
+      ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+
+      expect(chartSpy).toHaveBeenCalled();
+      const chartOptions = chartSpy.mock.calls[0]?.[1];
+      expect(chartOptions?.userId).toBe(userId);
+    } finally {
+      chartSpy.mockRestore();
+    }
   });
 
   it("Yahoo-fallbacks the whole allowed set, including index members, when the screener is empty", async () => {
@@ -73,7 +103,7 @@ describe("empty screener + expired seed", () => {
     });
   });
 
-  it("uses a last-good seed before Yahoo-pricing the whole allowed set", async () => {
+  it("uses a last-good seed after Yahoo and broker recovery both miss", async () => {
     let yahooCalls = 0;
     vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
       const url = String(request);
@@ -111,7 +141,7 @@ describe("empty screener + expired seed", () => {
       }
     });
 
-    expect(yahooCalls).toBe(0);
+    expect(yahooCalls).toBeGreaterThan(0);
     expect(scan.topCandidates.map((quote) => quote.symbol).sort()).toEqual(["AAPL", "MSFT"]);
     expect(scan.warnings.join(" ")).toContain("stale fallback");
   });
@@ -291,7 +321,8 @@ describe("fetchNasdaqScreener transport", () => {
         caught = error;
       }
     );
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS * NASDAQ_SCREENER_ATTEMPTS);
+    // Two proxied attempts plus the final direct-egress attempt (ST-3999), each bounded by 15s.
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS * (NASDAQ_SCREENER_ATTEMPTS + 1) + 5_000);
     await pending;
     expect(caught).toBeInstanceOf(ScanQuotesUnavailableError);
     const unavailable = caught as ScanQuotesUnavailableError;
@@ -390,7 +421,7 @@ describe("fetchNasdaqScreener transport", () => {
     });
 
     const pending = scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS + 5_000);
     const scan = await pending;
     expect(nasdaqCalls).toBe(2);
     expect(scan.returnedQuotes).toBe(1);
@@ -402,9 +433,8 @@ describe("fetchNasdaqScreener transport", () => {
     const market = readFileSync(join(process.cwd(), "src/lib/market.ts"), "utf8");
     const congress = readFileSync(join(process.cwd(), "src/lib/congress-share.ts"), "utf8");
     const helper = readFileSync(join(process.cwd(), "src/lib/nasdaq-screener-fetch.ts"), "utf8");
-    expect(market).toMatch(/"User-Agent": BROWSER_UA/);
-    expect(market).toContain("fetchWithRetry");
-    expect(market).toContain('Origin: "https://www.nasdaq.com"');
+    expect(market).toContain("fetchNasdaqScreenerResponse");
+    expect(market).toContain("readNasdaqScreenerJson");
     expect(market).not.toMatch(/"user-agent": "Mozilla\/5\.0"/);
     expect(congress).toContain("fetchNasdaqScreenerResponse");
     expect(congress).not.toContain('"Mozilla/5.0"');
@@ -432,10 +462,27 @@ describe("fetchNasdaqScreener transport", () => {
       return new Response(JSON.stringify({ data: { table: { rows: [] } } }), { status: 200 });
     });
     const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener");
-    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(NASDAQ_SCREENER_TIMEOUT_MS + 5_000);
     const response = await pending;
     expect(response.ok).toBe(true);
     expect(calls).toBe(2);
+  });
+
+  it("does not retry when the caller deadline aborts the screener", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    vi.stubGlobal("fetch", (_request: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1;
+      return new Promise((_resolve, reject) => {
+        const fail = () => reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+        if (init?.signal?.aborted) fail();
+        else init?.signal?.addEventListener("abort", fail, { once: true });
+      });
+    });
+    const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener", { signal: controller.signal });
+    controller.abort(new Error("Interactive market scan deadline exceeded."));
+    await expect(pending).rejects.toThrow(/deadline exceeded/);
+    expect(calls).toBe(1);
   });
 });
 
@@ -517,6 +564,430 @@ describe("GET /api/scan empty-screener contract", () => {
     expect(body.warnings?.join(" ") ?? "").not.toMatch(/universe has no symbols/i);
     expect(latestAuditByKind("market_scan_failed", userId)?.kind).toBe("market_scan_failed");
     expect(latestAuditByKind("market_scan", userId)).toBeUndefined();
+  });
+
+  it("returns the last good scan with stale:true when refresh fails and one exists", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "miss", nasdaqAbort: true });
+    const { userId } = resolveRequestUserFromEmail("scan-stale@example.com");
+    upsertConnectedAccount({
+      id: `scan-stale-${userId}`,
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "TEST",
+      label: "Scan stale test",
+      isActive: true
+    });
+    const policy = getPolicy(userId);
+    setPolicy({
+      ...policy,
+      includedIndices: [],
+      additionalSymbols: ["AAPL"],
+      blocklist: []
+    }, userId);
+    const generatedAt = "2026-10-12T06:29:00.000Z";
+    audit("market_scan", {
+      scan: {
+        source: "nasdaq-delayed-screener",
+        generatedAt,
+        scannedSymbols: 1,
+        returnedQuotes: 1,
+        topCandidates: [{ symbol: "AAPL", price: 10, score: 1 }],
+        sectorBySymbol: { AAPL: "Technology" },
+        // No numeric score: the interactive seed loader rejects the row, so refresh
+        // fails closed, while newestPersistedMarketScan still treats the scan as last-good.
+        quotesBySymbol: { AAPL: { symbol: "AAPL", price: 10 } },
+        warnings: []
+      }
+    }, userId, policy.connectedAccountId);
+
+    const res = await scanGet(
+      new Request("https://trading.example.com/api/scan", {
+        headers: { [AUTHENTICATED_EMAIL_HEADER]: "scan-stale@example.com" }
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as { stale?: boolean; staleReason?: string; generatedAt?: string; topCandidates?: Array<{ symbol?: string }> };
+    expect(body.stale).toBe(true);
+    expect(body.staleReason).toMatch(/aborted|unavailable|Quotes/i);
+    expect(body.generatedAt).toBe(generatedAt);
+    expect(body.topCandidates?.[0]?.symbol).toBe("AAPL");
+    expect(latestAuditByKind("market_scan_failed", userId)).toBeTruthy();
+  });
+
+  it("returns 401 instead of user local's last-good scan when identity resolution fails", async () => {
+    const generatedAt = "2026-10-12T06:29:00.000Z";
+    audit("market_scan", {
+      scan: {
+        source: "nasdaq-delayed-screener",
+        generatedAt,
+        scannedSymbols: 1,
+        returnedQuotes: 1,
+        topCandidates: [{ symbol: "LOCALONLY", price: 10, score: 1 }],
+        sectorBySymbol: { LOCALONLY: "Technology" },
+        quotesBySymbol: { LOCALONLY: { symbol: "LOCALONLY", price: 10, score: 1 } },
+        warnings: []
+      }
+    }, "local");
+    const email = "scan-fenced@example.com";
+    const fencedUserId = userIdForEmail(email);
+    markAccountIdentityDeleted(getDb(), fencedUserId, fencedUserId, "2026-10-01T00:00:00.000Z");
+
+    const res = await scanGet(
+      new Request("https://trading.example.com/api/scan", {
+        headers: {
+          [AUTHENTICATED_EMAIL_HEADER]: email,
+          [AUTHENTICATED_IDENTITY_SOURCE_HEADER]: AUTHENTICATED_IDENTITY_SOURCES.authJsSession
+        }
+      })
+    );
+    expect(res.status).toBe(401);
+    const body = await res.json() as { error?: string; stale?: boolean; topCandidates?: Array<{ symbol?: string }> };
+    expect(body.error).toMatch(/sign-in|sign in|session/i);
+    expect(body.stale).toBeUndefined();
+    expect(body.topCandidates).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("LOCALONLY");
+  });
+
+  it("does not cache a Nasdaq body that fails schema validation", async () => {
+    let nasdaqCalls = 0;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("api.nasdaq.com")) {
+        nasdaqCalls += 1;
+        const body = nasdaqCalls === 1
+          ? { unexpected: true }
+          : {
+              data: {
+                asof: "2026-08-18",
+                table: {
+                  rows: [{
+                    symbol: "AAPL",
+                    name: "Apple",
+                    lastsale: "$210",
+                    pctchange: "1%",
+                    volume: "1000000",
+                    marketCap: "3000000000000",
+                    sector: "Technology",
+                    industry: "Consumer Electronics"
+                  }]
+                }
+              }
+            };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await expect(scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" })).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
+    const scan = await scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
+    expect(nasdaqCalls).toBe(2);
+    expect(scan.topCandidates.map((quote) => quote.symbol)).toEqual(["AAPL"]);
+    expect(scan.quotesBySymbol.AAPL?.price).toBe(210);
+  });
+});
+
+describe("screener proxy-gate priority + direct fallback (ST-3999)", () => {
+  let savedProxyUrl: string | undefined;
+  let savedFailureMode: string | undefined;
+  let savedCap: string | undefined;
+
+  const AAPL_ROW = {
+    symbol: "AAPL",
+    name: "Apple Inc",
+    lastsale: "$210.50",
+    netchange: "2.5",
+    pctchange: "1.2%",
+    marketCap: "3000000000000",
+    volume: "1000000",
+    sector: "Technology",
+    industry: "Consumer Electronics"
+  };
+
+  function screenerRowsResponse(rows: unknown[]): Response {
+    return new Response(
+      JSON.stringify({ data: { asof: "2026-11-09", table: { rows } } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  }
+
+  function stubNasdaqHang(onDirectCall?: () => void): void {
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(request);
+      if (!url.includes("api.nasdaq.com")) {
+        return new Response("not found", { status: 404 });
+      }
+      onDirectCall?.();
+      await new Promise((_resolve, reject) => {
+        const fail = () => {
+          reject(Object.assign(new Error("This operation was aborted"), { name: "AbortError" }));
+        };
+        if (init?.signal?.aborted) fail();
+        else init?.signal?.addEventListener("abort", fail, { once: true });
+      });
+      return new Response("not found", { status: 404 });
+    });
+  }
+
+  /** TCP black hole: accepts connections and never answers (a hung proxy leg). */
+  async function startHangingTcpServer(): Promise<{ server: HangServer; port: number; sockets: HangSocket[] }> {
+    const sockets: HangSocket[] = [];
+    const server = createHangServer((socket) => {
+      socket.on("error", () => {});
+      sockets.push(socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    return { server, port, sockets };
+  }
+
+  async function stopHangingTcpServer(server: HangServer, sockets: HangSocket[]): Promise<void> {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  beforeEach(() => {
+    savedProxyUrl = process.env.RESIDENTIAL_PROXY_URL;
+    savedFailureMode = process.env.RESIDENTIAL_PROXY_FAILURE_MODE;
+    savedCap = process.env.PROXY_MAX_CONCURRENCY;
+    delete process.env.RESIDENTIAL_PROXY_FAILURE_MODE;
+    __resetProxyFetchForTests();
+    resetApiCircuitBreaker();
+  });
+
+  afterEach(() => {
+    if (savedProxyUrl === undefined) delete process.env.RESIDENTIAL_PROXY_URL;
+    else process.env.RESIDENTIAL_PROXY_URL = savedProxyUrl;
+    if (savedFailureMode === undefined) delete process.env.RESIDENTIAL_PROXY_FAILURE_MODE;
+    else process.env.RESIDENTIAL_PROXY_FAILURE_MODE = savedFailureMode;
+    if (savedCap === undefined) delete process.env.PROXY_MAX_CONCURRENCY;
+    else process.env.PROXY_MAX_CONCURRENCY = savedCap;
+    __resetProxyFetchForTests();
+  });
+
+  it("screener takes the reserved priority slot while the shared gate is saturated", async () => {
+    process.env.PROXY_MAX_CONCURRENCY = "1";
+    // Closed port: the proxy leg fails fast and fail_soft goes direct (the stub).
+    process.env.RESIDENTIAL_PROXY_URL = "http://127.0.0.1:1/";
+    const held = await sharedProxyConcurrencyGate.acquire();
+    try {
+      vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+        const url = String(request);
+        if (url.includes("api.nasdaq.com")) return screenerRowsResponse([AAPL_ROW]);
+        return new Response("not found", { status: 404 });
+      });
+      // Without the priority lane this would queue behind the held slot forever.
+      const scan = await scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
+      expect(scan.topCandidates.map((quote) => quote.symbol)).toEqual(["AAPL"]);
+      expect(scan.source).toContain("nasdaq-delayed-screener");
+      // The normal slot stayed held the whole time: the screener rode the reserved slot.
+      expect(sharedProxyConcurrencyGate.inFlight).toBe(1);
+    } finally {
+      held.release();
+    }
+  });
+
+  it("screener 15s budget excludes proxy-gate queue wait", async () => {
+    vi.useFakeTimers();
+    process.env.PROXY_MAX_CONCURRENCY = "1";
+    process.env.RESIDENTIAL_PROXY_URL = "http://127.0.0.1:1/";
+    // Occupy both the normal slot and the reserved slot so the screener queues.
+    const slotA = await sharedProxyConcurrencyGate.acquire();
+    const slotB = await sharedProxyConcurrencyGate.acquire(undefined, { priority: true });
+    try {
+      stubNasdaqHang();
+      // Capture, never rethrow: the derived promise must not sit rejected
+      // across the fake-timer advance (node flags that as unhandled).
+      let settled = false;
+      let caught: unknown;
+      const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener").then(
+        (response) => {
+          settled = true;
+          return response;
+        },
+        (error: unknown) => {
+          settled = true;
+          caught = error;
+          return undefined;
+        }
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      slotA.release();
+      slotB.release(); // grant with ~10s queue wait; the deadline extends to t0+25s
+      await vi.advanceTimersByTimeAsync(10_000); // t0+20s: past the un-extended deadline
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(5_000 + 15_000 + 15_000 + 30_000); // attempt1 fires, attempt2, final direct
+      await pending;
+      expect(settled).toBe(true);
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe(NASDAQ_SCREENER_TIMEOUT_MESSAGE);
+    } finally {
+      slotA.release();
+      slotB.release();
+    }
+  });
+
+  it("final direct attempt succeeds when the proxy hangs but direct egress answers", async () => {
+    vi.useFakeTimers();
+    const { server, port, sockets } = await startHangingTcpServer();
+    try {
+      process.env.RESIDENTIAL_PROXY_URL = `http://127.0.0.1:${port}`;
+      let directCalls = 0;
+      vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+        const url = String(request);
+        if (url.includes("api.nasdaq.com")) {
+          directCalls += 1;
+          return screenerRowsResponse([AAPL_ROW]);
+        }
+        return new Response("not found", { status: 404 });
+      });
+      const pending = scanMarket(["AAPL"], [], undefined, undefined, [], { enrichmentMode: "skip" });
+      await vi.advanceTimersByTimeAsync(15_000 + 15_000 + 30_000);
+      const scan = await pending;
+      expect(scan.topCandidates.map((quote) => quote.symbol)).toEqual(["AAPL"]);
+      expect(scan.source).toContain("nasdaq-delayed-screener");
+      // Both proxied attempts died on the caller timer with no fail_soft touch
+      // (caller cancellation never falls back); only the bypass went direct.
+      expect(directCalls).toBe(1);
+    } finally {
+      await stopHangingTcpServer(server, sockets);
+    }
+  });
+
+  it("skips the final direct attempt under fail_closed", async () => {
+    process.env.RESIDENTIAL_PROXY_URL = "http://127.0.0.1:1/";
+    process.env.RESIDENTIAL_PROXY_FAILURE_MODE = "fail_closed";
+    let directCalls = 0;
+    vi.stubGlobal("fetch", async () => {
+      directCalls += 1;
+      return screenerRowsResponse([AAPL_ROW]);
+    });
+    await expect(fetchNasdaqScreenerResponse("nasdaq-delayed-screener")).rejects.toThrow(/fail_closed/);
+    expect(directCalls).toBe(0);
+  });
+
+  it("never retries or bypasses once the parent signal fires", async () => {
+    vi.useFakeTimers();
+    // Hung proxy leg: the attempt hangs with no real I/O to complete, so the
+    // parent abort below lands mid-attempt deterministically (a failing proxy
+    // leg resolves on the real event loop, which fake-timer advancement does
+    // not interleave with deterministically).
+    const { server, port, sockets } = await startHangingTcpServer();
+    try {
+      process.env.RESIDENTIAL_PROXY_URL = `http://127.0.0.1:${port}`;
+      let directCalls = 0;
+      stubNasdaqHang(() => {
+        directCalls += 1;
+      });
+      const controller = new AbortController();
+      // Capture, never rethrow (see the queue-wait test above).
+      let caught: unknown;
+      const pending = fetchNasdaqScreenerResponse("nasdaq-delayed-screener", { signal: controller.signal }).then(
+        (response) => response,
+        (error: unknown) => {
+          caught = error;
+          return undefined;
+        }
+      );
+      await vi.advanceTimersByTimeAsync(5_000); // first proxied attempt in flight, hung on the proxy
+      controller.abort(new Error("parent scan deadline over."));
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pending;
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(/parent scan deadline over/);
+      // No second attempt and no final bypass: a bypass would have gone direct.
+      expect(directCalls).toBe(0);
+    } finally {
+      await stopHangingTcpServer(server, sockets);
+    }
+  });
+});
+
+describe("allowWholeSetYahooFallback (ST-3999 freshness fail-fast)", () => {
+  it("skips the whole-set Yahoo fallback and reports quotes unavailable when false", async () => {
+    let yahooCalls = 0;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("api.nasdaq.com")) {
+        return new Response(
+          JSON.stringify({ data: { asof: "2026-11-09", table: { rows: [] } } }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (url.includes("yahoo") || url.includes("/v7/finance/") || url.includes("/v8/finance/")) {
+        yahooCalls += 1;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    try {
+      await scanMarket(["AAPL", "MSFT"], [], undefined, undefined, [], {
+        enrichmentMode: "skip",
+        allowWholeSetYahooFallback: false
+      });
+      throw new Error("expected ScanQuotesUnavailableError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ScanQuotesUnavailableError);
+      const unavailable = error as ScanQuotesUnavailableError;
+      expect(unavailable.scannedSymbols).toBe(2);
+      expect(unavailable.returnedQuotes).toBe(0);
+      expect(unavailable.warnings.join(" ")).toMatch(/whole-set Yahoo fallback is disabled/);
+    }
+    expect(yahooCalls).toBe(0);
+  });
+
+  it("still uses a seed before skipping the Yahoo fallback when false", async () => {
+    let yahooCalls = 0;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL) => {
+      const url = String(request);
+      if (url.includes("api.nasdaq.com")) {
+        return new Response(
+          JSON.stringify({ data: { asof: "2026-11-09", table: { rows: [] } } }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (url.includes("yahoo") || url.includes("/v7/finance/") || url.includes("/v8/finance/")) {
+        yahooCalls += 1;
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const scan = await scanMarket(["AAPL", "MSFT"], [], undefined, undefined, [], {
+      enrichmentMode: "skip",
+      allowWholeSetYahooFallback: false,
+      seedEnrichment: {
+        AAPL: { symbol: "AAPL", price: 91, score: 44, peRatio: 15, intradayChangePct: -1, volume: 50_000 },
+        MSFT: { symbol: "MSFT", price: 400, score: 50, peRatio: 30, intradayChangePct: 1, volume: 20_000 }
+      }
+    });
+
+    expect(yahooCalls).toBe(0);
+    expect(scan.topCandidates.map((quote) => quote.symbol).sort()).toEqual(["AAPL", "MSFT"]);
+    expect(scan.warnings.join(" ")).toContain("stale fallback");
+  });
+});
+
+describe("allowWholeSetYahooFallback with a live, non-overlapping screener", () => {
+  it("keeps the Yahoo fallback when the screener answered but none of its rows are allowed", async () => {
+    stubFetches({
+      nasdaqRows: [{ symbol: "ZZZZ", name: "Other Co", lastsale: "$10.00", pctchange: "1.0%", netchange: "0.1", volume: "1000000", marketCap: "5000000000" }],
+      yahoo: "aapl"
+    });
+    const scan = await scanMarket(["AAPL"], [], undefined, undefined, [], {
+      enrichmentMode: "skip",
+      allowWholeSetYahooFallback: false
+    });
+    expect(scan.topCandidates.map((quote) => quote.symbol)).toContain("AAPL");
+  });
+
+  it("control: the same scan with an empty screener stays fail-fast (no Yahoo fallback)", async () => {
+    stubFetches({ nasdaqRows: [], yahoo: "aapl" });
+    await expect(
+      scanMarket(["AAPL"], [], undefined, undefined, [], {
+        enrichmentMode: "skip",
+        allowWholeSetYahooFallback: false
+      })
+    ).rejects.toBeInstanceOf(ScanQuotesUnavailableError);
   });
 });
 

@@ -61,6 +61,36 @@ describe("order provenance guard", () => {
     expect(gateway.placeEquityOrder).not.toHaveBeenCalled();
   });
 
+  it("does not auto-remediate a stale owner-placed GTC sell whose Alpaca UUID is not an app prefix", async () => {
+    const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
+    const { getDb } = await import("../src/lib/db");
+    const staleOwnerSell = order({
+      id: "owner-gtc-uuid",
+      side: "sell",
+      type: "limit",
+      state: "accepted",
+      clientOrderId: "6fa459ea-ee8a-3ca4-894e-db77e160355e",
+      createdAt: "2026-01-01T00:00:00.000Z"
+    });
+    const gateway = gatewayMock({ orders: [[staleOwnerSell]], positions: [position({ quantity: 10 })] });
+
+    const out = await autoRemediateStaleExitOrders({
+      userId: "local",
+      policy: paperPolicy(),
+      activeAccount: account("paper"),
+      gateway,
+      orders: [staleOwnerSell]
+    });
+
+    expect(out).toMatchObject({ attempted: 0, remediated: 0, deferred: 1 });
+    const row = getDb()
+      .prepare("SELECT 1 FROM order_replacements WHERE original_order_id = ?")
+      .get("owner-gtc-uuid");
+    expect(row).toBeUndefined();
+    expect(gateway.placeEquityOrder).not.toHaveBeenCalled();
+    expect(gateway.cancelEquityOrder).not.toHaveBeenCalled();
+  });
+
   it("does not auto-remediate a stale owner-placed GTC sell without clientOrderId", async () => {
     const { autoRemediateStaleExitOrders } = await import("../src/lib/order-replacement");
     const { getDb } = await import("../src/lib/db");
@@ -303,6 +333,104 @@ describe("order provenance guard", () => {
 
     expect(timeoutResult.placed).toBe(0);
     expect(reconcileGw.placeEquityOrder).not.toHaveBeenCalled();
+  });
+
+  // The owner-cancel tombstone is permanent and had no delete path anywhere in the repo, so it
+  // used to outlive the position it was written for.  A later re-entry into the same symbol is a
+  // position the owner never declined protection on; leaving it tombstoned left it NAKED forever.
+  it("retires the owner-cancel tombstone once the position is flat, so a re-entry is protected again", async () => {
+    const { reconcileBrokerProtectiveStops } = await import("../src/lib/broker-protective-stops");
+    const { hasOwnerCancelledProtectiveStop, recordOwnerCancelledProtectiveStop } = await import(
+      "../src/lib/order-provenance"
+    );
+    const { setPolicy } = await import("../src/lib/db");
+
+    const userId = "local";
+    const accountNumber = "PS-OWNER-CANCEL-REENTRY";
+    const policy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      accountNumber,
+      activeBroker: "robinhood",
+      robinhoodBrokerStops: true,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 8 }
+    };
+    setPolicy(policy, userId);
+
+    // The owner cancelled AAPL's app-managed protective stop while the position was open.
+    recordOwnerCancelledProtectiveStop(userId, accountNumber, "AAPL");
+    expect(hasOwnerCancelledProtectiveStop(userId, accountNumber, "AAPL")).toBe(true);
+
+    // Tick 1: AAPL has since been sold out.  `positions` here is a SUCCESSFUL broker snapshot
+    // (the caller returns early when the read throws), so AAPL's absence means genuinely flat.
+    const flatGw = gatewayMock({ orders: [[]] });
+    await reconcileBrokerProtectiveStops({
+      userId,
+      policy,
+      accountNumber,
+      gateway: flatGw,
+      positions: [position({ symbol: "MSFT", quantity: 5 })],
+      executionMode: "broker/live",
+      running: true,
+      orders: [],
+      ordersListed: true
+    });
+    expect(hasOwnerCancelledProtectiveStop(userId, accountNumber, "AAPL")).toBe(false);
+
+    // Tick 2: the owner re-enters AAPL.  This new position was never un-protected by anyone, so
+    // the reconciler must arm a protective stop for it.
+    const reentryGw = gatewayMock({ orders: [[]] });
+    const reentry = await reconcileBrokerProtectiveStops({
+      userId,
+      policy,
+      accountNumber,
+      gateway: reentryGw,
+      positions: [position({ symbol: "AAPL", quantity: 10 })],
+      executionMode: "broker/live",
+      running: true,
+      orders: [],
+      ordersListed: true
+    });
+
+    expect(reentryGw.placeEquityOrder).toHaveBeenCalled();
+    expect(reentry.placed).toBe(1);
+  });
+
+  it("keeps the owner-cancel tombstone while the un-protected position is still open", async () => {
+    const { reconcileBrokerProtectiveStops } = await import("../src/lib/broker-protective-stops");
+    const { hasOwnerCancelledProtectiveStop, recordOwnerCancelledProtectiveStop } = await import(
+      "../src/lib/order-provenance"
+    );
+    const { setPolicy } = await import("../src/lib/db");
+
+    const userId = "local";
+    const accountNumber = "PS-OWNER-CANCEL-STILL-OPEN";
+    const policy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      accountNumber,
+      activeBroker: "robinhood",
+      robinhoodBrokerStops: true,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 8 }
+    };
+    setPolicy(policy, userId);
+
+    recordOwnerCancelledProtectiveStop(userId, accountNumber, "AAPL");
+
+    const gw = gatewayMock({ orders: [[]] });
+    const result = await reconcileBrokerProtectiveStops({
+      userId,
+      policy,
+      accountNumber,
+      gateway: gw,
+      positions: [position({ symbol: "AAPL", quantity: 10 })],
+      executionMode: "broker/live",
+      running: true,
+      orders: [],
+      ordersListed: true
+    });
+
+    expect(hasOwnerCancelledProtectiveStop(userId, accountNumber, "AAPL")).toBe(true);
+    expect(result.placed).toBe(0);
+    expect(gw.placeEquityOrder).not.toHaveBeenCalled();
   });
 });
 

@@ -6,7 +6,7 @@
  *  into the console's hover highlight via .con-row. */
 
 import Link from "next/link";
-import { type ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 import type { EquityOrder, EquityPosition, PendingProposal } from "@/lib/types";
 import type { PeerAccountHolding, SymbolDeskExit, SymbolDeskLastCall } from "@/lib/symbol-desk";
 import { type ProtectionInfo } from "../lib/derive";
@@ -35,23 +35,21 @@ import {
 
 // ── Shared shells ────────────────────────────────────────────────────────────
 
-/** Bordered section block with an uppercase title (tooltip on the title). */
-function Section({ title, titleHint, children }: { title: string; titleHint: string; children: ReactNode }) {
-  return (
-    <section className="rounded-control border border-[color:var(--con-line)] p-3">
-      <h3 className="con-card-title mb-2 cursor-default">
-        <Tooltip content={titleHint}>{title}</Tooltip>
-      </h3>
-      {children}
-    </section>
-  );
+/** Existing visible sections stay open initially, but can be collapsed to shorten the drawer. */
+function Section(props: { title: string; titleHint: string; children: ReactNode }) {
+  return <Disclosure {...props} defaultOpen />;
 }
 
-/** Collapsible section for the deep-dive tail of the drawer. */
-function Disclosure({ title, titleHint, children, defaultOpen }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
+/** Native disclosure keeps keyboard toggling and the existing deep-dive closed defaults. */
+function Disclosure({ title, titleHint, children, defaultOpen = false }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
+  const hintId = useId();
   return (
     <details className="con-disclosure rounded-control border border-[color:var(--con-line)] px-3" open={defaultOpen}>
-      <summary><Tooltip content={titleHint}>{title}</Tooltip></summary>
+      <summary aria-label={title} aria-describedby={hintId} title={titleHint} className="group flex flex-wrap items-center gap-3 rounded-control py-3">
+        <h3 className="con-card-title">{title}</h3>
+        <span aria-hidden="true" className="con-disclosure-label ml-auto shrink-0 whitespace-nowrap" />
+        <span id={hintId} className="sr-only group-focus-visible:not-sr-only group-focus-visible:basis-full group-focus-visible:text-[length:var(--con-fs-sm)] group-focus-visible:text-[color:var(--con-muted)]">{titleHint}</span>
+      </summary>
       <div className="pb-3">{children}</div>
     </details>
   );

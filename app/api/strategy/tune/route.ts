@@ -10,7 +10,7 @@ import {
 } from "@/lib/db";
 import { ALL_LLM_REASONING_EFFORTS } from "@/lib/llm-request";
 import type { LlmReasoningEffort } from "@/lib/types";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { rateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { withTuningSingleFlight } from "@/lib/tuning-singleflight";
 import { rateLimitedOperationResponse } from "@/lib/operation-guard-response";
@@ -24,7 +24,8 @@ export async function POST(request: Request) {
     const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
     const reasoningEffort: LlmReasoningEffort | undefined =
       ALL_LLM_REASONING_EFFORTS.includes(body?.reasoningEffort) ? body.reasoningEffort : undefined;
-    const userId = resolveRequestUserId(request);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
 
     // P0 fix: pin the ACCOUNT being reviewed. Without this, proposeStrategyTuning silently fell back
     // to the global is_active connected account, which can differ from the account the user was
@@ -84,7 +85,8 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const rawAccountId = url.searchParams.get("connectedAccountId")?.trim();
   const explicitAccountId = rawAccountId ? rawAccountId : undefined;
@@ -111,7 +113,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const body = await request.json().catch(() => ({}));
   const reviewId = typeof body?.reviewId === "string" ? body.reviewId.trim() : "";
   const status = body?.status;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   approvalHomeToast,
   resolveApprovalExecutionMode,
+  toastForApproveResult,
   willPromptTypedApproval
 } from "../app/console/lib/approval-honesty";
 import { approvalIsLive } from "../app/console/approvals/triage";
@@ -53,5 +54,17 @@ describe("approve honesty: row.executionMode ?? currentMode", () => {
     expect(approvalHomeToast("busy").detail).toContain("\u00A0 ");
     expect(approvalHomeToast("blocked").title).toBe("Blocked at approval time");
     expect(approvalHomeToast("blocked").title).not.toBe("Approved");
+  });
+
+  it("shares card titles when a symbol is present and keeps home Approved without one", () => {
+    expect(toastForApproveResult({ status: "placed", symbol: "AAPL", side: "buy" })).toMatchObject({
+      tone: "pos",
+      title: "BUY AAPL placed"
+    });
+    expect(toastForApproveResult({ status: "filled", symbol: "AAPL", side: "sell" }).title).toBe("SELL AAPL filled");
+    expect(toastForApproveResult({ status: "paper", symbol: "AAPL", side: "short" }).title).toBe("SHORT AAPL filled (paper)");
+    expect(toastForApproveResult({ status: "busy", symbol: "AAPL", side: "buy" }).title).toBe("Approval is still busy");
+    expect(toastForApproveResult({ status: "busy", symbol: "AAPL", side: "buy" }).title).not.toBe("Approved");
+    expect(toastForApproveResult({ status: "placed" }).title).toBe("Approved");
   });
 });

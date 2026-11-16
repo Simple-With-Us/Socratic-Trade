@@ -128,9 +128,98 @@ const PAID_KEY_THRESHOLD_MS = 5_000;
 const DEFAULT_MAX_FILINGS_PER_RUN = 1;
 const DEFAULT_PAID_MAX_FILINGS_PER_RUN = 200;
 
+/**
+ * EDGAR form types the filing-discovery layer knows about.
+ *
+ * This used to be the literal `"10-K" | "10-Q"` inline in `FilingRef.docType`, which meant adding
+ * DEF 14A, S-1, 8-K or 13F to the backfill required a type change in three signatures plus every
+ * persisted value to be re-read. The list is the union of the forms this app can discover, fetch,
+ * parse and route; `(string & {})` keeps it OPEN on purpose, so a form EDGAR adds (or one already
+ * persisted by an earlier ingest) is a valid value rather than a type error — the open member
+ * preserves the old assignability of `FilingRef.docType` from any string, so every existing
+ * caller and every stored `doc_type` keeps working unchanged.
+ */
+export type FormType =
+  | "10-K"
+  | "10-K/A"
+  | "10-Q"
+  | "10-Q/A"
+  | "8-K"
+  | "8-K/A"
+  | "DEF 14A"
+  | "DEFA14A"
+  | "PRE 14A"
+  | "S-1"
+  | "S-1/A"
+  | "S-1MEF"
+  | "S-3"
+  | "S-3ASR"
+  | "424B4"
+  | "424B5"
+  | "20-F"
+  | "40-F"
+  | "6-K"
+  | "13F-HR"
+  | "13F-HR/A"
+  | "13F-NT"
+  | "3"
+  | "4"
+  | "4/A"
+  | "5"
+  | (string & {});
+
+/** Form types the SEC filings API is asked for by default (unchanged historical behavior). */
+export const DEFAULT_FETCH_FORM_TYPES: FormType[] = ["10-K", "10-Q"];
+
+/**
+ * `sourceType` key for the extractive document-abstract store. EXISTING ABSTRACTS DEPEND ON THIS
+ * STRING: `document_abstracts` is keyed by (accessionOrEventId, sourceType), so 10-K and 10-Q
+ * must keep mapping to their historical values or every stored abstract is orphaned and silently
+ * re-generated. New form types get their own key so they never collide with a 10-K abstract.
+ */
+export function secAbstractSourceType(docType: string): string {
+  switch (docType) {
+    case "10-Q":
+    case "10-Q/A":
+      return "10q-delta";
+    case "8-K":
+    case "8-K/A":
+      return "8k-brief";
+    case "DEF 14A":
+    case "DEFA14A":
+    case "PRE 14A":
+      return "def14a-delta";
+    case "S-1":
+    case "S-1/A":
+    case "S-1MEF":
+      return "s1-delta";
+    default:
+      // 10-K and every unrecognised form keep the historical 10-K key.
+      return "10k-delta";
+  }
+}
+
+/** Prior for the extractive highlighter's form-specific lexicons. Forms with no tuned lexicon
+ *  ("generic") still get ranked highlights — they are not silently dropped. */
+export function secAbstractFormHint(docType: string): "10-K" | "10-Q" | "8-K" | "earnings" | "generic" {
+  switch (docType) {
+    case "10-Q":
+    case "10-Q/A":
+      return "10-Q";
+    case "8-K":
+    case "8-K/A":
+      return "8-K";
+    case "10-K":
+    case "10-K/A":
+      return "10-K";
+    default:
+      return "generic";
+  }
+}
+
 export interface FilingRef {
   accession: string;   // dashed form: NNNNNNNNNN-YY-NNNNNN
-  docType: "10-K" | "10-Q";
+  docType: FormType;
   filedAt: string;           // ISO date (YYYY-MM-DD)
   acceptanceDateTime: string; // ISO datetime
   primaryDoc: string;         // filename inside the filing (e.g. "aapl-20231231.htm")
@@ -212,12 +301,12 @@ interface SubmissionsJson {
  * seeder's "latest 10-K + latest 4 10-Qs" baseline) can discover both in ONE submissions-API
  * call instead of one call per docType against the identical CIK URL.
  */
-export type FilingTypeLimits = number | Partial<Record<"10-K" | "10-Q", number>>;
+export type FilingTypeLimits = number | Partial<Record<FormType, number>>;
 
 const DEFAULT_FILING_LIMIT_PER_TYPE = 2;
 
 function resolveFilingLimits(
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitPerType: FilingTypeLimits
 ): Record<string, number> {
   const limits: Record<string, number> = {};
@@ -231,7 +320,7 @@ function resolveFilingLimits(
 function parseFilingBlock(
   recent: SubmissionsRecent | undefined,
   cik: string,
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitsByType: Record<string, number>,
   countPerType: Record<string, number>
 ): FilingRef[] {
@@ -245,7 +334,7 @@ function parseFilingBlock(
 
   const out: FilingRef[] = [];
   for (let i = 0; i < accessions.length; i++) {
-    const form = forms[i] as "10-K" | "10-Q" | undefined;
+    const form = forms[i] as FormType | undefined;
     if (!form || !docTypes.includes(form)) continue;
     if ((countPerType[form] ?? 0) >= (limitsByType[form] ?? 0)) continue;
 
@@ -276,7 +365,7 @@ function parseFilingBlock(
 export function parseRecentFilings(
   json: SubmissionsJson,
   cik: string,
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitPerType: FilingTypeLimits
 ): FilingRef[] {
   const limitsByType = resolveFilingLimits(docTypes, limitPerType);
@@ -299,7 +388,7 @@ export function parseRecentFilings(
  */
 export async function fetchRecentFilings(
   cik: string,
-  docTypes: Array<"10-K" | "10-Q"> = ["10-K", "10-Q"],
+  docTypes: FormType[] = DEFAULT_FETCH_FORM_TYPES,
   limitPerType: FilingTypeLimits = DEFAULT_FILING_LIMIT_PER_TYPE
 ): Promise<FilingRef[]> {
   const limitsByType = resolveFilingLimits(docTypes, limitPerType);
@@ -471,7 +560,7 @@ export async function maybeRefreshSecFilingAbstract(
   filingRef: FilingRef,
   _userId: string = "local"
 ): Promise<void> {
-  const sourceType = filingRef.docType === "10-Q" ? "10q-delta" : "10k-delta";
+  const sourceType = secAbstractSourceType(filingRef.docType);
   const { abstractNeedsUpgrade, generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } =
     await import("../rag/document-summarizer");
   if (!abstractNeedsUpgrade(filingRef.accession, sourceType)) return;
@@ -488,7 +577,7 @@ export async function maybeRefreshSecFilingAbstract(
 
   const { text, sections } = parseFilingHtml(html, { formType: filingRef.docType });
   if (text.length < 100) return;
-  const formHint = filingRef.docType === "10-Q" ? "10-Q" : "10-K";
+  const formHint = secAbstractFormHint(filingRef.docType);
   await generateAndStoreDocumentAbstract({
     ticker,
     accessionOrEventId: filingRef.accession,
@@ -542,18 +631,21 @@ export async function ingestFiling(
   // budget-skip it (and emit a budget warning per filing; prod 2026-07-10 saw a 20-event
   // burst from exactly this). Deferring here costs nothing: the accession stays
   // un-recorded and retries at the next tick.
-  const { hasIngestTextBudget, hasPineconeWriteBudget } = await import("../vector-db");
+  const { hasIngestTextBudget, hasVectorIngestWriteBudget } = await import("../vector-db");
   assertSecFilingLease(leaseGuard);
-  if (!hasIngestTextBudget(userId) || !hasPineconeWriteBudget(userId)) {
+  if (!hasIngestTextBudget(userId) || !hasVectorIngestWriteBudget(userId)) {
     return { skipped: true, chunks: 0, budgetExhausted: true };
   }
   // Same preflight for the MONTHLY Pinecone write-unit breaker: while it is active every
   // storeDocument call is refused before embedding anyway, so skip the EDGAR fetch/chunk work
   // entirely and let the bulk loop stop (budgetExhausted semantics — the accession stays
-  // un-recorded and retries after the marker expires).
-  const { pineconeWuExhaustedUntil } = await import("../pinecone-wu-breaker");
-  if (pineconeWuExhaustedUntil()) {
-    return { skipped: true, chunks: 0, budgetExhausted: true };
+  // un-recorded and retries after the marker expires).  Qdrant writes ignore this park.
+  const { vectorWriteBackend } = await import("../vector-store/qdrant-write");
+  if (vectorWriteBackend() === "pinecone") {
+    const { pineconeWuExhaustedUntil } = await import("../pinecone-wu-breaker");
+    if (pineconeWuExhaustedUntil()) {
+      return { skipped: true, chunks: 0, budgetExhausted: true };
+    }
   }
 
   let html: string | null = null;
@@ -686,8 +778,8 @@ export async function ingestFiling(
     const { generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } = await import(
       "../rag/document-summarizer"
     );
-    const sourceType = filingRef.docType === "10-Q" ? "10q-delta" : "10k-delta";
-    const formHint = filingRef.docType === "10-Q" ? "10-Q" : "10-K";
+    const sourceType = secAbstractSourceType(filingRef.docType);
+    const formHint = secAbstractFormHint(filingRef.docType);
     await generateAndStoreDocumentAbstract({
       ticker,
       accessionOrEventId: filingRef.accession,
@@ -986,7 +1078,7 @@ async function refreshFilingBodiesUnlocked(
           ticker: row.ticker,
           ref: {
             accession: row.accession,
-            docType: row.form as "10-K" | "10-Q",
+            docType: row.form as FormType,
             filedAt: row.filed_at,
             acceptanceDateTime: row.accepted_at,
             primaryDoc,
@@ -1093,10 +1185,16 @@ async function refreshFilingBodiesUnlocked(
         result.deferredForBudget = Math.max(0, Math.min(pending.length, cap) - processed);
         break;
       }
-      if (ingestResult.skipped) {
-        result.skipped++;
-      } else if (ingestResult.error) {
+      // Check `error` BEFORE `skipped`: ingestFiling can return `{ skipped: true, error: ... }`
+      // (e.g. "document-commit-proof-missing"/"document-commit-proof-lost" below) for a genuine
+      // failure that also happened to stop short of a full ingest. The old `skipped`-first order
+      // took that branch and silently dropped the error — `result.errors` stayed empty and this
+      // refresh reported success (skipped: true is normally benign) while it had actually failed,
+      // so monitoring never fired (P1, 2026-08-23).
+      if (ingestResult.error) {
         result.errors.push(`ingestFiling(${ticker} ${ref.accession}): ${ingestResult.error}`);
+      } else if (ingestResult.skipped) {
+        result.skipped++;
       } else {
         result.ingested++;
       }

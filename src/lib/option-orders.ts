@@ -40,7 +40,7 @@ export interface OptionOrderPolicy {
 }
 
 export type OptionOrderDecision =
-  | { allowed: true; paperOnly: boolean; broker: "alpaca" }
+  | { allowed: true; paperOnly: boolean; broker: string }
   | { allowed: false; reason: string };
 
 export function parseOccSymbol(raw: string): OptionContract | undefined {
@@ -87,8 +87,7 @@ export function optionNotionalUsd(premium: number, quantity: number): number {
 }
 
 /**
- * Gate for place/cancel.  Paper-only until the live flag is on.
- * Live shorts/options stay Alpaca-only; Robinhood is never a placement venue.
+ * Gate for place/cancel across all supported brokers. Paper-only until the live flag is on.
  */
 export function evaluateOptionOrderPolicy(
   policy: OptionOrderPolicy,
@@ -97,18 +96,23 @@ export function evaluateOptionOrderPolicy(
   if (policy.optionsTradingEnabled !== true) {
     return { allowed: false, reason: "Options trading is off. Enable Options Trading in Guardrails to place paper option orders." };
   }
-  const broker = policy.activeBroker;
-  if (broker !== "alpaca" && broker !== "alpaca-mcp") {
-    return { allowed: false, reason: "Option orders are Alpaca-only. Robinhood and other brokers stay display-only." };
+  const broker = policy.activeBroker ?? "alpaca";
+  if (broker === "robinhood") {
+    return { allowed: false, reason: "Option orders are not supported on Robinhood. Robinhood stays display-only." };
   }
+  const supported = ["alpaca", "alpaca-mcp", "tradier", "webull", "public", "test"].includes(broker);
+  if (!supported) {
+    return { allowed: false, reason: `Option orders are not supported on ${broker}.` };
+  }
+  const normalizedBroker = broker === "alpaca-mcp" ? "alpaca" : broker;
   if (executionMode === "broker/paper") {
-    return { allowed: true, paperOnly: true, broker: "alpaca" };
+    return { allowed: true, paperOnly: true, broker: normalizedBroker };
   }
   if (executionMode === "broker/live") {
     if (policy.optionsLiveOrdersEnabled !== true) {
       return { allowed: false, reason: "Live option orders are off. Paper place/cancel works; turn on Live Option Orders only after a paper round-trip." };
     }
-    return { allowed: true, paperOnly: false, broker: "alpaca" };
+    return { allowed: true, paperOnly: false, broker: normalizedBroker };
   }
   return { allowed: false, reason: "Option orders require a broker paper or live execution mode." };
 }

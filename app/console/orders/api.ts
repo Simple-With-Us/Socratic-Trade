@@ -1,6 +1,10 @@
 /** Self-contained typed fetch helpers for the Orders screen's two mutations.
  *  Deliberately NOT added to the shared app/console/lib/api.ts (that file is
- *  owned by a parallel workstream); the parsing rules are the same.
+ *  owned by a parallel workstream); the parsing rules are the same. A 401
+ *  still routes through that file's `redirectToLogin` (exported for exactly
+ *  this reuse) — a dead session on an order-mutation call needs the same
+ *  fail-closed /login redirect the dashboard poll and every other console
+ *  mutation get, not a silent OrdersApiError with no navigation.
  *
  *  Contracts (verbatim from the routes — read-only references):
  *  - POST /api/orders/replace-market (app/api/orders/replace-market/route.ts →
@@ -15,6 +19,8 @@
  *  - POST /api/orders/cancel (app/api/orders/cancel/route.ts): body
  *    { orderId } → the broker's ExecutedOrder JSON. No typed confirmation —
  *    cancelling is risk-reducing and stays available even while stopped. */
+
+import { redirectToLogin } from "../lib/api";
 
 export class OrdersApiError extends Error {
   status: number;
@@ -101,6 +107,7 @@ async function post<T>(url: string, body: unknown, fallbackMessage: string): Pro
   }
   const payload = await parseBody(res);
   if (!res.ok) {
+    if (res.status === 401) redirectToLogin();
     throw new OrdersApiError(messageFrom(payload, `${fallbackMessage} (${res.status}).`), res.status, payload);
   }
   return payload as T;

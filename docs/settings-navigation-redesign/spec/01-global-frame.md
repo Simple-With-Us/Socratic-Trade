@@ -1,7 +1,7 @@
 # Global Frame / App-Shell Specification — The Persistent Chrome
 
 **Owner:** Global Frame / App-Shell spec author · **Date:** 2026-07-01
-**Parent design (read first, do not restate):** [`docs/settings-navigation-redesign.md`](../settings-navigation-redesign.md) (v2) — this document is the deep, buildable spec for the "Global frame" section (Part I) and Screens 1 & 5 (Part II-A) of that doc. It closes the Part III gaps that touch chrome.
+**Parent design (read first, do not restate):** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2) — this document is the deep, buildable spec for the "Global frame" section (Part I) and Screens 1 & 5 (Part II-A) of that doc. It closes the Part III gaps that touch chrome.
 **Feature flag:** all new-shell rendering gates behind `NAV_V2` (env + localStorage override), per II-D. Every state below is a `NAV_V2=on` state; `NAV_V2=off` renders today's header unchanged.
 
 ---

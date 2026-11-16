@@ -49,6 +49,10 @@ const mocks = vi.hoisted(() => ({
   hasPineconeWriteBudget: vi.fn(() => true),
   insertSecArtifact: vi.fn(),
   audit: vi.fn(),
+  // Real implementation by default (wired in the vi.mock factory below via importOriginal); a
+  // test overrides it with .mockRejectedValueOnce to force ingestFiling's `skipped: true, error:
+  // "..."` (document-commit-proof-lost) branch without faking a real DB fault.
+  mirrorFtsChunksBounded: vi.fn(),
   setInternalSetting: vi.fn(),
   getInternalSetting: vi.fn(),
   // Defaults to "voyage" so every pre-existing VECTOR_EMBED_BATCH_DELAY_MS-driven test below is
@@ -87,6 +91,12 @@ vi.mock("../src/lib/db", async (importOriginal) => {
     insertSecArtifact: mocks.insertSecArtifact,
     runWithActiveVectorCommitProof: <T>(_proof: unknown, work: () => T) => work()
   };
+});
+
+vi.mock("../src/lib/rag/mirror-fts-bounded", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/rag/mirror-fts-bounded")>();
+  mocks.mirrorFtsChunksBounded.mockImplementation(actual.mirrorFtsChunksBounded);
+  return { ...actual, mirrorFtsChunksBounded: mocks.mirrorFtsChunksBounded };
 });
 
 vi.mock("../src/lib/db-vector-commits", async (importOriginal) => {
@@ -436,6 +446,37 @@ describe("ingestFiling", () => {
     expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
   });
 
+  // P1 fix (2026-08-23): ingestFiling can return `skipped: true` together with a real `error`
+  // (document-commit-proof-missing/-lost) — a genuine failure that also happened to stop short
+  // of a full ingest. This pins that `skipped` and `error` are not mutually exclusive on the
+  // ingestFiling contract, which is exactly what refreshFilingBodiesUnlocked's aggregation (see
+  // the next describe block) previously got wrong.
+  it("returns skipped:true WITH the error when the post-commit FTS mirror fails (document-commit-proof-lost)", async () => {
+    const ref = makeRef();
+    const fakeHtml = "<p>".concat("Risk text. ".repeat(30)).concat("</p>");
+
+    mocks.politeFetchText.mockResolvedValueOnce(fakeHtml);
+    mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
+    // ingestFiling's full-body path calls mirrorFtsChunksBounded TWICE: once inside
+    // persistLocalComplete (pre-commit FTS ledger, not wrapped in a try/catch — a failure there
+    // must propagate, not be swallowed as skipped:true) and once inside ingestFiling's own
+    // try/catch AFTER storeDocument commits (the one this test targets). Let the first succeed
+    // and only fail the second.
+    mocks.mirrorFtsChunksBounded
+      .mockResolvedValueOnce({ offset: 0, complete: true, abortedByStrategy: false })
+      .mockRejectedValueOnce(new Error("sqlite: disk I/O error"));
+
+    const { ingestFiling } = await import("../src/lib/web-sources/sec-filings");
+    const result = await ingestFiling("AAPL", ref);
+
+    expect(result.skipped).toBe(true);
+    expect(result.error).toBe("sqlite: disk I/O error");
+
+    // The accession must NOT be recorded as ingested — the commit proof was lost, not delivered.
+    const { hasIngestedAccession } = await import("../src/lib/db");
+    expect(hasIngestedAccession(ref.accession, ref.docType)).toBe(false);
+  });
+
   it("propagates the shared RAG lease guard into storeDocument", async () => {
     const ref = makeRef();
     mocks.politeFetchText.mockResolvedValueOnce(
@@ -522,6 +563,68 @@ describe("ingestFiling", () => {
 
     expect(ownershipChecks).toBeGreaterThanOrEqual(8);
     expect(mocks.storeDocument).not.toHaveBeenCalled();
+  });
+});
+
+// ── 4b. refreshFilingBodies error aggregation (P1 fix, 2026-08-23) ───────────
+//
+// refreshFilingBodiesUnlocked used to check `ingestResult.skipped` BEFORE `ingestResult.error`,
+// so a per-filing result of `{ skipped: true, error: "..." }` (a genuine failure that also
+// stopped short of a full ingest — see the ingestFiling test above) took the "skipped" branch
+// and the error was never pushed into `result.errors`. The refresh then reported success
+// (an empty errors array) while a filing had actually failed, so nothing downstream — the
+// dashboard audit row, any monitor keyed on `errors.length > 0` — ever saw it.
+describe("refreshFilingBodies error aggregation (P1 fix)", () => {
+  it("records the real error in result.errors instead of silently counting it as a skip", async () => {
+    mocks.loadTickerCikMap.mockResolvedValue({ AAPL: "320193" });
+    const accession = `0000320193-24-${randomUUID().slice(0, 6)}`;
+    mocks.politeFetchText
+      // AAPL submissions JSON: one filing.
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          filings: {
+            recent: {
+              accessionNumber: [accession],
+              form: ["10-K"],
+              filingDate: ["2024-11-01"],
+              acceptanceDateTime: ["2024-11-01T00:00:00.000Z"],
+              primaryDocument: ["aapl-10k.htm"]
+            }
+          }
+        })
+      )
+      // The filing body itself.
+      .mockResolvedValue("<p>".concat("Annual report content. ".repeat(20)).concat("</p>"));
+
+    mocks.storeDocument.mockImplementation(async (doc) => persistOk(doc));
+    // ingestFiling's full-body path calls mirrorFtsChunksBounded TWICE (see the ingestFiling
+    // test above): let the first (persistLocalComplete's pre-commit mirror) succeed, and only
+    // fail the second — the one whose catch returns `{ skipped: true, error: "..." }` WITHOUT
+    // throwing. A thrown exception from ingestFiling was already handled correctly by the
+    // pre-existing `catch (err)` below (pushed as "... threw: ..."); this fix is specifically
+    // about a NORMAL, non-throwing ingestFiling return that still carries a real error.
+    mocks.mirrorFtsChunksBounded
+      .mockResolvedValueOnce({ offset: 0, complete: true, abortedByStrategy: false })
+      .mockRejectedValueOnce(new Error("sqlite: disk I/O error"));
+
+    const { refreshFilingBodies } = await import("../src/lib/web-sources/sec-filings");
+    const result = await refreshFilingBodies(["AAPL"], Date.now(), undefined, { force: true });
+
+    expect(result.attempted).toBe(1);
+    // The bug: this used to be 0 while `skipped` absorbed the failure silently.
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(accession);
+    expect(result.errors[0]).toContain("sqlite: disk I/O error");
+    // Confirms this went through the ingestResult.error branch (the actual fix), not the
+    // pre-existing "ingestFiling(...) threw" catch a few lines below it in the source, which was
+    // already correct before this fix and would otherwise make this test pass for the wrong reason.
+    expect(result.errors[0]).not.toContain("threw");
+    // A real failure must not also be counted as a benign skip or a success.
+    expect(result.skipped).toBe(0);
+    expect(result.ingested).toBe(0);
+
+    const { hasIngestedAccession } = await import("../src/lib/db");
+    expect(hasIngestedAccession(accession, "10-K")).toBe(false);
   });
 });
 

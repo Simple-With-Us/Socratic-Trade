@@ -230,9 +230,16 @@ async function runDueRefreshes(now: number): Promise<WebSourceRefreshResult[]> {
     const insiderData = getInsiderDataset();
     const trades = congressData?.trades ?? [];
     const filings = insiderData?.filings ?? [];
-    embedDisclosures(trades, filings).catch((err) =>
-      console.error("[disclosure-rag] runDueRefreshes embed error:", err)
-    );
+    embedDisclosures(trades, filings).catch((err) => {
+      void import("../sentry-metrics").then(({ logError, recordEmbedFailure }) => {
+        recordEmbedFailure("disclosure-rag", "refresh-embed-error");
+        logError("embed.failed", {
+          provider: "disclosure-rag",
+          error_type: "refresh-embed-error",
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
+    });
   }
   return results;
 }

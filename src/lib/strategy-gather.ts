@@ -1,26 +1,36 @@
+import {
+  STRATEGY_GATHER_DEADLINE_MS,
+  STRATEGY_GATHER_QUOTE_FALLBACK_MS,
+  STRATEGY_GATHER_TIMEOUT_MESSAGE
+} from "./gather-budget";
 import { withDeadline } from "./inflight-deadline";
 import { newestPersistedMarketScan } from "./market-scan-freshness";
-import { mergeQuoteData, scanMarket } from "./market";
+import { isScanQuotesUnavailableError, mergeQuoteData, scanMarket } from "./market";
 import { normalizeSymbol } from "./money";
 import { fetchFreshQuotesCascade } from "./quotes-cascade";
 import type { EquityPosition, IndexUniverse, MarketScan, ScoringWeights, TradingPolicy, UniverseFloor } from "./types";
 
-/**
- * Live Roth `9d71dda4` sat in gather from 00:58:57Z until sweep-failed 01:29:44Z
- * (`stalled_no_progress`, llm=0).  Bound scan + quote cascade so a hung
- * Robinhood/Yahoo/congress.trade pass cannot keep the claimed request
- * `running` until the 30m sweep.  Green starts after this returns.
- */
-export const STRATEGY_GATHER_DEADLINE_MS = 8 * 60_000;
-export const STRATEGY_GATHER_TIMEOUT_MESSAGE = "strategy gather timeout";
-/** Short quote refresh after a timed-out scan, using the last completed tape. */
-export const STRATEGY_GATHER_QUOTE_FALLBACK_MS = 45_000;
+export {
+  STRATEGY_GATHER_DEADLINE_MS,
+  STRATEGY_GATHER_FULL_POOL_MIN_MS,
+  STRATEGY_GATHER_KEYED_WAVE_MIN_MS,
+  STRATEGY_GATHER_LIVE_ENRICH_MIN_MS,
+  STRATEGY_GATHER_QUOTE_FALLBACK_MS,
+  STRATEGY_GATHER_RETURN_RESERVE_MS,
+  STRATEGY_GATHER_SCARCE_WAVE_MIN_MS,
+  STRATEGY_GATHER_TIMEOUT_MESSAGE,
+  enrichmentPlanForDeadline,
+  gatherRemainingMs,
+  planGatherEnrichment
+} from "./gather-budget";
 
 export type StrategyGatherResult = {
   baseMarketScan: MarketScan;
   marketScan: MarketScan;
   usedLastGood: boolean;
   lastGoodAt?: string;
+  /** Why the live gather fell back to the last-good tape (set only when `usedLastGood`). */
+  lastGoodReason?: "timeout" | "quotes_unavailable";
 };
 
 export type StrategyGatherInput = {
@@ -49,12 +59,26 @@ export function throwIfGatherAborted(signal: AbortSignal | undefined, message = 
   throw new Error(message);
 }
 
-function withLastGoodWarning(scan: MarketScan, lastGoodAt: string, deadlineMs: number): MarketScan {
+function withLastGoodWarning(
+  scan: MarketScan,
+  lastGoodAt: string,
+  reason: "timeout" | "quotes_unavailable",
+  deadlineMs: number
+): MarketScan {
   const warning =
-    `Live gather timed out after ${deadlineMs}ms; using the last completed scan from ${lastGoodAt} and a short quote refresh.`;
+    reason === "quotes_unavailable"
+      ? `Live gather had no usable quotes; using the last completed scan from ${lastGoodAt} and a short quote refresh.`
+      : `Live gather timed out after ${deadlineMs}ms; using the last completed scan from ${lastGoodAt} and a short quote refresh.`;
+  // Defense in depth: `newestPersistedMarketScan` (market-scan-freshness.ts) already validates/
+  // normalizes the persisted payload so `scan.warnings` should always be a real array by the time
+  // it reaches here, but this is the exact spread that threw "scan.warnings is not iterable" in
+  // production when an unvalidated `{ omitted: true, ... }` audit-bounded summary was mistaken for
+  // a full scan — never let a missing/malformed `warnings` array crash a last-good fallback.
+  const existingWarnings = Array.isArray(scan.warnings) ? scan.warnings : [];
   return {
     ...scan,
-    warnings: [...scan.warnings, warning]
+    universeQuoteRecoverySource: undefined,
+    warnings: [...existingWarnings, warning]
   };
 }
 
@@ -85,13 +109,17 @@ async function refreshTopCandidateQuotes(
  * the sockets and the event loop.  That pile-up is why Roth + Paper spent 2026-08-21
  * RTH on `strategy gather timeout` after both completed the prior close.
  *
- * When the live scan still cannot finish, reuse the newest persisted MarketScan
- * (real last tape, not a fabricated book) plus a short quote refresh so Green can
- * start.  No last-good row still fails the run — there is nothing honest to decide on.
+ * When the live scan still cannot finish — deadline abort OR
+ * `ScanQuotesUnavailableError` from an empty Nasdaq/Yahoo recovery — reuse the
+ * newest persisted MarketScan (real last tape, not a fabricated book) plus a
+ * short quote refresh so Green can start.  Broker universe recovery (ST-4590)
+ * runs inside `scanMarket` before that throw.  No last-good row still fails the
+ * run — there is nothing honest to decide on.
  */
 export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<StrategyGatherResult> {
   const deadlineMs = input.deadlineMs ?? STRATEGY_GATHER_DEADLINE_MS;
   const quoteFallbackMs = input.quoteFallbackMs ?? STRATEGY_GATHER_QUOTE_FALLBACK_MS;
+  const deadlineAt = Date.now() + deadlineMs;
   const controller = new AbortController();
   const { signal } = controller;
 
@@ -109,7 +137,11 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
             outlierReserve: input.outlierReserve,
             universeFloor: input.universeFloor,
             congressMultiplier: input.congressMultiplier,
-            signal
+            signal,
+            deadlineAt,
+            // Account-scoped market-data tape: the connected Alpaca PAPER
+            // account scans on its own `delayed_sip` feed.
+            connectedAccountId: input.connectedAccountId
           }
         );
         throwIfGatherAborted(signal);
@@ -126,12 +158,22 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
   } catch (error) {
     const timedOut =
       error instanceof Error && error.message === STRATEGY_GATHER_TIMEOUT_MESSAGE;
-    if (!timedOut) throw error;
+    const quotesUnavailable = isScanQuotesUnavailableError(error);
+    // Timeout OR empty-universe quote failure: both leave Green with nothing to
+    // decide on unless we reuse the newest persisted tape (prod 2026-11-06/09 —
+    // ScanQuotesUnavailableError was rethrown and skipped this path).
+    if (!timedOut && !quotesUnavailable) throw error;
 
     const lastGood = newestPersistedMarketScan(input.userId, input.connectedAccountId);
     if (!lastGood) throw error;
 
-    const seeded = withLastGoodWarning(lastGood.scan, lastGood.entry.createdAt, deadlineMs);
+    const lastGoodReason = quotesUnavailable ? "quotes_unavailable" : "timeout";
+    const seeded = withLastGoodWarning(
+      lastGood.scan,
+      lastGood.entry.createdAt,
+      lastGoodReason,
+      deadlineMs
+    );
     const quoteController = new AbortController();
     let marketScan = seeded;
     try {
@@ -149,7 +191,8 @@ export async function gatherStrategyMarket(input: StrategyGatherInput): Promise<
       baseMarketScan: seeded,
       marketScan,
       usedLastGood: true,
-      lastGoodAt: lastGood.entry.createdAt
+      lastGoodAt: lastGood.entry.createdAt,
+      lastGoodReason
     };
   }
 }

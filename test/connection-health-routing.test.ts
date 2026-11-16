@@ -33,7 +33,13 @@ describe("Connection Health & Failure Routing", () => {
     delete process.env.PUSHOVER_APP_TOKEN;
     delete process.env.PUSHOVER_ST_API_TOKEN;
     delete process.env.PUSHOVER_USER_KEY;
-    
+    process.env.HEALTH_SNAPSHOT_TTL_MS = "0";
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
+    const { resetRateLimiter } = await import("../src/lib/rate-limit");
+    resetRateLimiter();
+
     // Clear out cooldown keys from DB
     const { db } = await load();
     db.getDb().prepare("DELETE FROM settings").run();
@@ -60,6 +66,12 @@ describe("Connection Health & Failure Routing", () => {
       db.deleteUserApiKey("local", "siliconflow");
       db.deleteUserApiKey("local", "voyage");
     } catch { /* best-effort */ }
+    const cache = await import("../src/lib/health-probe-cache");
+    cache.__resetHealthSnapshotForTests();
+    cache.__resetHeavyHealthSectionsForTests();
+    const { resetRateLimiter } = await import("../src/lib/rate-limit");
+    resetRateLimiter();
+    delete process.env.HEALTH_SNAPSHOT_TTL_MS;
     vi.unstubAllGlobals();
   });
 
@@ -293,6 +305,52 @@ describe("Connection Health & Failure Routing", () => {
     expect(body.checks.dependencies.pinecone.ok).toBe(false);
   });
 
+  it("/api/health stays 200 when Pinecone is hard-stopped but Qdrant is the read backend", async () => {
+    process.env.QDRANT_URL = "http://127.0.0.1:6333";
+    process.env.QDRANT_API_KEY = "test-qdrant-key";
+    process.env.RAG_VECTOR_WRITE_BACKEND = "qdrant";
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      for (let i = 0; i < 5; i++) {
+        db.logApiHealth({ service: "pinecone", ok: false, errorText: "fetch failed", keySource: "env" });
+      }
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.qdrantConfigured).toBe(true);
+      expect(body.checks.ragVectorReadBackend).toBe("qdrant");
+      expect(body.checks.ragVectorWriteBackend).toBe("qdrant");
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+      delete process.env.QDRANT_URL;
+      delete process.env.QDRANT_API_KEY;
+    }
+  });
+
+  it("/api/health reports a misconfigured Qdrant write backend without dropping the rest of the RAG block", async () => {
+    delete process.env.QDRANT_URL;
+    delete process.env.QDRANT_API_KEY;
+    delete process.env.RAG_VECTOR_WRITE_BACKEND;
+    try {
+      const { healthRoute, db } = await load();
+      db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
+      const response = await healthRoute.GET(anonymousHealthRequest());
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.ok).toBe(true);
+      expect(body.checks.ragVectorWriteBackend).toBe("misconfigured");
+      expect(body.checks.ragVectorWriteBackendError).toMatch(/QDRANT_URL/);
+      expect(body.checks.ragConfigured).toBe(false);
+      expect(body.checks.qdrantConfigured).toBe(false);
+      expect(body.checks.ragVectorReadBackend).toBeDefined();
+      expect(body.checks.ragEmbedProvider ?? body.checks.ragEmbedProviderError).toBeDefined();
+    } finally {
+      process.env.RAG_VECTOR_WRITE_BACKEND = "pinecone";
+    }
+  });
+
   it("/api/health stays 200 when env lane hard-stops but a user-keyed lane for the same critical service is healthy", async () => {
     // Prod failure mode 2026-08-05: Infisical env Alpaca keys 401 (env lane hard-stopped) while
     // Connections user keys succeed — Coolify healthcheck required HTTP 200 and rolled every deploy.
@@ -461,7 +519,7 @@ describe("Connection Health & Failure Routing", () => {
     expect(body.checks.dependencies.apify.ok).toBe(false);
   });
 
-  it("/api/health stays 200 when FilingAPI 401s (optional lane, soft skip)", async () => {
+  it("/api/health stays 200 after the FilingAPI retirement (leftover 401 rows are muted)", async () => {
     const { healthRoute, db } = await load();
 
     db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
@@ -473,10 +531,10 @@ describe("Connection Health & Failure Routing", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.ok).toBe(true);
-    // Optional lane: 401s are soft, so public health is ok (possibly degraded), never 503.
+    // Retired 2026-08-17 (ROIC.ai only): leftover 401 rows are muted OFF, so the
+    // dependency disappears from public health and status stays 200, never 503.
     const filing = body.checks.dependencies.filingapi;
-    expect(filing).toBeDefined();
-    expect(filing.ok).toBe(true);
+    expect(filing).toBeUndefined();
   });
 
   it("/api/health reports the live recovery path degraded when Litestream cannot be observed", async () => {
@@ -549,13 +607,11 @@ describe("Connection Health & Failure Routing", () => {
     }
   });
 
-  // 2026-08-14. The SAME wedge one stage later. Litestream's retention keeps pruning a wedged
-  // level while the wedge produces no replacements, so level 2 in production went 171 objects
-  // (frozen) to 0 objects (empty) — and the empty stage was classified "not observable / this is
-  // normal for a level Litestream has not needed to produce", so /api/health published
-  // `litestreamDegradedReasons: []` and no degraded storage tier for six days. This reproduces
-  // the persisted production snapshot against the real route.
-  it("/api/health flags an EMPTY deep-compaction level as wedged, with a stated reason, when its feeder is still advancing", async () => {
+  // 2026-09-01 product: L2/L3 are off.  The 2026-08-14 empty-L2 wedge is still covered
+  // in runtime-health.test.ts with disabledTiers: [].  The public route must not page
+  // leftover empty L2/L3 as a wedge, or the next deploy would 200-with-storageDegraded
+  // forever after we stop compacting those levels.
+  it("/api/health does not page empty L2/L3 when those levels are product-disabled", async () => {
     const { healthRoute, db } = await load();
     db.setInternalSetting("scheduler:lastTick", new Date().toISOString());
 
@@ -601,18 +657,27 @@ describe("Connection Health & Failure Routing", () => {
       expect(body.checks.storage.litestreamTiers).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ tier: "1", state: "known", degraded: false }),
-          expect.objectContaining({ tier: "2", state: "empty", verdict: "wedged", degraded: true }),
-          expect.objectContaining({ tier: "3", state: "empty", verdict: "upstream-wedged", degraded: true }),
+          expect.objectContaining({
+            tier: "2",
+            state: "empty",
+            verdict: "expected",
+            reason: "product-disabled",
+            degraded: false
+          }),
+          expect.objectContaining({
+            tier: "3",
+            state: "empty",
+            verdict: "expected",
+            reason: "product-disabled",
+            degraded: false
+          }),
           expect.objectContaining({ tier: "9", state: "known", degraded: false })
         ])
       );
-      expect(body.checks.storage.litestreamTiersDegraded).toBe(true);
-      expect(body.checks.storage.litestreamTierDegradedReasons.length).toBeGreaterThan(0);
-      expect(
-        body.checks.storage.litestreamTierDegradedReasons.some((r: string) => r.includes("no objects at level 2"))
-      ).toBe(true);
-      expect(body.checks.storageDegraded).toBe(true);
-      // Five levels listed, five observed: an empty level is measured, not a coverage gap.
+      expect(body.checks.storage.litestreamTiersDegraded).toBe(false);
+      expect(body.checks.storage.litestreamTierDegradedReasons).toEqual([]);
+      expect(body.checks.storageDegraded).toBeFalsy();
+      // Five levels listed, five observed: an empty disabled level is still measured.
       expect(body.checks.storage.litestreamTierCoverage).toMatchObject({ observed: 5, notObservable: 0 });
     } finally {
       inventoryMod.setLitestreamRemoteInventoryCache(null);

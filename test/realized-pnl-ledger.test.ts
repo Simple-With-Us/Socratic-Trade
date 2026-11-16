@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { aggregateRoundTrip, calculatePnl, type ClosedLot } from "../src/lib/performance";
+import { aggregateRoundTrip, calculatePnl, openLotSymbols, unrealizedFromOpenLots, type ClosedLot } from "../src/lib/performance";
 import { getTaxSummary } from "../src/lib/tax";
 import type { FillEvent, OrderSide } from "../src/lib/types";
 
@@ -192,6 +192,123 @@ describe("aggregateRoundTrip — scaled-out positions", () => {
 
   it("returns undefined when there are no exits", () => {
     expect(aggregateRoundTrip([], 10)).toBeUndefined();
+  });
+});
+
+describe("ST-4589 B10 — console win rate per completed round trip", () => {
+  it("counts a scaled-out position once, grades shorts, and skips still-open positions", async () => {
+    const { insertFillEvent } = await import("../src/lib/db");
+    const { getPerformanceSummary } = await import("../src/lib/performance");
+    const account = "LEDGER_ROUND_TRIPS";
+    const rows: Array<Parameters<typeof fill>[0]> = [
+      // AAPL long: two profitable trims, then a losing remainder -> ONE losing round trip.
+      { id: "rt-aapl-buy", symbol: "AAPL", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(10) },
+      { id: "rt-aapl-trim-a", symbol: "AAPL", side: "sell", quantity: 2, price: 120, filledAt: daysAgo(6) },
+      { id: "rt-aapl-trim-b", symbol: "AAPL", side: "sell", quantity: 2, price: 120, filledAt: daysAgo(5) },
+      { id: "rt-aapl-rest", symbol: "AAPL", side: "sell", quantity: 6, price: 70, filledAt: daysAgo(2) },
+      // TSLA short covered at a profit -> one winning round trip.
+      { id: "rt-tsla-short", symbol: "TSLA", side: "short", quantity: 5, price: 100, filledAt: daysAgo(9) },
+      { id: "rt-tsla-cover", symbol: "TSLA", side: "cover", quantity: 5, price: 90, filledAt: daysAgo(3) },
+      // MSFT long only partly closed -> not graded yet.
+      { id: "rt-msft-buy", symbol: "MSFT", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(8) },
+      { id: "rt-msft-trim", symbol: "MSFT", side: "sell", quantity: 3, price: 110, filledAt: daysAgo(4) }
+    ];
+    for (const row of rows) insertFillEvent(fill({ ...row, accountNumber: account }));
+
+    const summary = getPerformanceSummary(account, {}, "local");
+    // Per-lot (unchanged): AAPL 2 wins + 1 loss, TSLA 1 win, MSFT trim 1 win -> 4 of 5.
+    expect(summary.paperClosedLotCount).toBe(5);
+    expect(summary.paperWinRate).toBeCloseTo(80);
+    // Per completed round trip: AAPL loss, TSLA win -> 1 of 2; MSFT is still open.
+    expect(summary.paperRoundTripCount).toBe(2);
+    expect(summary.paperRoundTripWinRate).toBeCloseTo(50);
+    // No live fills: the rate is absent, never a fabricated 0.
+    expect(summary.liveRoundTripCount).toBe(0);
+    expect(summary.liveRoundTripWinRate).toBeUndefined();
+  });
+});
+
+describe("ST-4589 B8 — thesis/regime scorecards stamp alpha when benchmark closes are supplied", () => {
+  it("fills avgAlphaPct from the same entry->exit SPY window, and leaves it absent otherwise", async () => {
+    const { insertFillEvent } = await import("../src/lib/db");
+    const { getThesisScorecard, getRegimeScorecard } = await import("../src/lib/performance");
+    const account = "LEDGER_ALPHA";
+    const tags = { proposal: { tradeThesisTag: "Momentum-Breakout", entryMarketRegime: "Tech-Bull" } };
+    insertFillEvent(fill({ id: "alpha-buy", accountNumber: account, side: "buy", quantity: 1, price: 100, filledAt: "2026-05-01T15:00:00.000Z", raw: tags }));
+    insertFillEvent(fill({ id: "alpha-sell", accountNumber: account, side: "sell", quantity: 1, price: 110, filledAt: "2026-05-05T15:00:00.000Z" }));
+    insertFillEvent(fill({ id: "alpha-short", accountNumber: account, symbol: "TSLA", side: "short", quantity: 1, price: 100, filledAt: "2026-05-01T15:00:00.000Z", raw: tags }));
+    insertFillEvent(fill({ id: "alpha-cover", accountNumber: account, symbol: "TSLA", side: "cover", quantity: 1, price: 95, filledAt: "2026-05-05T15:00:00.000Z" }));
+    const benchBars = [
+      { date: "2026-05-01", close: 500 },
+      { date: "2026-05-05", close: 520 } // SPY +4% over the window
+    ];
+
+    const plain = getThesisScorecard(account, "paper", {}, "local");
+    expect(plain[0]?.avgAlphaPct).toBeUndefined();
+
+    const thesis = getThesisScorecard(account, "paper", {}, "local", undefined, undefined, { benchBars });
+    // Long +10% vs SPY +4% -> +6; short +5% vs inverted SPY -4% -> +9; mean +7.5.
+    expect(thesis[0]?.thesisTag).toBe("Momentum-Breakout");
+    expect(thesis[0]?.avgAlphaPct).toBeCloseTo(7.5, 2);
+    const regime = getRegimeScorecard(account, "paper", {}, "local", undefined, undefined, { benchBars });
+    expect(regime[0]?.avgAlphaPct).toBeCloseTo(7.5, 2);
+  });
+
+  it("matches an evening ET exit to that session's close, not the next UTC day's", async () => {
+    const { stampClosedLotAlpha } = await import("../src/lib/performance");
+    const benchBars = [
+      { date: "2026-05-01", close: 500 },
+      { date: "2026-05-05", close: 520 }, // +4%
+      { date: "2026-05-06", close: 600 } // would be +20% if the UTC date were used
+    ];
+    // Exit Tue 2026-05-05 9:30 PM ET == Wed 2026-05-06 01:30 UTC.
+    const [lot] = stampClosedLotAlpha(
+      [{ pnl: 10, returnPct: 10, symbol: "AAPL", side: "long", entryAt: "2026-05-01T15:00:00.000Z", exitAt: "2026-05-06T01:30:00.000Z" }],
+      benchBars
+    );
+    expect(lot.alphaPct).toBeCloseTo(6, 2);
+  });
+});
+
+describe("unrealizedFromOpenLots — mark-to-market over already-computed open lots", () => {
+  it("matches calculatePnl's own unrealized figure for the same prices, without re-running FIFO", () => {
+    const fills = [
+      fill({ id: "open-long", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(5) }),
+      fill({ id: "open-short", symbol: "MSFT", side: "short", quantity: 4, price: 50, filledAt: daysAgo(3) })
+    ];
+    const prices = { AAPL: 120, MSFT: 45 };
+    const withPrices = calculatePnl(fills, prices);
+    const withoutPrices = calculatePnl(fills, {});
+    // long AAPL: 10*(120-100)=200; short MSFT: 4*(50-45)=20 -> 220
+    expect(withPrices.unrealized).toBeCloseTo(220);
+    expect(unrealizedFromOpenLots(withoutPrices.openLots, prices)).toBeCloseTo(withPrices.unrealized);
+  });
+
+  it("skips a symbol with no price rather than fabricating a $0 mark", () => {
+    const fills = [fill({ id: "open", side: "buy", quantity: 10, price: 100, filledAt: daysAgo(5) })];
+    const { openLots } = calculatePnl(fills, {});
+    expect(unrealizedFromOpenLots(openLots, {})).toBe(0);
+    expect(unrealizedFromOpenLots(openLots, { AAPL: 0 })).toBe(0);
+    expect(unrealizedFromOpenLots(openLots, { AAPL: 150 })).toBeCloseTo(500);
+  });
+
+  it("marks a short as a profit when the price falls and a loss when it rises", () => {
+    const fills = [fill({ id: "open-short", symbol: "MSFT", side: "short", quantity: 4, price: 50, filledAt: daysAgo(3) })];
+    const { openLots } = calculatePnl(fills, {});
+    expect(unrealizedFromOpenLots(openLots, { MSFT: 45 })).toBeCloseTo(20);
+    expect(unrealizedFromOpenLots(openLots, { MSFT: 60 })).toBeCloseTo(-40);
+  });
+
+  it("openLotSymbols returns each open symbol once across books", () => {
+    const live = calculatePnl(
+      [
+        fill({ id: "a", side: "buy", quantity: 1, price: 10, filledAt: daysAgo(5) }),
+        fill({ id: "b", side: "buy", quantity: 1, price: 11, filledAt: daysAgo(4) })
+      ],
+      {}
+    ).openLots;
+    const paper = calculatePnl([fill({ id: "c", symbol: "MSFT", side: "buy", quantity: 1, price: 10, filledAt: daysAgo(4) })], {}).openLots;
+    expect(openLotSymbols(live, paper).sort()).toEqual(["AAPL", "MSFT"]);
   });
 });
 

@@ -21,6 +21,7 @@ import {
   redTeamSampleTier
 } from "../lib/red-team-efficacy";
 import { describeRedTeamFailureKind } from "@/lib/red-team-routing";
+import { BenchmarkChart } from "../components/benchmark-chart";
 import { EquityChart } from "../components/equity-chart";
 import { deriveReality } from "../lib/derive";
 import { fmtExact, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, EM_DASH, SENTENCE_GAP } from "../lib/format";
@@ -98,27 +99,31 @@ function bucketFor(
   winRate?: number;
   avgReturn?: number;
   closedLotCount: number;
+  roundTripCount: number;
   curve: EquityCurvePoint[];
 } {
   if (!performance) {
-    return { realized: undefined, unrealized: undefined, winRate: undefined, avgReturn: undefined, closedLotCount: 0, curve: [] };
+    return { realized: undefined, unrealized: undefined, winRate: undefined, avgReturn: undefined, closedLotCount: 0, roundTripCount: 0, curve: [] };
   }
   const bucket =
     environment === "paper"
       ? {
           realized: performance.paperRealizedPnl,
           unrealized: performance.paperUnrealizedPnl,
-          winRate: performance.paperWinRate,
+          // ST-4589 B10: per completed round trip (absent until one completes -> renders a dash).
+          winRate: performance.paperRoundTripWinRate,
           avgReturn: performance.paperAverageReturnPct,
           closedLotCount: performance.paperClosedLotCount,
+          roundTripCount: performance.paperRoundTripCount ?? 0,
           curve: performance.paperEquityCurve
         }
       : {
           realized: performance.liveRealizedPnl,
           unrealized: performance.liveUnrealizedPnl,
-          winRate: performance.liveWinRate,
+          winRate: performance.liveRoundTripWinRate,
           avgReturn: performance.liveAverageReturnPct,
           closedLotCount: performance.liveClosedLotCount,
+          roundTripCount: performance.liveRoundTripCount ?? 0,
           curve: performance.liveEquityCurve
         };
   return pricesUnavailable ? { ...bucket, unrealized: undefined } : bucket;
@@ -156,9 +161,10 @@ export default function ResultsPage() {
       tone="paper"
       realized={netRealized(perf?.paperRealizedPnl)}
       unrealized={perf?.paperUnrealizedPnl}
-      winRate={perf?.paperWinRate}
+      winRate={perf?.paperRoundTripWinRate}
       avgReturn={perf?.paperAverageReturnPct}
       closedLotCount={perf?.paperClosedLotCount ?? 0}
+      roundTripCount={perf?.paperRoundTripCount ?? 0}
       curve={perf?.paperEquityCurve ?? []}
       netOfTax={subtractFromResults}
       unmatchedClosingFills={perf?.paperUnmatchedClosingFills ?? 0}
@@ -170,9 +176,10 @@ export default function ResultsPage() {
       tone="live"
       realized={netRealized(perf?.liveRealizedPnl)}
       unrealized={perf?.liveUnrealizedPnl}
-      winRate={perf?.liveWinRate}
+      winRate={perf?.liveRoundTripWinRate}
       avgReturn={perf?.liveAverageReturnPct}
       closedLotCount={perf?.liveClosedLotCount ?? 0}
+      roundTripCount={perf?.liveRoundTripCount ?? 0}
       curve={perf?.liveEquityCurve ?? []}
       netOfTax={subtractFromResults}
       unmatchedClosingFills={perf?.liveUnmatchedClosingFills ?? 0}
@@ -229,6 +236,7 @@ export default function ResultsPage() {
               title={compareState.account.label}
               tone={compareState.account.environment}
               {...bucketFor(compareState.performance, compareState.account.environment, compareState.pricesUnavailable)}
+              grossAnnotate={subtractFromResults}
             />
           ) : compareState.status === "error" ? (
             <Card title="Comparison">
@@ -247,7 +255,7 @@ export default function ResultsPage() {
       )}
 
       {/* Benchmark */}
-      <Card title="Versus the Market (SPY Buy-and-Hold)">
+      <Card title="Versus the Market (Same-Cash S&P)">
         {perf?.benchmark ? (
           <>
             <div className="grid gap-4 sm:grid-cols-3">
@@ -255,7 +263,7 @@ export default function ResultsPage() {
                 label="Your account"
                 value={fmtPct(perf.benchmark.accountReturnPct, 2, true)}
                 sub={`Trailing ~${perf.benchmark.points} session${perf.benchmark.points === 1 ? "" : "s"} (${perf.benchmark.startDate} → ${perf.benchmark.endDate})`}
-                title="Time-weighted return: the window is split at every deposit/withdrawal into back-to-back capital regimes; each regime’s market return is chained (multiplied) with the others.  Having $100 for 10 days then $10 for 100 days does not let the long small-balance stretch dominate like a simple start→end ratio would.  This window is bounded to your most recently stored equity snapshots — a rolling window, not necessarily your full account history."
+                title="Time-weighted return: the window is split at every deposit/withdrawal into back-to-back capital regimes; each regime’s market return is chained (multiplied) with the others.  Having $100 for 10 days then $10 for 100 days does not let the long small-balance stretch dominate like a simple start→end ratio would.  One last snapshot per day, including early deposits, up to several years of sessions."
               />
               <Stat
                 label={perf.benchmark.benchmarkSymbol}
@@ -277,12 +285,46 @@ export default function ResultsPage() {
                 </div>
               </div>
             </div>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <Stat
+                label={`Same cash in ${perf.benchmark.benchmarkSymbol}`}
+                value={fmtMoney(perf.benchmark.shadowValue)}
+                sub={`${perf.benchmark.startDate} → ${perf.benchmark.endDate}`}
+                title={`Hypothetical ${perf.benchmark.benchmarkSymbol} tracker funded with the same deposits and withdrawals as this account.${SENTENCE_GAP}Each transfer is a breakpoint; the invested dollars grow with ${perf.benchmark.benchmarkSymbol} until the next transfer.${SENTENCE_GAP}Same-day additions and withdrawals are counted from the start of the day they land.`}
+              />
+              <div>
+                <div className="con-card-title">You vs that</div>
+                <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold">
+                  <SignedText value={perf.benchmark.dollarExcess}>
+                    <span
+                      title={`Your ending equity minus the same-cash ${perf.benchmark.benchmarkSymbol} tracker.${SENTENCE_GAP}Positive means you have more dollars than if the same cash had tracked the S&P.`}
+                    >
+                      {fmtSignedMoney(perf.benchmark.dollarExcess)}
+                    </span>
+                  </SignedText>
+                </div>
+                <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                  account dollars − same-cash {perf.benchmark.benchmarkSymbol}
+                </div>
+              </div>
+            </div>
+            {perf.benchmark.accountEquitySeries.length >= 2 && perf.benchmark.shadowBenchmarkSeries.length >= 2 && (
+              <div className="mt-4 border-t border-[color:var(--con-line)] pt-3">
+                <div className="con-card-title mb-2">Account vs same-cash {perf.benchmark.benchmarkSymbol}</div>
+                <BenchmarkChart
+                  account={perf.benchmark.accountEquitySeries}
+                  shadow={perf.benchmark.shadowBenchmarkSeries}
+                  accountLabel="Your account"
+                  benchmarkLabel={perf.benchmark.benchmarkSymbol}
+                />
+              </div>
+            )}
             <p className="mt-3 border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
               {perf.benchmark.cashFlowAdjusted
                 ? `Time-weighted across capital regimes — neutralized ${fmtMoney(Math.abs(perf.benchmark.netExternalFlows ?? 0))} net ${
                     (perf.benchmark.netExternalFlows ?? 0) < 0 ? "withdrawals" : "deposits"
-                  } (deposits +, withdrawals −).  Each stretch between transfers is its own sub-period for you and for SPY; overall = product of (1 + r) − 1.  Flows are inferred from snapshots and fills, not a broker transfer ledger.`
-                : "No material deposits or withdrawals detected — single continuous period (account equity growth vs SPY over the same dates)."}
+                  } (deposits +, withdrawals −).${SENTENCE_GAP}Each stretch between transfers is its own sub-period for you and for ${perf.benchmark.benchmarkSymbol}; the % tiles chain those returns, and the dollar chart applies the same cash to ${perf.benchmark.benchmarkSymbol} at each breakpoint.${SENTENCE_GAP}Flows come from the broker ledger when present, otherwise snapshots and fills.`
+                : `No material deposits or withdrawals detected — single continuous period (account equity growth vs ${perf.benchmark.benchmarkSymbol} over the same dates).`}
               {(perf.benchmark.unverifiedFlows?.length ?? 0) > 0 &&
                 ` ${perf.benchmark.unverifiedFlows!.length} inferred transfer${
                   perf.benchmark.unverifiedFlows!.length === 1 ? "" : "s"
@@ -350,7 +392,10 @@ export default function ResultsPage() {
                 ? "The SPY price series is stale — it ends before your account window, so a comparison would print 0.00% for a dead feed, not a flat market."
                 : perf.benchmarkUnavailable.reason === "no-bars"
                   ? "No SPY price history was returned by any provider."
-                  : "The SPY price fetch failed."}{" "}
+                  : perf.benchmarkUnavailable.reason === "insufficient-history" ||
+                      perf.benchmarkUnavailable.reason === "insufficient-overlap"
+                    ? "Not enough account history yet — the comparison needs at least two days of equity history overlapping SPY."
+                    : "The SPY price fetch failed."}{" "}
               Your account return is not compared against a dead benchmark; nothing here is estimated.
             </p>
             {perf.benchmarkUnavailable.detail && (
@@ -965,8 +1010,10 @@ function BucketCard({
   winRate,
   avgReturn,
   closedLotCount,
+  roundTripCount,
   curve,
   netOfTax = false,
+  grossAnnotate = false,
   unmatchedClosingFills = 0
 }: {
   title: string;
@@ -975,13 +1022,16 @@ function BucketCard({
   unrealized?: number;
   winRate?: number;
   avgReturn?: number;
-  /** Number of CLOSED lots behind winRate/avgReturn. Zero closed lots must render as "no data
-   *  yet" (EM_DASH), never a fabricated "0%"/"+0.00%" — winRate/avgReturn both compute to 0 (not
-   *  undefined) for an empty lot list, so the value itself can't distinguish "no trades closed"
-   *  from "closed trades that genuinely broke even". Gate on this count, not the value. */
+  /** Number of CLOSED lots behind avgReturn. Zero closed lots must render as "no data yet"
+   *  (EM_DASH), never a fabricated "+0.00%" — avgReturn computes to 0 (not undefined) for an empty
+   *  lot list, so the value itself can't distinguish "no trades closed" from "closed trades that
+   *  genuinely broke even". Gate on this count, not the value. */
   closedLotCount: number;
+  /** Completed round trips behind winRate (ST-4589): the win-rate tile's own empty-state gate. */
+  roundTripCount: number;
   curve: Array<{ timestamp: string; equity: number; source: "live" | "paper" }>;
   netOfTax?: boolean;
+  grossAnnotate?: boolean;
   unmatchedClosingFills?: number;
 }) {
   const realizedBasisNote =
@@ -996,7 +1046,7 @@ function BucketCard({
             className="con-card-title"
             title={netOfTax ? `${realizedBasisNote} Net of estimated tax at your configured short- and long-term rates.` : realizedBasisNote}
           >
-            Realized P&amp;L{netOfTax ? " (net of est. tax)" : ""}
+            Realized P&amp;L{netOfTax ? " (net of est. tax)" : grossAnnotate ? " (gross — no tax adjustment)" : ""}
           </div>
           <div className="con-num mt-0.5 text-[length:var(--con-fs-lg)] font-semibold">
             {typeof realized === "number" ? <SignedText value={realized}>{fmtSignedMoney(realized)}</SignedText> : <Dash />}
@@ -1020,15 +1070,21 @@ function BucketCard({
           </div>
         </div>
         <div>
-          <div className="con-card-title" title="Share of CLOSED lots that were profitable.  Shows — until this bucket has closed at least one lot — a 0% here would otherwise be indistinguishable from “no trades closed yet”.">
+          <div className="con-card-title" title="Share of completed round trips that were profitable: a position trimmed in steps counts once, when it is fully closed.  Shows — until at least one round trip has completed — a 0% here would otherwise be indistinguishable from “no trades closed yet”.">
             Win Rate
           </div>
-          <div className="con-num mt-0.5">{closedLotCount > 0 && typeof winRate === "number" ? fmtPct(winRate, 0) : EM_DASH}</div>
+          <div className="con-num mt-0.5">{roundTripCount > 0 && typeof winRate === "number" ? fmtPct(winRate, 0) : EM_DASH}</div>
+          <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            per round trip · {roundTripCount} completed
+          </div>
         </div>
         <div>
           <div className="con-card-title" title="Capital-weighted realized return across closed lots (sum of P&amp;L ÷ sum of entry notional).  Not the same as account NAV change — open positions and cash are excluded.  Unweighted trade averages were retired because small round-trips dominated.  The SPY panel below is the account equity time-weighted return.">Avg Return / Closed Capital</div>
           <div className="con-num mt-0.5" title="Raw realized return per closed trade, based on entry and exit prices.  It is not adjusted for SPY or market beta.">
             {closedLotCount > 0 && typeof avgReturn === "number" ? fmtPct(avgReturn, 2, true) : EM_DASH}
+          </div>
+          <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            all closed lots, incl. partial trims · {closedLotCount} {closedLotCount === 1 ? "lot" : "lots"}
           </div>
         </div>
       </div>

@@ -46,17 +46,17 @@ It had been open and unmergeable since 2026-07-04.
 ## Owner-side state (context for future sessions)
 
 - `SLACK_BOT_TOKEN` is now a cloud Runtime Secret (added 2026-07-05); fresh cloud sessions
-  can post to #agent-sync as the bot. This session predates the secret, so its Slack access
+  can post to #ag***-s**c as the bot. This session predates the secret, so its Slack access
   stayed review-gated (connector drafts).
 - The cloud environment's setup-script field points at `bash scripts/cloud-setup.sh`.
-- The ask + blockers were posted to Monet on PR #367 (comment) and #agent-sync
+- The ask + blockers were posted to Monet on PR #367 (comment) and #ag***-s**c
   (2026-07-04 23:15 CDT) before the takeover; Monet had not responded.
 
 ## Verification
 
 Run in this cloud container on the merged branch (commands per `AGENTS.md`):
 
-- `bash -n scripts/cloud-setup.sh scripts/slack-sync.sh scripts/setup-slack-sync.sh scripts/agent-sync-bootstrap.sh`
+- `bash -n scripts/cloud-setup.sh scripts/slack-sync.sh scripts/setup-slack-sync.sh scripts/ag***-s**c-bootstrap.sh`
 - `grep -nP '[^\x00-\x7F]' scripts/*.sh` (ASCII gate) — clean
 - `npm run lint` — 0 errors
 - `npx tsc --noEmit` — clean

@@ -1,4 +1,28 @@
 import Foundation
+import Sentry
+
+/// Per-item decode wrapper.  Decodes any element whose JSON is valid for `T`; an element
+/// whose JSON shape is wrong is captured as `error` (and a `nil` value) so the calling
+/// array can be decoded in full and the caller can decide what to do with the survivors +
+/// the drop count.  Used for the money-path collections on `MobileSnapshot` so a single
+/// malformed element never blanks the whole workspace — but the drop is counted, surfaced
+/// to Sentry, and the snapshot is marked partial-data so the caller cannot pretend the
+/// feed is intact.
+struct FailableDecodable<T: Decodable>: Decodable {
+    let value: T?
+    let error: Error?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        do {
+            self.value = try container.decode(T.self)
+            self.error = nil
+        } catch {
+            self.value = nil
+            self.error = error
+        }
+    }
+}
 
 struct MobileSnapshot: Decodable {
     let currentUser: CurrentUser?
@@ -6,6 +30,8 @@ struct MobileSnapshot: Decodable {
     /// payload where it is absent) leaves this nil and the app falls back to its built-in
     /// controls — see `MobileStore.serverAdvertises`.
     let catalog: ControlCatalog?
+    /// Server-built one-glance summary (`buildMobileBrief`).  Optional: older servers omit it.
+    let mobileBrief: MobileBrief?
     let readiness: Readiness
     let policy: PolicySummary
     let marketSession: String
@@ -31,9 +57,30 @@ struct MobileSnapshot: Decodable {
     /// Native weekly value + momentum screens.  Missing on older payloads.
     let weeklyMarketDigest: WeeklyMarketDigest?
 
+    /// 2026-09-20 MM comprehensive review (#3226): money-path collections (positions, orders,
+    /// pendingProposals) are decoded per-item with per-item failures dropped + counted rather
+    /// than letting a single malformed element blank the whole snapshot.  The snapshot is then
+    /// marked `partialData = true` and the drop counts are reported via `partialDropCounts` so a
+    /// caller can decide whether to surface partial-data UI without silently hiding live trading
+    /// state.  Per the issue guidance: a single drop on these three collections always counts as
+    /// partial data — the snapshot is never presented as "all good".
+    /// A server `partialData` flag (broker/dependency timeout) ORs in as well, with `partialReason`.
+    let partialData: Bool
+    let partialReason: String?
+    let partialDropCounts: PartialDropCounts
+
+    struct PartialDropCounts: Equatable {
+        var positions: Int = 0
+        var orders: Int = 0
+        var pendingProposals: Int = 0
+        var total: Int { positions + orders + pendingProposals }
+        var isEmpty: Bool { total == 0 }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case currentUser
         case catalog
+        case mobileBrief
         case readiness
         case policy
         case marketSession
@@ -53,6 +100,8 @@ struct MobileSnapshot: Decodable {
         case recentCommands
         case latestScan
         case weeklyMarketDigest
+        case partialDataFlag = "partialData"
+        case partialReason
     }
 
     init(from decoder: Decoder) throws {
@@ -65,16 +114,23 @@ struct MobileSnapshot: Decodable {
         // optional.  A catalog that cannot be read must land on nil, which `serverAdvertises`
         // reads as "the server did not answer" and falls back to the built-in controls.
         catalog = (try? values.decodeIfPresent(ControlCatalog.self, forKey: .catalog)) ?? nil
+        // Fail closed: a missing or wrong-shape `readiness` must not become a
+        // snapshot that presents as consented (`needsAppConsent: false`).  Same
+        // for `policy` — substituting `systemState: "stopped"` would hide an
+        // actually active strategy.  Inner fields of a valid object still have
+        // older-payload defaults in their own decoders.
+        // try?: display-only enrichment must never blank the snapshot.
+        mobileBrief = (try? values.decodeIfPresent(MobileBrief.self, forKey: .mobileBrief)) ?? nil
         readiness = try values.decode(Readiness.self, forKey: .readiness)
         policy = try values.decode(PolicySummary.self, forKey: .policy)
         marketSession = try values.decodeIfPresent(String.self, forKey: .marketSession) ?? "unknown"
         scheduler = try values.decodeIfPresent(SchedulerSummary.self, forKey: .scheduler) ?? .empty
         portfolio = try values.decodeIfPresent(PortfolioSummary.self, forKey: .portfolio)
-        positions = try values.decodeIfPresent([Position].self, forKey: .positions) ?? []
-        orders = try values.decodeIfPresent([EquityOrder].self, forKey: .orders) ?? []
-        pendingProposals = try values.decodeIfPresent([PendingProposal].self, forKey: .pendingProposals) ?? []
         dailyStats = try values.decodeIfPresent(DailyStats.self, forKey: .dailyStats) ?? .empty
-        performance = try values.decodeIfPresent(PerformanceSummary.self, forKey: .performance)
+        // try?: performance is display-only enrichment — a malformed sub-field (this is
+        // exactly where the equity-curve date/timestamp mismatch lived) must degrade to
+        // "no performance section", never blank the whole workspace.
+        performance = (try? values.decodeIfPresent(PerformanceSummary.self, forKey: .performance)) ?? nil
         connectedAccounts = try values.decodeIfPresent([ConnectedAccount].self, forKey: .connectedAccounts) ?? []
         watchlist = try values.decodeIfPresent([WatchlistItem].self, forKey: .watchlist) ?? []
         alerts = try values.decodeIfPresent([PriceAlert].self, forKey: .alerts) ?? []
@@ -85,6 +141,71 @@ struct MobileSnapshot: Decodable {
         recentCommands = try values.decodeIfPresent([MobileCommand].self, forKey: .recentCommands) ?? []
         latestScan = try values.decodeIfPresent(MarketScanResponse.self, forKey: .latestScan)
         weeklyMarketDigest = try values.decodeIfPresent(WeeklyMarketDigest.self, forKey: .weeklyMarketDigest)
+
+        // 2026-09-20 MM (#3226) — money-path collections use per-item decoding.  A single
+        // malformed position/order/pending-proposal drops that item (counted), the rest survive,
+        // and `partialData` flips to true so the caller can refuse to render a confident view
+        // over a corrupted feed.  Each drop is also reported to Sentry at warning level.
+        let decodedPositions = Self.decodeEach([FailableDecodable<Position>].self,
+                                               values: values,
+                                               key: .positions,
+                                               collection: "positions")
+        positions = decodedPositions.values
+        let decodedOrders = Self.decodeEach([FailableDecodable<EquityOrder>].self,
+                                            values: values,
+                                            key: .orders,
+                                            collection: "orders")
+        orders = decodedOrders.values
+        let decodedPendingProposals = Self.decodeEach([FailableDecodable<PendingProposal>].self,
+                                                      values: values,
+                                                      key: .pendingProposals,
+                                                      collection: "pendingProposals")
+        pendingProposals = decodedPendingProposals.values
+
+        let counts = PartialDropCounts(
+            positions: decodedPositions.dropped,
+            orders: decodedOrders.dropped,
+            pendingProposals: decodedPendingProposals.dropped
+        )
+        partialDropCounts = counts
+        let serverPartial = (try? values.decodeIfPresent(Bool.self, forKey: .partialDataFlag)) ?? false
+        partialReason = (try? values.decodeIfPresent(String.self, forKey: .partialReason)) ?? nil
+        partialData = !counts.isEmpty || serverPartial
+        if !counts.isEmpty {
+            Self.reportPartialDecodeDrops(counts: counts)
+        }
+    }
+
+    /// Per-item decoder helper. Returns both the successfully-decoded values and the count of
+    /// items that failed to decode (so the caller can mark the snapshot partial and surface the
+    /// drop count to Sentry).
+    private static func decodeEach<T: Decodable>(
+        _ type: [FailableDecodable<T>].Type,
+        values: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys,
+        collection: String
+    ) -> (values: [T], dropped: Int) {
+        // decodeIfPresent returns nil for missing OR null keys — both are fine, no drops.
+        guard let raw = try? values.decodeIfPresent(type, forKey: key) else {
+            return ([], 0)
+        }
+        let values = raw.compactMap(\.value)
+        let dropped = raw.count - values.count
+        return (values, dropped)
+    }
+
+    /// Surface a Sentry warning per dropped item so a real upstream bug (broker emitting a
+    /// malformed order, schema drift) is loud instead of invisible. The warning fingerprint
+    /// includes the collection name so the events cluster cleanly.
+    private static func reportPartialDecodeDrops(counts: PartialDropCounts) {
+        #if DEBUG
+        // Skip Sentry noise in dev — the per-decoder call would still be visible in the
+        // console via the throwing FailableDecodable.  Keep the file-log warning so a manual
+        // QA run sees it.
+        NSLog("[MobileSnapshot] partial decode: %@", "\(counts)")
+        #else
+        SentrySDK.capture(message: "MobileSnapshot partial decode: positions=\(counts.positions) orders=\(counts.orders) pendingProposals=\(counts.pendingProposals)")
+        #endif
     }
 
     var unreadNotificationCount: Int {
@@ -130,6 +251,21 @@ struct ControlCatalog: Decodable, Equatable {
     }
 }
 
+struct MobileBrief: Decodable {
+    let headline: String
+    let summary: String
+    let items: [MobileBriefItem]
+    let nextActions: [String]
+    let generatedAt: String
+}
+
+struct MobileBriefItem: Decodable, Identifiable {
+    var id: String { label }
+    let label: String
+    let value: String
+    let tone: String?
+}
+
 struct CurrentUser: Decodable {
     let userId: String
     let email: String?
@@ -142,6 +278,7 @@ struct CurrentUser: Decodable {
 struct Readiness: Decodable {
     let hasAccount: Bool
     let hasUniverse: Bool
+    let hasLlmKey: Bool?
     let systemState: String
     let strategyAuthority: String
     let selectedAccountNumber: String?
@@ -151,11 +288,82 @@ struct Readiness: Decodable {
     let needsAppConsent: Bool?
 
     var requiresAppConsent: Bool { needsAppConsent == true }
+
+    static let `default` = Readiness(
+        hasAccount: false,
+        hasUniverse: false,
+        systemState: "stopped",
+        strategyAuthority: "advisory",
+        selectedAccountNumber: nil,
+        activeConnectedAccount: nil,
+        commandBacklog: CommandBacklog(queued: 0, running: 0),
+        needsAppConsent: true
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case hasAccount, hasUniverse, hasLlmKey, systemState, strategyAuthority, selectedAccountNumber, activeConnectedAccount, commandBacklog, needsAppConsent
+    }
+
+    init(
+        hasAccount: Bool,
+        hasUniverse: Bool,
+        hasLlmKey: Bool? = nil,
+        systemState: String,
+        strategyAuthority: String,
+        selectedAccountNumber: String?,
+        activeConnectedAccount: ConnectedAccount?,
+        commandBacklog: CommandBacklog,
+        needsAppConsent: Bool?
+    ) {
+        self.hasAccount = hasAccount
+        self.hasUniverse = hasUniverse
+        self.hasLlmKey = hasLlmKey
+        self.systemState = systemState
+        self.strategyAuthority = strategyAuthority
+        self.selectedAccountNumber = selectedAccountNumber
+        self.activeConnectedAccount = activeConnectedAccount
+        self.commandBacklog = commandBacklog
+        self.needsAppConsent = needsAppConsent
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        hasAccount = (try? values.decode(Bool.self, forKey: .hasAccount)) ?? false
+        hasUniverse = (try? values.decode(Bool.self, forKey: .hasUniverse)) ?? false
+        // Missing on older payloads: treat as unknown so we do not nag for a
+        // key the server never reported.  A present non-Boolean is malformed
+        // and degrades to unknown rather than claiming a key exists.
+        hasLlmKey = try? values.decodeIfPresent(Bool.self, forKey: .hasLlmKey)
+        systemState = (try? values.decode(String.self, forKey: .systemState)) ?? "stopped"
+        strategyAuthority = (try? values.decode(String.self, forKey: .strategyAuthority)) ?? "advisory"
+        selectedAccountNumber = try? values.decodeIfPresent(String.self, forKey: .selectedAccountNumber)
+        activeConnectedAccount = try? values.decodeIfPresent(ConnectedAccount.self, forKey: .activeConnectedAccount)
+        commandBacklog = (try? values.decode(CommandBacklog.self, forKey: .commandBacklog)) ?? CommandBacklog(queued: 0, running: 0)
+        // Missing/null is the legacy shape.  A present non-Boolean value is a
+        // malformed consent contract and must reject the snapshot rather than
+        // degrading to nil, which would present the user as already consented.
+        needsAppConsent = try values.decodeIfPresent(Bool.self, forKey: .needsAppConsent)
+    }
 }
 
 struct CommandBacklog: Decodable {
     let queued: Int
     let running: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case queued, running
+    }
+
+    init(queued: Int, running: Int) {
+        self.queued = queued
+        self.running = running
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        queued = (try? values.decode(Int.self, forKey: .queued)) ?? 0
+        running = (try? values.decode(Int.self, forKey: .running)) ?? 0
+    }
 }
 
 struct ConnectedAccount: Decodable, Identifiable, Hashable {
@@ -200,6 +408,85 @@ struct PolicySummary: Decodable {
     /// Mirrors the server snapshot's policy.runDuringExtendedHours (app/api/mobile/snapshot).
     /// nil ≠ false: older payloads without the field cannot answer the market-window question.
     let runDuringExtendedHours: Bool?
+
+    static let `default` = PolicySummary(
+        systemState: "stopped",
+        strategyAuthority: "advisory",
+        accountNumber: nil,
+        connectedAccountId: nil,
+        includedIndices: [],
+        additionalSymbols: [],
+        blocklist: [],
+        holdingHorizon: nil,
+        runCadenceMinutes: 60,
+        maxOrderNotional: nil,
+        maxOrderPctOfNav: nil,
+        maxDailyNotional: nil,
+        maxDailyPctOfNav: nil,
+        maxDailyOrders: nil,
+        requireTypedConfirmation: true,
+        runDuringExtendedHours: false
+    )
+
+    private enum CodingKeys: String, CodingKey {
+        case systemState, strategyAuthority, accountNumber, connectedAccountId, includedIndices, additionalSymbols, blocklist, holdingHorizon, runCadenceMinutes, maxOrderNotional, maxOrderPctOfNav, maxDailyNotional, maxDailyPctOfNav, maxDailyOrders, requireTypedConfirmation, runDuringExtendedHours
+    }
+
+    init(
+        systemState: String,
+        strategyAuthority: String,
+        accountNumber: String?,
+        connectedAccountId: String?,
+        includedIndices: [String]?,
+        additionalSymbols: [String]?,
+        blocklist: [String]?,
+        holdingHorizon: String?,
+        runCadenceMinutes: Int?,
+        maxOrderNotional: Double?,
+        maxOrderPctOfNav: Double?,
+        maxDailyNotional: Double?,
+        maxDailyPctOfNav: Double?,
+        maxDailyOrders: Int?,
+        requireTypedConfirmation: Bool?,
+        runDuringExtendedHours: Bool?
+    ) {
+        self.systemState = systemState
+        self.strategyAuthority = strategyAuthority
+        self.accountNumber = accountNumber
+        self.connectedAccountId = connectedAccountId
+        self.includedIndices = includedIndices
+        self.additionalSymbols = additionalSymbols
+        self.blocklist = blocklist
+        self.holdingHorizon = holdingHorizon
+        self.runCadenceMinutes = runCadenceMinutes
+        self.maxOrderNotional = maxOrderNotional
+        self.maxOrderPctOfNav = maxOrderPctOfNav
+        self.maxDailyNotional = maxDailyNotional
+        self.maxDailyPctOfNav = maxDailyPctOfNav
+        self.maxDailyOrders = maxDailyOrders
+        self.requireTypedConfirmation = requireTypedConfirmation
+        self.runDuringExtendedHours = runDuringExtendedHours
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        systemState = (try? values.decode(String.self, forKey: .systemState)) ?? "stopped"
+        strategyAuthority = (try? values.decode(String.self, forKey: .strategyAuthority)) ?? "advisory"
+        accountNumber = try? values.decodeIfPresent(String.self, forKey: .accountNumber)
+        connectedAccountId = try? values.decodeIfPresent(String.self, forKey: .connectedAccountId)
+        includedIndices = try? values.decodeIfPresent([String].self, forKey: .includedIndices)
+        additionalSymbols = try? values.decodeIfPresent([String].self, forKey: .additionalSymbols)
+        blocklist = try? values.decodeIfPresent([String].self, forKey: .blocklist)
+        holdingHorizon = try? values.decodeIfPresent(String.self, forKey: .holdingHorizon)
+        runCadenceMinutes = try? values.decodeIfPresent(Int.self, forKey: .runCadenceMinutes)
+        maxOrderNotional = try? values.decodeIfPresent(Double.self, forKey: .maxOrderNotional)
+        maxOrderPctOfNav = try? values.decodeIfPresent(Double.self, forKey: .maxOrderPctOfNav)
+        maxDailyNotional = try? values.decodeIfPresent(Double.self, forKey: .maxDailyNotional)
+        maxDailyPctOfNav = try? values.decodeIfPresent(Double.self, forKey: .maxDailyPctOfNav)
+        maxDailyOrders = try? values.decodeIfPresent(Int.self, forKey: .maxDailyOrders)
+        requireTypedConfirmation = try? values.decodeIfPresent(Bool.self, forKey: .requireTypedConfirmation)
+        runDuringExtendedHours = try? values.decodeIfPresent(Bool.self, forKey: .runDuringExtendedHours)
+    }
 }
 
 /// The console's shared run-state vocabulary (app/console/lib/derive.ts `deriveStateInfo`).
@@ -248,11 +535,22 @@ func deriveRunStateWord(
 }
 
 /// Convenience over the snapshot's own policy + market session.
-func deriveRunStateWord(snapshot: MobileSnapshot) -> RunStateWord {
-    deriveRunStateWord(
+/// When `useDeviceMarketSession` is true (stale snapshot), ignores cached `marketSession`.
+func deriveRunStateWord(
+    snapshot: MobileSnapshot,
+    useDeviceMarketSession: Bool = false,
+    now: Date = Date()
+) -> RunStateWord {
+    let marketSession: String?
+    if useDeviceMarketSession {
+        marketSession = NYSEMarketSession.sessionKey(now: now)
+    } else {
+        marketSession = snapshot.marketSession
+    }
+    return deriveRunStateWord(
         systemState: snapshot.readiness.systemState,
         runDuringExtendedHours: snapshot.policy.runDuringExtendedHours,
-        marketSession: snapshot.marketSession
+        marketSession: marketSession
     )
 }
 
@@ -504,16 +802,70 @@ struct PerformanceSummary: Decodable {
     let liveEquityCurve: [EquityCurvePoint]?
     let paperEquityCurve: [EquityCurvePoint]?
     let benchmark: BenchmarkComparison?
+    let benchmarkUnavailable: BenchmarkUnavailability?
     let fills: [FillEvent]?
+}
+
+struct BenchmarkUnavailability: Decodable {
+    let reason: String
+    let detail: String?
 }
 
 struct EquityCurvePoint: Decodable, Identifiable, Equatable {
     var id: String { date }
+    /// The server's shared EquityCurvePoint (src/lib/types.ts) keys points by
+    /// `timestamp`; older payload shapes used `date`.  Accept either — requiring
+    /// `date` alone made one curve point abort the WHOLE snapshot decode and
+    /// blank the app with "Couldn't load your workspace" (2026-08-27).
     let date: String
     let equity: Double
     let cash: Double?
     let pnl: Double?
     let returnPct: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case timestamp
+        case equity
+        case cash
+        case pnl
+        case returnPct
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedDate =
+            try values.decodeIfPresent(String.self, forKey: .date) ??
+            values.decodeIfPresent(String.self, forKey: .timestamp)
+        guard let decodedDate else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.date,
+                DecodingError.Context(
+                    codingPath: values.codingPath,
+                    debugDescription: "Neither date nor timestamp present on equity curve point"
+                )
+            )
+        }
+        date = decodedDate
+        equity = try values.decode(Double.self, forKey: .equity)
+        cash = try values.decodeIfPresent(Double.self, forKey: .cash)
+        pnl = try values.decodeIfPresent(Double.self, forKey: .pnl)
+        returnPct = try values.decodeIfPresent(Double.self, forKey: .returnPct)
+    }
+
+    init(date: String, equity: Double, cash: Double? = nil, pnl: Double? = nil, returnPct: Double? = nil) {
+        self.date = date
+        self.equity = equity
+        self.cash = cash
+        self.pnl = pnl
+        self.returnPct = returnPct
+    }
+}
+
+struct BenchmarkDollarPoint: Decodable, Identifiable, Equatable {
+    var id: String { date }
+    let date: String
+    let value: Double
 }
 
 struct BenchmarkComparison: Decodable {
@@ -526,6 +878,10 @@ struct BenchmarkComparison: Decodable {
     let benchmarkSymbol: String
     let cashFlowAdjusted: Bool?
     let netExternalFlows: Double?
+    let accountEquitySeries: [BenchmarkDollarPoint]?
+    let shadowBenchmarkSeries: [BenchmarkDollarPoint]?
+    let shadowValue: Double?
+    let dollarExcess: Double?
 }
 
 struct FillEvent: Decodable, Identifiable, Equatable {

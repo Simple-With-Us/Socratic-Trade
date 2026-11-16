@@ -5,7 +5,7 @@
 > adversarial verification; the hardening commit on top fixes all three. See the "Adversarial
 > hardening" section below. **Until the hardening lands in prod: do NOT run symbol-scoped
 > re-embeds and do NOT invoke `purge-legacy` at all** (a fleet HOLD to this effect is posted in
-> #agent-sync) — a symbol-scoped run could stamp a completion receipt that unlocks a purge
+> #ag***-s**c) — a symbol-scoped run could stamp a completion receipt that unlocks a purge
 > deleting the only copy of un-re-embedded content.
 
 ## URGENT — run-me-now sequencing (read this first)

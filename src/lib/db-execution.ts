@@ -2,7 +2,10 @@
 // run lock (acquireStrategyLock / releaseStrategyLock), strategy runs.
 import "server-only";
 import { audit, getDb } from "./db";
+import { PROCESS_INSTANCE_ID } from "./process-instance";
+import { isStrategyRunExecutionLive } from "./strategy-run-execution-registry";
 import { CENTRAL_TRADING_DAY_ZONE, startOfCentralTradingDay } from "./trading-day";
+import type { StrategyRunOrigin } from "./strategy-run-origin";
 import type { StrategyRunFinishStatus } from "./strategy-run-status";
 import type { StrategyRunRow } from "./types";
 
@@ -287,7 +290,74 @@ export function releaseStrategyLock(owner: string, userId: string = "local", con
   }).immediate();
 }
 
-export function insertStrategyRun(id: string, userId: string = "local", connectedAccountId?: string, accountNumber?: string, policyRevision?: string): void {
+/** Default lease window of `acquireStrategyLock` / `startStrategyLockGuard` (5 min TTL, renewed
+ *  every 60s).  Duplicated as a literal rather than imported from `strategy-lock-guard.ts`,
+ *  which imports `renewStrategyLock` from this module — importing it back would recreate the
+ *  db -> db-execution cycle that PR #3138 already had to break once. */
+const STRATEGY_LOCK_LEASE_MS = 5 * 60_000;
+
+/**
+ * Durable, cross-process proof that `runId` is still being executed by SOMEONE.
+ *
+ * `runStrategyOnce` acquires the per-account strategy run lock with the run id itself as `owner`
+ * (strategy.ts, `acquireStrategyLock(runId, ...)`) BEFORE `insertStrategyRun` writes the
+ * `running` row, and releases it in the `finally` AFTER `finishStrategyRun`.  While the run is
+ * in flight `startStrategyLockGuard` renews that lease every 60s with a 5-minute TTL.  So an
+ * unexpired lock whose `owner` is the run id is durable evidence the run is alive — evidence
+ * that survives a process boundary, unlike `isStrategyRunExecutionLive`, whose map is
+ * process-local by construction and is EMPTY for a run another node legitimately adopted.
+ *
+ * Scans BOTH lock-key shapes for the user — the account-scoped `strategy_run_lock:<u>:<acct>`
+ * and the legacy user-wide `strategy_run_lock:<u>` — rather than deriving one key from the run
+ * row's `connected_account_id`.  `runStrategyOnce` locks under the account it resolved at entry,
+ * which is not guaranteed to be the id later persisted on the row, and the drain path releases
+ * with no account id at all; matching on `owner === runId` is the exact, shape-independent test.
+ */
+export function hasLiveStrategyRunLease(
+  runId: string,
+  userId: string,
+  nowMs: number = Date.now()
+): boolean {
+  try {
+    const database = getDb();
+    // Optimized index scan: replaces `key = ? OR key LIKE ?` which caused a full table scan.
+    // `:` is ASCII 58, `;` is ASCII 59, so `< ...;` cleanly bounds the exact key and all `:` prefixed subkeys.
+    const rows = database
+      .prepare("SELECT value FROM settings WHERE key >= ? AND key < ?")
+      .all(`strategy_run_lock:${userId}`, `strategy_run_lock:${userId};`) as Array<{ value: string }>;
+    for (const row of rows) {
+      let parsed: { owner?: string; expiresAt?: string; acquiredAt?: string; lockedAt?: string };
+      try {
+        parsed = JSON.parse(row.value) as typeof parsed;
+      } catch {
+        continue; // malformed lock value is not evidence of life
+      }
+      if (parsed.owner !== runId) continue;
+      const expiresAt = parsed.expiresAt
+        ? Date.parse(parsed.expiresAt)
+        : (parsed.acquiredAt ?? parsed.lockedAt)
+          ? Date.parse((parsed.acquiredAt ?? parsed.lockedAt)!) + STRATEGY_LOCK_LEASE_MS
+          : NaN;
+      if (Number.isFinite(expiresAt) && expiresAt > nowMs) return true;
+    }
+    return false;
+  } catch {
+    // A settings read fault must not be read as "definitely dead" — money-path sweeps fail closed
+    // by LEAVING the run alone.  A genuinely crashed run is swept on the next tick.
+    return true;
+  }
+}
+
+export function insertStrategyRun(
+  id: string,
+  userId: string = "local",
+  connectedAccountId?: string,
+  accountNumber?: string,
+  policyRevision?: string,
+  /** Who launched the run (strategy-run-origin.ts).  Omitted -> NULL, which the restart retry
+   *  treats as not retry-eligible. */
+  origin?: StrategyRunOrigin
+): void {
   const existing = getDb()
     .prepare("SELECT status FROM strategy_runs WHERE id = ? AND user_id = ?")
     .get(id, userId) as { status: string } | undefined;
@@ -298,8 +368,19 @@ export function insertStrategyRun(id: string, userId: string = "local", connecte
     throw new Error(`Cannot reuse strategy run ${id} after status=${existing.status}`);
   }
   getDb()
-    .prepare("INSERT INTO strategy_runs (id, user_id, connected_account_id, account_number, policy_revision, started_at, status) VALUES (?, ?, ?, ?, ?, ?, 'running')")
-    .run(id, userId, connectedAccountId ?? null, accountNumber ?? null, policyRevision ?? null, new Date().toISOString());
+    .prepare(
+      "INSERT INTO strategy_runs (id, user_id, connected_account_id, account_number, policy_revision, started_at, status, origin, owner_instance) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)"
+    )
+    .run(
+      id,
+      userId,
+      connectedAccountId ?? null,
+      accountNumber ?? null,
+      policyRevision ?? null,
+      new Date().toISOString(),
+      origin ?? null,
+      PROCESS_INSTANCE_ID
+    );
 }
 
 /**
@@ -361,6 +442,12 @@ const STALE_RUN_THRESHOLD_MS = 30 * 60_000;
  *  "process.uptime is not a function" and took down `/console/connections` (2026-08-18, #2848).
  *  Guarded + lazy: server callers get the real boot instant; a browser evaluation never throws. */
 let processStartedAtMsCache: number | null = null;
+
+/** Test pin for the boot instant used by the restart sweep.  `null` restores the real boot. */
+export function setProcessStartedAtMsForTests(ms: number | null): void {
+  processStartedAtMsCache = ms;
+}
+
 function processStartedAtMs(): number {
   if (processStartedAtMsCache === null) {
     const uptimeSeconds =
@@ -369,6 +456,15 @@ function processStartedAtMs(): number {
   }
   return processStartedAtMsCache;
 }
+
+/**
+ * How long after this process boots the restart arm stays quiet.  PR #3138 swept every
+ * pre-boot `running` row on the first tick, which closed runs another node had just adopted
+ * and beat the strategy-run drain to the same row.  Two scheduler ticks (60s) is enough for
+ * the leader's drain to claim an orphan before the restart arm looks at it.  The 30-minute
+ * same-process stall arm is not delayed: a wedged run this process owns is still swept.
+ */
+export const RESTART_SWEEP_BOOT_GRACE_MS = 2 * 60_000;
 /** Uptime rounding can place boot a few hundred ms after the first Date.now() in this process.
  *  Only treat a run as a prior-process leftover when it started clearly before boot. */
 const PROCESS_RESTART_DETECT_SKEW_MS = 2_000;
@@ -398,6 +494,24 @@ export function staleRunningRunSweepSummary(
       return `Process restarted mid-run — marked failed by stale-run sweep (started at ${startedAt})`;
     case "stalled_no_progress":
       return `Strategy run stalled with no progress — marked failed by stale-run sweep (started at ${startedAt})`;
+    default: {
+      const _exhaustive: never = cause;
+      throw new Error(`unhandled stale running sweep cause: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Both sweep causes are the app, not the broker or the LLM.  The auto-halt streak
+ * (`strategyRunCountsTowardAutoHalt`) ignores them.  One flag for both so a reader
+ * does not special-case only `process_restarted_mid_run` and keep counting a
+ * same-process stall.
+ */
+export function staleSweepFailureExemptsAutoHalt(cause: StaleRunningSweepCause): true {
+  switch (cause) {
+    case "process_restarted_mid_run":
+    case "stalled_no_progress":
+      return true;
     default: {
       const _exhaustive: never = cause;
       throw new Error(`unhandled stale running sweep cause: ${String(_exhaustive)}`);
@@ -532,6 +646,22 @@ export function finishStrategyRun(id: string, status: StrategyRunFinishStatus, s
   );
 }
 
+/** A run the sweep just transitioned running -> failed because its process restarted mid-run. */
+export type RestartKilledRun = {
+  id: string;
+  userId: string;
+  connectedAccountId: string | null;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type StaleRunningSweepResult = {
+  /** strategy_runs rows this sweep transitioned to failed (either cause). */
+  repaired: number;
+  /** The subset whose cause was `process_restarted_mid_run` — retry candidates for the caller. */
+  restartKilled: RestartKilledRun[];
+};
+
 /**
  * Sweep strategy_runs rows left in status='running' after a process crash / kill / unhandled
  * rejection (the normal `finishStrategyRun` exit paths never ran). A run that hasn't finished
@@ -544,37 +674,106 @@ export function finishStrategyRun(id: string, status: StrategyRunFinishStatus, s
  * is not left locked after the run is marked failed.  A later tick heals already-failed
  * runs whose request was left `running` by an older process.
  *
- * Returns the number of repaired strategy_runs rows for logging/auditing.
+ * Returns the repaired count plus the restart-killed rows this call itself transitioned (the
+ * caller decides on retries — strategy-run-retry.ts — so this module stays getDb-only).
  */
-export function markStaleRunningRuns(now: number = Date.now()): number {
+export type StaleRunningSweepOptions = {
+  /**
+   * Leader ticks only.  When false (the default), rows this instance did not start are invisible
+   * to the sweep.  A follower must never close the leader's runs.
+   */
+  reapUnowned?: boolean;
+  /** Pin the boot instant.  Tests use this so the grace window does not depend on worker uptime. */
+  processStartedMs?: number;
+  /** Pin "this instance".  Defaults to `PROCESS_INSTANCE_ID`. */
+  instanceId?: string;
+};
+
+/**
+ * Drain adopts a `strategy_run_requests` row that is still `running` and is not a restart retry
+ * (`processPendingStrategyRunRequests`).  Closing that row here frees it for a duplicate and
+ * steals the UUID Activity is polling.  A running retry is dropped by the drain, never adopted,
+ * so the sweep may close it.  Time-stale rows are not spared: a 30-minute wedge is the stuck-run
+ * case, and drain must not resume it.
+ */
+function restartSweepWouldPreemptDrainAdoption(
+  database: ReturnType<typeof getDb>,
+  runId: string
+): boolean {
+  const request = database
+    .prepare(
+      `SELECT retry_of_run_id AS retryOf FROM strategy_run_requests WHERE id = ? AND status = 'running'`
+    )
+    .get(runId) as { retryOf: string | null } | undefined;
+  if (!request) return false;
+  return request.retryOf == null;
+}
+
+export function sweepStaleRunningRuns(
+  now: number = Date.now(),
+  options: StaleRunningSweepOptions = {}
+): StaleRunningSweepResult {
   const cutoff = new Date(now - STALE_RUN_THRESHOLD_MS).toISOString();
+  const processStarted = options.processStartedMs ?? processStartedAtMs();
+  const instanceId = options.instanceId ?? PROCESS_INSTANCE_ID;
+  const reapUnowned = options.reapUnowned === true;
+  const bootGraceActive = now - processStarted < RESTART_SWEEP_BOOT_GRACE_MS;
+  const processBootCutoff = new Date(processStarted - PROCESS_RESTART_DETECT_SKEW_MS).toISOString();
+  // Liveness evidence for a run that started BEFORE this process booted must itself postdate the
+  // boot (board 687a5fb4).  Audit rows written before boot were written by the process that is
+  // now gone (stop-old-first) — they prove the run WAS alive, not that it is.  Counting them held
+  // every restart-killed run in `running` for up to 30 more minutes, by which time the next
+  // cadence run had started and the lost run could never be retried.  A run another node really
+  // adopted still has its two cross-process graces: the unexpired strategy run lease below
+  // (renewed every 60s) and any audit row it writes after this boot.
+  const processBootIso = new Date(processStarted).toISOString();
+  const preBootActivityFloor = processBootIso > cutoff ? processBootIso : cutoff;
   const db = getDb();
   const stale = db
     .prepare(
-      `SELECT id, user_id, connected_account_id, started_at FROM strategy_runs
-       WHERE status = 'running' AND started_at < ?`
+      `SELECT id, user_id, connected_account_id, started_at, owner_instance FROM strategy_runs
+       WHERE status = 'running' AND (started_at < ? OR started_at < ?)
+         AND (? = 1 OR owner_instance = ?)`
     )
-    .all(cutoff) as Array<{
+    .all(cutoff, processBootCutoff, reapUnowned ? 1 : 0, instanceId) as Array<{
       id: string;
       user_id: string;
       connected_account_id: string | null;
       started_at: string;
+      owner_instance: string | null;
     }>;
   let count = 0;
+  const restartKilled: RestartKilledRun[] = [];
   for (const row of stale) {
-    // Extra grace beyond the raised threshold: audit_events has no run_id COLUMN, but nearly every
-    // strategy-run audit kind carries `runId` in its JSON payload (e.g. strategy_bear_review_unavailable,
-    // order placements) — so a run that's still emitting audit rows more recently than the cutoff is
-    // demonstrably still alive, just slow, not crashed. This json_extract only runs for rows ALREADY
-    // past the time cutoff (typically 0-1 per sweep tick), so it's cheap despite no index on payload.
+    if (isStrategyRunExecutionLive(row.id)) continue;
+    const owned = row.owner_instance === instanceId;
+    // Followers pass reapUnowned false, so the SQL already hid other instances.  Keep the
+    // check next to the write so a future query change cannot close the leader's runs.
+    if (!owned && !reapUnowned) continue;
+    // Pre-boot grace (money path).  `started_at >= cutoff` means this row is NOT time-stale — the
+    // restart sweep alone selected it, purely because it started before this process booted.
+    // ST-8: stay quiet for RESTART_SWEEP_BOOT_GRACE_MS so the strategy-run drain can adopt the
+    // orphan before this arm marks it failed.  On a multi-instance deploy that row is also
+    // usually owned by the other process; only the leader reaps those, and only after the grace.
+    const preBootOnly = row.started_at >= cutoff;
+    if (preBootOnly && bootGraceActive) continue;
+    // Honour a live strategy-run lease for every restart-arm row, and for every row this
+    // instance does not own (a follower must not treat the leader's long run as wedged).
+    // Deliberately NOT applied to a time-stale row THIS instance owns: a wedged run whose lock
+    // guard interval keeps renewing must still be swept after STALE_RUN_THRESHOLD_MS.
+    if ((preBootOnly || !owned) && hasLiveStrategyRunLease(row.id, row.user_id, now)) continue;
+    if (preBootOnly && restartSweepWouldPreemptDrainAdoption(db, row.id)) continue;
+    const cause = staleRunningRunSweepCause(row.started_at, processStarted);
+    // Unconditional audit activity grace: check if the run is still emitting audit rows recently.
+    // For a pre-boot (restart) row only activity since this boot counts — see preBootActivityFloor.
+    const activityFloor = cause === "process_restarted_mid_run" ? preBootActivityFloor : cutoff;
     const recentActivity = db
       .prepare(`SELECT 1 FROM audit_events WHERE json_extract(payload, '$.runId') = ? AND created_at >= ? LIMIT 1`)
-      .get(row.id, cutoff);
+      .get(row.id, activityFloor);
     if (recentActivity) continue;
 
     const finishedAt = new Date(now).toISOString();
-    const cause = staleRunningRunSweepCause(row.started_at);
-    const summary = staleRunningRunSweepSummary(row.started_at);
+    const summary = staleRunningRunSweepSummary(row.started_at, processStarted);
     const res = db
       .prepare(
         `UPDATE strategy_runs SET status = 'failed', finished_at = ?, summary = ?
@@ -594,16 +793,38 @@ export function markStaleRunningRuns(now: number = Date.now()): number {
         runId: row.id,
         startedAt: row.started_at,
         reason: cause,
-        processStartedAt: new Date(processStartedAtMs()).toISOString()
+        // Same exemption for restart and same-process stall.  The summary phrases
+        // above are the streak classifier's copy of this flag (no audit join on
+        // the health path).
+        haltExempt: staleSweepFailureExemptsAutoHalt(cause),
+        processStartedAt: new Date(processStarted).toISOString()
       },
       row.user_id,
       // Scope the receipt to the run's account so per-account ops queries can filter it.
       row.connected_account_id ?? undefined
     );
     count++;
+    if (cause === "process_restarted_mid_run") {
+      restartKilled.push({
+        id: row.id,
+        userId: row.user_id,
+        connectedAccountId: row.connected_account_id,
+        startedAt: row.started_at,
+        finishedAt
+      });
+    }
   }
   closeOrphanedStrategyRunRequests(now);
-  return count;
+  return { repaired: count, restartKilled };
+}
+
+/** Back-compat wrapper: the repaired count only.  Retries are the scheduler's job
+ *  (`sweepStaleRunsAndRetry` in strategy-run-retry.ts). */
+export function markStaleRunningRuns(
+  now: number = Date.now(),
+  options?: StaleRunningSweepOptions
+): number {
+  return sweepStaleRunningRuns(now, options).repaired;
 }
 
 /**

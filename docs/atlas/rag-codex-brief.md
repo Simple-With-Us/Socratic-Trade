@@ -11,7 +11,7 @@
 
 ## Authorization & guardrails (non-negotiable)
 
-You're working in `jaywedgeworth22/public` (app under `apps/`, `packages/`, `tests/`, `evals/`).
+You're working in `Simple-With-Us/public` (app under `apps/`, `packages/`, `tests/`, `evals/`).
 Work on a **new branch**; open a **draft PR**; do **not** merge.
 
 - **Zero runtime dependencies.** Node 22 built-ins only (`node:http`, `node:crypto`, `node:fs`,

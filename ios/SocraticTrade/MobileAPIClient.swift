@@ -5,6 +5,8 @@ import Security
 enum MobileAPIError: Error, LocalizedError {
     case unauthorized(statusCode: Int)
     case serverError(statusCode: Int, message: String?)
+    /// POST /api/mobile/push/register returned 409. The token still belongs to another account.
+    case deviceTokenConflict(message: String?)
     case scanQuotesUnavailable(MarketScanResponse)
     case network(Error)
     case decoding(Error)
@@ -13,6 +15,8 @@ enum MobileAPIError: Error, LocalizedError {
         switch self {
         case .unauthorized:
             return "Your session expired.  Sign in again."
+        case .deviceTokenConflict:
+            return PushRegistrationPolicy.conflictMessage
         case .serverError(let statusCode, let message):
             // Cloudflare 521-523: origin unreachable.  Keep the reason, drop the vendor and code.
             if (521...523).contains(statusCode) {
@@ -30,11 +34,55 @@ enum MobileAPIError: Error, LocalizedError {
                 return reasons.joined(separator: "  ")
             }
             return "Quotes were unavailable for this universe.  Refresh after the quote feed recovers."
-        case .network:
-            return "Check your connection and try again."
+        case .network(let underlying):
+            if Self.isUserCancellation(underlying) { return nil }
+            return Self.userFacingNetworkMessage(for: underlying) ?? "Couldn't reach Socratic Trade"
         case .decoding:
             return "Couldn’t load your workspace.  Try again."
         }
+    }
+
+    /// A push upload can be sent again. A 409 is not transient: another account owns the token.
+    var isTransientPushRegistrationFailure: Bool {
+        switch self {
+        case .network, .decoding:
+            return true
+        case .serverError(let statusCode, _) where statusCode >= 500:
+            return true
+        case .serverError, .unauthorized, .deviceTokenConflict, .scanQuotesUnavailable:
+            return false
+        }
+    }
+
+    /// True when the failure is user- or task-initiated cancellation (no alert copy).
+    static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        if case MobileAPIError.network(let underlying) = error {
+            return isUserCancellation(underlying)
+        }
+        return false
+    }
+
+    /// Maps URLSession failures to short, accurate copy.  Returns nil for user-cancelled work.
+    static func userFacingNetworkMessage(for error: Error) -> String? {
+        if isUserCancellation(error) { return nil }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return nil
+            case .timedOut:
+                return "Server is slow, still trying"
+            case .notConnectedToInternet, .networkConnectionLost:
+                return "Check your connection"
+            default:
+                return "Couldn't reach Socratic Trade"
+            }
+        }
+        if case MobileAPIError.network(let underlying) = error {
+            return userFacingNetworkMessage(for: underlying)
+        }
+        return nil
     }
 }
 
@@ -57,21 +105,100 @@ struct SSEFrameAccumulator {
 struct MobileAPIClient {
     /// The one origin this app talks to.  Shared so the push coordinator (which cannot be
     /// handed the store's client) targets the same host — and therefore the same
-    /// `HTTPCookieStorage.shared` session — instead of a second hardcoded string that can drift.
+    /// in-memory cookie jar — instead of a second hardcoded string that can drift.
     static let productionBaseURL = URL(string: "https://socratictrade.com")!
+    /// Sent on mobile auth requests so the server applies ST-2599 strict checks.
+    static let sessionHardeningHeaderField = "x-socratic-mobile-session-hardening"
+    static let sessionHardeningHeaderValue = "1"
 
     let baseURL: URL
-    var session: URLSession = .shared
+    var session: URLSession
+    /// Stable in-memory jar — do not read `session.configuration.httpCookieStorage` (configuration is a copy).
+    let sessionCookieJar: HTTPCookieStorage
+    /// Custom URL protocols for the account-change DELETE session. A live
+    /// URLSession does not return `configuration.protocolClasses`, so a stub
+    /// installed on `session` has to be repeated here.
+    var isolatedProtocolClasses: [AnyClass]? = nil
+    /// Dedups the manual 502-504 Sentry report on the SSE stream to one per outage.
+    var eventsOutageLatch: OutageReportLatch = .events
+    /// Dedups the manual 502-504 Sentry report on /api/mobile/snapshot to one per outage.
+    var snapshotOutageLatch: OutageReportLatch = .snapshot
+
+    init(
+        baseURL: URL,
+        session: URLSession? = nil,
+        cookieJar: HTTPCookieStorage? = nil,
+        isolatedProtocolClasses: [AnyClass]? = nil
+    ) {
+        self.baseURL = baseURL
+        self.isolatedProtocolClasses = isolatedProtocolClasses
+        if let session {
+            if let cookieJar {
+                self.sessionCookieJar = cookieJar
+                self.session = session
+            } else if let existingJar = session.configuration.httpCookieStorage {
+                self.sessionCookieJar = existingJar
+                self.session = session
+            } else {
+                let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
+                let configuration = session.configuration.copy() as? URLSessionConfiguration
+                    ?? session.configuration
+                configuration.httpShouldSetCookies = true
+                configuration.httpCookieAcceptPolicy = .always
+                configuration.httpCookieStorage = jar
+                self.sessionCookieJar = jar
+                self.session = URLSession(
+                    configuration: configuration,
+                    delegate: session.delegate,
+                    delegateQueue: session.delegateQueue
+                )
+            }
+        } else {
+            let jar = SessionCookiePersistence.makeInMemoryCookieStorage()
+            self.sessionCookieJar = jar
+            self.session = Self.makeURLSession(cookieJar: jar)
+        }
+    }
+
+    /// In-memory cookie storage only — the durable session lives in the Keychain via `SessionCookieCoordinator`.
+    static func makeURLSession(cookieJar: HTTPCookieStorage = SessionCookiePersistence.makeInMemoryCookieStorage()) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpCookieStorage = cookieJar
+        return URLSession(configuration: configuration)
+    }
 
     func snapshot() async throws -> MobileSnapshot {
         let (snap, _) = try await snapshotData()
         return snap
     }
 
-    func snapshotData(timeout: TimeInterval = 30) async throws -> (MobileSnapshot, Data) {
+    /// Snapshot retry budget is split so the two loops never compound (see
+    /// `MobileAPIHTTPRetryPolicy.snapshotMaxRequests`):
+    /// - transport network errors are never retried here; `MobileStore.fetchSnapshotWithNetworkRetry`
+    ///   owns them (two attempts, `generation` checked between them);
+    /// - a 502/503/504 gets `maxGatewayRetries` transport retries (one on the store's first attempt,
+    ///   none on its second).  The store never retries a `.serverError`, so a gateway failure
+    ///   that exhausts this budget is terminal and reported once.
+    func snapshotData(
+        timeout: TimeInterval = 30,
+        captureFailures: Bool = true,
+        maxGatewayRetries: Int = MobileAPIHTTPRetryPolicy.snapshotGatewayRetries(storeAttempt: 0)
+    ) async throws -> (MobileSnapshot, Data) {
         var req = request(path: "/api/mobile/snapshot")
+        // A shared URL cache can replay the previous account after a switch or sign-out.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         req.timeoutInterval = timeout
-        let data = try await successfulResponseData(for: req)
+        // Retrying callers pass captureFailures: false and report only the terminal
+        // failure, so a recovered transient does not mint a Sentry issue per attempt.
+        let data = try await successfulResponseData(
+            for: req,
+            captureFailures: captureFailures,
+            maxTransientRetries: maxGatewayRetries,
+            maxNetworkRetries: 0,
+            outageLatch: snapshotOutageLatch
+        )
         do {
             let snap = try JSONDecoder().decode(MobileSnapshot.self, from: data)
             return (snap, data)
@@ -135,25 +262,20 @@ struct MobileAPIClient {
     /// so Scan can show the abort instead of "No Candidates."
     static let marketScanTimeout: TimeInterval = 50
 
-    func marketScan() async throws -> MarketScanResponse {
-        var req = request(path: "/api/scan")
+    func marketScan(recoveryId: String? = nil) async throws -> MarketScanResponse {
+        var req = marketScanRequest(recoveryId: recoveryId)
         req.timeoutInterval = Self.marketScanTimeout
-        let data: Data
-        let response: URLResponse
+        let endpoint = "/api/scan"
+        let (data, response) = try await marketScanAttempts(for: req, endpoint: endpoint)
         do {
-            (data, response) = try await session.data(for: req)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw MobileAPIError.network(error)
-        }
-        if let http = response as? HTTPURLResponse, http.statusCode == 503 {
-            if let failed = try? JSONDecoder().decode(MarketScanResponse.self, from: data),
-               (failed.scannedSymbols ?? 0) > 0 || !failed.warnings.isEmpty {
-                throw MobileAPIError.scanQuotesUnavailable(failed)
+            try Self.requireSuccess(response, body: data)
+        } catch let error as MobileAPIError {
+            if case .serverError(let statusCode, _) = error,
+               MobileAPIHTTPRetryPolicy.shouldCaptureExhaustedServerError(statusCode: statusCode) {
+                SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
             }
+            throw error
         }
-        try Self.requireSuccess(response, body: data)
         do {
             return try JSONDecoder().decode(MarketScanResponse.self, from: data)
         } catch {
@@ -161,8 +283,78 @@ struct MobileAPIClient {
         }
     }
 
-    func marketScanRequest() -> URLRequest {
+    /// Runs the /api/scan retry loop and returns the final attempt's data and response.
+    /// At most `1 + marketScanMaxRetries` (two) requests: each is a 50s server-side scan.
+    /// Each attempt binds its own `let` values inside the loop body, so the results are
+    /// initialized exactly once per iteration (a `let` declared outside the loop cannot be
+    /// assigned from inside it).
+    private func marketScanAttempts(
+        for req: URLRequest,
+        endpoint: String
+    ) async throws -> (Data, URLResponse) {
+        var attemptIndex = 0
+        while true {
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: req)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
+                    method: req.httpMethod,
+                    attemptIndex: attemptIndex,
+                    maxRetries: MobileAPIHTTPRetryPolicy.marketScanMaxRetries
+                ) {
+                    let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                        attemptIndex: attemptIndex,
+                        retryAfterSeconds: nil
+                    )
+                    attemptIndex += 1
+                    try await Task.sleep(nanoseconds: delay)
+                    continue
+                }
+                SentryTelemetry.captureAPIFailure(error: error, endpoint: endpoint)
+                throw MobileAPIError.network(error)
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode == 503 {
+                if let failed = try? JSONDecoder().decode(MarketScanResponse.self, from: data),
+                   (failed.scannedSymbols ?? 0) > 0 || !failed.warnings.isEmpty {
+                    throw MobileAPIError.scanQuotesUnavailable(failed)
+                }
+            }
+            if let http = response as? HTTPURLResponse,
+               MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+                   statusCode: http.statusCode,
+                   method: req.httpMethod,
+                   attemptIndex: attemptIndex,
+                   maxRetries: MobileAPIHTTPRetryPolicy.marketScanMaxRetries
+               ) {
+                let retryAfter = MobileAPIHTTPRetryPolicy.parseRetryAfterSeconds(
+                    http.value(forHTTPHeaderField: "Retry-After")
+                )
+                let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                    attemptIndex: attemptIndex,
+                    retryAfterSeconds: retryAfter
+                )
+                attemptIndex += 1
+                try await Task.sleep(nanoseconds: delay)
+                continue
+            }
+            return (data, response)
+        }
+    }
+
+    func marketScanRequest(recoveryId: String? = nil) -> URLRequest {
         var req = request(path: "/api/scan")
+        if let recoveryId, !recoveryId.isEmpty,
+           let url = req.url,
+           var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "recovery", value: recoveryId)]
+            if let next = components.url {
+                req.url = next
+            }
+        }
         req.timeoutInterval = Self.marketScanTimeout
         return req
     }
@@ -229,17 +421,41 @@ struct MobileAPIClient {
         var request = request(path: "/api/mobile/push/register", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: registration.jsonBody)
-        _ = try await successfulResponseData(for: request)
+        _ = try await successfulResponseData(for: request, deviceTokenConflictPath: true)
     }
 
     /// Sign-out counterpart.  Sends the token so the server drops the exact row rather than
     /// every token the session's user owns — signing out of one device must not silence
     /// another one the same owner is still signed in on.
     func unregisterPushToken(_ token: String) async throws {
+        _ = try await successfulResponseData(for: unregisterPushRequest(token))
+    }
+
+    /// Account-change DELETE. The prior account's cookies go on this request only.
+    /// The shared cookie jar is not read or written, so other in-flight calls keep
+    /// the signed-in session.
+    func unregisterPushToken(_ token: String, isolatedCookies: [HTTPCookie]) async throws {
+        var request = try unregisterPushRequest(token)
+        request.httpShouldHandleCookies = false
+        let cookie = HTTPCookie.requestHeaderFields(with: isolatedCookies)["Cookie"]
+        if let cookie {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        configuration.protocolClasses = isolatedProtocolClasses ?? session.configuration.protocolClasses
+        let isolated = URLSession(configuration: configuration)
+        defer { isolated.finishTasksAndInvalidate() }
+        _ = try await successfulResponseData(for: request, transport: isolated)
+    }
+
+    private func unregisterPushRequest(_ token: String) throws -> URLRequest {
         var request = request(path: "/api/mobile/push/register", method: "DELETE")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
-        _ = try await successfulResponseData(for: request)
+        return request
     }
 
     func acknowledgeNotifications(ids: [String]) async throws -> Int {
@@ -282,25 +498,66 @@ struct MobileAPIClient {
         return (try? JSONDecoder().decode(AccountDeletionResult.self, from: data)) ?? .successfulHTTP
     }
 
-    func loginWithApple(identityToken: String, name: String?) async throws -> AppleLoginResponse {
-        var request = request(path: "/api/mobile/auth/apple", method: "POST")
+    func prepareHandoff(codeChallenge: String) async throws -> String {
+        let response: HandoffNonceResponse = try await send(try handoffPrepareRequest(codeChallenge: codeChallenge))
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.handoffUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func fetchAppleSignInNonce() async throws -> String {
+        let response: AppleServerNonceResponse = try await send(appleNonceRequest())
+        guard MobileAuthNonce.isServerIssued(response.nonce) else {
+            throw MobileAPIError.serverError(
+                statusCode: 502,
+                message: MobileAuthStartFailure.appleNonceUnavailable
+            )
+        }
+        return response.nonce
+    }
+
+    func handoffPrepareRequest(codeChallenge: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/handoff-prepare", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        var body: [String: Any] = ["identityToken": identityToken]
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["codeChallenge": codeChallenge])
+        return request
+    }
+
+    func appleNonceRequest() -> URLRequest {
+        authRequest(path: "/api/mobile/auth/apple/nonce", method: "GET")
+    }
+
+    func appleLoginRequest(identityToken: String, name: String?, nonce: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/apple", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        var body: [String: Any] = ["identityToken": identityToken, "nonce": nonce]
         if let name, !name.isEmpty {
             body["name"] = name
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request)
+        return request
     }
 
-    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
-        var request = request(path: "/api/mobile/auth/exchange", method: "POST")
+    func webAuthExchangeRequest(code: String, verifier: String) throws -> URLRequest {
+        var request = authRequest(path: "/api/mobile/auth/exchange", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "code": code,
             "codeVerifier": verifier
         ])
-        let _: WebAuthExchangeResponse = try await send(request)
+        return request
+    }
+
+    func loginWithApple(identityToken: String, name: String?, nonce: String) async throws -> AppleLoginResponse {
+        try await send(try appleLoginRequest(identityToken: identityToken, name: name, nonce: nonce))
+    }
+
+    func exchangeWebAuthCode(_ code: String, verifier: String) async throws {
+        let _: WebAuthExchangeResponse = try await send(try webAuthExchangeRequest(code: code, verifier: verifier))
     }
 
     /// `onConnect` fires when the stream response is established and again on every received
@@ -315,9 +572,27 @@ struct MobileAPIClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
-        try Self.requireSuccess(response, body: nil)
+        // The SSE stream is not retried here (MobileStore reconnects quietly), and
+        // sentry-cocoa's automatic capture skips 502-504, so report those here, once per
+        // outage: MobileStore reconnects after every failure, so the latch stops one outage
+        // from minting an event per reconnect.  A successful connect resets it.
+        // Other 5xx stay with the automatic capture so nothing is reported twice.
+        do {
+            try Self.requireSuccess(response, body: nil)
+        } catch let error as MobileAPIError {
+            if case .serverError(let statusCode, _) = error,
+               MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(
+                   statusCode: statusCode,
+                   latch: eventsOutageLatch
+               ) {
+                SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: "/api/mobile/events")
+            }
+            throw error
+        }
+        eventsOutageLatch.reset()
         onConnect()
 
         var parser = SSEFrameAccumulator()
@@ -329,9 +604,10 @@ struct MobileAPIClient {
                     onEvent()
                 }
             }
-        } catch is CancellationError {
+            } catch is CancellationError {
             throw CancellationError()
         } catch {
+            SentryTelemetry.captureAPIFailure(error: error, endpoint: "/api/mobile/events")
             throw MobileAPIError.network(error)
         }
     }
@@ -365,11 +641,12 @@ struct MobileAPIClient {
     }
 
     func ownsCookie(_ cookie: HTTPCookie) -> Bool {
-        guard let host = baseURL.host?.lowercased() else { return false }
-        let domain = cookie.domain
-            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            .lowercased()
-        return host == domain || host.hasSuffix(".\(domain)")
+        guard let host = baseURL.host else { return false }
+        return SessionCookiePersistence.ownsDomain(cookie, host: host)
+    }
+
+    func authSessionCookies() -> [HTTPCookie] {
+        SessionCookiePersistence.authSessionCookies(in: sessionCookieJar, owningHost: baseURL.host)
     }
 
     private func request(path: String, method: String = "GET") -> URLRequest {
@@ -380,24 +657,22 @@ struct MobileAPIClient {
         return request
     }
 
+    private func authRequest(path: String, method: String) -> URLRequest {
+        var request = request(path: path, method: method)
+        request.setValue(Self.sessionHardeningHeaderValue, forHTTPHeaderField: Self.sessionHardeningHeaderField)
+        return request
+    }
+
     private func get<T: Decodable>(_ path: String, retries: Int = 2, timeout: TimeInterval = 30) async throws -> T {
-        var attempt = 0
-        while true {
-            do {
-                var req = request(path: path)
-                req.timeoutInterval = timeout
-                return try await send(req)
-            } catch let error as MobileAPIError {
-                if case .network = error, attempt < retries {
-                    attempt += 1
-                    let delayMs = UInt64(150_000_000 * (1 << attempt)) // 300ms, 600ms backoff
-                    try await Task.sleep(nanoseconds: delayMs)
-                    continue
-                }
-                throw error
-            } catch {
-                throw error
+        var req = request(path: path)
+        req.timeoutInterval = timeout
+        do {
+            return try await send(req, captureFailures: false, maxTransientRetries: retries)
+        } catch let error as MobileAPIError {
+            if case .network(let underlying) = error {
+                SentryTelemetry.captureAPIFailure(error: underlying, endpoint: path)
             }
+            throw error
         }
     }
 
@@ -414,8 +689,16 @@ struct MobileAPIClient {
         return try await send(request)
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let data = try await successfulResponseData(for: request)
+    private func send<T: Decodable>(
+        _ request: URLRequest,
+        captureFailures: Bool = true,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries
+    ) async throws -> T {
+        let data = try await successfulResponseData(
+            for: request,
+            captureFailures: captureFailures,
+            maxTransientRetries: maxTransientRetries
+        )
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -423,18 +706,110 @@ struct MobileAPIClient {
         }
     }
 
-    private func successfulResponseData(for request: URLRequest) async throws -> Data {
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw MobileAPIError.network(error)
-        }
-        try Self.requireSuccess(response, body: data)
+    private func successfulResponseData(
+        for request: URLRequest,
+        captureFailures: Bool = true,
+        deviceTokenConflictPath: Bool = false,
+        transport: URLSession? = nil,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
+        maxNetworkRetries: Int? = nil,
+        outageLatch: OutageReportLatch? = nil
+    ) async throws -> Data {
+        let (data, _) = try await transientAwareData(
+            for: request,
+            captureFailures: captureFailures,
+            deviceTokenConflictPath: deviceTokenConflictPath,
+            transport: transport,
+            maxTransientRetries: maxTransientRetries,
+            maxNetworkRetries: maxNetworkRetries,
+            outageLatch: outageLatch
+        )
         return data
+    }
+
+    private func transientAwareData(
+        for request: URLRequest,
+        captureFailures: Bool = true,
+        deviceTokenConflictPath: Bool = false,
+        transport: URLSession? = nil,
+        pathForTelemetry: String? = nil,
+        maxTransientRetries: Int = MobileAPIHTTPRetryPolicy.defaultMaxRetries,
+        /// Transport-error retry budget; nil means the same as `maxTransientRetries`.
+        maxNetworkRetries: Int? = nil,
+        /// When set, the manual 502-504 report fires once per outage; a 2xx resets it.
+        outageLatch: OutageReportLatch? = nil
+    ) async throws -> (Data, URLResponse) {
+        let endpoint = pathForTelemetry ?? request.url?.absoluteString ?? ""
+        var attemptIndex = 0
+        let urlSession = transport ?? session
+
+        while true {
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await urlSession.data(for: request)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if MobileAPIHTTPRetryPolicy.shouldRetryNetworkError(
+                    method: request.httpMethod,
+                    attemptIndex: attemptIndex,
+                    maxRetries: maxNetworkRetries ?? maxTransientRetries
+                ) {
+                    let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                        attemptIndex: attemptIndex,
+                        retryAfterSeconds: nil
+                    )
+                    attemptIndex += 1
+                    try await Task.sleep(nanoseconds: delay)
+                    continue
+                }
+                if captureFailures {
+                    SentryTelemetry.captureAPIFailure(error: error, endpoint: endpoint)
+                }
+                throw MobileAPIError.network(error)
+            }
+
+            if deviceTokenConflictPath,
+               let http = response as? HTTPURLResponse,
+               http.statusCode == 409 {
+                throw MobileAPIError.deviceTokenConflict(message: Self.serverMessage(from: data))
+            }
+
+            if let http = response as? HTTPURLResponse,
+               MobileAPIHTTPRetryPolicy.shouldRetryTransientGateway(
+                   statusCode: http.statusCode,
+                   method: request.httpMethod,
+                   attemptIndex: attemptIndex,
+                   maxRetries: maxTransientRetries
+               ) {
+                let retryAfter = MobileAPIHTTPRetryPolicy.parseRetryAfterSeconds(
+                    http.value(forHTTPHeaderField: "Retry-After")
+                )
+                let delay = MobileAPIHTTPRetryPolicy.backoffNanoseconds(
+                    attemptIndex: attemptIndex,
+                    retryAfterSeconds: retryAfter
+                )
+                attemptIndex += 1
+                try await Task.sleep(nanoseconds: delay)
+                continue
+            }
+
+            do {
+                try Self.requireSuccess(response, body: data)
+            } catch let error as MobileAPIError {
+                if case .serverError(let statusCode, _) = error,
+                   MobileAPIHTTPRetryPolicy.shouldReportGatewayFailure(
+                       statusCode: statusCode,
+                       latch: outageLatch
+                   ) {
+                    SentryTelemetry.captureHTTPServerFailure(statusCode: statusCode, endpoint: endpoint)
+                }
+                throw error
+            }
+            outageLatch?.reset()
+            return (data, response)
+        }
     }
 
     private static func requireSuccess(_ response: URLResponse, body: Data?) throws {
@@ -480,6 +855,14 @@ private struct AcknowledgeNotificationsResponse: Decodable {
 
 private struct WebAuthExchangeResponse: Decodable {
     let success: Bool
+}
+
+private struct HandoffNonceResponse: Decodable {
+    let nonce: String
+}
+
+private struct AppleServerNonceResponse: Decodable {
+    let nonce: String
 }
 
 struct WebAuthCodeVerifier {

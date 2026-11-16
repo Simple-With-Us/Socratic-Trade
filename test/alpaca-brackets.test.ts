@@ -17,8 +17,7 @@ let mockSendRequestError: any = null;
 let cancelledOrderIds: string[] = [];
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "MOCK_ACC", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "10000" };
       }
@@ -36,8 +35,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         }
         throw new Error(`unexpected sendRequest endpoint in test: ${endpoint}`);
       }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 beforeEach(async () => {

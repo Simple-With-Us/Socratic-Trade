@@ -48,6 +48,8 @@ const DELETE_TABLES_BY_USER_ID = [
   // Added 2026-08-12: registered APNs device tokens (native iOS push). A deleted account must not
   // leave a live token behind that would keep delivering to that person's phone.
   "device_push_tokens",
+  // Added 2026-11-09 (ST-2599): server-backed Auth.js session rows (migration 102).
+  "auth_sessions",
   "chat_turns",
   "llm_usage",
   "user_memory",
@@ -58,6 +60,9 @@ const DELETE_TABLES_BY_USER_ID = [
   "socratic_decisions",
   "socratic_framework_proposals",
   "synthetic_trailing_stops",
+  // Added 2026-09-29: per-user data-source residential proxy settings (including the
+  // encrypted proxy password). A deleted account must not leave proxy credentials behind.
+  "user_proxy_settings",
   "broker_protective_stops",
   "audit_events",
   // Added by the G9(b) coverage cross-check (2026-07-01) — previously missing:

@@ -109,6 +109,7 @@ export const PROTECTIVE_STOPS: FieldDef[] = [
   { path: "brokerBracketsEnabled", label: "Broker-held brackets", kind: "bool", hint: `Stop/take-profit legs rest at the broker (where supported) so protection survives app downtime.  Turning this OFF is looser.  ${ADVISORY_NOTE}`, looserWhen: "off" },
   { path: "brokerTrailingStops", label: "Broker-held trailing stops", kind: "bool", looserWhen: "off", hint: `With a trailing % set: on Alpaca REST, a native trailing_stop order (the broker moves the trigger itself, even while the app is down); an Alpaca MCP-endpoint account instead gets the SAME app-ratcheted resting stop as Robinhood (MCP has no native trailing parameter, so the trigger only moves on the app's own tick cadence, not continuously); on Robinhood a resting stop the app ratchets upward each cycle (needs Robinhood resting stops ON).  Turning this OFF keeps trailing app-managed only.  ${ADVISORY_NOTE}` },
   { path: "robinhoodBrokerStops", label: "Robinhood resting stops", kind: "bool", looserWhen: "off", hint: "Opt-in true broker-side stop for Robinhood positions (Robinhood cannot hold OCO brackets).  Also the gate for broker-held trailing on Robinhood." },
+  { path: "exitsReleaseAppStops", label: "Exits release the app's own stop", kind: "bool", hint: "When an approved sell or cover is blocked only because the app's own resting broker stop holds the shares, cancel that stop, place the exit, then re-place a stop for any shares left.  Owner and external orders are never touched.  While the exit order is working it holds the shares itself, so the stop comes back once it fills or is cancelled.  Off keeps the old behavior: the exit is blocked and the position can only leave through its stop.  Default on." },
   { path: "allowExtendedHoursSyntheticStops", label: "App stops in extended hours", kind: "bool", looserWhen: "on", hint: "Continues monitoring and executing synthetic stop-losses during extended hours (pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET)." },
   { path: "riskRules.protectWhileHalted", label: "Protect while halted", kind: "bool", looserWhen: "off", hint: "Allows synthetic stops to continue monitoring and executing protective exits even while trading is halted." }
 ];
@@ -274,6 +275,16 @@ export const TRIGGERS: FieldDef[] = [
   }
 ];
 
+/** Per-account Kalshi event-contract settings */
+export const KALSHI_EVENT_DEFS: FieldDef[] = [
+  { path: "eventContractsEnabled", label: "Event contracts trading", kind: "bool", looserWhen: "on", hint: `Permits autonomous and proposed trading of binary event contracts on Kalshi.  ${ADVISORY_NOTE}` },
+  { path: "maxOrderNotional", label: "Max per order ($)", kind: "money", optional: true, looserWhen: "up", hint: "Maximum dollar spend on any single event-contract order." },
+  { path: "maxDailyNotional", label: "Max daily spend ($)", kind: "money", optional: true, looserWhen: "up", hint: "Maximum cumulative dollar spend across all event contracts per calendar day." },
+  { path: "maxDailyOrders", label: "Max opening orders per day", kind: "int", looserWhen: "up", hint: "Caps the maximum number of new Yes/No event contract positions opened per day." },
+  { path: "runCadenceMinutes", label: "Scan cadence (minutes)", kind: "minutes", hint: "How frequently the agent evaluates Kalshi prediction markets." },
+  { path: "kalshiMacroEnabled", label: "Kalshi macro intelligence", kind: "bool", hint: "Ingest Kalshi event odds into macro outlook analysis." }
+];
+
 export const ALL_DEFS: FieldDef[] = [
   ...ESSENTIALS,
   ...SOCRATIC_OVERRIDE,
@@ -283,6 +294,7 @@ export const ALL_DEFS: FieldDef[] = [
   ...PANIC_BRAKE,
   ...SHORTS,
   ...OPTIONS,
+  ...KALSHI_EVENT_DEFS,
   ...HYGIENE,
   ...TAX_RULES,
   ...UNIVERSE_FLOOR,

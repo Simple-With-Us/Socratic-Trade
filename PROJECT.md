@@ -24,4 +24,4 @@ Consolidated roadmap after merging public-repo ("Atlas") efforts into the privat
 ## Public repo reference
 - Design docs: `docs/atlas/`
 - Provenance: `reference/atlas-public/`
-- Upstream: https://github.com/jaywedgeworth22/public
+- Upstream: https://github.com/Simple-With-Us/public

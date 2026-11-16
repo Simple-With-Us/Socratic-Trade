@@ -11,12 +11,17 @@ import { SymbolDrawerProvider } from "../app/console/ui/symbol-drawer";
  *  and the pure list body must show symbol, side, thesis tag, status, and age,
  *  each row linking into /console/decisions/[id]. */
 
+// Relative to now: timeAgo() renders "<N>d ago" only under 30 days and switches to
+// an absolute date (no "ago") past that, so a fixed calendar date rots the age
+// assertion the day it turns 30 (bit CI on 2026-08-31 with "2026-08-01T12:00:00.000Z").
+const RECENT_ISO = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
 function decisionCase(overrides: Partial<SocraticDecisionCase> = {}): SocraticDecisionCase {
   return {
     id: "dec-1",
     userId: "local",
-    createdAt: "2026-08-01T12:00:00.000Z",
-    updatedAt: "2026-08-01T12:00:00.000Z",
+    createdAt: RECENT_ISO,
+    updatedAt: RECENT_ISO,
     symbol: "NVDA",
     side: "buy",
     status: "placed",

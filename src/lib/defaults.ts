@@ -83,12 +83,12 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Daily LLM learning review — default OFF (nothing runs until enabled). When enabled the
   // default mode is "decide" (apply verdicts — remove/expire facts, resolve pending items,
   // each audited; owner-chosen 2026-07-09); "annotate" (audit + notify only, no mutation) is
-  // the opt-out. The reviewer model defaults to a real, explicit "claude-fable-5" value —
+  // the opt-out. The reviewer model defaults to a real, explicit "claude-fable-latest" value —
   // never a blank that silently means Fable (owner: no hidden model defaults; require a chosen
   // model). User-level (see USER_LEVEL_POLICY_FIELDS): one config for the whole login.
   learningReviewEnabled: false,
   learningReviewMode: "decide",
-  learningReviewModel: "claude-fable-5",
+  learningReviewModel: "claude-fable-latest",
   // Trigger: run when >= 5 new lessons pile up, OR the oldest un-reviewed one is >= 7 days old.
   learningReviewMinNewLessons: 5,
   learningReviewMaxWaitDays: 7,
@@ -121,6 +121,9 @@ export const DEFAULT_POLICY: TradingPolicy = {
   // Broker-held buy-stops for shorts (Alpaca). Default ON so enabling short
   // selling also arms the designed protection lane. Owner can turn off.
   brokerStopsForShorts: true,
+  // Approved exits may cancel the app's OWN resting protective stop that holds their shares, then
+  // re-place a stop for any remainder (src/lib/exit-stop-release.ts). Owner can turn off.
+  exitsReleaseAppStops: true,
   // Options + Kalshi event contracts:
   optionsTradingEnabled: true,
   eventContractsEnabled: true,
@@ -150,7 +153,20 @@ export const DEFAULT_POLICY: TradingPolicy = {
     riskReceipts: true,
     volTargeting: true,
     targetPortfolioVolPct: 25,
-    portfolioHeatBudgetPct: 10
+    portfolioHeatBudgetPct: 10,
+    // Owner ruling 2026-09-24 (board 687a5fb4): default flipped ON. Exits (sell/cover) are
+    // risk-REDUCING, so holding one for human approval just because the adversary is unavailable
+    // is itself the unsafe choice — blocking a de-risking trade on a reviewer outage can leave more
+    // capital exposed, not less. The per-account override still exists (`false` restores the old
+    // hold-for-review behavior) for anyone who explicitly wants it. mergePolicy deep-merges `tuning`,
+    // so any stored policy that never set this key inherits the new default automatically; only a
+    // policy that explicitly persisted `false` keeps the old behavior. NOTE: in the current
+    // §3.5 single-adversary design (docs/single-adversary-consolidation.md), exits are structurally
+    // exempt from ever reaching the reviewer at all (isRiskAddingOpening filters them out before
+    // debateProposal is called), so this flag's exit branch is not on the live path today — it is
+    // read-with-fallback hardening for `routeOnAdversaryUnavailable`'s exit branch (any future or
+    // secondary caller) rather than a change in today's observable exit behavior.
+    deRiskExitsOnAdversaryUnavailable: true
   },
   marketScanCandidateLimit: DEFAULT_MARKET_SCAN_CANDIDATE_LIMIT,
   marketScanOutlierReserve: DEFAULT_MARKET_SCAN_OUTLIER_RESERVE,

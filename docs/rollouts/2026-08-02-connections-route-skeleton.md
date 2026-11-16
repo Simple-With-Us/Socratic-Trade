@@ -124,7 +124,7 @@ Work was stopped by the owner mid-landing. Exact state at park time:
   live dev-server verification (SSR skeleton + deep links + zero console errors),
   `origin/main` merged in (`f7187a1e`) with the STATUS.md union-splice deliberately
   de-spliced (`d78e13c0`). Branch pushed; draft PR open (number in the live board /
-  #agent-sync closeout).
+  #ag***-s**c closeout).
 - **Interrupted:** the second `scripts/land.sh` run was killed during its gate phase, so
   the FULL `npm test` + `npm run build` have NOT been run against the final tree
   (first land.sh run aborted pre-gates on the board-file overlap check, by design).

@@ -194,9 +194,16 @@ async function seedDecision(input: {
   return id;
 }
 
+const NOW = Date.parse("2026-08-12T12:00:00.000Z");
+
 /** Seed `count` matured decisions across three days whose returns track (or invert) confidence. */
 async function seedMaturedDecisions(userId: string, count: number, opts: { invert?: boolean } = {}): Promise<void> {
-  const days = ["2026-08-08T15:00:00.000Z", "2026-08-09T15:00:00.000Z", "2026-08-10T15:00:00.000Z"];
+  // Relative to the injected NOW so the 90-day observation window never ages out of the fixtures.
+  const days = [
+    new Date(NOW - 4 * 86_400_000).toISOString(),
+    new Date(NOW - 3 * 86_400_000).toISOString(),
+    new Date(NOW - 2 * 86_400_000).toISOString()
+  ];
   for (let i = 0; i < count; i++) {
     const raw = i * 0.4 - (count * 0.4) / 2 + ((i % 3) - 1) * 0.6;
     await seedDecision({
@@ -208,8 +215,6 @@ async function seedMaturedDecisions(userId: string, count: number, opts: { inver
     });
   }
 }
-
-const NOW = Date.parse("2026-08-12T12:00:00.000Z");
 
 describe("signal-health refresh lane", () => {
   it("persists a snapshot row at/above the observation floor, with honest per-horizon gaps", async () => {

@@ -400,6 +400,19 @@ export type LitestreamCompactionTier = "0" | "1" | "2" | "3" | "9";
 
 export const LITESTREAM_COMPACTION_TIERS: readonly LitestreamCompactionTier[] = ["0", "1", "2", "3", "9"];
 
+/**
+ * Compaction levels this app actually runs.  litestream.coolify.yml `levels:` has
+ * one entry (L1 at 30s).  Litestream 0.5.12 has no other off switch for L2/L3.
+ * Health still *lists* 2/3 so leftover replica objects are visible, but must not
+ * treat them as a wedge (see disabledTiers on assessLitestreamTierFreshness).
+ */
+export const LITESTREAM_PRODUCT_ENABLED_TIERS: readonly LitestreamCompactionTier[] = ["0", "1", "9"];
+export const LITESTREAM_PRODUCT_DISABLED_TIERS: readonly LitestreamCompactionTier[] = ["2", "3"];
+
+export function isLitestreamProductDisabledTier(tier: string): boolean {
+  return (LITESTREAM_PRODUCT_DISABLED_TIERS as readonly string[]).includes(tier);
+}
+
 /** Plain-English names for the admin UI and alert text. */
 export const LITESTREAM_TIER_LABELS: Record<LitestreamCompactionTier, string> = {
   "0": "Continuous Sync",
@@ -418,19 +431,18 @@ export const LITESTREAM_TIER_LABELS: Record<LitestreamCompactionTier, string> = 
  * hours in production on 2026-08-11 (level 0 kept succeeding every ~60s the entire time —
  * see docs/rollouts/2026-08-09-event-loop-stall-instrumentation.md) before anyone noticed.
  * Reasoning per tier:
- *   - level 0: litestream.coolify.yml syncs every 60s. 10 minutes is ~10x that cadence,
- *     generous headroom for one missed tick while still catching a genuinely stuck sync
- *     in minutes rather than hours.
- *   - level 1: compaction is periodic, not continuous, so healthy operation naturally goes
- *     quiet between runs — there is no fixed interval to anchor a tight threshold to. 4
- *     hours tolerates ordinary gaps while catching a stuck compactor (this incident's
- *     failure mode) in a few hours instead of the 27+ hours it actually took.
- *   - level 2: 5-minute monitor interval, but output only appears when enough level-1
- *     input has accumulated — quiet stretches are normal.  2 hours (24x the interval)
- *     still catches a wedged retry loop (the 2026-08-12 incident shape) same-day.
- *   - level 3: 1-hour monitor interval, same accumulation caveat. 6 hours.
+ *   - level 0: litestream.coolify.yml `sync-interval: 300s`. 10 minutes is 2x that
+ *     cadence, generous headroom for one missed tick while still catching a genuinely
+ *     stuck sync in minutes rather than hours.
+ *   - level 1: product compaction interval is 30s (`levels: [{interval: 30s}]`). 4
+ *     hours tolerates ordinary gaps while catching a stuck L1 compactor in a few
+ *     hours instead of the 27+ hours the 2026-08-11 incident took.
+ *   - level 2 / 3: DISABLED as a product (omitted from `levels:`). Thresholds remain
+ *     for historical unit tests that pass `disabledTiers: []`. Production health
+ *     passes LITESTREAM_PRODUCT_DISABLED_TIERS so leftover L2/L3 objects never page.
  *   - level 9: `snapshot.interval: 24h`. 30 hours (24h + 6h buffer) rides out one
  *     delayed/retried run without false-alarming on ordinary scheduling jitter.
+ *     Graded independently of level 0 age — a fresh L0 must not hide a stale snapshot.
  *
  * Every threshold above 10 minutes is graded from the remote replica inventory, which
  * refreshes every 30 minutes and is discarded once it exceeds
@@ -448,18 +460,21 @@ export const LITESTREAM_TIER_STALE_AFTER_SECONDS: Record<LitestreamCompactionTie
 /**
  * How often litestream OFFERS each level a compaction opportunity, in seconds.
  *
- * Transcribed, not chosen. Levels 1/2/3 are litestream v0.5.12's `DefaultCompactionLevels`
- * (30s / 5m / 1h), which are in force because litestream.coolify.yml sets no `levels:` key.
- * Level 0's 60s is that file's replica `sync-interval`, and level 9's 86400 is its
- * `snapshot.interval: 24h`.
+ * Transcribed, not chosen, from litestream.coolify.yml:
+ *   L0 300s = replica `sync-interval: 300s`
+ *   L1 30s  = the single `levels:` entry (product compaction)
+ *   L2 300s / L3 3600s = litestream v0.5.12 DefaultCompactionLevels, kept for
+ *     historical unit tests that re-enable those levels via `disabledTiers: []`
+ *   L9 86400s = `snapshot.interval: 24h`
  *
- * LOCKSTEP TRAP: this map, LITESTREAM_FEEDER_TIER below, and LITESTREAM_COMPACTION_TIERS above
- * are all hand-maintained against litestream.coolify.yml and litestream's own boot log. If the
- * config ever grows an explicit `levels:` key, all three must be re-derived together — a level
- * that is configured OFF would otherwise look permanently wedged to the empty-level rule below.
+ * LOCKSTEP TRAP: this map, LITESTREAM_FEEDER_TIER, LITESTREAM_COMPACTION_TIERS,
+ * LITESTREAM_PRODUCT_DISABLED_TIERS, and litestream.coolify.yml `levels:` must
+ * stay in sync.  A level that is configured OFF would otherwise look permanently
+ * wedged to the empty-level rule below (the 2026-08-14 detector).  test/litestream-coolify-config.test.ts
+ * asserts the yaml side of that lockstep.
  */
 export const LITESTREAM_LEVEL_PRODUCTION_INTERVAL_SECONDS: Record<LitestreamCompactionTier, number> = {
-  "0": 60,
+  "0": 300,
   "1": 30,
   "2": 300,
   "3": 3600,
@@ -556,7 +571,8 @@ export type LitestreamTierEmptyReason =
   | "upstream-empty"
   | "input-idle"
   | "superseded"
-  | "within-threshold";
+  | "within-threshold"
+  | "product-disabled";
 
 export type LitestreamTierFreshness =
   | {
@@ -772,9 +788,17 @@ export function assessLitestreamTierFreshness(
     thresholdsSeconds?: Partial<Record<LitestreamCompactionTier, number>>;
     remoteInventory?: LitestreamRemoteInventorySnapshot | null;
     remoteInventoryMaxAgeSeconds?: number;
+    /**
+     * Compaction levels that are configured OFF.  Production passes
+     * LITESTREAM_PRODUCT_DISABLED_TIERS so leftover L2/L3 objects (or empty
+     * listings after they age out) never page.  Unit tests that document the
+     * 2026-08-14 empty-L2 detector omit this and keep the historical algorithm.
+     */
+    disabledTiers?: readonly LitestreamCompactionTier[];
   } = {}
 ): LitestreamTierFreshnessReport {
   const nowMs = options.nowMs ?? Date.now();
+  const disabled = new Set(options.disabledTiers ?? []);
   const inventory = options.remoteInventory ?? null;
   const inventoryState = remoteInventoryState(
     inventory,
@@ -980,13 +1004,37 @@ export function assessLitestreamTierFreshness(
         newestTxid: observation.newestTxid,
         ageSeconds,
         thresholdSeconds,
-        degraded: overThreshold && !caughtUpWithLevel0
+        // A disabled level may still list leftover replica objects.  Those must not
+        // page: the product no longer compacts them, so they will only get older.
+        degraded: disabled.has(tier) ? false : overThreshold && !caughtUpWithLevel0
       });
       continue;
     }
 
     const emptySource = measuredEmpty.get(tier);
     if (emptySource) {
+      if (disabled.has(tier)) {
+        decided.set(tier, {
+          tier,
+          label,
+          state: "empty",
+          source: emptySource,
+          fileCount: 0,
+          thresholdSeconds,
+          verdict: "expected",
+          reason: "product-disabled",
+          feederTier: null,
+          feederFileCount: null,
+          feederNewestActivityAt: null,
+          backlogSpanSeconds: null,
+          degraded: false,
+          detail:
+            `Level ${tier} is disabled in the product compaction set (litestream.coolify.yml ` +
+            "levels: is L1 only; Litestream 0.5.12 has no other off switch).  " +
+            "Emptiness at this level is expected, not a wedge."
+        });
+        continue;
+      }
       decided.set(tier, classifyEmptyTier(tier));
       continue;
     }
@@ -1366,6 +1414,11 @@ export interface LitestreamRuntimeLogFinding {
   marker: LitestreamRuntimeLogMarker;
   /** Trimmed, length-capped log line for a human-readable alert -- never the raw unbounded text. */
   line: string;
+  /**
+   * Numeric compaction level parsed from the line (`level=2`), not log severity
+   * (`level=ERROR`).  Null when the line has no compaction-level field.
+   */
+  level: string | null;
   /** Set when a compaction-failed line matches a known B2/mega-L2 failure substring. */
   classification?: LitestreamRuntimeLogClassification;
 }
@@ -1398,23 +1451,29 @@ function parseLitestreamLogTimeMs(line: string): number | null {
 }
 
 /** Numeric compaction level (`level=2`), not the log severity (`level=ERROR`). */
-function parseLitestreamCompactionLevel(line: string): string | null {
+export function parseLitestreamCompactionLevel(line: string): string | null {
   const matches = [...line.matchAll(/\blevel=(\d+)\b/g)];
   return matches.length > 0 ? matches[matches.length - 1]![1]! : null;
 }
 
-/** Pure: scan already-read text for litestream's own failure lines. Unit-testable without I/O. */
+/**
+ * Pure: scan already-read text for litestream's own failure lines. Unit-testable without I/O.
+ *
+ * Recovery is PER LEVEL.  A later `compaction complete` for level 1 must not clear a
+ * still-open level-2 `compaction failed` (the 2026-08-31 incident: nullish fallback to
+ * any-level complete kept `litestreamCompactionLogFailureCount` at 0 through the wedge).
+ * A failure whose compaction level cannot be parsed is never treated as recovered.
+ */
 export function scanLitestreamRuntimeLogText(text: string): LitestreamRuntimeLogFinding[] {
   const lastCompleteByLevel = new Map<string, number>();
-  let lastCompleteAny = 0;
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (!line.includes("compaction complete")) continue;
     const at = parseLitestreamLogTimeMs(line);
     if (at == null) continue;
-    const lvl = parseLitestreamCompactionLevel(line) ?? "*";
+    const lvl = parseLitestreamCompactionLevel(line);
+    if (!lvl) continue;
     lastCompleteByLevel.set(lvl, Math.max(lastCompleteByLevel.get(lvl) ?? 0, at));
-    lastCompleteAny = Math.max(lastCompleteAny, at);
   }
 
   const findings: LitestreamRuntimeLogFinding[] = [];
@@ -1425,10 +1484,10 @@ export function scanLitestreamRuntimeLogText(text: string): LitestreamRuntimeLog
     if (!marker) continue;
     const at = parseLitestreamLogTimeMs(line);
     const lvl = parseLitestreamCompactionLevel(line);
-    const recoveredAt = (lvl ? lastCompleteByLevel.get(lvl) : undefined) ?? lastCompleteAny;
-    // A later successful compaction for that level (or any level, if we cannot parse one)
-    // means the hole was healed. Keep paging only on failures that are still the newest signal.
-    if (at != null && recoveredAt > at) continue;
+    const recoveredAt = lvl ? lastCompleteByLevel.get(lvl) : undefined;
+    // A later successful compaction for THAT level means the hole was healed.
+    // Do not fall back to any-level completes — L1 ticking does not unwedge L2.
+    if (at != null && recoveredAt != null && recoveredAt > at) continue;
     const classification =
       marker === "compaction failed" ? classifyLitestreamCompactionFailure(line) : null;
     const capped =
@@ -1441,8 +1500,8 @@ export function scanLitestreamRuntimeLogText(text: string): LitestreamRuntimeLog
       classification != null ? `[${classification}] ${capped}` : capped;
     findings.push(
       classification != null
-        ? { marker, line: annotated, classification }
-        : { marker, line: annotated }
+        ? { marker, line: annotated, level: lvl, classification }
+        : { marker, line: annotated, level: lvl }
     );
     if (findings.length >= LITESTREAM_RUNTIME_LOG_MAX_FINDINGS) break;
   }

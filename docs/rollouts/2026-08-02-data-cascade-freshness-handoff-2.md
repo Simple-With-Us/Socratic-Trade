@@ -34,7 +34,7 @@ All pause-#1 decisions stand. New: (a) AG-context addendum baked into the workfl
 
 - Stage 1: `npx tsc --noEmit` clean + targeted vitest green (verify agent) → committed.
 - Stage 2 partial: `npx tsc --noEmit` clean (verified at pause). **No test run. No lint. No build. Full 4-gate suite has NOT run on this branch.**
-- Prod (no mutations made this session): healthy at main HEAD after peer-MONET's webhook restoration (~04:47Z receipt in #agent-sync); deploy queue rows 96-98 finished, 99/100 (dup commit b7d88e42) in flight at pause; row 101 failure = different app (compose buildpack). UptimeRobot incident ~04:11Z was transient CPU starvation under double build — app container never died.
+- Prod (no mutations made this session): healthy at main HEAD after peer-MONET's webhook restoration (~04:47Z receipt in #ag***-s**c); deploy queue rows 96-98 finished, 99/100 (dup commit b7d88e42) in flight at pause; row 101 failure = different app (compose buildpack). UptimeRobot incident ~04:11Z was transient CPU starvation under double build — app container never died.
 
 ## 5. Next Steps & Blockers (exact resume path)
 
@@ -47,5 +47,5 @@ All pause-#1 decisions stand. New: (a) AG-context addendum baked into the workfl
 ## 6. Zero-Code Findings
 
 - **Free-tier research (COMPLETE, 23 agents):** `docs/market-data-free-tier-research-2026-08-02.md` — ranked new sources (Treasury XML, Nasdaq calendars, FRED w/ no-DB-cache ToU, FINRA short interest, Wisesheets, BLS, SimFin, Marketaux, USAspending, S&P constituents PDDL), underused existing providers (Tiingo/SEC-EDGAR/Alpaca-options-greeks/Finnhub-calendars/AV-corp-actions/Cboe-VVIX/TwelveData-self-adjusted/Yahoo-hardening), the owner-requested NOT-free table (11 data types w/ cheapest paid), and license cautions (only gov sources are commercial-clean; Stooq dead behind bot wall; Nasdaq ToS AI-extraction clause affects our existing screener dependency).
-- **AG takeover verification:** #2337 (universe refs push) + #2342 (OHLC metering + peer-route rate limits) merged pre-resume; #2343 verified sound and merged by me. AG works out of the main integration tree (`/Users/jay/Code/Socratic.Trade`) against repo rules — flagged, not policed. The uncommitted `derive.ts`/`benchmark.ts` edits seen on `antigravity/monet-fixes` at session start never landed anywhere and are gone from that tree.
+- **AG takeover verification:** #2337 (universe refs push) + #2342 (OHLC metering + peer-route rate limits) merged pre-resume; #2343 verified sound and merged by me. AG works out of the main integration tree (`/Users/jay/Code/Socratic-Trade`) against repo rules — flagged, not policed. The uncommitted `derive.ts`/`benchmark.ts` edits seen on `antigravity/monet-fixes` at session start never landed anywhere and are gone from that tree.
 - **Deploy-pipeline context:** peer MONET session root-caused webhook HMAC drift and restored auto-deploy with receipts; queue behaved (serialized, self-drained) throughout — the "dual in_progress" signature during their redeliveries resolved without intervention both times.

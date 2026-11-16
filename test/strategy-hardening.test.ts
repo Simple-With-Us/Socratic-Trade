@@ -749,6 +749,12 @@ describe("bullAttemptUsesJsonObjectTransport (json_object post-parse gate routin
     expect(bullAttemptUsesJsonObjectTransport("openrouter", "openai/gpt-4.1-mini", "chat-completions", proposalSchema)).toBe(false);
   });
 
+  it("gates native MiniMax while retaining OpenRouter schema enforcement", () => {
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M3.1-Flash", "chat-completions", proposalSchema)).toBe(true);
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M2.7", "chat-completions", proposalSchema)).toBe(true);
+    expect(bullAttemptUsesJsonObjectTransport("openrouter", "minimax/minimax-m3.1-flash", "chat-completions", proposalSchema)).toBe(false);
+  });
+
   it("returns false for Anthropic messages transport", () => {
     expect(bullAttemptUsesJsonObjectTransport("anthropic", "claude-sonnet-5", "anthropic-messages", proposalSchema)).toBe(false);
   });
@@ -779,6 +785,15 @@ describe("filterRepairedProposals (post-jsonrepair completeness gate, Codex P1 P
     const { kept, dropped } = filterRepairedProposals([complete()]);
     expect(kept).toHaveLength(1);
     expect(dropped).toBe(0);
+  });
+
+  it("rejects valid JSON with incomplete native MiniMax proposals before sizing defaults", () => {
+    const parsed = JSON.parse(JSON.stringify({ proposals: [complete(), { symbol: "NVDA", side: "buy", type: "market" }] }));
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M3.1-Flash", "chat-completions", {})).toBe(true);
+    const { kept, dropped } = filterRepairedProposals(parsed.proposals);
+    expect(sanitizeProposals(kept)).toHaveLength(1);
+    expect(kept[0]?.symbol).toBe("AAPL");
+    expect(dropped).toBe(1);
   });
 
   it("drops a proposal truncated mid-object (missing tail keys), keeping complete siblings", () => {

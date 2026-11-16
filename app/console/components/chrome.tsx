@@ -9,6 +9,7 @@
  *  - data freshness strip */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Check, ChevronDown, LogOut, Monitor, Moon, OctagonMinus, Play, ShieldCheck, SlidersHorizontal, Sun, UserRound } from "lucide-react";
 import type { ConnectedAccount } from "@/lib/types";
@@ -25,7 +26,9 @@ import {
   deriveReality,
   deriveSpend,
   deriveStateInfo,
-  realityForAccount
+  realityForAccount,
+  stateChipTitle,
+  withHaltCause
 } from "../lib/derive";
 import {
   activateAccount,
@@ -45,6 +48,7 @@ import { useToast } from "../ui/toast";
 import { BREAKER_FIRED_NOTE } from "@/lib/guardrail-copy";
 import { Btn, Chip, Dot, Meter, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 // ── Reality banner ───────────────────────────────────────────────────────────
 
@@ -53,11 +57,11 @@ export function RealityBanner({ snapshot }: { snapshot: DashboardSnapshot }) {
   if (reality.tone === "live") return null;
   return (
     <div className={cx("con-reality", `con-reality-${reality.tone}`)}>
-      <div className="mx-auto flex max-w-[1400px] items-baseline gap-2 px-4 py-1.5">
+      <div className={cx("mx-auto flex max-w-[1400px] items-baseline px-4 py-1.5", reality.tone === "paper" ? "gap-0" : "gap-2")}>
         <span className="con-reality-word text-[length:var(--con-fs-sm)]">{reality.word}</span>
-        <span className="font-semibold text-black">•</span>
+        <span className={cx("font-semibold text-black", reality.tone === "paper" && "whitespace-pre")}>{reality.tone === "paper" ? "  •  " : "•"}</span>
         <span className="font-semibold text-black">{reality.phrase}</span>
-        <span className="hidden truncate text-black sm:inline">— {reality.clarification}</span>
+        {reality.tone !== "paper" && <span className="hidden truncate text-black sm:inline">— {reality.clarification}</span>}
       </div>
     </div>
   );
@@ -74,28 +78,38 @@ function brokerName(broker: string | undefined): string {
       return "Robinhood";
     case "tradier":
       return "Tradier";
+    case "kalshi":
+      return "Kalshi";
+    case "etoro":
+      return "eToro";
+    case "public":
+      return "Public";
+    case "webull":
+      return "Webull";
     default:
       return broker ?? "";
   }
 }
 
-export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapshot; compact?: boolean }) {
+export function ScopeSelector({ snapshot }: { snapshot: DashboardSnapshot; compact?: boolean }) {
   const toast = useToast();
   const guardAction = useDirtyActionGuard();
   const allowNextUnload = useNextUnloadBypass();
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const reality = deriveReality(snapshot);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "left", width: 360 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const active = activeConnectedAccount(snapshot);
   // Active account hoisted first, the rest after — same order the switch list
   // reads top-to-bottom. Mirrors the Broker connections settings card.
   const others = snapshot.connectedAccounts.filter((a) => !a.isActive);
   const ordered = active ? [active, ...others] : others;
 
-  const label = active
-    ? `${active.label || brokerName(active.broker)}${active.accountNumber ? ` ••${active.accountNumber.slice(-4)}` : ""}`
-    : "No connected account";
+  const label = active ? active.label || brokerName(active.broker) : "No connected account";
+  const activeLast4 = active?.accountNumber ? active.accountNumber.slice(-4) : null;
 
   const close = () => {
     setOpen(false);
@@ -133,21 +147,20 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
     }
   };
 
-  // Compact switch row: name + reality/run-state chips on line one, broker ••last4
-  // (bullet mask, same convention as iOS) on a faint second line. The whole row is
-  // the switch affordance; the loaded account is a non-interactive current-state
-  // marker (checkmark, accent tint).
+  // The whole row is the switch affordance; the loaded account is a non-interactive
+  // current-state marker (checkmark, accent tint).
   const renderRow = (account: ConnectedAccount) => {
     const r = realityForAccount(account);
     const policy = snapshot.connectedAccountPolicies?.[account.id];
-    const st = policy ? deriveStateInfo(policy) : null;
+    // Lane h5 review round: a stopped account that is not loaded says why, too.
+    const st = policy ? withHaltCause(deriveStateInfo(policy), policy.haltCause) : null;
     const isActive = account.isActive;
     const last4 = account.accountNumber ? account.accountNumber.slice(-4) : null;
     return (
       <button
         key={account.id}
         type="button"
-        role="menuitemradio"
+        role="radio"
         aria-checked={isActive}
         disabled={isActive || busyId !== null}
         onClick={() => guardAction(() => void switchTo(account.id))}
@@ -161,17 +174,16 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
             <span className="truncate text-[length:var(--con-fs-sm)] font-semibold">
               {account.label || brokerName(account.broker)}
             </span>
-            {r.tone !== "live" && <Chip tone={r.tone}>{r.word}</Chip>}
+            {r.tone !== "live" && <Chip tone={r.tone}>{r.tone === "paper" ? "PAPER" : r.word}</Chip>}
             {st && (
-              <Chip tone={st.tone}>
+              <Chip tone={st.tone} title={stateChipTitle(st)}>
                 {st.label.replace(" · market closed", "")}
               </Chip>
             )}
           </span>
-          <span className="mt-0.5 block truncate text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-            {brokerName(account.broker)}
-            {last4 ? ` · ••${last4}` : ""}
-            {r.tone !== "live" ? ` · ${r.phrase}` : ""}
+          <span className="mt-0.5 flex min-w-0 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+            <span className="truncate">{brokerName(account.broker)}</span>
+            {last4 && <span className="shrink-0 whitespace-pre">{` — ${last4}`}</span>}
           </span>
         </span>
         <span
@@ -205,25 +217,21 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
     // an "N.." clip comes from the reduced button padding (px-2.5) + truncate: at 360px
     // the leftover is ~73px, enough for "No con…"/the broker name, and it only grows
     // from there. Paired with the tighter mobile gap/padding on the header row (shell.tsx).
-    <div className="relative min-w-0 flex-1 sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
+    <div className="relative flex-1 min-w-[120px] sm:flex-none sm:min-w-[190px] sm:max-w-[300px]">
       <button
         ref={triggerRef}
         type="button"
         onClick={() => (open ? close() : setOpen(true))}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
-        // items-start + a small chevron nudge aligns the chevron with the first
-        // (account-name) line rather than floating between the two label lines.
-        className="flex w-full items-start gap-2 overflow-hidden rounded-control border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-2.5 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)] sm:px-3 con-bar-ctl con-bar-ctl-scope"
+        className="flex w-full items-center gap-2 overflow-hidden rounded-control border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] px-2.5 py-1.5 text-left transition-colors hover:border-[color:var(--con-accent)] sm:px-3 con-bar-ctl con-bar-ctl-scope"
         title="Switch which account this console shows"
       >
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[length:var(--con-fs-sm)] font-semibold leading-tight">{label}</span>
-          {!compact && (
-            <span className="hidden truncate text-[length:var(--con-fs-xs)] leading-tight text-[color:var(--con-faint)] sm:block">
-              {reality.tone === "live" ? "Brokerage account" : `${reality.word} · ${reality.phrase}`}
-            </span>
-          )}
+          <span className="flex min-w-0 text-[length:var(--con-fs-sm)] font-semibold leading-tight">
+            <span className="truncate">{label}</span>
+            {activeLast4 && <span className="shrink-0 whitespace-pre">{`   — ${activeLast4}`}</span>}
+          </span>
         </span>
         <ChevronDown
           size={14}
@@ -237,14 +245,20 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
           <button
             type="button"
             aria-label="Close account menu"
+            tabIndex={-1}
             className="fixed inset-0 z-40 h-full w-full cursor-default border-0 bg-transparent opacity-0"
             onClick={close}
           />
-          <div
-            role="menu"
-            aria-label="Account scope"
-            className="con-menu-drop absolute left-0 top-[calc(100%+4px)] z-50 flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
-          >
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                role="dialog"
+                aria-label="Account scope"
+                style={menu.style}
+                className="con-menu-drop flex max-h-[min(70vh,480px)] w-[min(calc(100vw-48px),360px)] max-w-[calc(100vw-48px)] sm:w-[360px] sm:max-w-[360px] flex-col gap-2 overflow-y-auto rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
+              >
             <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
               One account is loaded at a time. Switching rescopes everything — balances, guardrails, approvals, run
               state, and decision history.
@@ -260,12 +274,11 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
                 </p>
               </div>
             ) : (
-              <div className="flex flex-col gap-1.5">{ordered.map(renderRow)}</div>
+              <div role="radiogroup" aria-label="Select active account" className="flex flex-col gap-1.5">{ordered.map(renderRow)}</div>
             )}
             <div className="my-0.5 h-px bg-[color:var(--con-line)]" />
             <Link
               href="/console/connections#brokers"
-              role="menuitem"
               onClick={close}
               className="con-scope-row flex w-full items-center gap-2 rounded-control border border-[color:var(--con-line)] px-3 py-2 text-[length:var(--con-fs-sm)] font-medium"
               title="Add, remove, or reconnect broker accounts"
@@ -273,7 +286,9 @@ export function ScopeSelector({ snapshot, compact }: { snapshot: DashboardSnapsh
               <SlidersHorizontal size={14} className="shrink-0 text-[color:var(--con-faint)]" />
               Configure accounts
             </Link>
-          </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>
@@ -291,7 +306,7 @@ const STATE_TONE: Record<string, "pos" | "warn" | "neg" | "muted"> = {
 
 export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   // On phones the boxed single-line chip read as a second dropdown next to the
   // account selector and crowded the bar (owner report) — below sm it renders
   // unboxed with the state stacked over the authority in smaller type. Desktop
@@ -303,7 +318,7 @@ export function StateChip({ snapshot }: { snapshot: DashboardSnapshot }) {
         type="button"
         onClick={() => setOpen(true)}
         className="con-bar-ctl flex shrink-0 items-center gap-2 rounded-control border border-transparent px-1.5 py-1 text-left transition-colors sm:border-[color:var(--con-line-strong)] sm:bg-[color:var(--con-surface-2)] sm:px-3 sm:py-1.5 sm:hover:border-[color:var(--con-accent)]"
-        title={info.detail}
+        title={info.cause ? `${info.cause}  ${info.detail}` : info.detail}
       >
         <Dot tone={STATE_TONE[info.tone]} pulse={info.state === "active" && info.marketOpen !== false && snapshot.policy.strategyAuthority === "decide"} />
         <span className="flex flex-col leading-tight sm:flex-row sm:items-center sm:gap-1">
@@ -324,13 +339,13 @@ export function RunStateButton({ snapshot }: { snapshot: DashboardSnapshot }) {
   const [open, setOpen] = useState(false);
   const state = snapshot.policy.systemState;
   const isStartDirection = state === "halted" || state === "close_only";
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   const label = state === "halted" ? "Start Agent" : state === "close_only" ? "Resume Agent" : "Stop Agent";
   const title =
     info.word === "Paused · market closed"
       ? "The agent is on.  Scheduled runs wait for the next open.  Open this to stop it or change run state."
       : state === "halted"
-        ? "Open start options.  Scheduled runs stay off until you confirm Start Agent."
+        ? `${info.cause ? `${info.cause}  ` : ""}Open start options.  Scheduled runs stay off until you confirm Start Agent.`
         : state === "close_only"
           ? "Open resume options.  You can resume full operation or change run state."
           : "Stop the agent.  Stopping never sells anything.";
@@ -372,7 +387,7 @@ function ControlSheet({
   const [armText, setArmText] = useState("");
   const [confirmVerb, setConfirmVerb] = useState<"start" | "liquidate" | null>(null);
   const reality = deriveReality(snapshot);
-  const info = deriveStateInfo(snapshot.policy);
+  const info = withHaltCause(deriveStateInfo(snapshot.policy), snapshot.haltCause);
   const state = snapshot.policy.systemState;
 
   const startLabel = state === "close_only" ? "Resume Agent" : "Start Agent";
@@ -467,6 +482,14 @@ function ControlSheet({
           Now: <strong className="text-[color:var(--con-fg)]">{info.label}</strong>
         </span>
       </div>
+      {info.cause && (
+        <p
+          className="mb-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-fg)]"
+          data-testid="halt-cause"
+        >
+          {info.cause.replace(/ {2}/g, SENTENCE_GAP)}
+        </p>
+      )}
       <p className="mb-4 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
         {info.detail}
         {info.word === "Paused · market closed"
@@ -865,6 +888,10 @@ export function UserMenu({
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 340, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const user = snapshot.currentUser;
 
   const close = () => {
@@ -889,9 +916,9 @@ export function UserMenu({
   const who = user.name ?? user.email ?? user.userId;
 
   return (
-    // Not position:relative — the dropdown anchors to the bar row (the nearest
-    // positioned ancestor, set in shell.tsx) so it hugs the viewport-right edge
-    // instead of overflowing left off small screens.
+    // Not position:relative — the panel portals to <body> and fixed-anchors
+    // to this button (useAnchoredMenu), right-aligned so it cannot overflow
+    // off the left edge of small screens.
     <div className="shrink-0">
       <button
         ref={triggerRef}
@@ -901,8 +928,7 @@ export function UserMenu({
         aria-label={`Signed in as ${user.email ?? who} — account menu`}
         aria-expanded={open}
         aria-haspopup="menu"
-        style={{ width: 32, height: 32, minWidth: 32, minHeight: 32, maxWidth: 32, maxHeight: 32 }}
-        className="con-bar-ctl flex shrink-0 items-center justify-center overflow-hidden rounded-control border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
+        className="con-bar-ctl flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-control border border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] transition-colors hover:border-[color:var(--con-accent)] hover:text-[color:var(--con-accent)]"
       >
         <Avatar imageUrl={user.imageUrl} size="h-full w-full" iconSize={15} />
       </button>
@@ -911,7 +937,14 @@ export function UserMenu({
         <>
           {/* invisible click-away backdrop; the panel sits above it */}
           <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div className="con-menu-drop absolute right-2 top-[calc(100%+2px)] z-50 w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl">
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                style={menu.style}
+                className="con-menu-drop w-[min(92vw,340px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-4 shadow-xl"
+              >
             <div className="flex flex-col gap-3 text-[length:var(--con-fs-sm)]">
               <div className="flex items-center gap-3">
                 <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color:var(--con-line)] text-[color:var(--con-muted)]">
@@ -940,7 +973,7 @@ export function UserMenu({
                         title={THEME_WORD[t]}
                         aria-label={`Set theme to ${THEME_WORD[t]}`}
                         className={cx(
-                          "flex items-center gap-1.5 rounded-control px-2.5 py-1 text-[length:var(--con-fs-xs)] transition-colors",
+                          "con-theme-btn flex items-center gap-1.5 rounded-control px-2.5 py-1 text-[length:var(--con-fs-xs)] transition-colors",
                           active
                             ? "bg-[color:var(--con-surface)] text-[color:var(--con-fg)] font-medium shadow-sm border border-[color:var(--con-line)]"
                             : "text-[color:var(--con-muted)] hover:text-[color:var(--con-fg)] border border-transparent"
@@ -980,8 +1013,10 @@ export function UserMenu({
                   Sign out
                 </a>
               </div>
-            </div>
-          </div>
+              </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>

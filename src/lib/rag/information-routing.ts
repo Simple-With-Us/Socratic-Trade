@@ -35,9 +35,23 @@ const INFORMATION_NEED_SPECS: Record<InformationNeed, {
   financial_facts: { channel: "structured", structuredSource: "financial_facts" },
   insider_transactions: { channel: "structured", structuredSource: "insider_transactions" },
   // Full filings + compact document-summary abstracts (trade-relevant highlights for the LLM).
+  // 2026-09-27 breadth: DEF 14A / S-1 / ownership filings / 13F holdings are now in the corpus
+  // (they come in with the same lowercase form code the ingest path stores, e.g. "def 14a",
+  // "s-1", plus the two dedicated doc types below), so a filing question has to be allowed to
+  // reach them. doc_type is a filter, not a claim: adding a form to the corpus without adding it
+  // here is exactly how the 13F positions stayed invisible.
   filing_narrative: {
     channel: "semantic",
-    documentTypes: ["10-k", "10-q", "8-k", "document-summary"]
+    documentTypes: [
+      "10-k",
+      "10-q",
+      "8-k",
+      "def 14a",
+      "s-1",
+      "13f-holdings",
+      "insider-filing",
+      "document-summary"
+    ]
   },
   // Full call text + earnings-summary abstracts when the document-summarizer has run.
   earnings_transcript_narrative: {

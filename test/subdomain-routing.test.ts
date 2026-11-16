@@ -55,4 +55,31 @@ describe("middleware — subdomain routing for mobile and console", () => {
     const resConsole = await middleware(reqConsole);
     expect(resConsole.status).not.toBe(307);
   });
+
+  // Board/codex finding on PR #3188: app/console/lib/api.ts's redirectToLogin does a plain
+  // relative `window.location.href = "/login?callbackUrl=..."` navigation. Before this fix, that
+  // request re-entered THIS middleware on console.socratictrade.com/mobile.socratictrade.com and
+  // got rewritten to the protected /console/login (not a real route, and not public), which then
+  // hit the page-level fail-closed redirect back to /login — which got rewritten to /console/login
+  // again: an infinite loop that never reaches the sign-in page.
+  it("does not rewrite /login into /console/login on console.socratictrade.com (would otherwise loop)", async () => {
+    const req = createRequest("https://console.socratictrade.com/login", "console.socratictrade.com");
+    const res = await middleware(req);
+    expect(res.status).not.toBe(307);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("does not rewrite /login into /console/login on mobile.socratictrade.com (would otherwise loop)", async () => {
+    const req = createRequest("https://mobile.socratictrade.com/login", "mobile.socratictrade.com");
+    const res = await middleware(req);
+    expect(res.status).not.toBe(307);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("still rewrites other non-console paths on console.socratictrade.com (only /login is exempt)", async () => {
+    const req = createRequest("https://console.socratictrade.com/watchlist", "console.socratictrade.com");
+    const res = await middleware(req);
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("https://console.socratictrade.com/console/watchlist");
+  });
 });

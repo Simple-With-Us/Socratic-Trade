@@ -9,12 +9,13 @@
  *  PUT /api/policy path as every other settings card:
  *    learningReviewEnabled — the on/off switch (default off);
  *    learningReviewMode    — decide (apply verdicts, default) vs annotate (notify only);
- *    learningReviewModel   — the model that runs the review (default claude-fable-5,
+ *    learningReviewModel   — the model that runs the review (default claude-fable-latest,
  *                            an explicit value — never a blank that secretly means Fable). */
 
 import { useState } from "react";
 import type { LlmReasoningEffort } from "@/lib/types";
-import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { catalogEntryFor } from "@/lib/llm-model-catalog";
+import { normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { savePolicy, ConsoleApiError } from "../lib/api";
 import { resolveLearningReviewNumberCommit } from "../lib/number-commit";
@@ -42,13 +43,17 @@ const MODE_OPTIONS = [
 // options are frontier-tier; the review model is its own user-level pick (unrelated to the
 // per-account team models on Strategy → Models). No blank/"default" pseudo-option — the
 // field always holds a real, chosen model.
-const REVIEW_MODEL_OPTIONS = [
-  { value: "gpt-5.6-sol", label: "gpt-5.6-sol — recommended frontier audit · $$$" },
-  { value: "gpt-5.6-terra", label: "gpt-5.6-terra — balanced current-generation audit · $$$" },
-  { value: "gpt-5.6-luna", label: "gpt-5.6-luna — lower-cost current-generation audit · $$" },
-  { value: "claude-fable-5", label: "claude-fable-5 — most capable Claude · $$$" },
-  { value: "claude-opus-4-8", label: "claude-opus-4-8 — premium Claude reasoning · $$$" },
-  { value: "gemini-3.1-pro-preview", label: "gemini-3.1-pro-preview — deepest Gemini reasoning · $$$" }
+const reviewModelOption = (value: string, fallbackLabel: string) => {
+  const entry = catalogEntryFor(value);
+  return { value: entry?.displaySlug ?? value, label: entry?.label ?? fallbackLabel };
+};
+
+const NORMALIZED_REVIEW_MODEL_OPTIONS = [
+  reviewModelOption("gpt-6.1-sol", "gpt-6.1-sol — recommended frontier audit · $$$"),
+  reviewModelOption("gpt-6-luna", "gpt-6-luna — lower-cost current-generation audit · $"),
+  reviewModelOption("claude-fable-latest", "claude-fable-latest (5.1) — most capable Claude · $$$"),
+  reviewModelOption("claude-opus-latest", "claude-opus-latest (5.5) — premium Claude reasoning · $$$"),
+  reviewModelOption("gemini-pro-latest", "gemini-pro-latest (4 Argon) — deepest Gemini reasoning · $$$")
 ];
 
 export function LearningReviewCard() {
@@ -64,8 +69,12 @@ export function LearningReviewCard() {
   // "decide" is the default; only an explicit "annotate" opts out.
   const mode = policy.learningReviewMode === "annotate" ? "annotate" : "decide";
   // Real default value (never blank-means-Fable).
-  const model = policy.learningReviewModel?.trim() || "claude-fable-5";
-  const customModel = model && !REVIEW_MODEL_OPTIONS.some((o) => o.value === model) ? model : null;
+  const savedModel = policy.learningReviewModel?.trim() || "claude-fable-latest";
+  const catalogModel = catalogEntryFor(savedModel);
+  const model = catalogModel?.displaySlug ?? savedModel;
+  const extraModel = !NORMALIZED_REVIEW_MODEL_OPTIONS.some((o) => o.value === model)
+    ? { value: model, label: catalogModel?.label ?? `${model} — custom id` }
+    : null;
   const reasoningCapability = reasoningCapabilityForModel(model);
   const recommendedEffort = recommendedReasoningEffortForModel(model, "review");
   const reasoningEffort = normalizeReasoningEffortForModel(
@@ -214,7 +223,7 @@ export function LearningReviewCard() {
           </Field>
           <Field
             label="Learning-review model"
-            hint="A frontier model is the point.  Defaults to claude-fable-5."
+            hint="A frontier model is the point.  Defaults to the current claude-fable-latest catalog entry."
             htmlFor="learning-review-model"
           >
             <Select
@@ -233,12 +242,12 @@ export function LearningReviewCard() {
                 );
               }}
             >
-              {customModel && (
-                <option value={customModel} title="A model id outside the curated list, kept exactly as stored.">
-                  {customModel} — custom id
+              {extraModel && (
+                <option value={extraModel.value} title="A saved model outside the shortlist.">
+                  {extraModel.label}
                 </option>
               )}
-              {REVIEW_MODEL_OPTIONS.map((o) => (
+              {NORMALIZED_REVIEW_MODEL_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>

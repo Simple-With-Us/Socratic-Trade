@@ -7,8 +7,7 @@ let getAccountCalls = 0;
 let getAccountDelayMs = 0;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         getAccountCalls += 1;
         if (getAccountDelayMs > 0) {
@@ -31,8 +30,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
       async getOrders() {
         return [];
       }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 beforeEach(async () => {
@@ -98,5 +97,45 @@ describe("Alpaca getAccount coalescing", () => {
     await getAlpacaGateway("local", "roth-ira").getAccounts();
     await getAlpacaGateway("local", "paper-acct").getAccounts();
     expect(getAccountCalls).toBe(2);
+  });
+});
+
+describe("Alpaca credential and venue validation", () => {
+  it("honors only the environment-matched REST host and ignores a mismatched one", async () => {
+    const { resolveAlpacaRestBaseUrl } = await import("../src/lib/alpaca");
+    expect(
+      resolveAlpacaRestBaseUrl({ environment: "paper", storedBaseUrl: "https://paper-api.alpaca.markets/v2" })
+    ).toBe("https://paper-api.alpaca.markets");
+    expect(
+      resolveAlpacaRestBaseUrl({ environment: "paper", storedBaseUrl: "https://api.alpaca.markets/v2" })
+    ).toBeUndefined();
+    expect(
+      resolveAlpacaRestBaseUrl({ environment: "live", storedBaseUrl: "https://paper-api.alpaca.markets" })
+    ).toBeUndefined();
+    expect(resolveAlpacaRestBaseUrl({ environment: "paper", storedBaseUrl: "not a url" })).toBeUndefined();
+  });
+
+  it("rejects a REST key ID with no secret instead of sending it as OAuth", async () => {
+    const { upsertConnectedAccount } = await import("../src/lib/db");
+    upsertConnectedAccount({
+      id: "nosecret-acct",
+      userId: "local",
+      broker: "alpaca",
+      environment: "paper",
+      apiKey: "PK_NOSECRET",
+      accountNumber: "PA_NOSECRET",
+      isActive: false,
+      label: "Paper No Secret"
+    });
+    const { getAlpacaGateway } = await import("../src/lib/alpaca");
+    expect(() => getAlpacaGateway("local", "nosecret-acct")).toThrow(/API secret is missing/);
+  });
+
+  it("fingerprints credentials for caches without exposing the secret", async () => {
+    const { alpacaCredentialFingerprint } = await import("../src/lib/alpaca");
+    const a = alpacaCredentialFingerprint("PK_ONE", "secret-one");
+    const b = alpacaCredentialFingerprint("PK_ONE", "secret-two");
+    expect(a).not.toBe(b);
+    expect(a).not.toContain("secret");
   });
 });

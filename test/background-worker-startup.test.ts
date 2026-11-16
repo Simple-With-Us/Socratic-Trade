@@ -5,6 +5,15 @@ import {
   type BackgroundWorkerStarters,
 } from "../src/lib/background-worker-startup";
 
+const congressProbe = vi.hoisted(() => ({
+  token: vi.fn<() => string | undefined>(),
+  startup: vi.fn<() => Promise<void>>(),
+}));
+vi.mock("../src/lib/congress-share", () => ({
+  congressTradeToken: congressProbe.token,
+  probeCongressShareTokenOnStartup: congressProbe.startup,
+}));
+
 function starterSpies(): BackgroundWorkerStarters {
   return {
     startScheduler: vi.fn(),
@@ -72,6 +81,21 @@ describe("background worker startup", () => {
     expect(starters.startStreams).not.toHaveBeenCalled();
     expect(starters.startSecIngestWorker).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining("disabled (development"));
+  });
+
+  it("claims the unconditional boot probe before starting the scheduler", async () => {
+    congressProbe.token.mockReturnValue("test-token");
+    congressProbe.startup.mockResolvedValue(undefined);
+    const starters = starterSpies();
+    vi.mocked(starters.startScheduler).mockImplementation(() => {
+      expect(congressProbe.startup).toHaveBeenCalledTimes(1);
+    });
+    await startServerBackgroundWorkers({
+      env: { NODE_ENV: "production" }, starters, log: vi.fn(),
+    });
+    expect(congressProbe.startup).toHaveBeenCalledTimes(1);
+    congressProbe.token.mockReset();
+    congressProbe.startup.mockReset();
   });
 
   it("starts every worker family once after an explicit development opt-in", async () => {

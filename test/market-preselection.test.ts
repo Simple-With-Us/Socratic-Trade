@@ -245,6 +245,44 @@ describe("two-stage market enrichment", () => {
     expect(pool.slice(0, 4).map((quote) => quote.symbol)).toEqual(["R60", "R70", "R40", "R50"]);
     expect(new Set(pool.map((quote) => quote.symbol)).size).toBe(pool.length);
   });
+
+  it("honors a gather-budget pool cap override without dropping the candidate cut", () => {
+    const ranked = Array.from({ length: 80 }, (_, index) => quote(`R${index}`));
+    const pool = buildEnrichmentPreselectionPool(ranked, [], new Set(), 10, 10);
+    expect(pool).toHaveLength(10);
+  });
+
+  it("returns the ranked Nasdaq tape when enrichment aborts instead of throwing it away", async () => {
+    const rows = [screenerRow("AAPL", 1), screenerRow("MSFT", 0.5)];
+    vi.stubGlobal("fetch", async () => nasdaqRows(rows));
+    const controller = new AbortController();
+    mocks.enrich.mockImplementation(async () => {
+      controller.abort(new Error("strategy gather timeout"));
+      throw new Error("strategy gather timeout");
+    });
+    const scan = await scanMarket(["AAPL", "MSFT"], [], promotionWeights, undefined, [], {
+      candidateLimit: 2,
+      outlierReserve: 0,
+      signal: controller.signal
+    });
+    expect(scan.topCandidates.map((quote) => quote.symbol).sort()).toEqual(["AAPL", "MSFT"]);
+    expect(scan.warnings.join(" ")).toMatch(/aborted/i);
+  });
+
+  it("skips live enrichment when the gather deadline is already past", async () => {
+    const rows = [screenerRow("AAPL", 1), screenerRow("MSFT", 0.5)];
+    vi.stubGlobal("fetch", async () => nasdaqRows(rows));
+    const scan = await scanMarket(
+      ["AAPL", "MSFT"],
+      [],
+      promotionWeights,
+      undefined,
+      [],
+      { candidateLimit: 2, outlierReserve: 0, deadlineAt: Date.now() - 1_000 }
+    );
+    expect(mocks.enrich).not.toHaveBeenCalled();
+    expect(scan.warnings.join(" ")).toMatch(/Live enrichment skipped/);
+  });
 });
 
 function screenerRow(symbol: string, pctchange: number): Record<string, string> {
