@@ -18,7 +18,38 @@ const alpacaLiveAccount: ExecutionAccount = {
   label: "Alpaca Live"
 };
 
+const tradierPaperAccount: ExecutionAccount = {
+  id: "tradier-paper",
+  broker: "tradier",
+  environment: "paper",
+  accountNumber: "TRD-SANDBOX",
+  label: "Tradier Sandbox"
+};
+
+const tradierLiveAccount: ExecutionAccount = {
+  ...tradierPaperAccount,
+  id: "tradier-live",
+  environment: "live",
+  accountNumber: "TRD-LIVE",
+  label: "Tradier Brokerage"
+};
+
 describe("deriveExecutionState", () => {
+  it("derives Paper from a connected Tradier sandbox account with a Tradier clarification", () => {
+    const state = deriveExecutionState({ ...DEFAULT_POLICY, activeBroker: "tradier" }, tradierPaperAccount);
+    expect(state.mode).toBe("broker/paper");
+    expect(state.label).toBe("Paper");
+    expect(state.broker).toBe("tradier");
+    expect(state.clarification).toContain("Tradier Paper");
+  });
+
+  it("derives Brokerage from a connected Tradier production account with a Tradier clarification", () => {
+    const state = deriveExecutionState({ ...DEFAULT_POLICY, activeBroker: "tradier" }, tradierLiveAccount);
+    expect(state.mode).toBe("broker/live");
+    expect(state.label).toBe("Brokerage");
+    expect(state.clarification).toContain("Tradier Brokerage");
+  });
+
   it("derives Paper from a connected broker paper account — an account is an account", () => {
     const state = deriveExecutionState(DEFAULT_POLICY, alpacaPaperAccount);
 

@@ -27,7 +27,10 @@ const policy: TradingPolicy = {
   strategyAuthority: "decide",
   accountNumber: "LIVE1",
   includedIndices: [],
-  additionalSymbols: ["AAPL", "MSFT", "NVDA", "TSLA"]
+  additionalSymbols: ["AAPL", "MSFT", "NVDA", "TSLA"],
+  // Staleness gate pinned off (defaults to 120s since 2026-07-28): these margin-minimum tests pass
+  // no marketScan, and a missing quote timestamp blocks openings while the gate is on.
+  maxQuoteAgeSec: 0
 };
 
 function portfolioWithEquity(equity: number, accountNumber = "LIVE1"): Portfolio {
@@ -175,9 +178,14 @@ describe("evaluateTradeProposal — margin-minimum gate (PDT rule retired, FINRA
     expect(decision.reasons.some((r) => r.includes("margin_minimum"))).toBe(false);
   });
 
-  it("does NOT block a paper/Test account (not live) regardless of equity or margin", () => {
-    expect(evaluate({ equity: 100, isLiveExecution: undefined, marginEnabled: true }).reasons.some((r) => r.includes("margin_minimum"))).toBe(false);
-    expect(evaluate({ equity: 100, isLiveExecution: false, marginEnabled: true }).reasons.some((r) => r.includes("margin_minimum"))).toBe(false);
+  it("BLOCKS a paper/Test margin account below $2,000 only when margin is on (uniform gate, no paper exemption)", () => {
+    // Below $2K + margin → blocked (the paper exemption was removed 2026-07-23).
+    expect(evaluate({ equity: 100, isLiveExecution: false, marginEnabled: true }).reasons.some((r) => r.includes("margin_minimum"))).toBe(true);
+    // Below $2K + margin but isLiveExecution undefined → still blocked (the gate no longer gates on isLiveExecution).
+    expect(evaluate({ equity: 100, isLiveExecution: undefined, marginEnabled: true }).reasons.some((r) => r.includes("margin_minimum"))).toBe(true);
+    // Below $2K + CASH (margin off) → not blocked (cash accounts are never subject to margin minimum).
+    expect(evaluate({ equity: 100, isLiveExecution: false, marginEnabled: false }).reasons.some((r) => r.includes("margin_minimum"))).toBe(false);
+    // Above $2K + margin → not blocked.
     const paperHigh = evaluate({ equity: 100_000, isLiveExecution: false, marginEnabled: true });
     expect(paperHigh.reasons.some((r) => r.includes("margin_minimum"))).toBe(false);
     expect(paperHigh.approved).toBe(true);

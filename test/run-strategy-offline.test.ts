@@ -70,33 +70,81 @@ describe("strategy offline eval — scorers have teeth", () => {
 });
 
 describe("strategy offline eval — versioned prompts build (Chat A item 2)", () => {
-  it("buildBullSystem/buildBearSystem reflect the short-selling flag and STRATEGY_PROMPT_VERSION is set", async () => {
-    const { buildBullSystem, buildBearSystem, STRATEGY_PROMPT_VERSION } = await import("../src/lib/strategy-prompts");
+  it("buildBullSystem/buildRedTeamReviewSystem reflect their flags and STRATEGY_PROMPT_VERSION is set", async () => {
+    const { buildBullSystem, buildRedTeamReviewSystem, STRATEGY_PROMPT_VERSION } = await import("../src/lib/strategy-prompts");
     expect(typeof STRATEGY_PROMPT_VERSION).toBe("string");
     expect(STRATEGY_PROMPT_VERSION.length).toBeGreaterThan(0);
 
-    const base = { executionMode: "broker/paper", executionModeClarification: "x", strategyPrompt: "s", reflection: "", hasTaxContext: false, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const base = { executionMode: "broker/paper", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: false, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
     expect(buildBullSystem({ ...base, shortAllowed: false })).toContain("SHORT SELLING IS DISABLED");
     expect(buildBullSystem({ ...base, shortAllowed: true })).toContain("SHORT SELLING IS ENABLED");
-    expect(buildBearSystem({ shortAllowed: false })).toContain("Bear Agent");
-    expect(buildBearSystem({ shortAllowed: true })).toContain("Short selling is enabled");
+    // The single Red Team reviewer replaced the in-flow Bear (2026-07-07): direction-aware framing
+    // instead of a short-selling flag — a BUY gets the BEAR framing, a SHORT the skeptical-BULL one.
+    expect(buildRedTeamReviewSystem({ side: "buy", symbol: "AAPL" })).toContain("You are the BEAR");
+    expect(buildRedTeamReviewSystem({ side: "short", symbol: "AAPL" })).toContain("skeptical BULL");
+    for (const side of ["buy", "short"] as const) {
+      const prompt = buildRedTeamReviewSystem({ side, symbol: "AAPL" });
+      expect(prompt).toContain('"approve-at-half"');
+      expect(prompt).toContain("Red Team Risk Agent");
+    }
   });
 
   it("wash-sale prompt guidance: IRA-disregard PERMITS locked rebuys, taking precedence over washSaleHandling", async () => {
     const { buildBullSystem } = await import("../src/lib/strategy-prompts");
-    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", reflection: "", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
     // "block" (an explicit stricter opt-in, no longer the default): absolute prohibition.
     expect(buildBullSystem({ ...taxBase, washSaleHandling: "block" })).toContain("NEVER propose a BUY of any symbol in `washSaleLockedSymbols`");
     // IRA-disregard PERMITS the rebuy and takes precedence even when washSaleHandling is "block".
     const iraPrompt = buildBullSystem({ ...taxBase, washSaleHandling: "block", iraWashSaleDisregard: true });
-    expect(iraPrompt).toContain("You MAY propose a BUY of a symbol in `washSaleLockedSymbols`");
-    expect(iraPrompt).toContain("annotated as a technically-forfeited wash sale");
+    expect(iraPrompt).toContain("does not constrain this IRA");
+    expect(iraPrompt).toContain("the owner chose Ignore");
+    expect(iraPrompt).not.toContain("You MAY propose a BUY of a symbol in `washSaleLockedSymbols`");
+    expect(iraPrompt).not.toContain("technically-forfeited");
     expect(iraPrompt).not.toContain("NEVER propose a BUY of any symbol in `washSaleLockedSymbols`");
+    expect(iraPrompt).toContain("Do NOT sell to harvest a tax loss");
+    expect(iraPrompt).not.toContain("you trade in a taxable account");
+    expect(iraPrompt).not.toContain("harvestableLosses");
+  });
+
+  it("IRA tax context never instructs tax-loss harvesting even without disregard", async () => {
+    const { buildBullSystem } = await import("../src/lib/strategy-prompts");
+    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const iraPrompt = buildBullSystem({ ...taxBase, washSaleHandling: "auto", isIraAccount: true });
+    expect(iraPrompt).toContain("this is an IRA");
+    expect(iraPrompt).toContain("Do NOT sell to harvest a tax loss");
+    expect(iraPrompt).toContain("IRA wash-sale handling is Ignore");
+    expect(iraPrompt).not.toContain("you trade in a taxable account");
+    expect(iraPrompt).not.toContain("harvestableLosses");
+    expect(iraPrompt).not.toContain("positionsNearLongTerm");
+  });
+
+  it("IRA Auto prompt weighs lockouts; Block forbids them", async () => {
+    const { buildBullSystem } = await import("../src/lib/strategy-prompts");
+    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const autoPrompt = buildBullSystem({ ...taxBase, isIraAccount: true, iraWashSaleHandling: "auto" });
+    expect(autoPrompt).toContain("IRA wash-sale handling is Auto");
+    expect(autoPrompt).toContain("YOUR judgment call");
+    expect(autoPrompt).toContain("`taxContext.washSaleRebuyCosts`");
+    expect(autoPrompt).toContain("Do NOT sell to harvest a tax loss");
+    const blockPrompt = buildBullSystem({ ...taxBase, isIraAccount: true, iraWashSaleHandling: "block" });
+    expect(blockPrompt).toContain("IRA wash-sale handling is Block");
+    expect(blockPrompt).toContain("NEVER propose a BUY of a symbol in `washSaleLockedSymbols`");
+    expect(blockPrompt).not.toContain("YOUR judgment call");
+  });
+
+  it("taxable tax context still offers harvestableLosses", async () => {
+    const { buildBullSystem } = await import("../src/lib/strategy-prompts");
+    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const taxablePrompt = buildBullSystem({ ...taxBase, washSaleHandling: "auto" });
+    expect(taxablePrompt).toContain("you trade in a taxable account");
+    expect(taxablePrompt).toContain("harvestableLosses");
+    expect(taxablePrompt).toContain("positionsNearLongTerm");
+    expect(taxablePrompt).not.toContain("Do NOT sell to harvest a tax loss");
   });
 
   it("wash-sale prompt guidance: 'auto' (the default) tells the model the buy always proceeds and to weigh the priced tax cost itself", async () => {
     const { buildBullSystem } = await import("../src/lib/strategy-prompts");
-    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", reflection: "", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
+    const taxBase = { shortAllowed: false, executionMode: "test/local", executionModeClarification: "x", strategyPrompt: "s", hasTaxContext: true, holdingHorizon: "swing", maxSymbolExposurePct: 25, stopLossPct: 8, takeProfitPct: 20 };
     const autoPrompt = buildBullSystem({ ...taxBase, washSaleHandling: "auto" });
     // Owner decision 2026-07-03: no deterministic edge-vs-cost threshold language remains — the
     // model is told this is its own judgment call, referencing the priced cost in taxContext.

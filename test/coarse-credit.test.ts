@@ -28,7 +28,7 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   mockRunWalkForwardOOS.mockResolvedValue(null);
 });
 
@@ -208,7 +208,7 @@ describe("Change C — withhold OOS-unvalidated weight changes", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS WITHHOLD DEFAULT TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // No tuning.oosWithholdUnvalidated set → default true → withhold
@@ -236,7 +236,7 @@ describe("Change C — withhold OOS-unvalidated weight changes", () => {
     const { insertFillEvent, setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { proposeStrategyTuning } = await import("../src/lib/strategy-tuning");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setStrategyPrompt("OOS LEGACY KEEP TEST");
     const customWeights = { liquidity: 1.0, momentum: 1.0, value: 1.0, quality: 1.0, volatility: 1.0, sentiment: 1.0, positioning: 1.0, diversification: 1.0 };
     // Explicit opt-out: restore legacy keep-behavior

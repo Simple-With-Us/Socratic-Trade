@@ -1,12 +1,13 @@
 import { subscribeDashboardEvents, type DashboardEvent } from "@/lib/events";
 import { subscribeMobileCommandEvents } from "@/lib/mobile-api";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const subscriberId = resolveRequestUserId(request);
+  const subscriberId = resolveRequestUserIdOrResponse(request);
+  if (subscriberId instanceof Response) return subscriberId;
   const encoder = new TextEncoder();
   let unsubscribeMobile: (() => void) | null = null;
   let unsubscribeDashboard: (() => void) | null = null;

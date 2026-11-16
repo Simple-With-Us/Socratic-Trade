@@ -20,20 +20,25 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Loader2, RotateCcw, Send, Sparkles, Trash2 } from "lucide-react";
 import type { ChatDraft } from "@/lib/chat/types";
+import type { LlmReasoningEffort } from "@/lib/types";
 import { humanizeLlmError } from "@/lib/llm-errors";
+import { catalogEntryFor } from "@/lib/llm-model-catalog";
+import { ALL_LLM_REASONING_EFFORTS, normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
+import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact } from "../lib/format";
+import { redirectToLogin } from "../lib/api";
 import { useConsoleData } from "../lib/useConsoleData";
 import { ModelBadge } from "../ui/provider-logo";
-import { Chip, Select, TextInput } from "../ui/primitives";
+import { Chip, Select, TextInput, Tooltip } from "../ui/primitives";
 import { useToast } from "../ui/toast";
 import { DraftTicket } from "./draft-card";
 import { AssistantMarkdown } from "./markdown";
 import {
   CATALOG_MODEL_IDS,
   CHAT_MODEL_STORAGE_KEY,
+  CHAT_REASONING_STORAGE_KEY,
   CUSTOM_MODEL_VALUE,
-  DEFAULT_CHAT_MODEL,
   MODEL_GROUPS,
   providerDisplayName,
   providerForModel
@@ -78,6 +83,26 @@ interface LiveReply {
   model?: string;
 }
 
+type ChatProviderStatus = Partial<Record<string, boolean>>;
+
+/** Credential service the selected model will actually use: OpenRouter first when connected,
+ *  otherwise the native provider.  Meta and catalog entries without a native transport always
+ *  require OpenRouter, matching modelCredentialService / llmForModel on the server. */
+export function chatCredentialServiceForModel(model: string, providerStatus: ChatProviderStatus): string {
+  const nativeProvider = providerForModel(model);
+  if (/^openrouter\//i.test(model.trim()) || nativeProvider === "meta" || catalogEntryFor(model)?.openRouterOnly === true) {
+    return "openrouter";
+  }
+  return providerStatus.openrouter === true ? "openrouter" : nativeProvider;
+}
+
+/** Fail open while status is absent or partial; the API remains the authoritative credential gate. */
+export function chatModelHasCredential(model: string, providerStatus: ChatProviderStatus): boolean {
+  if (Object.keys(providerStatus).length === 0) return true;
+  if (providerStatus.openrouter === undefined) return true;
+  return providerStatus[chatCredentialServiceForModel(model, providerStatus)] !== false;
+}
+
 /** Router-matched suggested prompts (co-versioned with the chat orchestrator's
  *  intent classifier so a chip never dead-ends). */
 const SUGGESTIONS: Array<{ category: string; prompt: string }> = [
@@ -112,10 +137,15 @@ export function AssistantChat() {
   const [historyState, setHistoryState] = useState<"loading" | "ready" | "failed">("loading");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [model, setModel] = useState(DEFAULT_CHAT_MODEL);
+  const [inFlightClientTurnId, setInFlightClientTurnId] = useState<string | null>(null);
+  const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState<LlmReasoningEffort>("medium");
   /** Per-provider key availability ({} until loaded — treated as available so
    *  the gate never flashes before the check resolves). */
-  const [providerStatus, setProviderStatus] = useState<Partial<Record<string, boolean>>>({});
+  const [providerStatus, setProviderStatus] = useState<ChatProviderStatus>({});
+  /** True when the availability check itself failed, so "no 'no key' badges" means
+   *  "we couldn't check" rather than "every provider has a key". */
+  const [statusUnknown, setStatusUnknown] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const [clearing, setClearing] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -136,11 +166,25 @@ export function AssistantChat() {
   // ── Sticky model choice ────────────────────────────────────────────────────
   useEffect(() => {
     const saved = window.localStorage.getItem(CHAT_MODEL_STORAGE_KEY);
+    const selected = saved || "";
     if (saved) setModel(saved);
+    const savedEffort = window.localStorage.getItem(CHAT_REASONING_STORAGE_KEY) as LlmReasoningEffort | null;
+    setReasoningEffort(
+      savedEffort && ALL_LLM_REASONING_EFFORTS.includes(savedEffort)
+        ? savedEffort
+        : recommendedReasoningEffortForModel(selected, "chat")
+    );
   }, []);
   const pickModel = (m: string) => {
     setModel(m);
     window.localStorage.setItem(CHAT_MODEL_STORAGE_KEY, m);
+    const recommended = recommendedReasoningEffortForModel(m, "chat");
+    setReasoningEffort(recommended);
+    window.localStorage.setItem(CHAT_REASONING_STORAGE_KEY, recommended);
+  };
+  const pickReasoningEffort = (effort: LlmReasoningEffort) => {
+    setReasoningEffort(effort);
+    window.localStorage.setItem(CHAT_REASONING_STORAGE_KEY, effort);
   };
 
   // ── Server-persisted transcript ────────────────────────────────────────────
@@ -187,11 +231,26 @@ export function AssistantChat() {
     const load = async () => {
       try {
         const res = await fetch("/api/chat/providers");
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled) setStatusUnknown(true);
+          return;
+        }
         const body = (await res.json()) as { providers?: Partial<Record<string, boolean>> };
-        if (!cancelled && body.providers) setProviderStatus(body.providers);
+        if (cancelled) return;
+        if (body.providers) {
+          setProviderStatus(body.providers);
+          setStatusUnknown(false);
+        } else {
+          setStatusUnknown(true);
+        }
       } catch {
-        /* availability is best-effort; fail open so every model stays selectable */
+        // Availability stays FAIL-OPEN: every model remains selectable. Failing closed here
+        // would mean one flaky /api/chat/providers response locks the user out of Coach
+        // entirely, which is a far worse outcome than letting them pick a provider whose key
+        // is missing — that case already surfaces a clear error on send. What we must NOT do
+        // is keep quiet about it, because an empty status map is indistinguishable from
+        // "everything has a key". `statusUnknown` makes the difference visible instead.
+        if (!cancelled) setStatusUnknown(true);
       }
     };
     void load();
@@ -215,15 +274,21 @@ export function AssistantChat() {
   }, [messages, sending, historyState]);
 
   // ── Gate: does the SELECTED model's provider have a usable key? ────────────
-  const provider = providerForModel(model);
+  const modelUnselected = !model;
+  const provider = providerForModel(model || "");
+  const credentialService = chatCredentialServiceForModel(model || "", providerStatus);
   const statusLoaded = Object.keys(providerStatus).length > 0;
-  const keyMissing = provider !== "mock" && statusLoaded && providerStatus[provider] === false;
+  const keyMissing = modelUnselected || !chatModelHasCredential(model, providerStatus);
   const customPending = model === CUSTOM_MODEL_VALUE;
 
   const send = useCallback(
     async (override?: string, retryId?: string) => {
       const text = (override ?? input).trim();
       if (!text || sending || clearing || keyMissing) return;
+      if (modelUnselected) {
+        toast.push("warn", "Choose a model", "Coach has no hidden model default.  Pick the model you want to answer.");
+        return;
+      }
       if (customPending) {
         toast.push("warn", "Enter a model id", "Type a model id next to the picker, or choose a listed model.");
         return;
@@ -243,6 +308,7 @@ export function AssistantChat() {
           : [...m, { id: userId, role: "user", text, at: new Date().toISOString() }]
       );
       setSending(true);
+      setInFlightClientTurnId(clientTurnId);
       try {
         // clientTurnId is the retry-safety rail: the server records the user turn
         // BEFORE calling the provider, and dedupes on this id — so a Retry gets a
@@ -251,8 +317,19 @@ export function AssistantChat() {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ message: text, model, clientTurnId })
+          body: JSON.stringify({
+            message: text,
+            model,
+            clientTurnId,
+            ...(reasoningCapabilityForModel(model)
+              ? { reasoningEffort: normalizeReasoningEffortForModel(model, reasoningEffort) }
+              : {})
+          })
         });
+        if (res.status === 401) {
+          redirectToLogin();
+          throw new Error("Session expired.");
+        }
         if (!res.ok) throw new Error(await apiErrorMessage(res, "Chat request failed"));
         const reply = (await res.json()) as LiveReply;
         // If the user cleared the conversation while this was in flight, drop
@@ -277,9 +354,10 @@ export function AssistantChat() {
         toast.push("neg", "Message not answered", message);
       } finally {
         setSending(false);
+        setInFlightClientTurnId(null);
       }
     },
-    [input, sending, clearing, keyMissing, customPending, model, toast]
+    [input, sending, clearing, keyMissing, customPending, modelUnselected, model, reasoningEffort, toast]
   );
 
   const clearConversation = async () => {
@@ -303,7 +381,7 @@ export function AssistantChat() {
       toast.push(
         "info",
         "Conversation cleared",
-        "Your whole assistant transcript was deleted — it is one conversation shared across all your accounts. Staged proposals are untouched."
+        "Your whole assistant transcript was deleted — it is one conversation shared across all your accounts.  Staged proposals are untouched."
       );
     } catch {
       toast.push("neg", "Could not clear", "The transcript is unchanged — try again.");
@@ -319,82 +397,111 @@ export function AssistantChat() {
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   };
 
-  const canSend = !sending && !clearing && !keyMissing && !customPending && input.trim().length > 0;
+  const canSend = !sending && !clearing && !keyMissing && !customPending && !modelUnselected && input.trim().length > 0;
 
   return (
-    <section className="con-card flex h-[calc(100dvh-14rem)] min-h-[24rem] flex-col overflow-hidden lg:h-[calc(100dvh-12rem)]">
+    // Mobile height budgets the fixed bottom tab bar (~4rem incl. safe area) on top of the
+    // top chrome — 14rem left the composer pinned UNDER the bar. lg has no bottom bar.
+    <section className="con-card flex h-[calc(100dvh-18rem)] min-h-[24rem] flex-col overflow-hidden lg:h-[calc(100dvh-12rem)]">
       {/* Header */}
+      {/* No heading here: the page h1 ("Coach") above this card is the one title —
+          a second in-card h1 ("Assistant") gave the surface two competing names. */}
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-b border-[color:var(--con-line)] px-3 py-2 sm:px-4">
         <Sparkles size={15} className="shrink-0 text-[color:var(--con-accent)]" aria-hidden />
-        <h1 className="text-[length:var(--con-fs-md)] font-bold leading-none">Assistant</h1>
-        <span
-          className="hidden text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] md:inline"
-          title="The assistant can answer questions and draft orders, but it has no way to place one — every order goes through Approvals."
-        >
-          drafts orders you approve — it never places on its own
-        </span>
+        <Tooltip
+          content="The assistant can answer questions and draft orders, but it has no way to place one — every order goes through Approvals.">
+          <span
+            className="hidden text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] md:inline">
+            drafts orders you approve — it never places on its own
+          </span>
+        </Tooltip>
         <div className="ml-auto flex items-center gap-2">
-          {customPending || !CATALOG_MODEL_IDS.has(model) ? (
+          {reasoningCapabilityForModel(model) && (
+            <div className="w-24 sm:w-28">
+              <Select
+                value={normalizeReasoningEffortForModel(model, reasoningEffort) ?? "medium"}
+                onChange={(event) => pickReasoningEffort(event.target.value as LlmReasoningEffort)}
+                style={{ padding: "3px 8px", fontSize: "var(--con-fs-xs)" }}
+                title={reasoningAdviceForModel(model) ?? "Provider-side reasoning effort for this Coach response."}
+                aria-label="Chat reasoning effort"
+              >
+                {reasoningCapabilityForModel(model)!.options.map((option) => (
+                  <option key={option.value} value={option.value} title={option.hint}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
+          {customPending || (model.length > 0 && !CATALOG_MODEL_IDS.has(model)) ? (
             <div className="w-36">
               <TextInput
                 value={customPending ? "" : model}
-                placeholder="model id, e.g. gpt-5.5"
+                placeholder="model id, e.g. gpt-5.6-terra"
                 className="con-mono"
                 style={{ padding: "3px 8px", fontSize: "var(--con-fs-xs)" }}
-                title="Type any model id your provider serves. It is routed by name: claude-* to Anthropic, grok-* to xAI, gemini-* to Gemini, mistral-* to Mistral, deepseek-* to DeepSeek, anything else to OpenAI."
+                title="Type any model id your provider serves.  It is routed by name: claude-* to Anthropic, grok-* to xAI, gemini-* to Gemini, mistral-* to Mistral, deepseek-* to DeepSeek, anything else to OpenAI."
                 onChange={(e) => pickModel(e.target.value.trim() || CUSTOM_MODEL_VALUE)}
               />
             </div>
           ) : null}
           <div className="w-40 sm:w-56">
             <Select
-              value={CATALOG_MODEL_IDS.has(model) ? model : CUSTOM_MODEL_VALUE}
+              value={modelUnselected ? "" : CATALOG_MODEL_IDS.has(model) ? model : CUSTOM_MODEL_VALUE}
               onChange={(e) => {
                 pickModel(e.target.value);
                 inputRef.current?.focus();
               }}
               style={{ padding: "3px 8px", fontSize: "var(--con-fs-xs)" }}
-              title="Which AI model answers. $ signs are relative cost within the provider. 'no key' means that provider has no key in Settings; Mock is a deterministic offline model that needs no key."
+              title={
+                statusUnknown
+                  ? "Which AI model answers. $ signs are relative cost within the provider.  Key availability could NOT be checked right now, so no model is marked 'no key' — a provider without a key will fail on send."
+                  : "Which AI model answers.  $ signs are relative cost within the provider.  'no key' means that provider has no key in Connections."
+              }
               aria-label="Chat model"
             >
+              <option value="" disabled>Choose a model…</option>
               {MODEL_GROUPS.map((g) => {
-                const noKey = g.provider !== "offline" && statusLoaded && providerStatus[g.provider] === false;
+                const noKey = statusLoaded && g.options.every((o) => !chatModelHasCredential(o.value, providerStatus));
                 return (
                   <optgroup key={g.provider} label={`${g.label}${noKey ? " — no key" : ""}`}>
-                    {g.options.map((o) => (
-                      <option key={o.value} value={o.value} disabled={noKey}>
-                        {o.label}
-                        {o.tier ? ` (${o.tier})` : ""}
-                        {noKey ? " — no key" : ""}
-                      </option>
-                    ))}
+                    {g.options.map((o) => {
+                      const optionNoKey = statusLoaded && !chatModelHasCredential(o.value, providerStatus);
+                      return (
+                        <option key={o.value} value={o.value} disabled={optionNoKey}>
+                          {o.label}
+                          {o.tier ? ` (${o.tier})` : ""}
+                          {optionNoKey ? " — no key" : ""}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 );
               })}
             </Select>
           </div>
-          <button
-            type="button"
-            onClick={() => void clearConversation()}
-            disabled={sending || clearing}
-            className={cx(
-              "flex h-7 items-center gap-1 rounded-lg border px-2 text-[length:var(--con-fs-xs)] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-              clearArmed
-                ? "border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] text-[color:var(--con-neg)]"
-                : "border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)]"
-            )}
-            title={
+          <Tooltip
+            content={
               sending
                 ? "Wait for the current reply to finish — clearing mid-reply could orphan it in the saved history."
-                : "Deletes your ENTIRE saved assistant conversation — one transcript shared across all your accounts, not just the one selected. Staged proposals, orders, and positions are untouched. Click twice to confirm."
-            }
-          >
-            <Trash2 size={13} aria-hidden />
-            {clearArmed ? "Really clear?" : clearing ? "Clearing…" : "Clear"}
-          </button>
+                : "Deletes your ENTIRE saved assistant conversation — one transcript shared across all your accounts, not just the one selected.  Staged proposals, orders, and positions are untouched.  Click twice to confirm."
+            }>
+            <button
+              type="button"
+              onClick={() => void clearConversation()}
+              disabled={sending || clearing}
+              className={cx(
+                "flex h-7 items-center gap-1 rounded-control border px-2 text-[length:var(--con-fs-xs)] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                clearArmed
+                  ? "border-[color:var(--con-neg-border)] bg-[color:var(--con-neg-soft)] text-[color:var(--con-neg)]"
+                  : "border-[color:var(--con-line-strong)] text-[color:var(--con-muted)] hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)]"
+              )}>
+              <Trash2 size={13} aria-hidden />
+              {clearArmed ? "Really clear?" : clearing ? "Clearing…" : "Clear"}
+            </button>
+          </Tooltip>
         </div>
       </header>
-
       {/* Transcript */}
       <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto px-3 py-3 sm:px-4" role="log" aria-live="polite" aria-label="Conversation">
         {historyState === "loading" && (
@@ -403,12 +510,12 @@ export function AssistantChat() {
           </div>
         )}
         {historyState === "failed" && (
-          <div
-            className="rounded-md bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
-            title="Only loading old messages failed — sending new ones still works."
-          >
-            Couldn&apos;t load the earlier conversation. New messages still work; reload the page to retry.
-          </div>
+          <Tooltip
+            content="Only loading old messages failed — sending new ones still works.">
+            <div
+              className="rounded-control bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">Couldn't load the earlier conversation. New messages still work; reload the page to retry.
+                        </div>
+          </Tooltip>
         )}
         {historyState === "ready" && messages.length === 0 && (
           <div className="grid h-full place-items-center">
@@ -421,17 +528,16 @@ export function AssistantChat() {
               </p>
               <div className="mt-3 flex flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.prompt}
-                    type="button"
-                    onClick={() => void send(s.prompt)}
-                    disabled={sending || keyMissing}
-                    title={`Sends: "${s.prompt}"`}
-                    className="rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] transition-colors hover:border-[color:var(--con-accent)] hover:bg-[color:var(--con-surface-2)] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <span className="uppercase tracking-wide text-[color:var(--con-faint)]">{s.category}</span>
-                    <span className="ml-1.5">{s.prompt}</span>
-                  </button>
+                  <Tooltip key={s.prompt} content={`Sends: "${s.prompt}"`}>
+                    <button
+                      type="button"
+                      onClick={() => void send(s.prompt)}
+                      disabled={sending || keyMissing}
+                      className="rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] transition-colors hover:border-[color:var(--con-accent)] hover:bg-[color:var(--con-surface-2)] disabled:cursor-not-allowed disabled:opacity-50">
+                      <span className="uppercase tracking-wide text-[color:var(--con-faint)]">{s.category}</span>
+                      <span className="ml-1.5">{s.prompt}</span>
+                    </button>
+                  </Tooltip>
                 ))}
               </div>
             </div>
@@ -440,60 +546,57 @@ export function AssistantChat() {
         {messages.map((m) => (
           <div key={m.id} className={cx("flex", m.role === "user" ? "justify-end" : "justify-start")}>
             <div className="max-w-[88%] sm:max-w-[36rem]">
-              <div
-                className={cx(
-                  "rounded-xl px-3 py-2 text-[length:var(--con-fs-sm)]",
-                  m.role === "user" ? "bg-[color:var(--con-accent-soft)]" : "bg-[color:var(--con-surface-2)]",
-                  m.failed && "border border-[color:var(--con-warn-border)]"
-                )}
-                title={m.at ? fmtExact(m.at) : undefined}
-              >
-                {m.role === "assistant" ? (
-                  <AssistantMarkdown>{m.text}</AssistantMarkdown>
-                ) : (
-                  <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
-                )}
-                {m.citations && m.citations.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {m.citations.map((c, i) =>
-                      c.url ? (
-                        <a key={i} href={c.url} target="_blank" rel="noopener noreferrer" title={`Source this answer cited — opens ${c.url}`}>
-                          <Chip tone="muted" className="underline decoration-dotted">
+              <Tooltip content={m.at ? fmtExact(m.at) : undefined}>
+                <div
+                  className={cx(
+                    "rounded-card px-3 py-2 text-[length:var(--con-fs-sm)]",
+                    m.role === "user" ? "bg-[color:var(--con-accent-soft)]" : "bg-[color:var(--con-surface-2)]",
+                    m.failed && "border border-[color:var(--con-warn-border)]"
+                  )}>
+                  {m.role === "assistant" ? (
+                    <AssistantMarkdown>{m.text}</AssistantMarkdown>
+                  ) : (
+                    <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
+                  )}
+                  {m.citations && m.citations.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {m.citations.map((c, i) =>
+                        c.url ? (
+                          <Tooltip key={i} content={`Source this answer cited — opens ${c.url}`}>
+                            <a href={c.url} target="_blank" rel="noopener noreferrer">
+                              <Chip tone="muted" className="underline decoration-dotted">
+                                {c.label}
+                              </Chip>
+                            </a>
+                          </Tooltip>
+                        ) : (
+                          <Chip key={i} tone="muted" title="Source this answer cited.">
                             {c.label}
                           </Chip>
-                        </a>
-                      ) : (
-                        <Chip key={i} tone="muted" title="Source this answer cited.">
-                          {c.label}
-                        </Chip>
-                      )
-                    )}
-                  </div>
-                )}
-                {m.draft && reality && <DraftTicket draft={m.draft} reality={reality} />}
-              </div>
-              {m.role === "assistant" && m.model && (
-                <div className="mt-0.5 px-1 text-[10px] text-[color:var(--con-faint)]">
-                  {m.model.trim().toLowerCase() === "mock" ? (
-                    // No vendor logo for the offline mock — that would fake a provider.
-                    <span title="The deterministic offline model produced this answer — no LLM provider was called.">mock</span>
-                  ) : (
-                    <ModelBadge modelId={m.model} size="sm" className="font-normal" title="The model that produced this answer." />
+                        )
+                      )}
+                    </div>
                   )}
+                  {m.draft && reality && <DraftTicket draft={m.draft} reality={reality} />}
+                </div>
+              </Tooltip>
+              {m.role === "assistant" && m.model && (
+                <div className="mt-0.5 px-1 text-[length:var(--con-fs-2xs)] text-[color:var(--con-faint)]">
+                  <ModelBadge modelId={m.model} size="sm" className="font-normal" title="The model that produced this answer." />
                 </div>
               )}
               {m.failed && (
                 <div className="mt-1 flex items-center justify-end gap-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
                   <AlertTriangle size={12} aria-hidden /> Not answered
-                  <button
-                    type="button"
-                    onClick={() => void send(m.text, m.id)}
-                    disabled={sending || clearing}
-                    className="flex items-center gap-1 rounded border border-[color:var(--con-line-strong)] px-1.5 py-0.5 font-semibold text-[color:var(--con-fg)] transition-colors hover:bg-[color:var(--con-surface-2)] disabled:opacity-50"
-                    title="Send this message again."
-                  >
-                    <RotateCcw size={11} aria-hidden /> Retry
-                  </button>
+                  <Tooltip content="Send this message again.">
+                    <button
+                      type="button"
+                      onClick={() => void send(m.text, m.id)}
+                      disabled={sending || clearing}
+                      className="flex items-center gap-1 rounded border border-[color:var(--con-line-strong)] px-1.5 py-0.5 font-semibold text-[color:var(--con-fg)] transition-colors hover:bg-[color:var(--con-surface-2)] disabled:opacity-50">
+                      <RotateCcw size={11} aria-hidden /> Retry
+                    </button>
+                  </Tooltip>
                 </div>
               )}
             </div>
@@ -505,19 +608,18 @@ export function AssistantChat() {
           </div>
         )}
       </div>
-
       {/* Composer */}
       <div className="border-t border-[color:var(--con-line)] px-3 py-2.5 sm:px-4">
         {keyMissing && (
-          <p className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
+          <p className="mb-2 flex flex-wrap items-center gap-1.5 rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
             <AlertTriangle size={13} aria-hidden />
-            No {providerDisplayName(provider)} key is connected — this model can&apos;t answer.
+            No {credentialService === "openrouter" ? "OpenRouter" : providerDisplayName(provider)} key is connected — this model can&apos;t answer.
             <Link
-              href="/console/settings"
+              href="/console/connections#api-keys"
               className="font-semibold underline decoration-dotted"
-              title="Open Settings to connect an LLM provider key."
+              title="Open Connections to configure an LLM provider API key."
             >
-              Connect one in Settings
+              Connect one in Connections
             </Link>
             or pick a different model above.
           </p>
@@ -537,33 +639,55 @@ export function AssistantChat() {
                 void send();
               }
             }}
-            placeholder={keyMissing ? "Pick a model with a key to chat…" : "Ask a question, or describe an order to draft…"}
+            placeholder={modelUnselected ? "Choose a model above to chat…" : keyMissing ? "Pick a model with a key to chat…" : "Ask a question, or describe an order to draft…"}
             disabled={keyMissing}
             className="con-textarea flex-1 leading-normal"
             style={{ resize: "none", minHeight: "2.25rem", maxHeight: "9rem" }}
-            title="Your message to the assistant. Enter sends; Shift+Enter adds a line break."
+            title="Your message to the assistant.  Enter sends; Shift+Enter adds a line break."
             aria-label="Message the assistant"
           />
-          <button
-            type="button"
-            onClick={() => void send()}
-            disabled={!canSend}
-            className="con-btn con-btn-primary h-9 shrink-0"
-            title={
+          <Tooltip
+            content={
               keyMissing
                 ? "Connect a key for this model's provider, or pick another model."
+                : modelUnselected
+                  ? "Choose a model first; Coach has no hidden default."
                 : customPending
                   ? "Type a model id next to the picker first."
                   : "Send the message (Enter)."
-            }
-          >
-            <Send size={14} aria-hidden /> Send
-          </button>
+            }>
+            <button
+              type="button"
+              onClick={() => void send()}
+              disabled={!canSend}
+              className="con-btn con-btn-primary h-9 shrink-0">
+              <Send size={14} aria-hidden /> Send
+            </button>
+          </Tooltip>
+          {sending && inFlightClientTurnId ? (
+            <button
+              type="button"
+              className="con-btn h-9 shrink-0"
+              title="Cancel this turn.  In-flight work is kept as a partial reply."
+              onClick={() => {
+                void fetch("/api/chat/cancel", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ clientTurnId: inFlightClientTurnId })
+                });
+              }}
+            >
+              Cancel
+            </button>
+          ) : null}
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[10px] text-[color:var(--con-faint)]">
-          <span title="The assistant reads real quotes and your real account data. When it can't know something, it says so instead of inventing a number.">
-            Answers use live data and your account. Orders come back as drafts — nothing places without your approval.
-          </span>
+        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[length:var(--con-fs-2xs)] text-[color:var(--con-faint)]">
+          <Tooltip
+            content="The assistant reads real quotes and your real account data.  When it can't know something, it says so instead of inventing a number.">
+            <span>
+              Answers use live data and your account.  Orders come back as drafts — nothing places without your approval.
+            </span>
+          </Tooltip>
           <span className="hidden sm:inline">Enter to send · Shift+Enter for a line break</span>
         </div>
       </div>

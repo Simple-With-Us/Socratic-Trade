@@ -254,11 +254,11 @@ E4 (Autonomy) and any tightening/loosening of E1/E2/E3 that affects Live trigger
 | Rk11 | Broker-held brackets | toggle | `brokerBracketsEnabled` | `true` |
 | Rk12 | Robinhood broker stops | toggle | `robinhoodBrokerStops` | `false` |
 | Rk13 | **Enable short selling** | toggle (capability-gated) | `shortSellingEnabled` | `undefined` | 
-| Rk14 | **Short stop-loss %** | number (%) — **mandatory when Rk13 on** | `riskRules.shortStopLossPct` | `undefined` |
+| Rk14 | **Short stop-loss %** | number (%) — **mandatory when Rk13 on** | `riskRules.shortStopLossPct` | `8` |
 | Rk15 | Max short order $ | number ($) | `maxShortOrderNotional` | `undefined` |
 | Rk16 | Max short exposure % | number (%) | `maxShortExposurePct` | `undefined` |
 
-**Coupling rule:** enabling Rk13 hard-requires Rk14 (block save if short-selling on and `shortStopLossPct` empty). Rk13 is **greyed with an inline explainer when `ConnectedAccount.capabilities.shortSelling === false`** or the account is an IRA (capability-aware disabling, companion §"Woven through every control"). Enabling short selling is a §0.2 confirm.
+**Coupling rule:** Rk14 is pre-filled at its 8% default, so enabling Rk13 is not blocked out of the box. Blanking the field is **not** a way to re-arm the mandatory-stop rejection: `PUT /api/policy` strips a cleared (`null`) `riskRules.shortStopLossPct` back to an absent key before saving (`stripNullsDeep`), and `setPolicy` re-merges through `mergePolicy`'s `{...DEFAULT_POLICY.riskRules, ...policy.riskRules}`, which silently restores the 8% default for an absent key — the guard (`policy.riskRules.shortStopLossPct <= 0` in `src/lib/policy.ts`) never fires. The only reachable way to re-arm the rejection is setting `shortStopLossPct` to **0 or a negative number** (a real, non-null value survives `stripNullsDeep` and overrides the default); block save if the user sets it to <= 0 while Rk13 is on. Rk13 is **greyed with an inline explainer when `ConnectedAccount.capabilities.shortSelling === false`** or the account is an IRA (capability-aware disabling, companion §"Woven through every control"). Enabling short selling is a §0.2 confirm.
 
 ## 2.6 ADVANCED — Circuit breakers (cards double as armed/tripped status)
 

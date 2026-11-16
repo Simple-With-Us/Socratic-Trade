@@ -13,8 +13,9 @@
  *     receipt telemetry (never silent) instead of gating; the old edge-vs-cost veto was removed
  *     because it re-arithmetized the LLM's own outputs rather than adding independent judgment;
  *   - IRA replacement purchases are hard-blocked ONLY when iraWashSaleHandling is explicitly
- *     "block" (Rev. Rul. 2008-5), ignoring override tokens and even the per-account
- *     washSaleGuard flag; the default ("disregard") lets them proceed, annotated + audited;
+ *     "block". Optional washSaleMinLossUsd (blank = every loss) can exempt smaller losses.
+ *     "auto" proceeds with receipt telemetry. The default ("disregard" / Ignore) proceeds
+ *     annotated + audited and does not steer Green;
  *   - the override token never weakens an explicit "block" (ignored when handling is "block")
  *     and never bypasses OTHER gates at approval time;
  *   - only the closed escalation allowlist (ask-mode wash sale + time-context gates) can ever
@@ -24,12 +25,12 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import {
   evaluateTradeProposal,
+  iraWashSaleMinLossUsd,
   washSaleExpectedEdgeUsd,
   washSaleOverrideCostTolerance,
   IRA_WASH_SALE_DISREGARD_NOTE,
   WASH_SALE_AUTO_EDGE_MULTIPLE
 } from "../src/lib/policy";
-import { approvedEscalationsFromDecision, shouldEscalateDecision } from "../src/lib/strategy";
 import type { WashSaleLockMap } from "../src/lib/tax";
 import type {
   AccountCapabilities,
@@ -40,6 +41,7 @@ import type {
   TradeProposal,
   TradingPolicy
 } from "../src/lib/types";
+import { approvedEscalationsFromDecision, shouldEscalateDecision } from "../src/lib/strategy-risk";
 
 // Mock the tax module so the gate tests don't need a DB (the gate's fallback resolver is
 // exercised by policy.test.ts; here every test passes washSaleLocks/washSaleLockedSymbols).
@@ -82,7 +84,11 @@ function policyWith(overrides: Partial<TradingPolicy> = {}): TradingPolicy {
     maxOrderNotional: 50_000,
     maxOrderPctOfNav: undefined,
     maxDailyNotional: 50_000,
+    maxDailyPctOfNav: undefined,
     taxSettings: taxSettings(),
+    // Staleness gate pinned off (defaults to 120s since 2026-07-28): these wash-sale tests exercise
+    // the tax gates without fresh quote timestamps; tests about the gate itself override below.
+    maxQuoteAgeSec: 0,
     ...overrides
   };
 }
@@ -491,6 +497,46 @@ describe("IRA-replacement default disregard — every taxable wash-sale mode", (
     expect(decision.approved).toBe(false);
     expect(decision.washSale?.outcome).toBe("blocked_ira");
   });
+
+  it("IRA Auto proceeds with auto_proceeded receipt telemetry", () => {
+    const decision = evaluateTradeProposal(
+      buy,
+      ctx(policyWith({ taxSettings: taxSettings({ taxationType: "roth_ira", iraWashSaleHandling: "auto" }) }))
+    );
+    expect(decision.approved).toBe(true);
+    expect(decision.washSale?.outcome).toBe("auto_proceeded");
+    expect(decision.reasons).toHaveLength(0);
+  });
+
+  it("optional min-loss: IRA Block does not lock a $10 loss when the floor is $50", () => {
+    const decision = evaluateTradeProposal(
+      buy,
+      ctx(
+        policyWith({
+          taxSettings: taxSettings({ taxationType: "roth_ira", iraWashSaleHandling: "block", washSaleMinLossUsd: 50 })
+        }),
+        { washSaleLocks: locks(10) }
+      )
+    );
+    expect(decision.approved).toBe(true);
+    expect(decision.washSale).toBeUndefined();
+    expect(decision.reasons).toHaveLength(0);
+  });
+
+  it("optional min-loss: blank floor means every loss is in play", () => {
+    expect(iraWashSaleMinLossUsd(undefined)).toBeUndefined();
+    expect(iraWashSaleMinLossUsd({})).toBeUndefined();
+    expect(iraWashSaleMinLossUsd({ washSaleMinLossUsd: 0 })).toBeUndefined();
+    expect(iraWashSaleMinLossUsd({ washSaleMinLossUsd: 25 })).toBe(25);
+    const decision = evaluateTradeProposal(
+      buy,
+      ctx(policyWith({ taxSettings: taxSettings({ taxationType: "roth_ira", iraWashSaleHandling: "block" }) }), {
+        washSaleLocks: locks(10)
+      })
+    );
+    expect(decision.approved).toBe(false);
+    expect(decision.washSale?.outcome).toBe("blocked_ira");
+  });
 });
 
 
@@ -577,33 +623,41 @@ describe("time-context gate escalations (closed allowlist)", () => {
     expect(decision.escalations?.map((e) => e.kind)).toContain("daily_order_cap");
   });
 
-  it("quote staleness failure is escalatable", () => {
+  it("fundamentals/scan-age staleness is NOT escalatable (owner: never block on staleness)", () => {
     const decision = evaluateTradeProposal(
       buy,
-      ctx(policyWith({ maxQuoteAgeSec: 60 }), {
+      ctx(policyWith({ maxFundamentalsAgeSec: 60 }), {
         ...cleanLocks,
         now: new Date("2026-07-02T15:00:00.000Z"),
         marketScan: {
           source: "test",
-          generatedAt: "2026-07-02T15:00:00.000Z",
+          generatedAt: "2026-07-02T14:00:00.000Z",
           scannedSymbols: 1,
           returnedQuotes: 1,
           topCandidates: [],
           sectorBySymbol: {},
-          quotesBySymbol: { TSLA: { symbol: "TSLA", price: 100, volume: 1, intradayChangePct: 0, positionMarketValue: 0, score: 1, asOf: "2026-07-02T14:00:00.000Z" } },
+          quotesBySymbol: { TSLA: { symbol: "TSLA", price: 100, volume: 1, intradayChangePct: 0, positionMarketValue: 0, score: 1, asOf: "2026-07-02T15:00:00.000Z" } },
           warnings: []
         }
       })
     );
-    expect(decision.approved).toBe(false);
-    expect(decision.escalations?.map((e) => e.kind)).toContain("quote_staleness");
+    // Annotate only — no reasons, no escalations, still approved.
+    expect(decision.approved).toBe(true);
+    expect(decision.escalations?.map((e) => e.kind) ?? []).not.toContain("quote_staleness");
+    expect(decision.reasons.every((r) => !r.includes("staleness_gate"))).toBe(true);
   });
 
   it("PER-ORDER caps are never escalatable (hard class)", () => {
     // Daily budget has plenty of room — ONLY the per-order cap trips.
     const decision = evaluateTradeProposal(
       { ...buy, dollarAmount: 60_000 },
-      ctx(policyWith({ maxDailyNotional: 100_000 }), { ...cleanLocks, estimatedNotional: 60_000 })
+      ctx(policyWith({ maxDailyNotional: 100_000 }), {
+        ...cleanLocks,
+        estimatedNotional: 60_000,
+        // Keep the daily budget above the test order so this assertion remains
+        // about the hard per-order cap only.
+        portfolio: { ...portfolio, buyingPower: 100_000 }
+      })
     );
     expect(decision.approved).toBe(false);
     expect(decision.reasons.join(" ")).toContain("exceeds the maximum order limit");

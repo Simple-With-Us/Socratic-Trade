@@ -14,12 +14,26 @@ describe("normalizeExclusivePolicyCaps", () => {
     expect(policy.maxOrderPctOfNav).toBe(5);
   });
 
-  it("keeps daily caps in absolute mode when both legacy values exist", () => {
+  it("drops a hidden daily dollar cap when percent mode is visible", () => {
     const policy = normalizeExclusivePolicyCaps({
       ...DEFAULT_POLICY,
       maxDailyNotional: 1_000,
       maxDailyPctOfNav: 10
     });
+
+    expect(policy.maxDailyNotional).toBeUndefined();
+    expect(policy.maxDailyPctOfNav).toBe(10);
+  });
+
+  it("preserves an explicit dollar mode when a new percent default was only merged underneath it", () => {
+    const policy = normalizeExclusivePolicyCaps(
+      {
+        ...DEFAULT_POLICY,
+        maxDailyNotional: 1_000,
+        maxDailyPctOfNav: 20
+      },
+      { maxDailyNotional: 1_000 }
+    );
 
     expect(policy.maxDailyNotional).toBe(1_000);
     expect(policy.maxDailyPctOfNav).toBeUndefined();

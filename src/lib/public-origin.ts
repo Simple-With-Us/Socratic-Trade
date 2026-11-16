@@ -2,33 +2,20 @@ export const PUBLIC_SITE_FALLBACK_ORIGIN = "https://socratictrade.com";
 const LEGACY_PUBLIC_HOSTS = new Set(["trading.jays.services"]);
 
 export function resolvePublicAppOrigin(request: Request): string {
-  const requestOrigin = resolveRequestOrigin(request);
-  if (!isLoopbackUrl(requestOrigin)) return requestOrigin;
-
   const configuredPublicOrigin =
     normalizeOrigin(process.env.NEXT_PUBLIC_SITE_URL) ||
     normalizeOrigin(process.env.AUTH_URL) ||
     normalizeOrigin(process.env.NEXTAUTH_URL);
-  if (configuredPublicOrigin && !isLoopbackUrl(configuredPublicOrigin)) return configuredPublicOrigin;
+  if (configuredPublicOrigin && (process.env.NODE_ENV !== "production" || !isLoopbackUrl(configuredPublicOrigin))) {
+    return configuredPublicOrigin;
+  }
 
-  if (process.env.NODE_ENV === "production") return PUBLIC_SITE_FALLBACK_ORIGIN;
-  return requestOrigin;
-}
-
-function resolveRequestOrigin(request: Request): string {
-  const url = new URL(request.url);
-  const forwardedHost = firstForwardedValue(request.headers.get("x-forwarded-host"));
-  const host = forwardedHost || firstForwardedValue(request.headers.get("host")) || url.host;
-  const forwardedProto = firstForwardedValue(request.headers.get("x-forwarded-proto"));
-  const protocol = forwardedProto || (isLoopbackHost(host) ? url.protocol.replace(/:$/, "") || "http" : "https");
-  return normalizeOrigin(`${protocol}://${host}`) || url.origin;
-}
-
-function firstForwardedValue(value: string | null): string | undefined {
-  return value
-    ?.split(",")[0]
-    ?.trim()
-    .replace(/\/+$/, "");
+  // Proxy forwarding headers and Host are client-influenceable at a directly reachable origin.
+  // With no configured canonical origin, use the fixed production hostname. Local development is
+  // the only exception, and derives solely from Request.url (never X-Forwarded-Host).
+  const requestOrigin = new URL(request.url).origin;
+  if (process.env.NODE_ENV !== "production" && isLoopbackUrl(requestOrigin)) return requestOrigin;
+  return PUBLIC_SITE_FALLBACK_ORIGIN;
 }
 
 function normalizeOrigin(value: string | undefined): string | undefined {

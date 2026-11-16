@@ -6,6 +6,7 @@
 // `learning-ledger.ts` wraps these primitives with the setPolicy-based capture/revert semantics; this
 // module is intentionally thin (persistence only, module-per-concern).
 
+import "server-only";
 import { getDb } from "./db";
 
 /** A recorded learning mutation. `beforeState`/`afterState`/`evidence` are already JSON-parsed. */
@@ -132,6 +133,22 @@ export function listLearningMutations(
   sql += " ORDER BY created_at DESC LIMIT ?";
   params.push(limit);
   const rows = getDb().prepare(sql).all(...params) as RawRow[];
+  return rows.map(mapRow);
+}
+
+/**
+ * All of a user's ledger rows created at/after `sinceIso`, ACROSS connected accounts (unlike
+ * listLearningMutations, whose default `connected_account_id = ''` filter returns only user-wide
+ * rows). Used by the daily learning review's context pack: "what did the system auto-tune recently".
+ */
+export function listLearningMutationsSince(
+  userId: string,
+  sinceIso: string,
+  limit = 100
+): LearningMutationRow[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM learning_mutations WHERE user_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?")
+    .all(userId, sinceIso, Math.max(1, Math.min(500, limit))) as RawRow[];
   return rows.map(mapRow);
 }
 

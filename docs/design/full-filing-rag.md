@@ -1,5 +1,17 @@
 # Scope: Full-filing RAG ingestion (Q2) — 10-K/10-Q body fetch → storeDocument → ingested_accessions de-dup → scope:shared
 
+> **2026-07-21 implementation note:** Production embeddings are now OpenRouter/SiliconFlow BGE-M3,
+> while a Voyage client may exist only in tests. Before a managed `storeDocument` commit, the gate
+> must require the initialized Pinecone authority and the credential for the resolved active
+> embedding provider—not a test-only Voyage client. A production-mode OpenRouter/Pinecone regression
+> protects that invariant. This is separate from the gated corpus re-embed/purge program.
+
+> **2026-07-12 scope correction:** this file preserves the original recent-10-K/10-Q implementation design.
+> It is not sufficient for a 1,000-issuer historical backfill: the scheduler path, regex parser, recent-only
+> discovery, coarse accession ledger, and global content-hash dedup all require replacement or hardening first.
+> The current architecture and rollout plan is
+> [`docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`](../reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md).
+
 _Scoped 2026-06-21 (multi-agent design pass). Effort: **m** · Autonomy: **autonomous-after-decisions**_
 
 ## Current state

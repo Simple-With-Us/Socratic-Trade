@@ -21,9 +21,24 @@
  * dependency (`rerankMatches`) is exercised in-process against fake `{ rerank }` stand-ins that
  * throw/return synchronously, never touching a real client.
  */
-import { describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { rankPool, isWithinAsOf, resolveAsOfStamp, matchToChunk, rerankMatches } from "../src/lib/vector-db";
 import { fuseHybrid } from "../src/lib/rag/hybrid";
+
+vi.mock("../src/lib/db-health", () => ({
+  logApiHealth: vi.fn(),
+}));
+
+// Isolate the DB: even though logApiHealth is mocked, rankPool's strict-asOf `audit()` and
+// rerankMatches' `alertRagConnectionFailure()` (getInternalSetting/setInternalSetting) still touch
+// getDb(). Point DATABASE_URL at a per-run temp file so incidental writes never mutate the repo's
+// real data/app.db (repo convention — see AGENTS.md "Tests use a temp SQLite file per run").
+beforeAll(() => {
+  process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-rag-retrieval-regression-${randomUUID()}.db`)}`;
+});
 
 // ── Fixture builders (matchToChunk-shaped: id/score/metadata, exactly what Pinecone returns) ────
 
@@ -216,5 +231,168 @@ describe("R4.5 — rankPool defaults are a no-op (byte-for-byte identical to raw
     const out = await rankPool(pool, "q", 1, {});
     const chunks = out.map(matchToChunk);
     expect(chunks[0]).toMatchObject({ id: "a", score: 0.9, text: "alpha text", doc_type: "10-k", as_of: "2026-05-01" });
+  });
+
+  it("no `onDispositions` hook passed: return value is byte-identical across repeated calls (pure-function regression)", async () => {
+    // Same fixture/options shape as production's default config (minScore + asOf + dedupe, no
+    // hook) — pins that adding the OPTIONAL onDispositions param changed nothing for every
+    // existing caller, which never supplies it.
+    const pool = [
+      mk("a", 0.9, "alpha text about revenue growth", { acceptance_datetime: "2026-05-01" }),
+      mk("b", 0.8, "beta text about margin expansion", { acceptance_datetime: "2026-04-01" }),
+      mk("low", 0.1, "unrelated filler", { acceptance_datetime: "2026-03-01" })
+    ];
+    const withoutHook = await rankPool(pool, "q", 2, { minScore: 0.5, asOf: "2026-05-15", dedupeSimilarity: 0.6 });
+    const alsoWithoutHook = await rankPool(pool, "q", 2, { minScore: 0.5, asOf: "2026-05-15", dedupeSimilarity: 0.6 });
+    expect(withoutHook).toEqual(alsoWithoutHook);
+    expect(withoutHook.map((m) => m.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("persist-pool-v2 — rankPool's optional onDispositions hook", () => {
+  it("every candidate gets exactly one disposition, correctly naming the stage that dropped it", async () => {
+    const pool = [
+      mk("kept", 0.9, "alpha text about revenue growth", { acceptance_datetime: "2026-05-01" }),
+      mk("not-used", 0.85, "beta text about margin expansion", { acceptance_datetime: "2026-04-01" }),
+      mk("dropped-asof", 0.8, "gamma text about future plans", { acceptance_datetime: "2026-06-01" }),
+      mk("dropped-minscore", 0.1, "delta unrelated filler", { acceptance_datetime: "2026-03-01" })
+    ];
+    let captured: Map<string, string> | undefined;
+    // rankPool does NOT itself slice to `limit` (that's the caller's job — see its own doc
+    // comment); passing limit=1 here only affects rerank's would-be topK, which is irrelevant
+    // since no `rerank` option is supplied. Both "kept" and "not-used" survive every rankPool
+    // stage, so BOTH come back in `out` and BOTH are `kept_not_used` (the caller upgrades
+    // whichever ends up in ITS final `.slice(0, limit)` to `used`, which rankPool has no view of).
+    const out = await rankPool(pool, "q", 1, {
+      minScore: 0.5,
+      asOf: "2026-05-15",
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["kept", "not-used"]);
+    expect(captured).toBeDefined();
+    expect(captured!.get("kept")).toBe("kept_not_used");
+    expect(captured!.get("not-used")).toBe("kept_not_used");
+    expect(captured!.get("dropped-asof")).toBe("dropped_asof");
+    expect(captured!.get("dropped-minscore")).toBe("dropped_minscore");
+    expect(captured!.size).toBe(4);
+  });
+
+  it("dedupe drop is disposed as dropped_dedupe", async () => {
+    const text = "alpha text about revenue growth this quarter";
+    const pool = [mk("original", 0.9, text), mk("near-dup", 0.85, text)];
+    let captured: Map<string, string> | undefined;
+    const out = await rankPool(pool, "q", 2, {
+      dedupeSimilarity: 0.5,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["original"]);
+    expect(captured!.get("original")).toBe("kept_not_used");
+    expect(captured!.get("near-dup")).toBe("dropped_dedupe");
+  });
+
+  it("review fix: 5 fully-distinct candidates with limit=3 — the 2 cut candidates are dropped_dedupe_truncate, NOT dropped_dedupe (flagship strategy.ts config: limit=3, dedupeSimilarity=0.6)", async () => {
+    const pool = [
+      mk("a", 0.95, "the first entirely distinct passage about quarterly revenue growth trends"),
+      mk("b", 0.9, "a second entirely distinct passage about supply chain logistics risk factors"),
+      mk("c", 0.85, "a third entirely distinct passage about executive compensation governance policy"),
+      mk("d", 0.8, "a fourth entirely distinct passage about international regulatory compliance matters"),
+      mk("e", 0.75, "a fifth entirely distinct passage about capital expenditure and infrastructure investment")
+    ];
+    let captured: Map<string, string> | undefined;
+    const out = await rankPool(pool, "q", 3, {
+      dedupeSimilarity: 0.6,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["a", "b", "c"]);
+    expect(captured!.get("a")).toBe("kept_not_used");
+    expect(captured!.get("b")).toBe("kept_not_used");
+    expect(captured!.get("c")).toBe("kept_not_used");
+    // "d" and "e" are distinct, non-duplicate candidates cut purely by dedupeSimilar's OWN
+    // internal top-limit cap — must NOT be mislabeled as near-duplicate removal.
+    expect(captured!.get("d")).toBe("dropped_dedupe_truncate");
+    expect(captured!.get("e")).toBe("dropped_dedupe_truncate");
+  });
+
+  it("review fix: a genuine near-duplicate is still dropped_dedupe (distinct from dropped_dedupe_truncate) even alongside cap-truncated candidates", async () => {
+    const text = "the exact same repeated phrase over and over about revenue growth this quarter";
+    const pool = [
+      mk("original", 0.95, text),
+      mk("near-dup", 0.9, text + " precisely"),
+      mk("b", 0.85, "a completely different discussion about supply chain risk factors and logistics"),
+      mk("c", 0.8, "yet another unrelated passage about executive compensation and governance policy"),
+      mk("d", 0.75, "a fourth unrelated passage about capital markets and treasury operations")
+    ];
+    let captured: Map<string, string> | undefined;
+    // limit=2: "original" kept, "near-dup" genuinely judged a duplicate of "original", "b" kept
+    // (fills the cap) — "c" and "d" never even compared, cut purely by the cap.
+    const out = await rankPool(pool, "q", 2, {
+      dedupeSimilarity: 0.5,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["original", "b"]);
+    expect(captured!.get("original")).toBe("kept_not_used");
+    expect(captured!.get("b")).toBe("kept_not_used");
+    expect(captured!.get("near-dup")).toBe("dropped_dedupe");
+    expect(captured!.get("c")).toBe("dropped_dedupe_truncate");
+    expect(captured!.get("d")).toBe("dropped_dedupe_truncate");
+  });
+
+  it("rerank truncation (Voyage topK cut) is disposed as dropped_rerank_truncate, distinct from the relevance floor", async () => {
+    const pool = [mk("a", 0.9, "alpha"), mk("b", 0.8, "beta"), mk("c", 0.7, "gamma")];
+    // topK=2 (limit) means rerankMatches asks Voyage for only the top 2 — "c" never comes back.
+    const rerank = async (_q: string, matches: any[], topK: number) =>
+      matches.slice(0, topK).map((m, i) => ({ ...m, _rerankScore: 1 - i * 0.1 }));
+    let captured: Map<string, string> | undefined;
+    const out = await rankPool(pool, "q", 2, {
+      rerank,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["a", "b"]);
+    expect(captured!.get("a")).toBe("kept_not_used");
+    expect(captured!.get("b")).toBe("kept_not_used");
+    expect(captured!.get("c")).toBe("dropped_rerank_truncate");
+  });
+
+  it("post-rerank relevance floor drop is disposed as dropped_rerank_floor", async () => {
+    // 4 candidates with limit=3 so `rerankRan` is true (fusedPool.length=4 > limit=3) and the
+    // injected rerank fn's own topK cut (matches.slice(0, topK)) keeps exactly 3 — isolating the
+    // relevance-floor drop (applied AFTER rerank, against those 3) from the truncate drop.
+    const pool = [mk("a", 0.9, "alpha"), mk("b", 0.8, "beta"), mk("c", 0.7, "gamma"), mk("d", 0.6, "delta")];
+    const rerank = async (_q: string, matches: any[], topK: number) =>
+      matches.slice(0, topK).map((m, i) => ({ ...m, _rerankScore: [0.9, 0.5, 0.1][i] }));
+    let captured: Map<string, string> | undefined;
+    const out = await rankPool(pool, "q", 3, {
+      rerank,
+      minRelevanceScore: 0.3,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.map((m) => m.id)).toEqual(["a", "b"]);
+    expect(captured!.get("a")).toBe("kept_not_used");
+    expect(captured!.get("b")).toBe("kept_not_used");
+    expect(captured!.get("c")).toBe("dropped_rerank_floor");
+    expect(captured!.get("d")).toBe("dropped_rerank_truncate");
+  });
+
+  it("id-less candidates get distinct synthetic keys instead of colliding on empty-string id", async () => {
+    const idLess1 = { score: 0.9, metadata: { text: "id-less kept", userId: "local", scope: "shared" } };
+    const idLess2 = { score: 0.1, metadata: { text: "id-less dropped", userId: "local", scope: "shared" } };
+    let captured: Map<string, string> | undefined;
+    const out = await rankPool([idLess1, idLess2], "q", 1, {
+      minScore: 0.5,
+      onDispositions: (d) => { captured = d as unknown as Map<string, string>; }
+    });
+    expect(out.length).toBe(1);
+    expect(captured!.size).toBe(2);
+    const keys = Array.from(captured!.keys());
+    expect(new Set(keys).size).toBe(2); // distinct synthetic keys, no collision
+    const values = Array.from(captured!.values());
+    expect(values).toEqual(expect.arrayContaining(["kept_not_used", "dropped_minscore"]));
+  });
+
+  it("omitting onDispositions entirely costs nothing extra — output unaffected by whether a hook is present", async () => {
+    const pool = [mk("a", 0.9, "alpha"), mk("b", 0.2, "beta")];
+    const withHook = await rankPool(pool, "q", 2, { minScore: 0.5, onDispositions: () => {} });
+    const withoutHook = await rankPool(pool, "q", 2, { minScore: 0.5 });
+    expect(withHook.map((m) => m.id)).toEqual(withoutHook.map((m) => m.id));
   });
 });

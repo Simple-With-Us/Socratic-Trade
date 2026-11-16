@@ -51,4 +51,42 @@ describe("library-profile edits never arm/disarm the active account (PR #7)", ()
     // Still armed — a config change never disarms.
     expect(db.getPolicy(u, acct).systemState).toBe("active");
   });
+
+  it("activating a profile whose policy is Autopilot does NOT arm Ask-first on the active account", async () => {
+    const db = await import("../src/lib/db");
+    const u = `user-${randomUUID()}`;
+    const acct = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: acct, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-1", label: "Acct", isActive: true });
+
+    db.setPolicy({ ...db.getPolicy(u, acct), strategyAuthority: "propose" }, u, acct);
+    expect(db.getPolicy(u, acct).strategyAuthority).toBe("propose");
+
+    const autopilot = db.createStrategyProfile({
+      name: "Autopilot",
+      policy: { ...db.getPolicy(u, acct), strategyAuthority: "decide", maxOrderNotional: 99 }
+    }, u);
+    db.activateStrategyProfile(autopilot.id, u);
+
+    const after = db.getPolicy(u, acct);
+    expect(after.strategyAuthority).toBe("propose");
+    expect(after.maxOrderNotional).toBe(99);
+  });
+
+  it("activating a profile whose policy is Ask-first does NOT disarm Autopilot on the active account", async () => {
+    const db = await import("../src/lib/db");
+    const u = `user-${randomUUID()}`;
+    const acct = `acct-${randomUUID()}`;
+    db.upsertConnectedAccount({ id: acct, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-1", label: "Acct", isActive: true });
+
+    db.setPolicy({ ...db.getPolicy(u, acct), strategyAuthority: "decide" }, u, acct);
+    expect(db.getPolicy(u, acct).strategyAuthority).toBe("decide");
+
+    const askFirst = db.createStrategyProfile({
+      name: "Ask-first",
+      policy: { ...db.getPolicy(u, acct), strategyAuthority: "propose" }
+    }, u);
+    db.activateStrategyProfile(askFirst.id, u);
+
+    expect(db.getPolicy(u, acct).strategyAuthority).toBe("decide");
+  });
 });

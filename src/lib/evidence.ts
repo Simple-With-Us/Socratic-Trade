@@ -1,6 +1,7 @@
 import { normalizeSymbol } from "./money";
 import { deriveMetrics } from "./derived-metrics";
-import type { CandidateEvidence, MarketQuote, OrderSide } from "./types";
+import { buildSourceAblations } from "./source-value";
+import type { CandidateEvidence, MarketQuote, OrderSide, ScoringWeights } from "./types";
 
 /** Max web-source bulletins to keep per candidate in the persisted digest. */
 const MAX_BULLETINS = 3;
@@ -21,6 +22,7 @@ export function buildCandidateEvidence(
     side?: OrderSide;
     status?: string;
     thesisTag?: string;
+    scoringWeights?: ScoringWeights;
   }
 ): CandidateEvidence {
   const q = quote;
@@ -56,9 +58,31 @@ export function buildCandidateEvidence(
     congressCompositeVersion: q?.congressCompositeVersion,
     congressCompositeWeights: q?.congressCompositeWeights,
     preCongressScore: q?.preCongressScore,
+    congressMemberSkillScore: q?.congressMemberSkillScore,
+    congressMemberSkillSource: q?.congressMemberSkillSource,
+    congressMemberFilerId: q?.congressMemberFilerId,
+    congressMemberFilingAvgExcess: q?.congressMemberFilingAvgExcess,
+    congressMemberFilingWinRate: q?.congressMemberFilingWinRate,
+    congressMemberFilingScoredCount: q?.congressMemberFilingScoredCount,
+    congressMemberFilingAvgAnnualizedExcess: q?.congressMemberFilingAvgAnnualizedExcess,
+    congressMemberTradeAvgExcess: q?.congressMemberTradeAvgExcess,
+    congressMemberTradeWinRate: q?.congressMemberTradeWinRate,
+    congressMemberTradeScoredCount: q?.congressMemberTradeScoredCount,
     asOf: q?.asOf,
     provider: q?.provider,
+    bid: q?.bid,
+    ask: q?.ask,
+    bidSize: q?.bidSize,
+    askSize: q?.askSize,
+    volume: q?.volume,
+    fetchedAt: q?.fetchedAt,
+    delayedFallback: q?.delayedFallback,
+    syntheticBid: q?.syntheticBid,
+    syntheticAsk: q?.syntheticAsk,
+    venuePriceAuthoritative: q?.venuePriceAuthoritative,
     sources: q?.sources,
+    ...(q ? { sourceAblations: buildSourceAblations(q, opts.scoringWeights) } : {}),
+    providerFailures: q?.providerFailures,
     bulletins: q?.evidenceBulletins?.slice(0, MAX_BULLETINS),
     ...(derived && Object.keys(derived).length > 0 ? { derived } : {})
   };

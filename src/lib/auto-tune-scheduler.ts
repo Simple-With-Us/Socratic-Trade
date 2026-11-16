@@ -7,7 +7,9 @@
 
 import { getInternalSetting, setInternalSetting } from "./db-settings";
 import { getPolicy } from "./db";
+import { acquireStrategyLock, releaseStrategyLock } from "./db-execution";
 import { releaseLlmReservation, reserveLlmRunBudget } from "./llm-budget";
+import { startStrategyLockGuard, StrategyLockOwnershipLostError } from "./strategy-lock-guard";
 import { applyAutonomousWeightTuning, type AutonomousWeightApplyResult } from "./strategy-tuning";
 
 /** Minimum interval (ms) between autonomous auto-tune attempts. Env-tunable; default 24h. */
@@ -17,7 +19,11 @@ export function autoTuneMinIntervalMs(): number {
   return h * 60 * 60 * 1000;
 }
 
-function cadenceKey(userId: string): string {
+function cadenceKey(userId: string, connectedAccountId: string): string {
+  return `last_auto_tune_at:${userId}:${connectedAccountId}`;
+}
+
+function legacyCadenceKey(userId: string): string {
   return `last_auto_tune_at:${userId}`;
 }
 
@@ -32,12 +38,33 @@ export interface MaybeAutoTuneResult extends Partial<AutonomousWeightApplyResult
  * never break the strategy-run path that calls it. Marks the cadence timestamp only when it actually runs
  * the tuner (so a transient failure retries next run rather than blocking for a full window).
  */
-export async function maybeAutoTuneWeights(userId: string = "local", now: number = Date.now()): Promise<MaybeAutoTuneResult> {
+export async function maybeAutoTuneWeights(
+  userId: string = "local",
+  now: number = Date.now(),
+  connectedAccountId?: string
+): Promise<MaybeAutoTuneResult> {
+  // Bind once even when a direct caller omits the account. No later active-account switch can
+  // redirect the cadence row, evidence reads, or policy mutation.
+  const accountId = connectedAccountId ?? getPolicy(userId).connectedAccountId;
+  if (!accountId) return { ran: false, skippedReason: "no_account" };
+
+  // The tuner is policy-mutating follow-on work, so it contends on the same account lease as a
+  // strategy/approval run and renews it for the full LLM/OOS duration.
+  const lockOwner = `auto-tune:${crypto.randomUUID()}`;
+  if (!acquireStrategyLock(lockOwner, userId, accountId)) {
+    return { ran: false, skippedReason: "account_busy" };
+  }
+  const lockGuard = startStrategyLockGuard({ owner: lockOwner, userId, connectedAccountId: accountId });
+  let reservationId: string | undefined;
   try {
-    const policy = getPolicy(userId);
+    lockGuard.assertOwned();
+    const policy = getPolicy(userId, accountId);
     if (!policy.tuning?.autoApplyWeights) return { ran: false, skippedReason: "autoApplyWeights_off" };
 
-    const last = getInternalSetting<number>(cadenceKey(userId));
+    // Honor the former user-wide stamp during migration so account scoping cannot trigger an
+    // immediate duplicate tune; new successful attempts write only the account-scoped key.
+    const last = getInternalSetting<number>(cadenceKey(userId, accountId))
+      ?? getInternalSetting<number>(legacyCadenceKey(userId));
     if (typeof last === "number" && now - last < autoTuneMinIntervalMs()) {
       return { ran: false, skippedReason: "cadence_window" };
     }
@@ -45,17 +72,26 @@ export async function maybeAutoTuneWeights(userId: string = "local", now: number
     // take its OWN per-user reservation — otherwise it spends against headroom a concurrent same-user run's
     // reservation has claimed (its budget checks read only the committed ledger). Reserve BEFORE marking the
     // cadence so a stand-down retries next run instead of burning the 24h window. Default-OFF budget → no-op.
-    const reservation = reserveLlmRunBudget(userId, undefined, new Date(now));
+    const reservation = reserveLlmRunBudget(userId, accountId, new Date(now));
     if (!reservation.ok) return { ran: false, skippedReason: "budget_reservation" };
-    try {
-      setInternalSetting(cadenceKey(userId), now);
-      const result = await applyAutonomousWeightTuning(userId);
-      return { ran: true, ...result };
-    } finally {
-      if (reservation.reservationId) releaseLlmReservation(userId, reservation.reservationId);
-    }
+    reservationId = reservation.reservationId;
+
+    const assertOwned = () => lockGuard.assertOwned();
+    const result = await applyAutonomousWeightTuning(userId, undefined, accountId, assertOwned);
+    lockGuard.assertOwned();
+    // Advance only after the account-bound attempt completed under the lease. A transient failure
+    // or ownership loss retries on the next successful strategy run instead of burning 24 hours.
+    setInternalSetting(cadenceKey(userId, accountId), now);
+    return { ran: true, ...result };
   } catch (err) {
     console.error("[auto-tune] autonomous weight tuning error:", err);
-    return { ran: false, skippedReason: "error" };
+    return {
+      ran: false,
+      skippedReason: err instanceof StrategyLockOwnershipLostError ? "lease_lost" : "error"
+    };
+  } finally {
+    if (reservationId) releaseLlmReservation(userId, reservationId);
+    lockGuard.stop();
+    releaseStrategyLock(lockOwner, userId, accountId);
   }
 }

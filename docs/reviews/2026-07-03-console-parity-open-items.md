@@ -14,9 +14,14 @@ Socratic Trade reframe.
 - Live thesis headline is reframed as a market thesis, with ticker-specific
   action shown as the current expression rather than the thesis itself.
 - Home ticker references now open the shared right-side symbol drawer.
+- Home evidence-card ticker references now open the shared right-side symbol
+  drawer with the same candidate quote the card is rendering.
 - Strategy Green/Red models use curated dropdowns instead of raw text boxes.
 - Strategy and AI Review model controls now expose provider-specific
   reasoning/thinking options for OpenAI, Anthropic, Gemini, xAI, and Mistral.
+- `/console/scan` matches the legacy dashboard's browser-local column behavior
+  for the current console columns: visibility toggles, reorder controls, Reset,
+  and saved visible-column order/state.
 - Pinecone/Voyage health and RAG ingest state are surfaced in admin RAG/health
   responses instead of being hidden only in activity logs.
 - User-scoped LLM usage is available outside admin; admins still see all users.
@@ -26,22 +31,23 @@ Socratic Trade reframe.
   expansion/restriction is shown with lock/unlock language.
 - The first absolute-vs-percent duplicate cap pairs now render as a mode switch:
   Max Per Order and Max In One Stock.
+- Guardrails universe and autonomy controls now carry native titles for the
+  checkbox/text/select/button controls that were previously bare.
 
 ## Still incomplete / needs follow-up
 
 - `admin.socratictrade.com` is not implemented. Admin pages remain in-app routes;
   DNS/routing/middleware split still needs a dedicated admin host plan.
 - Universal tooltips are not complete. Many console controls have `title` hints,
-  but this has not been proven across every button, setting, metric, table cell,
-  and data point.
+  and the Guardrails universe/autonomy controls have been swept, but this has
+  not been proven across every button, setting, metric, table cell, and data point.
 - Only two absolute-vs-percent setting pairs have been converted to polished
   mode switches. Remaining duplicated constraints need the same treatment where
   the pair is semantically either/or.
-- Scan table parity is still short of the legacy dashboard in column
-  customization: visibility, ordering, reset, and richer saved column state.
-- The shared symbol drawer is restored for many ticker surfaces, but full
-  app-wide coverage still needs a grep-driven pass for every remaining ticker
-  render in the console, legacy dashboard, mobile, and admin surfaces.
+- The shared symbol drawer is restored across the documented console ticker
+  surfaces: scan, Home action rows, Home evidence cards, proposals, orders,
+  activity, outcomes, approvals, and watchlist. Legacy dashboard/admin surfaces
+  remain separate from the console parity row.
 - The market scan company-info popup/drawer behavior still needs live UI
   verification on desktop and mobile after the drawer migration.
 - Admin/API connection health has broader placeholders now, but each provider

@@ -30,6 +30,7 @@ export type SettingsDestination =
   | "settings/keys-models"
   | "settings/alert-delivery"
   | "settings/data-privacy"
+  | "settings/llm-budget"
   | "settings/presets"
   | "settings/appearance"
   | "settings/admin";
@@ -46,6 +47,10 @@ export interface SettingsFieldDef {
   backingField: string; // policy path, e.g. "maxOrderNotional"
   disclosure: Disclosure;
   help?: string;
+  // Hash on the destination page (no '#'). Palette deep-links via
+  // hrefForSettingsField — keep these in sync with the live section ids
+  // (#data-sources, #confirmation, #autonomy, …).
+  anchor?: string;
 }
 
 // The five Guardrails Essentials (copy deck §5.0). Order is the render order.
@@ -95,7 +100,8 @@ const GUARDRAILS_ESSENTIAL_DEFS: SettingsFieldDef[] = [
     legacySection: "operate",
     backingField: "strategyAuthority",
     disclosure: "essential",
-    help: "Propose = you approve each trade. Decide = the AI trades within these limits."
+    help: "Propose = you approve each trade.  Decide = the AI trades within these limits.",
+    anchor: "autonomy"
   },
   {
     id: "guardrails.extendedHours",
@@ -128,6 +134,17 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     help: "If the account falls this far from its high point, it goes close-only."
   },
   {
+    id: "guardrails.accuracyBreaker",
+    label: "Consecutive-loss breaker",
+    synonyms: ["accuracy breaker", "losing streak", "consecutive losses", "hit rate", "wrong calls", "nofx"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "risk",
+    backingField: "riskRules.accuracyBreakerConsecutiveLosses",
+    disclosure: "advanced",
+    help: "Flags the account after this many matured losses in a row — advisory by default; the agent decides."
+  },
+  {
     id: "guardrails.perSymbolCap",
     label: "Per-symbol cap",
     synonyms: ["symbol exposure", "most in one symbol", "concentration", "position cap"],
@@ -149,6 +166,61 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     disclosure: "advanced"
   },
   {
+    id: "guardrails.volTargeting",
+    label: "Volatility-target sizing",
+    synonyms: ["volatile", "wild names", "vol target", "size taper", "volatility taper", "position sizing volatility"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "tuning",
+    backingField: "tuning.volTargeting",
+    disclosure: "advanced",
+    help: "Tapers opening order size down when a name's realized volatility exceeds your target."
+  },
+  {
+    id: "guardrails.heatBudget",
+    label: "Portfolio heat budget",
+    synonyms: ["heat", "risk budget", "portfolio heat", "size taper", "distance to stop", "total risk"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "tuning",
+    backingField: "tuning.portfolioHeatBudgetPct",
+    disclosure: "advanced",
+    help: "Caps the book's total distance-to-stop dollar risk; openings taper to fit what's left."
+  },
+  {
+    id: "guardrails.riskReceipts",
+    label: "Risk receipts",
+    synonyms: ["risk receipt", "correlation receipt", "stress scenario", "pre-trade stress"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "tuning",
+    backingField: "tuning.riskReceipts",
+    disclosure: "advanced",
+    help: "Inform-only correlation + stress notes appended to every opening proposal."
+  },
+  {
+    id: "guardrails.eventTriggers",
+    label: "Event-triggered runs",
+    synonyms: ["event trigger", "signal", "regime flip run", "trigger engine", "event driven", "8-k trigger", "material event"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "operate",
+    backingField: "triggerSettings.enabled",
+    disclosure: "advanced",
+    help: "Let material events (filings, regime flips, signals) fire a run instead of waiting for the interval."
+  },
+  {
+    id: "guardrails.triggerFallbackInterval",
+    label: "Event-mode fallback interval",
+    synonyms: ["fallback interval", "event mode fallback", "cadence fallback", "safety floor", "trigger mode"],
+    scope: "account",
+    destination: "guardrails",
+    legacySection: "operate",
+    backingField: "triggerSettings.fallbackIntervalMinutes",
+    disclosure: "advanced",
+    help: "Event-only mode: still run the fixed cadence at least this often so a quiet tape can't strand the account."
+  },
+  {
     id: "guardrails.washSaleGuard",
     label: "Taxable-account wash-sale guard",
     synonyms: ["wash sale", "tax lock", "30 day", "cross account"],
@@ -157,7 +229,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     legacySection: "tax",
     backingField: "taxSettings.washSaleGuard",
     disclosure: "advanced",
-    help: "For taxable accounts, blocks rebuying a stock within 30 days of selling it at a loss. IRA replacement buys use their own account setting."
+    help: "For taxable accounts, blocks rebuying a stock within 30 days of selling it at a loss.  IRA replacement buys use their own account setting.",
+    anchor: "tax"
   },
   {
     id: "guardrails.washSaleHandling",
@@ -168,7 +241,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     legacySection: "tax",
     backingField: "taxSettings.washSaleHandling",
     disclosure: "advanced",
-    help: "Let the rebuy proceed with the forfeited tax cost priced into the rationale/receipt (auto — default), route it to you for approval at that price (ask), or block a wash-sale rebuy outright (a stricter opt-in). IRA rebuys are governed by the separate IRA wash-sale setting."
+    help: "Let the rebuy proceed with the forfeited tax cost priced into the rationale/receipt (auto — default), route it to you for approval at that price (ask), or block a wash-sale rebuy outright (a stricter opt-in).  IRA rebuys are governed by the separate IRA wash-sale setting.",
+    anchor: "tax"
   },
   {
     id: "guardrails.iraWashSaleHandling",
@@ -176,6 +250,7 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     synonyms: [
       "ira wash sale",
       "ignore wash sale",
+      "auto wash sale",
       "disregard wash sale",
       "roth rebuy",
       "roth wash sale",
@@ -189,7 +264,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     legacySection: "tax",
     backingField: "taxSettings.iraWashSaleHandling",
     disclosure: "advanced",
-    help: "Disregard (default) lets an IRA rebuy of a taxable-loss-locked stock proceed, annotated and audited: brokers don't report cross-account IRA wash sales to the IRS, so this is an explicit audit-risk acceptance made on your behalf by default. Block refuses the rebuy instead (a stricter opt-in) — Rev. Rul. 2008-5 permanently destroys the deduction."
+    help: "Ignore (default) does not constrain this IRA.  Auto lets Green weigh the priced forfeited deduction, then proceeds.  Block refuses.  Minimum loss is optional (blank = every loss).",
+    anchor: "tax"
   },
   // Strategy (account scope)
   {
@@ -200,7 +276,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     destination: "strategy",
     legacySection: "strategy",
     backingField: "scoringWeights",
-    disclosure: "advanced"
+    disclosure: "advanced",
+    anchor: "scoring"
   },
   {
     id: "strategy.model",
@@ -210,7 +287,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     destination: "strategy",
     legacySection: "strategy",
     backingField: "llmModel",
-    disclosure: "advanced"
+    disclosure: "advanced",
+    anchor: "models"
   },
   // User-scope Settings tree (off-rail)
   {
@@ -220,17 +298,19 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     scope: "user",
     destination: "settings/account-security",
     backingField: "account",
-    disclosure: "advanced"
+    disclosure: "advanced",
+    anchor: "danger"
   },
   {
     id: "settings.brokerConnections",
     label: "Broker connections",
-    synonyms: ["connections", "broker", "alpaca", "robinhood", "test paper live"],
+    synonyms: ["connections", "broker", "alpaca", "robinhood", "tradier", "test paper live"],
     scope: "user",
     destination: "settings/connections",
     legacySection: "connections",
     backingField: "connectedAccounts",
-    disclosure: "essential"
+    disclosure: "essential",
+    anchor: "brokers"
   },
   {
     id: "settings.apiKeys",
@@ -240,7 +320,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     destination: "settings/keys-models",
     legacySection: "connections",
     backingField: "apiKeys",
-    disclosure: "essential"
+    disclosure: "essential",
+    anchor: "api-keys"
   },
   {
     id: "settings.alertWebhook",
@@ -250,7 +331,32 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     destination: "settings/alert-delivery",
     legacySection: "notifications",
     backingField: "notificationSettings.webhookUrl",
-    disclosure: "advanced"
+    disclosure: "advanced",
+    anchor: "delivery"
+  },
+  {
+    id: "settings.dataPool",
+    label: "Shared market-data pool",
+    synonyms: ["data pool", "consent", "sharing", "market data pool", "research corpus"],
+    scope: "user",
+    destination: "settings/data-privacy",
+    legacySection: "data",
+    backingField: "dataPoolConsent",
+    disclosure: "advanced",
+    help: "Required.  General market data is pooled; personal account data is not.",
+    anchor: "sharing"
+  },
+  {
+    id: "settings.legalNotice",
+    label: "Legal notice",
+    synonyms: ["terms", "privacy", "disclaimer", "not investment advice"],
+    scope: "user",
+    destination: "settings/data-privacy",
+    legacySection: "data",
+    backingField: "legalNoticeConsent",
+    disclosure: "advanced",
+    help: "Terms and privacy you accepted.  You will be asked again only if they change.",
+    anchor: "legal"
   },
   {
     id: "settings.scanBreadthCandidates",
@@ -261,7 +367,30 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     legacySection: "data",
     backingField: "marketScanCandidateLimit",
     disclosure: "advanced",
-    help: "How many candidates each scan considers. Applies to all your accounts."
+    help: "How many candidates each scan considers.  Applies to all your accounts.",
+    anchor: "scan-shape"
+  },
+  {
+    id: "settings.llmDailyTokenBudget",
+    label: "Daily AI token cap",
+    synonyms: ["llm budget", "AI budget", "token budget", "daily token ceiling", "TRIGGER_LLM_DAILY_TOKEN_BUDGET"],
+    scope: "user",
+    destination: "settings/llm-budget",
+    backingField: "llm_daily_budget.tokenBudget",
+    disclosure: "essential",
+    help: "Daily token limit for model and research spend.  When set, spend pauses for the rest of the day.",
+    anchor: "llm-budget"
+  },
+  {
+    id: "settings.llmDailyCostBudget",
+    label: "Daily AI cost cap",
+    synonyms: ["llm cost cap", "AI cost cap", "daily usd budget", "cost budget", "TRIGGER_LLM_DAILY_COST_BUDGET_USD"],
+    scope: "user",
+    destination: "settings/llm-budget",
+    backingField: "llm_daily_budget.costBudgetUsd",
+    disclosure: "essential",
+    help: "Daily dollar limit for model and research spend.  When set, spend pauses for the rest of the day.",
+    anchor: "llm-budget"
   },
   {
     id: "settings.theme",
@@ -271,18 +400,8 @@ const OTHER_FIELD_DEFS: SettingsFieldDef[] = [
     destination: "settings/appearance",
     legacySection: "display",
     backingField: "theme",
-    disclosure: "essential"
-  },
-  {
-    id: "settings.defaultLandingAccount",
-    label: "Default landing account",
-    synonyms: ["appearance", "landing", "default account", "startup account"],
-    scope: "user",
-    destination: "settings/appearance",
-    legacySection: "display",
-    backingField: "defaultLandingAccount",
-    disclosure: "advanced",
-    help: "Where you land on load. Live accounts can't be auto-selected, for safety."
+    disclosure: "essential",
+    anchor: "appearance"
   }
 ];
 
@@ -331,6 +450,77 @@ export function relocationForSection(section: SettingsSection): string {
   return LEGACY_SECTION_RELOCATION[section];
 }
 
+/** Console path for a catalog destination (no hash). Exhaustive so a new
+ *  SettingsDestination fails the build until it has a real page. */
+export function pathForSettingsDestination(destination: SettingsDestination): string {
+  switch (destination) {
+    case "strategy":
+      return "/console/strategy";
+    case "guardrails":
+      return "/console/guardrails";
+    case "settings/account-security":
+      return "/console/settings";
+    case "settings/connections":
+      return "/console/connections";
+    case "settings/keys-models":
+      return "/console/connections";
+    case "settings/alert-delivery":
+      return "/console/settings";
+    case "settings/data-privacy":
+      return "/console/settings";
+    case "settings/llm-budget":
+      return "/console/settings";
+    case "settings/presets":
+      return "/console/strategy";
+    case "settings/appearance":
+      return "/console/settings";
+    case "settings/admin":
+      return "/console/settings";
+    default: {
+      const _exhaustive: never = destination;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Short location label shown as the palette hint. */
+export function settingsDestinationLabel(destination: SettingsDestination): string {
+  switch (destination) {
+    case "strategy":
+      return "Strategy";
+    case "guardrails":
+      return "Guardrails";
+    case "settings/account-security":
+      return "Settings · Account";
+    case "settings/connections":
+      return "Connections";
+    case "settings/keys-models":
+      return "Connections · Keys";
+    case "settings/alert-delivery":
+      return "Settings · Delivery";
+    case "settings/data-privacy":
+      return "Settings · Data sources";
+    case "settings/llm-budget":
+      return "Settings · AI budget";
+    case "settings/presets":
+      return "Strategy · Presets";
+    case "settings/appearance":
+      return "Settings · Appearance";
+    case "settings/admin":
+      return "Settings · Admin";
+    default: {
+      const _exhaustive: never = destination;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Deep-link for a catalog field: destination path + optional live section hash. */
+export function hrefForSettingsField(field: SettingsFieldDef): string {
+  const path = pathForSettingsDestination(field.destination);
+  return field.anchor ? `${path}#${field.anchor}` : path;
+}
+
 // ── Help "Settings Glossary" old→new mapping (copy deck §11) ───────────────────
 // A returning user who knew the old names finds the new home. Rendered under
 // Help → Settings Glossary when NAV_V2 is on.
@@ -345,16 +535,16 @@ export const SETTINGS_GLOSSARY: GlossaryEntry[] = [
   { oldName: "Strategy (Settings section)", newHome: "Strategy (destination)", whatChanged: "The read-only mirror is gone; Strategy is one editable home on the top nav." },
   { oldName: "Strategy Studio", newHome: "Strategy (destination)", whatChanged: "The pop-up editor folded inline into the Strategy destination." },
   { oldName: "Operate", newHome: "Guardrails → Execution / Autonomy (+ Strategy → Signals)", whatChanged: "The vague “Operate” section was dissolved: order types/hours/cadence → Guardrails; universe/scan → Strategy." },
-  { oldName: "Safety", newHome: "Guardrails → Risk", whatChanged: "Renamed. Stops, take-profit, and trailing live here; the five most-used surface as Essentials." },
+  { oldName: "Safety", newHome: "Guardrails → Risk", whatChanged: "Renamed.  Stops, take-profit, and trailing live here; the five most-used surface as Essentials." },
   { oldName: "Tuning", newHome: "Results → Tuning (+ Guardrails → Learning params)", whatChanged: "The AI's proposed changes are reviewed in Results; the learning knobs live in Guardrails." },
   { oldName: "Tax (tab / section)", newHome: "Results → Tax (+ Guardrails → Tax rules)", whatChanged: "Split by intent: realized tax outcomes vs the decision-time tax rules." },
-  { oldName: "Review (destination)", newHome: "Results", whatChanged: "Renamed. “Review” is now a verb for approving and tuning, not a place." },
+  { oldName: "Review (destination)", newHome: "Results", whatChanged: "Renamed.  “Review” is now a verb for approving and tuning, not a place." },
   { oldName: "Notifications (feed tab)", newHome: "Results → Alert history", whatChanged: "The alerts log moved under Results." },
-  { oldName: "Notifications (Settings section)", newHome: "Settings → Alert delivery", whatChanged: "Renamed. This is delivery rules only (channels/routing)." },
+  { oldName: "Notifications (Settings section)", newHome: "Settings → Alert delivery", whatChanged: "Renamed.  This is delivery rules only (channels/routing)." },
   { oldName: "Notifications (the dropdown)", newHome: "🔔 Alerts", whatChanged: "The live stream is now called Alerts." },
-  { oldName: "Display", newHome: "Settings → Appearance", whatChanged: "Renamed. Adds “default landing account” (non-Live only)." },
-  { oldName: "Data", newHome: "Settings → Data & Privacy", whatChanged: "Renamed. Houses web-source toggles and the two scan-breadth knobs (all accounts)." },
-  { oldName: "Halt & Flatten", newHome: "STOP (+ a separate Flatten)", whatChanged: "STOP halts new activity in one click and never sells. Selling is a separate, deliberate action." },
+  { oldName: "Display", newHome: "Settings → Appearance", whatChanged: "Renamed.  Theme, fonts, and ticker-logo display live here." },
+  { oldName: "Data", newHome: "Settings → Data & Privacy", whatChanged: "Renamed.  Houses web-source toggles and the two scan-breadth knobs (all accounts)." },
+  { oldName: "Halt & Flatten", newHome: "STOP (+ a separate Flatten)", whatChanged: "STOP halts new activity in one click and never sells.  Selling is a separate, deliberate action." },
   { oldName: "Connections", newHome: "Settings → Connections (+ Keys & Models)", whatChanged: "Keys split into their own section; broker links stay in Connections." },
   { oldName: "/admin/* (four pages)", newHome: "Settings → Admin", whatChanged: "The four admin pages consolidated into one role-gated section." },
   { oldName: "/strategy (public page)", newHome: "/how-it-works", whatChanged: "The marketing explainer was renamed; linked from the editor footer and Help." }
@@ -387,4 +577,23 @@ export function searchSettings(query: string): SettingsFieldDef[] {
   return scored
     .sort((a, b) => a.rank - b.rank || a.field.label.localeCompare(b.field.label))
     .map((s) => s.field);
+}
+
+/** Palette-ready hits: same ranking as searchSettings, plus the live href. */
+export interface SettingsPaletteHit {
+  id: string;
+  label: string;
+  hint: string;
+  href: string;
+  help?: string;
+}
+
+export function settingsPaletteHits(query: string): SettingsPaletteHit[] {
+  return searchSettings(query).map((field) => ({
+    id: field.id,
+    label: field.label,
+    hint: settingsDestinationLabel(field.destination),
+    href: hrefForSettingsField(field),
+    help: field.help
+  }));
 }

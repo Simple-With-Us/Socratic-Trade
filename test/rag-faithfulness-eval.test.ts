@@ -6,7 +6,7 @@
  * model's cited/stated claims actually trace back to the retrieved chunks.
  *
  * Fully offline: no network, no API keys, no live LLM. The optional LLM-judge path is separately
- * unit-tested to confirm it no-ops without OPENAI_API_KEY — it is NEVER exercised for real here
+ * unit-tested to confirm it no-ops without OPENROUTER_API_KEY — it is NEVER exercised for real here
  * (keeping this suite in the required/default `npm test` gate flake-free).
  */
 import { describe, expect, it, vi } from "vitest";
@@ -120,28 +120,28 @@ describe("summarizeFaithfulness", () => {
 describe("faithfulnessJudgeEnabled / judgeFaithfulness (LLM judge stays default-off, no network)", () => {
   it("is disabled by default (no env vars set)", () => {
     const savedFlag = process.env.RAG_EVAL_FAITHFULNESS_JUDGE;
-    const savedKey = process.env.OPENAI_API_KEY;
+    const savedKey = process.env.OPENROUTER_API_KEY;
     delete process.env.RAG_EVAL_FAITHFULNESS_JUDGE;
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     try {
       expect(faithfulnessJudgeEnabled()).toBe(false);
     } finally {
       if (savedFlag !== undefined) process.env.RAG_EVAL_FAITHFULNESS_JUDGE = savedFlag;
-      if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+      if (savedKey !== undefined) process.env.OPENROUTER_API_KEY = savedKey;
     }
   });
 
-  it("stays disabled when the flag is on but OPENAI_API_KEY is unset (fail-closed on missing key)", () => {
+  it("stays disabled when the flag is on but OPENROUTER_API_KEY is unset (fail-closed on missing key)", () => {
     const savedFlag = process.env.RAG_EVAL_FAITHFULNESS_JUDGE;
-    const savedKey = process.env.OPENAI_API_KEY;
+    const savedKey = process.env.OPENROUTER_API_KEY;
     process.env.RAG_EVAL_FAITHFULNESS_JUDGE = "on";
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     try {
       expect(faithfulnessJudgeEnabled()).toBe(false);
     } finally {
       if (savedFlag === undefined) delete process.env.RAG_EVAL_FAITHFULNESS_JUDGE;
       else process.env.RAG_EVAL_FAITHFULNESS_JUDGE = savedFlag;
-      if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+      if (savedKey !== undefined) process.env.OPENROUTER_API_KEY = savedKey;
     }
   });
 

@@ -72,10 +72,10 @@ Reconciliation
     made beyond the initial list. Existing issues are only updated when
     something actually changed.
   - Never deletes issues. An item that disappears from the board (row
-    removed/merged into another) leaves its mirrored issue in place,
-    untouched, with whatever state it last had — a human can close it
-    manually if desired. This script does not guess intent for vanished
-    rows.
+    removed/reworded) becomes an orphan: if that mirrored issue is still
+    OPEN, close it and set `state:completed` so stale in-progress/planned
+    mirrors cannot accumulate after board hygiene. Already-closed orphans
+    are left untouched.
   - Hand-made issues without the `effort-key` marker are ignored entirely
     (never edited, never closed, never relabeled).
 
@@ -108,6 +108,24 @@ trip GitHub's *secondary* rate limit: the API 403s with "secondary rate limit
     is idempotent and board-driven, so the next scheduled/triggered run picks
     up exactly where this one stopped; a red workflow run for an expected
     partial pass would be noise.
+  - The same budget covers a transient HTTP 5xx, and a bare 429, on an
+    idempotent method (GET/HEAD/PUT/PATCH/DELETE).  A 500 with an empty `{}`
+    body is an edge/proxy fault, not a validation error — GitHub's real API
+    errors include a `message` — and one of those used to abort a run of
+    hundreds of serial PATCHes.  POST is not replayed for a 5xx: the create
+    may already have landed.  502/503/504 stay on this budget for every
+    method, which is the older gateway path.  A 4xx other than a rate-limit
+    403/429 is returned immediately.
+
+Transport failures
+------------------
+Rate-limit handling only sees requests that produced an HTTP *response*.  A
+connection that dies below that layer — TLS handshake rejected, DNS blip,
+socket reset, a body cut short mid-read — raises out of `http_request` and used
+to kill the whole run.  These are retried separately, with bounded exponential
+backoff, for *idempotent* methods only; see TRANSPORT_RETRY_METHODS for why a
+POST is deliberately never replayed.  An HTTP 500 is not a transport failure:
+`http_request` returns it, and `GitHubClient._request` decides the retry.
 
 Local testing: export GITHUB_TOKEN and GITHUB_REPOSITORY yourself, then run
 `python3 scripts/sync-effort-issues.py [--dry-run]`.
@@ -117,6 +135,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -141,6 +160,25 @@ RATE_LIMIT_RETRY_BUDGET_SECONDS = 300.0
 # Backoff for rate-limited requests when the server sends no Retry-After.
 RATE_LIMIT_BACKOFF_BASE_SECONDS = 15.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 120.0
+
+# Transport-level (not HTTP-level) retries. A failure below the HTTP layer never
+# produces a status code, so it bypasses the rate-limit retry in
+# GitHubClient._request entirely and used to abort the whole sync. Seen in the
+# wild: an SSL handshake rejected with "CERTIFICATE_VERIFY_FAILED: self-signed
+# certificate" reaching api.github.com (2026-08-12), and a truncated response
+# body raising http.client.IncompleteRead out of resp.read() *after* a 200 —
+# listing every issue with state=all pulls hundreds of KB across pages, so one
+# mid-body disconnect was enough to fail the run.
+#
+# Only *idempotent* methods are retried. A POST that created an issue but whose
+# response body was truncated has already mutated the repo — replaying it would
+# file a duplicate issue, which is worse than the failure we are fixing. POSTs
+# therefore surface the transport error and let the next scheduled run reconcile
+# (creation is keyed off the board, so a re-run is self-healing).
+TRANSPORT_RETRY_METHODS = frozenset({"GET", "HEAD", "PUT", "PATCH", "DELETE"})
+TRANSPORT_RETRY_ATTEMPTS = 4
+TRANSPORT_BACKOFF_BASE_SECONDS = 2.0
+TRANSPORT_BACKOFF_MAX_SECONDS = 15.0
 
 MIRROR_LABEL = "effort-board"
 STATE_LABELS = {
@@ -178,7 +216,16 @@ SECTION_KEYWORDS = [
 ]
 
 PLACEHOLDER_RE = re.compile(
-    r"^\(?\s*(none|n/?a\b.*|seeded empty.*|add rows here.*|record the.*|see rollout notes.*)\s*\)?\.?$",
+    r"^\(?\s*(none|n/?a\b.*|seeded empty.*|add rows here.*)\s*\)?\.?$",
+    re.IGNORECASE,
+)
+# Broad imperative prefixes only count as empty-section scaffolding when
+# PARENTHESIZED (e.g. "(record the effort here ...)"); a bare "Record the ..."
+# / "See rollout notes ..." is a real effort row. Kept identical to
+# scripts/effort-log-union-merge.py so the two tools never disagree about what
+# is a placeholder vs a real row.
+PLACEHOLDER_PARENS_RE = re.compile(
+    r"^\(\s*(record the.*|see rollout notes.*)\s*\)\.?$",
     re.IGNORECASE,
 )
 
@@ -249,7 +296,7 @@ def parse_board(text: str) -> list[BoardItem]:
                 items.append(current_item)
                 current_item = None
             content = bullet_match.group(1).strip()
-            if PLACEHOLDER_RE.match(content):
+            if PLACEHOLDER_RE.match(content) or PLACEHOLDER_PARENS_RE.match(content):
                 continue  # "(none)" etc. — not a real item.
             current_item = BoardItem(bucket=current_bucket, first_line=content)
             continue
@@ -282,17 +329,53 @@ def http_request(
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
+
+    retryable = method.upper() in TRANSPORT_RETRY_METHODS
+    attempt = 0
+    while True:
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"message": raw.decode("utf-8", errors="replace")}
-        return e.code, parsed, dict(e.headers or {})
+            # Explicit socket timeout: the default (None) lets a stalled connection
+            # hang the job forever, squatting the single socratic-ci runner and
+            # blocking the whole CI queue (seen twice on 2026-07-29, both runs
+            # had to be cancelled manually after 10+ min stuck in this call).
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            # A real HTTP response, not a transport failure. Return it so
+            # GitHubClient._request can apply its rate-limit backoff. Note this
+            # must stay ahead of URLError below — HTTPError subclasses it.
+            raw = e.read()
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"message": raw.decode("utf-8", errors="replace")}
+            return e.code, parsed, dict(e.headers or {})
+        except (
+            http.client.IncompleteRead,
+            http.client.HTTPException,
+            urllib.error.URLError,
+            ConnectionError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ) as e:
+            # json.JSONDecodeError lands here because a body that was cut short
+            # without tripping IncompleteRead still fails to parse — same root
+            # cause, same remedy.
+            attempt += 1
+            if not retryable or attempt >= TRANSPORT_RETRY_ATTEMPTS:
+                raise
+            wait = min(
+                TRANSPORT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                TRANSPORT_BACKOFF_MAX_SECONDS,
+            )
+            print(
+                f"transport error on {method} {url} "
+                f"({type(e).__name__}: {e}) — retrying in {wait:.0f}s "
+                f"(attempt {attempt}/{TRANSPORT_RETRY_ATTEMPTS - 1})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
 
 
 class RateLimitBudgetExhausted(Exception):
@@ -300,6 +383,14 @@ class RateLimitBudgetExhausted(Exception):
 
 
 def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) -> bool:
+    # 502/503/504 are transient gateway/timeouts (seen as GitHub "couldn't respond
+    # in time" 504s during large board syncs). Treat them like rate limits so the
+    # bounded retry budget can absorb a blip instead of failing the whole run.
+    # 500 is intentionally not in this set: a 500 is retried only for idempotent
+    # methods, in _should_retry_response.  Replaying a POST 500 can duplicate an
+    # issue whose create landed before the edge returned `{}`.
+    if status in (502, 503, 504):
+        return True
     if status not in (403, 429):
         return False
     message = str(payload.get("message", "")).lower() if isinstance(payload, dict) else ""
@@ -307,8 +398,28 @@ def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) ->
         "rate limit" in message
         or "abuse" in message
         or "temporarily blocked" in message
+        or "couldn't respond" in message
         or _retry_after_seconds(headers) is not None
     )
+
+
+def _should_retry_response(
+    method: str, status: int, payload: dict | list, headers: dict[str, str]
+) -> bool:
+    """Whether GitHubClient._request should spend rate-limit budget on this response.
+
+    502/503/504 and a real rate-limit 403/429 retry for every method, matching
+    the older gateway path.  Any other 5xx, and a bare 429 whose body has no
+    rate-limit message, retries only when the method is idempotent.  Other
+    4xx responses are final.
+    """
+    if _rate_limited(status, payload, headers):
+        return True
+    if method.upper() not in TRANSPORT_RETRY_METHODS:
+        return False
+    if status == 429:
+        return True
+    return 500 <= status <= 599
 
 
 def _retry_after_seconds(headers: dict[str, str]) -> float | None:
@@ -333,7 +444,7 @@ class GitHubClient:
         attempt = 0
         while True:
             status, payload, headers = http_request(method, url, self.token, body)
-            if not _rate_limited(status, payload, headers):
+            if not _should_retry_response(method, status, payload, headers):
                 return status, payload
             attempt += 1
             wait = _retry_after_seconds(headers)
@@ -473,10 +584,39 @@ def reconcile(items: list[BoardItem], client: GitHubClient, repo: str, ref: str,
         return stats
 
     orphaned = [k for k in by_key if k not in seen_keys]
+    orphan_closed = 0
+    orphan_left = 0
+    for key in orphaned:
+        issue = by_key[key]
+        number = issue["number"]
+        if issue.get("state") != "open":
+            orphan_left += 1
+            continue
+        # Open orphan = board row removed/reworded while the mirror stayed open.
+        # Close it under state:completed so hygiene actually clears the Issues UI.
+        current_labels = issue_label_names(issue)
+        preserved = {
+            l for l in current_labels if l != MIRROR_LABEL and not l.startswith("state:")
+        }
+        fields = {
+            "state": "closed",
+            "labels": sorted({MIRROR_LABEL, "state:completed"} | preserved),
+        }
+        client.update_issue(number, fields)
+        print(
+            f"closed orphan issue #{number} (board row removed/reworded) "
+            f"as state:completed: {(issue.get('title') or '')[:80]}"
+        )
+        stats["closed"] += 1
+        stats["updated"] += 1
+        orphan_closed += 1
     if orphaned:
-        print(f"note: {len(orphaned)} previously-mirrored issue(s) no longer match a board row "
-              f"(row removed/reworded) — left untouched: "
-              f"{', '.join('#' + str(by_key[k]['number']) for k in orphaned)}")
+        print(
+            f"note: {len(orphaned)} previously-mirrored issue(s) no longer match a board row "
+            f"(row removed/reworded) — closed_open={orphan_closed} "
+            f"already_closed_left={orphan_left}: "
+            f"{', '.join('#' + str(by_key[k]['number']) for k in orphaned)}"
+        )
 
     return stats
 

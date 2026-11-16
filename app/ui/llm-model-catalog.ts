@@ -1,74 +1,92 @@
-import type { ModelGroup } from "./model-picker";
+// Picker types + groups derived from the canonical three-column catalog
+// (`src/lib/llm-model-catalog.ts`).  Persisted values are display slugs only.
 
-export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
+import {
+  CATALOG_DISPLAY_SLUGS,
+  LLM_MODEL_CATALOG,
+  type CatalogProviderId
+} from "@/lib/llm-model-catalog";
+
+export type PickerProviderId =
+  | CatalogProviderId
+  | "openrouter"
+  | "offline";
+
+export interface ModelOption {
+  value: string;
+  label: string;
+  tier: "" | "$" | "$$" | "$$$";
+  recommendedGreen?: boolean;
+  recommendedRed?: boolean;
+}
+
+export interface ModelGroup {
+  provider: PickerProviderId;
+  label: string;
+  options: ModelOption[];
+}
+
 export const CUSTOM_MODEL_ID_SEED = "custom-model-id";
 
-export const CURATED_LLM_MODEL_GROUPS: ModelGroup[] = [
-  {
-    provider: "openai",
-    label: "OpenAI",
-    options: [
-      { value: "gpt-5.4-nano", label: "gpt-5.4-nano - lowest cost OpenAI", tier: "$" },
-      { value: "gpt-5.4-mini", label: "gpt-5.4-mini - balanced default", tier: "$$" },
-      { value: "gpt-5.4", label: "gpt-5.4 - stronger analysis", tier: "$$$" },
-      { value: "gpt-5.5", label: "gpt-5.5 - deepest OpenAI reasoning", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "anthropic",
-    label: "Anthropic (Claude)",
-    options: [
-      { value: "claude-haiku-4-5", label: "claude-haiku-4-5 - fast Claude review", tier: "$" },
-      { value: "claude-sonnet-4-6", label: "claude-sonnet-4-6 - balanced Claude analysis", tier: "$$" },
-      { value: "claude-opus-4-8", label: "claude-opus-4-8 - premium Claude critique", tier: "$$$" },
-      { value: "claude-fable-5", label: "claude-fable-5 - most capable Claude", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "xai",
-    label: "xAI (Grok)",
-    options: [
-      { value: "grok-build-0.1", label: "grok-build-0.1 - coding specialist", tier: "$" },
-      { value: "grok-4.3", label: "grok-4.3 - default Grok analysis", tier: "$$" }
-    ]
-  },
-  {
-    provider: "gemini",
-    label: "Google (Gemini)",
-    options: [
-      { value: "gemini-3.1-flash-lite", label: "gemini-3.1-flash-lite - low-cost Gemini", tier: "$" },
-      { value: "gemini-3.5-flash", label: "gemini-3.5-flash - stable flagship Flash", tier: "$$" },
-      { value: "gemini-3.1-pro-preview", label: "gemini-3.1-pro-preview - preview Pro reasoning", tier: "$$$" }
-    ]
-  },
-  {
-    provider: "mistral",
-    label: "Mistral",
-    options: [
-      { value: "mistral-small-2603", label: "mistral-small-2603 - low-cost Mistral Small 4", tier: "$" },
-      { value: "mistral-medium-3-5", label: "mistral-medium-3-5 - frontier Mistral Medium", tier: "$$" }
-    ]
-  },
-  {
-    provider: "deepseek",
-    label: "DeepSeek",
-    options: [
-      { value: "deepseek-v4-flash", label: "deepseek-v4-flash - fast DeepSeek V4", tier: "$" },
-      { value: "deepseek-v4-pro", label: "deepseek-v4-pro - stronger DeepSeek V4", tier: "$$" }
-    ]
-  }
+/**
+ * Sentinel model id meaning "rotate through all eligible curated models — a different one each
+ * run" (comparative-measurement option for accruing attributed history across models on any real
+ * broker account). Persisted as-is on policy.llmModel / policy.redTeamLlmModel; the strategy
+ * run substitutes a concrete representation-weighted pick at run start (src/lib/model-rotation.ts —
+ * models with no resolvable provider key are skipped; models underrepresented in recent rotation
+ * history are twice as likely to be picked). Keep the literal in sync with
+ * LLM_MODEL_ROTATION_SENTINEL in src/lib/llm-request.ts.
+ */
+export const ROTATE_ALL_MODELS_ID = "__rotate__";
+export const ROTATE_ALL_MODELS_LABEL = "Rotate eligible models (comparative measurement)";
+
+const PROVIDER_LABEL: Record<CatalogProviderId, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  xai: "xAI",
+  gemini: "Google",
+  mistral: "Mistral",
+  moonshot: "Moonshot AI (Kimi)",
+  minimax: "MiniMax",
+  deepseek: "DeepSeek",
+  // Was "Meta (via OpenRouter)" — every catalog model is served over OpenRouter whenever an
+  // OpenRouter credential is configured (src/lib/llm-provider.ts resolveLlmEndpoint), so
+  // singling out Meta implied a routing distinction that does not exist. See
+  // docs/rollouts/2026-09-18-model-catalog-cleanup.md.
+  meta: "Meta"
+};
+
+const PROVIDER_ORDER: CatalogProviderId[] = [
+  "openai",
+  "anthropic",
+  "xai",
+  "gemini",
+  "mistral",
+  "moonshot",
+  "minimax",
+  "deepseek",
+  "meta"
 ];
 
-export const CURATED_LLM_MODEL_IDS = CURATED_LLM_MODEL_GROUPS.flatMap((group) => group.options.map((option) => option.value));
+export const CURATED_LLM_MODEL_GROUPS: ModelGroup[] = PROVIDER_ORDER.map((provider) => ({
+  provider,
+  label: PROVIDER_LABEL[provider],
+  options: LLM_MODEL_CATALOG.filter((row) => row.provider === provider).map((row) => ({
+    value: row.displaySlug,
+    label: row.label,
+    tier: row.tier,
+    recommendedGreen: row.recommendedGreen,
+    recommendedRed: row.recommendedRed
+  }))
+}));
+
+export const CURATED_LLM_MODEL_IDS = [...CATALOG_DISPLAY_SLUGS];
 
 export const CHAT_MODEL_GROUPS: ModelGroup[] = [
+  ...CURATED_LLM_MODEL_GROUPS,
   {
-    provider: "offline",
-    label: "Offline",
-    options: [
-      { value: "mock", label: "Mock - deterministic, no key", tier: "" },
-      { value: "custom", label: "Custom Model ID...", tier: "" }
-    ]
-  },
-  ...CURATED_LLM_MODEL_GROUPS
+    provider: "openrouter",
+    label: "Other",
+    options: [{ value: "custom", label: "Custom Model ID...", tier: "" }]
+  }
 ];

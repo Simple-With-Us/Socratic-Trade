@@ -43,7 +43,16 @@ function stubAnalyticsFetch(p: {
       const perfMatch = u.match(/\/member\/([^/]+)\/performance/);
       if (perfMatch) {
         const id = decodeURIComponent(perfMatch[1]);
-        return new Response(JSON.stringify({ performance: p.perf?.[id] ?? null }), { status: 200 });
+        const leg = p.perf?.[id] ?? null;
+        if (!leg) return new Response(JSON.stringify({ performance: null }), { status: 200 });
+        // Dual envelope: allow explicit dual shape or wrap a single leg as filing+trade.
+        if (typeof leg === "object" && leg && ("filingDate" in (leg as object) || "tradeDate" in (leg as object))) {
+          return new Response(JSON.stringify(leg), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({ filerId: id, filingDate: leg, tradeDate: leg, performance: leg }),
+          { status: 200 }
+        );
       }
       return new Response("{}", { status: 200 });
     })
@@ -52,6 +61,7 @@ function stubAnalyticsFetch(p: {
 
 describe("congress analytics overlay", () => {
   it("is inert when disabled (no fetch, skipped refresh)", async () => {
+    process.env.CONGRESS_ANALYTICS_ENABLED = "off";
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const res = await refreshCongressAnalytics(Date.now());
@@ -116,7 +126,36 @@ describe("congress analytics overlay", () => {
     expect(res.ok).toBe(true);
     // topMemberScore is the max skill score across the cluster's members — the high-alpha filer at 100.
     expect(getCongressAnalyticsOverlay(["NVDA"]).NVDA.topMemberScore).toBe(100);
-    expect(getCongressAnalyticsOverlay(["NVDA"]).NVDA.topMemberScoreSource).toBe("realized_skill");
+    expect(getCongressAnalyticsOverlay(["NVDA"]).NVDA.topMemberScoreSource).toBe("realized_skill_filing");
+    expect(getCongressAnalyticsOverlay(["NVDA"]).NVDA.topMemberFilingAvgExcess).toBe(0.25);
+    expect(getCongressAnalyticsOverlay(["NVDA"]).NVDA.topMemberFilingScoredCount).toBe(20);
+  });
+
+  it("prefers filing-date alpha over trade-date when both legs exist", async () => {
+    process.env.CONGRESS_ANALYTICS_ENABLED = "on";
+    stubAnalyticsFetch({
+      tickers: [{ ticker: "META", tradeCount: 2, estNetFlowUsd: 50_000 }],
+      clusters: [
+        {
+          ticker: "META",
+          memberCount: 1,
+          topMembers: [{ filerId: "filer-dual", fullName: "Dual Leg" }]
+        }
+      ],
+      members: [{ filerId: "filer-dual", fullName: "Dual Leg", estVolumeUsd: 1 }],
+      perf: {
+        "filer-dual": {
+          filingDate: { scoredCount: 10, avgExcess: 0.05, winRate: 0.7 },
+          tradeDate: { scoredCount: 12, avgExcess: 0.3, winRate: 0.9 },
+          performance: { scoredCount: 12, avgExcess: 0.3, winRate: 0.9 }
+        }
+      }
+    });
+    await refreshCongressAnalytics(Date.now(), true);
+    const row = getCongressAnalyticsOverlay(["META"]).META;
+    expect(row.topMemberScoreSource).toBe("realized_skill_filing");
+    expect(row.topMemberFilingAvgExcess).toBe(0.05);
+    expect(row.topMemberTradeAvgExcess).toBe(0.3);
   });
 
   it("labels raw conviction as an input instead of an uncapped standalone score", async () => {
@@ -199,7 +238,7 @@ describe("buildMemberSkillScores", () => {
   });
 
   it("is empty (no fetch) when analytics is disabled", async () => {
-    delete process.env.CONGRESS_ANALYTICS_ENABLED;
+    process.env.CONGRESS_ANALYTICS_ENABLED = "off";
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     expect((await buildMemberSkillScores(["a"])).size).toBe(0);

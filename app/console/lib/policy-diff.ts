@@ -11,6 +11,7 @@
  *  never claims "off" when the guard silently comes back at its default. */
 
 import { DEFAULT_POLICY } from "@/lib/defaults";
+import { formatIndexUniverseLabels } from "@/lib/index-universes";
 import type { TradingPolicy } from "@/lib/types";
 
 // ── Field metadata ───────────────────────────────────────────────────────────
@@ -32,6 +33,12 @@ export interface FieldDef {
   optional?: boolean;
   /** kind "select": the enum choices, in render order. */
   options?: Array<{ value: string; label: string }>;
+  /** kind "select": optional map from the string option value to the TYPED draft value — needed
+   *  when the backing field isn't a string (e.g. a three-state boolean "Use global / On / Off"
+   *  where "" must write `null` so the key clears back to the global default, and "true"/"false"
+   *  must write real booleans). Keys not present map to themselves; "" MUST be mapped explicitly
+   *  (to null) or the cleared state can never be committed. */
+  optionValues?: Record<string, unknown>;
   /** kind "select": looseness rank per value (higher = looser). Moving to a higher-ranked
    *  value classifies as LOOSER (typed word on LIVE); lower = tighter. Blank values fall back
    *  to the DEFAULT_POLICY value at `path`. Omit for selects with no safety ordering. */
@@ -100,7 +107,11 @@ export function classify(def: FieldDef, from: unknown, to: unknown): DiffEntry["
   if (fromNum === null && toNum !== null) return "tighter";
   if (fromNum === null || toNum === null || fromNum === toNum) return "changed";
   const up = toNum > fromNum;
-  return def.looserWhen === "up" ? (up ? "looser" : "tighter") : up ? "looser" : "tighter";
+  // looserWhen "up": a BIGGER number loosens (raising a cap). "down": a SMALLER number loosens —
+  // e.g. a universe floor, where lowering the min price/cap/volume lets MORE names in. The two
+  // cases invert; a prior version used the same `up ? looser : tighter` for both, so lowering a
+  // floor was mislabeled "Locks Down" when it actually widens the universe.
+  return def.looserWhen === "up" ? (up ? "looser" : "tighter") : (up ? "tighter" : "looser");
 }
 
 export interface SparseDraftValues {
@@ -199,10 +210,10 @@ export function classifyExtraPatch(policy: TradingPolicy, extraPatch: PolicyPatc
         const { added, removed } = setDiff(toStringArray(policy.includedIndices), toStringArray(value));
         entries.push({
           key,
-          label: "Base indices",
+          label: "Indices",
           // Any broadening of the tradable universe is a loosening, even mixed with removals.
           direction: added.length > 0 ? "looser" : removed.length > 0 ? "tighter" : "changed",
-          summary: listSummary(added, removed)
+          summary: listSummary(formatIndexUniverseLabels(added), formatIndexUniverseLabels(removed))
         });
         break;
       }

@@ -1,6 +1,6 @@
 # Settings & Navigation Redesign — Ordered Delivery Plan (PR-by-PR Build Spec)
 
-**Author's contract:** This is the normative, ordered PR list that executes the 5-phase plan in [`docs/settings-navigation-redesign.md`](./settings-navigation-redesign.md) §II-D. It does **not** restate the design — read Part I/II for the *what* and *why*. This document is the *how, in what order, behind which flag, with which tests, and what can never break*. Every PR is independently shippable behind `NAV_V2` (env + localStorage override) unless flagged "no flag needed."
+**Author's contract:** This is the normative, ordered PR list that executes the 5-phase plan in [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) §II-D. It does **not** restate the design — read Part I/II for the *what* and *why*. This document is the *how, in what order, behind which flag, with which tests, and what can never break*. Every PR is independently shippable behind `NAV_V2` (env + localStorage override) unless flagged "no flag needed."
 
 The critic's #1 fix (Part III, "3 most important fixes") is encoded structurally here: **the view/execution decouple + server-side write-time `accountId` validation (PR #7) is a hard gate that must land before ANY account-switching chrome (PR #9+) merges.** This is enforced as an explicit ordering dependency and as a per-PR merge-gate checklist item, not prose.
 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getPolicy, listLearningMutations } from "@/lib/db";
 import { revertLearningMutation, LEARNING_SUBSYSTEM_SCORING_WEIGHTS } from "@/lib/learning-ledger";
 
@@ -13,13 +13,15 @@ export const dynamic = "force-dynamic";
 //          `entryId` reverts a specific row; otherwise the most-recent non-reverted row for the subsystem
 //          (default `scoring_weights`) on the caller's active account is reverted.
 //
-// Admin-gated because a revert mutates live policy and this repo has prior IDOR history. requireAdmin accepts
-// the ADMIN_USER_EMAILS allowlist / primary operator, the legacy x-admin-token, or non-production.
+// Admin-gated because a revert mutates live policy and this repo has prior IDOR history. requireAdmin
+// accepts a middleware-verified primary/allowlisted admin email or the timing-safe legacy
+// x-admin-token; there is no environment bypass.
 
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const url = new URL(request.url);
   const connectedAccountId = getPolicy(userId).connectedAccountId;
   const subsystem = url.searchParams.get("subsystem") || undefined;
@@ -31,7 +33,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const body = (await request.json().catch(() => ({}))) as { entryId?: string; subsystem?: string };
   const connectedAccountId = getPolicy(userId).connectedAccountId;
 

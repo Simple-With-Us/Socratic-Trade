@@ -24,7 +24,10 @@ vi.mock("../src/lib/macro-history", () => ({ fetchMacroHistory: vi.fn(async () =
 vi.mock("../src/lib/market-signals", () => ({ getMarketSignals: vi.fn(async () => ({})) }));
 vi.mock("../src/lib/market-signals/massive", () => ({ fetchMassiveNews: vi.fn(async () => []) }));
 vi.mock("../src/lib/market-internals", () => ({ computeMarketInternals: vi.fn(() => ({ medianEarnYld: undefined })) }));
-vi.mock("../src/lib/benchmark", () => ({ computeSpyBenchmark: vi.fn(async () => null) }));
+vi.mock("../src/lib/benchmark", () => ({
+  computeSpyBenchmark: vi.fn(async () => null),
+  computeSpyBenchmarkDetailed: vi.fn(async () => ({ comparison: null }))
+}));
 vi.mock("../src/lib/web-sources", () => ({
   getCongressDataset: vi.fn(() => undefined),
   getInsiderDataset: vi.fn(() => undefined),
@@ -59,8 +62,12 @@ beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-dashboard-batch-${randomUUID()}.db`)}`;
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  // C1 snapshot TTL would otherwise collapse a second getDashboardSnapshot into a cache hit
+  // and under-count fill/proposal calls in call-count assertions.
+  const { resetDashboardSnapshotCacheForTests } = await import("../src/lib/dashboard-snapshot-cache");
+  resetDashboardSnapshotCacheForTests();
 });
 
 describe("getDashboardSnapshot fill/proposal batching", () => {
@@ -145,6 +152,88 @@ describe("getDashboardSnapshot fill/proposal batching", () => {
     expect(getProposalsByIdsSpy).toHaveBeenCalled();
     const batchedIds = getProposalsByIdsSpy.mock.calls.flatMap((args) => args[0] as string[]);
     expect(batchedIds).toContain(proposalId);
+  });
+
+  it("includes red-team efficacy plus the override split in the snapshot", async () => {
+    const db = await import("../src/lib/db");
+    const { getDashboardSnapshot } = await import("../src/lib/dashboard");
+
+    const userId = `dash-red-team-${randomUUID()}`;
+    const connectedAccountId = `acct-${userId}`;
+
+    db.upsertConnectedAccount({
+      id: connectedAccountId,
+      userId,
+      broker: "test",
+      environment: "paper",
+      accountNumber: "TEST",
+      label: "Red Team Snapshot Account",
+      isActive: true
+    });
+
+    db.audit(
+      "proposal_rejected_by_red_team",
+      { runId: "run-rt-1", symbol: "AAPL", side: "buy", thesisTag: "Momentum", reason: "Overbought.", model: "openai/gpt-4.1-mini" },
+      userId,
+      connectedAccountId
+    );
+    db.insertSkippedCounterfactualCandidate({
+      userId,
+      connectedAccountId,
+      runId: "run-rt-1",
+      symbol: "AAPL",
+      snapshotAt: "2026-06-01T00:00:00.000Z",
+      refPrice: 100,
+      horizonDays: 5,
+      targetDate: "2026-06-06"
+    });
+    db.markSkippedCounterfactualMatured({
+      id: `${userId}:run-rt-1:AAPL:5`,
+      userId,
+      exitDate: "2026-06-06",
+      exitPrice: 90,
+      returnPct: -10
+    });
+
+    db.audit(
+      "red_team_veto_override_requested",
+      { runId: "run-rt-2", symbol: "MSFT", side: "buy", thesisTag: "Momentum", reason: "Too early.", model: "claude-opus", mode: "execute" },
+      userId,
+      connectedAccountId
+    );
+    db.audit(
+      "socratic_override_applied",
+      { runId: "run-rt-2", symbol: "MSFT", side: "buy", conflicts: ["red_team_veto: Too early."], thesis: "Override with logged evidence.", mode: "execute" },
+      userId,
+      connectedAccountId
+    );
+    db.audit(
+      // Historical rows used this name before request and applied states were separated.
+      "red_team_veto_overridden",
+      { runId: "run-rt-3", symbol: "TSLA", side: "buy", thesisTag: "Momentum", reason: "Crowded.", model: "claude-opus", mode: "execute" },
+      userId,
+      connectedAccountId
+    );
+    db.audit(
+      "socratic_override_refused",
+      { runId: "run-rt-3", symbol: "TSLA", side: "buy", conflicts: ["red_team_veto: Crowded."], hardReasons: [], thesis: "Override was refused." },
+      userId,
+      connectedAccountId
+    );
+
+    const snapshot = await getDashboardSnapshot(userId);
+
+    expect(snapshot.redTeamEfficacy).toBeDefined();
+    expect(snapshot.redTeamEfficacy).toMatchObject({
+      totalVetoes: 1,
+      maturedVetoes: 1,
+      overrideVetoes: 2,
+      appliedOverrideVetoes: 1,
+      vetoDecisions: 3,
+      overrideSharePct: 33.3,
+      vetoValueAddRate: 100
+    });
+    expect(snapshot.redTeamEfficacy?.records[0]?.symbol).toBe("AAPL");
   });
 });
 

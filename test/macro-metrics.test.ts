@@ -21,6 +21,7 @@ function macro(overrides: Partial<MacroData> = {}): MacroData {
     wtiOil: "$75.00",
     housingStarts: "1.30M",
     consumerSentiment: "75.0",
+    nonfarmPayrollsChangeK: "+150K",
     vix: "15.00",
     vix3m: "17.00",
     asOf: "2026-06-17",

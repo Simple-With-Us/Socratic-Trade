@@ -1,0 +1,61 @@
+# One-way GitHub Issues mirror of docs/EFFORT-LOG.md (the committed effort
+# board). Boards remain the single source of truth; this workflow is purely
+# a read-only owner-visibility layer (phone notifications via issue
+# assignment, aggregated Issues views). Agents never write issues directly —
+# only scripts/sync-effort-issues.py, invoked here, does.
+#
+# ADDITIVE ONLY: this file does not modify any other workflow's behavior.
+#
+# Triggers:
+#   - push to main touching docs/EFFORT-LOG.md: sync immediately when the
+#     board actually changes (the normal landing cadence).
+#   - daily schedule (off-minute cron, deliberately not aligned with other
+#     workflows' schedules): catches drift if a push-triggered run was
+#     skipped/failed, or if the board changed via a path this trigger missed.
+#   - workflow_dispatch: manual/on-demand run (also used for the first-ever
+#     sync after this workflow lands).
+#
+# See scripts/sync-effort-issues.py for the full parsing/reconciliation
+# design (docstring at the top of that file).
+
+name: Effort Issues Sync
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/EFFORT-LOG.md
+  schedule:
+    - cron: "12 6 * * *" # daily, off-minute vs. other workflows' schedules (drift catch)
+  workflow_dispatch: {}
+
+concurrency:
+  group: effort-issues-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: [self-hosted, socratic-ci]
+    # Backstop: a hung sync must self-terminate, not squat the single
+    # socratic-ci runner (the script also has a 30s per-request timeout).
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Sync effort board to GitHub Issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: python3 scripts/sync-effort-issues.py

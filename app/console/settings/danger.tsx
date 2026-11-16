@@ -25,6 +25,7 @@ interface DeletionBlockers {
   placingProposals: number;
   pendingReconciliationFills: number;
   activeMobileCommands: number;
+  activeReplacements: number;
 }
 
 interface DeletionPreview {
@@ -47,7 +48,7 @@ const ACK_ITEMS: Array<{ key: string; label: string }> = [
 ];
 
 function blockerCount(b: DeletionBlockers): number {
-  return b.runningStrategyRuns + b.placingProposals + b.pendingReconciliationFills + b.activeMobileCommands;
+  return b.runningStrategyRuns + b.placingProposals + b.pendingReconciliationFills + b.activeMobileCommands + b.activeReplacements;
 }
 
 function recordTotal(preview: DeletionPreview): number {
@@ -86,7 +87,7 @@ export function AccountDeletionCard() {
     try {
       const next = await fetchPreview("POST");
       setPreview(next);
-      toast.push("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared. Nothing has been deleted yet.");
+      toast.push("warn", "Deletion prepared", "This login's strategy is now stopped and its run lock cleared.  Nothing has been deleted yet.");
     } catch (error) {
       toast.push("neg", "Could not prepare deletion", error instanceof Error ? error.message : undefined);
     } finally {
@@ -155,7 +156,7 @@ export function AccountDeletionCard() {
       <p className="text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
         Permanently deletes this login&apos;s data from <strong>this app</strong>: stored API keys, broker connections
         and OAuth tokens, settings, strategy profiles, watchlists, alerts, chat history, memories, proposals, fills,
-        snapshots, notifications, and private learned context. It does <strong>not</strong> close broker positions,
+        snapshots, notifications, and private learned context.  It does <strong>not</strong> close broker positions,
         cancel broker orders, or delete your Google/GitHub/Apple account — those live outside this app.
       </p>
 
@@ -166,7 +167,7 @@ export function AccountDeletionCard() {
             size="sm"
             disabled={busy}
             onClick={() => void start()}
-            title="Opens the deletion flow. Nothing is deleted until the final typed confirmation."
+            title="Opens the deletion flow.  Nothing is deleted until the final typed confirmation."
           >
             <Trash2 size={13} /> {busy ? "Loading…" : "Start deletion…"}
           </Btn>
@@ -174,14 +175,14 @@ export function AccountDeletionCard() {
       ) : (
         <div className="mt-3 flex flex-col gap-3">
           {/* Scope preview */}
-          <div className="rounded-lg border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed">
+          <div className="rounded-control border border-[color:var(--con-line)] p-3 text-[length:var(--con-fs-xs)] leading-relaxed">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-[color:var(--con-fg)]">In scope for {preview.email ?? preview.userId}:</span>
               <span className="con-num text-[color:var(--con-muted)]" title="Sum of the per-table row counts the server reported for this user.">
                 {preview.connectedAccounts.length} broker connection{preview.connectedAccounts.length === 1 ? "" : "s"} · about {recordTotal(preview)} private app row{recordTotal(preview) === 1 ? "" : "s"}
               </span>
               {preview.prepared ? (
-                <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock. Nothing is deleted yet.">
+                <Chip tone="warn" title="Preparing stopped this login's strategy and cleared its run lock.  Nothing is deleted yet.">
                   prepared — strategy stopped
                 </Chip>
               ) : (
@@ -208,12 +209,13 @@ export function AccountDeletionCard() {
           </div>
 
           {blocked && (
-            <p className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-warn)]">
+            <p className="rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-warn)]">
               Deletion is blocked until trading activity settles: {preview.blockers.runningStrategyRuns} running
               strategy run(s), {preview.blockers.placingProposals} placing proposal(s),{" "}
-              {preview.blockers.pendingReconciliationFills} fill(s) pending broker reconciliation, and{" "}
-              {preview.blockers.activeMobileCommands} in-flight mobile command(s). Preparing (below) stops the strategy;
-              in-flight work must drain on its own.
+              {preview.blockers.pendingReconciliationFills} fill(s) pending broker reconciliation,{" "}
+              {preview.blockers.activeMobileCommands} in-flight mobile command(s), and{" "}
+              {preview.blockers.activeReplacements} active order replacement(s). Preparing (below)
+              stops the strategy; in-flight work must drain on its own.
             </p>
           )}
 
@@ -228,7 +230,7 @@ export function AccountDeletionCard() {
               >
                 {busy ? "Preparing…" : "Prepare deletion — stops the strategy"}
               </Btn>
-              <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow. Nothing was deleted.">
+              <Btn variant="ghost" size="sm" onClick={cancelFlow} title="Close the flow.  Nothing was deleted.">
                 Cancel
               </Btn>
             </div>
@@ -239,7 +241,7 @@ export function AccountDeletionCard() {
                 {ackItems.map((item) => (
                   <label
                     key={item.key}
-                    className="con-row flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 text-[length:var(--con-fs-xs)] leading-relaxed"
+                    className="con-row flex cursor-pointer items-start gap-2 rounded-control px-1.5 py-1 text-[length:var(--con-fs-xs)] leading-relaxed"
                     title="The server refuses deletion unless every acknowledgement is explicitly checked."
                   >
                     <input
@@ -254,7 +256,7 @@ export function AccountDeletionCard() {
               </div>
 
               {/* Typed ritual — destructive, so it gets the red frame. */}
-              <div className="rounded-lg border border-[color:var(--con-live-border)] bg-[color:var(--con-live-soft)] p-3">
+              <div className="rounded-control border border-[color:var(--con-live-border)] bg-[color:var(--con-live-soft)] p-3">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <Field
                     label="Type your signed-in email"
@@ -309,16 +311,16 @@ export function AccountDeletionCard() {
                     variant="danger"
                     disabled={!canDelete}
                     onClick={() => void confirmDelete()}
-                    title="Irreversible. Deletes this login's app data and signs you out."
+                    title="Irreversible.  Deletes this login's app data and signs you out."
                   >
                     <Trash2 size={13} /> {deleting ? "Deleting…" : "Permanently delete account"}
                   </Btn>
-                  <Btn variant="ghost" size="sm" disabled={deleting} onClick={cancelFlow} title="Close the flow. The prepared request stays recorded; the strategy stays stopped until you start it again.">
+                  <Btn variant="ghost" size="sm" disabled={deleting} onClick={cancelFlow} title="Close the flow.  The prepared request stays recorded; the strategy stays stopped until you start it again.">
                     Cancel
                   </Btn>
                 </div>
                 <p className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                  On success you are signed out. Cancelling here does not restart the strategy — start it again from the
+                  On success you are signed out.  Cancelling here does not restart the strategy — start it again from the
                   run-state chip if you keep the account.
                 </p>
               </div>

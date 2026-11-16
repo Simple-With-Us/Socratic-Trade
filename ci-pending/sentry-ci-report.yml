@@ -1,0 +1,103 @@
+name: Sentry CI Report
+
+# Fleet-wide CI observability: fires after every other workflow in this repo
+# completes and reports failures to the shared `fleet-infra` Sentry project
+# (org jays-services). ADDITIVE ONLY — this file must never modify the
+# behavior of the workflows it observes.
+#
+# Two independent signals per completed run:
+#   1. On conclusion == failure: a Sentry error event, tagged with
+#      {workflow, branch, actor}, carrying the run URL, fingerprinted on
+#      [workflow, branch] so repeated failures on the same branch group
+#      together instead of paging separately every time.
+#   2. On event == schedule (i.e. the completed run was a cron-triggered
+#      run of a workflow that defines `schedule:`): a Sentry Crons check-in
+#      (ok on success, error on failure) with an upsert monitor_config whose
+#      schedule mirrors that workflow's own cron expression, slug
+#      `ci-<workflow-slug>`. This means a nightly/weekly job that silently
+#      STOPS firing (not "runs and fails" but "never runs again") raises a
+#      missed-check-in alert instead of going unnoticed.
+#
+# Raw Sentry envelope HTTP via curl + python3 — no action marketplace dependency, no new job permissions
+# beyond what's needed to read the triggering run.
+#
+# workflows observed (from `ls .github/workflows/`; see each file's `name:`):
+#   CI, Cleanup Actions Caches, Codex Autofix, Effort Issues Sync,
+#   merge-shepherd, Shared package pin check, Playwright Smoke, Security
+# Reusable-only `_merge-shepherd-impl` executes inside `merge-shepherd` and has no independent
+# workflow_run event; the caller's completion is the observable run.
+#
+# Cron schedules mirrored for the check-in step (must match the source
+# workflow's `schedule:` block; keep in sync if those change):
+#   CI                       -> "47 7 * * *"  (ci.yml nightly hosted canary)
+#   Cleanup Actions Caches   -> "5 3 * * *"   (cleanup-caches.yml)
+#   Effort Issues Sync       -> "12 6 * * *"  (effort-issues-sync.yml)
+#   Security                 -> "41 10 * * 1" (security.yml)
+#   Playwright Smoke         -> "17 9 * * *"  (e2e.yml nightly)
+#   Shared package pin check -> "0 13 * * 1"  (shared-package-pin-check.yml)
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Cleanup Actions Caches
+      - Codex Autofix
+      - Effort Issues Sync
+      - merge-shepherd
+      - Shared package pin check
+      - Playwright Smoke
+      - Security
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentry-ci-report-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    # Cost gate (2026-07-05): the reporter only emits on FAILURE (a Sentry error
+    # event) or on SCHEDULE completions (a Sentry Crons check-in). On the common
+    # case — a successful, non-scheduled run — the script is a no-op, yet it was
+    # still spinning up a full runner + checkout for every one of ~95 completions/day.
+    # Gate the whole job so those no-op cases skip at ZERO runner minutes while the
+    # two real signals (failure alerts, cron missed-check-in detection) are unchanged.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.event == 'schedule' }}
+    # Fleet CI is GitHub-hosted only (the ci-cpx32 Hetzner build box was deleted
+    # 2026-07-31; self-hosted runner labels are retired). The short failure/schedule-only
+    # reporter runs on ubuntu-latest like every other job.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the reporter script only; does not touch observed workflows)
+        # Deliberately no `ref:` override: actions/checkout defaults workflow_run events to the
+        # repo's default branch (main), NOT the head ref of the triggering run. That's intentional
+        # here — it means this step always executes the trusted, merged copy of the reporter
+        # script rather than whatever version lives on an arbitrary (possibly fork/PR) branch that
+        # triggered the observed workflow. Do not add `ref: ${{ github.event.workflow_run.head_sha }}`
+        # without re-reviewing the security implications.
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/sentry-ci-report.py
+          sparse-checkout-cone-mode: false
+
+      - name: Report failure + cron check-in to Sentry fleet-infra
+        shell: bash
+        env:
+          SENTRY_FLEET_DSN: ${{ secrets.SENTRY_FLEET_DSN }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_ACTOR: ${{ github.event.workflow_run.actor.login }}
+          WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: python3 scripts/sentry-ci-report.py
+
+      - name: Disable sparse checkout (prevent poisoning self-hosted runner workspace)
+        if: always()
+        shell: bash
+        run: |
+          git sparse-checkout disable || true

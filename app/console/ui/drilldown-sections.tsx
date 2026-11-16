@@ -6,11 +6,15 @@
  *  into the console's hover highlight via .con-row. */
 
 import Link from "next/link";
-import { type ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 import type { EquityOrder, EquityPosition, PendingProposal } from "@/lib/types";
+import type { PeerAccountHolding, SymbolDeskExit, SymbolDeskLastCall } from "@/lib/symbol-desk";
+import { type ProtectionInfo } from "../lib/derive";
 import { friendlySource, orderedSourceEntries, provenanceLabel } from "@/lib/dashboard-ui";
 import { cx, fmtMoney, fmtPct, fmtQty, EM_DASH } from "../lib/format";
-import { Ago, Chip, Dash, SignedText, type ChipTone } from "./primitives";
+import { plainLabel, thesisTagLabel } from "../lib/labels";
+import { readableState } from "../orders/lib";
+import { Ago, Chip, Dash, SignedText, Tooltip, type ChipTone } from "./primitives";
 import {
   buildDerivedTiles,
   buildSignalChips,
@@ -24,29 +28,28 @@ import {
   ratingTooltip,
   targetUpsidePct,
   withProvenance,
+  isStaleViewField,
   type DerivedResult,
   type QuoteView
 } from "./drilldown-data";
 
 // ── Shared shells ────────────────────────────────────────────────────────────
 
-/** Bordered section block with an uppercase title (tooltip on the title). */
-function Section({ title, titleHint, children }: { title: string; titleHint: string; children: ReactNode }) {
-  return (
-    <section className="rounded-lg border border-[color:var(--con-line)] p-3">
-      <h3 className="con-card-title mb-2 cursor-default" title={titleHint}>
-        {title}
-      </h3>
-      {children}
-    </section>
-  );
+/** Existing visible sections stay open initially, but can be collapsed to shorten the drawer. */
+function Section(props: { title: string; titleHint: string; children: ReactNode }) {
+  return <Disclosure {...props} defaultOpen />;
 }
 
-/** Collapsible section for the deep-dive tail of the drawer. */
-function Disclosure({ title, titleHint, children, defaultOpen }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
+/** Native disclosure keeps keyboard toggling and the existing deep-dive closed defaults. */
+function Disclosure({ title, titleHint, children, defaultOpen = false }: { title: string; titleHint: string; children: ReactNode; defaultOpen?: boolean }) {
+  const hintId = useId();
   return (
-    <details className="con-disclosure rounded-lg border border-[color:var(--con-line)] px-3" open={defaultOpen}>
-      <summary title={titleHint}>{title}</summary>
+    <details className="con-disclosure rounded-control border border-[color:var(--con-line)] px-3" open={defaultOpen}>
+      <summary aria-label={title} aria-describedby={hintId} title={titleHint} className="group flex flex-wrap items-center gap-3 rounded-control py-3">
+        <h3 className="con-card-title">{title}</h3>
+        <span aria-hidden="true" className="con-disclosure-label ml-auto shrink-0 whitespace-nowrap" />
+        <span id={hintId} className="sr-only group-focus-visible:not-sr-only group-focus-visible:basis-full group-focus-visible:text-[length:var(--con-fs-sm)] group-focus-visible:text-[color:var(--con-muted)]">{titleHint}</span>
+      </summary>
       <div className="pb-3">{children}</div>
     </details>
   );
@@ -61,6 +64,169 @@ function sideChip(side: string) {
     <Chip tone={SIDE_TONE[side] ?? "muted"} title={`Proposed order side: ${side}`}>
       {side.toUpperCase()}
     </Chip>
+  );
+}
+
+export function ExitPlanSection({
+  symbol,
+  protection,
+  exit
+}: {
+  symbol: string;
+  protection: ProtectionInfo;
+  exit?: SymbolDeskExit;
+}) {
+  const hasNumbers =
+    typeof exit?.stopPrice === "number" ||
+    typeof exit?.takeProfitPrice === "number" ||
+    typeof exit?.trailPercent === "number" ||
+    typeof exit?.resolvedStopPct === "number" ||
+    typeof exit?.trimBand === "number";
+  return (
+    <Section
+      title="Exit plan"
+      titleHint={`How this account currently plans to cut a loss or harvest profit in ${symbol}: a resting broker stop, an app-managed stop or trail, staged take-profit trims, and any kill condition written at entry.`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        {protection.label ? (
+          <Chip tone={protection.tone === "pos" ? "pos" : protection.tone === "warn" ? "warn" : "muted"}>
+            {protection.label}
+          </Chip>
+        ) : (
+          <Chip tone="muted">No stop armed</Chip>
+        )}
+        {typeof exit?.trimBand === "number" && exit.trimBand > 0 && (
+          <Chip tone="accent" title="How many take-profit bands have already been harvested on this lot.">
+            Trim band {exit.trimBand} done
+          </Chip>
+        )}
+      </div>
+      <p className="mt-2 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-ink)]">
+        {protection.detail}
+      </p>
+      {hasNumbers && (
+        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {typeof exit?.stopPrice === "number" && (
+            <div>
+              <div className="con-card-title mb-0.5">Stop</div>
+              <div className="con-num text-[length:var(--con-fs-sm)]">{fmtMoney(exit.stopPrice)}</div>
+            </div>
+          )}
+          {typeof exit?.takeProfitPrice === "number" && (
+            <div>
+              <div className="con-card-title mb-0.5">Take profit</div>
+              <div className="con-num text-[length:var(--con-fs-sm)]">{fmtMoney(exit.takeProfitPrice)}</div>
+            </div>
+          )}
+          {typeof exit?.trailPercent === "number" && (
+            <div>
+              <div className="con-card-title mb-0.5">Trail</div>
+              <div className="con-num text-[length:var(--con-fs-sm)]">{fmtPct(exit.trailPercent, 1, false)}</div>
+            </div>
+          )}
+          {typeof exit?.resolvedStopPct === "number" && (
+            <div>
+              <div className="con-card-title mb-0.5">Stop distance</div>
+              <div className="con-num text-[length:var(--con-fs-sm)]">{fmtPct(exit.resolvedStopPct, 1, false)}</div>
+            </div>
+          )}
+        </div>
+      )}
+      {exit?.invalidation && (
+        <p className="mt-2 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-faint)]">
+          Kill condition: {exit.invalidation}
+        </p>
+      )}
+      {exit?.rationale && (
+        <p className="mt-1 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-faint)]">
+          Why this plan: {exit.rationale}
+        </p>
+      )}
+      {exit?.maxHoldingUntil && (
+        <p className="mt-1 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-faint)]">
+          Time stop after {exit.maxHoldingUntil.slice(0, 10)}.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+export function PeerAccountsSection({
+  symbol,
+  peers,
+  onSwitch
+}: {
+  symbol: string;
+  peers: PeerAccountHolding[];
+  onSwitch?: (accountId: string) => void;
+}) {
+  if (peers.length === 0) return null;
+  return (
+    <Section
+      title="Other accounts"
+      titleHint={`Same owner, different account.  Only size and direction — open that account to see cost, P&amp;L, and the full exit plan.`}
+    >
+      <ul className="flex flex-col">
+        {peers.map((peer) => (
+          <li key={peer.accountId} className="con-row -mx-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded px-1 py-1.5 text-[length:var(--con-fs-sm)]">
+            <Chip tone={peer.direction === "short" ? "neg" : "pos"}>
+              {peer.direction === "short" ? "Short" : "Long"}
+            </Chip>
+            <span className="con-num">{fmtQty(peer.quantity)} sh</span>
+            <span className="text-[color:var(--con-ink)]">{peer.label}</span>
+            {peer.environment && (
+              <span className="text-[color:var(--con-faint)]">{peer.environment}</span>
+            )}
+            {onSwitch && (
+              <button
+                type="button"
+                className="ml-auto font-semibold text-[color:var(--con-accent)] hover:underline"
+                onClick={() => onSwitch(peer.accountId)}
+              >
+                Use this account
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[length:var(--con-fs-xs)] leading-snug text-[color:var(--con-faint)]">
+        Last recorded lot on another account of yours — not a live broker refresh.  Switching loads that account&apos;s full book.
+      </p>
+    </Section>
+  );
+}
+
+export function LastCallSection({ lastCall }: { lastCall?: SymbolDeskLastCall }) {
+  if (!lastCall) return null;
+  return (
+    <Section
+      title="Last desk call"
+      titleHint="The latest Green/Red decision case for this ticker on this account.  Full evidence stays on the decision page."
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        {lastCall.side && <Chip tone={lastCall.side === "buy" || lastCall.side === "cover" ? "pos" : "neg"}>{lastCall.side}</Chip>}
+        <Chip tone="muted">{lastCall.status.replace(/_/g, " ")}</Chip>
+        {lastCall.outcome && lastCall.outcome !== "open" && lastCall.outcome !== "unknown" && (
+          <Chip tone={lastCall.outcome === "won" ? "pos" : lastCall.outcome === "lost" ? "neg" : "muted"}>
+            {lastCall.outcome}
+          </Chip>
+        )}
+      </div>
+      {lastCall.green && (
+        <p className="mt-2 text-[length:var(--con-fs-sm)] leading-snug">Green: {lastCall.green}</p>
+      )}
+      {lastCall.red && (
+        <p className="mt-1 text-[length:var(--con-fs-sm)] leading-snug text-[color:var(--con-faint)]">
+          {lastCall.red}
+        </p>
+      )}
+      <Link
+        href={`/console/decisions/${encodeURIComponent(lastCall.id)}`}
+        className="mt-2 inline-block font-semibold text-[color:var(--con-accent)] hover:underline"
+      >
+        Open decision
+      </Link>
+    </Section>
   );
 }
 
@@ -91,26 +257,26 @@ export function ExposureSection({
 
       {position && econ && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="cursor-default" title={`Shares currently held${econ.isShort ? " (negative = short position)" : ""}.`}>
+          <Tooltip className="cursor-default flex flex-col" content={`Shares currently held${econ.isShort ? " (negative = short position)" : ""}.`}>
             <div className="con-card-title mb-0.5">Quantity</div>
             <div className="con-num text-[length:var(--con-fs-sm)]">
               {fmtQty(position.quantity)} sh{econ.isShort ? " · short" : ""}
             </div>
-          </div>
-          <div className="cursor-default" title="What the position is worth at the latest known price.">
+          </Tooltip>
+          <Tooltip className="cursor-default flex flex-col" content="What the position is worth at the latest known price.">
             <div className="con-card-title mb-0.5">Market value</div>
             <div className="con-num text-[length:var(--con-fs-sm)]">{fmtMoney(position.marketValue)}</div>
-          </div>
-          <div className="cursor-default" title={`Average cost per share (${fmtMoney(position.averageCost)}) × quantity — what was paid to build the position.`}>
+          </Tooltip>
+          <Tooltip className="cursor-default flex flex-col" content={`Average cost per share (${fmtMoney(position.averageCost)}) × quantity — what was paid to build the position.`}>
             <div className="con-card-title mb-0.5">Entry basis</div>
             <div className="con-num text-[length:var(--con-fs-sm)]">
               {fmtMoney(econ.costBasis)}
               <span className="text-[color:var(--con-faint)]"> @ {fmtMoney(position.averageCost)}</span>
             </div>
-          </div>
-          <div
-            className="cursor-default"
-            title="Market value minus entry basis — the open gain or loss if closed at the latest known price. Not realized until sold."
+          </Tooltip>
+          <Tooltip
+            className="cursor-default flex flex-col"
+            content="Market value minus entry basis — the open gain or loss if closed at the latest known price.  Not realized until sold."
           >
             <div className="con-card-title mb-0.5">Unrealized P&L</div>
             <div className="text-[length:var(--con-fs-sm)]">
@@ -119,21 +285,21 @@ export function ExposureSection({
                 {typeof econ.returnPct === "number" ? ` (${fmtPct(econ.returnPct, 1, true)})` : ""}
               </SignedText>
             </div>
-          </div>
+          </Tooltip>
         </div>
       )}
 
       {pending.length > 0 && (
         <div className={cx(position && "mt-3 border-t border-[color:var(--con-line)] pt-3")}>
-          <div className="con-card-title mb-1.5" title="Trade ideas for this symbol waiting for your approval. Nothing happens until you approve or reject them.">
-            Waiting for you
+          <div className="con-card-title mb-1.5">
+            <Tooltip content="Trade ideas for this symbol waiting for your approval.  Nothing happens until you approve or reject them.">Waiting for you</Tooltip>
           </div>
           <ul className="flex flex-col">
             {pending.map((p) => (
-              <li
-                key={p.id}
-                className="con-row -mx-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded px-1 py-1.5 text-[length:var(--con-fs-sm)]"
-                title={p.proposal.rationale || "No rationale recorded."}
+              <li key={p.id}>
+              <Tooltip
+                className="con-row -mx-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded px-1 py-1.5 text-[length:var(--con-fs-sm)] w-full"
+                content={p.proposal.rationale || "No rationale recorded."}
               >
                 {sideChip(p.proposal.side)}
                 <span className="con-num">
@@ -145,13 +311,13 @@ export function ExposureSection({
                 </span>
                 {p.proposal.tradeThesisTag && (
                   <Chip tone="muted" title="The thesis tag the strategy filed this idea under.">
-                    {p.proposal.tradeThesisTag}
+                    {thesisTagLabel(p.proposal.tradeThesisTag)}
                   </Chip>
                 )}
                 {typeof p.proposal.confidenceScore === "number" && (
-                  <span className="con-num text-[color:var(--con-faint)]" title="The strategy's stated conviction in this idea (0–100).">
+                  <Tooltip className="con-num text-[color:var(--con-faint)]" content="The strategy's stated conviction in this idea (0–100).">
                     conf {Math.round(p.proposal.confidenceScore)}
-                  </span>
+                  </Tooltip>
                 )}
                 <span className="text-[color:var(--con-faint)]">
                   <Ago iso={p.createdAt} />
@@ -159,10 +325,10 @@ export function ExposureSection({
                 <Link
                   href="/console/approvals"
                   className="ml-auto font-semibold text-[color:var(--con-accent)] hover:underline"
-                  title="Open the Approvals screen to approve or reject this idea."
                 >
-                  Review →
+                  <Tooltip content="Open the Approvals screen to approve or reject this idea.">Review →</Tooltip>
                 </Link>
+              </Tooltip>
               </li>
             ))}
           </ul>
@@ -171,15 +337,15 @@ export function ExposureSection({
 
       {orders.length > 0 && (
         <div className={cx((position || pending.length > 0) && "mt-3 border-t border-[color:var(--con-line)] pt-3")}>
-          <div className="con-card-title mb-1.5" title="The most recent orders this account has placed in this symbol, newest first.">
-            Recent orders
+          <div className="con-card-title mb-1.5">
+            <Tooltip content="The most recent orders this account has placed in this symbol, newest first.">Recent orders</Tooltip>
           </div>
           <ul className="flex flex-col">
             {orders.map((o) => (
-              <li
-                key={o.id}
-                className="con-row -mx-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded px-1 py-1.5 text-[length:var(--con-fs-sm)]"
-                title={`${o.side} ${o.type.replace(/_/g, " ")} order · state: ${o.state}${o.placedAgent ? ` · placed by ${o.placedAgent}` : ""}`}
+              <li key={o.id}>
+              <Tooltip
+                className="con-row -mx-1 flex flex-wrap items-center gap-x-2 gap-y-1 rounded px-1 py-1.5 text-[length:var(--con-fs-sm)] w-full"
+                content={`${o.side} ${o.type.replace(/_/g, " ")} order · state: ${readableState(o.state)}${o.placedAgent ? ` · placed by ${plainLabel(o.placedAgent)}` : ""}`}
               >
                 {sideChip(o.side)}
                 <span className="con-num">
@@ -192,12 +358,13 @@ export function ExposureSection({
                         : EM_DASH}
                   {typeof o.averagePrice === "number" && o.averagePrice > 0 ? ` @ ${fmtMoney(o.averagePrice)}` : ""}
                 </span>
-                <Chip tone={o.state === "filled" ? "pos" : ["cancelled", "canceled", "rejected", "failed", "expired"].includes(o.state) ? "neg" : "muted"} title={`Order state reported by the broker: ${o.state}.`}>
-                  {o.state}
+                <Chip tone={o.state === "filled" ? "pos" : ["cancelled", "canceled", "rejected", "failed", "expired"].includes(o.state) ? "neg" : "muted"} title={`Order state reported by the broker: ${readableState(o.state)}.`}>
+                  {readableState(o.state)}
                 </Chip>
                 <span className="ml-auto text-[color:var(--con-faint)]">
                   <Ago iso={o.createdAt} />
                 </span>
+              </Tooltip>
               </li>
             ))}
           </ul>
@@ -266,11 +433,11 @@ export function DerivedTilesSection({ view, derived }: { view: QuoteView; derive
   return (
     <Section
       title="Derived metrics"
-      titleHint="Ratios this app computes from the raw quote data it already pulls — the same values handed to the trading agent. Hover any tile for what it means and how to read it."
+      titleHint="Ratios this app computes from the raw quote data it already pulls — the same values handed to the trading agent.  Hover any tile for what it means and how to read it."
     >
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         {tiles.map((t) => (
-          <div key={t.key} className="con-tile cursor-default" title={t.title}>
+          <Tooltip key={t.key} className="con-tile cursor-default flex flex-col" content={t.title}>
             <div className="con-card-title">{t.label}</div>
             <div
               className="con-num mt-0.5 text-[length:var(--con-fs-md)] font-semibold"
@@ -278,7 +445,7 @@ export function DerivedTilesSection({ view, derived }: { view: QuoteView; derive
             >
               {t.value ?? <Dash />}
             </div>
-          </div>
+          </Tooltip>
         ))}
       </div>
     </Section>
@@ -295,11 +462,11 @@ export function FactorSection({ view }: { view: QuoteView }) {
   return (
     <Section
       title="Factor breakdown"
-      titleHint="Every weighted sub-score (0–100 each) behind this symbol's composite scan score. The composite is the policy-weighted total the screener ranked by."
+      titleHint="Every weighted sub-score (0–100 each) behind this symbol's composite scan score.  The composite is the policy-weighted total the screener ranked by."
     >
       <div className="space-y-2">
         {rows.map((f) => (
-          <div key={f.key} className="con-row -mx-1 cursor-default rounded px-1 py-0.5" title={f.title}>
+          <Tooltip key={f.key} className="con-row -mx-1 cursor-default rounded px-1 py-0.5 flex flex-col w-full" content={f.title}>
             <div className="mb-0.5 flex items-baseline justify-between text-[length:var(--con-fs-xs)]">
               <span className="text-[color:var(--con-faint)]">{f.label}</span>
               <span className="con-num font-semibold">{f.value.toFixed(1)}</span>
@@ -307,15 +474,15 @@ export function FactorSection({ view }: { view: QuoteView }) {
             <div className="con-score-bar">
               <div style={{ width: `${Math.max(0, Math.min(100, f.value))}%` }} />
             </div>
-          </div>
+          </Tooltip>
         ))}
-        <div
-          className="flex items-baseline justify-between border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-sm)] font-semibold"
-          title="The weighted total of all factor sub-scores using the active policy's scoring weights — the number the screener ranked this symbol by."
+        <Tooltip
+          className="flex items-baseline justify-between border-t border-[color:var(--con-line)] pt-2 text-[length:var(--con-fs-sm)] font-semibold w-full"
+          content="The weighted total of all factor sub-scores using the active policy's scoring weights — the number the screener ranked this symbol by."
         >
           <span>Composite score</span>
           <span className="con-num">{typeof view.score === "number" ? view.score.toFixed(1) : EM_DASH}</span>
-        </div>
+        </Tooltip>
       </div>
     </Section>
   );
@@ -379,7 +546,7 @@ export function AnalystSection({ view }: { view: QuoteView }) {
           <div
             className="cursor-default"
             title={withProvenance(
-              `Analyst 12-month price targets: low ${fmtMoney(view.targetLow)}, ${typeof view.targetMedian === "number" ? `median ${fmtMoney(view.targetMedian)}, ` : ""}${typeof view.targetMean === "number" ? `mean ${fmtMoney(view.targetMean)}, ` : ""}high ${fmtMoney(view.targetHigh)}. The marker is the current price — left of the mean implies analysts expect upside.`,
+              `Analyst 12-month price targets: low ${fmtMoney(view.targetLow)}, ${typeof view.targetMedian === "number" ? `median ${fmtMoney(view.targetMedian)}, ` : ""}${typeof view.targetMean === "number" ? `mean ${fmtMoney(view.targetMean)}, ` : ""}high ${fmtMoney(view.targetHigh)}.  The marker is the current price — left of the mean implies analysts expect upside.`,
               view,
               "targetMean"
             )}
@@ -429,6 +596,8 @@ interface FundRow {
   title: string;
   /** True when the value is a computed "n/a" (real state), not missing data. */
   na?: boolean;
+  /** True when the underlying observation is older than 24 hours. */
+  stale?: boolean;
 }
 
 export function FundamentalsSection({ view }: { view: QuoteView }) {
@@ -440,10 +609,11 @@ export function FundamentalsSection({ view }: { view: QuoteView }) {
       label: "P/E ratio",
       value: pe ? pe.text : null,
       na: pe?.na,
+      stale: isStaleViewField(view, "peRatio"),
       title: withProvenance(
         pe?.na
           ? "Price ÷ trailing earnings per share. n/a because trailing earnings are negative or zero — the ratio genuinely doesn't exist, which is different from missing data."
-          : "Price ÷ trailing earnings per share. Under ~15 is traditionally cheap; over ~50 prices in a lot of growth.",
+          : "Price ÷ trailing earnings per share.  Under ~15 is traditionally cheap; over ~50 prices in a lot of growth.",
         view,
         "peRatio"
       )
@@ -452,37 +622,43 @@ export function FundamentalsSection({ view }: { view: QuoteView }) {
       key: "eps",
       label: "EPS (ttm)",
       value: typeof view.eps === "number" ? fmtMoney(view.eps) : null,
-      title: withProvenance("Trailing-twelve-month earnings per share. Negative = the company lost money over the last year.", view, "eps")
+      stale: isStaleViewField(view, "eps"),
+      title: withProvenance("Trailing-twelve-month earnings per share.  Negative = the company lost money over the last year.", view, "eps")
     },
     {
       key: "epsGrowth",
       label: "EPS growth (YoY)",
       value: typeof view.epsGrowth === "number" ? fmtPct(view.epsGrowth * 100, 0, true) : null,
-      title: withProvenance("Year-over-year earnings-per-share growth. Positive and rising is the healthy pattern.", view, "epsGrowth")
+      stale: isStaleViewField(view, "epsGrowth"),
+      title: withProvenance("Year-over-year earnings-per-share growth.  Positive and rising is the healthy pattern.", view, "epsGrowth")
     },
     {
       key: "pbRatio",
       label: "P/B ratio",
       value: typeof view.pbRatio === "number" ? view.pbRatio.toFixed(2) : null,
-      title: "Price ÷ book value per share. Under 1 = trading below accounting net worth; capital-light businesses normally trade far above 1."
+      stale: isStaleViewField(view, "pbRatio"),
+      title: "Price ÷ book value per share.  Under 1 = trading below accounting net worth; capital-light businesses normally trade far above 1."
     },
     {
       key: "dividendYield",
       label: "Dividend yield",
       value: typeof view.dividendYield === "number" ? fmtPct(view.dividendYield, 2) : null,
+      stale: isStaleViewField(view, "dividendYield"),
       title: withProvenance("Annual dividends ÷ price. 0 or missing simply means the company doesn't pay one.", view, "dividendYield")
     },
     {
       key: "fcfYield",
       label: "FCF yield",
       value: typeof view.fcfYield === "number" ? fmtPct(view.fcfYield, 1) : null,
+      stale: isStaleViewField(view, "fcfYield"),
       title: withProvenance("Free cash flow ÷ market cap — cash actually generated per dollar of company value. 6%+ is strong; negative means the business burns cash.", view, "fcfYield")
     },
     {
       key: "debtToEquity",
       label: "Debt / equity",
       value: typeof de === "number" ? de.toFixed(2) : null,
-      title: withProvenance("Total debt ÷ shareholder equity, normalized to a ratio. Under 0.5 = conservatively financed; over 3 = heavily leveraged.", view, "debtToEquity")
+      stale: isStaleViewField(view, "debtToEquity"),
+      title: withProvenance("Total debt ÷ shareholder equity, normalized to a ratio.  Under 0.5 = conservatively financed; over 3 = heavily leveraged.", view, "debtToEquity")
     },
     {
       key: "beta",
@@ -500,43 +676,43 @@ export function FundamentalsSection({ view }: { view: QuoteView }) {
       key: "instOwn",
       label: "Institutional ownership",
       value: typeof view.institutionOwnershipPct === "number" ? fmtPct(view.institutionOwnershipPct, 1) : null,
-      title: "Percentage of shares held by institutions (funds, pensions). High ownership = professional validation but less retail float."
+      title: "Percentage of shares held by institutions (funds, pensions).  High ownership = professional validation but less retail float."
     },
     {
       key: "iv",
       label: "Near-the-money IV",
       value: typeof view.nearTheMoneyIv === "number" ? fmtPct(view.nearTheMoneyIv, 1) : null,
-      title: "Implied volatility of near-the-money options — the market's priced-in expectation of movement. Higher = bigger expected swings."
+      title: "Implied volatility of near-the-money options — the market's priced-in expectation of movement.  Higher = bigger expected swings."
     },
     {
       key: "putCall",
       label: "Put/call ratio",
       value: typeof view.putCallRatio === "number" ? view.putCallRatio.toFixed(2) : null,
-      title: "Put open interest ÷ call open interest around the money. Above 1 = more downside hedging/bets; below 1 = call-heavy optimism."
+      title: "Put open interest ÷ call open interest around the money.  Above 1 = more downside hedging/bets; below 1 = call-heavy optimism."
     },
     {
       key: "vwap",
       label: "VWAP",
       value: typeof view.vwap === "number" ? fmtMoney(view.vwap) : null,
-      title: withProvenance("Volume-weighted average price of the latest session. Price above VWAP = buyers paid up today; below = sellers dominated.", view, "vwap")
+      title: withProvenance("Volume-weighted average price of the latest session.  Price above VWAP = buyers paid up today; below = sellers dominated.", view, "vwap")
     },
     {
       key: "bidAsk",
       label: "Bid / ask",
       value: typeof view.bid === "number" && typeof view.ask === "number" ? `${fmtMoney(view.bid)} / ${fmtMoney(view.ask)}` : null,
-      title: withProvenance("The best quoted buy (bid) and sell (ask) prices from the last scan. The gap between them is the spread you pay to trade immediately.", view, "bid")
+      title: withProvenance("The best quoted buy (bid) and sell (ask) prices from the last scan.  The gap between them is the spread you pay to trade immediately.", view, "bid")
     },
     {
       key: "marketCap",
       label: "Market cap",
       value: fmtCompact(view.marketCap) ? `$${fmtCompact(view.marketCap)}` : null,
-      title: "Total value of all shares (price × shares outstanding). Over $10B = large cap; under $2B = small cap territory."
+      title: "Total value of all shares (price × shares outstanding).  Over $10B = large cap; under $2B = small cap territory."
     },
     {
       key: "volume",
       label: "Share volume",
       value: fmtCompact(view.volume),
-      title: withProvenance("Shares traded in the latest session. Compare with the stock's normal volume — spikes usually accompany news.", view, "volume")
+      title: withProvenance("Shares traded in the latest session.  Compare with the stock's normal volume — spikes usually accompany news.", view, "volume")
     },
     {
       key: "range52w",
@@ -552,7 +728,7 @@ export function FundamentalsSection({ view }: { view: QuoteView }) {
   return (
     <Disclosure
       title="Fundamentals & market data"
-      titleHint="Every raw enrichment field the last scan knew for this symbol. An em dash means the data wasn't available; 'n/a' on P/E means earnings are negative/zero (a real state, not missing data). Hover each row for meaning and source."
+      titleHint="Every raw enrichment field the last scan knew for this symbol.  An em dash means the data wasn't available; 'n/a' on P/E means earnings are negative/zero (a real state, not missing data).  Hover each row for meaning and source."
     >
       <div className="grid gap-x-6 sm:grid-cols-2">
         {rows.map((r) => (
@@ -562,7 +738,7 @@ export function FundamentalsSection({ view }: { view: QuoteView }) {
             title={r.title}
           >
             <span className="text-[color:var(--con-faint)]">{r.label}</span>
-            <span className={cx("con-num text-right", r.na && "text-[color:var(--con-muted)]")}>{r.value ?? <Dash />}</span>
+            <span className={cx("con-num text-right", r.na && "text-[color:var(--con-muted)]", r.stale && "italic opacity-70")}>{r.value ?? <Dash />}</span>
           </div>
         ))}
       </div>

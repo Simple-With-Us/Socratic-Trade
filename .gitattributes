@@ -4,3 +4,7 @@
 # is built into git (no config needed) and is honored by GitHub's server-side merge.
 STATUS.md merge=union
 PLAN.md merge=union
+# docs/EFFORT-LOG.md is the single most-edited file — the handoff protocol makes
+# EVERY PR touch it, so it conflicted with every other open PR and was the #1 reason
+# auto-merge-armed PRs silently rotted into CONFLICTING. Union-merge closes that gap.
+docs/EFFORT-LOG.md merge=union

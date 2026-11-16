@@ -424,7 +424,7 @@
 | `riskRules.takeProfitNotional` | Risk | USD | 100–50000 | Alt: absolute $ take-profit |
 | `riskRules.takeProfitTrimPct` | Risk | % | 25–100 | % of position to sell when TP triggers (default 50); rest rides |
 | `riskRules.trailingStopPct` | Risk | % | 2–10 | Trailing stop ratchet (how far back from running high) |
-| `riskRules.shortStopLossPct` | Risk | % | 2–10 | **Mandatory** on shorts; max adverse excursion tolerance |
+| `riskRules.shortStopLossPct` | Risk | % | 2–10 | **Mandatory** on shorts; max adverse excursion tolerance; default 8 (since 2026-07-09) |
 | `riskRules.atrStopPeriod` | Risk | integer | 7–20 | ATR lookback (days) if atrStops enabled; default 14 |
 | `riskRules.atrStopMultiple` | Risk | number | 1.0–3.0 | ATR multiplier for stop distance; default 2.0 |
 | `atrStops` | Risk (policy) | boolean | on/off | Volatility-scaled stops: stopLoss = ATR × multiple × entry% |
@@ -551,7 +551,7 @@
 |-----------|--------|------|----------------|-------|
 | `FINNHUB_API_KEY` | Market Data (env) | secret | User or operator key | Fundamentals + analyst ratings enrichment |
 | `FMP_API_KEY` | Market Data (env) | secret | User or operator key | FMP fundamentals + analyst consensus |
-| `FMP_MAX_SYMBOLS` | Market Data (env) | integer | 1–30 | Max symbols enriched per scan (free-tier aware) |
+| `FMP_MAX_SYMBOLS` | Market Data (env) | integer | ≥1, unclamped | Optional explicit throttle on symbols enriched per scan; unset, every requested candidate is enriched (no cap — owner ruling 2026-07-09) |
 | `FMP_PRICE_TARGETS_ENABLED` | Market Data (env) | boolean | on/off | Fetch analyst price targets (opt-in; extra call per symbol) |
 | `FRED_API_KEY` | Market Data (env) | secret | User or operator key | Macro data (rates, inflation, unemployment) |
 | `ALPHAVANTAGE_API_KEY` | Market Data (env) | secret | User or operator key | News sentiment, macro backfill |
@@ -596,7 +596,7 @@
 | Parameter | Domain | Type | Typical Range | Notes |
 |-----------|--------|------|----------------|-------|
 | `AUTONOMY_RESUME_ON_BOOT` | Safety (env) | boolean | off/on | Preserve running autonomy state on restart (default off; safe) |
-| `SCHEDULER_SINGLE_LEADER` | Clustering (env) | boolean | off/on | Single-leader lease for multi-process deploys (opt-in, default off) |
+| `SCHEDULER_SINGLE_LEADER` | Clustering (env) | boolean | off/on | Single-leader lease for multi-process deploys (default on; unset/empty is on, explicit false/off/0/no disables) |
 | `SCHEDULER_LEASE_TTL_MS` | Clustering (env) | milliseconds | 30000–180000 | Lease validity window (default 90s) |
 
 #### **Observability & Debug**

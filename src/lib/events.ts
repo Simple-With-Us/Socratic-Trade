@@ -9,7 +9,7 @@
 // — they share this module instance. It is NOT durable and does NOT fan out across processes;
 // for multi-process/multi-host later, back this with Redis pub/sub or Postgres LISTEN/NOTIFY.
 
-export type DashboardEventType = "run-complete" | "proposal" | "order" | "market-data" | "dirty" | "pending-learned-change";
+export type DashboardEventType = "run-complete" | "proposal" | "order" | "market-data" | "dirty" | "pending-learned-change" | "chat-turn";
 
 export interface DashboardEvent {
   type: DashboardEventType;

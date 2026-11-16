@@ -12,8 +12,10 @@ historical and forward gates below pass.
 - `conviction` (25%): App A `convictionScore` when present; otherwise a modest inferred directional
   value from net flow/sentiment.
 - `consensus` (20%): member breadth and cluster-buy breadth.
-- `memberSkill` (20%): App A per-member realized alpha rank (`topMemberScore`) when available; falls
-  back upstream to activity prominence until member skill is scored.
+- `memberSkill` (20%): App A per-member realized alpha rank (`topMemberScore`) when available,
+  **preferring filing-date (copy-trade) excess vs S&P**, falling back to trade-date timing skill,
+  then activity prominence. Raw `avgExcess` / `winRate` / `scoredCount` are also stored on quotes
+  and `signal_snapshot` evidence (not only the rank).
 - `flow` (15%): estimated net dollar flow, then net sentiment, then raw congressional net signal.
 - `freshness` (10%): disclosure-recency decay from `lastDisclosedAt`; missing disclosure dates do not
   receive trade-date credit.

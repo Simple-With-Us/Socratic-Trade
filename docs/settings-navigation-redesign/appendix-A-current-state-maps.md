@@ -164,7 +164,7 @@ This map is a precise inventory of the current state—**not a redesign**, but a
 - **Per-broker Stop Support Info** — readonly table showing Alpaca OCO, Robinhood GTC stop, or Test simulation
 
 **Short-Selling Limits:**
-- **Short Stop-Loss %** (riskRules.shortStopLossPct) — REQUIRED when short selling is enabled
+- **Short Stop-Loss %** (riskRules.shortStopLossPct) — REQUIRED when short selling is enabled; defaults to 8% since 2026-07-09 (`DEFAULT_RISK_RULES`), so the requirement is auto-satisfied unless explicitly cleared
 - **Max Short Order ($)** (maxShortOrderNotional)
 - **Max Short Exposure %** (maxShortExposurePct)
 

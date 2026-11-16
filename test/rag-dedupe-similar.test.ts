@@ -94,4 +94,85 @@ describe("dedupeSimilar", () => {
     ];
     expect(() => dedupeSimilar(pool, 2, 0.5)).not.toThrow();
   });
+
+  describe("optional `report` out-param: distinguishes genuine near-dup drops from limit-cap truncation", () => {
+    it("5 fully-distinct candidates, limit=3: the 2 cut candidates are never-reached (cap truncation), not genuine duplicates", () => {
+      const pool = [
+        match("a", "the first entirely distinct passage about quarterly revenue growth trends"),
+        match("b", "a second entirely distinct passage about supply chain logistics risk factors"),
+        match("c", "a third entirely distinct passage about executive compensation governance policy"),
+        match("d", "a fourth entirely distinct passage about international regulatory compliance matters"),
+        match("e", "a fifth entirely distinct passage about capital expenditure and infrastructure investment")
+      ];
+      const report = { genuineDuplicateIndices: [], neverReachedIndices: [] };
+      const result = dedupeSimilar(pool, 3, 0.6, report);
+
+      // Behavior unchanged: exactly 3 distinct candidates kept.
+      expect(result.length).toBe(3);
+      expect(result.map((m) => m.id)).toEqual(["a", "b", "c"]);
+
+      // The 2 cut candidates (indices 3="d", 4="e") were never even compared — pure cap
+      // truncation — NOT genuine near-duplicates.
+      expect(report.genuineDuplicateIndices).toEqual([]);
+      expect(report.neverReachedIndices.sort()).toEqual([3, 4]);
+    });
+
+    it("genuine near-duplicates are reported in genuineDuplicateIndices, distinct from cap truncation", () => {
+      const text = "the exact same repeated phrase over and over about revenue growth this quarter";
+      const pool = [
+        match("original", text),
+        match("near-dup", text + " indeed"),
+        match("distinct", "a totally different passage about supply chain risk and logistics")
+      ];
+      const report = { genuineDuplicateIndices: [], neverReachedIndices: [] };
+      const result = dedupeSimilar(pool, 2, 0.5, report);
+
+      expect(result.map((m) => m.id)).toEqual(["original", "distinct"]);
+      // "near-dup" (index 1) was compared and judged a genuine duplicate of "original".
+      expect(report.genuineDuplicateIndices).toEqual([1]);
+      expect(report.neverReachedIndices).toEqual([]);
+    });
+
+    it("a mix: some genuinely deduped, others cut only by the cap", () => {
+      const text = "the exact same repeated phrase over and over about revenue growth this quarter";
+      const pool = [
+        match("a", text),
+        match("a-dup", text + " precisely"),
+        match("b", "a completely different discussion about supply chain risk factors and logistics"),
+        match("c", "yet another unrelated passage about executive compensation and governance policy"),
+        match("d", "a fourth unrelated passage about capital markets and treasury operations")
+      ];
+      // limit=2: "a" kept first, "a-dup" judged genuine dup of "a" (deferred, then re-judged dup
+      // again in back-fill since "a" is still the only kept item), "b" kept second (fills the cap),
+      // "c" and "d" never reached because the cap (2) is already full by the time they're visited.
+      const report = { genuineDuplicateIndices: [], neverReachedIndices: [] };
+      const result = dedupeSimilar(pool, 2, 0.5, report);
+
+      expect(result.map((m) => m.id)).toEqual(["a", "b"]);
+      expect(report.genuineDuplicateIndices).toEqual([1]); // a-dup
+      expect(report.neverReachedIndices.sort()).toEqual([3, 4]); // c, d
+    });
+
+    it("does not change dedupeSimilar's return value or behavior when report is supplied vs omitted", () => {
+      const pool = [
+        match("a", "alpha passage about revenue growth this quarter across every segment"),
+        match("a-dup", "alpha passage about revenue growth this quarter across every segment too"),
+        match("b", "beta passage about supply chain risk and logistics disruption")
+      ];
+      const withoutReport = dedupeSimilar(pool, 2, 0.5);
+      const report = { genuineDuplicateIndices: [], neverReachedIndices: [] };
+      const withReport = dedupeSimilar(pool, 2, 0.5, report);
+      expect(withReport).toEqual(withoutReport);
+      expect(withReport.map((m) => m.id)).toEqual(withoutReport.map((m) => m.id));
+    });
+
+    it("early-return shape (pool.length <= 1) populates an empty report rather than leaving it stale", () => {
+      const pool = [match("solo", "only one candidate here")];
+      const report = { genuineDuplicateIndices: [1, 2], neverReachedIndices: [3] };
+      const result = dedupeSimilar(pool, 3, 0.5, report);
+      expect(result).toEqual(pool);
+      expect(report.genuineDuplicateIndices).toEqual([]);
+      expect(report.neverReachedIndices).toEqual([]);
+    });
+  });
 });

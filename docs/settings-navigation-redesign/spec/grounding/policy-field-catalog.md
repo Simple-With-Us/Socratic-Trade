@@ -95,7 +95,7 @@ Per `/home/user/agentic-trading/src/lib/db-profiles.ts:20-24`, these three field
 | `riskRules.takeProfitTrimPct` | `number \| undefined` | — | `50` | % of position to sell at target (1–100) |
 | `riskRules.takeProfitNotional` | `number \| undefined` | — | `undefined` | Per-position $ gain target |
 | `riskRules.trailingStopPct` | `number \| undefined` | — | `0` | Trailing stop distance |
-| `riskRules.shortStopLossPct` | `number \| undefined` | — | `undefined` | Hard stop on short positions (required for shorts) |
+| `riskRules.shortStopLossPct` | `number \| undefined` | — | `8` (`DEFAULT_RISK_RULES`) | Hard stop on short positions (required for shorts; gate is auto-satisfied by the default) |
 | `riskRules.atrStopPeriod` | `number \| undefined` | — | `undefined` | ATR lookback bars for volatility-aware stops (default 14) |
 | `riskRules.atrStopMultiple` | `number \| undefined` | — | `undefined` | ATR multiplier for stop distance (default 2.0) |
 | `riskRules.maxDrawdownPct` | `number \| undefined` | — | `undefined` | Account-level max drawdown from high-water mark; triggers close_only |

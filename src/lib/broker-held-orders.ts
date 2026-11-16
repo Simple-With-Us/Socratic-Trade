@@ -1,9 +1,12 @@
 import { normalizeSymbol } from "./money";
+import { shortOrderLabel } from "./order-labels";
 import type { EquityOrder, EquityPosition, TradeProposal } from "./types";
 
 const EPSILON = 1e-6;
 
-const ACTIVE_BROKER_ORDER_STATES = new Set([
+// Exported so broker-side.test.ts can assert LIVE_ORDER_STATES (broker-side.ts) stays a superset —
+// an order this module counts as active/held must also count as live protection over there.
+export const ACTIVE_BROKER_ORDER_STATES = new Set([
   "accepted",
   "accepted_for_bidding",
   "confirmed",
@@ -11,6 +14,7 @@ const ACTIVE_BROKER_ORDER_STATES = new Set([
   "new",
   "open",
   "partially_filled",
+  "pending", // Tradier bare resting state
   "pending_cancel",
   "pending_new",
   "pending_replace",
@@ -33,6 +37,34 @@ export interface BrokerHeldExitAvailability {
 export function isActiveBrokerOrderState(state: string | undefined): boolean {
   return ACTIVE_BROKER_ORDER_STATES.has(String(state ?? "").trim().toLowerCase());
 }
+
+/**
+ * Broker states that are not in ACTIVE_BROKER_ORDER_STATES but still mean the order can fill
+ * or needs operator attention (stale-limit / Orders "open" list).
+ *
+ * Deliberately excludes `done_for_day`: that is a terminal day-order outcome that persists
+ * forever in Alpaca `getEquityOrders` (`status:"all"`) history. Counting it as working made
+ * the Orders screen and stale-limit path treat hundreds of historical day orders as "pending
+ * open" — matching owner reports of 300+ pending on Alpaca (and similarly inflated lists on
+ * other brokers that return full history).
+ *
+ * `stopped` — stop triggered, fill still pending. `calculated` — Alpaca pre-accept.
+ * Both remain actionable; `done_for_day` does not.
+ */
+export const EXTRA_WORKING_ORDER_STATES = new Set(["stopped", "calculated"]);
+
+/** True when an order should appear on the open/working Orders list (and stale-limit scan). */
+export function isWorkingOrderState(state: string | undefined): boolean {
+  const normalized = String(state ?? "").trim().toLowerCase();
+  return isActiveBrokerOrderState(normalized) || EXTRA_WORKING_ORDER_STATES.has(normalized);
+}
+
+// CANONICAL HOME: broker-side.ts. This module previously carried its own drifted local copy
+// ({canceled, cancelled, rejected, expired} — missing "failed" and "error") with NO importers;
+// found by the §7 conformance audit and replaced by this re-export so the two modules can never
+// diverge again. The conformance tables (broker-status-conformance.ts) lock the canonical set
+// against every broker's documented vocabulary in CI.
+export { isRejectedOrCanceledState } from "./broker-side";
 
 export function evaluateBrokerHeldExitAvailability(
   proposal: TradeProposal,
@@ -73,7 +105,7 @@ export function evaluateBrokerHeldExitAvailability(
 
 export function brokerHeldExitBlockReason(availability: BrokerHeldExitAvailability): string {
   const orderList = availability.heldOrderIds.length > 0
-    ? ` Related open order(s): ${availability.heldOrderIds.join(", ")}.`
+    ? ` Related open order(s): ${availability.heldOrderIds.map(shortOrderLabel).join(", ")}.`
     : "";
   return (
     `Existing open ${availability.side === "sell" ? "sell" : "cover"} order(s) already hold ` +
@@ -84,7 +116,13 @@ export function brokerHeldExitBlockReason(availability: BrokerHeldExitAvailabili
   );
 }
 
-function requestedExitQuantity(proposal: TradeProposal): number | undefined {
+/** Exported so UI derivations (e.g. app/console/lib/derive.ts's approval-card P/L estimate)
+ *  can reuse the SAME shares-being-sold math as the broker-held-exit-availability check
+ *  above, instead of re-deriving it and risking drift. Structural param (only the sizing
+ *  fields) so narrow client-side proposal shapes (mobile snapshot) can call it too. */
+export function requestedExitQuantity(
+  proposal: Pick<TradeProposal, "quantity" | "dollarAmount" | "limitPrice" | "stopPrice" | "referencePrice">
+): number | undefined {
   if (proposal.quantity != null) return Math.abs(proposal.quantity);
   if (proposal.dollarAmount != null) {
     const price = proposal.limitPrice ?? proposal.stopPrice ?? proposal.referencePrice;

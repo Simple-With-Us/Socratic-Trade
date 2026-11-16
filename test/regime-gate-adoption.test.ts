@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { deterministicBearFilter } from "../src/lib/strategy";
 import { isEscalationRegime } from "../src/lib/regime-watch";
 import { MARKET_REGIME_LABELS } from "../src/lib/market-regime";
 import type { MarketFactorBreakdown, MarketQuote, TradeProposal } from "../src/lib/types";
+import { deterministicBearFilter } from "../src/lib/strategy-risk";
 
 /**
  * Gate-level regression for the risk lane's typed-`MarketRegime` adoption: the crisis cap
@@ -62,11 +62,14 @@ function belowMedianBuy() {
 }
 
 describe("bear-filter risk-off veto — typed regime adoption", () => {
-  it("vetoes a below-median buy in canonical Crisis and Risk-Off regimes", () => {
+  it("TAGS (advisory, keeps) a below-median buy in canonical Crisis and Risk-Off regimes", () => {
     for (const label of [MARKET_REGIME_LABELS.crisis, MARKET_REGIME_LABELS["risk-off"]]) {
       const { quotes, proposal } = belowMedianBuy();
       const { kept, vetoed } = deterministicBearFilter([proposal], [], quotes, label);
-      expect(kept).toHaveLength(0);
+      // Advisory pre-veto (tag-not-drop): KEPT + tagged, still reported in `vetoed` for telemetry.
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: /);
+      expect(kept[0].preVetoReasons?.[0]).toContain(label);
       expect(vetoed).toHaveLength(1);
       // The veto reason still quotes the ORIGINAL label (not the enum key).
       expect(vetoed[0].reason).toContain(label);

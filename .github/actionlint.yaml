@@ -1,0 +1,5 @@
+# GitHub-hosted runners only (owner 2026-07-29). Self-hosted / Oracle fleet retired.
+self-hosted-runner:
+  labels: []
+
+config-variables: null

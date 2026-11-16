@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+process.env.OPENROUTER_API_KEY = "test-key";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 
-// Item 1 (Chat A): the inline Bear (Red Team) review MUST fail closed. When the Bear call errors,
-// returns non-200, times out, or returns unparseable JSON, an autonomous ("decide") run must route
-// the un-critiqued Bull proposals to human review — never auto-execute them.
+// Single-adversary consolidation (2026-07-07): the ONE Red Team review MUST fail closed. When the
+// review call errors, returns non-200, times out, or returns unparseable JSON, an autonomous
+// ("decide") run must route the un-reviewed risk-adding opening to human review — never
+// auto-execute it. (This file previously covered the in-flow Bear's fail-closed path; the Bear was
+// deleted and the same guarantees now live on the consolidated post-sizing review.)
 
 vi.mock("../src/lib/vector-db", () => ({
+  getCurrentVectorProviderAuthority: vi.fn(),
+  managedVectorLedgerAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -27,8 +32,6 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
   const { getTestGateway } = await import("../src/lib/robinhood");
   return { ...actual, getBrokerGateway: (_policy: unknown, userId: string = "local") => getTestGateway(userId) };
 });
-// (No tax mock: on a fresh temp DB the real wash-sale lookup returns an empty locked set, and the
-// portfolio path needs the module's other exports intact.)
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-bear-failclosed-${randomUUID()}.db`)}`;
@@ -56,8 +59,8 @@ const BULL_PROPOSAL = {
   marketHours: "regular_hours",
   rationale: "Bull thesis for AAPL",
   tradeThesisTag: "Breakout",
-  // Below the Red Team conviction threshold (80) so the *standalone* debate never runs — this test
-  // isolates the INLINE Bear path (exactly two OpenAI calls: Bull then Bear).
+  // Confidence no longer gates the review (universal coverage): every risk-adding opening is
+  // reviewed, so exactly two OpenAI calls run — Bull, then the single Red Team review.
   confidenceScore: 60
 };
 
@@ -92,22 +95,29 @@ function bullOk(): Response {
   });
 }
 
-// Route by request BODY (not call order, which extra calls like revalidation could shift): the Bear
-// request carries the "Bear Agent" system prompt / "bear_proposals" schema and fails per `bearFailure`;
-// every other Green-Team/revalidation call gets a valid single-buy proposal set.
-function stubFetchBearFailure(bearFailure: "http429" | "throw" | "malformed"): void {
+function reviewApprove(): Response {
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content: JSON.stringify({ verdict: "approve", reason: "Evidence checks out." }) } }] }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
+// Route by request BODY (not call order): the Red Team review carries the "Red Team Risk Agent"
+// system prompt and fails per `reviewFailure`; every other Green-Team/revalidation call gets a
+// valid single-buy proposal set.
+function stubFetchReviewFailure(reviewFailure: "http429" | "throw" | "malformed"): void {
   vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if (href.includes("openrouter.ai") || href.includes("api.openai.com")) {
       const body = String(init?.body ?? "");
-      const isBear = body.includes("Bear Agent") || body.includes("bear_proposals");
-      if (isBear) {
-        if (bearFailure === "http429") return new Response("rate limited", { status: 429 });
-        if (bearFailure === "malformed") {
-          return new Response(JSON.stringify({ output_text: "```\nnot valid json {{{" }), {
-            status: 200,
-            headers: { "content-type": "application/json" }
-          });
+      const isReview = body.includes("Red Team Risk Agent") || body.includes("red_team_verdict");
+      if (isReview) {
+        if (reviewFailure === "http429") return new Response("rate limited", { status: 429 });
+        if (reviewFailure === "malformed") {
+          return new Response(
+            JSON.stringify({ choices: [{ message: { content: "```\nnot valid json {{{" } }] }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
         }
         throw new Error("The operation was aborted due to timeout");
       }
@@ -120,11 +130,8 @@ function stubFetchBearFailure(bearFailure: "http429" | "throw" | "malformed"): v
 
 async function setupBrokerPaperDecide(label: string): Promise<void> {
   const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
-  // Broker "alpaca" with environment "paper" so this resolves broker/paper (not broker/live); the
-  // gateway is mocked to the canned local sim above, so no real Alpaca credentials/network are used.
-  // accountNumber "TEST" matches what the test gateway's getAccounts() reports.
   upsertConnectedAccount({
     id: accountId,
     userId: "local",
@@ -140,17 +147,17 @@ async function setupBrokerPaperDecide(label: string): Promise<void> {
   setPolicy({
     ...DEFAULT_POLICY,
     systemState: "active",
-    // An active alpaca paper account => broker/paper, so the requiresHumanReview branch actually
-    // routes to "proposed" instead of auto-placing through the broker.
     activeBroker: "alpaca",
     accountNumber: "TEST",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
+    // Both models are required explicit picks now (no defaults, no fallback to Green).
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
     // Relax caps so a single $1000 AAPL buy survives the risk gates and reaches the routing branch.
     maxOrderPctOfNav: 100,
-    // Kept just under the db.ts safety clamp (>=500_000 is reset to the 500 default).
+    // Large explicit dollar mode keeps this test focused on Red-Team fail-closed routing.
     maxDailyNotional: 400_000,
     // 0/falsy disables the NAV-relative daily cap (the test broker reports ~0 NAV, which would
     // otherwise make the percent-of-NAV ceiling 0 and block every opening).
@@ -161,56 +168,65 @@ async function setupBrokerPaperDecide(label: string): Promise<void> {
   });
 }
 
-describe("inline Bear red-team fail-closed (Chat A item 1)", () => {
-  it.each(["http429", "throw", "malformed"] as const)(
-    "routes Bull proposals to human review (never auto-executes) when the Bear call fails (%s) in decide mode",
-    async (bearFailure) => {
-      vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
-      stubFetchBearFailure(bearFailure);
-      await setupBrokerPaperDecide(`Bear ${bearFailure}`);
+describe("single Red Team review fail-closed (§3.7)", () => {
+  it.each([
+    ["http429", "rate_limited"],
+    ["throw", "timeout"],
+    ["malformed", "malformed_response"]
+  ] as const)(
+    "routes the opening to human review (never auto-executes) when the review fails (%s → %s) in decide mode",
+    async (reviewFailure, expectedKind) => {
+      vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
+      stubFetchReviewFailure(reviewFailure);
+      await setupBrokerPaperDecide(`Review ${reviewFailure}`);
       const { runStrategyOnce } = await import("../src/lib/strategy");
-      const { listAudit } = await import("../src/lib/db");
+      const { listAudit, listRecentProposals } = await import("../src/lib/db");
 
       const result = await runStrategyOnce();
 
-      // The un-critiqued Bull proposal is routed to a human ("proposed"), never auto-executed.
+      // The un-reviewed opening is routed to a human ("proposed"), never auto-executed.
       const statuses = result.proposals.map((p) => p.status);
       expect(statuses).toContain("proposed");
       expect(statuses).not.toContain("paper");
       expect(statuses).not.toContain("filled");
       expect(statuses).not.toContain("placing");
 
-      // The fail-closed path emitted the loud audit signals from both proposeTrades and the caller.
-      // Scope to this run's runId — the temp DB is shared across the tests in this file.
-      const runKinds = listAudit(500)
-        .filter((e) => (e.payload as { runId?: string })?.runId === result.runId)
-        .map((e) => e.kind);
-      expect(runKinds).toContain("strategy_bear_review_unavailable");
-      expect(runKinds).toContain("strategy_bear_review_routed_to_human");
+      // The fail-closed path emitted the loud per-proposal audit signal, with the right failureKind.
+      const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
+      const unavailable = runAudits.filter((e) => e.kind === "strategy_red_team_unavailable");
+      expect(unavailable.length).toBeGreaterThanOrEqual(1);
+      expect((unavailable[0].payload as { failureKind?: string }).failureKind).toBe(expectedKind);
+      expect((unavailable[0].payload as { heldForHuman?: boolean }).heldForHuman).toBe(true);
 
-      // The Bear step is recorded as fallback (not "completed").
-      const bearStep = result.llmSteps?.find((s) => s.step === "bear");
-      expect(bearStep?.status).toBe("fallback");
+      // R19: the stored decision carries the machine-readable badge flag + reason.
+      const aapl = listRecentProposals("TEST", 100, "local").find((p) => p.proposal.symbol === "AAPL");
+      expect(aapl?.proposal.redTeamVerdict?.available).toBe(false);
+      expect(aapl?.proposal.redTeamVerdict?.failureKind).toBe(expectedKind);
+      expect((aapl?.decision as { adversaryUnavailable?: boolean } | undefined)?.adversaryUnavailable).toBe(true);
     },
     30_000
   );
 
-  it("routes Bull proposals to human review when the Bear LLM key is not configured (decide mode)", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
-    // Force the Red Team's (gemini) provider to have NO key so the inline Bear is skipped for lack of
-    // a credential — the fourth acceptance failure mode ("missing-key").
+  it("routes the opening to human review when the Red model's provider has no key (not_configured)", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "");
+    // Point the Red Team at a provider with no configured key so the review resolves keyless.
     vi.stubEnv("GEMINI_API_KEY", "");
     vi.stubEnv("GOOGLE_API_KEY", "");
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
-      // Only the Bull runs (the Bear is skipped, no fetch); return the buy.
-      if (href.includes("api.openai.com")) return bullOk();
+      // Only the Bull runs (the review is skipped keyless, no fetch); return the buy.
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) return bullOk();
       if (href.includes("nasdaq.com")) return nasdaqResponse();
       return new Response("not found", { status: 404 });
     });
-    await setupBrokerPaperDecide("Bear no-key");
-    const { setPolicy, getPolicy, listAudit } = await import("../src/lib/db");
-    // Point the Red Team at a provider with no configured key so bearKey resolves empty.
+    await setupBrokerPaperDecide("Review no-key");
+
+    const { setPolicy, getPolicy, listAudit, deleteUserApiKey, upsertUserApiKey } = await import("../src/lib/db");
+    deleteUserApiKey("local", "gemini");
+    deleteUserApiKey("local", "openrouter");
+    upsertUserApiKey("local", "openai", "test-openai-key", "test");
+
     setPolicy({ ...getPolicy(), redTeamLlmModel: "gemini-2.5-flash" });
     const { runStrategyOnce } = await import("../src/lib/strategy");
 
@@ -220,26 +236,53 @@ describe("inline Bear red-team fail-closed (Chat A item 1)", () => {
     expect(statuses).toContain("proposed");
     expect(statuses).not.toContain("paper");
     expect(statuses).not.toContain("filled");
-    const runKinds = listAudit(500)
-      .filter((e) => (e.payload as { runId?: string })?.runId === result.runId)
-      .map((e) => e.kind);
-    expect(runKinds).toContain("strategy_bear_review_unavailable");
-    expect(runKinds).toContain("strategy_bear_review_routed_to_human");
-    // No key → the Bear step is recorded as "skipped" (not "fallback").
-    const bearStep = result.llmSteps?.find((s) => s.step === "bear");
-    expect(bearStep?.status).toBe("skipped");
+    const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
+    const unavailable = runAudits.filter((e) => e.kind === "strategy_red_team_unavailable");
+    expect(unavailable.length).toBeGreaterThanOrEqual(1);
+    expect((unavailable[0].payload as { failureKind?: string }).failureKind).toBe("not_configured");
   }, 30_000);
 
-  it("does NOT flag bearReviewUnavailable when the Bear call succeeds", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+  it("routes the opening to human review when NO Red model is chosen at all (blank — no Green fallback)", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
-      // Both the Bull and the surviving-Bear response are valid proposal JSON.
-      if (href.includes("api.openai.com")) return bullOk();
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) return bullOk();
       if (href.includes("nasdaq.com")) return nasdaqResponse();
       return new Response("not found", { status: 404 });
     });
-    await setupBrokerPaperDecide("Bear OK");
+    await setupBrokerPaperDecide("Review blank model");
+    const { setPolicy, getPolicy, listAudit } = await import("../src/lib/db");
+    const policy = { ...getPolicy() };
+    delete (policy as { redTeamLlmModel?: string }).redTeamLlmModel;
+    setPolicy(policy);
+    const { runStrategyOnce } = await import("../src/lib/strategy");
+
+    const result = await runStrategyOnce();
+
+    const statuses = result.proposals.map((p) => p.status);
+    expect(statuses).toContain("proposed");
+    expect(statuses).not.toContain("paper");
+    expect(statuses).not.toContain("filled");
+    const runAudits = listAudit(500).filter((e) => (e.payload as { runId?: string })?.runId === result.runId);
+    const unavailable = runAudits.filter((e) => e.kind === "strategy_red_team_unavailable");
+    expect(unavailable.length).toBeGreaterThanOrEqual(1);
+    expect((unavailable[0].payload as { failureKind?: string }).failureKind).toBe("not_configured");
+    expect((unavailable[0].payload as { reason?: string }).reason).toMatch(/not chosen/i);
+  }, 30_000);
+
+  it("does NOT flag unavailable when the review succeeds — the verdict is stamped and no hold audit fires", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) {
+        const body = String(init?.body ?? "");
+        if (body.includes("Red Team Risk Agent") || body.includes("red_team_verdict")) return reviewApprove();
+        return bullOk();
+      }
+      if (href.includes("nasdaq.com")) return nasdaqResponse();
+      return new Response("not found", { status: 404 });
+    });
+    await setupBrokerPaperDecide("Review OK");
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const { listAudit } = await import("../src/lib/db");
 
@@ -248,13 +291,14 @@ describe("inline Bear red-team fail-closed (Chat A item 1)", () => {
     const runKinds = listAudit(500)
       .filter((e) => (e.payload as { runId?: string })?.runId === result.runId)
       .map((e) => e.kind);
-    expect(runKinds).not.toContain("strategy_bear_review_unavailable");
-    expect(runKinds).not.toContain("strategy_bear_review_routed_to_human");
-    // Regression (composite review B/high/S): the inline Bear schema now includes confidenceScore in
-    // both `properties` and `required`, so a Bear-surviving proposal retains a numeric score instead
-    // of silently degrading to undefined (which previously zeroed shouldRunRedTeamDebate's `?? 0`
-    // trigger and sizing's `?? 50` neutral fallback).
+    expect(runKinds).not.toContain("strategy_red_team_unavailable");
+
+    // The verdict is stamped first-class with universal-coverage trigger, and the proposal's
+    // confidence survives (no second schema pass to strip it anymore).
     const aaplProposal = result.proposals.find((p) => p.proposal.symbol === "AAPL");
+    expect(aaplProposal?.proposal.redTeamVerdict?.available).toBe(true);
+    expect(aaplProposal?.proposal.redTeamVerdict?.verdict).toBe("approve");
+    expect(aaplProposal?.proposal.redTeamVerdict?.trigger).toBe("all_openings");
     expect(aaplProposal?.proposal.confidenceScore).toBe(BULL_PROPOSAL.confidenceScore);
   }, 30_000);
 });

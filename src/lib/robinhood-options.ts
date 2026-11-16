@@ -15,7 +15,15 @@ import { normalizeSymbol } from "./money";
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 
 const DEFAULT_OPTIONS_TTL_MS = 6 * 60 * 60_000; // 6h — options metrics move slowly at this granularity.
-const OPTIONS_MAX_SYMBOLS = 20;
+// Default 20 is deliberate (per-symbol option-chain fetches through the broker MCP are slow),
+// but the env override is unclamped — first-N slicing starves the tail of the candidate list,
+// so an operator who wants full options coverage can raise it explicitly.
+const DEFAULT_OPTIONS_MAX_SYMBOLS = 20;
+function optionsMaxSymbols(): number {
+  const value = Number(process.env.ROBINHOOD_OPTIONS_MAX_SYMBOLS ?? DEFAULT_OPTIONS_MAX_SYMBOLS);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_OPTIONS_MAX_SYMBOLS;
+  return Math.floor(value);
+}
 
 interface OptionRow {
   strike?: number;
@@ -130,7 +138,7 @@ export class RobinhoodOptionsEnrichmentProvider implements MarketEnrichmentProvi
   constructor(private readonly userId?: string) {}
 
   async enrich(symbols: string[]): Promise<Record<string, SymbolEnrichment>> {
-    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, OPTIONS_MAX_SYMBOLS);
+    const normalized = Array.from(new Set(symbols.map(normalizeSymbol))).filter(Boolean).slice(0, optionsMaxSymbols());
     const result: Record<string, SymbolEnrichment> = {};
     if (normalized.length === 0) return result;
     // Fail closed without a user in scope — never borrow the operator's broker token.

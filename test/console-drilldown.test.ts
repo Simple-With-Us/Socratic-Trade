@@ -5,6 +5,7 @@ import {
   buildSignalSummary,
   deriveForView,
   formatDollarsM,
+  hasEnrichedData,
   normalizedDebtToEquity,
   peDisplay,
   positionEconomics,
@@ -12,10 +13,12 @@ import {
   ratingDistribution,
   targetUpsidePct,
   toQuoteView,
+  toQuoteViewFromEnrichment,
   withProvenance,
   factorRows,
   type QuoteView
 } from "../app/console/ui/drilldown-data";
+import { resolveDrilldownCompanyName } from "../app/console/ui/symbol-drilldown";
 import { deriveMetrics } from "../src/lib/derived-metrics";
 import type { EquityPosition, MarketQuote, MarketQuoteSummary } from "../src/lib/types";
 
@@ -311,6 +314,21 @@ describe("console drilldown: provenance + misc formatting", () => {
     expect(withProvenance("Volume.", view, "volume")).not.toContain("Source:");
   });
 
+  it("only stamps 'Received' freshness on fields a provider actually supplied", () => {
+    const view: QuoteView = {
+      symbol: "X",
+      full: false,
+      asOf: new Date().toISOString(),
+      peRatio: 12,
+      sources: { peRatio: "yahoo-finance" }
+    };
+    // Sourced field → provenance + freshness.
+    expect(withProvenance("P/E.", view, "peRatio")).toContain("Received");
+    // Unsourced field (no provider returned it this scan) → no fabricated freshness:
+    // "Received 2:00 PM" on a blank cell claimed we got data we never did.
+    expect(withProvenance("FCF yield.", view, "fcfYield")).toBe("FCF yield.");
+  });
+
   it("normalizes debt/equity like the legacy scan table (percent vs ratio, sec-xbrl exempt)", () => {
     expect(normalizedDebtToEquity({ symbol: "X", full: false, debtToEquity: 150 })).toBe(1.5);
     expect(normalizedDebtToEquity({ symbol: "X", full: false, debtToEquity: 1.5 })).toBe(1.5);
@@ -326,6 +344,53 @@ describe("console drilldown: provenance + misc formatting", () => {
     expect(formatDollarsM(0.5)).toBe("$500K");
   });
 
+});
+
+describe("console drilldown: on-demand enrichment (symbol outside the last scan)", () => {
+  it("builds a QuoteView from a live /api/quote fetch, marked not-full and score-less", () => {
+    const view = toQuoteViewFromEnrichment("LRCX", {
+      price: 78.2,
+      companyName: "Lam Research",
+      sector: "Technology",
+      peRatio: 24.1,
+      eps: 3.24,
+      sentiment: 65,
+      sources: { price: "webull-unofficial", peRatio: "yahoo-finance" }
+    });
+    expect(view.symbol).toBe("LRCX");
+    expect(view.full).toBe(false);
+    expect(view.price).toBe(78.2);
+    expect(view.companyName).toBe("Lam Research");
+    expect(view.peRatio).toBe(24.1);
+    // Never fabricated: scan-only fields stay absent.
+    expect(view.score).toBeUndefined();
+    expect(view.factorBreakdown).toBeUndefined();
+    expect(view.marketCap).toBeUndefined();
+  });
+
+  it("drops non-positive price-family values instead of rendering them", () => {
+    const view = toQuoteViewFromEnrichment("X", { price: 0, bid: -1 });
+    expect(view.price).toBeUndefined();
+    expect(view.bid).toBeUndefined();
+  });
+
+  it("hasEnrichedData is true when any real field came back", () => {
+    expect(hasEnrichedData(toQuoteViewFromEnrichment("LRCX", { peRatio: 24.1 }))).toBe(true);
+    expect(hasEnrichedData(toQuoteViewFromEnrichment("LRCX", { headlines: ["Lam Research ships new tool"] }))).toBe(true);
+  });
+
+  it("hasEnrichedData is false when every provider came back empty (sources is always a defined-but-empty object)", () => {
+    expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", { sources: {} }))).toBe(false);
+    expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", {}))).toBe(false);
+  });
+
+  it("fills the drawer header name from on-demand identity while keeping scan identity authoritative", () => {
+    const scan = toQuoteViewFromEnrichment("LRCX", { companyName: "Scan Name" });
+    const onDemand = toQuoteViewFromEnrichment("LRCX", { companyName: "Lam Research Corporation" });
+    expect(resolveDrilldownCompanyName(null, onDemand)).toBe("Lam Research Corporation");
+    expect(resolveDrilldownCompanyName(scan, onDemand)).toBe("Scan Name");
+    expect(resolveDrilldownCompanyName(null, toQuoteViewFromEnrichment("LRCX", { companyName: "  " }))).toBeUndefined();
+  });
 });
 
 describe("console drilldown: factor rows derive from the breakdown's own keys", () => {

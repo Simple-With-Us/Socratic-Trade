@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deterministicBearFilter } from "../src/lib/strategy";
 import type { EquityPosition, MarketFactorBreakdown, MarketQuote, TradeProposal } from "../src/lib/types";
+import { deterministicBearFilter } from "../src/lib/strategy-risk";
 
 function makeProposal(overrides: Partial<TradeProposal>): TradeProposal {
   return {
@@ -94,8 +94,8 @@ describe("deterministicBearFilter", () => {
     });
   });
 
-  describe("Rule 3: regime contradiction veto", () => {
-    it("vetoes a below-median buy in Crisis regime", () => {
+  describe("Rule 3: regime contradiction veto (now ADVISORY — tag-not-drop)", () => {
+    it("TAGS (keeps) a below-median buy in Crisis regime with a preVetoReason", () => {
       const quotes = [
         makeQuote("AAPL", 80),
         makeQuote("NVDA", 70),
@@ -105,22 +105,29 @@ describe("deterministicBearFilter", () => {
       const { kept, vetoed } = deterministicBearFilter(
         [proposal], [], quotes, "Crisis (Extreme Volatility)"
       );
-      expect(kept).toHaveLength(0);
+      // Advisory pre-veto: KEPT (not dropped) but tagged, and still reported in `vetoed` for telemetry.
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons).toBeDefined();
+      expect(kept[0].preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: /);
+      expect(kept[0].preVetoReasons?.[0]).toContain("Crisis");
+      expect(vetoed).toHaveLength(1);
       expect(vetoed[0].reason).toContain("Crisis");
     });
 
-    it("vetoes a below-median buy in Risk-Off regime", () => {
+    it("TAGS (keeps) a below-median buy in Risk-Off regime", () => {
       const quotes = [makeQuote("AAPL", 80), makeQuote("META", 30)];
       const proposal = makeProposal({ symbol: "META" });
       const { kept } = deterministicBearFilter([proposal], [], quotes, "Risk-Off (High Volatility)");
-      expect(kept).toHaveLength(0);
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: /);
     });
 
-    it("allows an above-median buy even in Crisis regime", () => {
+    it("allows an above-median buy even in Crisis regime WITHOUT a preVetoReason tag", () => {
       const quotes = [makeQuote("AAPL", 80), makeQuote("META", 90)];
       const proposal = makeProposal({ symbol: "META" });
       const { kept } = deterministicBearFilter([proposal], [], quotes, "Crisis (Extreme Volatility)");
       expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons).toBeUndefined();
     });
 
     it("does not apply the regime rule in Neutral regime", () => {
@@ -128,6 +135,7 @@ describe("deterministicBearFilter", () => {
       const proposal = makeProposal({ symbol: "META" });
       const { kept } = deterministicBearFilter([proposal], [], quotes, "Neutral (Normal Volatility)");
       expect(kept).toHaveLength(1); // neutral regime — rule 3 doesn't fire
+      expect(kept[0].preVetoReasons).toBeUndefined();
     });
 
     it("does not apply regime rule to sell proposals", () => {
@@ -136,11 +144,61 @@ describe("deterministicBearFilter", () => {
       const position = makePosition("META");
       const { kept } = deterministicBearFilter([proposal], [position], quotes, "Crisis (Extreme Volatility)");
       expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons).toBeUndefined();
+    });
+  });
+
+  describe("Rule 4: fundamentals veto (now ADVISORY — tag-not-drop)", () => {
+    function makeFundamentalsQuote(symbol: string, extra: { fcfYield?: number; debtToEquity?: number }): MarketQuote {
+      return { ...makeQuote(symbol, 80), ...extra } as unknown as MarketQuote;
+    }
+
+    it("TAGS (keeps) a cash-burning buy below the FCF-yield floor", () => {
+      const quote = makeFundamentalsQuote("BURN", { fcfYield: -3.1 });
+      const proposal = makeProposal({ symbol: "BURN" });
+      const { kept, vetoed } = deterministicBearFilter(
+        [proposal], [], [quote], "Neutral (Normal Volatility)", { fcfYieldFloorPct: 0 }
+      );
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: Fundamentals veto: FCF yield/);
+      expect(vetoed).toHaveLength(1);
+      expect(vetoed[0].reason).toContain("cash-burning");
+    });
+
+    it("TAGS (keeps) an over-levered buy above the debt/equity ceiling", () => {
+      const quote = makeFundamentalsQuote("LEVR", { debtToEquity: 5 });
+      const proposal = makeProposal({ symbol: "LEVR" });
+      const { kept, vetoed } = deterministicBearFilter(
+        [proposal], [], [quote], "Neutral (Normal Volatility)", { debtToEquityCeiling: 2 }
+      );
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: Fundamentals veto: debt\/equity/);
+      expect(vetoed[0].reason).toContain("over-levered");
+    });
+
+    it("does not veto when the fundamental is within the threshold", () => {
+      const quote = makeFundamentalsQuote("GOOD", { fcfYield: 4, debtToEquity: 1 });
+      const proposal = makeProposal({ symbol: "GOOD" });
+      const { kept, vetoed } = deterministicBearFilter(
+        [proposal], [], [quote], "Neutral (Normal Volatility)", { fcfYieldFloorPct: 0, debtToEquityCeiling: 2 }
+      );
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons).toBeUndefined();
+      expect(vetoed).toHaveLength(0);
+    });
+
+    it("does not veto when the threshold is unset", () => {
+      const quote = makeFundamentalsQuote("BURN", { fcfYield: -3.1, debtToEquity: 5 });
+      const proposal = makeProposal({ symbol: "BURN" });
+      const { kept, vetoed } = deterministicBearFilter([proposal], [], [quote], "Neutral (Normal Volatility)");
+      expect(kept).toHaveLength(1);
+      expect(kept[0].preVetoReasons).toBeUndefined();
+      expect(vetoed).toHaveLength(0);
     });
   });
 
   describe("multiple proposals and mixed rules", () => {
-    it("keeps unaffected proposals when one is vetoed", () => {
+    it("keeps all proposals — the below-median one is tagged, the strong one is not", () => {
       const quotes = [makeQuote("AAPL", 90), makeQuote("WEAK", 20)];
       const proposals = [
         makeProposal({ symbol: "AAPL" }),
@@ -149,8 +207,12 @@ describe("deterministicBearFilter", () => {
       const { kept, vetoed } = deterministicBearFilter(
         proposals, [], quotes, "Crisis (Extreme Volatility)"
       );
-      expect(kept).toHaveLength(1);
-      expect(kept[0].symbol).toBe("AAPL");
+      // Both KEPT now (advisory tag-not-drop); the weak one carries the pre-veto tag.
+      expect(kept).toHaveLength(2);
+      const weak = kept.find((p) => p.symbol === "WEAK");
+      const strong = kept.find((p) => p.symbol === "AAPL");
+      expect(weak?.preVetoReasons?.[0]).toMatch(/^deterministic_bear_veto: /);
+      expect(strong?.preVetoReasons).toBeUndefined();
       expect(vetoed).toHaveLength(1);
     });
 

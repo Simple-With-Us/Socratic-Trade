@@ -1,5 +1,7 @@
+import { createHash } from "crypto";
 import { normalizeSymbol } from "./money";
 import { isHardGateReason } from "./policy";
+import { stableRagEvidenceRef, type PromptRagCandidate } from "./rag/evidence-consumption";
 import type { RetrievedChunk } from "./vector-db";
 import type {
   MarketQuote,
@@ -134,10 +136,40 @@ export function applySocraticOverrideSizing(proposal: TradeProposal, policy: Tra
   };
 }
 
-export function ragAttributionsFromChunks(symbol: string, query: string, chunks: RetrievedChunk[]): SocraticRagAttribution[] {
-  return chunks.slice(0, 5).map((chunk) => ({
+export function ragEvidenceIdentityFromChunk(
+  symbol: string,
+  chunk: RetrievedChunk
+): Omit<PromptRagCandidate, "serializedText" | "text"> {
+  const metadata = chunk.metadata ?? {};
+  return {
+    ...(chunk.id ? { chunkId: chunk.id } : {}),
     symbol: normalizeSymbol(symbol),
-    query,
+    ...(chunk.source ? { source: chunk.source } : {}),
+    ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),
+    ...(typeof metadata.accession === "string" ? { accession: metadata.accession } : {}),
+    ...(chunk.section ? { section: chunk.section } : {}),
+    ...(typeof metadata.chunk_ordinal === "number"
+      ? { ordinal: metadata.chunk_ordinal }
+      : typeof metadata.ordinal === "number"
+        ? { ordinal: metadata.ordinal }
+        : {}),
+    ...(typeof metadata.content_hash === "string" ? { contentHash: metadata.content_hash } : {}),
+    ...(typeof metadata.vector_namespace === "string" ? { vectorNamespace: metadata.vector_namespace } : {}),
+    ...(chunk.scope ? { scope: chunk.scope } : {}),
+    ...(typeof metadata.tenant_scope === "string" ? { tenantScope: metadata.tenant_scope } : {}),
+    ...(chunk.section ? { title: chunk.section } : {}),
+    ...(chunk.url ? { url: chunk.url } : {}),
+    ...(chunk.as_of ? { publishedAt: chunk.as_of } : {}),
+    ...(typeof chunk.score === "number" ? { score: chunk.score } : {}),
+    ...(typeof chunk.relevanceScore === "number" ? { relevanceScore: chunk.relevanceScore } : {})
+  };
+}
+
+export function ragAttributionsFromChunks(symbol: string, query: string, chunks: RetrievedChunk[]): SocraticRagAttribution[] {
+  return chunks.map((chunk) => ({
+    symbol: normalizeSymbol(symbol),
+    evidenceRef: stableRagEvidenceRef(ragEvidenceIdentityFromChunk(symbol, chunk)),
+    queryHash: createHash("sha256").update(query, "utf8").digest("hex").slice(0, 24),
     ...(chunk.id ? { chunkId: chunk.id } : {}),
     ...(chunk.source ? { source: chunk.source } : {}),
     ...(chunk.doc_type ? { docType: chunk.doc_type } : {}),
@@ -239,13 +271,23 @@ function evidenceForDecision(input: {
 function dissentForDecision(proposal: TradeProposal, decision: PolicyDecision, overrideResolution?: SocraticOverrideResolution): SocraticEvidenceItem[] {
   const rows: SocraticEvidenceItem[] = [];
   if (proposal.redTeamVerdict?.available) {
+    // Distinguish "Bear rejected AND blocked" from "Bear rejected but OVERRIDDEN & executed": an
+    // overridden veto is advisory (a logged rationale let the opening proceed), so it reads as a
+    // warning, not a hard negative, and the title says so.
+    const overridden = overrideResolution?.applied === true;
     rows.push({
       kind: "red_team",
-      title: proposal.redTeamVerdict.rejected ? "Red Team rejection" : "Red Team objection",
-      summary: proposal.redTeamVerdict.reason,
+      title: proposal.redTeamVerdict.rejected
+        ? overridden
+          ? "Red Team rejection (overridden)"
+          : "Red Team rejection"
+        : "Red Team objection",
+      summary: overridden
+        ? `${proposal.redTeamVerdict.reason} — overridden by a logged autonomy thesis; trade allowed to proceed.`
+        : proposal.redTeamVerdict.reason,
       source: proposal.redTeamVerdict.model,
       symbol: normalizeSymbol(proposal.symbol),
-      tone: proposal.redTeamVerdict.rejected ? "negative" : "warning",
+      tone: proposal.redTeamVerdict.rejected && !overridden ? "negative" : "warning",
       data: proposal.redTeamVerdict
     });
   }
@@ -286,6 +328,12 @@ export function buildSocraticDecisionCase(input: {
   marketScan?: MarketScan;
   ragAttributions?: SocraticRagAttribution[];
   overrideResolution?: SocraticOverrideResolution;
+  /** Run-level advisory receipts appended to the evidence list (e.g. kind 'safety'
+   * prompt-injection / evidence-age items from src/lib/prompt-safety.ts). */
+  extraEvidence?: SocraticEvidenceItem[];
+  /** Typed retrieval-status receipt for this run (typed-retrieval-status, 2026-07-06) — see
+   * `SocraticDecisionCase.ragRetrievalStatus`. Persistence only, never rendered. */
+  ragRetrievalStatus?: { symbol: string; status: string; reason?: string }[];
 }): Omit<SocraticDecisionCase, "createdAt" | "updatedAt"> {
   const ragAttributions = input.ragAttributions ?? [];
   const notional = input.review?.estimatedNotional ?? input.proposal.dollarAmount;
@@ -309,6 +357,8 @@ export function buildSocraticDecisionCase(input: {
     authority: input.authority,
     thesis: input.proposal.tradeThesisTag,
     rationale: input.proposal.rationale,
+    ...(input.proposal.greenTeamRationale ? { greenTeamRationale: input.proposal.greenTeamRationale } : {}),
+    ...(input.proposal.sizingSnapshot ? { sizingSnapshot: input.proposal.sizingSnapshot } : {}),
     action: formatAction(input.proposal, notional),
     thesisTag: input.proposal.tradeThesisTag,
     regime: input.proposal.entryMarketRegime,
@@ -317,20 +367,38 @@ export function buildSocraticDecisionCase(input: {
     ...(input.proposal.proposedByModel ? { model: input.proposal.proposedByModel } : {}),
     ...(input.proposal.redTeamVerdict ? { redTeamVerdict: input.proposal.redTeamVerdict } : {}),
     policyDecision: input.decision,
-    evidence: evidenceForDecision({
-      proposal: input.proposal,
-      status: input.status,
-      decision: input.decision,
-      marketScan: input.marketScan,
-      ragAttributions,
-      notional,
-      overrideResolution: input.overrideResolution
-    }),
+    evidence: [
+      ...evidenceForDecision({
+        proposal: input.proposal,
+        status: input.status,
+        decision: input.decision,
+        marketScan: input.marketScan,
+        ragAttributions,
+        notional,
+        overrideResolution: input.overrideResolution
+      }),
+      // Appended AFTER the per-proposal evidence (which is capped at 8) so safety receipts are
+      // never crowded out by candidate/market rows.
+      //
+      // This ordering is DELIBERATE and safety-load-bearing, not incidental: kind-'safety' items
+      // (prompt-injection / evidence-age receipts from src/lib/prompt-safety.ts) land at the TAIL
+      // of this array. Downstream summarizers that feed the RAG/lesson-learning prompts take a
+      // fixed-size PREFIX slice — socratic-memory.ts summarizeEvidence does .slice(0, 5) and
+      // outcome-engine.ts's lesson pass does decisionCase.evidence.slice(0, 6) — so as long as a
+      // case has >5/>6 proposal-evidence rows ahead of them, the tail-appended safety items are
+      // excluded from what gets summarized back into memory/lessons. Do NOT reorder extraEvidence
+      // to the front (or otherwise make it appear before the slice cutoff): that would let a
+      // detected injection attempt's own excerpt text ride into the RAG/lesson corpus, creating a
+      // detection -> memory -> re-detection feedback loop where the scanner's receipts become
+      // future "learned" input. Keep safety receipts append-only and tail-positioned.
+      ...(input.extraEvidence ?? [])
+    ],
     ragAttributions: ragAttributions.filter((row) => normalizeSymbol(row.symbol) === normalizeSymbol(input.proposal.symbol)),
+    ...(input.ragRetrievalStatus && input.ragRetrievalStatus.length > 0 ? { ragRetrievalStatus: input.ragRetrievalStatus } : {}),
     dissent: dissentForDecision(input.proposal, input.decision, input.overrideResolution),
     ...(override ? { autonomyOverride: override } : {}),
     lessons: [
-      input.status === "placed" ? "Track realized outcome against the stated thesis and invalidation note." : "",
+      input.status === "placed" || input.status === "filled" ? "Track realized outcome against the stated thesis and invalidation note." : "",
       input.status === "blocked" && input.proposal.autonomyOverride?.requested ? "Override request did not clear the hard/preference split; review classifier or mandate." : "",
       input.overrideResolution?.applied ? "Owner preference gate was explicitly overridden; measure whether the autonomy judgment improved returns." : ""
     ].filter(Boolean),
@@ -373,10 +441,16 @@ export function frameworkProposalFromDecision(decision: SocraticDecisionCase): O
 }
 
 export function socraticStatusFromProposalStatus(status: string): SocraticDecisionStatus {
-  if (status === "placed") return "placed";
+  if (status === "placed" || status === "paper") return "placed";
+  if (status === "filled") return "filled";
   if (status === "proposed") return "proposed";
+  if (status === "placing") return "placing";
   if (status === "blocked") return "blocked";
-  if (status === "rejected" || status === "rejected_by_broker") return "rejected";
-  if (status === "error" || status === "placing_failed") return "error";
+  if (status === "rejected" || status === "rejected_by_red_team") return "rejected";
+  if (status === "rejected_by_broker") return "rejected_by_broker";
+  if (status === "not_placed" || status === "placing_failed") return "not_placed";
+  if (status === "expired") return "expired";
+  if (status === "withdrawn") return "withdrawn";
+  if (status === "error" || status === "failed") return "error";
   return "planned";
 }

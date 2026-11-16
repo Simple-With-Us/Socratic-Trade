@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { buildSocraticMemoryDocument } from "../src/lib/socratic-memory";
+import {
+  buildSocraticMemoryDocument,
+  fmpDerivedSocraticMemoryVectorId
+} from "../src/lib/socratic-memory";
 import type { SocraticDecisionCase } from "../src/lib/types";
 
 describe("Socratic institutional memory documents", () => {
+  it("derives the licensed provider identity with edge-safe SHA-256", async () => {
+    await expect(fmpDerivedSocraticMemoryVectorId({ id: "case-1", userId: "u1" }, 3))
+      .resolves.toBe(
+        "fmp-derived-socratic:v1:9ecf2499f591755a3bc8ca29a428cd4ee583ba779a5619c3185124b6640c9cc6"
+      );
+  });
+
   it("maps a decision case into a dense RAG memory document", () => {
     const decision: SocraticDecisionCase = {
       id: "case-1",
@@ -17,7 +27,8 @@ describe("Socratic institutional memory documents", () => {
       status: "blocked",
       authority: "decide",
       thesis: "Flash crash selling is overdone.",
-      rationale: "Cloud capex demand is intact and liquidity stress looks temporary.",
+      rationale: "Cloud capex demand is intact. Red Team review — stale legacy objection text.",
+      greenTeamRationale: "Cloud capex demand is intact and liquidity stress looks temporary.",
       action: "BUY AMD $50000",
       thesisTag: "Mean-Reversion",
       regime: "High-Vol",
@@ -77,6 +88,8 @@ describe("Socratic institutional memory documents", () => {
       entry_market_regime: "High-Vol"
     });
     expect(document.text).toContain("broker_argument: Flash crash selling is overdone.");
+    expect(document.text).toContain("Cloud capex demand is intact and liquidity stress looks temporary.");
+    expect(document.text).not.toContain("stale legacy objection text");
     expect(document.text).toContain("critic_counter_argument: Inventory buildup");
     expect(document.text).toContain("policy_outcome: blocked: Daily notional limit exceeded.");
     expect(document.text).toContain("rag_contribution: memory-rag score=0.820");

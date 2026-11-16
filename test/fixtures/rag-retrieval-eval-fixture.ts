@@ -458,5 +458,195 @@ export const RAG_EVAL_FIXTURE: FixtureCase[] = [
       mk("aapl-8k-catalyst-older", 0.4, "Catalyst: AAPL filed an 8-K (material event) on 2026-03-20. Items: Item 5.02 Departure of Directors or Certain Officers.", { doc_type: "8-k", acceptance_datetime: "2026-03-20" }),
       mk("aapl-10k-business-1", 0.35, "Apple designs, manufactures and markets smartphones, personal computers, tablets, wearables and accessories worldwide.", { doc_type: "10-k", section: "Business", acceptance_datetime: "2026-01-15" })
     ]
+  },
+  // ── Episodic decision memory (2026-07-06 golden-eval expansion) ──────────────────────────────
+  // Filings-only cases above stop exercising doc_type in {socratic-decision, coach-note, lesson}
+  // (EPISODIC_DOC_TYPES, src/lib/experience-memory.ts:44) entirely — the eval harness reportedly
+  // saturates at recall 1.0 because it has never had to discriminate a decision-memory query from
+  // a NEAR-MISS prior decision on the SAME symbol/regime but a DIFFERENT thesis or DIRECTION. The
+  // cases below mirror `buildClosedLotExperienceDocument`'s text shape (ticker/side/thesis_tag/
+  // entry_market_regime/entry_rationale/exit_reason/realized_outcome) and coach-note/lesson shapes,
+  // each with a hard negative that shares symbol+regime but flips thesis or side — exactly the
+  // confusion a real cross-encoder/reranker must resolve, not a bag-of-words giveaway.
+  {
+    id: "episodic-nvda-momentum-analog",
+    query: "Closest prior decision: NVDA long momentum breakout in a risk-on regime — how did it play out?",
+    symbol: "NVDA",
+    goldRelevantIds: ["exp-nvda-momentum-win"],
+    hardNegativeIds: ["exp-nvda-meanreversion-loss", "exp-nvda-momentum-short-loss", "coach-note-nvda-generic"],
+    pool: [
+      // Same symbol + same regime, but a MEAN-REVERSION thesis (not momentum) — a near-miss that
+      // shares surface vocabulary (ticker, regime) without being the actual analog.
+      mk("exp-nvda-meanreversion-loss", 0.5, "Experience memory: closed lot with realized outcome\nticker: NVDA\nside: buy\nthesis_tag: mean-reversion-oversold\nentry_market_regime: risk-on\nsector: Semiconductors\nentry_rationale: Bought the dip after a sharp pullback expecting reversion to the 20-day average.\nexit_reason: stopped out on continued downside momentum (risk-exit)\nrealized_outcome: return_pct=-6.2; holding_days=4; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same symbol + same regime + same "momentum" vocabulary, but SIDE is short — the opposite
+      // directional bet, so its realized outcome says nothing about the long-momentum analog.
+      mk("exp-nvda-momentum-short-loss", 0.47, "Experience memory: closed lot with realized outcome\nticker: NVDA\nside: short\nthesis_tag: momentum-breakout-fade\nentry_market_regime: risk-on\nsector: Semiconductors\nentry_rationale: Shorted into strength expecting the breakout to fail and mean-revert.\nexit_reason: covered for a loss after the breakout continued (risk-exit)\nrealized_outcome: return_pct=-9.1; holding_days=3; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same symbol, same regime, same thesis direction (long momentum breakout), buried
+      // below both near-misses on cosine so rerank/rrf must recover it.
+      mk("exp-nvda-momentum-win", 0.42, "Experience memory: closed lot with realized outcome\nticker: NVDA\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-on\nsector: Semiconductors\nentry_rationale: Entered on a high-volume breakout above resistance with strong relative strength and a risk-on macro backdrop.\nexit_reason: trailing stop hit after a multi-week uptrend (target reached)\nrealized_outcome: return_pct=18.4; holding_days=21; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("coach-note-nvda-generic", 0.3, "Owner coaching note: size NVDA positions conservatively around earnings dates regardless of thesis.", { doc_type: "coach-note", source: "socratic-coach" })
+    ]
+  },
+  {
+    id: "episodic-tsla-riskoff-counterexample",
+    query: "What happened the last time we bought TSLA going into a risk-off regime?",
+    symbol: "TSLA",
+    goldRelevantIds: ["exp-tsla-riskoff-buy-loss"],
+    hardNegativeIds: ["exp-tsla-riskon-buy-win", "exp-tsla-riskoff-short-win", "lesson-tsla-generic"],
+    pool: [
+      // Same symbol, opposite regime (risk-on, not risk-off) — a near-miss on ticker alone.
+      mk("exp-tsla-riskon-buy-win", 0.49, "Experience memory: closed lot with realized outcome\nticker: TSLA\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-on\nsector: Consumer Discretionary\nentry_rationale: Entered long on strong delivery numbers during a broad risk-on rally.\nexit_reason: target reached on continued strength\nrealized_outcome: return_pct=22.7; holding_days=15; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same regime (risk-off), same symbol, but the OPPOSITE side (short, not buy) — the
+      // realized outcome (a short win) is not evidence for how a LONG performed.
+      mk("exp-tsla-riskoff-short-win", 0.46, "Experience memory: closed lot with realized outcome\nticker: TSLA\nside: short\nthesis_tag: momentum-breakdown\nentry_market_regime: risk-off\nsector: Consumer Discretionary\nentry_rationale: Shorted into weakness as broad risk appetite deteriorated and delivery guidance missed.\nexit_reason: covered for a gain as the stock continued lower\nrealized_outcome: return_pct=14.3; holding_days=9; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same symbol, same side (buy), same regime (risk-off) — the actual counterexample
+      // analog (a loss), buried below both near-misses on cosine.
+      mk("exp-tsla-riskoff-buy-loss", 0.4, "Experience memory: closed lot with realized outcome\nticker: TSLA\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-off\nsector: Consumer Discretionary\nentry_rationale: Entered long expecting a bounce despite deteriorating risk appetite across the market.\nexit_reason: stopped out as the broader risk-off move dragged the position down (risk-exit)\nrealized_outcome: return_pct=-11.5; holding_days=6; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("lesson-tsla-generic", 0.3, "Lesson: TSLA reacts sharply to delivery-number surprises regardless of prevailing regime.", { doc_type: "lesson", source: "outcome-engine" })
+    ]
+  },
+  {
+    id: "episodic-owner-coaching-sizing",
+    query: "What coaching has the owner given about position sizing after a risk-exit stop-out?",
+    symbol: "PORTFOLIO",
+    goldRelevantIds: ["coach-note-sizing-after-stopout"],
+    hardNegativeIds: ["coach-note-earnings-timing", "exp-generic-riskexit-loss", "lesson-generic-diversification"],
+    pool: [
+      // A real coach-note, but about earnings timing, not post-stop-out sizing — topically
+      // adjacent (both "coaching") but not the actual gold answer.
+      mk("coach-note-earnings-timing", 0.48, "Owner coaching note: avoid opening new positions in the 48 hours before a scheduled earnings release.", { doc_type: "coach-note", source: "socratic-coach" }),
+      // A closed-lot experience with a risk-exit, but no sizing coaching attached — a near-miss
+      // that shares the "risk_exit" vocabulary without being coaching content.
+      mk("exp-generic-riskexit-loss", 0.44, "Experience memory: closed lot with realized outcome\nticker: SPY\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-on\nsector: Broad Market\nentry_rationale: Entered on an index breakout.\nexit_reason: stopped out on a sharp reversal (risk-exit)\nrealized_outcome: return_pct=-4.8; holding_days=2; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold, buried below both near-misses.
+      mk("coach-note-sizing-after-stopout", 0.39, "Owner coaching note: after two consecutive risk-exit stop-outs on the same thesis tag, cut position size in half until a win resets the streak.", { doc_type: "coach-note", source: "socratic-coach" }),
+      mk("lesson-generic-diversification", 0.3, "Lesson: concentration in a single sector amplified drawdowns during the last risk-off episode.", { doc_type: "lesson", source: "outcome-engine" })
+    ]
+  },
+  {
+    id: "episodic-lesson-sector-concentration",
+    query: "Is there a recorded lesson about sector concentration amplifying drawdowns?",
+    symbol: "PORTFOLIO",
+    goldRelevantIds: ["lesson-sector-concentration-drawdown"],
+    hardNegativeIds: ["lesson-generic-diversification-2", "exp-jpm-sector-loss", "coach-note-sector-generic"],
+    pool: [
+      // A lesson about diversification in general, not specifically sector concentration amplifying
+      // drawdowns — near-miss on topic.
+      mk("lesson-generic-diversification-2", 0.47, "Lesson: spreading exposure across uncorrelated sectors reduced portfolio volatility over the last quarter.", { doc_type: "lesson", source: "outcome-engine" }),
+      // A single closed lot in a concentrated sector, but no lesson-level generalization recorded.
+      mk("exp-jpm-sector-loss", 0.43, "Experience memory: closed lot with realized outcome\nticker: JPM\nside: buy\nthesis_tag: value-reversion\nentry_market_regime: risk-off\nsector: Financials\nentry_rationale: Entered long on a valuation dislocation within Financials.\nexit_reason: stopped out as the whole sector sold off together (risk-exit)\nrealized_outcome: return_pct=-8.9; holding_days=5; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: the actual generalized lesson tying concentration to amplified drawdowns.
+      mk("lesson-sector-concentration-drawdown", 0.38, "Lesson: when 3+ open positions share the same GICS sector, a sector-wide risk-off move amplifies drawdown well beyond any single position's stop — cap same-sector concentration going forward.", { doc_type: "lesson", source: "outcome-engine" }),
+      mk("coach-note-sector-generic", 0.3, "Owner coaching note: re-check correlation across open positions before adding a new one.", { doc_type: "coach-note", source: "socratic-coach" })
+    ]
+  },
+  {
+    id: "episodic-msft-value-thesis-analog",
+    query: "Closest prior decision: MSFT bought on a value/quality thesis in a risk-off regime",
+    symbol: "MSFT",
+    goldRelevantIds: ["exp-msft-value-win"],
+    hardNegativeIds: ["exp-msft-momentum-loss", "exp-msft-value-riskon-win", "coach-note-msft-generic"],
+    pool: [
+      // Same symbol, same regime, but a MOMENTUM thesis (not value/quality) — a near-miss.
+      mk("exp-msft-momentum-loss", 0.5, "Experience memory: closed lot with realized outcome\nticker: MSFT\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-off\nsector: Technology\nentry_rationale: Entered long on a breakout despite a risk-off macro backdrop, chasing relative strength.\nexit_reason: stopped out as the breakout failed (risk-exit)\nrealized_outcome: return_pct=-7.3; holding_days=5; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same symbol, same thesis (value/quality), but the OPPOSITE regime (risk-on, not risk-off).
+      mk("exp-msft-value-riskon-win", 0.46, "Experience memory: closed lot with realized outcome\nticker: MSFT\nside: buy\nthesis_tag: value-quality\nentry_market_regime: risk-on\nsector: Technology\nentry_rationale: Entered long on durable cash flow and cloud margin expansion during a broad risk-on rally.\nexit_reason: target reached on continued strength\nrealized_outcome: return_pct=12.1; holding_days=30; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same symbol, same thesis, same regime — the true analog, buried below both
+      // near-misses on cosine.
+      mk("exp-msft-value-win", 0.41, "Experience memory: closed lot with realized outcome\nticker: MSFT\nside: buy\nthesis_tag: value-quality\nentry_market_regime: risk-off\nsector: Technology\nentry_rationale: Entered long on durable cash flow and cloud margin quality as a defensive value tilt during a risk-off stretch.\nexit_reason: trailing stop hit after a slow grind higher (target reached)\nrealized_outcome: return_pct=9.6; holding_days=40; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("coach-note-msft-generic", 0.3, "Owner coaching note: MSFT earnings reactions have historically been muted relative to peers.", { doc_type: "coach-note", source: "socratic-coach" })
+    ]
+  },
+  {
+    id: "episodic-amzn-thesis-tag-exact-term",
+    query: "thesis_tag momentum-breakout AMZN risk-on realized_outcome win",
+    symbol: "AMZN",
+    goldRelevantIds: ["exp-amzn-momentum-win"],
+    hardNegativeIds: ["exp-amzn-momentum-loss-riskoff", "exp-amzn-value-win-riskon", "lesson-amzn-generic"],
+    pool: [
+      // Same thesis tag and exact lexical overlap ("momentum-breakout"), but wrong regime and a
+      // LOSS — a near-miss that would score high on pure lexical overlap alone.
+      mk("exp-amzn-momentum-loss-riskoff", 0.5, "Experience memory: closed lot with realized outcome\nticker: AMZN\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-off\nsector: Consumer Discretionary\nentry_rationale: Chased a breakout despite deteriorating risk appetite.\nexit_reason: stopped out on reversal (risk-exit)\nrealized_outcome: return_pct=-5.4; holding_days=4; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same regime and a win, but wrong thesis (value, not momentum-breakout) — a near-miss on
+      // outcome sign+regime, not thesis.
+      mk("exp-amzn-value-win-riskon", 0.44, "Experience memory: closed lot with realized outcome\nticker: AMZN\nside: buy\nthesis_tag: value-reversion\nentry_market_regime: risk-on\nsector: Consumer Discretionary\nentry_rationale: Entered on a valuation dislocation after a post-earnings gap down.\nexit_reason: target reached on reversion to fair value\nrealized_outcome: return_pct=10.8; holding_days=18; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: exact thesis_tag + regime + a win, buried below both near-misses on cosine.
+      mk("exp-amzn-momentum-win", 0.39, "Experience memory: closed lot with realized outcome\nticker: AMZN\nside: buy\nthesis_tag: momentum-breakout\nentry_market_regime: risk-on\nsector: Consumer Discretionary\nentry_rationale: Entered on a high-volume breakout with strong relative strength during a risk-on rally.\nexit_reason: trailing stop hit after sustained uptrend (target reached)\nrealized_outcome: return_pct=16.2; holding_days=24; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("lesson-amzn-generic", 0.3, "Lesson: AMZN fulfillment-cost commentary tends to move the stock more than headline revenue.", { doc_type: "lesson", source: "outcome-engine" })
+    ]
+  },
+  {
+    id: "episodic-asof-guard-analog",
+    query: "Closest prior decision: XOM commodity-driven long in a risk-off regime",
+    symbol: "XOM",
+    asOf: "2026-04-15",
+    goldRelevantIds: ["exp-xom-riskoff-older"],
+    hardNegativeIds: ["exp-xom-riskoff-future", "exp-xom-riskon-win", "coach-note-xom-generic"],
+    pool: [
+      // Cosine ranks this highest (exact thesis+regime match), but it's dated AFTER asOf — the
+      // guard must exclude it as look-ahead, mirroring the filings as-of case above but for an
+      // episodic doc_type.
+      mk("exp-xom-riskoff-future", 0.53, "Experience memory: closed lot with realized outcome\nticker: XOM\nside: buy\nthesis_tag: commodity-momentum\nentry_market_regime: risk-off\nsector: Energy\nentry_rationale: Entered long on rising crude prices despite broad risk-off conditions.\nexit_reason: target reached on continued crude strength\nrealized_outcome: return_pct=13.4; holding_days=12; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory", acceptance_datetime: "2026-05-01" }),
+      // Same symbol, wrong regime (risk-on) — a near-miss that must not win even without the as-of
+      // guard, since it isn't the same-regime analog.
+      mk("exp-xom-riskon-win", 0.47, "Experience memory: closed lot with realized outcome\nticker: XOM\nside: buy\nthesis_tag: commodity-momentum\nentry_market_regime: risk-on\nsector: Energy\nentry_rationale: Entered long on rising crude prices during a broad risk-on rally.\nexit_reason: target reached on continued strength\nrealized_outcome: return_pct=15.9; holding_days=10; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory", acceptance_datetime: "2026-02-01" }),
+      // Gold: same symbol, same thesis, same regime, dated BEFORE asOf — the correct in-window
+      // analog once the look-ahead chunk is excluded.
+      mk("exp-xom-riskoff-older", 0.4, "Experience memory: closed lot with realized outcome\nticker: XOM\nside: buy\nthesis_tag: commodity-momentum\nentry_market_regime: risk-off\nsector: Energy\nentry_rationale: Entered long on a crude price spike despite a risk-off macro backdrop.\nexit_reason: trailing stop hit after a multi-week climb (target reached)\nrealized_outcome: return_pct=8.7; holding_days=14; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory", acceptance_datetime: "2026-03-01" }),
+      mk("coach-note-xom-generic", 0.3, "Owner coaching note: XOM positions correlate heavily with crude spot moves intraday.", { doc_type: "coach-note", source: "socratic-coach", acceptance_datetime: "2026-01-10" })
+    ]
+  },
+  {
+    id: "episodic-googl-counterexample-dissent",
+    query: "Closest prior decision: GOOGL ad-revenue momentum long — including any counterexamples",
+    symbol: "GOOGL",
+    goldRelevantIds: ["exp-googl-adrev-loss-counterexample"],
+    hardNegativeIds: ["exp-googl-search-different-thesis", "exp-googl-adrev-win-riskon", "lesson-googl-generic"],
+    pool: [
+      // Same symbol, DIFFERENT thesis (search-share, not ad-revenue-momentum) — a near-miss.
+      mk("exp-googl-search-different-thesis", 0.49, "Experience memory: closed lot with realized outcome\nticker: GOOGL\nside: buy\nthesis_tag: search-share-defense\nentry_market_regime: risk-off\nsector: Communication Services\nentry_rationale: Entered long on defensive search-share stability during a risk-off stretch.\nexit_reason: target reached on steady performance\nrealized_outcome: return_pct=6.4; holding_days=20; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same thesis, but wrong regime and a WIN, not the counterexample loss being asked about.
+      mk("exp-googl-adrev-win-riskon", 0.45, "Experience memory: closed lot with realized outcome\nticker: GOOGL\nside: buy\nthesis_tag: adrev-momentum\nentry_market_regime: risk-on\nsector: Communication Services\nentry_rationale: Entered long on accelerating ad revenue growth during a risk-on rally.\nexit_reason: target reached on continued strength\nrealized_outcome: return_pct=19.3; holding_days=25; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same thesis, and specifically the COUNTEREXAMPLE (opposite/negative realized sign) —
+      // buried below both near-misses on cosine, exercising the "weigh dissent" retrieval case.
+      mk("exp-googl-adrev-loss-counterexample", 0.4, "Experience memory: closed lot with realized outcome\nticker: GOOGL\nside: buy\nthesis_tag: adrev-momentum\nentry_market_regime: risk-off\nsector: Communication Services\nentry_rationale: Entered long on accelerating ad revenue growth despite broad risk-off conditions.\nexit_reason: stopped out as ad spend guidance disappointed (risk-exit)\nrealized_outcome: return_pct=-13.7; holding_days=7; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("lesson-googl-generic", 0.3, "Lesson: GOOGL ad-revenue guidance surprises move the stock more than search-share commentary.", { doc_type: "lesson", source: "outcome-engine" })
+    ]
+  },
+  {
+    id: "episodic-meta-side-short-analog",
+    query: "Closest prior decision: META shorted on a platform-policy risk thesis",
+    symbol: "META",
+    goldRelevantIds: ["exp-meta-short-platformrisk-win"],
+    hardNegativeIds: ["exp-meta-long-platformrisk", "exp-meta-short-different-thesis", "coach-note-meta-generic"],
+    pool: [
+      // Same thesis, same symbol, but the OPPOSITE side (long, not short) — a near-miss that
+      // shares thesis vocabulary but the opposite directional bet.
+      mk("exp-meta-long-platformrisk", 0.48, "Experience memory: closed lot with realized outcome\nticker: META\nside: buy\nthesis_tag: platform-policy-risk\nentry_market_regime: risk-on\nsector: Communication Services\nentry_rationale: Bought the dip after platform-policy risk was already priced in, expecting recovery.\nexit_reason: target reached on recovery\nrealized_outcome: return_pct=11.2; holding_days=16; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same side (short), same symbol, but a DIFFERENT thesis (reality-labs-spend, not
+      // platform-policy-risk) — a near-miss on side+symbol, not thesis.
+      mk("exp-meta-short-different-thesis", 0.45, "Experience memory: closed lot with realized outcome\nticker: META\nside: short\nthesis_tag: reality-labs-spend-overhang\nentry_market_regime: risk-on\nsector: Communication Services\nentry_rationale: Shorted on concern that Reality Labs losses would keep weighing on margins.\nexit_reason: covered for a loss as margins stabilized (risk-exit)\nrealized_outcome: return_pct=-8.1; holding_days=11; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same side (short), same thesis (platform-policy-risk), buried below both near-misses.
+      mk("exp-meta-short-platformrisk-win", 0.4, "Experience memory: closed lot with realized outcome\nticker: META\nside: short\nthesis_tag: platform-policy-risk\nentry_market_regime: risk-on\nsector: Communication Services\nentry_rationale: Shorted ahead of an expected platform-policy change that would raise ad-targeting costs.\nexit_reason: covered for a gain as the policy change hit ad pricing (target reached)\nrealized_outcome: return_pct=9.8; holding_days=8; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("coach-note-meta-generic", 0.3, "Owner coaching note: META reacts more to platform-policy headlines than to quarterly guidance.", { doc_type: "coach-note", source: "socratic-coach" })
+    ]
+  },
+  {
+    id: "episodic-jpm-rate-thesis-analog",
+    query: "Closest prior decision: JPM long on rate-sensitivity thesis during a risk-off regime",
+    symbol: "JPM",
+    goldRelevantIds: ["exp-jpm-ratesens-riskoff-win"],
+    hardNegativeIds: ["exp-jpm-creditloss-thesis", "exp-jpm-ratesens-riskon-loss", "lesson-jpm-generic"],
+    pool: [
+      // Same symbol, same regime, but a DIFFERENT thesis (credit-loss-provision, not
+      // rate-sensitivity) — a near-miss.
+      mk("exp-jpm-creditloss-thesis", 0.5, "Experience memory: closed lot with realized outcome\nticker: JPM\nside: buy\nthesis_tag: credit-loss-normalization\nentry_market_regime: risk-off\nsector: Financials\nentry_rationale: Entered long expecting credit-loss provisions to normalize lower.\nexit_reason: stopped out as provisions kept rising (risk-exit)\nrealized_outcome: return_pct=-6.6; holding_days=9; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Same thesis (rate-sensitivity), same symbol, but the OPPOSITE regime (risk-on) and a loss.
+      mk("exp-jpm-ratesens-riskon-loss", 0.46, "Experience memory: closed lot with realized outcome\nticker: JPM\nside: buy\nthesis_tag: rate-sensitivity-nii\nentry_market_regime: risk-on\nsector: Financials\nentry_rationale: Entered long expecting net interest income to benefit from rate moves during a risk-on stretch.\nexit_reason: stopped out as rates moved the wrong way (risk-exit)\nrealized_outcome: return_pct=-4.3; holding_days=6; risk_exit=true", { doc_type: "socratic-decision", source: "experience-memory" }),
+      // Gold: same symbol, same thesis, same regime — the true analog, buried below both
+      // near-misses on cosine.
+      mk("exp-jpm-ratesens-riskoff-win", 0.4, "Experience memory: closed lot with realized outcome\nticker: JPM\nside: buy\nthesis_tag: rate-sensitivity-nii\nentry_market_regime: risk-off\nsector: Financials\nentry_rationale: Entered long expecting net interest income resilience as rates stayed elevated during a risk-off stretch.\nexit_reason: target reached as NII held up better than feared\nrealized_outcome: return_pct=7.9; holding_days=22; risk_exit=false", { doc_type: "socratic-decision", source: "experience-memory" }),
+      mk("lesson-jpm-generic", 0.3, "Lesson: JPM's NII sensitivity commentary in the MD&A tends to lead the stock's rate-move reaction by a quarter.", { doc_type: "lesson", source: "outcome-engine" })
+    ]
   }
 ];

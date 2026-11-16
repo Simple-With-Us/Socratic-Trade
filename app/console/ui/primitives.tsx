@@ -2,45 +2,72 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { HelpCircle } from "lucide-react";
-import { createPortal } from "react-dom";
-import {
-  cloneElement,
-  isValidElement,
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ButtonHTMLAttributes,
-  type InputHTMLAttributes,
-  type ReactElement,
-  type ReactNode,
-  type SelectHTMLAttributes,
-  type TextareaHTMLAttributes
-} from "react";
+import { useState, useEffect, useLayoutEffect, useId, useRef, type CSSProperties, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
+import { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
+import { AnimatePresence, motion } from "motion/react";
+import { createPortal } from "react-dom";
+import { tooltipPosition } from "../lib/tooltip-position";
+
+export { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 
 // ── Card ─────────────────────────────────────────────────────────────────────
+
 
 export function Card({
   title,
   action,
   children,
   className,
-  padded = true
+  padded = true,
+  collapsible = false,
+  defaultOpen = true,
+  stackAction = false
 }: {
   title?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
   padded?: boolean;
+  /** On narrow screens, put `action` on its own row under the title so a
+   *  cluster of buttons does not sit in a cramped side column. */
+  stackAction?: boolean;
+  /** Render the card as a collapsible disclosure (native <details>) with the title as the
+   *  summary and a chevron. Requires a title. Off by default so existing cards are unchanged. */
+  collapsible?: boolean;
+  /** Initial open state when collapsible. Defaults to open so nothing is hidden on first load. */
+  defaultOpen?: boolean;
 }) {
+  if (collapsible && title) {
+    return (
+      <details className={cx("con-card con-disclosure", className)} open={defaultOpen}>
+        <summary>
+          {/* Open: pt-3.5 pb-1 (tight bottom toward body). Collapsed: balanced
+              py via .con-disclosure.con-card:not([open]) in console.css so
+              one-line titles like "You're set" sit vertically centered. */}
+          <div className="flex items-center gap-3 px-4 pt-3.5 pb-1">
+            <h2 className="con-card-title">{title}</h2>
+            {action && (
+              <span className="ml-auto" onClick={(e) => e.preventDefault()}>{action}</span>
+            )}
+            <span className={cx("con-disclosure-label", !action && "ml-auto")} />
+          </div>
+        </summary>
+        <div className={padded ? "px-4 pb-4 pt-2" : undefined}>{children}</div>
+      </details>
+    );
+  }
   return (
     <section className={cx("con-card", className)}>
       {(title || action) && (
-        <header className="flex items-center justify-between gap-3 px-4 pt-3.5 pb-1">
+        <header
+          className={cx(
+            "flex gap-3 px-4 pt-3.5 pb-1",
+            stackAction
+              ? "flex-col items-stretch sm:flex-row sm:items-center sm:justify-between"
+              : "items-center justify-between"
+          )}
+        >
           {title ? <h2 className="con-card-title">{title}</h2> : <span />}
           {action}
         </header>
@@ -68,208 +95,94 @@ export function Btn({
   size,
   className,
   type = "button",
+  title,
+  align,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: BtnVariant; size?: "sm" }) {
-  return (
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: BtnVariant; size?: "sm"; align?: "center" | "left" | "right" }) {
+  const button = (
     <button
       type={type}
       className={cx("con-btn", BTN_CLASS[variant], size === "sm" && "con-btn-sm", className)}
       {...rest}
     />
   );
+  if (title) {
+    return <Tooltip content={title} align={align}>{button}</Tooltip>;
+  }
+  return button;
 }
 
-// ── Tooltip / popover primitives ────────────────────────────────────────────
-
-type TooltipSide = "top" | "bottom";
-type TooltipAlign = "start" | "center" | "end";
-
-function tooltipLines(content: ReactNode): ReactNode {
-  if (typeof content !== "string" || !content.includes("\n")) return content;
-  return content.split("\n").map((line, i) => (
-    <span key={`${line}-${i}`} className="block">
-      {line}
-    </span>
-  ));
-}
-
-function useTooltipPosition(open: boolean, side: TooltipSide, align: TooltipAlign) {
-  const triggerRef = useRef<HTMLElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const [style, setStyle] = useState<{ top: number; left: number }>({ top: -9999, left: -9999 });
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    const update = () => {
-      const trigger = triggerRef.current;
-      const content = contentRef.current;
-      if (!trigger || !content) return;
-      const gap = 10;
-      const pad = 12;
-      const triggerBox = trigger.getBoundingClientRect();
-      const contentBox = content.getBoundingClientRect();
-
-      let top = side === "top" ? triggerBox.top - contentBox.height - gap : triggerBox.bottom + gap;
-      const topFits = triggerBox.top - contentBox.height - gap >= pad;
-      const bottomFits = triggerBox.bottom + gap + contentBox.height <= window.innerHeight - pad;
-      if (side === "top" && !topFits && bottomFits) top = triggerBox.bottom + gap;
-      if (side === "bottom" && !bottomFits && topFits) top = triggerBox.top - contentBox.height - gap;
-
-      let left =
-        align === "start"
-          ? triggerBox.left
-          : align === "end"
-            ? triggerBox.right - contentBox.width
-            : triggerBox.left + (triggerBox.width - contentBox.width) / 2;
-      left = Math.max(pad, Math.min(left, window.innerWidth - contentBox.width - pad));
-      setStyle({ top: Math.max(pad, top), left });
-    };
-
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [align, open, side]);
-
-  return { triggerRef, contentRef, style };
-}
-
-export function Tooltip({
-  content,
-  children,
-  side = "top",
-  align = "center"
-}: {
-  content?: ReactNode;
-  children: ReactElement;
-  side?: TooltipSide;
-  align?: TooltipAlign;
-}) {
-  const [open, setOpen] = useState(false);
-  const id = useId();
-  const { triggerRef, contentRef, style } = useTooltipPosition(open, side, align);
-  const setTriggerNode = useCallback(
-    (node: HTMLElement | null) => {
-      triggerRef.current = node;
-    },
-    [triggerRef]
-  );
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open]);
-
-  if (!content || !isValidElement(children)) return children;
-
-  const child = children as ReactElement<Record<string, unknown>>;
-  const childProps = child.props as {
-    ["aria-describedby"]?: string;
-  };
-
-  return (
-    <>
-      <span
-        ref={setTriggerNode}
-        className="inline-flex max-w-full"
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-      >
-        {cloneElement(child, { "aria-describedby": open ? id : childProps["aria-describedby"] } as Record<string, unknown>)}
-      </span>
-      {open &&
-        createPortal(
-          <div
-            id={id}
-            ref={contentRef}
-            role="tooltip"
-            className="pointer-events-none fixed z-[1400] max-w-[min(22rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line)] bg-[color:var(--con-panel)] px-3 py-2 text-left text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)] shadow-[var(--shadow-lg)]"
-            style={style}
-          >
-            {tooltipLines(content)}
-          </div>,
-          document.body
-        )}
-    </>
-  );
-}
-
-export function TooltipText({
-  content,
+export function IconButton({
   label,
-  children,
   className,
-  block = false
-}: {
-  content?: ReactNode;
-  label?: string;
-  children: ReactNode;
-  className?: string;
-  block?: boolean;
-}) {
-  const trigger = (
+  type = "button",
+  align,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; align?: "center" | "left" | "right" }) {
+  const button = (
     <button
-      type="button"
+      type={type}
       aria-label={label}
       className={cx(
-        "cursor-help rounded-[var(--con-radius-sm)] text-left text-inherit outline-none transition-colors hover:text-[color:var(--con-fg)] focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)]",
-        block ? "flex w-full items-center gap-1" : "inline-flex items-center gap-1 align-baseline",
+        "inline-flex h-8 w-8 items-center justify-center rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-muted)] transition-colors hover:text-[color:var(--con-fg)] hover:bg-[color:var(--con-surface-2)] disabled:opacity-45 disabled:cursor-not-allowed",
         className
       )}
-    >
-      {children}
-    </button>
+      {...rest}
+    />
   );
-  return content ? <Tooltip content={content}>{trigger}</Tooltip> : trigger;
-}
-
-export function InfoTip({ label, content, className }: { label: string; content: ReactNode; className?: string }) {
-  return (
-    <Tooltip content={content}>
-      <button
-        type="button"
-        aria-label={`More info about ${label}`}
-        className={cx(
-          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[color:var(--con-faint)] outline-none transition-colors hover:text-[color:var(--con-fg)] focus-visible:ring-2 focus-visible:ring-[color:var(--con-accent)]",
-          className
-        )}
-      >
-        <HelpCircle size={13} aria-hidden />
-      </button>
-    </Tooltip>
-  );
+  return <Tooltip content={label} align={align}>{button}</Tooltip>;
 }
 
 // ── Chip ─────────────────────────────────────────────────────────────────────
 
-export type ChipTone = "muted" | "accent" | "pos" | "neg" | "warn" | "none" | "paper" | "live";
+export type ChipTone = "muted" | "accent" | "pos" | "neg" | "warn" | "info" | "none" | "paper" | "live";
 
-const CHIP_CLASS: Record<ChipTone, string | undefined> = {
-  muted: undefined,
-  accent: "con-chip-accent",
-  pos: "con-chip-pos",
-  neg: "con-chip-neg",
-  warn: "con-chip-warn",
-  none: "con-chip-none",
-  paper: "con-chip-paper",
-  live: "con-chip-live"
+/** Single source of truth for tone -> CSS custom-property color. CHIP_CLASS, the status
+ *  Dot, and the inline Stat/SignedText color ternaries all derive their tone set from this
+ *  one map, so adding a new tone is one edit here instead of three. */
+export const TONE_VAR: Record<ChipTone, string> = {
+  muted: "var(--con-faint)",
+  accent: "var(--con-accent)",
+  pos: "var(--con-pos)",
+  neg: "var(--con-neg)",
+  warn: "var(--con-warn)",
+  info: "var(--con-info)",
+  none: "var(--con-none)",
+  paper: "var(--con-paper)",
+  // Accent, not --con-live red: .con-chip-live (console.css) deliberately renders the
+  // live state in the accent tint — live trading is this app's normal state, not an
+  // alarm. Dots and chip fallbacks must agree with the chip class.
+  live: "var(--con-accent)"
 };
 
-export function Chip({ tone = "muted", className, title, children }: { tone?: ChipTone; className?: string; title?: string; children: ReactNode }) {
-  return (
-    <span className={cx("con-chip", CHIP_CLASS[tone], className)} title={title}>
+const CHIP_CLASS: Record<ChipTone, string | undefined> = Object.fromEntries(
+  (Object.keys(TONE_VAR) as ChipTone[]).map((tone) => [tone, tone === "muted" ? undefined : `con-chip-${tone}`])
+) as Record<ChipTone, string | undefined>;
+
+export function Chip({
+  tone = "muted",
+  className,
+  title,
+  align,
+  children
+}: {
+  tone?: ChipTone;
+  className?: string;
+  title?: string;
+  align?: "center" | "left" | "right";
+  children: ReactNode;
+}) {
+  const chip = (
+    <span className={cx("con-chip", CHIP_CLASS[tone], className)}>
       {children}
     </span>
   );
+  // Only pay for the Tooltip (state + effects) when there's actually a title —
+  // matches the Btn pattern above and avoids per-chip hook overhead in lists.
+  if (title) {
+    return <Tooltip content={title} align={align}>{chip}</Tooltip>;
+  }
+  return chip;
 }
 
 /** Small brokerage-confirmation tag for actions that still use the server's
@@ -282,27 +195,54 @@ export function LiveTag() {
 
 // ── Status dot ───────────────────────────────────────────────────────────────
 
-const DOT_COLOR: Record<string, string> = {
-  pos: "var(--con-pos)",
-  neg: "var(--con-neg)",
-  warn: "var(--con-warn)",
-  accent: "var(--con-accent)",
-  muted: "var(--con-faint)"
-};
-
-export function Dot({ tone = "muted", pulse }: { tone?: keyof typeof DOT_COLOR; pulse?: boolean }) {
-  return <span className={cx("con-dot", pulse && "con-dot-pulse")} style={{ background: DOT_COLOR[tone] ?? DOT_COLOR.muted }} aria-hidden />;
+export function Dot({ tone = "muted", pulse }: { tone?: keyof typeof TONE_VAR; pulse?: boolean }) {
+  return <span className={cx("con-dot", pulse && "con-dot-pulse")} style={{ background: TONE_VAR[tone] ?? TONE_VAR.muted }} aria-hidden />;
 }
 
 // ── Meter ────────────────────────────────────────────────────────────────────
 
-export function Meter({ value, max, className }: { value: number; max?: number; className?: string }) {
+export function Meter({
+  value,
+  max,
+  className,
+  label
+}: {
+  value: number;
+  max?: number;
+  className?: string;
+  /** Accessible name for the progressbar. Required for AT; the visible caption sits beside the bar. */
+  label?: string;
+}) {
   const hasMax = typeof max === "number" && Number.isFinite(max) && max > 0;
-  const ratio = hasMax ? Math.min(1, Math.max(0, value / max!)) : 0;
+  const rawRatio = hasMax ? Math.max(0, value / max!) : 0;
+  const ratio = Math.min(1, rawRatio);
+  // At-cap and over-cap used to render identically (both clamp to a solid 100% fill) —
+  // a breach gets a hatched pattern + the overage surfaced in a title tooltip / aria-valuetext
+  // so it doesn't rely on the red tint alone to signal "this is over the limit, not just full".
+  const breached = hasMax && rawRatio > 1;
+  const overagePct = breached ? Math.round((rawRatio - 1) * 100) : undefined;
   const tone = ratio >= 0.95 ? "con-meter-neg" : ratio >= 0.75 ? "con-meter-warn" : undefined;
   return (
-    <div className={cx("con-meter", tone, className)} role="progressbar" aria-valuenow={value} aria-valuemax={hasMax ? max : undefined}>
-      <div style={{ width: `${hasMax ? ratio * 100 : 0}%` }} />
+    <div
+      className={cx("con-meter", tone, className)}
+      role="progressbar"
+      aria-label={label}
+      aria-valuenow={value}
+      aria-valuemax={hasMax ? max : undefined}
+      aria-valuetext={breached ? `${overagePct}% over` : undefined}
+      title={breached ? `+${overagePct}% over` : undefined}
+    >
+      <div
+        style={
+          breached
+            ? {
+                width: "100%",
+                backgroundImage:
+                  "repeating-linear-gradient(135deg, var(--con-neg) 0px, var(--con-neg) 4px, var(--con-warn) 4px, var(--con-warn) 8px)"
+              }
+            : { width: `${hasMax ? ratio * 100 : 0}%` }
+        }
+      />
     </div>
   );
 }
@@ -322,15 +262,17 @@ export function Stat({
   tone?: "pos" | "neg" | "muted";
   title?: string;
 }) {
-  const color = tone === "pos" ? "var(--con-pos)" : tone === "neg" ? "var(--con-neg)" : undefined;
+  const color = tone && tone !== "muted" ? TONE_VAR[tone] : undefined;
   return (
-    <div title={title}>
-      <div className="con-card-title">{label}</div>
-      <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight" style={color ? { color } : undefined}>
-        {value}
+    <Tooltip content={title} className="block">
+      <div>
+        <div className="con-card-title">{label}</div>
+        <div className="con-num mt-1 text-[length:var(--con-fs-xl)] font-semibold leading-tight" style={color ? { color } : undefined}>
+          {value}
+        </div>
+        {sub !== undefined && <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{sub}</div>}
       </div>
-      {sub !== undefined && <div className="mt-0.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">{sub}</div>}
-    </div>
+    </Tooltip>
   );
 }
 
@@ -415,23 +357,70 @@ export function Toggle({
   checked,
   onChange,
   disabled,
+  busy,
   label
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
-  label?: string;
+  /** In-flight write — keeps the optimistic checked value visible and marks the switch busy. */
+  busy?: boolean;
+  label: string;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-busy={busy === true}
       aria-label={label}
       disabled={disabled}
-      className="con-toggle"
+      className={cx("con-toggle", busy && "opacity-70")}
       onClick={() => onChange(!checked)}
     />
+  );
+}
+
+export function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+  className
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: Array<{ value: T; label: ReactNode; title?: string }>;
+  ariaLabel?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className={cx("inline-flex rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] p-0.5", className)}
+    >
+      {options.map((opt) => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            aria-pressed={active}
+            title={opt.title}
+            onClick={() => onChange(opt.value)}
+            className={cx(
+              "con-segmented-btn",
+              active
+                ? "rounded px-2 py-1 text-[length:var(--con-fs-xs)] font-bold text-[color:var(--con-fg)] bg-[color:var(--con-surface)]"
+                : "rounded px-2 py-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
+            )}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -450,9 +439,11 @@ export function Dash() {
 export function Ago({ iso }: { iso: string | null | undefined }) {
   if (!iso) return <Dash />;
   return (
-    <time dateTime={iso} title={fmtExact(iso)} className="cursor-default whitespace-nowrap">
-      {timeAgo(iso)}
-    </time>
+    <Tooltip content={fmtExact(iso)}>
+      <time dateTime={iso} className="cursor-default whitespace-nowrap">
+        {timeAgo(iso)}
+      </time>
+    </Tooltip>
   );
 }
 
@@ -464,10 +455,153 @@ export function signTone(v: number | null | undefined): "pos" | "neg" | undefine
 
 export function SignedText({ value, children }: { value: number | null | undefined; children: ReactNode }) {
   const tone = signTone(value);
-  const color = tone === "pos" ? "var(--con-pos)" : tone === "neg" ? "var(--con-neg)" : undefined;
+  const color = tone ? TONE_VAR[tone] : undefined;
   return (
     <span className="con-num" style={color ? { color } : undefined}>
       {children}
     </span>
   );
 }
+
+// ── Tooltip ──────────────────────────────────────────────────────────────────
+
+export function Tooltip({
+  children,
+  content,
+  className,
+  align = "center"
+}: {
+  children: ReactNode;
+  content: ReactNode;
+  className?: string;
+  align?: "center" | "left" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const openAtPointerDown = useRef(false);
+  const [position, setPosition] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = ref.current;
+    const tooltip = contentRef.current;
+    if (!trigger || !tooltip) return;
+    const update = () => {
+      const inherited = getComputedStyle(trigger);
+      // A body portal escapes clipping ancestors, but no longer inherits the console theme.
+      // Copy its computed tokens rather than assuming the default or changing global styles.
+      const tokens: Record<string, string> = {};
+      for (let index = 0; index < inherited.length; index++) {
+        const name = inherited.item(index);
+        if (name.startsWith("--con-") || name.startsWith("--brand-")) {
+          tokens[name] = inherited.getPropertyValue(name);
+        }
+      }
+      const next: CSSProperties = {
+        ...tokens,
+        fontFamily: inherited.fontFamily,
+        ...tooltipPosition(trigger.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+          { width: window.innerWidth, height: window.innerHeight }, align)
+      };
+      setPosition((previous) => previous && Object.keys(previous).length === Object.keys(next).length &&
+        Object.entries(next).every(([key, value]) => previous[key as keyof CSSProperties] === value) ? previous : next);
+    };
+    let frame = 0;
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; update(); });
+    };
+    update();
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
+    const resize = new ResizeObserver(schedule);
+    resize.observe(trigger);
+    resize.observe(tooltip);
+    const theme = new MutationObserver(schedule);
+    const consoleRoot = trigger.closest(".console-root");
+    if (consoleRoot) theme.observe(consoleRoot, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    theme.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    const scheme = window.matchMedia("(prefers-color-scheme: dark)");
+    scheme.addEventListener("change", schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      scheme.removeEventListener("change", schedule);
+      resize.disconnect();
+      theme.disconnect();
+    };
+  }, [open, align, content]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    function handleClickOutside(event: MouseEvent | TouchEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
+    };
+  }, [open]);
+
+  if (!content) return <>{children}</>;
+
+  const interactive = isInteractiveTooltipTrigger(children);
+
+  return (
+    <span
+      ref={ref}
+      className={cx(
+        "group relative inline-flex cursor-pointer",
+        !interactive &&
+          "rounded-[var(--con-radius-sm)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--con-accent)]",
+        className
+      )}
+      tabIndex={interactive ? undefined : 0}
+      aria-describedby={tooltipId}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onPointerDown={() => { openAtPointerDown.current = open; }}
+      onClick={(event) => setOpen(event.detail === 0 ? !open : !openAtPointerDown.current)}
+      onFocus={() => setOpen(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
+      {children}
+      <span id={tooltipId} className="sr-only">
+        {content}
+      </span>
+      {typeof document !== "undefined" && createPortal(<AnimatePresence>
+        {open && (
+          <motion.div
+            ref={contentRef}
+            style={position ?? { visibility: "hidden" }}
+            initial={{ opacity: 0, y: 2, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 2, scale: 0.98 }}
+            transition={{ duration: 0.15, ease: "easeOut" }}
+            role="tooltip"
+            aria-hidden
+            className={cx(
+              "pointer-events-none fixed z-[1400] w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line"
+            )}
+          >
+            {content}
+          </motion.div>
+        )}
+      </AnimatePresence>, document.body)}
+    </span>
+  );
+}
+

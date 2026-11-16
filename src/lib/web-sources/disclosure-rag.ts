@@ -13,22 +13,16 @@ import type { CongressTrade } from "./types";
 import type { InsiderFiling } from "./sec";
 import type { ContextDocument } from "../vector-db";
 import { envFlagOn } from "../rag/env-flag";
+import { resolveSourceBool } from "../source-settings";
 
 // ── Flag ─────────────────────────────────────────────────────────────────────
 
 /**
- * Returns true when RAG_EMBED_DISCLOSURES is set to a truthy value. Default is off.
- *
- * R6 (2026-07-01 RAG backlog): previously required the EXACT string "on" — `RAG_EMBED_DISCLOSURES=true`
- * silently no-op'd even though every other RAG flag in this app accepts "true"/"1"/"yes". Now routed
- * through the shared `envFlagOn` parser so "true"/"1"/"yes"/"on" are all accepted. This is an
- * intentional, SAFE-DIRECTION behavior change: an operator who set any of those "look-alike" values
- * was already trying to turn disclosure embedding ON. Note it triggers real Voyage/Pinecone embedding
- * cost/corpus growth for any operator who was unknowingly relying on the old exact-match quirk to
- * silently no-op with e.g. `=true`.
+ * Returns true when RAG_EMBED_DISCLOSURES is truthy via Settings override or env.
+ * Default is off. Accepts "true"/"1"/"yes"/"on" through the shared source-settings resolver.
  */
 export function disclosureRagEnabled(): boolean {
-  return envFlagOn("RAG_EMBED_DISCLOSURES", false);
+  return resolveSourceBool("RAG_EMBED_DISCLOSURES");
 }
 
 // ── Text builders ────────────────────────────────────────────────────────────
@@ -60,7 +54,11 @@ function tradeToDoc(trade: CongressTrade): ContextDocument {
       symbol: trade.symbol,
       source: "congress-disclosure",
       timestamp: acceptanceDatetime,
-      accession: `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
+      accession: trade.id
+        ? `id:${trade.id}`
+        : trade.docId && trade.rowKey
+          ? `doc:${trade.docId}|row:${trade.rowKey}`
+          : `${trade.symbol}|${trade.member}|${trade.side}|${trade.tradedAt}`,
       doc_type: "congress-trade",
       acceptance_datetime: acceptanceDatetime
     }
@@ -119,6 +117,15 @@ export async function embedDisclosures(
     return { attempted: 0, indexed: 0 };
   }
 
+  // Pre-flight: skip the storeContexts call entirely when the daily text embed budget is
+  // already spent — mirroring the hasIngestTextBudget() check in ingestFiling() (sec-filings.ts).
+  // Without this check the scheduler invokes storeContexts every ~30 min and triggers a
+  // cooldown-gated Sentry warning on every tick for the rest of the 24h budget window.
+  const { hasIngestTextBudget } = await import("../vector-db");
+  if (!hasIngestTextBudget(userId)) {
+    return { attempted: docs.length, indexed: 0, skipped: true };
+  }
+
   try {
     const { storeContexts } = await import("../vector-db");
     // R10 (2026-07-01 RAG backlog): content_hash dedup, gated on the same
@@ -130,17 +137,13 @@ export async function embedDisclosures(
       envFlagOn("VECTOR_STORECONTEXTS_DEDUP", true) ? { dedupKeyPrefix: "disclosure" } : undefined
     );
 
-    // Best-effort audit — never let audit failures propagate
-    import("../db")
-      .then(({ audit }) =>
-        audit("disclosure_rag_embed", {
-          ok: !result.error,
-          attempted: result.attempted,
-          indexed: result.indexed,
-          skipped: result.skipped
-        })
-      )
-      .catch(() => {});
+    // Best-effort audit — never let audit failures propagate. Awaited (cheap local write) so
+    // callers/tests observe a consistent audit state, but any failure is swallowed.
+    try {
+      await recordEmbedAudit(result);
+    } catch {
+      /* best-effort */
+    }
 
     return {
       attempted: result.attempted,
@@ -150,7 +153,60 @@ export async function embedDisclosures(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[disclosure-rag] embed failed:", msg);
+    const { logError, recordEmbedFailure } = await import("../sentry-metrics");
+    recordEmbedFailure("disclosure-rag", "embed-failed");
+    logError("embed.failed", { provider: "disclosure-rag", error_type: "embed-failed" });
     return { attempted: docs.length, indexed: 0, error: msg };
   }
+}
+
+// ── Audit hygiene (#2553c) ────────────────────────────────────────────────────
+
+/** Internal-settings watermark for the no-op rollup below. */
+export const DISCLOSURE_RAG_NOOP_ROLLUP_KEY = "disclosureRag:noopRollup";
+const NOOP_AUDIT_INTERVAL_MS = 24 * 3600_000;
+
+interface NoopRollupState {
+  cycles: number;
+  attempted: number;
+  lastAuditAt?: string;
+}
+
+/**
+ * Write the `disclosure_rag_embed` audit row — unless the run was a pure no-op (every document
+ * deduped before embedding: indexed=0, not skipped, no error). Content-hash dedup makes that the
+ * COMMON case, and it used to write an identical "Attempted: 310 · Indexed: 0" audit row every
+ * refresh cycle (1–3 min). No-op cycles now accumulate into an internal-settings watermark and
+ * flush as at most ONE daily rollup row carrying the suppressed-cycle count, so the receipt that
+ * the lane is alive survives without the per-minute noise.
+ */
+async function recordEmbedAudit(result: { attempted: number; indexed: number; skipped?: boolean; error?: string }): Promise<void> {
+  const { audit, getInternalSetting, setInternalSetting } = await import("../db");
+  const isNoop = !result.error && !result.skipped && result.indexed === 0;
+  if (!isNoop) {
+    audit("disclosure_rag_embed", {
+      ok: !result.error,
+      attempted: result.attempted,
+      indexed: result.indexed,
+      skipped: result.skipped
+    });
+    return;
+  }
+  const state = getInternalSetting<NoopRollupState>(DISCLOSURE_RAG_NOOP_ROLLUP_KEY) ?? { cycles: 0, attempted: 0 };
+  const cycles = state.cycles + 1;
+  const attempted = state.attempted + result.attempted;
+  const lastAuditMs = state.lastAuditAt ? Date.parse(state.lastAuditAt) : NaN;
+  if (Number.isFinite(lastAuditMs) && Date.now() - lastAuditMs < NOOP_AUDIT_INTERVAL_MS) {
+    setInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY, { cycles, attempted, lastAuditAt: state.lastAuditAt });
+    return;
+  }
+  audit("disclosure_rag_embed", {
+    ok: true,
+    indexed: 0,
+    attempted: result.attempted,
+    dedupedCycles: cycles,
+    dedupedAttempted: attempted,
+    rollup: true
+  });
+  setInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY, { cycles: 0, attempted: 0, lastAuditAt: new Date().toISOString() });
 }

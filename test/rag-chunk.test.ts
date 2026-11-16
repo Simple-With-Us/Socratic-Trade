@@ -22,6 +22,7 @@ describe("rag chunkDocument", () => {
       doc_type: "10-K",
       source: "sec",
       acceptance_datetime: "2024-01-15",
+      published_at: "2024-01-15",
     };
     const chunks = chunkDocument(doc);
     expect(chunks.length).toBeGreaterThanOrEqual(3);
@@ -41,13 +42,13 @@ describe("rag chunkDocument", () => {
 
   it("splits long prose into multiple windows under the token cap", () => {
     const longText = Array.from({ length: 1200 }, (_, i) => `word${i}`).join(" ");
-    const chunks = chunkDocument({ text: longText }, { maxTokens: 100, overlapRatio: 0.1 });
+    const chunks = chunkDocument({ text: longText, published_at: "2024-01-15" }, { maxTokens: 100, overlapRatio: 0.1 });
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.every((c) => c.text.split(/\s+/).filter(Boolean).length <= 100)).toBe(true);
   });
 
   it("requires doc.text", () => {
-    expect(() => chunkDocument({ text: "" })).toThrow();
+    expect(() => chunkDocument({ text: "", published_at: "2024-01-15" })).toThrow();
   });
 
   it("canonicalTicker uppercases and strips noise", () => {
@@ -69,15 +70,15 @@ describe("rag chunkDocument", () => {
   });
 
   it("chunks carry content_hash", () => {
-    const chunks = chunkDocument({ text: "Test content for hashing.", ticker: "TSLA", doc_type: "10-K", source: "sec" });
+    const chunks = chunkDocument({ text: "Test content for hashing.", ticker: "TSLA", doc_type: "10-K", source: "sec", published_at: "2024-01-15" });
     expect(chunks.length).toBe(1);
     expect(chunks[0]!.content_hash).toBeDefined();
     expect(chunks[0]!.content_hash.length).toBe(32); // 128-bit (first 32 hex chars of SHA-256)
     // Same content → same hash
-    const chunks2 = chunkDocument({ text: "Test content for hashing.", ticker: "TSLA", doc_type: "10-K", source: "sec" });
+    const chunks2 = chunkDocument({ text: "Test content for hashing.", ticker: "TSLA", doc_type: "10-K", source: "sec", published_at: "2024-01-15" });
     expect(chunks2[0]!.content_hash).toBe(chunks[0]!.content_hash);
     // Different content → different hash
-    const chunks3 = chunkDocument({ text: "Different content.", ticker: "TSLA", doc_type: "10-K", source: "sec" });
+    const chunks3 = chunkDocument({ text: "Different content.", ticker: "TSLA", doc_type: "10-K", source: "sec", published_at: "2024-01-15" });
     expect(chunks3[0]!.content_hash).not.toBe(chunks[0]!.content_hash);
   });
 });

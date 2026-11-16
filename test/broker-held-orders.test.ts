@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   brokerHeldExitBlockReason,
   evaluateBrokerHeldExitAvailability,
-  isActiveBrokerOrderState
+  isActiveBrokerOrderState,
+  isWorkingOrderState
 } from "../src/lib/broker-held-orders";
 import type { EquityOrder, EquityPosition, TradeProposal } from "../src/lib/types";
 
@@ -119,5 +120,25 @@ describe("broker-held exit availability", () => {
       requestedQuantity: 30,
       heldOrderIds: ["cover-1"]
     });
+  });
+});
+
+describe("isWorkingOrderState — open/pending list (excludes done_for_day)", () => {
+  it("treats live Alpaca/RH states as working", () => {
+    expect(isWorkingOrderState("new")).toBe(true);
+    expect(isWorkingOrderState("held")).toBe(true);
+    expect(isWorkingOrderState("partially_filled")).toBe(true);
+    expect(isWorkingOrderState("confirmed")).toBe(true);
+    expect(isWorkingOrderState("stopped")).toBe(true);
+    expect(isWorkingOrderState("calculated")).toBe(true);
+  });
+
+  it("does NOT treat terminal done_for_day as working (history inflation guard)", () => {
+    // Alpaca getEquityOrders pages status:"all"; day orders stay done_for_day forever.
+    // Counting them as open produced false 300+ pending lists on paper accounts.
+    expect(isWorkingOrderState("done_for_day")).toBe(false);
+    expect(isWorkingOrderState("filled")).toBe(false);
+    expect(isWorkingOrderState("canceled")).toBe(false);
+    expect(isWorkingOrderState("expired")).toBe(false);
   });
 });

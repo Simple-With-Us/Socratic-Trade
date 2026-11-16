@@ -3,9 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  SseParser,
   applySseMessage,
+  CONGRESS_SSE_FLAP_CAP,
+  CONGRESS_SSE_INITIAL_BACKOFF_MS,
+  CONGRESS_SSE_MAX_BACKOFF_MS,
+  CONGRESS_SSE_MIN_HEALTHY_MS,
   connectOnce,
+  nextCongressSseBackoff,
+  resetCongressStreamStateForTests,
   resolveSubscription,
   toCongressEventEnvelope,
 } from "../src/lib/congress-stream";
@@ -16,29 +21,6 @@ beforeAll(() => {
 });
 
 const recent = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
-
-describe("SseParser", () => {
-  it("parses a complete event with event/id/data fields", () => {
-    const msgs = new SseParser().push("event: congress.trade\nid: e1\ndata: {\"a\":1}\n\n");
-    expect(msgs).toEqual([{ event: "congress.trade", id: "e1", data: '{"a":1}' }]);
-  });
-
-  it("joins multi-line data and ignores comments/heartbeats", () => {
-    const msgs = new SseParser().push(": heartbeat\ndata: line1\ndata: line2\n\n");
-    expect(msgs).toEqual([{ event: undefined, id: undefined, data: "line1\nline2" }]);
-  });
-
-  it("handles events split across chunk boundaries", () => {
-    const p = new SseParser();
-    expect(p.push("data: {\"x\"")).toEqual([]); // incomplete — nothing dispatched yet
-    expect(p.push(":5}\n\n")).toEqual([{ event: undefined, id: undefined, data: '{"x":5}' }]);
-  });
-
-  it("emits multiple events from one chunk and strips a single leading space after the colon", () => {
-    const msgs = new SseParser().push("data:a\n\ndata: b\n\n");
-    expect(msgs.map((m) => m.data)).toEqual(["a", "b"]);
-  });
-});
 
 describe("applySseMessage", () => {
   it("returns false on unparseable data", () => {
@@ -78,11 +60,62 @@ describe("resolveSubscription", () => {
   it("returns the operator-provisioned env subscription id+token", async () => {
     process.env.CONGRESS_STREAM_SUBSCRIPTION_ID = "sub_env";
     process.env.CONGRESS_STREAM_SUBSCRIPTION_TOKEN = "env-tok";
-    await expect(resolveSubscription()).resolves.toEqual({ id: "sub_env", token: "env-tok" });
+    await expect(resolveSubscription()).resolves.toEqual({ id: "sub_env", secret: "env-tok" });
   });
 
   it("returns null when nothing is configured and auto-subscribe is off (inert)", async () => {
     await expect(resolveSubscription()).resolves.toBeNull();
+  });
+});
+
+describe("nextCongressSseBackoff — flap policy (#2550)", () => {
+  it("does not reset backoff on a short-lived 200 (flap)", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: CONGRESS_SSE_INITIAL_BACKOFF_MS,
+      livedMs: 800,
+      flapsInWindow: 0,
+    });
+    expect(out.resetHealthy).toBe(false);
+    expect(out.softFlap).toBe(true);
+    expect(out.backoffMs).toBe(CONGRESS_SSE_INITIAL_BACKOFF_MS * 2);
+    expect(out.flapsInWindow).toBe(1);
+  });
+
+  it("resets backoff only after a connection lived the healthy minimum", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: 60_000,
+      livedMs: CONGRESS_SSE_MIN_HEALTHY_MS,
+      flapsInWindow: 3,
+    });
+    expect(out.resetHealthy).toBe(true);
+    expect(out.softFlap).toBe(false);
+    expect(out.backoffMs).toBe(CONGRESS_SSE_INITIAL_BACKOFF_MS);
+    expect(out.flapsInWindow).toBe(0);
+  });
+
+  it("five soft SSE flaps do not hard-STOP the lane", async () => {
+    const { logApiHealth, getLaneHealth, HEALTH_REASON_CONSECUTIVE_FAILURES } = await import("../src/lib/db-health");
+    for (let i = 0; i < 5; i += 1) {
+      logApiHealth({
+        service: "congress.trade:sse",
+        ok: false,
+        errorText: "SSE flap (short-lived connection)",
+        soft: true,
+      });
+    }
+    const lane = getLaneHealth("congress.trade:sse", null);
+    expect(lane.reason).not.toBe(HEALTH_REASON_CONSECUTIVE_FAILURES);
+  });
+
+  it("caps reconnect storms at the 5-minute max after five flaps", () => {
+    const out = nextCongressSseBackoff({
+      previousBackoffMs: 16_000,
+      livedMs: 400,
+      flapsInWindow: CONGRESS_SSE_FLAP_CAP - 1,
+    });
+    expect(out.backoffMs).toBe(CONGRESS_SSE_MAX_BACKOFF_MS);
+    expect(out.flapsInWindow).toBe(CONGRESS_SSE_FLAP_CAP);
+    expect(out.softFlap).toBe(true);
   });
 });
 
@@ -91,6 +124,7 @@ describe("connectOnce — App A subscription-model SSE (stubbed stream)", () => 
     vi.unstubAllGlobals();
     delete process.env.CONGRESS_STREAM_SUBSCRIPTION_ID;
     delete process.env.CONGRESS_STREAM_SUBSCRIPTION_TOKEN;
+    resetCongressStreamStateForTests();
   });
 
   it("connects with ?subscription= + Bearer secret and ingests a pushed trade.new event end-to-end", async () => {

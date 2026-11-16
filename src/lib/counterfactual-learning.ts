@@ -1,4 +1,5 @@
 import {
+  enqueueDueJob,
   getCounterfactualLearningWatermark,
   insertSkippedCounterfactualCandidate,
   listPendingSkippedCounterfactuals,
@@ -6,13 +7,15 @@ import {
   markSkippedCounterfactualChecked,
   markSkippedCounterfactualMatured,
   markSkippedCounterfactualUnresolvable,
-  setCounterfactualLearningWatermark
+  setCounterfactualLearningWatermark,
+  skippedCounterfactualId
 } from "./db";
 import { fetchDailyOHLC, toBusinessDay } from "./history";
 import type { OHLCBar } from "./indicators";
 import { addTradingDays, marketDateOf } from "./market-calendar";
 import { normalizeSymbol } from "./money";
 import {
+  buildIntradaySampleJobSpecs,
   computeDailyHorizonRows,
   computeIntradayHorizonRows,
   mergeHorizonRows,
@@ -124,7 +127,11 @@ export async function materializeSkippedCandidateCounterfactuals(
   const nowDate = new Date(now).toISOString().slice(0, 10);
   // One SPY series per run for the spyExcessPct of every matured row's daily horizons. A failed
   // SPY fetch simply omits spyExcessPct (never fabricated) — the symbol's own return still lands.
+  // Intentionally left on plain SPY (not the ^GSPC-index/sector-aware benchmark outcome-engine.ts
+  // now uses, r4): this pipeline feeds missed-opportunity analytics, not the primary alpha-grading
+  // loop — upgrading it is a follow-up, not this slice.
   const spyBars = pending.length > 0 ? normalizeDailyBars(await fetchOHLC("SPY", now, userId).catch(() => null)) : [];
+  const spyBenchmark = spyBars.length > 0 ? { bars: spyBars, basis: "SPY" } : null;
 
   for (const candidate of pending) {
     let bars = barsBySymbol.get(candidate.symbol);
@@ -149,9 +156,11 @@ export async function materializeSkippedCandidateCounterfactuals(
         }),
         ...computeDailyHorizonRows({
           basisPrice: candidate.refPrice,
-          basisDate: candidate.snapshotAt.slice(0, 10),
+          // Market (America/New_York) day, not the UTC date: an after-hours ET snapshot must anchor
+          // on its own session, same as targetBusinessDate below (ST-4589 B12).
+          basisDate: marketDateOf(candidate.snapshotAt) ?? candidate.snapshotAt.slice(0, 10),
           bars: normalizedBars,
-          spyBars,
+          benchmark: spyBenchmark,
           nowDate,
           priceBasisPrefix: "ref_price",
           measuredAt: nowIso
@@ -211,6 +220,50 @@ export async function materializeSkippedCandidateCounterfactuals(
  * propose but a human/policy then rejected. Additive: reuses insertSkippedCounterfactualCandidate
  * (INSERT OR IGNORE) so it never double-counts and writes no fills/orders. Returns true if inserted.
  */
+/**
+ * Enqueue the pair of 'sample_intraday_horizon' due-jobs (15m/1h) for a skipped-candidate
+ * counterfactual whose (refPrice, snapshotAt) basis is known immediately at insert time. Fire-safe
+ * by construction — enqueueDueJob is a plain INSERT OR IGNORE and never throws; wrapped anyway so a
+ * future change to that guarantee can't take the counterfactual pipeline down with it.
+ */
+function enqueueIntradaySampleJobs(input: {
+  caseId: string;
+  runId: string;
+  symbol: string;
+  horizonDays: number;
+  refPrice: number;
+  snapshotAt: string;
+  regime?: string;
+  userId: string;
+  connectedAccountId?: string;
+}): void {
+  try {
+    const specs = buildIntradaySampleJobSpecs({
+      caseKind: "counterfactual",
+      caseId: input.caseId,
+      runId: input.runId,
+      symbol: input.symbol,
+      horizonDays: input.horizonDays,
+      basisPrice: input.refPrice,
+      basisAtMs: Date.parse(input.snapshotAt),
+      priceBasisPrefix: "ref_price"
+    });
+    for (const spec of specs) {
+      enqueueDueJob({
+        jobType: "sample_intraday_horizon",
+        dedupeKey: spec.dedupeKey,
+        dueAt: spec.dueAt,
+        notAfter: spec.notAfter,
+        payload: spec.payload,
+        userId: input.userId,
+        connectedAccountId: input.connectedAccountId
+      });
+    }
+  } catch (err) {
+    console.warn("[counterfactual-learning] intraday sample job enqueue failed:", err instanceof Error ? err.message : String(err));
+  }
+}
+
 export function recordRejectedProposalCounterfactual(input: {
   userId?: string;
   connectedAccountId?: string;
@@ -231,7 +284,7 @@ export function recordRejectedProposalCounterfactual(input: {
   const horizonDays = boundedInteger(input.horizonDays ?? envHorizonDays(), 1, 252, DEFAULT_HORIZON_DAYS);
   const targetDate = targetBusinessDate(snapshotAt, horizonDays);
   if (!targetDate) return false;
-  return insertSkippedCounterfactualCandidate({
+  const inserted = insertSkippedCounterfactualCandidate({
     userId,
     connectedAccountId: input.connectedAccountId,
     runId: input.runId,
@@ -243,6 +296,19 @@ export function recordRejectedProposalCounterfactual(input: {
     regime: nonEmpty(input.regime),
     now: new Date(nowMs).toISOString()
   });
+  if (inserted) {
+    enqueueIntradaySampleJobs({
+      caseId: skippedCounterfactualId(userId, input.runId, symbol, horizonDays),
+      runId: input.runId,
+      symbol,
+      horizonDays,
+      refPrice,
+      snapshotAt,
+      userId,
+      connectedAccountId: input.connectedAccountId
+    });
+  }
+  return inserted;
 }
 
 function ingestSignalSnapshot(
@@ -281,6 +347,16 @@ function ingestSignalSnapshot(
       })
     ) {
       inserted += 1;
+      enqueueIntradaySampleJobs({
+        caseId: skippedCounterfactualId(context.userId, snapshot.runId, symbol, context.horizonDays),
+        runId: snapshot.runId,
+        symbol,
+        horizonDays: context.horizonDays,
+        refPrice,
+        snapshotAt,
+        userId: context.userId,
+        connectedAccountId: context.connectedAccountId
+      });
     }
   }
   return inserted;
