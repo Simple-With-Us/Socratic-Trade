@@ -112,6 +112,7 @@ targets:
         LSApplicationCategoryType: public.app-category.finance
         LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
+        NSFaceIDUsageDescription: "Unlock Socratic Trade after launch or when returning from the background."
         # Lato (SIL OFL 1.1) — the shared web/native typeface, sources in SocraticTrade/Fonts/.
         # BARE FILENAMES, no "Fonts/" prefix: XcodeGen emits Fonts/ as a PBXGroup (not a folder
         # reference), so the Resources build phase copies each .ttf to the TOP level of the

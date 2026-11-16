@@ -32,7 +32,7 @@ export interface LlmUsageEntry {
   connectedAccountId?: string;
   promptTokens?: number;
   completionTokens?: number;
-  /** Prompt tokens served from the provider's prompt cache (bill at ~0.1× input). */
+  /** Prompt tokens served from the provider's prompt cache (model-specific discount). */
   cachedPromptTokens?: number;
   /** Anthropic-only: tokens WRITTEN to the cache this call (bill at ~1.25× input). */
   cacheCreationTokens?: number;
@@ -135,7 +135,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "o1": [15, 60],
   "gpt-5.5": [5, 30],
   "gpt-5.4": [2.5, 15],
-  "gpt-5.6": [5, 30],
+  "gpt-5.6": [4.4, 22], // catalog alias of retired gpt-5.6-sol, same base rate
   "gemini-3.1-flash-lite": [0.25, 1.5],
   "gemini-3.1-pro-preview": [2, 12],
   "gemini-3.5-flash": [1.5, 9],
@@ -155,6 +155,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "grok-4.5": [1.25, 2.5],
   "claude-fable-5": [10, 50],
   "claude-opus-4-8": [5, 25],
+  "claude-opus-4.8": [5, 25],
 
   // --- Curated catalog rows (LLM_MODEL_CATALOG, 26 rows as of 2026-11-04) ---
   // 2026-11-04 rows below are OpenRouter list prices for the exact wire slug each row uses
@@ -167,9 +168,12 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   "grok-4.6": [2, 6],
   "grok-latest": [2, 6],
   "claude-fable-latest": [10, 50],
-  "claude-opus-latest": [4.5, 22.5],
-  "claude-opus-5-5": [4.5, 22.5],
-  "claude-opus-5.5": [4.5, 22.5],
+  // Verified 2026-11-13: Claude Opus 5.5 base rates, USD per million tokens.
+  // https://platform.claude.com/docs/en/models/opus-5-5/overview
+  // OpenRouter /api/v1/models agrees for anthropic/claude-opus-5.5 and ~anthropic/claude-opus-latest.
+  "claude-opus-latest": [4, 20],
+  "claude-opus-5-5": [4, 20],
+  "claude-opus-5.5": [4, 20],
   "claude-opus-5": [5, 25],
   "claude-sonnet-5": [2, 10], // was [3, 15] — real price is $2/$10 (verified 2026-09-18)
   "claude-sonnet-4-6": [2, 10], // was [3, 15] — kept in sync with claude-sonnet-5 above
@@ -211,7 +215,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   // undefined for them instead of borrowing Wonder's price through the prefix match below.
   "muse-spark-1.3": [1.25, 4.25],
   "muse-spark-1.3-contributor": [0.1, 0.2], // verified 2026-10-12 on OpenRouter and dev.meta.ai pricing
-  "muse-glimmer-30b": [0.35, 1.5], // was [0.3, 1.1] — real (live OpenRouter) price is $0.35/$1.50 (verified 2026-09-18)
+  "muse-glimmer-30b": [0.3, 1.2], // exact meta/muse-glimmer-30b base rate, OpenRouter /models 2026-11-13
   // kimi-latest now pins moonshotai/kimi-k3.1-pro ($2/$10, 2026-11-04).
   "kimi-latest": [2, 10],
   "kimi-k3.1-pro": [2, 10],
@@ -221,7 +225,7 @@ const MODEL_PRICE_PER_M: Record<string, [number, number]> = {
   // --- Retired from the picker 2026-11-04 (RETIRED_LLM_MODEL_CATALOG) ---
   // A stored selection of these is still served, so they keep a live price.
   "gpt-6-astra-pro": [10, 50],
-  "gpt-5.6-sol": [4, 20], // was [2, 10]; OpenRouter lists openai/gpt-5.6-sol at $4/$20 (2026-11-04)
+  "gpt-5.6-sol": [4.4, 22], // exact openai/gpt-5.6-sol base rate, OpenRouter /models 2026-11-13
   "gpt-5.6-luna": [0.2, 1.2], // was [1, 6] — real price is $0.20/$1.20 (verified 2026-09-18)
 
   // --- Retired from the curated catalog 2026-09-18 (model-catalog cleanup) ---
@@ -277,17 +281,32 @@ function priceForModel(model: string | undefined): [number, number] {
   return hit ? MODEL_PRICE_PER_M[hit] : defaultModelPricePerM();
 }
 
-// Cache-read tokens bill at ~0.1× the input rate across providers that report them
-// (OpenAI gpt-5.5: $0.50 vs $5.00; Anthropic cache read: 0.1×; DeepSeek cache hit: ~0.1×).
+// Default cache-read estimate is 0.1× input; verified Opus 5.5 identities below use 0.05×.
+// Other models keep their existing estimate (not a claim of exact cross-provider cache pricing).
 // Anthropic cache WRITES bill at 1.25× input (5-minute ephemeral TTL).
 const CACHE_READ_INPUT_MULTIPLIER = 0.1;
 const CACHE_WRITE_INPUT_MULTIPLIER = 1.25;
 
+/** Match only verified Opus 5.5 identities, not canonicalModelId's broad Opus
+ * family collapse. Older and unknown snapshots must not inherit a new discount.
+ * https://platform.claude.com/docs/en/models/opus-5-5/overview (2026-11-13):
+ * cache read $0.20 per million / base input $4 per million = 0.05. */
+function cacheReadInputMultiplier(model: string | undefined): number {
+  const id = model?.trim().toLowerCase().replace(/^openrouter\//, "").replace(/^~/, "").replace(/^anthropic\//, "").replace(/^~/, "");
+  // The catalog's unversioned claude-opus alias targets the current 5.5 row.
+  // Explicit 5.5 dated snapshots keep the same model rate. Do not use a broad
+  // canonical family or numeric price equality: older Opus and Muse Wonder
+  // can otherwise inherit this discount without being the verified model.
+  return id === "claude-opus-latest" || id === "claude-opus" || /^claude-opus-(?:5-5|5\.5)(?:-\d{8})?$/.test(id ?? "")
+    ? 0.05
+    : CACHE_READ_INPUT_MULTIPLIER;
+}
+
 /** Best-effort cost in USD. Unpriced models fall back to a conservative default
  *  (env LLM_UNPRICED_MODEL_COST_PER_M as a single USD-per-1M-tokens number, split 50/50
- *  between input/output; default 15 → $7.50/$7.50 per 1M). Cache-read tokens are priced
- *  at ~0.1× input and Anthropic cache-creation tokens at 1.25× input, so cached calls no
- *  longer overstate cost (previously ALL prompt tokens billed at the full input rate).
+ *  between input/output; default 15 → $7.50/$7.50 per 1M). Cache-read tokens use the
+ *  model-specific multiplier above; cache-creation tokens retain the existing 1.25×
+ *  estimate (5-minute writes, not a complete 1-hour-write price calculation).
  *  Returns undefined only when token counts are both zero/unknown. */
 export function estimateLlmCostUsd(
   model: string | undefined,
@@ -306,7 +325,7 @@ export function estimateLlmCostUsd(
   const cached = Math.min(Math.max(cachedPromptTokens ?? 0, 0), inTok);
   const creation = Math.min(Math.max(cacheCreationTokens ?? 0, 0), inTok - cached);
   const fullRate = inTok - cached - creation;
-  const inputCost = (fullRate + cached * CACHE_READ_INPUT_MULTIPLIER + creation * CACHE_WRITE_INPUT_MULTIPLIER) * price[0];
+  const inputCost = (fullRate + cached * cacheReadInputMultiplier(model) + creation * CACHE_WRITE_INPUT_MULTIPLIER) * price[0];
   return (inputCost + outTok * price[1]) / 1_000_000;
 }
 

@@ -38,7 +38,8 @@
 #   bash scripts/alert-deploy-freshness.sh
 #   bash scripts/alert-deploy-freshness.sh origin/main
 #   DEPLOY_FRESHNESS_STALE_SECONDS=3600 bash scripts/alert-deploy-freshness.sh
-#   DEPLOY_FRESHNESS_NOTIFY=1 bash scripts/alert-deploy-freshness.sh
+#   DEPLOY_FRESHNESS_NOTIFY is retired and ignored.
+# Scheduled verdicts feed the existing sentry-ci-report.yml pipeline.
 #
 # Keep this file pure ASCII (AGENTS.md: operator shell scripts, Apple bash 3.2).
 set -euo pipefail
@@ -46,21 +47,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STALENESS_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERIFY="${SCRIPT_DIR}/verify-deploy-sha.sh"
-FLEET_POST="${SCRIPT_DIR}/simple-tools-fleet-post.sh"
 
 HOST="${DEPLOY_VERIFY_HOST:-https://socratictrade.com}"
 EXPECTED_REF="${1:-${DEPLOY_VERIFY_EXPECTED_SHA:-origin/main}}"
 STALE_SECONDS="${DEPLOY_FRESHNESS_STALE_SECONDS:-3600}"
 STALENESS_CLI="${SCRIPT_DIR}/deploy-freshness-staleness-cli.ts"
 STALENESS_TSX_VERSION="${DEPLOY_FRESHNESS_TSX_VERSION:-4.23.15}"
-NOTIFY="${DEPLOY_FRESHNESS_NOTIFY:-0}"
-# success|failure|none - previous cron tick, used to de-dupe optional Zulip pages.
-PREVIOUS="${DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION:-none}"
 TREAT_UNREACHABLE_OK="${DEPLOY_FRESHNESS_TREAT_UNREACHABLE:-1}"
 NO_FETCH="${DEPLOY_VERIFY_NO_FETCH:-0}"
 CURL_TIMEOUT_SECONDS="${DEPLOY_VERIFY_CURL_TIMEOUT_SECONDS:-20}"
 
 log() { printf '[deploy-freshness] %s\n' "$*" >&2; }
+
+# Historical workflow flags no longer enable a second notification client.
+if [ "${DEPLOY_FRESHNESS_NOTIFY:-0}" != "0" ]; then
+  log "DEPLOY_FRESHNESS_NOTIFY is retired and ignored; scheduled reporting uses Sentry CI."
+fi
 
 fail_usage() {
   log "error: $*"
@@ -160,8 +162,7 @@ LIVE_FULL=""
 OLDEST_UNDEPLOYED=""
 OLDEST_AGE=""
 VERDICT="ok"
-NOTIFY_REASON=""
-export VERDICT NOTIFY_REASON
+export VERDICT
 
 extract_live_sha() {
   # Prefer a live probe so we do not depend on log-line wording.
@@ -170,47 +171,10 @@ extract_live_sha() {
   printf '%s' "$body" | jq -r '.checks.release.sha // empty' 2>/dev/null || true
 }
 
-maybe_notify() {
-  # $1 reason tag, $2 message
-  if [ "$NOTIFY" != "1" ]; then
-    log "notify skipped (DEPLOY_FRESHNESS_NOTIFY=${NOTIFY})."
-    return 0
-  fi
-  case "$PREVIOUS" in
-    failure)
-      if [ "$1" != "recovered" ]; then
-        log "notify skipped (same incident as previous failure; de-dupe)."
-        return 0
-      fi
-      ;;
-    success|none)
-      if [ "$1" = "recovered" ]; then
-        log "notify skipped (no prior failure to recover from)."
-        return 0
-      fi
-      ;;
-    *)
-      log "warn: unknown PREVIOUS_CONCLUSION '${PREVIOUS}' - treating as none."
-      if [ "$1" = "recovered" ]; then
-        return 0
-      fi
-      ;;
-  esac
-  if [ ! -f "$FLEET_POST" ]; then
-    log "notify skipped (simple-tools-fleet-post.sh not present)."
-    return 0
-  fi
-  FLEET_POST_SEAT="${FLEET_POST_SEAT:-ST}" \
-  FLEET_POST_REPO="${FLEET_POST_REPO:-Socratic-Trade}" \
-  FLEET_POST_TOPIC="${FLEET_POST_TOPIC:-fleet}" \
-    bash "$FLEET_POST" "$2" || log "warn: fleet post failed (no Zulip creds?)."
-}
-
 case "$VERIFY_CODE" in
   0)
     VERDICT="fresh"
     log "PASS: live contains ${EXPECTED_SHA}."
-    maybe_notify recovered "deploy freshness recovered: prod contains ${EXPECTED_SHA:0:12}.  Silent-freeze watch is clear.  #2545"
     exit 0
     ;;
   1)
@@ -224,21 +188,18 @@ case "$VERIFY_CODE" in
   2)
     VERDICT="no-sha"
     log "FAIL: production publishes no release sha."
-    maybe_notify no-sha "deploy freshness: prod /api/health has no .checks.release.sha so drift cannot be verified.  Check Coolify SOURCE_COMMIT injection.  #2545"
     exit 2
     ;;
   4)
     VERDICT="divergent"
     LIVE_SHA="$(extract_live_sha)"
     log "FAIL: production is on a divergent commit (live ${LIVE_SHA:-unknown}, expected ${EXPECTED_SHA})."
-    maybe_notify divergent "deploy freshness DIVERGENT: prod ${LIVE_SHA:-unknown} neither contains nor is contained by origin/main ${EXPECTED_SHA:0:12}.  Escalate before anything touches production.  #2545"
     exit 4
     ;;
   5)
     VERDICT="unknown-live"
     LIVE_SHA="$(extract_live_sha)"
     log "FAIL: live ${LIVE_SHA:-unknown} is not a commit in this repo."
-    maybe_notify unknown "deploy freshness: prod is running ${LIVE_SHA:-unknown}, which is not in this repo.  Fetch and re-check; if it persists, escalate.  #2545"
     exit 5
     ;;
   3)
@@ -292,15 +253,10 @@ if [ -z "$OLDEST_UNDEPLOYED" ]; then
   # never owed a deployment for it.  Not the silent-freeze class, and this is
   # the case ST-4575 was about: a CI-only commit must never age the verdict.
   #
-  # The recovery notification belongs here as well as in the fresh branch.  The
-  # premise of this fix is that the gaps that paged before were CI-only gaps
-  # that now resolve to image-noop, so without this the four outstanding stale
-  # pages would never be closed and any later stale -> image-noop transition
-  # would leave the incident open forever.
+  # Scheduled recovery reporting belongs to the existing Sentry CI pipeline.
   VERDICT="image-noop"
   log "PASS: live is behind ${EXPECTED_SHA}, but no commit in the gap touches a watched path."
   log "  no deployment was owed for this gap, so there is nothing to wait for."
-  maybe_notify recovered "deploy freshness recovered: prod ${LIVE_FULL:0:12} is behind ${EXPECTED_SHA:0:12}, but no commit in the gap touches a watched path, so no deployment was owed.  Silent-freeze watch is clear.  #2545"
   exit 0
 fi
 
@@ -369,12 +325,8 @@ fi
 VERDICT="stale"
 HOURS=$((EFFECTIVE_AGE / 3600))
 MINS=$(((EFFECTIVE_AGE % 3600) / 60))
-RAW_HOURS=$((OLDEST_AGE / 3600))
-RAW_MINS=$(((OLDEST_AGE % 3600) / 60))
 log "FAIL: production is STALE - deploy gap is ${HOURS}h${MINS}m past the latch-adjusted due anchor (raw commit age ${OLDEST_AGE}s)."
 log "  this is the silent-freeze class (webhook 200s, health green on an old sha)."
 log "  do NOT hand-trigger a deploy - investigate the webhook and Coolify build queue."
-
-maybe_notify stale "deploy freshness STALE: prod ${LIVE_FULL:0:12} is behind origin/main ${EXPECTED_SHA:0:12}.  Oldest image-affecting undeployed ${OLDEST_UNDEPLOYED:0:12} (${OLDEST_ISO}) is ${RAW_HOURS}h${RAW_MINS}m old (${HOURS}h${MINS}m past its latch-adjusted deploy-due time).  Silent freeze class - webhook 200s, health green on the old sha.  Do not hand-trigger.  Investigate Coolify queue / SSH exec stream.  #2545"
 
 exit 3

@@ -7,6 +7,8 @@
 # Usage: bash scripts/alert-deploy-freshness.selftest.sh
 # Keep this file pure ASCII (AGENTS.md: operator shell scripts, Apple bash 3.2).
 set -uo pipefail
+# Use the local/cached tsx only; the hermetic suite never fetches the registry.
+export npm_config_offline=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 UNDER_TEST="${SCRIPT_DIR}/alert-deploy-freshness.sh"
@@ -423,6 +425,75 @@ run_case "npx failure stays in-flight when raw commit age is under threshold" 0 
   DEPLOY_FRESHNESS_STALE_SECONDS=3600 \
   "PATH=${WORK}/shim-npx:${PATH}"
 EXPECT_OUTPUT=""
+
+# Historical notification settings must not invoke a client or alter verdicts.
+LEGACY_POST_PROBE="${WORK}/legacy-client-called"
+HEALTH_CURL_PROBE="${WORK}/health-curl-called"
+REAL_HEALTH_CURL="$(command -v curl)"
+mkdir -p "${WORK}/shim-notify"
+cat > "${WORK}/retired-post-probe" <<'SH'
+#!/bin/sh
+printf '%s\n' "${0##*/}" >> "$LEGACY_POST_PROBE"
+exit 99
+SH
+chmod +x "${WORK}/retired-post-probe"
+cp "${WORK}/retired-post-probe" "${WORK}/shim-notify/simple-chat"
+cat > "${WORK}/shim-notify/curl" <<'SH'
+#!/bin/sh
+# Only the watchdog's exact localhost GET may reach the health stub.
+if [ "$#" -eq 4 ] && [ "$1" = "-sS" ] && [ "$2" = "--max-time" ] &&
+   [ "$4" = "${DEPLOY_VERIFY_HOST%/}/api/health" ]; then
+  case "$4" in
+    http://127.0.0.1:*/api/health)
+      printf health >> "$HEALTH_CURL_PROBE"
+      exec "$REAL_HEALTH_CURL" "$@"
+      ;;
+  esac
+fi
+printf '%s\n' curl >> "$LEGACY_POST_PROBE"
+exit 99
+SH
+chmod +x "${WORK}/shim-notify/simple-chat" "${WORK}/shim-notify/curl"
+
+# Positive controls prove each explicit/PATH trap rejects a notification call.
+for client in "${WORK}/retired-post-probe" simple-chat curl; do
+  rm -f "$LEGACY_POST_PROBE"
+  probe_status=0
+  LEGACY_POST_PROBE="$LEGACY_POST_PROBE" PATH="${WORK}/shim-notify:${PATH}" \
+    "$client" -X POST https://notification.invalid >/dev/null 2>&1 || probe_status=$?
+  if [ "$probe_status" -ne 99 ] || ! grep -qx "${client##*/}" "$LEGACY_POST_PROBE" 2>/dev/null; then
+    echo "FAIL  retired notification trap control (${client##*/})"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo "PASS  retired notification trap control (${client##*/}, exit 99)"
+    PASSES=$((PASSES + 1))
+  fi
+  rm -f "$LEGACY_POST_PROBE"
+done
+
+EXPECT_OUTPUT="DEPLOY_FRESHNESS_NOTIFY is retired and ignored"
+run_case "retired notification flags preserve fresh exit" 0 "$C1" 200 "$(payload "\"${C1}\"" 10)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=failure \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}" \
+  "PATH=${WORK}/shim-notify:${PATH}" "REAL_HEALTH_CURL=${REAL_HEALTH_CURL}" "HEALTH_CURL_PROBE=${HEALTH_CURL_PROBE}"
+run_case "retired notification flags preserve missing-sha exit" 2 "$C1" 200 "$(payload null 10)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=success \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}" \
+  "PATH=${WORK}/shim-notify:${PATH}" "REAL_HEALTH_CURL=${REAL_HEALTH_CURL}" "HEALTH_CURL_PROBE=${HEALTH_CURL_PROBE}"
+run_case "retired notification flags preserve stale exit" 3 "$C4" 200 "$(payload "\"${C3}\"" 9000)" \
+  DEPLOY_FRESHNESS_NOTIFY=1 DEPLOY_FRESHNESS_PREVIOUS_CONCLUSION=success \
+  DEPLOY_FRESHNESS_STALE_SECONDS=60 DEPLOY_FRESHNESS_LATCH_NOW="$PINNED_LATCH_NOW" \
+  "FLEET_POST_BIN=${WORK}/retired-post-probe" "LEGACY_POST_PROBE=${LEGACY_POST_PROBE}" \
+  "PATH=${WORK}/shim-notify:${PATH}" "REAL_HEALTH_CURL=${REAL_HEALTH_CURL}" "HEALTH_CURL_PROBE=${HEALTH_CURL_PROBE}"
+EXPECT_OUTPUT=""
+if [ -e "$LEGACY_POST_PROBE" ]; then
+  echo "FAIL  retired notification invoked a client"
+  FAILURES=$((FAILURES + 1))
+fi
+if [ ! -s "$HEALTH_CURL_PROBE" ]; then
+  echo "FAIL  retired notification cases bypassed the localhost health curl control"
+  FAILURES=$((FAILURES + 1))
+fi
 
 echo "---- ${PASSES} passed, ${FAILURES} failed ----"
 [ "$FAILURES" = "0" ]

@@ -765,6 +765,24 @@ export async function fetchWithRetry(
      * duplicate it. Never set this on anything that mutates state.
      */
     retryNonIdempotent?: boolean;
+    /**
+     * Take the proxy gate's priority lane for this request (queue-jump + one
+     * reserved slot above the cap) — the Nasdaq screener's lane, so bulk Yahoo
+     * waves cannot starve it.
+     */
+    proxyPriority?: boolean;
+    /**
+     * Bypass the residential proxy for this request (direct egress). The
+     * screener's final fallback after its proxied attempts fail; refused under
+     * fail_closed. Health/circuit/telemetry behavior is unchanged.
+     */
+    bypassProxy?: boolean;
+    /**
+     * Called with the milliseconds this request waited for a proxy-gate slot
+     * (> 0 only). The screener extends its per-attempt deadline by the reported
+     * wait so queue time never counts against its upstream budget.
+     */
+    onProxyQueueWait?: (waitMs: number) => void;
   } = {}
 ): Promise<Response> {
   const retries = options.retries ?? 1;
@@ -790,7 +808,13 @@ export async function fetchWithRetry(
         // Data-source egress: per-user proxy -> operator env proxy -> residential
         // default (see src/lib/data-source-fetch.ts). Internal/excluded services and
         // loopback/private targets bypass the proxy inside dataSourceFetch.
-        response = await dataSourceFetch(url, init, { userId: options.userId, service: options.service });
+        response = await dataSourceFetch(url, init, {
+          userId: options.userId,
+          service: options.service,
+          proxyPriority: options.proxyPriority,
+          bypassProxy: options.bypassProxy,
+          onProxyQueueWait: options.onProxyQueueWait
+        });
       } catch (error) {
         options.durableAttempt?.onTransportError?.(error);
         // Dead keep-alive sockets (`fetch failed` / UND_ERR_SOCKET) are worth one
