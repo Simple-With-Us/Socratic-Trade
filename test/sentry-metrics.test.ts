@@ -8,12 +8,14 @@ const sentryMock = vi.hoisted(() => ({
   logger: {
     warn: vi.fn(),
     error: vi.fn()
-  }
+  },
+  captureException: vi.fn()
 }));
 
 vi.mock("@sentry/nextjs", () => sentryMock);
 
 import {
+  captureHandledException,
   logError,
   logWarn,
   recordBrokerCall,
@@ -29,6 +31,7 @@ describe("sentry-metrics helpers", () => {
     sentryMock.metrics.distribution.mockReset();
     sentryMock.logger.warn.mockReset();
     sentryMock.logger.error.mockReset();
+    sentryMock.captureException.mockReset();
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -83,6 +86,29 @@ describe("sentry-metrics helpers", () => {
     expect(sentryMock.logger.error).toHaveBeenCalledWith("broker.call", {
       broker: "alpaca",
       endpoint: "mcp:get_orders"
+    });
+  });
+
+  it("captures a sanitized Error with tags and context, not the raw exception", async () => {
+    const failure = new TypeError("Tradier HTTP 401: invalid token sk-live-secret-value");
+    failure.stack = "TypeError: Tradier HTTP 401: invalid token sk-live-secret-value\n    at broker.ts:1:1";
+    const callerMessage = "Tradier HTTP 401: invalid token [redacted]";
+    captureHandledException(failure, "Broker read failed with an internal server error", { error: callerMessage });
+    await vi.waitFor(() => {
+      expect(sentryMock.captureException).toHaveBeenCalledOnce();
+    });
+    const [captured, ctx] = sentryMock.captureException.mock.calls[0];
+    expect(captured).toBeInstanceOf(Error);
+    expect(captured).not.toBe(failure);
+    expect(captured.name).toBe("TypeError");
+    expect(captured.message).toContain("Tradier HTTP 401");
+    expect(captured.message).not.toMatch(/sk-live/);
+    expect(captured.cause).toBeUndefined();
+    expect(String(captured.stack ?? "")).toContain("Tradier HTTP 401");
+    expect(String(captured.stack ?? "")).not.toMatch(/sk-live/);
+    expect(ctx).toEqual({
+      tags: { handled: "true", error_name: "TypeError" },
+      extra: { context: "Broker read failed with an internal server error", error: callerMessage }
     });
   });
 
