@@ -34,11 +34,11 @@
       "groupName": "eslint-toolchain"
     },
     {
-      "matchPackagePatterns": ["^next$", "^react$", "^react-dom$"],
+      "matchPackageNames": ["/^next$/", "/^react$/", "/^react-dom$/"],
       "groupName": "next-react"
     },
     {
-      "matchPackagePatterns": ["^@sentry/.*$", "^@langfuse/.*$", "^@opentelemetry/.*$"],
+      "matchPackageNames": ["/^@sentry/.*$/", "/^@langfuse/.*$/", "/^@opentelemetry/.*$/"],
       "groupName": "observability"
     },
     {
@@ -53,7 +53,7 @@
       "allowedVersions": "<0.300.0"
     },
     {
-      "matchPackagePatterns": ["^vitest$", "^@playwright/.*$"],
+      "matchPackageNames": ["/^vitest$/", "/^@playwright/.*$/"],
       "groupName": "testing"
     }
   ],

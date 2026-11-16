@@ -7,7 +7,8 @@ struct LoginView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var store: MobileStore
 
-    /// Keep in sync with `LOGIN_VALUE_BULLETS` in `app/login/page.tsx`.
+    /// First three lines match `LOGIN_VALUE_BULLETS` on the web login page.
+    /// This card keeps its own last line.
     private static let valueBullets = [
         "Configure framework and guardrails",
         "Review and approve proposals",
