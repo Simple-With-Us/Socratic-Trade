@@ -15,16 +15,22 @@ beforeAll(() => {
 
 const mocks = vi.hoisted(() => ({
   storeContexts: vi.fn().mockResolvedValue({ attempted: 0, indexed: 0 }),
+  hasIngestTextBudget: vi.fn().mockReturnValue(true),
 }));
 
 vi.mock("../src/lib/vector-db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/vector-db")>();
-  return { ...actual, storeContexts: mocks.storeContexts };
+  return {
+    ...actual,
+    managedVectorLedgerAuthority: vi.fn(),
+    storeContexts: mocks.storeContexts,
+    hasIngestTextBudget: mocks.hasIngestTextBudget,
+  };
 });
 
 vi.mock("../src/lib/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/db")>();
-  return { ...actual, audit: vi.fn().mockResolvedValue(undefined) };
+  return { managedVectorLedgerAuthority: vi.fn(), ...actual, audit: vi.fn().mockResolvedValue(undefined) };
 });
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -152,6 +158,21 @@ describe("embedDisclosures() — flag OFF", () => {
     const { embedDisclosures } = await import("../src/lib/web-sources/disclosure-rag");
     const result = await embedDisclosures([singleTrade], [singleFiling]);
     expect(result.skipped).toBe(true);
+    expect(mocks.storeContexts).not.toHaveBeenCalled();
+  });
+});
+
+describe("embedDisclosures() — daily text embed budget spent", () => {
+  beforeEach(() => {
+    process.env.RAG_EMBED_DISCLOSURES = "on";
+    mocks.storeContexts.mockClear();
+    mocks.hasIngestTextBudget.mockReturnValueOnce(false);
+  });
+
+  it("skips without calling storeContexts", async () => {
+    const { embedDisclosures } = await import("../src/lib/web-sources/disclosure-rag");
+    const result = await embedDisclosures([singleTrade], [singleFiling]);
+    expect(result).toMatchObject({ indexed: 0, skipped: true });
     expect(mocks.storeContexts).not.toHaveBeenCalled();
   });
 });
@@ -330,5 +351,69 @@ describe("embedDisclosures() — empty inputs", () => {
     expect(result.attempted).toBe(0);
     expect(result.indexed).toBe(0);
     expect(result.skipped).toBeUndefined();
+  });
+});
+
+describe("embedDisclosures() — no-op audit rollup (#2553c)", () => {
+  beforeEach(async () => {
+    process.env.RAG_EMBED_DISCLOSURES = "on";
+    mocks.storeContexts.mockClear();
+    const db = await import("../src/lib/db");
+    vi.mocked(db.audit).mockClear();
+    const { DISCLOSURE_RAG_NOOP_ROLLUP_KEY } = await import("../src/lib/web-sources/disclosure-rag");
+    db.deleteInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY);
+  });
+
+  it("suppresses per-cycle no-op audits and flushes at most one daily rollup carrying the count", async () => {
+    const { embedDisclosures, DISCLOSURE_RAG_NOOP_ROLLUP_KEY } = await import("../src/lib/web-sources/disclosure-rag");
+    const db = await import("../src/lib/db");
+    const auditMock = vi.mocked(db.audit);
+    // The live symptom: every 1–3 min refresh re-embedded 310 already-deduped docs
+    // ("Attempted: 310 · Indexed: 0") and wrote an identical audit row each time.
+    mocks.storeContexts.mockResolvedValue({ attempted: 310, indexed: 0 });
+
+    // First-ever no-op (no watermark): ONE rollup row proves the lane is alive.
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    expect(auditMock.mock.calls[0]![0]).toBe("disclosure_rag_embed");
+    expect(auditMock.mock.calls[0]![1]).toMatchObject({ ok: true, indexed: 0, rollup: true, dedupedCycles: 1 });
+
+    // Further no-op cycles inside the 24h window: silent — only the watermark accumulates.
+    await embedDisclosures([singleTrade], []);
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    expect(db.getInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY)).toMatchObject({ cycles: 2, attempted: 620 });
+
+    // Window lapsed: the next no-op flushes ONE rollup carrying every suppressed cycle.
+    const state = db.getInternalSetting<{ cycles: number; attempted: number }>(DISCLOSURE_RAG_NOOP_ROLLUP_KEY)!;
+    db.setInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY, {
+      ...state,
+      lastAuditAt: new Date(Date.now() - 25 * 3600_000).toISOString()
+    });
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(2);
+    expect(auditMock.mock.calls[1]![1]).toMatchObject({ rollup: true, dedupedCycles: 3, dedupedAttempted: 930 });
+    expect(db.getInternalSetting(DISCLOSURE_RAG_NOOP_ROLLUP_KEY)).toMatchObject({ cycles: 0, attempted: 0 });
+  });
+
+  it("still audits every cycle that indexed documents, was skipped upstream, or errored", async () => {
+    const { embedDisclosures } = await import("../src/lib/web-sources/disclosure-rag");
+    const db = await import("../src/lib/db");
+    const auditMock = vi.mocked(db.audit);
+
+    mocks.storeContexts.mockResolvedValue({ attempted: 310, indexed: 4 });
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(1);
+    expect(auditMock.mock.calls[0]![1]).toMatchObject({ ok: true, indexed: 4 });
+
+    mocks.storeContexts.mockResolvedValue({ attempted: 0, indexed: 0, skipped: true });
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(2);
+    expect(auditMock.mock.calls[1]![1]).toMatchObject({ skipped: true });
+
+    mocks.storeContexts.mockResolvedValue({ attempted: 310, indexed: 0, error: "pinecone unavailable" });
+    await embedDisclosures([singleTrade], []);
+    expect(auditMock).toHaveBeenCalledTimes(3);
+    expect(auditMock.mock.calls[2]![1]).toMatchObject({ ok: false });
   });
 });

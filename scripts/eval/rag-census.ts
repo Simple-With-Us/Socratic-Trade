@@ -60,12 +60,19 @@ function reportBySymbol(topN = 50): SymbolCoverageRow[] {
     .all(topN) as SymbolCoverageRow[];
 }
 
+/** Matches isFreeTier() in src/lib/web-sources/sec-filings.ts — paid tier
+ *  (VECTOR_EMBED_BATCH_DELAY_MS ≤ 5000) uses higher filing caps. */
+function isFreeTier(): boolean {
+  const delay = Number(process.env.VECTOR_EMBED_BATCH_DELAY_MS ?? 21_000);
+  return !Number.isFinite(delay) || delay > 5000;
+}
+
 function getConfigurationSummary() {
   // Resolve effective configuration matching the ingest path's defaults
   // rather than printing "unset" when a default is silently in effect.
   // Defaults sourced from:
   //   vector-db.ts:  RAG_INGEST_BUDGET_ENABLED → true,  RAG_PINECONE_WRITE_BUDGET_ENABLED → true
-  //                   RAG_INGEST_MAX_TEXTS_PER_DAY → 1,000,000,  RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY → 10,000,000
+  //                   RAG_INGEST_MAX_TEXTS_PER_DAY → 20,000,  RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY → 200,000
   //   sec-filings.ts: SEC_FILING_RAG_MAX_PER_RUN → 1 (free) / 200 (paid),  SEC_FILING_INGEST_TTL_HOURS → 168
   //   sec8k.ts:       VECTOR_STORECONTEXTS_DEDUP → true,  WEB_SOURCE_SEC8K_RAG_LIMIT → 16,
   //                   WEB_SOURCE_SEC8K_FULL_BODY → off
@@ -78,20 +85,20 @@ function getConfigurationSummary() {
       ? "on (default)"
       : `${envFlagOn("RAG_INGEST_BUDGET_ENABLED", true) ? "on" : "off"}  (env: ${process.env.RAG_INGEST_BUDGET_ENABLED})`,
     RAG_INGEST_MAX_TEXTS_PER_DAY: process.env.RAG_INGEST_MAX_TEXTS_PER_DAY == null
-      ? "1,000,000 (default)"
-      : `${numericEnv("RAG_INGEST_MAX_TEXTS_PER_DAY", 1_000_000, 1).toLocaleString()}  (raw env: "${process.env.RAG_INGEST_MAX_TEXTS_PER_DAY}")`,
+      ? "20,000 (default)"
+      : `${numericEnv("RAG_INGEST_MAX_TEXTS_PER_DAY", 20_000, 1).toLocaleString()}  (raw env: "${process.env.RAG_INGEST_MAX_TEXTS_PER_DAY}")`,
     RAG_PINECONE_WRITE_BUDGET_ENABLED: process.env.RAG_PINECONE_WRITE_BUDGET_ENABLED == null
       ? "on (default)"
       : `${envFlagOn("RAG_PINECONE_WRITE_BUDGET_ENABLED", true) ? "on" : "off"}  (env: ${process.env.RAG_PINECONE_WRITE_BUDGET_ENABLED})`,
     RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY: process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY == null
-      ? "10,000,000 (default)"
-      : `${numericEnv("RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY", 10_000_000, 1).toLocaleString()}  (raw env: "${process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY}")`,
+      ? "200,000 (default)"
+      : `${numericEnv("RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY", 200_000, 1).toLocaleString()}  (raw env: "${process.env.RAG_PINECONE_MAX_WRITE_UNITS_PER_DAY}")`,
     VECTOR_STORECONTEXTS_DEDUP: process.env.VECTOR_STORECONTEXTS_DEDUP == null
       ? "on (default)"
       : `${envFlagOn("VECTOR_STORECONTEXTS_DEDUP", true) ? "on" : "off"}  (env: ${process.env.VECTOR_STORECONTEXTS_DEDUP})`,
     SEC_FILING_RAG_MAX_PER_RUN: process.env.SEC_FILING_RAG_MAX_PER_RUN == null
       ? "1 (free-tier default, 200 paid)"
-      : `${numericEnv("SEC_FILING_RAG_MAX_PER_RUN", 1, 1).toLocaleString()}  (raw env: "${process.env.SEC_FILING_RAG_MAX_PER_RUN}")`,
+      : `${numericEnv("SEC_FILING_RAG_MAX_PER_RUN", isFreeTier() ? 1 : 200, 1).toLocaleString()}  (raw env: "${process.env.SEC_FILING_RAG_MAX_PER_RUN}")`,
     SEC_FILING_INGEST_TTL_HOURS: process.env.SEC_FILING_INGEST_TTL_HOURS == null
       ? "168 (default, 7 days)"
       : `${numericEnv("SEC_FILING_INGEST_TTL_HOURS", 168, 1).toLocaleString()} h  (raw env: "${process.env.SEC_FILING_INGEST_TTL_HOURS}")`,

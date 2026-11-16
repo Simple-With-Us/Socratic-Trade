@@ -1,6 +1,6 @@
 # Field-by-Field Settings Reference — The Master Control Catalog
 
-**Companion to:** [`docs/settings-navigation-redesign.md`](./settings-navigation-redesign.md) (v2, the canonical design). This document does not restate the IA — it is the exhaustive per-field build spec that the design's Part II-B tree points at. Every configurable field from the grounding catalog (all `TradingPolicy` account-scope fields + nested `riskRules`/`scoringWeights`/`taxSettings`/`tuning`/`universeFloor`/`notificationSettings`, the 3 user-global fields, and the capability-gating inputs) appears exactly once, grouped by its **new home** in the v2 tree.
+**Companion to:** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2, the canonical design). This document does not restate the IA — it is the exhaustive per-field build spec that the design's Part II-B tree points at. Every configurable field from the grounding catalog (all `TradingPolicy` account-scope fields + nested `riskRules`/`scoringWeights`/`taxSettings`/`tuning`/`universeFloor`/`notificationSettings`, the 3 user-global fields, and the capability-gating inputs) appears exactly once, grouped by its **new home** in the v2 tree.
 
 **Grounding anchors (verified this session):** `src/lib/types.ts` (all enums, `AccountCapabilities`), `src/lib/defaults.ts` (`DEFAULT_POLICY`, `DEFAULT_RISK_RULES`, `DEFAULT_SCORING_WEIGHTS`, `DEFAULT_TAX_SETTINGS`, `DEFAULT_NOTIFICATION_SETTINGS`), `src/lib/db-profiles.ts:20-24` (`USER_LEVEL_POLICY_FIELDS` = exactly 3), `db-profiles.ts:142-147` (`mergePolicy` server-side clamps), `app/dashboard-client.tsx:162-168` (`SettingsSection`, `ACCOUNT_SETTINGS_SECTIONS`, `settingsTierForSection`).
 
@@ -160,7 +160,7 @@ The design flagged this as ambiguous: *"position size" (total holding) and "orde
 | `maxOrderNotional` | ACCOUNT | Advanced | number+unit ($) | `undefined` | `> 0`, **server clamp ≤ 100_000** | none | raise = inline-confirm / type-to-confirm on Live |
 | `maxOrderPctOfNav` | ACCOUNT | Advanced | number+unit (%) | `5` | `0 < x ≤ 100` | none | raise = inline-confirm on Live |
 | `maxOrderPctOfAdv` | ACCOUNT | Advanced | number+unit (%) | `5` | `0 < x ≤ 100` | none | frictionless |
-| `maxDailyNotional` | ACCOUNT | Advanced | number+unit ($) | `500` | `> 0`; **`≥ 500_000` resets to default + caps `maxDailyOrders`** (`db-profiles.ts:142-144`) | none | raise = inline-confirm on Live |
+| `maxDailyNotional` | ACCOUNT | Advanced | number+unit ($) | mutually exclusive with the default `maxDailyPctOfNav` mode | `> 0`; explicit dollar values are preserved | none | raise = inline-confirm on Live |
 | `maxDailyPctOfNav` | ACCOUNT | Advanced | number+unit (%) | `undefined` (disabled) | `0 < x ≤ 100` | none | raise = inline-confirm on Live |
 | `maxHourlyNotional` | ACCOUNT | Advanced | number+unit ($) | `undefined` (disabled) | `> 0` | none | raise = inline-confirm on Live |
 | `maxDailyOrders` | ACCOUNT | Advanced | number (count) | `10` | integer `≥ 1`; auto-capped when `maxDailyNotional` resets | none | frictionless |
@@ -441,7 +441,7 @@ Per the "flag any field with no obvious new home" instruction:
 # Cross-cutting acceptance criteria (every field)
 
 1. **Scope round-trip:** each field writes to and reads back from its declared store — account fields to `account_strategy_state` (via `pickAccountFields`), the 3 user fields to `user_settings.policy` (via `pickUserFields`). A read-after-write test per user-global field is mandatory (the silent enrichment trap).
-2. **Server clamps honored in UI:** `maxOrderNotional ≤ 100_000`, `maxDailyNotional ≥ 500_000 → reset`, `normalizeScoringWeights` non-negativity — the control must reflect the clamped value, not the typed value.
+2. **Server normalization honored in UI:** `maxOrderNotional ≤ 100_000`, dollar/percent daily modes are mutually exclusive, and `normalizeScoringWeights` enforces non-negativity — the control must reflect the persisted value, not stale local state.
 3. **Capability gating is data-driven:** every gated control reads `ConnectedAccount.capabilities` (never hardcoded per broker) and shows the inline explainer when disabled.
 4. **Friction rule enforced at write time, not just UI:** loosening on a Live active account triggers the per-field confirm; the server-side write-time `accountId` validation (P2) is the real boundary regardless of client friction.
 5. **Consequence preview derives from the same field definition that renders the control** — never a parallel copy list (feeds the settings search index too).

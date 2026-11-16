@@ -110,6 +110,30 @@ export function extendedHoursExitBufferBps(policy: TradingPolicy, now?: Date): n
 }
 
 /**
+ * Tick-aware OUTWARD limit-price rounding, shared by the protective-exit reprice below and the
+ * approval-time ordinary-limit reprice (src/lib/approval-reprice.ts). Symmetric Math.round can
+ * UN-cross a thin quote: a SELL anchored to a $0.496 bid with a 15 bps buffer rounds UP to $0.50 —
+ * above the bid, resting unfilled exactly where the exit must fill; rounding in the order's
+ * marketable direction ("up" for buy-side, "down" for sell-side) can never make the price less
+ * marketable than the exact input. Sub-$1 prices may quote in $0.0001 increments (SEC Rule 612), so
+ * use 4 dp below $1 and whole pennies at/above $1.
+ */
+export function roundLimitOutwardToTick(raw: number, direction: "up" | "down"): number | undefined {
+  const factor = raw < 1 ? 10_000 : 100;
+  const scaled = raw * factor;
+  const nearestTick = Math.round(scaled);
+  // Snap float artifacts (e.g. 99.85 * 100 = 9984.999...94) to the exact tick instead of pushing a
+  // genuinely-on-tick price one tick further out; otherwise round outward.
+  const ticks = Math.abs(scaled - nearestTick) < 1e-6
+    ? nearestTick
+    : direction === "up"
+      ? Math.ceil(scaled)
+      : Math.floor(scaled);
+  const price = ticks / factor;
+  return price > 0 ? price : undefined;
+}
+
+/**
  * Marketable-limit price for a protective exit: cross the spread so a thin-liquidity extended-hours
  * order still fills. A SELL (long exit) prices DOWN off the BID and a COVER (short buy-to-close)
  * prices UP off the ASK — pricing a SELL off the composite quote price (ask ?? bid on Alpaca) would
@@ -117,12 +141,9 @@ export function extendedHoursExitBufferBps(policy: TradingPolicy, now?: Date): n
  * The composite `price` is only the fallback anchor when the crossing side is missing. Returns
  * undefined when no usable anchor exists so the caller falls back to a market order.
  *
- * Rounding is tick-aware and OUTWARD — always in the marketable direction (down for a SELL, up for
- * a COVER). Symmetric Math.round can UN-cross a thin quote: a SELL anchored to a $0.496 bid with a
- * 15 bps buffer rounds UP to $0.50 — above the bid, resting unfilled exactly where the exit must
- * fill. Sub-$1 prices may quote in $0.0001 increments (SEC Rule 612), so use 4 dp below $1 and
- * whole pennies at/above $1 (the entry marketable-limit path rounds 2 dp; protective exits need the
- * finer tick to stay marketable on sub-dollar symbols).
+ * Rounding is tick-aware and OUTWARD via roundLimitOutwardToTick (down for a SELL, up for a COVER):
+ * the entry marketable-limit path rounds 2 dp, but protective exits need the finer sub-$1 tick to
+ * stay marketable on sub-dollar symbols.
  */
 export function marketableLimitExitPrice(quote: ProtectiveExitQuote, exitSide: "sell" | "cover", bufferBps: number): number | undefined {
   const usable = (value: number | undefined): number | undefined =>
@@ -131,18 +152,7 @@ export function marketableLimitExitPrice(quote: ProtectiveExitQuote, exitSide: "
   if (anchor === undefined) return undefined;
   const buffer = bufferBps / 10_000;
   const raw = exitSide === "cover" ? anchor * (1 + buffer) : anchor * (1 - buffer);
-  const factor = raw < 1 ? 10_000 : 100;
-  const scaled = raw * factor;
-  const nearestTick = Math.round(scaled);
-  // Snap float artifacts (e.g. 99.85 * 100 = 9984.999...94) to the exact tick instead of pushing a
-  // genuinely-on-tick price one tick further out; otherwise round outward.
-  const ticks = Math.abs(scaled - nearestTick) < 1e-6
-    ? nearestTick
-    : exitSide === "cover"
-      ? Math.ceil(scaled)
-      : Math.floor(scaled);
-  const price = ticks / factor;
-  return price > 0 ? price : undefined;
+  return roundLimitOutwardToTick(raw, exitSide === "cover" ? "up" : "down");
 }
 
 /**
@@ -170,6 +180,22 @@ export function resolveProtectiveExitRouting(
 }
 
 /**
+ * The claim condition for the approval-time protective-exit reprice below: an extended-hours
+ * protective-exit limit. Exported so the ordinary-limit reprice (src/lib/approval-reprice.ts) can
+ * decline exactly what this path owns — including when this path deliberately KEPT the stored limit
+ * (fresh routing priced the same marketable limit), which must not then be ratio-re-anchored off the
+ * composite price by the sibling path.
+ */
+export function isApprovalRepriceProtectiveExit(proposal: TradeProposal): boolean {
+  return (
+    (proposal.tradeThesisTag === "Risk-Exit" || proposal.tradeThesisTag === "Synthetic Stop") &&
+    proposal.type === "limit" &&
+    proposal.marketHours === "extended_hours" &&
+    (proposal.side === "sell" || proposal.side === "cover")
+  );
+}
+
+/**
  * Re-resolve a STORED protective exit's routing at placement time. Under propose authority the
  * Risk-Exit card can sit for minutes/hours between generation and the human Approve; an
  * extended-hours marketable-limit is only as good as the quote it was priced off, so a market that
@@ -186,9 +212,8 @@ export function repriceStoredProtectiveExit(
   quote: ProtectiveExitQuote | undefined,
   now?: Date
 ): TradeProposal {
-  const isProtectiveExit = proposal.tradeThesisTag === "Risk-Exit" || proposal.tradeThesisTag === "Synthetic Stop";
-  if (!isProtectiveExit || proposal.type !== "limit" || proposal.marketHours !== "extended_hours") return proposal;
   if (proposal.side !== "sell" && proposal.side !== "cover") return proposal;
+  if (!isApprovalRepriceProtectiveExit(proposal)) return proposal;
   const routing = resolveProtectiveExitRouting(policy, proposal.side, quote, now, proposal.quantity);
   if (routing.type === "limit" && routing.limitPrice === proposal.limitPrice) return proposal;
   return { ...proposal, type: routing.type, limitPrice: routing.limitPrice, marketHours: routing.marketHours };

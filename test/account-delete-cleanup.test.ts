@@ -83,4 +83,24 @@ describe("purgeConnectedAccount — FK pragma + cascade cleanup", () => {
     expect(db.purgeConnectedAccount(accId, "local")).toBe(true);
     expect(db.listLearningMutations("local", { connectedAccountId: accId }).length).toBe(0);
   });
+
+  // Codex review, PR #1738: account deletion must also purge the per-account option-alert dedupe
+  // reservations, or a removed account's alert claims linger indefinitely (the row it dedupes,
+  // notification_events, is already purged).
+  it("purges the account's option_alert_reservations when the account is deleted", async () => {
+    const db = await import("../src/lib/db");
+    const acct = "OPTALERTDEL";
+    const accId = randomUUID();
+    db.upsertConnectedAccount({
+      id: accId, userId: "local", broker: "alpaca", environment: "paper",
+      accountNumber: acct, label: "x", isActive: true
+    });
+    expect(db.reserveOptionAlert("local", accId, "AAPL240101C00100000", "appearance")).toBe(true);
+    // Sanity: the reservation now blocks a second claim.
+    expect(db.reserveOptionAlert("local", accId, "AAPL240101C00100000", "appearance")).toBe(false);
+
+    expect(db.purgeConnectedAccount(accId, "local")).toBe(true);
+    // After purge the row is gone, so the claim is free again.
+    expect(db.reserveOptionAlert("local", accId, "AAPL240101C00100000", "appearance")).toBe(true);
+  });
 });

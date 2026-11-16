@@ -135,6 +135,56 @@ describe("applyEnrichment", () => {
     expect(enriched.sources?.senateTrades).toBe("congress-trades");
   });
 
+  it("folds the newly arbitrated quote fields (bidSize/askSize/prevClose/OHLC/netChange) onto the quote", () => {
+    // Codex P1 review on #3449: providers supply these, the cascade arbitrates
+    // them, and applyEnrichment must carry them onto the MarketQuote.
+    const extra: SymbolEnrichment = {
+      bidSize: 100,
+      askSize: 200,
+      prevClose: 148,
+      open: 149,
+      high: 151,
+      low: 147.5,
+      netChange: 2.5
+    };
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), extra);
+    expect(enriched.bidSize).toBe(100);
+    expect(enriched.askSize).toBe(200);
+    expect(enriched.prevClose).toBe(148);
+    expect(enriched.open).toBe(149);
+    expect(enriched.high).toBe(151);
+    expect(enriched.low).toBe(147.5);
+    expect(enriched.netChange).toBe(2.5);
+  });
+
+  it("carries the delayed-tape metadata onto the quote so a ~900s print is not realtime-stale", () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` enrichment must
+    // reach the scan quote with its tape metadata, otherwise the staleness
+    // gate reads the ~900s-old print as a stale realtime observation.
+    const extra: SymbolEnrichment = {
+      price: 195.5,
+      asOf: "2026-11-05T19:45:00.000Z",
+      expectedDelaySec: 900,
+      delayToleranceSec: 120,
+      venuePriceAuthoritative: true,
+      fetchedAt: "2026-11-05T20:00:00.000Z"
+    };
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), extra);
+    expect(enriched.expectedDelaySec).toBe(900);
+    expect(enriched.delayToleranceSec).toBe(120);
+    expect(enriched.venuePriceAuthoritative).toBe(true);
+    // The RETRIEVAL stamp travels with it so the quote ages by fetch time.
+    expect(enriched.fetchedAt).toBe("2026-11-05T20:00:00.000Z");
+  });
+
+  it("leaves a realtime enrichment without tape metadata", () => {
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), { price: 195.5 });
+    expect(enriched.expectedDelaySec).toBeUndefined();
+    expect(enriched.delayToleranceSec).toBeUndefined();
+    expect(enriched.venuePriceAuthoritative).toBeUndefined();
+    expect(enriched.fetchedAt).toBeUndefined();
+  });
+
   it("keeps the existing quote value when enrichment omits a field", () => {
     const enriched = applyEnrichment(quote({ symbol: "AAPL", senateTrades: 2 }), { peRatio: 30 });
     expect(enriched.senateTrades).toBe(2); // not clobbered by undefined
@@ -161,6 +211,89 @@ describe("applyEnrichment", () => {
     expect(enriched.putCallRatio).toBe(0.9);
     expect(enriched.sources?.daysToEarnings).toBe("yahoo-finance");
     expect(enriched.sources?.nearTheMoneyIv).toBe("robinhood-options");
+  });
+
+  it("keeps a positive screener market cap when SEC XBRL only derived one", () => {
+    const extra: SymbolEnrichment = {
+      marketCap: 50_000_000,
+      sharesOutstanding: 1_000_000,
+      price: 50,
+      sources: { marketCap: "sec-xbrl", sharesOutstanding: "sec-xbrl", price: "yahoo-finance" },
+      fieldObservations: {
+        marketCap: {
+          value: 50_000_000,
+          source: "sec-xbrl",
+          upstreamFamily: "sec-xbrl",
+          fetchedAt: "2026-10-14T00:00:00.000Z",
+          status: "ok"
+        }
+      }
+    };
+    const enriched = applyEnrichment(
+      quote({ symbol: "AAPL", marketCap: 3_000_000_000_000, sources: { marketCap: "nasdaq-delayed-screener" } }),
+      extra
+    );
+    expect(enriched.marketCap).toBe(3_000_000_000_000);
+    expect(enriched.sources?.marketCap).toBe("nasdaq-delayed-screener");
+    expect(enriched.fieldObservations?.marketCap).toBeUndefined();
+    expect(enriched.sharesOutstanding).toBe(1_000_000);
+  });
+
+  it("adopts SEC-derived market cap only when the screener cap is missing", () => {
+    const extra: SymbolEnrichment = {
+      marketCap: 200_000_000,
+      sources: { marketCap: "sec-xbrl" },
+      fieldObservations: {
+        marketCap: {
+          value: 200_000_000,
+          source: "sec-xbrl",
+          upstreamFamily: "sec-xbrl",
+          fetchedAt: "2026-10-14T00:00:00.000Z",
+          status: "ok"
+        }
+      }
+    };
+    const enriched = applyEnrichment(quote({ symbol: "AAPL" }), extra);
+    expect(enriched.marketCap).toBe(200_000_000);
+    expect(enriched.sources?.marketCap).toBe("sec-xbrl");
+    expect(enriched.fieldObservations?.marketCap?.source).toBe("sec-xbrl");
+  });
+
+  it("still lets a non-SEC enrichment market cap override the screener", () => {
+    const enriched = applyEnrichment(
+      quote({ symbol: "AAPL", marketCap: 1_000 }),
+      { marketCap: 2_000_000_000, sources: { marketCap: "yahoo-finance" } }
+    );
+    expect(enriched.marketCap).toBe(2_000_000_000);
+    expect(enriched.sources?.marketCap).toBe("yahoo-finance");
+  });
+
+  it("preserves cascade fieldObservations and providerFailures on the quote", () => {
+    const extra: SymbolEnrichment = {
+      peRatio: 22,
+      sources: { peRatio: "yahoo-finance" },
+      fieldObservations: {
+        peRatio: {
+          value: 22,
+          source: "yahoo-finance",
+          upstreamFamily: "yahoo-finance",
+          fetchedAt: "2026-07-26T00:00:00.000Z",
+          status: "ok"
+        }
+      },
+      providerFailures: {
+        finnhub: {
+          source: "finnhub",
+          upstreamFamily: "finnhub",
+          fetchedAt: "2026-07-26T00:00:00.000Z",
+          status: "failed",
+          errorKind: "TimeoutError"
+        }
+      }
+    };
+    const enriched = applyEnrichment(quote({ symbol: "NVDA" }), extra);
+    expect(enriched.fieldObservations?.peRatio?.source).toBe("yahoo-finance");
+    expect(enriched.providerFailures?.finnhub?.errorKind).toBe("TimeoutError");
   });
 });
 
@@ -351,6 +484,150 @@ describe("mergeQuoteData", () => {
     expect(merged.topCandidates[0]!.sources?.bid).toBe("yahoo-finance-synthetic");
     expect(merged.topCandidates[0]!.sources?.ask).toBe("yahoo-finance-synthetic");
     expect(merged.quotesBySymbol.AAPL!.sources?.price).toBe("yahoo-finance");
+  });
+
+  it("recalculates intradayChangePct and netChange when fresh quote and prevClose are merged", () => {
+    const scan: MarketScan = {
+      source: "nasdaq-delayed-screener",
+      generatedAt: "2026-06-19T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [quote({ symbol: "AAPL", price: 100, intradayChangePct: 0, netChange: 0 })],
+      sectorBySymbol: {},
+      quotesBySymbol: { AAPL: quote({ symbol: "AAPL", price: 100, intradayChangePct: 0, netChange: 0 }) },
+      cacheTtlMs: 300_000,
+      cached: false,
+      warnings: []
+    };
+
+    const merged = mergeQuoteData(scan, {
+      AAPL: {
+        price: 105,
+        prevClose: 100,
+        open: 101,
+        high: 106,
+        low: 100.5,
+        vwap: 103.5,
+        companyName: "Apple Inc.",
+        provider: "alpaca"
+      }
+    });
+
+    const cand = merged.topCandidates[0];
+    expect(cand.price).toBe(105);
+    expect(cand.prevClose).toBe(100);
+    expect(cand.intradayChangePct).toBe(5.0);
+    expect(cand.netChange).toBe(5.0);
+    expect(cand.open).toBe(101);
+    expect(cand.high).toBe(106);
+    expect(cand.low).toBe(100.5);
+    expect(cand.vwap).toBe(103.5);
+    expect(cand.companyName).toBe("Apple Inc.");
+
+    const summary = merged.quotesBySymbol.AAPL;
+    expect(summary.intradayChangePct).toBe(5.0);
+    expect(summary.netChange).toBe(5.0);
+    expect(summary.prevClose).toBe(100);
+    expect(summary.open).toBe(101);
+    expect(summary.high).toBe(106);
+    expect(summary.low).toBe(100.5);
+    expect(summary.vwap).toBe(103.5);
+    expect(summary.companyName).toBe("Apple Inc.");
+  });
+
+  it("populates newly discovered symbols from quoteData with full quote metrics", () => {
+    const scan: MarketScan = {
+      source: "nasdaq-delayed-screener",
+      generatedAt: "2026-06-19T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [quote({ symbol: "AAPL" })],
+      sectorBySymbol: {},
+      quotesBySymbol: { AAPL: quote({ symbol: "AAPL" }) },
+      cacheTtlMs: 300_000,
+      cached: false,
+      warnings: []
+    };
+
+    const merged = mergeQuoteData(scan, {
+      MSFT: {
+        symbol: "MSFT",
+        price: 300,
+        prevClose: 295,
+        open: 296,
+        high: 302,
+        low: 294,
+        vwap: 298.5,
+        companyName: "Microsoft Corp",
+        provider: "finnhub"
+      }
+    });
+
+    expect(merged.quotesBySymbol.MSFT).toBeDefined();
+    const msft = merged.quotesBySymbol.MSFT;
+    expect(msft.price).toBe(300);
+    expect(msft.prevClose).toBe(295);
+    expect(msft.open).toBe(296);
+    expect(msft.high).toBe(302);
+    expect(msft.low).toBe(294);
+    expect(msft.vwap).toBe(298.5);
+    expect(msft.companyName).toBe("Microsoft Corp");
+    expect(msft.intradayChangePct).toBe(1.69);
+    expect(msft.netChange).toBe(5);
+  });
+
+  it("carries bidSize/askSize and uses cascade fieldProvenance receipts for observations", () => {
+    const base = quote({
+      symbol: "AAPL",
+      price: 100,
+      bid: 99.9,
+      ask: 100.1,
+      sources: { price: "screener" }
+    });
+    const scan: MarketScan = {
+      source: "nasdaq-delayed-screener",
+      generatedAt: "2026-06-19T00:00:00.000Z",
+      scannedSymbols: 1,
+      returnedQuotes: 1,
+      topCandidates: [base],
+      sectorBySymbol: {},
+      quotesBySymbol: { AAPL: base },
+      cacheTtlMs: 300_000,
+      cached: false,
+      warnings: []
+    };
+    const merged = mergeQuoteData(scan, {
+      AAPL: {
+        price: 105,
+        bid: 104.9,
+        ask: 105.1,
+        bidSize: 200,
+        askSize: 300,
+        prevClose: 100,
+        vwap: 103,
+        provider: "finnhub",
+        asOf: "2026-09-21T10:05:00.000Z",
+        fetchedAt: "2026-09-21T10:05:05.000Z",
+        fieldProvenance: {
+          price: { provider: "finnhub", asOf: "2026-09-21T10:05:00.000Z", fetchedAt: "2026-09-21T10:05:05.000Z" },
+          prevClose: { provider: "alpaca", asOf: "2026-09-21T10:00:00.000Z", fetchedAt: "2026-09-21T10:00:05.000Z" },
+          vwap: { provider: "alpaca", asOf: "2026-09-21T10:00:00.000Z", fetchedAt: "2026-09-21T10:00:05.000Z" },
+          bidSize: { provider: "alpaca", asOf: "2026-09-21T10:00:00.000Z", fetchedAt: "2026-09-21T10:00:05.000Z" },
+          askSize: { provider: "alpaca", asOf: "2026-09-21T10:00:00.000Z", fetchedAt: "2026-09-21T10:00:05.000Z" }
+        }
+      }
+    });
+    const cand = merged.topCandidates[0]!;
+    expect(cand.bidSize).toBe(200);
+    expect(cand.askSize).toBe(300);
+    expect(cand.fieldObservations?.prevClose?.source).toBe("alpaca");
+    expect(cand.fieldObservations?.vwap?.source).toBe("alpaca");
+    expect(cand.fieldObservations?.price?.source).toBe("finnhub");
+    expect(cand.fieldObservations?.bidSize?.source).toBe("alpaca");
+    const summary = merged.quotesBySymbol.AAPL!;
+    expect(summary.bidSize).toBe(200);
+    expect(summary.askSize).toBe(300);
+    expect(summary.fieldObservations?.prevClose?.source).toBe("alpaca");
   });
 });
 

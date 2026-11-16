@@ -3,7 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { generateProactiveRiskProposals, planTakeProfitTrims, takeProfitTrimQuantity } from "../src/lib/strategy";
-import { getStopPlans, insertFillEvent, listFillEvents, recordStopPlan } from "../src/lib/db";
+import {
+  getProposal,
+  getSocraticDecisionCase,
+  getStopPlans,
+  insertFillEvent,
+  insertProposal,
+  listFillEvents,
+  recordStopPlan,
+  upsertSocraticDecisionCase
+} from "../src/lib/db";
+import {
+  isUnusableBrokerOrderId,
+  listPendingBrokerReconciliationFills,
+  markUnreconcilableUnusableBrokerOrderFills
+} from "../src/lib/db-fills";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { BrokerGateway } from "../src/lib/types";
 import type { EquityOrder, TradingPolicy } from "../src/lib/types";
@@ -11,6 +25,8 @@ import { reconcilePendingFills } from "../src/lib/strategy-execution";
 import { isRiskAddingOpening } from "../src/lib/strategy-risk";
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -30,10 +46,45 @@ beforeAll(() => {
 describe("reconcilePendingFills", () => {
   it("updates pending_reconciliation live fills when matched broker order is filled", async () => {
     const fillId = randomUUID();
+    const proposalId = randomUUID();
     const brokerOrderId = "broker-order-123";
+    const proposal = {
+      symbol: "AAPL",
+      side: "buy" as const,
+      type: "market" as const,
+      quantity: 10,
+      timeInForce: "gfd" as const,
+      marketHours: "regular_hours" as const,
+      rationale: "Delayed-fill lifecycle regression.",
+      tradeThesisTag: "Momentum-Breakout",
+      entryMarketRegime: "Neutral"
+    };
+    insertProposal({
+      id: proposalId,
+      runId: "r1",
+      accountNumber: "ACC123",
+      proposal,
+      decision: { approved: true, reasons: [] },
+      estimatedNotional: 1500,
+      status: "placed",
+      executionMode: "broker/live"
+    });
+    upsertSocraticDecisionCase({
+      id: proposalId,
+      proposalId,
+      runId: "r1",
+      accountNumber: "ACC123",
+      symbol: "AAPL",
+      side: "buy",
+      status: "placed",
+      authority: "decide",
+      thesis: "Momentum-Breakout",
+      rationale: proposal.rationale,
+      action: "BUY AAPL 10 sh"
+    });
     insertFillEvent({
       id: fillId,
-      proposalId: "p1",
+      proposalId,
       runId: "r1",
       accountNumber: "ACC123",
       source: "live",
@@ -71,6 +122,8 @@ describe("reconcilePendingFills", () => {
     expect(matched!.status).toBe("filled");
     expect(matched!.price).toBe(155);
     expect(matched!.notional).toBe(1550);
+    expect(getProposal(proposalId)?.status).toBe("filled");
+    expect(getSocraticDecisionCase(proposalId)).toMatchObject({ status: "filled", notional: 1550 });
   });
 
   it("commits a per-position stop plan once a pending_reconciliation opening fill is CONFIRMED filled (the plan couldn't commit at placement time — the order might still cancel/expire before ever opening the lot; Codex review, PR #1371)", async () => {
@@ -263,9 +316,44 @@ describe("reconcilePendingFills", () => {
 
   it("books the executed shares when an order is cancelled after a partial fill", async () => {
     const fillId = randomUUID();
+    const proposalId = randomUUID();
     const brokerOrderId = "broker-order-partial-2";
+    const proposal = {
+      symbol: "MSFT",
+      side: "buy" as const,
+      type: "market" as const,
+      quantity: 5,
+      timeInForce: "gfd" as const,
+      marketHours: "regular_hours" as const,
+      rationale: "terminal partial lifecycle",
+      tradeThesisTag: "Momentum-Breakout",
+      entryMarketRegime: "Neutral"
+    };
+    insertProposal({
+      id: proposalId,
+      runId: "r-terminal-partial",
+      accountNumber: "ACCPF",
+      proposal,
+      decision: { approved: true, reasons: [] },
+      estimatedNotional: 2000,
+      status: "placed",
+      executionMode: "broker/live"
+    });
+    upsertSocraticDecisionCase({
+      id: proposalId,
+      proposalId,
+      runId: "r-terminal-partial",
+      accountNumber: "ACCPF",
+      symbol: "MSFT",
+      side: "buy",
+      status: "placed",
+      authority: "decide",
+      thesis: "Momentum-Breakout",
+      rationale: proposal.rationale,
+      action: "BUY MSFT 5 sh"
+    });
     insertFillEvent({
-      id: fillId, proposalId: "pp2", runId: "r1", accountNumber: "ACCPF",
+      id: fillId, proposalId, runId: "r1", accountNumber: "ACCPF",
       source: "live", symbol: "MSFT", side: "buy", quantity: 5, price: 400, notional: 2000,
       status: "pending_reconciliation", brokerOrderId, raw: { test: true }
     });
@@ -280,6 +368,334 @@ describe("reconcilePendingFills", () => {
     expect(matched!.status).toBe("filled");
     expect(matched!.quantity).toBe(2);
     expect(matched!.notional).toBeCloseTo(802); // 2 * 401
+    expect(getProposal(proposalId)).toMatchObject({ status: "filled", estimatedNotional: 802 });
+    expect(getSocraticDecisionCase(proposalId)).toMatchObject({ status: "filled", notional: 802 });
+  });
+
+  it("never reduces an already-booked partial fill when a stale smaller snapshot arrives", async () => {
+    const accountNumber = `MONO-PARTIAL-${randomUUID()}`;
+    const fillId = randomUUID();
+    const brokerOrderId = randomUUID();
+    insertFillEvent({
+      id: fillId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 4,
+      price: 151,
+      notional: 604,
+      status: "partially_filled",
+      brokerOrderId
+    });
+
+    await reconcilePendingFills(createMockGateway({
+      getEquityOrders: async () => [{
+        id: brokerOrderId,
+        symbol: "AAPL",
+        side: "buy",
+        type: "market",
+        state: "partially_filled",
+        filledQuantity: 2,
+        averagePrice: 149,
+        createdAt: new Date().toISOString()
+      } as EquityOrder]
+    }), accountNumber);
+
+    expect(listFillEvents(accountNumber, "live").find((fill) => fill.id === fillId)).toMatchObject({
+      status: "partially_filled",
+      quantity: 4,
+      price: 151,
+      notional: 604
+    });
+  });
+
+  it("finalizes the known partial instead of rejecting it when a terminal snapshot regresses to zero", async () => {
+    const accountNumber = `MONO-TERMINAL-${randomUUID()}`;
+    const proposalId = randomUUID();
+    const brokerOrderId = randomUUID();
+    const proposal = {
+      symbol: "MSFT",
+      side: "buy" as const,
+      type: "market" as const,
+      quantity: 5,
+      timeInForce: "gfd" as const,
+      marketHours: "regular_hours" as const,
+      rationale: "monotonic terminal snapshot",
+      tradeThesisTag: "Momentum-Breakout",
+      entryMarketRegime: "Neutral"
+    };
+    insertProposal({
+      id: proposalId,
+      runId: randomUUID(),
+      accountNumber,
+      proposal,
+      decision: { approved: true, reasons: [] },
+      estimatedNotional: 2000,
+      status: "placed",
+      executionMode: "broker/live"
+    });
+    upsertSocraticDecisionCase({
+      id: proposalId,
+      proposalId,
+      accountNumber,
+      symbol: "MSFT",
+      side: "buy",
+      status: "placed",
+      authority: "decide",
+      thesis: "Momentum-Breakout",
+      rationale: proposal.rationale,
+      action: "BUY MSFT 5 sh"
+    });
+    insertFillEvent({
+      proposalId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "MSFT",
+      side: "buy",
+      quantity: 2,
+      price: 401,
+      notional: 802,
+      status: "partially_filled",
+      brokerOrderId
+    });
+
+    await reconcilePendingFills(createMockGateway({
+      getEquityOrders: async () => [{
+        id: brokerOrderId,
+        symbol: "MSFT",
+        side: "buy",
+        type: "market",
+        state: "canceled",
+        filledQuantity: 0,
+        createdAt: new Date().toISOString()
+      } as EquityOrder]
+    }), accountNumber);
+
+    expect(listFillEvents(accountNumber, "live")[0]).toMatchObject({ status: "filled", quantity: 2, price: 401, notional: 802 });
+    expect(getProposal(proposalId)).toMatchObject({ status: "filled", estimatedNotional: 802 });
+    expect(getSocraticDecisionCase(proposalId)).toMatchObject({ status: "filled", notional: 802 });
+  });
+
+  it("keeps an expanded cumulative fill pending when the broker omits its realized price", async () => {
+    const accountNumber = `MONO-UNPRICED-${randomUUID()}`;
+    const fillId = randomUUID();
+    const brokerOrderId = randomUUID();
+    insertFillEvent({
+      id: fillId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "NVDA",
+      side: "buy",
+      quantity: 2,
+      price: 100,
+      notional: 200,
+      status: "partially_filled",
+      brokerOrderId
+    });
+
+    await reconcilePendingFills(createMockGateway({
+      getEquityOrders: async () => [{
+        id: brokerOrderId,
+        symbol: "NVDA",
+        side: "buy",
+        type: "market",
+        state: "filled",
+        filledQuantity: 4,
+        createdAt: new Date().toISOString()
+      } as EquityOrder]
+    }), accountNumber);
+
+    expect(listFillEvents(accountNumber, "live").find((fill) => fill.id === fillId)).toMatchObject({
+      status: "partially_filled",
+      quantity: 2,
+      price: 100,
+      notional: 200
+    });
+  });
+
+  it("preserves an unpriced pending quantity floor until an equal-or-larger priced snapshot arrives", async () => {
+    const accountNumber = `MONO-PENDING-FLOOR-${randomUUID()}`;
+    const fillId = randomUUID();
+    const brokerOrderId = randomUUID();
+    insertFillEvent({
+      id: fillId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 4,
+      price: 0,
+      notional: 0,
+      status: "pending_reconciliation",
+      brokerOrderId,
+      raw: { execution: { filledQuantity: 4 } }
+    });
+
+    let snapshot: EquityOrder = {
+      id: brokerOrderId,
+      symbol: "AAPL",
+      side: "buy",
+      type: "market",
+      state: "partially_filled",
+      filledQuantity: 2,
+      averagePrice: 149,
+      createdAt: new Date().toISOString()
+    };
+    const gateway = createMockGateway({ getEquityOrders: async () => [snapshot] });
+    await reconcilePendingFills(gateway, accountNumber);
+
+    expect(listFillEvents(accountNumber, "live").find((fill) => fill.id === fillId)).toMatchObject({
+      status: "pending_reconciliation",
+      quantity: 4,
+      price: 0,
+      notional: 0,
+      raw: expect.objectContaining({ maxBrokerFilledQuantity: 4 })
+    });
+
+    snapshot = { ...snapshot, filledQuantity: 4, averagePrice: 151 };
+    await reconcilePendingFills(gateway, accountNumber);
+    expect(listFillEvents(accountNumber, "live").find((fill) => fill.id === fillId)).toMatchObject({
+      status: "partially_filled",
+      quantity: 4,
+      price: 151,
+      notional: 604
+    });
+  });
+
+  it("excludes unusable broker_order_id and unreconcilable fills from the pending reconcile list", () => {
+    const accountNumber = `UNRECON-LIST-${randomUUID()}`;
+    const goodId = randomUUID();
+    const badUndefinedId = randomUUID();
+    const badEmptyId = randomUUID();
+    const alreadyUnreconcilableId = randomUUID();
+
+    insertFillEvent({
+      id: goodId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      price: 100,
+      notional: 100,
+      status: "pending_reconciliation",
+      brokerOrderId: "real-broker-order-1"
+    });
+    insertFillEvent({
+      id: badUndefinedId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "MSFT",
+      side: "buy",
+      quantity: 1,
+      price: 100,
+      notional: 100,
+      status: "pending_reconciliation",
+      brokerOrderId: "undefined"
+    });
+    insertFillEvent({
+      id: badEmptyId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "GOOG",
+      side: "buy",
+      quantity: 1,
+      price: 100,
+      notional: 100,
+      status: "pending_reconciliation",
+      brokerOrderId: ""
+    });
+    insertFillEvent({
+      id: alreadyUnreconcilableId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "TSLA",
+      side: "buy",
+      quantity: 1,
+      price: 100,
+      notional: 100,
+      status: "unreconcilable",
+      brokerOrderId: "undefined"
+    });
+
+    expect(isUnusableBrokerOrderId("undefined")).toBe(true);
+    expect(isUnusableBrokerOrderId("")).toBe(true);
+    expect(isUnusableBrokerOrderId(null)).toBe(true);
+    expect(isUnusableBrokerOrderId("real-broker-order-1")).toBe(false);
+
+    const pending = listPendingBrokerReconciliationFills(accountNumber);
+    expect(pending.map((f) => f.id)).toEqual([goodId]);
+    expect(pending.some((f) => f.brokerOrderId === "undefined")).toBe(false);
+    expect(pending.some((f) => f.status === "unreconcilable")).toBe(false);
+  });
+
+  it("flips pending fills with unusable broker_order_id to unreconcilable (forward guard + list exclusion)", async () => {
+    const accountNumber = `UNRECON-FLIP-${randomUUID()}`;
+    const badId = randomUUID();
+    const goodId = randomUUID();
+    const goodBrokerOrderId = `broker-${randomUUID()}`;
+
+    insertFillEvent({
+      id: badId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      price: 10,
+      notional: 10,
+      status: "pending_reconciliation",
+      brokerOrderId: "undefined"
+    });
+    insertFillEvent({
+      id: goodId,
+      accountNumber,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "MSFT",
+      side: "buy",
+      quantity: 2,
+      price: 50,
+      notional: 100,
+      status: "pending_reconciliation",
+      brokerOrderId: goodBrokerOrderId
+    });
+
+    const getEquityOrders = vi.fn(async () => [
+      {
+        id: goodBrokerOrderId,
+        symbol: "MSFT",
+        side: "buy",
+        type: "market",
+        state: "filled",
+        filledQuantity: 2,
+        averagePrice: 51,
+        createdAt: new Date().toISOString(),
+        updatedAt: "2026-06-15T12:00:00.000Z"
+      } as EquityOrder
+    ]);
+    await reconcilePendingFills(createMockGateway({ getEquityOrders }), accountNumber);
+
+    const bad = listFillEvents(accountNumber, "live").find((f) => f.id === badId);
+    const good = listFillEvents(accountNumber, "live").find((f) => f.id === goodId);
+    expect(bad?.status).toBe("unreconcilable");
+    expect(good?.status).toBe("filled");
+    expect(good?.price).toBe(51);
+    // Quarantined bad id never reaches the broker listing path as a match target.
+    expect(listPendingBrokerReconciliationFills(accountNumber)).toHaveLength(0);
+
+    // Idempotent second pass: mark helper finds nothing once flipped.
+    expect(markUnreconcilableUnusableBrokerOrderFills(accountNumber)).toHaveLength(0);
   });
 
   it("reconciles broker-paper pending fills even after many older paper fills", async () => {
@@ -491,7 +907,7 @@ describe("generateProactiveRiskProposals", () => {
     expect(proposals[0].rationale).toContain("short stop-loss");
   });
 
-  it("does not manage a short position when short selling is disabled", () => {
+  it("emits a COVER to protect an existing breached short even when short selling is disabled", () => {
     const policy: TradingPolicy = {
       ...DEFAULT_POLICY,
       shortSellingEnabled: false,
@@ -499,7 +915,10 @@ describe("generateProactiveRiskProposals", () => {
     };
     const positions = [{ symbol: "TSLA", quantity: -5, averageCost: 100, marketValue: -550 }];
     const proposals = generateProactiveRiskProposals(positions, { TSLA: 110 }, policy);
-    expect(proposals).toHaveLength(0);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].side).toBe("cover");
+    expect(proposals[0].quantity).toBe(5);
+    expect(proposals[0].rationale).toContain("short stop-loss");
   });
 });
 

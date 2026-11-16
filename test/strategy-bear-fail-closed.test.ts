@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+process.env.OPENROUTER_API_KEY = "test-key";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 
 // Single-adversary consolidation (2026-07-07): the ONE Red Team review MUST fail closed. When the
@@ -11,6 +12,8 @@ import { DEFAULT_POLICY } from "../src/lib/defaults";
 // deleted and the same guarantees now live on the consolidated post-sizing review.)
 
 vi.mock("../src/lib/vector-db", () => ({
+  getCurrentVectorProviderAuthority: vi.fn(),
+  managedVectorLedgerAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -105,7 +108,7 @@ function reviewApprove(): Response {
 function stubFetchReviewFailure(reviewFailure: "http429" | "throw" | "malformed"): void {
   vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    if (href.includes("api.openai.com")) {
+    if (href.includes("openrouter.ai") || href.includes("api.openai.com")) {
       const body = String(init?.body ?? "");
       const isReview = body.includes("Red Team Risk Agent") || body.includes("red_team_verdict");
       if (isReview) {
@@ -127,7 +130,7 @@ function stubFetchReviewFailure(reviewFailure: "http429" | "throw" | "malformed"
 
 async function setupBrokerPaperDecide(label: string): Promise<void> {
   const { setPolicy, upsertConnectedAccount, setActiveConnectedAccount, upsertUserApiKey } = await import("../src/lib/db");
-  upsertUserApiKey("local", "openai", "test-openai-key", "test fixture");
+  upsertUserApiKey("local", "openrouter", "test-openai-key", "test fixture");
   const accountId = randomUUID();
   upsertConnectedAccount({
     id: accountId,
@@ -146,15 +149,15 @@ async function setupBrokerPaperDecide(label: string): Promise<void> {
     systemState: "active",
     activeBroker: "alpaca",
     accountNumber: "TEST",
-    llmModel: "gpt-4.1-mini",
+    llmModel: "openai/gpt-4.1-mini",
     // Both models are required explicit picks now (no defaults, no fallback to Green).
-    redTeamLlmModel: "gpt-4.1-mini",
+    redTeamLlmModel: "openai/gpt-4.1-mini",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
     strategyAuthority: "decide",
     // Relax caps so a single $1000 AAPL buy survives the risk gates and reaches the routing branch.
     maxOrderPctOfNav: 100,
-    // Kept just under the db.ts safety clamp (>=500_000 is reset to the 500 default).
+    // Large explicit dollar mode keeps this test focused on Red-Team fail-closed routing.
     maxDailyNotional: 400_000,
     // 0/falsy disables the NAV-relative daily cap (the test broker reports ~0 NAV, which would
     // otherwise make the percent-of-NAV ceiling 0 and block every opening).
@@ -173,7 +176,7 @@ describe("single Red Team review fail-closed (§3.7)", () => {
   ] as const)(
     "routes the opening to human review (never auto-executes) when the review fails (%s → %s) in decide mode",
     async (reviewFailure, expectedKind) => {
-      vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+      vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
       stubFetchReviewFailure(reviewFailure);
       await setupBrokerPaperDecide(`Review ${reviewFailure}`);
       const { runStrategyOnce } = await import("../src/lib/strategy");
@@ -205,19 +208,25 @@ describe("single Red Team review fail-closed (§3.7)", () => {
   );
 
   it("routes the opening to human review when the Red model's provider has no key (not_configured)", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "");
     // Point the Red Team at a provider with no configured key so the review resolves keyless.
     vi.stubEnv("GEMINI_API_KEY", "");
     vi.stubEnv("GOOGLE_API_KEY", "");
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
       // Only the Bull runs (the review is skipped keyless, no fetch); return the buy.
-      if (href.includes("api.openai.com")) return bullOk();
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) return bullOk();
       if (href.includes("nasdaq.com")) return nasdaqResponse();
       return new Response("not found", { status: 404 });
     });
     await setupBrokerPaperDecide("Review no-key");
-    const { setPolicy, getPolicy, listAudit } = await import("../src/lib/db");
+
+    const { setPolicy, getPolicy, listAudit, deleteUserApiKey, upsertUserApiKey } = await import("../src/lib/db");
+    deleteUserApiKey("local", "gemini");
+    deleteUserApiKey("local", "openrouter");
+    upsertUserApiKey("local", "openai", "test-openai-key", "test");
+
     setPolicy({ ...getPolicy(), redTeamLlmModel: "gemini-2.5-flash" });
     const { runStrategyOnce } = await import("../src/lib/strategy");
 
@@ -234,10 +243,10 @@ describe("single Red Team review fail-closed (§3.7)", () => {
   }, 30_000);
 
   it("routes the opening to human review when NO Red model is chosen at all (blank — no Green fallback)", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     vi.stubGlobal("fetch", async (url: string | URL | Request) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) return bullOk();
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) return bullOk();
       if (href.includes("nasdaq.com")) return nasdaqResponse();
       return new Response("not found", { status: 404 });
     });
@@ -262,10 +271,10 @@ describe("single Red Team review fail-closed (§3.7)", () => {
   }, 30_000);
 
   it("does NOT flag unavailable when the review succeeds — the verdict is stamped and no hold audit fires", async () => {
-    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openai-key");
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
-      if (href.includes("api.openai.com")) {
+      if (href.includes("openrouter.ai") || href.includes("api.openai.com")) {
         const body = String(init?.body ?? "");
         if (body.includes("Red Team Risk Agent") || body.includes("red_team_verdict")) return reviewApprove();
         return bullOk();

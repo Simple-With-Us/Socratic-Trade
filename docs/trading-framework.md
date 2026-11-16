@@ -63,7 +63,7 @@ scheduler, or manually — flows through eight stages:
    else is an owner preference the agent may argue past with a logged,
    structured override thesis.
 7. **Execute (broker).** Approved orders route through one guarded choke point
-   into a broker-agnostic gateway (Alpaca, Tradier, Robinhood adapters).
+   into a broker-agnostic gateway (Alpaca, Tradier, and Robinhood adapters).
    Placement is crash-safe and idempotent: the intent is persisted before the
    broker call, uncertain outcomes are reconciled against broker truth by
    client-order-id, and protective stops rest at the broker so they survive
@@ -229,9 +229,12 @@ truncated or malformed reply degrades to zero proposals with a distinct audit
 — and zero proposals is prompted as a *correct* outcome, not a failure.
 
 A **rotation sentinel** (`__rotate__`, `src/lib/model-rotation.ts`) can serve a
-different curated model each run — with proposer/reviewer pairings
-phase-shifted so combinations vary — accruing live comparative model history,
-since every proposal is stamped with the model that actually served it.
+different curated model each run — sampled representation-weighted, so models
+underrepresented in the account's recent rotation history are twice as likely
+to be picked as overrepresented ones (which can still be picked), and a run
+never serves the same model to both seats — accruing live comparative model
+history evenly, since every proposal is stamped with the model that actually
+served it.
 
 ### Deterministic sizing
 
@@ -308,9 +311,10 @@ Framework rules that shape it:
 - **Tax-aware, not tax-paternalistic.** The wash-sale gate prices the
   forfeited deduction and, by default, records it as telemetry and prompt
   context rather than vetoing (the deterministic edge-vs-cost veto was
-  removed as pseudo-math). IRA rebuys — where the loss destruction is
-  permanent — have their own owner control. No wash-sale outcome is ever
-  silent.
+  removed as pseudo-math). IRA Ignore (default) does not steer Green or
+  veto; Auto weighs the priced cost then proceeds; Block refuses.
+  Minimum loss is optional (blank = every loss). No wash-sale outcome is
+  ever silent.
 - Missing data skips a check rather than guessing (staleness is the one
   deliberate, opt-in fail-safe exception).
 

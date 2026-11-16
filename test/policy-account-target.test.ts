@@ -145,4 +145,60 @@ describe("/api/policy account-target binding", () => {
     expect(response.status).toBe(400);
     expect(db.getStrategyPrompt(userId, accountId)).toBe("Original prompt");
   });
+
+  it("switches the targeted account daily cap between percent and dollars exclusively", async () => {
+    const db = await import("../src/lib/db");
+    const { resolveRequestUserFromEmail } = await import("../src/lib/request-user");
+    const { PUT } = await import("../app/api/policy/route");
+    const email = `policy-cap-${randomUUID()}@example.com`;
+    const userId = resolveRequestUserFromEmail(email).userId;
+    const accountA = `cap-a-${randomUUID()}`;
+    const accountB = `cap-b-${randomUUID()}`;
+
+    for (const [id, number, active] of [[accountA, "CAP-A", true], [accountB, "CAP-B", false]] as const) {
+      db.upsertConnectedAccount({
+        id,
+        userId,
+        broker: "alpaca",
+        environment: "live",
+        accountNumber: number,
+        label: number,
+        isActive: active
+      });
+    }
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountA), maxDailyNotional: 1_000, maxDailyPctOfNav: undefined },
+      userId,
+      accountA
+    );
+    db.setPolicy(
+      { ...db.getPolicy(userId, accountB), maxDailyNotional: 600, maxDailyPctOfNav: undefined },
+      userId,
+      accountB
+    );
+
+    const percentResponse = await PUT(
+      policyRequest(email, {
+        targetConnectedAccountId: accountA,
+        maxDailyNotional: null,
+        maxDailyPctOfNav: 20
+      })
+    );
+    expect(percentResponse.status).toBe(200);
+    expect(db.getPolicy(userId, accountA)).toMatchObject({ maxDailyPctOfNav: 20 });
+    expect(db.getPolicy(userId, accountA).maxDailyNotional).toBeUndefined();
+    expect(db.getPolicy(userId, accountB)).toMatchObject({ maxDailyNotional: 600 });
+
+    const dollarResponse = await PUT(
+      policyRequest(email, {
+        targetConnectedAccountId: accountA,
+        maxDailyNotional: 250,
+        maxDailyPctOfNav: null
+      })
+    );
+    expect(dollarResponse.status).toBe(200);
+    expect(db.getPolicy(userId, accountA)).toMatchObject({ maxDailyNotional: 250 });
+    expect(db.getPolicy(userId, accountA).maxDailyPctOfNav).toBeUndefined();
+    expect(db.getPolicy(userId, accountB)).toMatchObject({ maxDailyNotional: 600 });
+  });
 });

@@ -18,6 +18,7 @@ import {
   factorRows,
   type QuoteView
 } from "../app/console/ui/drilldown-data";
+import { resolveDrilldownCompanyName } from "../app/console/ui/symbol-drilldown";
 import { deriveMetrics } from "../src/lib/derived-metrics";
 import type { EquityPosition, MarketQuote, MarketQuoteSummary } from "../src/lib/types";
 
@@ -381,6 +382,14 @@ describe("console drilldown: on-demand enrichment (symbol outside the last scan)
   it("hasEnrichedData is false when every provider came back empty (sources is always a defined-but-empty object)", () => {
     expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", { sources: {} }))).toBe(false);
     expect(hasEnrichedData(toQuoteViewFromEnrichment("ZZZZ", {}))).toBe(false);
+  });
+
+  it("fills the drawer header name from on-demand identity while keeping scan identity authoritative", () => {
+    const scan = toQuoteViewFromEnrichment("LRCX", { companyName: "Scan Name" });
+    const onDemand = toQuoteViewFromEnrichment("LRCX", { companyName: "Lam Research Corporation" });
+    expect(resolveDrilldownCompanyName(null, onDemand)).toBe("Lam Research Corporation");
+    expect(resolveDrilldownCompanyName(scan, onDemand)).toBe("Scan Name");
+    expect(resolveDrilldownCompanyName(null, toQuoteViewFromEnrichment("LRCX", { companyName: "  " }))).toBeUndefined();
   });
 });
 

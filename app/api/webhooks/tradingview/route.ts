@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { audit } from "@/lib/db";
+import { PayloadTooLargeError, readBodyWithLimit, TRADINGVIEW_WEBHOOK_MAX_BYTES } from "@/lib/bounded-body";
 import {
   recordTradingViewSignal,
   technicalEnabled,
@@ -47,12 +48,18 @@ export async function POST(req: Request) {
   }
 
   // Pine `alert()` sends the message as the raw request body; content-type is not
-  // guaranteed to be application/json, so read text and parse defensively.
+  // guaranteed to be application/json, so read text and parse defensively. This route had no
+  // byte cap at all (unlike the congress webhook, which at least checked a declared
+  // content-length); readBodyWithLimit enforces one independent of any header, streaming-abort
+  // style, since a single alert payload is always tiny.
   let payload: TradingViewWebhookPayload;
   try {
-    const text = await req.text();
+    const text = await readBodyWithLimit(req, TRADINGVIEW_WEBHOOK_MAX_BYTES);
     payload = JSON.parse(text) as TradingViewWebhookPayload;
-  } catch {
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return NextResponse.json({ ok: false, error: "payload too large" }, { status: 413 });
+    }
     return NextResponse.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
   }
 

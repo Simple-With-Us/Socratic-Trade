@@ -123,7 +123,7 @@ export function DirtyGuardProvider({ children }: { children: ReactNode }) {
       {children}
       <Sheet open={prompt !== null} onClose={() => setPrompt(null)} title="Unsaved changes">
         <p className="text-[length:var(--con-fs-sm)] leading-relaxed text-[color:var(--con-muted)]">
-          You have unsaved changes on this page. Leaving now discards them.
+          You have unsaved changes on this page.  Leaving now discards them.
         </p>
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           <Btn variant="ghost" onClick={() => setPrompt(null)} title="Stay on this page and keep your unsaved changes.">

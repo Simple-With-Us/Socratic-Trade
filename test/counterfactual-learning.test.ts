@@ -91,6 +91,36 @@ describe("counterfactual skipped-candidate learning", () => {
     expect(promptRows[0]).toMatchObject({ symbol: "AAPL", returnPct: 15, currentPrice: 115 });
   });
 
+  it("ST-4589 B12: an after-hours ET snapshot anchors its daily horizons on the ET market day, not the UTC date", async () => {
+    const userId = `cf-etday-${randomUUID()}`;
+    // Wed 2026-06-10 11:30 PM ET == Thu 2026-06-11 03:30 UTC.
+    const fetchOHLC: CounterfactualOHLCFetcher = async () => [
+      { time: "2026-06-10", close: 100 },
+      { time: "2026-06-11", close: 110 },
+      { time: "2026-06-12", close: 120 },
+      { time: "2026-06-17", close: 125 },
+      { time: "2026-06-18", close: 130 }
+    ];
+    audit("signal_snapshot", {
+      runId: "run-cf-etday",
+      asOf: "2026-06-11T03:30:00.000Z",
+      signals: [{ symbol: "NVDA", chosen: false, refPrice: 100, score: 80 }]
+    }, userId);
+
+    await materializeSkippedCandidateCounterfactuals(userId, {
+      now: Date.parse("2026-06-25T00:00:00.000Z"),
+      horizonDays: 5,
+      fetchOHLC
+    });
+
+    const row = listMaturedSkippedCounterfactuals(userId)[0];
+    const oneDay = row?.outcomes?.find((r) => r.horizon === "1d");
+    // ET basis Wed 06-10 -> 1d target Thu 06-11 (close 110 = +10%). The UTC basis (Thu 06-11)
+    // would have read Fri 06-12 (+20%).
+    expect(oneDay?.priceBasis).toContain("daily_close(2026-06-11)");
+    expect(oneDay?.returnPct).toBeCloseTo(10, 2);
+  });
+
   it("keeps materialization scoped by user even for the same run and symbol", async () => {
     const userA = `cf-user-a-${randomUUID()}`;
     const userB = `cf-user-b-${randomUUID()}`;

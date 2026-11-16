@@ -1,32 +1,78 @@
-# Socratic Trade iOS Client
+# Socratic-Trade iOS
 
-SwiftUI starter for the native iPhone control surface. The backend remains the
-source of truth: this app stores only the server session/token, submits commands
-to `/api/mobile/commands`, reads `/api/mobile/snapshot`, and listens to
-`/api/mobile/events`.
+Native, phone-first desk for Socratic-Trade. Pin Home, Proposals, Assets,
+Activity, Insights, Coach, Scan, Guardrails, or Results — More keeps every
+screen reachable. Insights stays a snapshot brief; Coach is the live
+`/api/chat` conversation.
 
-## Target Setup
+The backend remains authoritative. The app reads `/api/mobile/snapshot`, submits
+audited work through `/api/mobile/commands`, and listens to
+`/api/mobile/events`. Broker credentials, provider keys, policy enforcement,
+proposal revalidation, inference, and order placement stay on the server.
 
-1. Create an iOS SwiftUI app target in Xcode.
-2. Add the Swift files from this directory to the target.
-3. Set the backend base URL in `SocraticTradeApp.swift`.
-4. Use `ASWebAuthenticationSession` or an embedded system browser session for
-   backend login. Store only the resulting server session token/cookie in
-   Keychain or the system cookie store.
+## Generate and build
 
-Provider keys, broker credentials, scraping, calculations, MCP calls, and order
-placement stay behind the backend API.
+The XcodeGen spec at `ios/project.yml` is the single project definition. The
+checked-in `.xcodeproj` is regenerated from that spec so Xcode users can open
+and build it directly; never hand-edit it. When the spec changes, regenerate
+the project and include the generated project update in the same change.
 
-## Account Deletion
+```bash
+cd ios
+xcodegen generate
+xcodebuild \
+  -project SocraticTrade.xcodeproj \
+  -scheme SocraticTrade \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build
+```
 
-The iOS app should use the same multi-step backend flow as the PWA:
+Run unit tests against an installed simulator:
 
-1. `POST /api/mobile/account-deletion/request`.
-2. Show the returned warning steps, signed-in email/user id, and required text.
-3. `POST /api/mobile/account-deletion/confirm` with `requestId`,
-   `typedIdentity`, and `typedText`.
-4. On success, clear local session state and open `/logout`.
+```bash
+xcodebuild \
+  -project SocraticTrade.xcodeproj \
+  -scheme SocraticTrade \
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+  CODE_SIGNING_ALLOWED=NO test
+```
 
-This deletes the app-side account data and server-stored secrets. Revoking the
-OAuth grant inside Google or Apple account settings is a separate provider-side
-action.
+The canonical application bundle identifier is `com.socratictrade.ios`. The
+project includes the Sign in with Apple entitlement and the `socratictrade` URL
+scheme. The app signs in directly with Apple's identity-token endpoint. Google
+and GitHub use `ASWebAuthenticationSession`, but the custom callback carries a
+short-lived opaque code bound to a device-generated verifier; the session JWT
+never appears in a callback URL and is exchanged into an HTTP-only cookie.
+
+## Data and failure states
+
+Snapshot-backed screens explicitly distinguish first load, retryable errors,
+empty sections, refreshing data, and stale data. A cached in-memory snapshot
+stays visible through transient network and server errors. Only HTTP 401/403
+clears the authenticated session.
+
+SSE parsing dispatches one refresh per complete payload frame and ignores
+comments/heartbeats. Store-level coalescing prevents overlapping reload storms.
+Each command has its own busy state, so an unrelated command never removes the
+Stop action.
+
+## Account deletion
+
+Account & Settings is available from the Home toolbar. Deletion uses the
+backend's request/confirm flow, requires both identity and exact phrase, clears
+the local cookie session after success, and opens the server-provided logout
+URL. Provider-side OAuth revocation remains a separate user action.
+
+## TestFlight ship (no Xcode UI)
+
+Agents (and humans) ship device builds to TestFlight from the CLI:
+
+## Ship (TestFlight)
+
+Do not archive from a Linux cloud seat or by restarting a Mac runner. GitHub-hosted
+`macos-latest` runs `.github/workflows/ios-ship.yml` (`gh workflow run ios-ship.yml`).
+The wrapper is `scripts/ios-ship-testflight.sh` -> in-repo `scripts/ios-fleet/`.
+
+Signing secrets live on the GitHub repo (same five names as Congress.Trade). Never
+mint a new App Store Connect key. Never print secret values.

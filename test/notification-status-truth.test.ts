@@ -5,8 +5,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { getDb } from "../src/lib/db";
 import { sendNotification } from "../src/lib/notifications";
-import { notify } from "../src/lib/notify";
-import type { NotificationEventType, NotifyChannelResult, TradingPolicy } from "../src/lib/types";
+import { notify, type NotifyConfig } from "../src/lib/notify";
+import type { NotificationEventType, NotifyChannelResult, NotifyPrefs, TradingPolicy } from "../src/lib/types";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `notification-status-truth-${randomUUID()}.db`)}`;
@@ -34,9 +34,52 @@ function notifierReturning(results: NotifyChannelResult[]): typeof notify {
   return vi.fn(async () => results) as unknown as typeof notify;
 }
 
+// The legacy webhook path now re-validates its target with a real DNS lookup on every send
+// (SSRF/rebinding hardening — src/lib/egress-guard.ts). "legacy.example" is an IANA-reserved,
+// never-resolving host used deliberately so these tests stay hermetic; inject a stub resolver
+// standing in for a normal public address wherever a test actually reaches sendLegacyWebhook.
+const resolveWebhookHost = async () => ["8.8.8.8"];
+
 function auditPayloads(kind: string): Array<Record<string, unknown>> {
   const rows = getDb().prepare("SELECT payload FROM audit_events WHERE kind = ? ORDER BY created_at ASC").all(kind) as Array<{ payload: string }>;
   return rows.map((row) => JSON.parse(row.payload) as Record<string, unknown>);
+}
+
+function guardedNotifyConfig(retryDelayMs = 10_000): NotifyConfig {
+  return {
+    timeoutMs: 10_000,
+    retryAttempts: 3,
+    retryDelayMs,
+    push: { ntfyServer: "https://ntfy.example" },
+    pushover: { pushoverToken: "" },
+    email: { provider: "resend", resendKey: "resend-test-key", from: "alerts@example.test" },
+    sms: { twilioSid: "", twilioToken: "", twilioFrom: "" }
+  };
+}
+
+function guardedNotifyPrefs(userId: string): NotifyPrefs {
+  return {
+    userId,
+    channels: ["push", "email"],
+    pushTarget: "lease-test-topic",
+    pushoverTarget: "",
+    webhookUrl: "",
+    email: "owner@example.test",
+    phone: "",
+    pushoverAppTokenSet: false,
+    twilioAccountSidSet: false,
+    twilioAuthTokenSet: false,
+    twilioFromSet: false,
+    watchlistDigestEnabled: false,
+    updatedAt: null
+  };
+}
+
+function durableNotificationCounts(): { notifications: number; audits: number } {
+  return {
+    notifications: (getDb().prepare("SELECT COUNT(*) AS n FROM notification_events").get() as { n: number }).n,
+    audits: (getDb().prepare("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n
+  };
 }
 
 describe("truthful notification delivery aggregation", () => {
@@ -65,7 +108,7 @@ describe("truthful notification delivery aggregation", () => {
     );
 
     expect(event.status).toBe("skipped");
-    expect(event.error).toBe("Phone push is not configured by the operator. | Email has no delivery target.");
+    expect(event.error).toBe("ntfy.sh is not configured by the operator. | Email has no delivery target.");
   });
 
   it("records joined, channel-labelled failures when every delivery fails", async () => {
@@ -82,7 +125,7 @@ describe("truthful notification delivery aggregation", () => {
     );
 
     expect(event.status).toBe("failed");
-    expect(event.error).toBe("Phone push: HTTP 500 | Email: Delivery failed.");
+    expect(event.error).toBe("ntfy.sh: HTTP 500 | Email: Delivery failed.");
   });
 
   it("records sent-with-partial-failure and audits a failed legacy webhook", async () => {
@@ -92,7 +135,8 @@ describe("truthful notification delivery aggregation", () => {
         policy: policyFor("fill", "https://legacy.example/hook"),
         userId: "partial",
         notifyImpl: notifierReturning([{ channel: "email", ok: true }]),
-        fetcher: async () => new Response("down", { status: 500 })
+        fetcher: async () => new Response("down", { status: 500 }),
+        resolveWebhookHost
       }
     );
 
@@ -180,6 +224,126 @@ describe("truthful notification delivery aggregation", () => {
     );
   });
 
+  it("does not persist delivery outcomes after a caller ownership guard is lost while awaiting", async () => {
+    let active = true;
+    let rowsAtLoss = { notifications: 0, audits: 0 };
+    const notifyImpl = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      rowsAtLoss = {
+        notifications: (getDb().prepare("SELECT COUNT(*) AS n FROM notification_events").get() as { n: number }).n,
+        audits: (getDb().prepare("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n
+      };
+      active = false;
+      return [{ channel: "email", ok: true }] satisfies NotifyChannelResult[];
+    }) as unknown as typeof notify;
+
+    await expect(sendNotification(
+      { type: "provider_degraded", title: "Provider degraded", payload: {} },
+      {
+        policy: policyFor("provider_degraded"),
+        userId: "lease-fenced",
+        notifyImpl,
+        assertActive: () => {
+          if (!active) throw new Error("lease lost during notification");
+        }
+      }
+    )).rejects.toThrow(/lease lost/i);
+
+    expect({
+      notifications: (getDb().prepare("SELECT COUNT(*) AS n FROM notification_events").get() as { n: number }).n,
+      audits: (getDb().prepare("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n
+    }).toEqual(rowsAtLoss);
+    expect(rowsAtLoss).toEqual({ notifications: 0, audits: 0 });
+  });
+
+  it("fences the real dispatcher inside a delayed channel send before retries, later channels, or audits", async () => {
+    const userId = "real-dispatch-lease-fenced";
+    const controller = new AbortController();
+    let active = true;
+    let requestSignal: AbortSignal | undefined;
+    let entered!: () => void;
+    let release!: () => void;
+    const sendEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const releaseSend = new Promise<void>((resolve) => { release = resolve; });
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      entered();
+      await releaseSend;
+      // Deliberately ignore cancellation and settle successfully: the dispatcher still must recheck.
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const pending = sendNotification(
+      { type: "provider_degraded", title: "Provider degraded", payload: {} },
+      {
+        policy: policyFor("provider_degraded"),
+        userId,
+        notifyDeps: {
+          config: guardedNotifyConfig(),
+          prefs: guardedNotifyPrefs(userId),
+          fetchImpl
+        },
+        assertActive: () => {
+          if (!active) throw new Error("lease lost during real channel send");
+        },
+        signal: controller.signal
+      }
+    );
+
+    await sendEntered;
+    const rowsAtLoss = durableNotificationCounts();
+    active = false;
+    controller.abort(new Error("lease lost during real channel send"));
+    expect(requestSignal?.aborted).toBe(true);
+    release();
+
+    await expect(pending).rejects.toThrow(/lease lost/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(durableNotificationCounts()).toEqual(rowsAtLoss);
+    expect(rowsAtLoss).toEqual({ notifications: 0, audits: 0 });
+  });
+
+  it("aborts the real dispatcher's retry wait without issuing a retry or moving to the next channel", async () => {
+    const userId = "real-dispatch-retry-fenced";
+    const controller = new AbortController();
+    let active = true;
+    let entered!: () => void;
+    const firstSendEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const fetchImpl = vi.fn(async () => {
+      entered();
+      return new Response("temporary outage", { status: 503 });
+    }) as unknown as typeof fetch;
+
+    const pending = sendNotification(
+      { type: "provider_degraded", title: "Provider degraded", payload: {} },
+      {
+        policy: policyFor("provider_degraded"),
+        userId,
+        notifyDeps: {
+          config: guardedNotifyConfig(60_000),
+          prefs: guardedNotifyPrefs(userId),
+          fetchImpl
+        },
+        assertActive: () => {
+          if (!active) throw new Error("lease lost during notification retry wait");
+        },
+        signal: controller.signal
+      }
+    );
+
+    await firstSendEntered;
+    // Let postOrThrow consume the 503 body and enter its long retry wait.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const rowsAtLoss = durableNotificationCounts();
+    active = false;
+    controller.abort(new Error("lease lost during notification retry wait"));
+
+    await expect(pending).rejects.toThrow(/lease lost/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(durableNotificationCounts()).toEqual(rowsAtLoss);
+    expect(rowsAtLoss).toEqual({ notifications: 0, audits: 0 });
+  });
+
   it("audits a successful legacy webhook through the same delivery telemetry vocabulary", async () => {
     const event = await sendNotification(
       { type: "fill", title: "Fill", payload: {} },
@@ -187,7 +351,8 @@ describe("truthful notification delivery aggregation", () => {
         policy: policyFor("fill", "https://legacy.example/hook"),
         userId: "webhook-success",
         notifyImpl: notifierReturning([]),
-        fetcher: async () => new Response(null, { status: 204 })
+        fetcher: async () => new Response(null, { status: 204 }),
+        resolveWebhookHost
       }
     );
 

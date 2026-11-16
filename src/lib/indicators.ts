@@ -24,6 +24,14 @@ export interface OHLCBar {
   volume?: number;
   /** Volume-weighted average price for the bar, when the source supplies it (e.g. Massive `vw`). */
   vwap?: number;
+  /**
+   * Provenance: which history tier produced this bar series (e.g. "massive", "yahoo-finance",
+   * "history-cache-eod"). Applied to every bar in a cascade result so chart/cache consumers can
+   * show source without a parallel series metadata object. See source-capability-matrix ohlcv_daily.
+   */
+  source?: string;
+  /** When we fetched/stored this bar (ISO). Distinct from bar `time` (session date). */
+  fetchedAt?: string;
 }
 
 export interface TechnicalRead {
@@ -54,6 +62,18 @@ export function sma(values: number[], len: number): number | undefined {
   let sum = 0;
   for (let i = values.length - len; i < values.length; i++) sum += values[i];
   return sum / len;
+}
+
+/**
+ * Rate of change over `period` bars, in percent: (last / last-N − 1) × 100.
+ * Needs period+1 closes.  Undefined when the lookback close is missing or not positive.
+ */
+export function rocPct(values: number[], period: number): number | undefined {
+  if (!Number.isInteger(period) || period <= 0 || values.length <= period) return undefined;
+  const current = values[values.length - 1];
+  const prior = values[values.length - 1 - period];
+  if (!Number.isFinite(current) || !Number.isFinite(prior) || prior <= 0) return undefined;
+  return ((current / prior) - 1) * 100;
 }
 
 /** True range for one bar given the prior close: max(H−L, |H−prevClose|, |L−prevClose|). */

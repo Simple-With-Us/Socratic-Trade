@@ -25,12 +25,28 @@ import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 import GitHub from "next-auth/providers/github";
 import Apple from "next-auth/providers/apple";
+import Twitter from "next-auth/providers/twitter";
 import type { Account, Profile, Session, User } from "next-auth";
 import type { JWT } from "next-auth/jwt";
 import type { Provider } from "next-auth/providers";
 import { canonicalizeLegacyAuthEnv } from "../public-origin";
+import { isAppleWebAuthConfigured, resolveAppleClientSecret } from "./apple-web";
 import { normalizeAuthEmail, selectVerifiedGitHubEmail, type GitHubEmail } from "./github-email";
+import { userIdForEmail } from "./identity";
+import {
+  absoluteExpUnixSeconds,
+  createAuthServerSession,
+  touchAuthServerSession,
+  revokeAuthServerSession,
+} from "../db-auth-sessions";
 import { decodeSessionToken, encodeSessionToken } from "./session-token";
+import {
+  SESSION_JWT_ABS_EXP_CLAIM,
+  SESSION_JWT_SID_CLAIM,
+  SESSION_JWT_SRV_TOUCH_CLAIM,
+  SESSION_SLIDING_MAX_AGE_SEC,
+} from "./session-policy";
+import { backfillServerSessionClaims } from "./session-backfill";
 
 type EmailProfile = Profile & {
   email?: string | null;
@@ -64,13 +80,25 @@ if (process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET) {
   );
 }
 
-if (process.env.AUTH_APPLE_ID && process.env.AUTH_APPLE_SECRET) {
+if (process.env.AUTH_TWITTER_ID && process.env.AUTH_TWITTER_SECRET) {
   providers.push(
-    Apple({
-      clientId: process.env.AUTH_APPLE_ID,
-      clientSecret: process.env.AUTH_APPLE_SECRET
+    Twitter({
+      clientId: process.env.AUTH_TWITTER_ID,
+      clientSecret: process.env.AUTH_TWITTER_SECRET
     })
   );
+}
+
+if (isAppleWebAuthConfigured()) {
+  const appleSecret = resolveAppleClientSecret();
+  if (appleSecret && process.env.AUTH_APPLE_ID) {
+    providers.push(
+      Apple({
+        clientId: process.env.AUTH_APPLE_ID,
+        clientSecret: appleSecret
+      })
+    );
+  }
 }
 
 async function verifiedGitHubEmail(accessToken: string | undefined, fallbackEmail?: string | null): Promise<string | undefined> {
@@ -116,12 +144,34 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
     : {}),
   providers,
-  session: { strategy: "jwt" },
+  session: { strategy: "jwt", maxAge: SESSION_SLIDING_MAX_AGE_SEC },
   jwt: {
     encode: encodeSessionToken,
-    decode: decodeSessionToken
+    decode: decodeSessionToken,
+  },
+  events: {
+    async signOut(message) {
+      const token = "token" in message ? message.token : undefined;
+      const sid = token?.[SESSION_JWT_SID_CLAIM];
+      if (typeof sid === "string") revokeAuthServerSession(sid);
+    },
   },
   callbacks: {
+    async redirect({ url, baseUrl }: { url: string; baseUrl: string }) {
+      // Allows relative callback URLs starting with a single '/' (not '//' or '/\')
+      if (url.startsWith("/") && !url.startsWith("//") && !url.startsWith("/\\")) {
+        return `${baseUrl}${url}`;
+      }
+      try {
+        const parsed = new URL(url);
+        if (parsed.origin === baseUrl) {
+          return url;
+        }
+      } catch {
+        // invalid URL
+      }
+      return baseUrl;
+    },
     // Gate GitHub and Apple sign-ins.
     // - GitHub: the built-in provider picks the primary email from /user/emails without
     //   checking the `verified` flag. We call /user/emails ourselves to confirm the
@@ -135,7 +185,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       account?: { provider?: string; access_token?: string } | null;
       profile?: { email?: string | null };
     }) {
-      if (!profile?.email) return account?.provider === "github" || account?.provider === "apple" ? false : true;
+      if (!profile?.email) return account?.provider === "github" || account?.provider === "apple" || account?.provider === "twitter" ? false : true;
       if (account?.provider === "github" && account.access_token) {
         const res = await fetch("https://api.github.com/user/emails", {
           headers: { Authorization: `Bearer ${account.access_token}`, "User-Agent": "authjs" }
@@ -162,6 +212,25 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       if (name) token.name = name;
       if (image) token.picture = image;
       if (account?.provider) token.loginProvider = account.provider;
+      // Bind account recreation to an actual provider sign-in, not JWT rolling refresh. The
+      // middleware forwards this trusted claim so a pre-deletion cookie cannot clear a tombstone.
+      if (account?.provider) token.loginAt = Date.now();
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (account?.provider && email) {
+        const record = createAuthServerSession(userIdForEmail(email));
+        token[SESSION_JWT_SID_CLAIM] = record.id;
+        token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(record.absoluteExpiresAt);
+        token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
+      } else if (backfillServerSessionClaims(token, nowSeconds)) {
+        // Legacy JWT migrated to a server-backed session on first Node refresh.
+      } else if (typeof token[SESSION_JWT_SID_CLAIM] === "string") {
+        const touched = touchAuthServerSession(token[SESSION_JWT_SID_CLAIM]);
+        if (!touched) {
+          return { exp: nowSeconds - 1, iat: nowSeconds - 1 };
+        }
+        token[SESSION_JWT_ABS_EXP_CLAIM] = absoluteExpUnixSeconds(touched.absoluteExpiresAt);
+        token[SESSION_JWT_SRV_TOUCH_CLAIM] = nowSeconds;
+      }
       return token;
     },
     // Expose display identity on the `session` object returned by `auth()`.
@@ -184,6 +253,6 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   },
   pages: {
     signIn: "/login",
-    error: "/access-denied"
+    error: "/login"
   }
 });

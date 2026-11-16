@@ -13,6 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrokerGateway, EquityOrder } from "../src/lib/types";
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -34,7 +36,7 @@ beforeEach(() => {
 });
 
 async function seedPlacingProposal(userId: string, id: string, refId: string): Promise<void> {
-  const { insertProposal, getDb } = await import("../src/lib/db");
+  const { insertProposal, getDb, upsertSocraticDecisionCase } = await import("../src/lib/db");
   insertProposal({
     userId,
     id,
@@ -56,6 +58,19 @@ async function seedPlacingProposal(userId: string, id: string, refId: string): P
     refId,
     status: "placing",
     executionMode: "broker/live"
+  });
+  upsertSocraticDecisionCase({
+    id,
+    userId,
+    proposalId: id,
+    accountNumber: ACCOUNT,
+    symbol: "AAPL",
+    side: "buy",
+    status: "placing",
+    authority: "decide",
+    thesis: "Momentum-Breakout",
+    rationale: "sweep test",
+    action: "BUY AAPL 1 sh"
   });
   // Backdate so listStalePlacingProposals (created_at < now-2min) picks it up.
   getDb().prepare("UPDATE trade_proposals SET created_at = ? WHERE id = ?").run(STALE_ISO, id);
@@ -108,6 +123,105 @@ describe("flagStalePlacingIntents idempotency", () => {
     expect(listFillEventsByProposalId(proposalId, userId).length).toBe(1);
   });
 
+  it("crash window: a pending receipt is finalized when broker truth advances to filled", async () => {
+    const userId = `sweep-pending-to-filled-${randomUUID()}`;
+    const proposalId = randomUUID();
+    const refId = randomUUID();
+    await seedPlacingProposal(userId, proposalId, refId);
+
+    const { getProposal, getSocraticDecisionCase, insertFillEvent, listFillEventsByProposalId } = await import("../src/lib/db");
+    const { flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const order = orderWith(refId, { state: "filled", filledQuantity: 1, averagePrice: 202 });
+    insertFillEvent({
+      userId,
+      proposalId,
+      accountNumber: ACCOUNT,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      price: 200,
+      notional: 200,
+      status: "pending_reconciliation",
+      brokerOrderId: order.id
+    });
+
+    const gateway = createMockGateway({ getEquityOrders: async () => [order] });
+    await flagStalePlacingIntents(gateway, ACCOUNT, userId);
+
+    expect(listFillEventsByProposalId(proposalId, userId)).toHaveLength(1);
+    expect(listFillEventsByProposalId(proposalId, userId)[0]).toMatchObject({ status: "filled", price: 202, quantity: 1, notional: 202 });
+    expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 202 });
+    expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 202 });
+  });
+
+  it("crash window: a terminal order with executed quantity finalizes the existing partial receipt", async () => {
+    const userId = `sweep-terminal-partial-${randomUUID()}`;
+    const proposalId = randomUUID();
+    const refId = randomUUID();
+    await seedPlacingProposal(userId, proposalId, refId);
+
+    const { getProposal, getSocraticDecisionCase, insertFillEvent, listFillEventsByProposalId } = await import("../src/lib/db");
+    const { flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const order = orderWith(refId, { state: "canceled", filledQuantity: 0.25, averagePrice: 204 });
+    insertFillEvent({
+      userId,
+      proposalId,
+      accountNumber: ACCOUNT,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      price: 200,
+      notional: 200,
+      status: "pending_reconciliation",
+      brokerOrderId: order.id
+    });
+
+    await flagStalePlacingIntents(createMockGateway({ getEquityOrders: async () => [order] }), ACCOUNT, userId);
+
+    expect(listFillEventsByProposalId(proposalId, userId)).toMatchObject([
+      { status: "filled", quantity: 0.25, price: 204, notional: 51 }
+    ]);
+    expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 51 });
+    expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 51 });
+  });
+
+  it("crash window: a stale terminal-zero snapshot finalizes rather than erases an existing priced partial", async () => {
+    const userId = `sweep-terminal-stale-zero-${randomUUID()}`;
+    const proposalId = randomUUID();
+    const refId = randomUUID();
+    await seedPlacingProposal(userId, proposalId, refId);
+
+    const { getProposal, getSocraticDecisionCase, insertFillEvent, listFillEventsByProposalId } = await import("../src/lib/db");
+    const { flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const order = orderWith(refId, { state: "canceled", filledQuantity: 0, averagePrice: undefined });
+    insertFillEvent({
+      userId,
+      proposalId,
+      accountNumber: ACCOUNT,
+      source: "live",
+      executionMode: "broker/live",
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 0.4,
+      price: 203,
+      notional: 81.2,
+      status: "partially_filled",
+      brokerOrderId: order.id
+    });
+
+    await flagStalePlacingIntents(createMockGateway({ getEquityOrders: async () => [order] }), ACCOUNT, userId);
+
+    expect(listFillEventsByProposalId(proposalId, userId)).toMatchObject([
+      { status: "filled", quantity: 0.4, price: 203, notional: 81.2 }
+    ]);
+    expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 81.2 });
+    expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 81.2 });
+  });
+
   it("sweep run twice books exactly one fill (status gate closes after the first pass)", async () => {
     const userId = `sweep-twice-${randomUUID()}`;
     const proposalId = randomUUID();
@@ -123,6 +237,25 @@ describe("flagStalePlacingIntents idempotency", () => {
 
     expect(getProposal(proposalId, userId)?.status).toBe("placed");
     expect(listFillEventsByProposalId(proposalId, userId).length).toBe(1);
+  });
+
+  it("recovers a broker-confirmed fill as filled in proposal, case, and fill ledgers", async () => {
+    const userId = `sweep-filled-${randomUUID()}`;
+    const proposalId = randomUUID();
+    const refId = randomUUID();
+    await seedPlacingProposal(userId, proposalId, refId);
+
+    const { getProposal, getSocraticDecisionCase, listFillEventsByProposalId } = await import("../src/lib/db");
+    const { flagStalePlacingIntents } = await import("../src/lib/strategy");
+    const gateway = createMockGateway({
+      getEquityOrders: async () => [orderWith(refId, { state: "filled", filledQuantity: 1, averagePrice: 201 })]
+    });
+
+    await flagStalePlacingIntents(gateway, ACCOUNT, userId);
+
+    expect(getProposal(proposalId, userId)).toMatchObject({ status: "filled", estimatedNotional: 201 });
+    expect(getSocraticDecisionCase(proposalId, userId)).toMatchObject({ status: "filled", notional: 201 });
+    expect(listFillEventsByProposalId(proposalId, userId)[0]).toMatchObject({ status: "filled", notional: 201 });
   });
 
   it("inline-then-sweep: a proposal already flipped out of 'placing' is never re-booked", async () => {

@@ -5,9 +5,13 @@ const followupMocks = vi.hoisted(() => ({
   maybeAutoTuneWeights: vi.fn()
 }));
 
-vi.mock("../src/lib/strategy", () => ({
-  runStrategyOnce: followupMocks.runStrategyOnce
-}));
+vi.mock("../src/lib/strategy", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/strategy")>();
+  return {
+    ...actual,
+    runStrategyOnce: followupMocks.runStrategyOnce
+  };
+});
 
 vi.mock("../src/lib/auto-tune-scheduler", () => ({
   maybeAutoTuneWeights: followupMocks.maybeAutoTuneWeights
@@ -52,6 +56,22 @@ describe("scheduled auto-tune follow-up", () => {
     expect(shouldAutoTuneAfterStrategyRun(result)).toBe(false);
     expect(followupMocks.runStrategyOnce).toHaveBeenCalledWith("user-a", { connectedAccountId: "account-a" });
     expect(followupMocks.maybeAutoTuneWeights).not.toHaveBeenCalled();
+  });
+
+  it("does not tune after pure pre-decision skips (UX PR-A1)", async () => {
+    for (const status of ["skipped", "skipped_budget", "skipped_market_closed", "skipped_broker_unhealthy"] as const) {
+      followupMocks.runStrategyOnce.mockReset();
+      followupMocks.maybeAutoTuneWeights.mockReset();
+      followupMocks.runStrategyOnce.mockResolvedValue({
+        runId: `skip-${status}`,
+        status,
+        summary: status,
+        proposals: []
+      });
+      const result = await runScheduledStrategyAndMaybeTune("user-skip", "account-skip", 99);
+      expect(shouldAutoTuneAfterStrategyRun(result)).toBe(false);
+      expect(followupMocks.maybeAutoTuneWeights).not.toHaveBeenCalled();
+    }
   });
 
   it("passes the scheduled account id into tuning after a completed run", async () => {

@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import { evaluateTradeProposal, betaScaledStopPct } from "../src/lib/policy";
 import {
+  BULL_PROPOSAL_REQUIRED_KEYS,
+  bullAttemptUsesJsonObjectTransport,
+  firstQuoteTolerantBlockEnd,
   enrichOpeningProposal,
+  filterRepairedProposals,
   filterStopPlansByLiveBasis,
   generateProactiveRiskProposals,
   sanitizeProposals
@@ -38,7 +42,11 @@ const portfolio: Portfolio = {
 function policy(extra: Partial<TradingPolicy> = {}): TradingPolicy {
   return {
     ...DEFAULT_POLICY, systemState: "active", accountNumber: "A1",
-    includedIndices: [], additionalSymbols: ["AAPL", "TSLA", "NVDA"], ...extra
+    includedIndices: [], additionalSymbols: ["AAPL", "TSLA", "NVDA"],
+    // Staleness gate pinned off (defaults to 120s since 2026-07-28): this file's scan() fixtures
+    // carry no asOf timestamps, and a missing timestamp blocks openings while the gate is on.
+    maxQuoteAgeSec: 0,
+    ...extra
   };
 }
 
@@ -213,6 +221,95 @@ describe("enrichOpeningProposal (broker brackets + entry anchor)", () => {
     const p = enrichOpeningProposal(buy(), policy({ activeBroker: "test", riskRules: { stopLossPct: 8, takeProfitPct: 20 } }), marketScan);
     expect(p.referencePrice).toBe(100);
     expect(p.bracketStopLoss).toBeUndefined();
+  });
+  it("attaches stop/take brackets for Tradier limit orders (native OTOCO/OTO bracket support)", () => {
+    const p = enrichOpeningProposal(buy({ type: "limit", limitPrice: 100 }), policy({ activeBroker: "tradier", riskRules: { stopLossPct: 8, takeProfitPct: 20 } }), marketScan);
+    expect(p.bracketStopLoss).toBe(92);
+    expect(p.bracketTakeProfit).toBe(120);
+  });
+  it("does not attach brackets for Tradier market orders (multi-leg entry does not support market type)", () => {
+    const p = enrichOpeningProposal(buy(), policy({ activeBroker: "tradier", riskRules: { stopLossPct: 8, takeProfitPct: 20 } }), marketScan);
+    expect(p.bracketStopLoss).toBeUndefined();
+    expect(p.bracketTakeProfit).toBeUndefined();
+  });
+  it("keeps native brackets for a Tradier market entry the marketable-limit conversion turns into a limit (PR #1701 finding 2)", () => {
+    // A Tradier `market` entry that qualifies for marketable-limit conversion becomes a `limit`
+    // order a few lines later — a type Tradier's native OTOCO/OTO bracket DOES support. The strip
+    // must NOT fire for it, or the converted limit order ends up with no native broker-held
+    // protection. dollarAmount 1000 / price 100 = 10 whole shares (>= 1), so it converts.
+    const p = enrichOpeningProposal(
+      buy({ dollarAmount: 1000 }),
+      policy({ activeBroker: "tradier", marketableLimitEntries: true, permittedOrderTypes: ["market", "limit"], riskRules: { stopLossPct: 8, takeProfitPct: 20 } }),
+      marketScan
+    );
+    expect(p.type).toBe("limit"); // converted to a marketable limit
+    // The bracket legs anchor to the CONVERTED limit price, not the pre-conversion reference (Codex
+    // review, PR #1738): no real ask on this quote, so the buy limit is refPrice*(1+15bps)=100.15,
+    // and the legs price off that (100.15*0.92=92.14 stop, 100.15*1.2=120.18 take) — NOT 92/120 off
+    // the raw 100 reference. The take-profit must stay strictly above the entry limit or the OTOCO
+    // would be rejected / exit at a loss.
+    expect(p.limitPrice).toBe(100.15);
+    expect(p.bracketStopLoss).toBe(92.14); // native bracket legs survived AND repriced to the limit
+    expect(p.bracketTakeProfit).toBe(120.18);
+    expect(p.bracketTakeProfit!).toBeGreaterThan(p.limitPrice!);
+    expect(p.bracketStopLoss!).toBeLessThan(p.limitPrice!);
+    // The market-entry strip's "not supported" annotation must NOT have been applied.
+    expect(p.rationale).not.toContain("Tradier native entry brackets are not supported");
+  });
+  it("reprices bracket legs to a marketable-limit that lands ABOVE the reference via a real ask (Codex PR #1738)", () => {
+    // The finding's exact shape: a wide/stale spread pushes the converted buy limit well above the
+    // reference. A take-profit priced off the raw reference could then sit AT/BELOW the fill. With the
+    // fix, both legs anchor to the actual limit so the take-profit is always a real profit target.
+    // ref/entry 100, real ask 120 -> buy limit 120*(1+15bps)=120.18; 20% take -> 120.18*1.2=144.22.
+    const withWideAsk: MarketScan = {
+      ...marketScan,
+      quotesBySymbol: {
+        TSLA: { symbol: "TSLA", price: 100, ask: 120, score: 50, sources: { ask: "alpaca" } }
+      }
+    };
+    const p = enrichOpeningProposal(
+      buy({ dollarAmount: 1000 }),
+      policy({ activeBroker: "tradier", marketableLimitEntries: true, permittedOrderTypes: ["market", "limit"], riskRules: { stopLossPct: 8, takeProfitPct: 20 } }),
+      withWideAsk
+    );
+    expect(p.type).toBe("limit");
+    expect(p.limitPrice).toBe(120.18);
+    expect(p.bracketTakeProfit).toBe(144.22); // off the limit, not 120 off the reference
+    expect(p.bracketStopLoss).toBe(110.57); // 120.18*0.92
+    // The pre-fix bug: take-profit would have been 120, i.e. BELOW the 120.18 entry — an instant loss.
+    expect(p.bracketTakeProfit!).toBeGreaterThan(p.limitPrice!);
+  });
+  it("strips Tradier brackets when a pathological buffer makes the marketable-limit non-positive — conversion no-ops, order stays market (Codex PR #1738)", () => {
+    // marketableLimitBufferBps 10000 (buffer 1.0) makes a SHORT limit bid*(1-1.0)=0 → non-positive →
+    // marketableLimitPrice undefined → the conversion block leaves the order type: "market". Gating the
+    // strip on the ACTUAL converted price (not just the willBecomeMarketableLimit predicate) means the
+    // un-converted Tradier market order correctly has its OTOCO legs stripped rather than handed to a
+    // gateway that can't carry them.
+    const withBid: MarketScan = {
+      ...marketScan,
+      quotesBySymbol: { TSLA: { symbol: "TSLA", price: 100, bid: 100, score: 50, sources: { bid: "alpaca" } } }
+    };
+    const p = enrichOpeningProposal(
+      buy({ side: "short", dollarAmount: 1000, bracketStopLoss: 105, bracketTakeProfit: 80 }),
+      policy({ activeBroker: "tradier", shortSellingEnabled: true, marketableLimitEntries: true, permittedOrderTypes: ["market", "limit"], tuning: { marketableLimitBufferBps: 10000 }, riskRules: { shortStopLossPct: 5, takeProfitPct: 20 } }),
+      withBid
+    );
+    expect(p.type).toBe("market"); // conversion no-op'd (computed limit was non-positive)
+    expect(p.bracketStopLoss).toBeUndefined(); // legs stripped — Tradier can't bracket a market entry
+    expect(p.bracketTakeProfit).toBeUndefined();
+    expect(p.rationale).toContain("Tradier native entry brackets are not supported");
+  });
+  it("still strips brackets for a Tradier market entry that will NOT convert (marketable-limit off)", () => {
+    // Guardrail for the finding-2 fix: with the conversion disabled the entry STAYS a market order,
+    // which Tradier can't bracket — the strip must still fire.
+    const p = enrichOpeningProposal(
+      buy({ dollarAmount: 1000 }),
+      policy({ activeBroker: "tradier", riskRules: { stopLossPct: 8, takeProfitPct: 20 } }),
+      marketScan
+    );
+    expect(p.type).toBe("market");
+    expect(p.bracketStopLoss).toBeUndefined();
+    expect(p.bracketTakeProfit).toBeUndefined();
   });
   it("attaches no brackets when brokerBracketsEnabled is false", () => {
     const p = enrichOpeningProposal(buy(), policy({ activeBroker: "alpaca", brokerBracketsEnabled: false, riskRules: { stopLossPct: 8 } }), marketScan);
@@ -471,6 +568,13 @@ describe("sanitizeProposals — per-position stop plan coercion (Codex review, P
     const [p] = sanitizeProposals([buy({ side: "sell", stopPlan: { style: "trailing" } })]);
     expect(p.stopPlan).toBeUndefined();
   });
+
+  it("keeps a non-empty exitPlan and drops blank or oversized noise", () => {
+    const [kept] = sanitizeProposals([buy({ exitPlan: "  Trim a third at 220.  " })]);
+    expect(kept.exitPlan).toBe("Trim a third at 220.");
+    const [blank] = sanitizeProposals([buy({ exitPlan: "   " })]);
+    expect(blank.exitPlan).toBeUndefined();
+  });
 });
 
 describe("enrichOpeningProposal per-position stop plans", () => {
@@ -598,5 +702,231 @@ describe("enrichOpeningProposal per-position stop plans", () => {
     // filterStopPlansByLiveBasis and never threaded here, so recordFillFromProposal later nulled the
     // stored justification on the scale-in fill's upsert.
     expect(p.stopPlan).toEqual({ style: "none", rationale: "high-conviction thesis, riding through the drawdown" });
+  });
+});
+
+describe("firstQuoteTolerantBlockEnd (Bull trailing-JSON ambiguity, Codex round 11)", () => {
+  it("finds the end of a single-quoted block whose strings contain braces, and exposes trailing JSON", () => {
+    const text = "{'proposals': [{'rationale': 'breaks the {wedge}'}]} Correction: []";
+    const end = firstQuoteTolerantBlockEnd(text);
+    expect(end).toBeGreaterThan(0);
+    expect(text.slice(end + 1)).toContain("[]"); // the guard treats this trailing JSON as ambiguous
+  });
+
+  it("reports no trailing JSON for a clean single block", () => {
+    const text = "{'proposals': []}";
+    const end = firstQuoteTolerantBlockEnd(text);
+    expect(end).toBe(text.length - 1);
+    expect(/[[{]/.test(text.slice(end + 1))).toBe(false);
+  });
+});
+
+describe("bullAttemptUsesJsonObjectTransport (json_object post-parse gate routing)", () => {
+  const proposalSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["proposals"],
+    properties: {
+      proposals: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [...BULL_PROPOSAL_REQUIRED_KEYS],
+          properties: Object.fromEntries(BULL_PROPOSAL_REQUIRED_KEYS.map((key) => [key, { type: "string" }]))
+        }
+      }
+    }
+  };
+
+  it("returns true for DeepSeek chat-completions (no provider schema enforcement)", () => {
+    expect(bullAttemptUsesJsonObjectTransport("deepseek", "deepseek-v4-pro", "chat-completions", proposalSchema)).toBe(true);
+    expect(bullAttemptUsesJsonObjectTransport("openrouter", "deepseek/deepseek-v4-pro", "chat-completions", proposalSchema)).toBe(true);
+  });
+
+  it("returns false for OpenAI strict json_schema transports", () => {
+    expect(bullAttemptUsesJsonObjectTransport("openai", "gpt-5.4-mini", "responses", proposalSchema)).toBe(false);
+    expect(bullAttemptUsesJsonObjectTransport("openrouter", "openai/gpt-4.1-mini", "chat-completions", proposalSchema)).toBe(false);
+  });
+
+  it("gates native MiniMax while retaining OpenRouter schema enforcement", () => {
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M3.1-Flash", "chat-completions", proposalSchema)).toBe(true);
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M2.7", "chat-completions", proposalSchema)).toBe(true);
+    expect(bullAttemptUsesJsonObjectTransport("openrouter", "minimax/minimax-m3.1-flash", "chat-completions", proposalSchema)).toBe(false);
+  });
+
+  it("returns false for Anthropic messages transport", () => {
+    expect(bullAttemptUsesJsonObjectTransport("anthropic", "claude-sonnet-5", "anthropic-messages", proposalSchema)).toBe(false);
+  });
+});
+
+describe("filterRepairedProposals (post-jsonrepair completeness gate, Codex P1 PR #1696)", () => {
+  const complete = () => ({
+    symbol: "AAPL",
+    side: "buy",
+    type: "market",
+    quantity: null,
+    dollarAmount: 1000,
+    limitPrice: null,
+    stopPrice: null,
+    timeInForce: "gfd",
+    marketHours: "regular_hours",
+    rationale: "Breakout over the 50d with volume confirmation.",
+    tradeThesisTag: "Momentum-Breakout",
+    confidenceScore: 72,
+    autonomyOverride: null,
+    bracketStopLoss: 172.5,
+    bracketTakeProfit: 205,
+    exitPlan: null,
+    stopPlan: { style: "atr", rationale: null }
+  });
+
+  it("keeps a schema-complete proposal", () => {
+    const { kept, dropped } = filterRepairedProposals([complete()]);
+    expect(kept).toHaveLength(1);
+    expect(dropped).toBe(0);
+  });
+
+  it("rejects valid JSON with incomplete native MiniMax proposals before sizing defaults", () => {
+    const parsed = JSON.parse(JSON.stringify({ proposals: [complete(), { symbol: "NVDA", side: "buy", type: "market" }] }));
+    expect(bullAttemptUsesJsonObjectTransport("minimax", "MiniMax-M3.1-Flash", "chat-completions", {})).toBe(true);
+    const { kept, dropped } = filterRepairedProposals(parsed.proposals);
+    expect(sanitizeProposals(kept)).toHaveLength(1);
+    expect(kept[0]?.symbol).toBe("AAPL");
+    expect(dropped).toBe(1);
+  });
+
+  it("drops a proposal truncated mid-object (missing tail keys), keeping complete siblings", () => {
+    const truncated: Record<string, unknown> = { symbol: "NVDA", side: "buy", type: "market" };
+    const { kept, dropped } = filterRepairedProposals([complete(), truncated]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.symbol).toBe("AAPL");
+    expect(dropped).toBe(1);
+  });
+
+  it("drops a proposal whose judgment fields are empty even when every key is present", () => {
+    const hollow = { ...complete(), rationale: "  ", tradeThesisTag: "", confidenceScore: Number.NaN };
+    const { kept, dropped } = filterRepairedProposals([hollow]);
+    expect(kept).toHaveLength(0);
+    expect(dropped).toBe(1);
+  });
+
+  it("drops a repaired proposal whose identity fields have wrong TYPES even with all keys present (Codex round 2)", () => {
+    // json_object-mode repair can produce schema-invalid values; a numeric symbol would crash
+    // normalizeSymbol(.trim()) downstream and abort the whole run.
+    const wrongTypes = { ...complete(), symbol: 42 };
+    const badSide = { ...complete(), side: { verdict: "buy" } };
+    const badType = { ...complete(), type: "market_if_touched" };
+    const { kept, dropped } = filterRepairedProposals([wrongTypes, badSide, badType, complete()]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.symbol).toBe("AAPL");
+    expect(dropped).toBe(3);
+  });
+
+  it("drops a repaired proposal for a symbol outside the run's schema enum (Codex round 10)", () => {
+    // A repaired sell on an UNHELD symbol would reach Alpaca as side:sell and open an
+    // unintended short — the openings candidate gate only checks buy/short.
+    const offEnum = { ...complete(), symbol: "ZZZQ", side: "sell" };
+    const restricted = filterRepairedProposals([offEnum, complete()], ["buy", "sell"], ["AAPL", "NVDA"]);
+    expect(restricted.kept).toHaveLength(1);
+    expect(restricted.kept[0]?.symbol).toBe("AAPL");
+    expect(restricted.dropped).toBe(1);
+    // No enum (schema bare-string fallback) keeps prior behavior.
+    const unrestricted = filterRepairedProposals([offEnum], ["buy", "sell"]);
+    expect(unrestricted.kept).toHaveLength(1);
+  });
+
+  it("drops a repaired short when the run's schema is long-only (Codex round 8)", () => {
+    const shortIdea = { ...complete(), side: "short" };
+    const longOnly = filterRepairedProposals([shortIdea, complete()], ["buy", "sell"]);
+    expect(longOnly.kept).toHaveLength(1);
+    expect(longOnly.kept[0]?.side).toBe("buy");
+    expect(longOnly.dropped).toBe(1);
+    // Same proposal survives when the run's schema exposes shorts.
+    const shortsOn = filterRepairedProposals([shortIdea], ["buy", "sell", "short", "cover"]);
+    expect(shortsOn.kept).toHaveLength(1);
+  });
+
+  it("strips schema-extraneous fields from kept repaired proposals (Codex round 7)", () => {
+    // additionalProperties: false — a smuggled bracketStopLimit would turn the protective stop
+    // into a stop-limit order at the Alpaca adapter.
+    const smuggler = { ...complete(), bracketStopLimit: 171.9, stopPlan: { style: "atr", rationale: null, resetAll: true } };
+    const { kept, dropped } = filterRepairedProposals([smuggler]);
+    expect(dropped).toBe(0);
+    expect(kept).toHaveLength(1);
+    expect("bracketStopLimit" in (kept[0] as unknown as Record<string, unknown>)).toBe(false);
+    expect("resetAll" in ((kept[0]?.stopPlan ?? {}) as Record<string, unknown>)).toBe(false);
+    expect(kept[0]?.bracketStopLoss).toBe(172.5);
+  });
+
+  it("drops a repaired proposal with a fabricated (non-playbook) thesis tag (Codex round 6)", () => {
+    // A tag outside THESIS_PLAYBOOK has no scorecard history, so it would bypass the
+    // negative-expectancy skip gate as "unproven".
+    const madeUpTag = { ...complete(), tradeThesisTag: "vibes-based-momentum" };
+    const { kept, dropped } = filterRepairedProposals([madeUpTag, complete()]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.tradeThesisTag).toBe("Momentum-Breakout");
+    expect(dropped).toBe(1);
+  });
+
+  it("drops repaired proposals with null execution enums, out-of-range confidence, or invalid stopPlan (Codex round 5)", () => {
+    const nullTif = { ...complete(), timeInForce: null };
+    const nullHours = { ...complete(), marketHours: null };
+    const maxedConfidence = { ...complete(), confidenceScore: 999 };
+    const bareReset = { ...complete(), stopPlan: { style: "default" } }; // missing required rationale key
+    const nakedNone = { ...complete(), stopPlan: { style: "none", rationale: "  " } }; // no-stop without justification
+    const { kept, dropped } = filterRepairedProposals([nullTif, nullHours, maxedConfidence, bareReset, nakedNone, complete()]);
+    expect(kept).toHaveLength(1);
+    expect(dropped).toBe(5);
+  });
+
+  it("drops repaired proposals with out-of-enum timeInForce or coercible autonomyOverride (Codex round 4)", () => {
+    // "day" is not in the gfd/gtc schema enum — Alpaca maps unknown strings to gtc.
+    const dayTif = { ...complete(), timeInForce: "day" };
+    // An object thesis coerces to "[object Object]" and could pass preference gates as a
+    // "real" override thesis under execute mode.
+    const junkOverride = { ...complete(), autonomyOverride: { requested: true, thesis: {} } };
+    const validOverride = {
+      ...complete(),
+      autonomyOverride: { requested: true, thesis: "Earnings momentum intact.", preferenceConflicts: [], invalidation: null, cashDeploymentPct: null }
+    };
+    const { kept, dropped } = filterRepairedProposals([dayTif, junkOverride, validOverride]);
+    expect(kept).toHaveLength(1);
+    expect((kept[0]?.autonomyOverride as { thesis?: string })?.thesis).toBe("Earnings momentum intact.");
+    expect(dropped).toBe(2);
+  });
+
+  it("drops a repaired proposal whose sizing fields are non-numeric strings (Codex round 3)", () => {
+    // sanitize preserves a string dollarAmount via ??, and Robinhood later calls .toFixed on it.
+    const stringMoney = { ...complete(), dollarAmount: "100" };
+    const stringQty = { ...complete(), quantity: "3" };
+    const nullsOk = { ...complete(), dollarAmount: null, limitPrice: null };
+    const { kept, dropped } = filterRepairedProposals([stringMoney, stringQty, nullsOk]);
+    expect(kept).toHaveLength(1);
+    expect(dropped).toBe(2);
+  });
+
+  it("drops non-object entries outright", () => {
+    const { kept, dropped } = filterRepairedProposals([null, 42, "proposal", [complete()]]);
+    expect(kept).toHaveLength(0);
+    expect(dropped).toBe(4);
+  });
+
+  it("drops a repaired proposal missing exitPlan (schema-required nullable key)", () => {
+    const missingExitPlan = { ...complete() };
+    delete (missingExitPlan as Record<string, unknown>).exitPlan;
+    const { kept, dropped } = filterRepairedProposals([missingExitPlan, complete()]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.symbol).toBe("AAPL");
+    expect(dropped).toBe(1);
+  });
+
+  it("the completeness gate and the structured-output schema share one required-keys source", () => {
+    // If a future schema change adds/removes a required key, this import proves the gate moves
+    // with it (the schema literal spreads the same constant).
+    expect(BULL_PROPOSAL_REQUIRED_KEYS).toContain("exitPlan");
+    expect(BULL_PROPOSAL_REQUIRED_KEYS).toContain("stopPlan");
+    expect(BULL_PROPOSAL_REQUIRED_KEYS).toContain("tradeThesisTag");
+    expect(new Set(BULL_PROPOSAL_REQUIRED_KEYS).size).toBe(BULL_PROPOSAL_REQUIRED_KEYS.length);
   });
 });

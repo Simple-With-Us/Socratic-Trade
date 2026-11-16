@@ -5,6 +5,17 @@
 **Baseline audited:** `origin/main@c9023ea6` and production release `c9023ea613aa4df0e650c3a5de69081ac479aade`
 **Scope:** SEC primary-source documents and derived evidence for a frozen 1,000-issuer universe
 
+## Implementation status (2026-07-13)
+
+Implementation is active on `codex/sec-rag-program`; bulk corpus writes remain blocked. The first local slice
+adds a versioned/checksummed universe acceptance contract and durable SQLite ingest jobs/tasks with leases,
+bounded retries, dead-letter/quarantine states, verification receipts, and replay identity. Focused tests and
+Node 24 type-checking pass. The committed legacy universe intentionally fails the new acceptance gate because
+it is an unversioned bare array without source hashes, eligibility evidence, ranking inputs, aliases, or dated
+snapshot truth. Historical SEC discovery/pacing, DOM/iXBRL parsing/chunking, and the corrected issuer census
+are under isolated review; no SEC bulk fetch, object-store write, embedding, vector upsert, or production
+backfill has started.
+
 ## Decision
 
 The best design is **not** “turn every filing byte into a vector.” It is:

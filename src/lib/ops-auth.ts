@@ -14,12 +14,21 @@ function tokensMatch(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** Accepted env secrets. Legacy admin token is only used when OPS token is unset. */
+/**
+ * Accepted env secret for `/api/ops/*` and the operator projection on `/api/health`.
+ * `OPS_DIAGNOSTIC_TOKEN` is required.  `ADMIN_REINDEX_TOKEN` is a different admin
+ * gate and is never an ops fallback — even in non-production, even when the two
+ * values happen to match.  Do not mint a second token if both envs already share
+ * one value; just keep using `OPS_DIAGNOSTIC_TOKEN`.
+ */
 export function opsDiagnosticSecrets(): string[] {
   const ops = process.env.OPS_DIAGNOSTIC_TOKEN?.trim();
-  if (ops) return [ops];
-  const legacy = process.env.ADMIN_REINDEX_TOKEN?.trim();
-  return legacy ? [legacy] : [];
+  return ops ? [ops] : [];
+}
+
+/** True when this process has a usable ops diagnostic token.  Production must. */
+export function opsDiagnosticTokenConfigured(): boolean {
+  return opsDiagnosticSecrets().length > 0;
 }
 
 /**

@@ -84,13 +84,15 @@ const portfolio: Portfolio = {
 
 const held: EquityPosition[] = [{ symbol: "HELD", quantity: 10, averageCost: 100, marketValue: 10_000 }];
 
-describe("applyRiskReceipts — flag OFF (default)", () => {
+describe("applyRiskReceipts — flag OFF (explicit opt-out)", () => {
   it("is byte-identical: no [Risk] notes, no preVetoReasons, and fetchDailyOHLC is never called", async () => {
     const { fetchDailyOHLC } = await import("../src/lib/history");
     const { applyRiskReceipts } = await import("../src/lib/strategy");
 
     const proposals = [buy("AAA")];
-    const policy = { ...DEFAULT_POLICY, accountNumber: "X" }; // tuning undefined -> both flags off
+    // riskReceipts defaulted ON 2026-07-28 (guard enablement); pin it OFF to keep testing the
+    // flag-off code path.
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: false } };
     const marketScan = scan([quote("AAA", { beta: 1.2 })]);
 
     const out = await applyRiskReceipts(proposals, policy, held, portfolio, marketScan, "local");
@@ -108,7 +110,9 @@ describe("applyRiskReceipts — flag OFF (default)", () => {
     // test documents that: the note appears, but no tag and no correlation/stress notes.
     const { applyRiskReceipts } = await import("../src/lib/strategy");
     const proposals = [buy("AAA")];
-    const policy = { ...DEFAULT_POLICY, accountNumber: "X" };
+    // riskReceipts pinned OFF (it defaults ON since the 2026-07-28 guard enablement) so this test
+    // keeps isolating the unconditional earnings note from the correlation/stress receipts.
+    const policy = { ...DEFAULT_POLICY, accountNumber: "X", tuning: { riskReceipts: false } };
     const marketScan = scan([quote("AAA", { daysToEarnings: 5 })]);
 
     const out = await applyRiskReceipts(proposals, policy, held, portfolio, marketScan, "local");

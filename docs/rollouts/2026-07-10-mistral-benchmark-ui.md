@@ -85,3 +85,9 @@ have been a much larger, out-of-scope UI rewrite for a data-wiring task.
   benchmark-script validator fix, and the owner decision (already made — see
   `docs/rollouts/2026-07-10-mistral-rebench.md`) is reflected in `MODEL_ROTATION_POOL`
   separately.
+
+## Addendum 2026-07-16 — board state correction
+
+This effort's `docs/EFFORT-LOG.md` row was left under **In Progress** after PR #1361 merged
+(2026-07-10) and auto-deployed. Flipped the row marker to ✅ DEPLOYED (bookkeeping only; no
+code change). The live board `/Users/jay/apps/TRADING-EFFORT-LOG.md` already reflected DEPLOYED.

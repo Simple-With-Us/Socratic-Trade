@@ -39,10 +39,45 @@ export async function GET(request: NextRequest) {
       : null;
     const expectedUserId = sessionEmail ? resolveRequestUserFromEmail(sessionEmail).userId : undefined;
     await completeMcpOAuthCallback({ code, state, expectedUserId });
-    return NextResponse.redirect(new URL("/console/settings?robinhoodMcp=connected", resolvePublicAppOrigin(request)));
+    return NextResponse.redirect(new URL("/console/connections?robinhoodMcp=connected", resolvePublicAppOrigin(request)));
   } catch (callbackError) {
     return new NextResponse(callbackError instanceof Error ? callbackError.message : "Robinhood MCP OAuth callback failed.", {
       status: 500
     });
+  }
+}
+
+export async function POST(request: NextRequest) {
+  const clientIp = request.headers.get("cf-connecting-ip")?.trim() || "unknown-ip";
+  const limited = enforceRateLimit(clientIp, "auth/robinhood/callback", RATE_LIMITS.oauth);
+  if (limited) return limited;
+
+  try {
+    const body = (await request.json().catch(() => ({}))) as { url?: string; code?: string; state?: string };
+    let code = body.code?.trim();
+    let state = body.state?.trim();
+    if (body.url) {
+      try {
+        const parsed = new URL(body.url.trim());
+        code = parsed.searchParams.get("code")?.trim() || code;
+        state = parsed.searchParams.get("state")?.trim() || state;
+      } catch {
+        // ignore malformed URL and fall back to code/state fields
+      }
+    }
+    if (!code || !state) {
+      return NextResponse.json({ ok: false, error: "Missing OAuth code or state parameter." }, { status: 400 });
+    }
+    const sessionEmail = process.env.AUTH_SECRET
+      ? await getSessionEmail(request.headers.get("cookie"), process.env.AUTH_SECRET)
+      : null;
+    const expectedUserId = sessionEmail ? resolveRequestUserFromEmail(sessionEmail).userId : undefined;
+    await completeMcpOAuthCallback({ code, state, expectedUserId });
+    return NextResponse.json({ ok: true, connected: true });
+  } catch (err) {
+    return NextResponse.json(
+      { ok: false, error: err instanceof Error ? err.message : "Robinhood MCP OAuth callback completion failed." },
+      { status: 500 }
+    );
   }
 }

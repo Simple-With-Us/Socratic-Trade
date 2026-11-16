@@ -1,12 +1,21 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { getDb, getNotifyPrefs, setNotifyPrefs } from "../src/lib/db";
-import { describeChannels, notify, type NotifyConfig } from "../src/lib/notify";
+import { describeChannels, formatNotifyEmailText, NOTIFY_EMAIL_SENT_BY, notify, type NotifyConfig } from "../src/lib/notify";
+
+// notify()'s webhook channel now re-validates the target with a real DNS lookup on every
+// send (SSRF/rebinding hardening — src/lib/egress-guard.ts). These tests use the
+// IANA-reserved, never-resolving `h.example` host on purpose (so they stay hermetic and
+// don't depend on real network/DNS access), so every send here injects a stub resolver
+// standing in for a normal public address (Google public DNS — definitely not
+// private/loopback/link-local).
+const resolveHost = async () => ["8.8.8.8"];
 
 const baseCfg = (): NotifyConfig => ({
   timeoutMs: 1000,
   retryAttempts: 3,
   retryDelayMs: 0, // no real backoff waits in tests
-  push: { provider: "ntfy", ntfyServer: "https://ntfy.example", pushoverToken: "" },
+  push: { ntfyServer: "https://ntfy.example" },
+  pushover: { pushoverToken: "" },
   email: { provider: "resend", resendKey: "rk_test", from: "alerts@example.com" },
   sms: { twilioSid: "AC1", twilioToken: "tok", twilioFrom: "+10000000000" }
 });
@@ -42,7 +51,7 @@ describe("notify multi-channel delivery", () => {
       return new Response("ok", { status: 200 });
     }) as unknown as typeof fetch;
 
-    const results = await notify("u2", { title: "T", body: "B", kind: "price_alert" }, { config: baseCfg(), fetchImpl });
+    const results = await notify("u2", { title: "T", body: "B", kind: "price_alert" }, { config: baseCfg(), fetchImpl, resolveHost });
     const byChannel = Object.fromEntries(results.map((r) => [r.channel, r]));
     expect(byChannel.webhook?.ok).toBe(true);
     expect(byChannel.email?.ok).toBe(true);
@@ -54,7 +63,7 @@ describe("notify multi-channel delivery", () => {
   it("records a channel failure without throwing", async () => {
     setNotifyPrefs("u3", { channels: ["webhook"], webhookUrl: "https://h.example/hook" });
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
-    const results = await notify("u3", { title: "T", body: "B" }, { config: baseCfg(), fetchImpl });
+    const results = await notify("u3", { title: "T", body: "B" }, { config: baseCfg(), fetchImpl, resolveHost });
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.error).toContain("HTTP 500");
   });
@@ -67,7 +76,7 @@ describe("notify multi-channel delivery", () => {
       if (attempts < 3) throw new TypeError("fetch failed"); // the exact transient prod error
       return new Response("ok", { status: 200 });
     }) as unknown as typeof fetch;
-    const results = await notify("u4", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl });
+    const results = await notify("u4", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl, resolveHost });
     expect(results[0]!.ok).toBe(true);
     expect(attempts).toBe(3); // failed twice, delivered on the third — the alert is NOT dropped
   });
@@ -79,9 +88,52 @@ describe("notify multi-channel delivery", () => {
       attempts++;
       return new Response("bad", { status: 400 });
     }) as unknown as typeof fetch;
-    const results = await notify("u5", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl });
+    const results = await notify("u5", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl, resolveHost });
     expect(results[0]!.ok).toBe(false);
     expect(attempts).toBe(1); // 4xx is permanent — retrying just wastes attempts
+  });
+
+  it("skips Resend when Pushover can deliver", async () => {
+    setNotifyPrefs("u-prefer-pushover", {
+      channels: ["email", "pushover"],
+      email: "ops@example.test",
+      pushoverTarget: "u1userkey"
+    });
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL) => {
+      calls.push(String(url));
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    const cfg = { ...baseCfg(), pushover: { pushoverToken: "pv-token" } };
+    const results = await notify(
+      "u-prefer-pushover",
+      { title: "Storage Warning: litestream tier 2 stale", body: "Deep compaction is stale." },
+      { config: cfg, fetchImpl, resolveHost }
+    );
+    expect(results.find((r) => r.channel === "pushover")?.ok).toBe(true);
+    expect(calls).toEqual(["https://api.pushover.net/1/messages.json"]);
+  });
+
+  it("email body ends with a Socratic-Trade sign-off", async () => {
+    setNotifyPrefs("u-email-signoff", { channels: ["email"], email: "ops@example.test" });
+    const calls: Array<{ text?: string; subject?: string }> = [];
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as { text?: string; subject?: string });
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const results = await notify(
+      "u-email-signoff",
+      { title: "Storage Warning: litestream tier 2 stale", body: "Deep compaction is stale." },
+      { config: baseCfg(), fetchImpl, resolveHost }
+    );
+    expect(results[0]?.ok).toBe(true);
+    expect(calls[0]?.subject).toBe("[Socratic-Trade] Storage Warning: litestream tier 2 stale");
+    expect(calls[0]?.text).toBe(
+      formatNotifyEmailText("Storage Warning: litestream tier 2 stale", "Deep compaction is stale.")
+    );
+    expect(calls[0]?.text).toMatch(/\n\(sent by Socratic-Trade\)$/);
+    expect(formatNotifyEmailText("T", "B")).toBe(`T\n\nB\n\n${NOTIFY_EMAIL_SENT_BY}`);
   });
 
   it("describeChannels reflects admin availability", () => {

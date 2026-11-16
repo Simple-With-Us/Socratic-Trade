@@ -1,3 +1,4 @@
+import { llmFetch } from "../llm-request";
 // Structured-output LLM salience extractor (item 7, 2026-07-01 RAG workstream).
 //
 // extractLearnedCandidates() in salience.ts is an admitted "deterministic rule-based stand-in"
@@ -21,7 +22,7 @@
 import { getPolicy } from "../db";
 import { isIndexMemberSymbol } from "../index-universes";
 import { buildLlmRequestBody, extractLlmText, llmAuthHeaders, type LlmJsonSchema } from "../llm-call";
-import { extractLlmUsage, recordLlmUsage } from "../llm-usage";
+import { extractLlmUsage, providerRequestIdFromPayload, recordLlmUsage } from "../llm-usage";
 import { resolveLlmEndpoint } from "../llm-provider";
 import { LLM_OUTPUT_TOKEN_CAPS, LLM_TIMEOUT_MS } from "../llm-request";
 import type { LearnedContextCandidate } from "../types";
@@ -154,11 +155,15 @@ export async function extractLearnedCandidatesLLM(message: string, userId: strin
         systemPrompt: SYSTEM_PROMPT,
         userContent: message,
         schema: SCHEMA,
-        maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.salienceExtraction
+        maxOutputTokens: LLM_OUTPUT_TOKEN_CAPS.salienceExtraction,
+        userId,
+        keyRef: endpoint.keyRef,
+        service: "memory",
+        feature: "chat-salience"
       }
     );
 
-    const response = await fetch(endpoint.url, {
+    const response = await llmFetch(endpoint.url, {
       method: "POST",
       headers: llmAuthHeaders(endpoint),
       body: JSON.stringify(body),
@@ -178,6 +183,7 @@ export async function extractLearnedCandidatesLLM(message: string, userId: strin
         context: "chat-salience",
         keySource: endpoint.keySource,
         keyRef: endpoint.keyRef,
+        providerRequestId: providerRequestIdFromPayload(endpoint.provider, payload),
         ...extractLlmUsage(payload)
       });
     } catch {

@@ -121,6 +121,11 @@ describe("provider/dataset operation boundaries", () => {
       const { parentPort, workerData } = require("node:worker_threads");
       const Database = require(workerData.betterSqlitePath);
       const db = new Database(workerData.databaseFile);
+      // App connections install these deterministic trigger functions in getDb(). This raw worker
+      // exists only to hold an independent SQLite writer lock, so register inert equivalents for
+      // the unrelated global cadence setting it writes.
+      db.function("account_subject_token", (value) => String(value ?? ""));
+      db.function("account_setting_matches_subject", (_key, _token) => 0);
       db.pragma("busy_timeout = 5000");
       db.exec("BEGIN IMMEDIATE");
       parentPort.postMessage("locked");

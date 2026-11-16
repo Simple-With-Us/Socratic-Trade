@@ -1,12 +1,23 @@
-import { ACCOUNT_DELETE_PHRASE, LOCAL_OPERATOR_DELETE_PHRASE, confirmAndDeleteAccount } from "@/lib/account-deletion";
-import { resolveRequestUser } from "@/lib/request-user";
+import {
+  ACCOUNT_DELETE_PHRASE,
+  LOCAL_OPERATOR_DELETE_PHRASE,
+  confirmAndDeleteAccount,
+  getAccountDeletionBlockers,
+  prepareAccountDeletion
+} from "@/lib/account-deletion";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+function blockerCount(blockers: ReturnType<typeof getAccountDeletionBlockers>): number {
+  return Object.values(blockers).reduce((sum, count) => sum + count, 0);
+}
+
 export async function POST(request: Request) {
-  const user = resolveRequestUser(request);
+  const user = resolveRequestUserOrResponse(request);
+  if (user instanceof Response) return user;
   const body = (await request.json().catch(() => ({}))) as {
     typedText?: unknown;
     typedIdentity?: unknown;
@@ -21,8 +32,19 @@ export async function POST(request: Request) {
   }
 
   try {
+    // Do not halt the strategy or install the durable write fence until every user-entered value is
+    // valid and current activity is drainable. Preparation and deletion are one explicit final
+    // native action; the read-only preview endpoint never mutates account state.
+    const blockers = getAccountDeletionBlockers(user.userId);
+    if (blockerCount(blockers) > 0) {
+      return NextResponse.json(
+        { error: "Account deletion is blocked by in-flight trading activity.", blockers },
+        { status: 409 }
+      );
+    }
+    prepareAccountDeletion(user);
     return NextResponse.json(
-      confirmAndDeleteAccount({
+      await confirmAndDeleteAccount({
         userId: user.userId,
         email: user.email,
         body: {

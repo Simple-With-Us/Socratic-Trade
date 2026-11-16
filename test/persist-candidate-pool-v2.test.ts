@@ -26,6 +26,7 @@
  * Mocking pattern mirrors test/persist-candidate-pool.test.ts (full Pinecone/Voyage mock, no live
  * network, `audit` mocked so we can assert on its call args).
  */
+import { pinRagQualityFlagsOff } from "./rag-test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -80,6 +81,7 @@ function v1PoolCalls() {
 
 describe("retrieveContextDetailed: RAG_PERSIST_CANDIDATE_POOL_FULL wiring", () => {
   beforeEach(() => {
+  pinRagQualityFlagsOff();
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -111,13 +113,13 @@ describe("retrieveContextDetailed: RAG_PERSIST_CANDIDATE_POOL_FULL wiring", () =
 
   it("flag OFF (default/unset): never calls audit('rag_candidate_pool_full', ...) — byte-identical audit-call count and returned chunks", async () => {
     mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
-    mocks.query.mockResolvedValue({
+    mocks.query.mockResolvedValueOnce({
       matches: [
         { id: "a", score: 0.9, metadata: { text: "AAPL earnings", userId: "local", scope: "shared" } },
         { id: "b", score: 0.8, metadata: { text: "AAPL revenue", userId: "local", scope: "shared" } },
         { id: "low", score: 0.1, metadata: { text: "barely related", userId: "local", scope: "shared" } }
       ]
-    });
+    }).mockResolvedValueOnce({ matches: [] });
 
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     const result = await retrieveContextDetailed("AAPL earnings", "AAPL", 2, "local", { minScore: 0.5 });
@@ -378,7 +380,7 @@ describe("retrieveContextDetailed: RAG_PERSIST_CANDIDATE_POOL_FULL wiring", () =
     process.env.RAG_PERSIST_CANDIDATE_POOL_FULL = "on";
     process.env.VECTOR_ENABLE_RERANK = "on";
     mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
-    mocks.query.mockResolvedValue({
+    mocks.query.mockResolvedValueOnce({
       matches: [
         // Index 0: id-less, SURVIVES rerank (Voyage assigns it the top relevanceScore below) —
         // this is the exact case the bug mislabeled, because rerankMatches returns a NEW spread
@@ -389,7 +391,7 @@ describe("retrieveContextDetailed: RAG_PERSIST_CANDIDATE_POOL_FULL wiring", () =
         // Index 2: real id, also survives.
         { id: "real-id", score: 0.6, metadata: { text: "real-id survivor", userId: "local", scope: "shared" } }
       ]
-    });
+    }).mockResolvedValueOnce({ matches: [] });
     // Voyage's rerank is invoked with topK=Math.min(limit, matches.length)=2, so only indices 0
     // and 2 come back (reordered so the id-less survivor ranks first); index 1 is truncated.
     mocks.rerank.mockResolvedValue({

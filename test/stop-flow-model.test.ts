@@ -92,5 +92,18 @@ describe("stopFlowModel — the guardrails stop diagram tells the truth about th
       expect(lane(p, "perPosition").note).toMatch(/account's own precedence/i);
       expect(lane(p, "perPosition").note).toMatch(/opening buy\/short/i);
     });
+
+    it("contains the RTH-only broker stop warning in the broker-held detail string", () => {
+      const p = policy();
+      expect(node(p, "enforcement", "broker").detail).toMatch(/Regular Trading Hours/);
+    });
+
+    it("displays the propose-authority blind spot warning on the app-managed node only under propose mode", () => {
+      const proposeMode = policy({ strategyAuthority: "propose" });
+      expect(node(proposeMode, "enforcement", "app").detail).toMatch(/blind spot/i);
+
+      const decideMode = policy({ strategyAuthority: "decide" });
+      expect(node(decideMode, "enforcement", "app").detail).not.toMatch(/blind spot/i);
+    });
   });
 });

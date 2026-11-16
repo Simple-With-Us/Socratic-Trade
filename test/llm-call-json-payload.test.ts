@@ -51,8 +51,37 @@ describe("extractJsonPayload", () => {
     expect(() => JSON.parse(extractJsonPayload(refusal))).toThrow();
   });
 
-  it("does not fabricate valid JSON from a truncated/unbalanced object", () => {
+  it("does NOT repair by default — a truncated object stays unparseable (fail-closed for safety sites)", () => {
+    // Codex P1/P2, PR #1696: global repair turned truncated Red Team approvals and revalidation
+    // withdrawals from fail-closed "unavailable" into fail-open acceptance. Repair is opt-in.
     const truncated = '{"verdict":"approve","reason":"cut off here';
     expect(() => JSON.parse(extractJsonPayload(truncated))).toThrow();
+  });
+
+  it("heals a truncated/unbalanced object with jsonrepair ONLY when repair is opted in", () => {
+    const truncated = '{"verdict":"approve","reason":"cut off here';
+    expect(JSON.parse(extractJsonPayload(truncated, { repair: true }))).toEqual({ verdict: "approve", reason: "cut off here" });
+  });
+
+  it("repairs style defects (single quotes, trailing commas) under repair without changing content", () => {
+    const sloppy = "{'a': 1, 'b': [1, 2,],}";
+    expect(JSON.parse(extractJsonPayload(sloppy, { repair: true }))).toEqual({ a: 1, b: [1, 2] });
+    expect(() => JSON.parse(extractJsonPayload(sloppy))).toThrow(); // and stays strict by default
+  });
+
+  it("repairs single-quoted payloads from the FULL text, preserving string values containing '}' (Codex round 9)", () => {
+    // firstBalancedJson only understands double-quoted strings — it would slice this payload at
+    // the '}' inside the rationale, silently truncating it before repair.
+    const singleQuoted = "{'proposals': [{'symbol': 'AAPL', 'rationale': 'breaks out of the {wedge} pattern', 'confidenceScore': 70}]}";
+    const parsed = JSON.parse(extractJsonPayload(singleQuoted, { repair: true })) as {
+      proposals: Array<{ rationale: string }>;
+    };
+    expect(parsed.proposals[0].rationale).toBe("breaks out of the {wedge} pattern");
+  });
+
+  it("returns unrepairable text unchanged even with repair on, so the caller fails loudly", () => {
+    const refusal = "I can't help with that request.";
+    expect(extractJsonPayload(refusal, { repair: true })).not.toContain("{");
+    expect(() => JSON.parse(extractJsonPayload(refusal, { repair: true }))).toThrow();
   });
 });

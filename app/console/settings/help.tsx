@@ -7,8 +7,14 @@
  *  the app actually behaves, and it must never drift into marketing. */
 
 import { useMemo, useState } from "react";
+import {
+  BROKERAGE_ACCOUNT_GLOSSARY_DEFINITION,
+  GUARDRAILS_GLOSSARY_DEFINITION,
+  PAPER_ACCOUNT_GLOSSARY_ALIASES,
+  PAPER_ACCOUNT_GLOSSARY_DEFINITION,
+  PAPER_ACCOUNT_GLOSSARY_TERM
+} from "@/lib/guardrail-copy";
 import { Card, TextInput } from "../ui/primitives";
-import { ListSection, ListRow } from "../../ui/ios-components";
 
 interface GlossaryEntry {
   term: string;
@@ -29,16 +35,14 @@ const GLOSSARY: GlossaryGroup[] = [
     blurb: "Every screen states which money it is in words — the colors only reinforce.",
     entries: [
       {
-        term: "Alpaca PAPER Account (NOT Real Money)",
-        aliases: "paper trading sandbox",
-        definition:
-          "Your broker's practice sandbox: real broker endpoints and order flow, zero real dollars. Good for verifying broker plumbing before using a brokerage account."
+        term: PAPER_ACCOUNT_GLOSSARY_TERM,
+        aliases: PAPER_ACCOUNT_GLOSSARY_ALIASES,
+        definition: PAPER_ACCOUNT_GLOSSARY_DEFINITION
       },
       {
         term: "Brokerage Account",
         aliases: "broker connected live trading real account",
-        definition:
-          "A connected brokerage account. The app treats this as the normal trading state and does not wrap the whole console in red; broker-paper accounts are the exceptional state called out as not real money."
+        definition: BROKERAGE_ACCOUNT_GLOSSARY_DEFINITION
       }
     ]
   },
@@ -48,39 +52,45 @@ const GLOSSARY: GlossaryGroup[] = [
     entries: [
       {
         term: "Ask-first (propose)",
-        aliases: "propose authority approval",
+        aliases: "propose authority approval running active",
         definition:
-          "The strategy runs on schedule but every trade waits for your explicit approval. Nothing is placed until you approve it; ignoring a proposal lets it expire."
+          "Autonomy can be on (Running) while every trade still waits for your explicit approval.  This is not Autopilot.  Nothing is placed until you approve it; ignoring a proposal lets it expire."
       },
       {
         term: "Autopilot (decide)",
-        aliases: "decide authority autonomous",
+        aliases: "decide authority autonomous auto-decide",
         definition:
-          "The strategy may place orders itself, inside your guardrails. Manual 'Run once' runs are always forced back to Ask-first regardless of this setting."
+          "The app is making trades: the strategy may place orders itself, inside your guardrails.  Use Autopilot only for this auto-decide mode.  Manual Run Once runs are always forced back to Ask-first regardless of this setting."
+      },
+      {
+        term: "Running (active)",
+        aliases: "active running autonomy on",
+        definition:
+          "Scheduled runs are on for this account.  If authority is Ask-first, the chip says Running — not Autopilot.  If authority is Autopilot, the chip says Autopilot because the app may place orders."
       },
       {
         term: "Arming",
         aliases: "arm start enable",
         definition:
-          "Starting scheduled runs (Stopped → Running). The server checks preconditions first: an account is selected, a universe is configured, and the account allows agentic trading."
+          "Starting scheduled runs (Stopped → Running).  The server checks preconditions first: an account is selected, a universe is configured, and the account allows agentic trading."
       },
       {
         term: "System state",
         aliases: "systemState running stopped halted close_only liquidating exit-only winding down",
         definition:
-          "The run-state of one account's strategy. Running: scheduled runs happen. Exit-only (close_only): no new buys, protective exits keep working — the state circuit breakers set. Winding down (liquidating): only sells, until the account is in cash. Stopped (halted): nothing trades, and this app's automatic stops pause too — broker-held orders keep resting at the broker."
+          "The run-state of one account's strategy.  Running: scheduled runs happen.  Exit-only (close_only): no new buys, protective exits keep working — the state circuit breakers set.  Winding down (liquidating): only sells, until the account is in cash.  Stopped (halted): nothing trades, and this app's automatic stops pause too — broker-held orders keep resting at the broker."
       },
       {
         term: "STOP everything",
         aliases: "stop button halt",
         definition:
-          "The always-reachable red control. Sets the account to Stopped. It never sells anything — it stops activity, including this app's own automatic stops. Broker-held brackets keep resting."
+          "The always-reachable red control.  Sets the account to Stopped.  It never sells anything — it stops activity, including this app's own automatic stops.  Broker-held brackets keep resting."
       },
       {
         term: "Auto-resume on boot",
         aliases: "restart boot resume",
         definition:
-          "Off (recommended): after a server restart, any Running account stays stopped until a person starts it again — a restored backup or crash-loop can never silently resume trading. On removes that safety net."
+          "Off: after a server restart, any Running account stays stopped until a person starts it again — a restored backup or crash-loop cannot silently resume trading.  On: scheduled runs may resume after a restart when you have opted in."
       }
     ]
   },
@@ -98,31 +108,31 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "Green team (strategist)",
         aliases: "proposer bull llmModel green team",
         definition:
-          "The LLM that writes trade proposals from the scan evidence and your written strategy instructions. Its model is the 'Green Team' pick under Framework → Models."
+          "The LLM that writes trade proposals from the scan evidence and your written strategy instructions.  Its model is the 'Green Team' pick under Strategy → Models."
       },
       {
         term: "Red team (reviewer)",
         aliases: "bear reviewer redTeamLlmModel debate red team",
         definition:
-          "An adversarial second model that reviews every risk-adding opening at its final size, fact-checking the rationale against the same evidence the Green Team saw. A veto or half-size downgrade is recorded with the proposal. Blank = not configured — openings route to human approval instead of auto-executing (it never silently self-reviews)."
+          "An adversarial second model that reviews every risk-adding opening at its final size, fact-checking the rationale against the same evidence the Green Team saw.  A veto or half-size downgrade is recorded with the proposal.  Blank = not configured — openings route to human approval instead of auto-executing (it never silently self-reviews)."
       },
       {
         term: "Conviction",
         aliases: "confidence score",
         definition:
-          "The strategist's 0–100 confidence in a proposal. High-conviction ideas trigger the red-team debate; conviction also scales position sizing between the configured floor and ceiling."
+          "The strategist's 0–100 confidence in a proposal.  High-conviction ideas trigger the red-team debate; conviction also scales position sizing between the configured floor and ceiling."
       },
       {
         term: "Proposal",
         aliases: "trade idea approval pending",
         definition:
-          "A concrete order the strategy wants to place, with its thesis and evidence. In Ask-first it waits in Approvals; unanswered proposals expire on the configured timer rather than executing stale."
+          "A concrete order the strategy wants to place, with its thesis and evidence.  In Ask-first it waits in Approvals; unanswered proposals expire on the configured timer rather than executing stale."
       },
       {
         term: "Policy gate",
         aliases: "guardrails limits blocked",
         definition:
-          "The deterministic checks every order passes through regardless of which model proposed it: notional caps, exposure caps, sector caps, order-type limits, quote freshness, and more. A block is recorded and (optionally) notified."
+          "The deterministic checks every order passes through regardless of which model proposed it: notional caps, exposure caps, sector caps, order-type limits, quote freshness, and more.  A block is recorded and (optionally) notified."
       }
     ]
   },
@@ -133,32 +143,31 @@ const GLOSSARY: GlossaryGroup[] = [
       {
         term: "Guardrails",
         aliases: "risk rules caps limits",
-        definition:
-          "The per-account hard limits the policy gate enforces: per-order and daily notional, symbol/sector exposure, order counts, drift, and the rest. Editable on the Guardrails screen; loosening one on a brokerage account costs a typed word."
+        definition: GUARDRAILS_GLOSSARY_DEFINITION
       },
       {
         term: "Circuit breaker (kill switch)",
         aliases: "kill_switch breaker drawdown",
         definition:
-          "An automatic tripwire (e.g. max drawdown) that drops the account to Exit-only and sends a notification. It limits further damage; it does not sell everything."
+          "An automatic tripwire (e.g. max drawdown) that drops the account to Exit-only and sends a notification.  It limits further damage; it does not sell everything."
       },
       {
         term: "Broker stop vs app stop",
         aliases: "stop loss trailing synthetic stops protection",
         definition:
-          "A broker stop is an order resting AT the broker — it keeps protecting even if this app is down. An app stop is a rule this app enforces on its scheduler tick — it needs the app running and pauses while Stopped. The Positions table says which one protects each position."
+          "A broker stop is an order resting AT the broker — it keeps protecting even if this app is down.  An app stop is a rule this app enforces on its scheduler tick — it needs the app running and pauses while Stopped.  The Positions table says which one protects each position."
       },
       {
         term: "Wash-sale guard",
         aliases: "wash sale lock 30 days",
         definition:
-          "For taxable accounts, blocks or prices rebuying a symbol that was closed at a loss within the last 30 days. Same-account IRA wash sales are ignored automatically; an IRA buying after another taxable account's loss is governed by the IRA taxable-loss rebuy setting."
+          "For taxable accounts, blocks or prices rebuying a symbol that was closed at a loss within the last 30 days.  Same-account IRA wash sales are ignored automatically; an IRA buying after another taxable account's loss is governed by the IRA taxable-loss rebuy setting."
       },
       {
         term: "Daily spend",
         aliases: "notional budget daily orders",
         definition:
-          "How much buying the strategy has done today against its caps: total notional and opening-order count. Resets daily; the meters live on the Overview."
+          "How much buying the strategy has done today against its caps: total notional and opening-order count.  Resets daily; the meters live on the Overview."
       }
     ]
   },
@@ -170,25 +179,25 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "Connected account",
         aliases: "broker connection robinhood alpaca",
         definition:
-          "A brokerage login this app can read and trade through (Robinhood via OAuth, Alpaca via API keys, Tradier via access token). Disconnecting removes the connection from this app only — nothing changes at the broker."
+          "A brokerage login this app can read and trade through (Robinhood via OAuth, Alpaca via API keys, Tradier via access token).  Disconnecting removes the connection from this app only — nothing changes at the broker."
       },
       {
         term: "Active account",
         aliases: "scope switcher",
         definition:
-          "Exactly one account is active at a time; the entire console — balances, guardrails, approvals, run state — is scoped to it. Switch scope from the header. Each account keeps its own strategy and policy."
+          "Exactly one account is active at a time; the entire console — balances, guardrails, approvals, run state — is scoped to it.  Switch scope from the header.  Each account keeps its own strategy and policy."
       },
       {
         term: "THIS ACCOUNT vs ALL YOUR ACCOUNTS",
         aliases: "settings scope user-level account-level",
         definition:
-          "The two storage scopes for configuration. THIS ACCOUNT settings follow the account and live where you configure the account itself — Framework (models, tax treatment, prompt, weights) and Mandates (guardrails). ALL YOUR ACCOUNTS settings follow you (connections, API keys, notifications, scan shape, learning review, typed confirmation) and overlay every account — everything on this Settings page is that kind."
+          "The two storage scopes for configuration.  THIS ACCOUNT settings follow the account and live where you configure the account itself — Strategy (models, prompt, weights) and Guardrails (caps, protective stops, tax treatment, rulebook).  ALL YOUR ACCOUNTS settings follow you (connections, API keys, notifications, scan shape, learning review, typed confirmation) and overlay every account — they live on Connections and Settings."
       },
       {
         term: "Preset (profile)",
         aliases: "strategy profile library apply",
         definition:
-          "A saved strategy bundle (policy + prompt + weights). Applying one COPIES it onto the active account — later edits to the preset never follow, and a preset can never start or stop trading."
+          "A saved strategy bundle (policy + prompt + weights).  Applying one COPIES it onto the active account — later edits to the preset never follow, and a preset can never start or stop trading."
       }
     ]
   },
@@ -200,7 +209,7 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "— (em dash)",
         aliases: "dash missing data empty",
         definition:
-          "Data simply wasn't available. The console never fabricates a number to fill a gap — a dash means 'we don't know', full stop."
+          "Data simply wasn't available.  The console never fabricates a number to fill a gap — a dash means 'we don't know', full stop."
       },
       {
         term: "n/a (P/E)",
@@ -212,7 +221,7 @@ const GLOSSARY: GlossaryGroup[] = [
         term: "Source attribution",
         aliases: "provider yahoo finnhub data source",
         definition:
-          "Scan data names every provider that actually contributed this run (e.g. yahoo-finance+finnhub). Every symbol shows real data or an honest gap — never a synthetic placeholder."
+          "Scan data names every provider that actually contributed this run (e.g. yahoo-finance+finnhub).  Every symbol shows real data or an honest gap — never a synthetic placeholder."
       }
     ]
   }
@@ -236,53 +245,49 @@ export function HelpGlossaryCard() {
   }, [query]);
 
   return (
-    <ListSection title="Help & glossary">
-      <div className="px-2 pb-2">
-        <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          The words this console uses, defined the way the app actually behaves. If a term on any screen is unclear,
-          it&apos;s in here — most controls also explain themselves on hover.
-        </p>
-        <div className="mb-3 max-w-md">
-          <TextInput
-            value={query}
-            placeholder="Search terms — e.g. wash sale, autopilot, red team…"
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search the glossary"
-            title="Filters the glossary by term, synonym, or definition text."
-          />
-        </div>
+    <Card title="Help & glossary">
+      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+        The words this console uses, defined the way the app actually behaves. If a term on any screen is unclear,
+        it&apos;s in here — most controls also explain themselves on hover.
+      </p>
+      <div className="mb-3 max-w-md">
+        <TextInput
+          value={query}
+          placeholder="Search terms — e.g. wash sale, autopilot, red team…"
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search the glossary"
+          title="Filters the glossary by term, synonym, or definition text."
+        />
       </div>
-      
       {filtered.length === 0 ? (
-        <ListRow>
-          <p className="py-4 text-center w-full text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">
-            No term matches &quot;{query.trim()}&quot; — try a shorter word.
-          </p>
-        </ListRow>
+        <p className="py-4 text-center text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">
+          No term matches &quot;{query.trim()}&quot; — try a shorter word.
+        </p>
       ) : (
-        <div className="flex flex-col w-full">
+        <div className="flex flex-col">
           {filtered.map((group) => (
-            <details key={group.group} className="con-disclosure !px-2 !pb-2" open={query.trim().length > 0}>
-              <summary title={group.blurb} className="!pl-3 !pr-3">
+            <details key={group.group} className="con-disclosure" open={query.trim().length > 0}>
+              <summary title={group.blurb}>
                 {group.group}
                 <span className="font-normal text-[color:var(--con-faint)]">· {group.entries.length}</span>
               </summary>
-              <dl className="mb-2 flex flex-col rounded-lg overflow-hidden shadow-sm">
+              <dl className="mb-2 flex flex-col divide-y divide-[color:var(--con-line)] rounded-control border border-[color:var(--con-line)]">
                 {group.entries.map((entry) => (
-                  <ListRow key={entry.term}>
-                    <div className="w-full">
-                      <dt className="text-[length:var(--con-fs-sm)] font-semibold">{entry.term}</dt>
-                      <dd className="mt-0.5 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
-                        {entry.definition}
-                      </dd>
-                    </div>
-                  </ListRow>
+                  <div
+                    key={entry.term}
+                    className="px-3 py-2.5 transition-colors first:rounded-t-lg last:rounded-b-lg hover:bg-[color:var(--con-surface-2)]"
+                  >
+                    <dt className="text-[length:var(--con-fs-sm)] font-semibold">{entry.term}</dt>
+                    <dd className="mt-0.5 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+                      {entry.definition}
+                    </dd>
+                  </div>
                 ))}
               </dl>
             </details>
           ))}
         </div>
       )}
-    </ListSection>
+    </Card>
   );
 }

@@ -180,8 +180,8 @@ describe("per-account policy isolation (PR 1)", () => {
     db.upsertConnectedAccount({ id: other, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-O", label: "Other", isActive: false });
 
     db.setUserSetting(u, "policy", {
-      llmModel: "grok-4.3",
-      redTeamLlmModel: "claude-opus-4-8",
+      llmModel: "xai/grok-4.3",
+      redTeamLlmModel: "anthropic/claude-opus-4-8",
       llmReasoningEffort: "high"
     });
 
@@ -206,14 +206,14 @@ describe("per-account policy isolation (PR 1)", () => {
         new Date().toISOString()
       );
 
-    expect(db.getPolicy(u, other).llmModel).toBe("grok-4.3");
-    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("claude-opus-4-8");
+    expect(db.getPolicy(u, other).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
     expect(db.getPolicy(u, other).llmReasoningEffort).toBe("high");
 
-    db.setPolicy({ ...db.getPolicy(u, active), llmModel: "gpt-5.5", redTeamLlmModel: "gpt-5.4" }, u, active);
+    db.setPolicy({ ...db.getPolicy(u, active), llmModel: "openai/gpt-5.5", redTeamLlmModel: "gpt-5.4" }, u, active);
     db.setPolicy({ ...db.getPolicy(u, other), llmModel: "gemini-2.5-flash", redTeamLlmModel: undefined }, u, other);
 
-    expect(db.getPolicy(u, active).llmModel).toBe("gpt-5.5");
+    expect(db.getPolicy(u, active).llmModel).toBe("openai/gpt-5.5");
     expect(db.getPolicy(u, active).redTeamLlmModel).toBe("gpt-5.4");
     expect(db.getPolicy(u, other).llmModel).toBe("gemini-2.5-flash");
     expect(db.getPolicy(u, other).redTeamLlmModel).toBeUndefined();
@@ -242,8 +242,8 @@ describe("per-account policy isolation (PR 1)", () => {
     db.upsertConnectedAccount({ id: untouched, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-U", label: "Untouched", isActive: false });
 
     db.setUserSetting(u, "policy", {
-      llmModel: "grok-4.3",
-      redTeamLlmModel: "claude-opus-4-8",
+      llmModel: "xai/grok-4.3",
+      redTeamLlmModel: "anthropic/claude-opus-4-8",
       llmReasoningEffort: "high"
     });
 
@@ -275,12 +275,12 @@ describe("per-account policy isolation (PR 1)", () => {
     expect(userPolicy.redTeamLlmModel).toBeUndefined();
     expect(userPolicy.llmReasoningEffort).toBeUndefined();
 
-    expect(db.getPolicy(u, other).llmModel).toBe("grok-4.3");
-    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("claude-opus-4-8");
+    expect(db.getPolicy(u, other).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
     expect(db.getPolicy(u, other).llmReasoningEffort).toBe("high");
 
-    expect(db.getPolicy(u, untouched).llmModel).toBe("grok-4.3");
-    expect(db.getPolicy(u, untouched).redTeamLlmModel).toBe("claude-opus-4-8");
+    expect(db.getPolicy(u, untouched).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, untouched).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
     expect(db.getPolicy(u, untouched).llmReasoningEffort).toBe("high");
   });
 

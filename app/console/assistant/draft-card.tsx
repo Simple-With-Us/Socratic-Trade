@@ -108,7 +108,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
       // Network failure of the PREVIEW only — staging stays available because the
       // server re-checks policy authoritatively on commit and again at approval.
       setDecision(null);
-      setPreviewError("Policy preview unreachable right now. You can still stage — the server re-checks before anything is created.");
+      setPreviewError("Policy preview unreachable right now.  You can still stage — the server re-checks before anything is created.");
     }
     if (gen !== previewGenRef.current) return;
     setPhase("ready");
@@ -175,8 +175,8 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
 
   if (phase === "discarded") {
     return (
-      <div className="mt-2 rounded-lg border border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-        Draft discarded. Nothing was created.
+      <div className="mt-2 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface)] px-3 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+        Draft discarded.  Nothing was created.
       </div>
     );
   }
@@ -198,10 +198,10 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
   const stagedLive = stagedScope?.tone === "live";
 
   return (
-    <div className="mt-2 rounded-lg border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3">
+    <div className="mt-2 rounded-control border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Tooltip className="con-mono text-[length:var(--con-fs-sm)] font-semibold" content="The order the assistant drafted. It is only a draft until you stage and then approve it.">
-          {sideUp} {draft.qty} <SymbolButton symbol={draft.symbol} showLogo={false} className="font-mono text-inherit" /> · {draft.order_type}
+        <Tooltip className="con-mono text-[length:var(--con-fs-sm)] font-semibold" content="The order the assistant drafted.  It is only a draft until you stage and then approve it.">
+          {sideUp} {draft.qty} <SymbolButton symbol={draft.symbol} className="font-mono text-inherit" /> · {draft.order_type}
           {limitText}
         </Tooltip>
         <Chip
@@ -241,11 +241,11 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
           content={
             blocked
               ? "Your policy guardrails would refuse this order as things stand now."
-              : "A preview check against your policy guardrails. The authoritative check re-runs when you approve."
+              : "A preview check against your policy guardrails.  The authoritative check re-runs when you approve."
           }
         >
           <div
-            className="rounded-md px-2.5 py-1.5 text-[length:var(--con-fs-xs)]"
+            className="rounded-control px-2.5 py-1.5 text-[length:var(--con-fs-xs)]"
             style={{
               background: blocked ? "var(--con-neg-soft)" : "var(--con-pos-soft)",
               color: blocked ? "var(--con-neg)" : "var(--con-pos)"
@@ -257,7 +257,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
               {estimatedNotional !== undefined && (
                 <Tooltip
                   className="con-num font-normal text-[color:var(--con-muted)]"
-                  content="Estimated order value from the broker's pre-trade review. Final numbers are re-checked at approval time."
+                  content="Estimated order value from the broker's pre-trade review.  Final numbers are re-checked at approval time."
                 >
                   · est. {fmtMoney(estimatedNotional)}
                 </Tooltip>
@@ -275,8 +275,8 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
       )}
       {phase !== "checking" && previewError && (
         <Tooltip
-          className="mt-2 rounded-md bg-[color:var(--con-warn-soft)] px-2.5 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
-          content="Only the preview failed. Staging still runs the real policy check on the server."
+          className="mt-2 rounded-control bg-[color:var(--con-warn-soft)] px-2.5 py-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
+          content="Only the preview failed.  Staging still runs the real policy check on the server."
         >
           <AlertTriangle size={13} className="mr-1.5 inline-block align-[-2px]" />
           {previewError}
@@ -286,7 +286,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
       {/* Actions */}
       <div className="mt-2.5 flex flex-wrap items-center gap-2">
         {phase === "ready" && !blocked && (
-          <Tooltip content="Creates a pending proposal in Approvals. Nothing is bought or sold until you approve it there.">
+          <Tooltip content="Creates a pending proposal in Approvals.  Nothing is bought or sold until you approve it there.">
             <Btn
               size="sm"
               variant="primary"
@@ -313,7 +313,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
           </Tooltip>
         )}
         {(phase === "ready" || phase === "staging") && (
-          <Tooltip content="Dismiss this draft. It only removes the card — nothing was created yet.">
+          <Tooltip content="Dismiss this draft.  It only removes the card — nothing was created yet.">
             <Btn
               size="sm"
               variant="ghost"
@@ -332,7 +332,7 @@ export function DraftTicket({ draft, reality }: { draft: ChatDraft; reality: Rea
             <Tooltip
               content={
                 stagedLive
-                  ? "Open the Approvals screen. Approving there places a broker order."
+                  ? "Open the Approvals screen.  Approving there places a broker order."
                   : "Open the Approvals screen to approve or reject this proposal."
               }
             >

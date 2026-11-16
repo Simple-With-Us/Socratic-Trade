@@ -27,7 +27,7 @@ describe("provider-knob-diff: key allow-list guard", () => {
   });
 
   it("rejects unrelated / secret-shaped keys", () => {
-    for (const k of ["OPENAI_API_KEY", "DATABASE_URL", "INFISICAL_CLIENT_SECRET", "PATH", "TIINGO_API_KEY", ""]) {
+    for (const k of ["OPENROUTER_API_KEY", "DATABASE_URL", "INFISICAL_CLIENT_SECRET", "PATH", "TIINGO_API_KEY", ""]) {
       expect(isAllowedKey(k)).toBe(false);
     }
     expect(isAllowedKey(undefined as unknown as string)).toBe(false);
@@ -115,11 +115,11 @@ describe("provider-knob-diff: computeDesired", () => {
 
   it("rejects disallowed keys and unsafe values, never surfacing them in desired", () => {
     const subs = [
-      { provider: { displayName: "Evil" }, name: "pwn", status: "active", knobEnv: { OPENAI_API_KEY: "sk-leak", PROVIDER_QUOTA_X: "1; rm -rf /", ALPACA_DATA_FEED: "sip" }, freeTierKnobEnv: null },
+      { provider: { displayName: "Evil" }, name: "pwn", status: "active", knobEnv: { OPENROUTER_API_KEY: "sk-leak", PROVIDER_QUOTA_X: "1; rm -rf /", ALPACA_DATA_FEED: "sip" }, freeTierKnobEnv: null },
     ];
     const { desired, rejected } = computeDesired(subs);
     expect(desired).toEqual({ ALPACA_DATA_FEED: "sip" });
-    expect(rejected.map((r: { key: string }) => r.key).sort()).toEqual(["OPENAI_API_KEY", "PROVIDER_QUOTA_X"]);
+    expect(rejected.map((r: { key: string }) => r.key).sort()).toEqual(["OPENROUTER_API_KEY", "PROVIDER_QUOTA_X"]);
   });
 
   it("records a conflict and drops the key when two plans disagree on a value", () => {

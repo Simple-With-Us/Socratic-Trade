@@ -1,6 +1,6 @@
 import type { MetadataRoute } from "next";
 
-const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://socratictrade.com";
+const base = process.env.NEXT_PUBLIC_SITE_URL || "https://socratictrade.com";
 
 // AI crawlers and training-data harvesters are told to stay out of the whole
 // site regardless of the indexing flag. This is a published opt-out signal
@@ -51,12 +51,13 @@ export default function robots(): MetadataRoute.Robots {
   }
   // Public: only product/site pages are crawlable; the gated app + APIs are not.
   // /framework is deliberately excluded from the allow list — it is served to
-  // humans in browsers only, never to crawlers of any kind.
+  // humans in browsers only, never to crawlers of any kind. /how-it-works was
+  // retired into /framework on 2026-10-19 and now 308s there.
   return {
     rules: [
       {
         userAgent: "*",
-        allow: ["/welcome", "/how-it-works", "/design/socratic-trade", "/privacy-policy", "/terms-and-conditions"],
+        allow: ["/welcome", "/design/socratic-trade", "/privacy-policy", "/terms-and-conditions"],
         disallow: ["/", "/api/", "/access-denied", "/framework"]
       },
       ...aiRules

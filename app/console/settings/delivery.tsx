@@ -1,6 +1,6 @@
 "use client";
 
-/** Delivery channels — where out-of-app alerts actually go (phone push,
+/** Delivery channels — where out-of-app alerts actually go (ntfy.sh,
  *  webhook, email, SMS). Reads GET /api/notifications (channel availability +
  *  saved prefs), writes POST /api/notifications, and exercises every enabled
  *  channel via the existing test endpoint. A channel can only be enabled when
@@ -15,12 +15,13 @@
  *  edit in a sibling field, and vice versa. */
 
 import { useCallback, useEffect, useState } from "react";
-import { sendTestNotification, ConsoleApiError } from "../lib/api";
+import { savePolicy, sendTestNotification, ConsoleApiError } from "../lib/api";
 import { useAutoSave } from "../lib/useAutoSave";
+import { useConsoleData } from "../lib/useConsoleData";
 import { useToast } from "../ui/toast";
 import { SaveStatus } from "../ui/save-status";
 import { Btn, Card, Field, TextInput, Toggle } from "../ui/primitives";
-import { ListSection, ListRow, LabeledContent } from "../../ui/ios-components";
+import { SENTENCE_GAP } from "../lib/format";
 import {
   fetchDeliverySettings,
   saveDeliveryPrefs,
@@ -30,19 +31,101 @@ import {
 } from "./lib";
 
 const CHANNEL_TITLE: Record<DeliveryChannelDescriptor["id"], string> = {
-  push: "A push notification on your phone via a notification app — usually the fastest and cheapest channel.",
+  apns: "Native notifications on your iPhone.  Your devices register themselves when you allow notifications in the Socratic-Trade app.",
+  push: "Alerts via ntfy.sh — subscribe to a topic in the ntfy app or any ntfy-compatible client.",
+  pushover: "Pushover push notifications to your phone.  Paste your own application API token + user key below — no server setup needed.",
   webhook: "An HTTPS POST with a JSON payload to any URL you control (chat webhooks get rich embeds).",
-  email: "An email per alert. Needs the server operator to have configured an email provider.",
-  sms: "A text message per alert. Needs the server operator's Twilio credentials; carrier rates may apply."
+  email: "An email per alert.  Needs the server operator to have configured an email provider.",
+  sms: "A text message per alert.  Uses your own Twilio credentials below, or the server operator's if none are saved here; carrier rates may apply."
 };
 
-type TargetField = "pushTarget" | "webhookUrl" | "email" | "phone";
+type TargetField = "pushTarget" | "pushoverTarget" | "webhookUrl" | "email" | "phone";
+
+/** Per-user channel credential fields (write-only secrets; server stores them
+ *  encrypted and only ever returns presence flags). */
+type SecretField = "pushoverAppToken" | "twilioAccountSid" | "twilioAuthToken" | "twilioFrom";
+
+const SECRET_FIELD_META: Record<SecretField, { label: string; placeholder: string; hint: string; setFlag: "pushoverAppTokenSet" | "twilioAccountSidSet" | "twilioAuthTokenSet" | "twilioFromSet" }> = {
+  pushoverAppToken: {
+    label: "Pushover application API token",
+    placeholder: "azGDORePK8gMaC0QOYAMyEEuzJnyUi",
+    hint: "Your own Pushover app token — create one at pushover.net/apps.  Stored encrypted; never shown again.",
+    setFlag: "pushoverAppTokenSet"
+  },
+  twilioAccountSid: {
+    label: "Twilio Account SID",
+    placeholder: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    hint: "From your Twilio console.  Stored encrypted; never shown again.",
+    setFlag: "twilioAccountSidSet"
+  },
+  twilioAuthToken: {
+    label: "Twilio Auth Token",
+    placeholder: "••••••••",
+    hint: "From your Twilio console.  Stored encrypted; never shown again.",
+    setFlag: "twilioAuthTokenSet"
+  },
+  twilioFrom: {
+    label: "Twilio sender number (From)",
+    placeholder: "+14155551234",
+    hint: "Your Twilio phone number that alerts are sent from.",
+    setFlag: "twilioFromSet"
+  }
+};
+
+const CHANNEL_SECRET_FIELDS: Partial<Record<DeliveryChannelDescriptor["id"], SecretField[]>> = {
+  pushover: ["pushoverAppToken"],
+  sms: ["twilioAccountSid", "twilioAuthToken", "twilioFrom"]
+};
 
 interface TestResult {
   channel: string;
   ok: boolean;
   skipped?: string;
   error?: string;
+}
+
+/** The OLDER, separate webhook mechanism: policy.notificationSettings.webhookUrl
+ *  (written via savePolicy, distinct from the Webhook CHANNEL's own target field
+ *  above, which lives in NotifyPrefs and is written via saveDeliveryPrefs). This
+ *  one fires for every enabled event in Event notifications, unconditionally —
+ *  it does not depend on the Webhook channel toggle. Moved here from Event
+ *  notifications in the 2026-07-16 IA restructure (UI move only — same
+ *  savePolicy write path, same commit-on-blur / revert-on-error semantics) so
+ *  both webhook knobs sit together instead of splitting across two cards. */
+function WebhookUrlRow() {
+  const { snapshot, refresh } = useConsoleData();
+  const autoSave = useAutoSave();
+  const [localWebhook, setLocalWebhook] = useState<string | null>(null);
+  if (!snapshot) return null;
+
+  const current = snapshot.policy.notificationSettings;
+  const webhook = localWebhook ?? current.webhookUrl ?? "";
+
+  const commitWebhook = () => {
+    const next = webhook.trim();
+    if (next === (current.webhookUrl ?? "")) return; // unchanged → no write
+    const prev = webhook;
+    // Server validates (400 on a non-URL); revert the field on failure.
+    autoSave.save(() => savePolicy({ notificationSettings: { webhookUrl: next } }).then(() => refresh()), {
+      onError: () => setLocalWebhook(prev),
+      errorTitle: "Webhook not saved"
+    });
+  };
+
+  return (
+    <div className="mt-2 max-w-md">
+      <Field label="Webhook URL (optional)" hint="Rich embeds for chat webhooks; generic JSON otherwise." htmlFor="webhook">
+        <TextInput
+          id="webhook"
+          value={webhook}
+          placeholder="https://…"
+          title="Every enabled event in Event notifications above is also POSTed to this URL.  Chat webhooks (Discord/Slack) get rich embeds; anything else gets plain JSON.  Saves when you click away."
+          onChange={(e) => setLocalWebhook(e.target.value)}
+          onBlur={commitWebhook}
+        />
+      </Field>
+    </div>
+  );
 }
 
 export function DeliveryChannelsCard() {
@@ -57,6 +140,10 @@ export function DeliveryChannelsCard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState(false);
   const [results, setResults] = useState<TestResult[] | null>(null);
+  // In-progress secret edits, keyed by field. Kept OUT of the persisted prefs
+  // object until blur — undefined keys are dropped by JSON.stringify, so an
+  // untouched secret input never clears the stored server-side value.
+  const [secretDrafts, setSecretDrafts] = useState<Partial<Record<SecretField, string>>>({});
 
   const load = useCallback(async () => {
     try {
@@ -104,8 +191,37 @@ export function DeliveryChannelsCard() {
     });
   };
 
+  const toggleDigest = (on: boolean) => {
+    const prevValue = prefs.watchlistDigestEnabled ?? false;
+    const next = { ...prefs, watchlistDigestEnabled: on };
+    setLocal(next);
+    persist(next, {
+      onError: () => setLocal((l) => (l ? { ...l, watchlistDigestEnabled: prevValue } : l)),
+      successToast: { title: `Daily Watchlist Digest ${on ? "on" : "off"}` }
+    });
+  };
+
   const targetValue = (field: TargetField) => prefs[field];
   const setTarget = (field: TargetField, value: string) => setLocal((l) => ({ ...(l ?? prefs), [field]: value }));
+
+  const commitSecret = (field: SecretField) => {
+    const value = (secretDrafts[field] ?? "").trim();
+    if (!value) return; // untouched or whitespace → no write, never clear by accident
+    const next = { ...prefs, [field]: value };
+    persist(next, {
+      onError: () => undefined,
+      successToast: { title: `${SECRET_FIELD_META[field].label} saved` }
+    });
+    setSecretDrafts((d) => ({ ...d, [field]: "" }));
+  };
+
+  const clearSecret = (field: SecretField) => {
+    const next = { ...prefs, [field]: "" };
+    persist(next, {
+      onError: () => undefined,
+      successToast: { title: `${SECRET_FIELD_META[field].label} removed` }
+    });
+  };
 
   const commitTarget = (field: TargetField) => {
     const raw = targetValue(field);
@@ -144,7 +260,7 @@ export function DeliveryChannelsCard() {
   };
 
   return (
-    <ListSection
+    <Card
       title="Delivery channels"
       action={
         <div className="flex items-center gap-3">
@@ -160,100 +276,171 @@ export function DeliveryChannelsCard() {
         </div>
       }
     >
-      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] px-2">
+      <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
         Where alerts leave the app — one setup for your whole login, across every account. Which events fire is chosen
         in Event notifications above; this is how they reach you. Without any channel, events are still recorded in
         Activity, just not pushed anywhere.
       </p>
 
-      {loadError && (
-        <div className="px-2 mb-3">
-          <p className="rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-2.5 text-[length:var(--con-fs-xs)]">
-            {loadError}{" "}
-            <button type="button" className="font-semibold underline" onClick={() => void load()} title="Try loading the channels again.">
-              Retry
-            </button>
+      <div
+        className="con-row mb-3 flex items-center justify-between gap-4 rounded-control border border-[color:var(--con-line)] px-3 py-2.5"
+        title="Sends a summary of your whole watchlist once a day, shortly after the US market closes.  Uses only data the app already collected — no extra provider calls."
+      >
+        <div>
+          <div className="text-[length:var(--con-fs-sm)] font-semibold">Daily Watchlist Digest</div>
+          <p className="mt-0.5 max-w-xl text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+            {prefs.watchlistDigestEnabled
+              ? <>Sends once a day, after US market close (3:15pm Central).{SENTENCE_GAP}Covers every symbol on your watchlist using only data the app already collected — the last market scan and each symbol&apos;s recent trade proposals.</>
+              : <>Off — no digest is sent.{SENTENCE_GAP}Delivered through the channels enabled above.</>}
           </p>
         </div>
+        <Toggle
+          checked={prefs.watchlistDigestEnabled ?? false}
+          disabled={busy}
+          label="Daily Watchlist Digest"
+          onChange={(next) => toggleDigest(next)}
+        />
+      </div>
+
+      {loadError && (
+        <p className="mb-3 rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-2.5 text-[length:var(--con-fs-xs)]">
+          {loadError}{" "}
+          <button type="button" className="font-semibold underline" onClick={() => void load()} title="Try loading the channels again.">
+            Retry
+          </button>
+        </p>
       )}
 
       {channels === null && !loadError && (
-        <ListRow>
-          <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)] py-1">Loading channels…</p>
-        </ListRow>
+        <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-faint)]">Loading channels…</p>
       )}
 
-      {channels !== null && channels.map((ch) => {
-        const on = prefs.channels.includes(ch.id);
-        const target = targetValue(ch.targetField as TargetField);
-        return (
-          <ListRow key={ch.id}>
-            <div className="flex flex-col gap-2 w-full">
-              <LabeledContent label={
-                <div className="flex flex-wrap items-center gap-2">
-                  <span title={CHANNEL_TITLE[ch.id]}>{ch.label}</span>
-                  {ch.id === "push" && ch.available && (
-                    <span
-                      className="rounded-full border border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[color:var(--con-pos)]"
-                      title="Push via ntfy needs no account or key and is free — the recommended first channel."
-                    >
-                      recommended · free
+      {channels !== null && (
+        <div className="flex flex-col gap-2">
+          {channels.map((ch) => {
+            const on = prefs.channels.includes(ch.id);
+            const target = targetValue(ch.targetField as TargetField);
+            return (
+              <div
+                key={ch.id}
+                className="rounded-control border border-[color:var(--con-line)] p-3 transition-colors hover:bg-[color:var(--con-surface-2)] focus-within:bg-[color:var(--con-surface-2)]"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[length:var(--con-fs-sm)] font-semibold" title={CHANNEL_TITLE[ch.id]}>
+                      {ch.label}
                     </span>
-                  )}
-                  {!ch.available && (
-                    <span
-                      className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)] font-normal"
-                      title="The server operator hasn't configured this channel's provider, so it can't be enabled from here."
-                    >
-                      not configured on the server
-                    </span>
-                  )}
+                    {ch.id === "push" && ch.available && ch.provider === "pushover" && (
+                      <span
+                        className="rounded-full border border-[color:var(--con-pos-border)] bg-[color:var(--con-pos-soft)] px-2 py-0.5 text-[length:var(--con-fs-2xs)] font-bold uppercase tracking-wide text-[color:var(--con-pos)]"
+                        title="Push via Pushover — paste your Pushover user key as the target.  Server needs PUSHOVER_APP_TOKEN + NOTIFY_PUSH_PROVIDER=pushover."
+                      >
+                        pushover
+                      </span>
+                    )}
+                    {!ch.available && (
+                      <span
+                        className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]"
+                        title="No credentials for this channel yet — add your own below, or ask the server operator to configure it."
+                      >
+                        not configured
+                      </span>
+                    )}
+                  </div>
+                  <Toggle
+                    checked={on}
+                    disabled={!ch.available || busy}
+                    onChange={(next) => toggleChannel(ch.id, next)}
+                    label={`${ch.label} channel`}
+                  />
                 </div>
-              } hint={ch.id === "push" && ch.available ? undefined : ""}>
-                <Toggle
-                  checked={on}
-                  disabled={!ch.available || busy}
-                  onChange={(next) => toggleChannel(ch.id, next)}
-                />
-              </LabeledContent>
-              
-              {on && ch.available && (
-                <div className="pl-2 pr-1 pb-1 mt-1 border-t border-[color:var(--con-border-subtle)] pt-2">
-                  <LabeledContent label={ch.targetLabel} hint={ch.hint}>
-                    <input
-                      id={`ch-${ch.id}`}
-                      className="w-48 text-right bg-transparent text-[length:var(--con-fs-sm)] focus:outline-none placeholder:text-[color:var(--con-muted)]"
-                      value={typeof target === "string" ? target : ""}
-                      placeholder={ch.placeholder}
-                      onChange={(e) => setTarget(ch.targetField as TargetField, e.target.value)}
-                      onBlur={() => commitTarget(ch.targetField as TargetField)}
-                      title={ch.hint}
-                    />
-                  </LabeledContent>
-                </div>
-              )}
-            </div>
-          </ListRow>
-        );
-      })}
+                {/* App-managed target (iPhone push): there is nothing for the user to type — the
+                    devices register themselves — so show the explanation, not an empty input. */}
+                {on && ch.available && ch.managedTarget && (
+                  <p className="mt-2 max-w-md text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{ch.hint}</p>
+                )}
+                {on && ch.available && !ch.managedTarget && (
+                  <div className="mt-2 max-w-md">
+                    <Field label={ch.targetLabel} hint={ch.hint} htmlFor={`ch-${ch.id}`}>
+                      <TextInput
+                        id={`ch-${ch.id}`}
+                        value={typeof target === "string" ? target : ""}
+                        placeholder={ch.placeholder}
+                        onChange={(e) => setTarget(ch.targetField as TargetField, e.target.value)}
+                        onBlur={() => commitTarget(ch.targetField as TargetField)}
+                        title={ch.hint}
+                      />
+                    </Field>
+                  </div>
+                )}
+                {/* Per-user channel credentials (Pushover app token, Twilio set).
+                    Always visible for these channels — they are how you make an
+                    unavailable channel work without any server-side setup. */}
+                {(CHANNEL_SECRET_FIELDS[ch.id] ?? []).length > 0 && (
+                  <div className="mt-2 flex max-w-md flex-col gap-2 border-t border-[color:var(--con-line)] pt-2">
+                    {(CHANNEL_SECRET_FIELDS[ch.id] ?? []).map((field) => {
+                      const meta = SECRET_FIELD_META[field];
+                      const isSet = Boolean(prefs[meta.setFlag]);
+                      return (
+                        <Field
+                          key={field}
+                          label={meta.label}
+                          hint={meta.hint}
+                          htmlFor={`cred-${field}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <TextInput
+                              id={`cred-${field}`}
+                              type="password"
+                              autoComplete="off"
+                              value={secretDrafts[field] ?? ""}
+                              placeholder={isSet ? "Saved — enter to replace" : meta.placeholder}
+                              onChange={(e) => setSecretDrafts((d) => ({ ...d, [field]: e.target.value }))}
+                              onBlur={() => commitSecret(field)}
+                              title={meta.hint}
+                            />
+                            {isSet && (
+                              <Btn
+                                size="sm"
+                                variant="ghost"
+                                disabled={busy}
+                                onClick={() => clearSecret(field)}
+                                title={`Remove the saved ${meta.label} (the channel falls back to the server env if one is configured).`}
+                              >
+                                Remove
+                              </Btn>
+                            )}
+                          </div>
+                        </Field>
+                      );
+                    })}
+                  </div>
+                )}
+                {/* The older, always-on legacy webhook (see WebhookUrlRow above) sits under this
+                    channel's toggle regardless of whether the toggle is on — it's a separate
+                    field, not the channel's own target. */}
+                {ch.id === "webhook" && <WebhookUrlRow />}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {results && (
-        <ListRow>
-          <ul className="flex flex-col gap-1 text-[length:var(--con-fs-xs)] w-full py-2">
-            {results.length === 0 && <li className="text-[color:var(--con-muted)]">No channels enabled — toggle one above first.</li>}
-            {results.map((r, i) => (
-              <li
-                key={i}
-                className={r.ok ? "text-[color:var(--con-pos)]" : "text-[color:var(--con-muted)]"}
-                title={r.ok ? "The test message was accepted by the provider." : r.skipped ? "Skipped — the channel is off, has no target, or its provider isn't configured." : r.error ?? "The provider rejected the test."}
-              >
-                {r.ok ? "✓" : "—"} {r.channel}
-                {r.skipped ? ` (${r.skipped.replace(/_/g, " ")})` : r.ok ? " — sent" : ` — failed${r.error ? `: ${r.error}` : ""}`}
-              </li>
-            ))}
-          </ul>
-        </ListRow>
+        <ul className="mt-3 flex flex-col gap-1 text-[length:var(--con-fs-xs)]">
+          {results.length === 0 && <li className="text-[color:var(--con-muted)]">No channels enabled — toggle one above first.</li>}
+          {results.map((r, i) => (
+            <li
+              key={i}
+              className={r.ok ? "text-[color:var(--con-pos)]" : "text-[color:var(--con-muted)]"}
+              title={r.ok ? "The test message was accepted by the provider." : r.skipped ? "Skipped — the channel is off, has no target, or its provider isn't configured." : r.error ?? "The provider rejected the test."}
+            >
+              {r.ok ? "✓" : "—"} {r.channel}
+              {r.skipped ? ` (${r.skipped.replace(/_/g, " ")})` : r.ok ? " — sent" : ` — failed${r.error ? `: ${r.error}` : ""}`}
+            </li>
+          ))}
+        </ul>
       )}
-    </ListSection>
+    </Card>
   );
 }

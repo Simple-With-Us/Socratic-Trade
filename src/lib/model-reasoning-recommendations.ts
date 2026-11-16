@@ -6,7 +6,7 @@
 //   1. Model rotation (src/lib/model-rotation.ts): a rotating seat auto-sets each served model's
 //      reasoning effort to its recommended level (unknown model -> "medium") — there is no manual
 //      effort control under rotation.
-//   2. The Framework Models UI (app/console/strategy/page.tsx): per-seat advice text under each
+//   2. The Strategy Models UI (app/console/strategy/page.tsx): per-seat advice text under each
 //      reasoning control, shown BEFORE any save (e.g. the gpt-5.5 interactive-high rule).
 //
 // Every recommendation is still re-clamped per model at call time by
@@ -15,16 +15,21 @@
 // guidance + rotation defaults, not a wire contract. Keep entries keyed by the exact curated
 // catalog ids (app/ui/llm-model-catalog.ts CURATED_LLM_MODEL_GROUPS / MODEL_ROTATION_POOL).
 
+import { displaySlugFor } from "./llm-model-catalog";
 import type { LlmReasoningEffort } from "./types";
 
 export interface ModelReasoningRecommendation {
   /** The curated recommended effort for this model (what rotation serves it at). */
   effort: LlmReasoningEffort;
+  /** Optional role-specific override. The base effort is the Green/default recommendation. */
+  roleEfforts?: Partial<Record<ModelReasoningRole, LlmReasoningEffort>>;
   /** Optional owner-facing advice rendered under the seat's reasoning control when this model is
    *  selected — only present where there is something real to say (provider quirks, the gpt-5.5
    *  interactive-high rule, opt-in slow tiers). */
   advice?: string;
 }
+
+export type ModelReasoningRole = "green" | "red" | "chat" | "review";
 
 /** Rotation's effort for a model with no curated entry (task rule: unknown -> medium). The
  *  per-model clamp at call time still applies (e.g. "medium" resolves to thinking-off on
@@ -46,42 +51,100 @@ const MISTRAL_MEDIUM_ADVICE =
   "every round; High actually proposed (schema-valid, brackets included) but took ~50s/~$0.07 " +
   "per call, and one of two benchmarked calls exceeded even the widened reasoning timeout.";
 
+const MINIMAX_FLASH_ADVICE =
+  "MiniMax M3.1 Flash always thinks and runs at Max when no effort is sent, so the app always " +
+  "sends one.\u00A0 Medium (recommended) keeps latency and cost down; Max is the slowest.";
+
+const MUSE_CONTRIBUTOR_ADVICE =
+  "Muse contributor models always reason and do not accept Max; a stored Max runs as XHigh.\u00A0 " +
+  "Meta trains on contributor prompts and completions.";
+
 export const MODEL_REASONING_RECOMMENDATIONS: Record<string, ModelReasoningRecommendation> = {
-  // OpenAI — reasoning models take low/medium/high; medium is the balanced default everywhere.
-  "gpt-5.4-nano": { effort: "medium" },
-  "gpt-5.4-mini": { effort: "medium" },
-  "gpt-5.4": { effort: "medium" },
-  "gpt-5.5": { effort: "medium", advice: GPT_55_INTERACTIVE_HIGH_ADVICE },
-  // Anthropic adaptive thinking (low..max) — medium balances depth vs the run-lock latency.
-  "claude-haiku-4-5": { effort: "medium" },
-  "claude-sonnet-5": { effort: "medium" },
-  "claude-opus-4-8": { effort: "medium" },
-  "claude-fable-5": { effort: "medium" },
-  // xAI (none/low/medium/high).
-  "grok-4.3": { effort: "medium" },
-  // Gemini thinking (minimal..high; selected Flash models also allow off).
-  "gemini-3.1-flash-lite": { effort: "medium" },
-  "gemini-3.5-flash": { effort: "medium" },
-  "gemini-3.1-pro-preview": { effort: "medium" },
-  // Opt-in thinking providers: sub-high resolves to thinking OFF by design (llm-request.ts) —
-  // recommend the fast tier explicitly so rotation and the UI say what actually runs.
-  "deepseek-v4-flash": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
-  "deepseek-v4-pro": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
-  "mistral-medium-3-5": { effort: "none", advice: MISTRAL_MEDIUM_ADVICE }
-  // mistral-small-2603 / grok-build-0.1: no reasoning capability at all
-  // (reasoningCapabilityForModel returns undefined) — no entry on purpose; the unknown-model
-  // default is harmless because the call-time clamp sends no reasoning params for them.
+  // Retired 2026-11-04 (kept so a stored selection keeps its guidance).
+  "gpt-6-astra-pro": { effort: "medium" },
+  "gpt-6-astra": { effort: "medium" },
+  // GPT-6.1 / GPT-6 (2026-11-04): the Sol and Luna guidance carries forward to the new generation.
+  "gpt-6.1-sol": {
+    effort: "medium",
+    roleEfforts: { red: "high", review: "high", chat: "medium" },
+    advice: "Sol: Medium for Green/Coach; High for Red Team or one-off strategy/learning review."
+  },
+  "gpt-6.1-terra": {
+    effort: "medium",
+    roleEfforts: { red: "medium", review: "medium", chat: "low" }
+  },
+  "gpt-6-luna": {
+    effort: "medium",
+    roleEfforts: { red: "medium", review: "medium", chat: "low" },
+    advice: "Luna: Low for chat/high-volume synthesis; Medium for Green."
+  },
+  // GPT-5.6 (gpt-5.6-sol / gpt-5.6-luna retired 2026-11-04)
+  "gpt-5.6": {
+    effort: "medium",
+    roleEfforts: { red: "high", review: "high", chat: "medium" },
+    advice: "Sol: Medium for Green/Coach; High for Red Team or one-off strategy/learning review."
+  },
+  "gpt-5.6-sol": {
+    effort: "medium",
+    roleEfforts: { red: "high", review: "high", chat: "medium" },
+    advice: "Sol: Medium for Green/Coach; High for Red Team or one-off strategy/learning review."
+  },
+  "gpt-5.6-luna": {
+    effort: "medium",
+    roleEfforts: { red: "medium", review: "medium", chat: "low" },
+    advice: "Luna: Low for chat/high-volume synthesis; Medium for Green."
+  },
+  // Anthropic
+  "claude-haiku-latest": { effort: "medium" },
+  "claude-sonnet-latest": { effort: "medium" },
+  "claude-opus-latest": { effort: "medium" },
+  "claude-fable-latest": { effort: "medium" },
+  // xAI
+  "grok-latest": { effort: "medium" },
+  // Gemini
+  "gemini-flash-lite-latest": { effort: "medium" },
+  "gemini-flash-latest": { effort: "medium" },
+  "gemini-pro-latest": { effort: "medium" },
+  // DeepSeek
+  "deepseek-flash-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
+  "deepseek-pro-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
+  // Mistral
+  "mistral-small-latest": { effort: "none" },
+  "mistral-medium-latest": { effort: "none", advice: MISTRAL_MEDIUM_ADVICE },
+  // Large 4 reasons by default; High is the only effort both OpenRouter and Mistral document.
+  "mistral-large-latest": { effort: "high" },
+  // MiniMax (M3 has no documented effort; the entry only matters for M3.1 Flash)
+  "minimax-m3": { effort: "medium" },
+  "minimax-m3.1-flash": { effort: "medium", roleEfforts: { chat: "low" }, advice: MINIMAX_FLASH_ADVICE },
+  // Meta Muse: never "none" (a provider 400); contributor models never "max".
+  "muse-wonder-1.0": { effort: "medium" },
+  "muse-spark-1.3": { effort: "medium" },
+  "muse-spark-1.3-contributor": { effort: "medium", roleEfforts: { chat: "low" }, advice: MUSE_CONTRIBUTOR_ADVICE },
+  "muse-glimmer-30b": { effort: "medium", roleEfforts: { chat: "low" } },
+  "muse-wonder-1.0-contributor": { effort: "medium", advice: MUSE_CONTRIBUTOR_ADVICE },
+  "muse-wonder-full-1.0-contributor": { effort: "medium", advice: MUSE_CONTRIBUTOR_ADVICE }
 };
 
 function lookup(model: string | undefined): ModelReasoningRecommendation | undefined {
-  const id = (model ?? "").trim();
+  const display = displaySlugFor(model);
+  if (display && MODEL_REASONING_RECOMMENDATIONS[display]) {
+    return MODEL_REASONING_RECOMMENDATIONS[display];
+  }
+  let id = (model ?? "").trim();
+  if (id.includes("/")) {
+    id = id.split("/").pop()!;
+  }
   return id ? MODEL_REASONING_RECOMMENDATIONS[id] : undefined;
 }
 
 /** The curated recommended effort for a model; unknown/custom ids get the "medium" default.
  *  Rotation serves every rotated model at this level (clamped per model at call time). */
-export function recommendedReasoningEffortForModel(model: string | undefined): LlmReasoningEffort {
-  return lookup(model)?.effort ?? DEFAULT_REASONING_RECOMMENDATION_EFFORT;
+export function recommendedReasoningEffortForModel(
+  model: string | undefined,
+  role: ModelReasoningRole = "green"
+): LlmReasoningEffort {
+  const recommendation = lookup(model);
+  return recommendation?.roleEfforts?.[role] ?? recommendation?.effort ?? DEFAULT_REASONING_RECOMMENDATION_EFFORT;
 }
 
 /** Curated advice text for a model's reasoning control, or undefined when there is nothing

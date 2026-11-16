@@ -164,7 +164,7 @@ export async function judgeFaithfulness(evalCase: FaithfulnessCase): Promise<Fai
     return { ran: false, pass: false, detail: "skipped (RAG_EVAL_FAITHFULNESS_JUDGE off or OPENAI_API_KEY unset)" };
   }
   const apiKey = process.env.OPENAI_API_KEY!;
-  const model = process.env.RAG_EVAL_FAITHFULNESS_JUDGE_MODEL || "gpt-4o-mini";
+  const model = process.env.RAG_EVAL_FAITHFULNESS_JUDGE_MODEL || "gpt-5.4-mini";
   const context = evalCase.retrievedChunks.map((c) => `[${c.chunk_id}] ${c.text}`).join("\n\n");
   const prompt = [
     "You are a faithfulness judge for a RAG system. Given retrieved context and a model answer,",

@@ -78,7 +78,7 @@ describe("generateHydePassages", () => {
   });
 
   it("returns [] when no LLM credential resolves (no key)", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => {
       throw new Error("should not be called with no key");
     }) as any;
@@ -90,7 +90,7 @@ describe("generateHydePassages", () => {
   });
 
   it("drafts passages and records LLM usage under context 'rag-hyde' on success", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", keyRef: "fp123", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", keyRef: "fp123", transport: "chat-completions" });
     const passages = ["Hypothetical risk-factor excerpt one.", "Hypothetical guidance excerpt two."];
     global.fetch = vi.fn(() =>
       Promise.resolve({
@@ -124,7 +124,7 @@ describe("generateHydePassages", () => {
     // `policy.llmModel` while a DIFFERENT model, hydeModel(), is sent in the request body).
     mocks.resolveLlmEndpoint.mockImplementation((policy: { llmModel?: string | null }) => ({
       provider: "openai",
-      url: "https://api.openai.com/v1/chat/completions",
+      url: "https://openrouter.ai/v1/chat/completions",
       key: "sk-test",
       model: policy?.llmModel ?? "gpt-5.4-mini",
       keySource: "user",
@@ -145,7 +145,7 @@ describe("generateHydePassages", () => {
     // resolveLlmEndpoint must have been called with the override baked into the policy it resolves
     // provider/URL/key from, not the ambient getPolicy() llmModel ("gpt-5.4-mini" per this file's
     // default beforeEach mock) — otherwise an Anthropic-policy user would get an OpenAI model routed
-    // to api.anthropic.com (the exact bug this fix closes).
+    // to openrouter.ai (the exact bug this fix closes).
     expect(mocks.resolveLlmEndpoint).toHaveBeenCalledWith(
       expect.objectContaining({ llmModel: "gpt-5.4" }),
       "local",
@@ -154,7 +154,7 @@ describe("generateHydePassages", () => {
     );
   });
 
-  it("resolves the endpoint FOR the HyDE model even under an Anthropic policy.llmModel (Finding 4: prevents an OpenAI model id being sent to api.anthropic.com)", async () => {
+  it("resolves the endpoint FOR the HyDE model even under an Anthropic policy.llmModel (Finding 4: prevents an OpenAI model id being sent to openrouter.ai)", async () => {
     // No RAG_HYDE_MODEL override -> default "gpt-5.4-mini". getPolicy() (mocked in beforeEach)
     // returns { llmModel: "gpt-5.4-mini" } for this describe block already, but assert explicitly
     // that resolveLlmEndpoint is called with the HyDE model, NOT whatever policy.llmModel says —
@@ -163,7 +163,7 @@ describe("generateHydePassages", () => {
     mocks.getPolicy.mockReturnValue({ llmModel: "claude-opus-4-1" });
     mocks.resolveLlmEndpoint.mockImplementation((policy: { llmModel?: string | null }) => ({
       provider: "openai",
-      url: "https://api.openai.com/v1/chat/completions",
+      url: "https://openrouter.ai/v1/chat/completions",
       key: "sk-test",
       model: policy?.llmModel ?? "gpt-5.4-mini",
       keySource: "user",
@@ -191,7 +191,7 @@ describe("generateHydePassages", () => {
   });
 
   it("returns [] and audits on a network error (fail-open, never throws)", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.reject(new Error("network down"))) as any;
 
     const { generateHydePassages } = await import("../src/lib/rag/multi-query");
@@ -202,7 +202,7 @@ describe("generateHydePassages", () => {
   });
 
   it("returns [] on a non-OK HTTP response, and audits rag_hyde_failed (2026-07-05 review fix: this path used to be silent)", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 429, json: async () => ({}) })) as any;
 
     const { generateHydePassages } = await import("../src/lib/rag/multi-query");
@@ -217,7 +217,7 @@ describe("generateHydePassages", () => {
   });
 
   it("returns [] on malformed/unparseable JSON", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: "not valid json {{{" } }] }) })
     ) as any;
@@ -228,7 +228,7 @@ describe("generateHydePassages", () => {
   });
 
   it("caps at 3 passages even when the model returns more", async () => {
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() =>
       Promise.resolve({
         ok: true,
@@ -243,7 +243,7 @@ describe("generateHydePassages", () => {
 
   it("returns [] with no request when the user is over their daily LLM/RAG budget (2026-07-05 review fix, Finding 6: mirrors retrieveContextDetailed's own isOverLlmBudget gate)", async () => {
     mocks.isOverLlmBudget.mockReturnValue(true);
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => {
       throw new Error("should not be called when over budget");
     }) as any;

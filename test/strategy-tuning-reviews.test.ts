@@ -23,8 +23,8 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_URL;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_URL;
 });
 
 function tuneRequest(email: string, body: Record<string, unknown>): Request {
@@ -65,7 +65,7 @@ describe("db-tuning-reviews CRUD", () => {
     const firstId = insertStrategyTuningReview({
       userId,
       connectedAccountId: accountId,
-      model: "gpt-4.1-mini",
+      model: "openai/gpt-4.1-mini",
       reasoningEffort: "low",
       generatedBy: "local_rules",
       result: { summary: "First review", cautions: [] }
@@ -80,7 +80,7 @@ describe("db-tuning-reviews CRUD", () => {
     const secondId = insertStrategyTuningReview({
       userId,
       connectedAccountId: accountId,
-      model: "gpt-4.1-mini",
+      model: "openai/gpt-4.1-mini",
       reasoningEffort: "low",
       generatedBy: "llm",
       result: { summary: "Second review", cautions: [] }
@@ -158,7 +158,7 @@ describe("/api/strategy/tune route: persistence, targeting, and lifecycle", () =
       await import("../src/lib/db");
     const { POST } = await import("../app/api/strategy/tune/route");
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     const email = `tune-route-post-${randomUUID()}@example.com`;
     const { resolveRequestUserFromEmail } = await import("../src/lib/request-user");
     const userId = resolveRequestUserFromEmail(email).userId;
@@ -306,7 +306,7 @@ describe("/api/strategy/tune route: persistence, targeting, and lifecycle", () =
     const reviewId = insertStrategyTuningReview({
       userId,
       connectedAccountId: accountId,
-      model: "gpt-4.1-mini",
+      model: "openai/gpt-4.1-mini",
       reasoningEffort: "low",
       generatedBy: "llm",
       result: { summary: "GET me", cautions: [], generatedBy: "llm" }
@@ -363,7 +363,7 @@ describe("/api/strategy/tune route: persistence, targeting, and lifecycle", () =
 });
 
 describe("proposeStrategyTuning evidence-pack widening", () => {
-  it("includes lessons, reflection, decisionMemory, thesis/sector scorecards, cross-account performance, learning mutations, and regime context", async () => {
+  it("includes account-scoped lessons, reflection, decision memory, scorecards, learning mutations, and regime context", async () => {
     const {
       insertFillEvent,
       insertLearnedContext,
@@ -384,8 +384,8 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     const accountNumber = "TUNE-EVIDENCE";
     const otherAccountNumber = "TUNE-EVIDENCE-OTHER";
 
-    process.env.OPENAI_API_KEY = "test-key";
-    process.env.OPENAI_API_URL = "https://api.openai.com/v1/responses";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/responses";
 
     upsertConnectedAccount({
       id: accountId,
@@ -408,7 +408,7 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     setActiveConnectedAccount(accountId, userId);
     setStrategyPrompt("EVIDENCE STRATEGY", userId, accountId);
     setPolicy(
-      { ...DEFAULT_POLICY, accountNumber, llmModel: "gpt-4.1-mini", scoringWeights: { ...DEFAULT_POLICY.scoringWeights } },
+      { ...DEFAULT_POLICY, accountNumber, llmModel: "openai/gpt-4.1-mini", scoringWeights: { ...DEFAULT_POLICY.scoringWeights } },
       userId,
       accountId
     );
@@ -489,14 +489,19 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
       riskTier: "fact",
       confidence: 0.72,
       contributorUserId: userId,
+      connectedAccountId: accountId,
+      accountEnvironment: "paper",
+      learningScope: "account",
+      transferState: "candidate",
       assertedAt: new Date().toISOString(),
       supersededBy: null,
       expiresAt: null
     });
 
-    // Global Socratic decision memory (no connectedAccountId scoping — across this user's accounts).
+    // Exact-account Socratic decision memory; sibling-account outcomes must not enter this review.
     upsertSocraticDecisionCase({
       userId,
+      connectedAccountId: accountId,
       symbol: "NVDA",
       status: "placed",
       authority: "propose",
@@ -579,7 +584,7 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     expect((reflection as Record<string, unknown> | undefined)?.thesisOutcomes).toBeUndefined();
     expect(reflection?.regimeOutcomes?.length).toBeGreaterThan(0);
 
-    // decisionMemory (global, thesis truncated, outcome/lessons compact)
+    // decisionMemory (exact account, thesis truncated, outcome/lessons compact)
     const decisionMemory = capturedContext?.decisionMemory as Array<{ symbol?: string; outcome?: string; lessons?: string[] }>;
     expect(decisionMemory.some((d) => d.symbol === "NVDA")).toBe(true);
     const nvda = decisionMemory.find((d) => d.symbol === "NVDA");
@@ -592,10 +597,8 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     const sectorScorecard = capturedContext?.sectorScorecard as Array<{ sector: string }>;
     expect(sectorScorecard.some((s) => s.sector === "Technology")).toBe(true);
 
-    // crossAccountPerformance excludes the reviewed account, includes the other one
-    const crossAccountPerformance = capturedContext?.crossAccountPerformance as Array<{ label: string }>;
-    expect(crossAccountPerformance.some((c) => c.label === "Other Account")).toBe(true);
-    expect(crossAccountPerformance.some((c) => c.label === "Evidence Account")).toBe(false);
+    // Sibling-account performance is intentionally excluded unless separately transfer-validated.
+    expect(capturedContext?.crossAccountPerformance).toBeUndefined();
 
     // learningMutations
     const learningMutations = capturedContext?.learningMutations as Array<{ subsystem: string }>;
@@ -616,7 +619,7 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     const accountId = randomUUID();
     const accountNumber = "TUNE-RESILIENCE";
 
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
 
     upsertConnectedAccount({
       id: accountId,
@@ -643,6 +646,7 @@ describe("proposeStrategyTuning evidence-pack widening", () => {
     });
     upsertSocraticDecisionCase({
       userId,
+      connectedAccountId: accountId,
       symbol: "NVDA",
       status: "placed",
       authority: "propose",

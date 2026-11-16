@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateLlmCostUsd, extractLlmUsage } from "../src/lib/llm-usage";
+import { estimateLlmCostUsd, extractLlmUsage, remapOpenRouterTelemetry } from "../src/lib/llm-usage";
 
 // Prompt-cache accounting: extractLlmUsage must surface cache-read/creation tokens from every
 // provider's usage shape, and estimateLlmCostUsd must price cached tokens at the discounted rate
@@ -76,29 +76,78 @@ describe("estimateLlmCostUsd — cache-aware pricing", () => {
   it("prices cache reads at 0.1x input instead of full rate (gpt-5.5)", () => {
     // 6000 prompt (5000 cached) + 1500 out on gpt-5.5 ($5/$30):
     // uncached: 6000*5/1M = $0.03 ... full-price version:
-    const fullPrice = estimateLlmCostUsd("gpt-5.5", 6000, 1500);
+    const fullPrice = estimateLlmCostUsd("openai/gpt-5.5", 6000, 1500);
     // cache-aware: (1000*5 + 5000*0.5)*1e-6 + 1500*30*1e-6
-    const cached = estimateLlmCostUsd("gpt-5.5", 6000, 1500, 5000);
+    const cached = estimateLlmCostUsd("openai/gpt-5.5", 6000, 1500, 5000);
     expect(fullPrice).toBeCloseTo((6000 * 5 + 1500 * 30) / 1_000_000, 10);
     expect(cached).toBeCloseTo((1000 * 5 + 5000 * 0.5 + 1500 * 30) / 1_000_000, 10);
     expect(cached!).toBeLessThan(fullPrice!);
   });
 
+  it("prices MiniMax M3.1 Flash at $0.15/$0.60 per 1M, and still prices historical M3 rows at $0.30/$1.20", () => {
+    // platform.minimax.io pay-as-you-go, verified 2026-10-21: M3.1 Flash $0.15 in / $0.60 out /
+    // $0.015 cached (= the 0.1x cache-read multiplier).  Every spelling a call can be recorded under
+    // must hit the new row, never the M3 prefix (":free" suffix variants once shadowed to M3).
+    const flash = (1000 * 0.15 + 500 * 0.6) / 1_000_000;
+    for (const model of ["minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax/minimax-m3.1-flash", "minimax/minimax-m3.1-flash:free"]) {
+      expect(estimateLlmCostUsd(model, 1000, 500), model).toBeCloseTo(flash, 10);
+    }
+    expect(estimateLlmCostUsd("MiniMax-M3.1-Flash", 1000, 500, 1000)).toBeCloseTo((1000 * 0.015 + 500 * 0.6) / 1_000_000, 10);
+    // A usage row recorded before the switch keeps the M3 price instead of being repriced.
+    for (const model of ["minimax-m3", "MiniMax-M3", "minimax/minimax-m3"]) {
+      expect(estimateLlmCostUsd(model, 1000, 500), model).toBeCloseTo((1000 * 0.3 + 500 * 1.2) / 1_000_000, 10);
+    }
+  });
+
   it("prices Anthropic cache creation at 1.25x input", () => {
     // opus-4-8 ($5/$25): 6000 prompt = 800 full + 4000 read(0.1x) + 1200 creation(1.25x)
-    const cost = estimateLlmCostUsd("claude-opus-4-8", 6000, 400, 4000, 1200);
+    const cost = estimateLlmCostUsd("anthropic/claude-opus-4-8", 6000, 400, 4000, 1200);
     const expected = ((800 + 4000 * 0.1 + 1200 * 1.25) * 5 + 400 * 25) / 1_000_000;
     expect(cost).toBeCloseTo(expected, 10);
   });
 
   it("clamps malformed usage (cached > prompt) — never a negative cost", () => {
-    const cost = estimateLlmCostUsd("gpt-5.5", 1000, 0, 999999);
+    const cost = estimateLlmCostUsd("openai/gpt-5.5", 1000, 0, 999999);
     // all 1000 treated as cached at 0.1x
     expect(cost).toBeCloseTo((1000 * 0.5) / 1_000_000, 10);
     expect(cost!).toBeGreaterThan(0);
   });
 
   it("back-compat: two-arg call unchanged", () => {
-    expect(estimateLlmCostUsd("gpt-5.5", 1000, 100)).toBeCloseTo((1000 * 5 + 100 * 30) / 1_000_000, 10);
+    expect(estimateLlmCostUsd("openai/gpt-5.5", 1000, 100)).toBeCloseTo((1000 * 5 + 100 * 30) / 1_000_000, 10);
+  });
+
+  it("openrouter/vendor/model 3-part form prices identically to bare model name", () => {
+    // Before the fix, priceForModel stripped only ONE slash:
+    //   "openrouter/openai/gpt-5.5" → "openai/gpt-5.5" (no price-table hit → fallback rate).
+    // After the fix it strips "openrouter/" first, then "openai/" → "gpt-5.5" (correct rate).
+    const bare = estimateLlmCostUsd("gpt-5.5", 1000, 100);
+    const twopart = estimateLlmCostUsd("openai/gpt-5.5", 1000, 100);
+    const threepart = estimateLlmCostUsd("openrouter/openai/gpt-5.5", 1000, 100);
+    expect(bare).toBeCloseTo((1000 * 5 + 100 * 30) / 1_000_000, 10);
+    expect(twopart).toBe(bare);
+    expect(threepart).toBe(bare);
+  });
+});
+
+describe("remapOpenRouterTelemetry — family identity", () => {
+  it("maps OpenRouter Gemini Flash wire slugs onto gemini-flash-latest", () => {
+    expect(remapOpenRouterTelemetry("openrouter", "~google/gemini-flash-latest")).toEqual({
+      provider: "gemini",
+      model: "gemini-flash-latest"
+    });
+    expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.7-flash")).toEqual({
+      provider: "gemini",
+      model: "gemini-flash-latest"
+    });
+    expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.5-flash-lite").model).toBe("gemini-flash-lite-latest");
+    expect(remapOpenRouterTelemetry("openrouter", "google/gemini-3.1-pro-preview").model).toBe("gemini-pro-latest");
+  });
+
+  it("maps every Claude Opus slug onto claude-opus-latest", () => {
+    expect(remapOpenRouterTelemetry("openrouter", "anthropic/claude-opus-4-8").model).toBe("claude-opus-latest");
+    expect(remapOpenRouterTelemetry("anthropic", "claude-opus-4-8").model).toBe("claude-opus-latest");
+    expect(remapOpenRouterTelemetry("openrouter", "anthropic/claude-opus-5-5").model).toBe("claude-opus-latest");
+    expect(remapOpenRouterTelemetry("anthropic", "claude-opus-5-5").model).toBe("claude-opus-latest");
   });
 });

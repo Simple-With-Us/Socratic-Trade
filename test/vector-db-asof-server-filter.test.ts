@@ -53,7 +53,10 @@ vi.mock("voyageai", () => ({
 vi.mock("../src/lib/db", () => ({
   resolveApiKey: mocks.resolveApiKey,
   audit: mocks.audit,
-  setInternalSetting: vi.fn()
+  setInternalSetting: vi.fn(),
+  getDb: () => ({
+    prepare: () => ({ get: () => undefined })
+  })
 }));
 
 beforeEach(() => {
@@ -66,7 +69,8 @@ beforeEach(() => {
   delete process.env.HYBRID_RETRIEVAL;
   delete process.env.VECTOR_MIN_SCORE;
   delete process.env.VECTOR_ASOF_STRICT;
-  delete process.env.VECTOR_ASOF_SERVER_FILTER;
+  // Explicit off so these tests stay independent of the production default ON (2026-07-24).
+  process.env.VECTOR_ASOF_SERVER_FILTER = "off";
 
   mocks.resolveApiKey.mockImplementation((service: string) => {
     if (service === "pinecone") return process.env.PINECONE_API_KEY;
@@ -91,6 +95,22 @@ function extractQueryFilter(): Record<string, unknown> {
   return (call![0] as { filter: Record<string, unknown> }).filter;
 }
 
+const COMMITTED_RECEIPT_CLAUSE = {
+  $or: [
+    { receipt_required: { $exists: false } },
+    { receipt_required: { $eq: false } },
+    { ingest_state: { $eq: "committed" } }
+  ]
+};
+
+function unwrapCommittedFilter(filter: Record<string, unknown>): Record<string, unknown> {
+  expect(Array.isArray(filter.$and)).toBe(true);
+  const clauses = filter.$and as Record<string, unknown>[];
+  expect(clauses).toHaveLength(2);
+  expect(clauses[1]).toEqual(COMMITTED_RECEIPT_CLAUSE);
+  return clauses[0]!;
+}
+
 describe("server-asof-filter: Pinecone query filter shape", () => {
   it("(a) asOf set + VECTOR_ASOF_SERVER_FILTER=on (FAIL-OPEN): filter carries $and with the $lte-or-$exists:false epoch clause", async () => {
     process.env.VECTOR_ASOF_SERVER_FILTER = "on";
@@ -99,7 +119,7 @@ describe("server-asof-filter: Pinecone query filter shape", () => {
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     await retrieveContextDetailed("q", "AAPL", 3, "local", { asOf: AS_OF });
 
-    const filter = extractQueryFilter();
+    const filter = unwrapCommittedFilter(extractQueryFilter());
     expect(Array.isArray(filter.$and)).toBe(true);
     const clauses = filter.$and as Record<string, unknown>[];
     // one clause is the base (symbol/scope-coexistence), the other is the epoch $or
@@ -113,7 +133,12 @@ describe("server-asof-filter: Pinecone query filter shape", () => {
     expect(baseClause).toBeTruthy();
     expect((baseClause as { $or: unknown[] }).$or).toEqual([
       { scope: { $eq: "shared" } },
-      { userId: { $eq: "local" } }
+      {
+        $and: [
+          { userId: { $eq: "local" } },
+          { scope: { $exists: false } }
+        ]
+      }
     ]);
   });
 
@@ -125,12 +150,13 @@ describe("server-asof-filter: Pinecone query filter shape", () => {
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     await retrieveContextDetailed("q", "AAPL", 3, "local", { asOf: AS_OF });
 
-    const filter = extractQueryFilter();
+    const filter = unwrapCommittedFilter(extractQueryFilter());
     const clauses = filter.$and as Record<string, unknown>[];
     const epochClause = clauses.find((c) => JSON.stringify(c).includes("as_of_epoch_ms"));
     expect(epochClause).toEqual({ as_of_epoch_ms: { $lte: AS_OF_MS } });
-    // no $exists branch anywhere in the fail-closed filter
-    expect(JSON.stringify(filter)).not.toContain("$exists");
+    // The point-in-time clause itself has no $exists branch. Independent scope and committed-receipt
+    // compatibility guards deliberately retain theirs for legacy vectors.
+    expect(JSON.stringify(epochClause)).not.toContain("$exists");
   });
 
   it("(d) asOf UNSET: no epoch clause, filter byte-identical to today (top-level scope $or, no $and)", async () => {
@@ -140,28 +166,34 @@ describe("server-asof-filter: Pinecone query filter shape", () => {
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     await retrieveContextDetailed("q", "AAPL", 3, "local", {});
 
-    const filter = extractQueryFilter();
+    const filter = unwrapCommittedFilter(extractQueryFilter());
     expect(filter.$and).toBeUndefined();
     expect(JSON.stringify(filter)).not.toContain("as_of_epoch_ms");
     expect(filter).toEqual({
       symbol: { $eq: "AAPL" },
-      $or: [{ scope: { $eq: "shared" } }, { userId: { $eq: "local" } }]
+      $or: [
+        { scope: { $eq: "shared" } },
+        { $and: [{ userId: { $eq: "local" } }, { scope: { $exists: false } }] }
+      ]
     });
   });
 
-  it("(d2) asOf set but server filter FLAG OFF (default): no epoch clause — byte-identical to today", async () => {
-    delete process.env.VECTOR_ASOF_SERVER_FILTER;
+  it("(d2) asOf set but server filter FLAG OFF: no epoch clause — byte-identical to pre-enablement", async () => {
+    process.env.VECTOR_ASOF_SERVER_FILTER = "off";
     mocks.query.mockResolvedValue({ matches: [] });
 
     const { retrieveContextDetailed } = await import("../src/lib/vector-db");
     await retrieveContextDetailed("q", "AAPL", 3, "local", { asOf: AS_OF });
 
-    const filter = extractQueryFilter();
+    const filter = unwrapCommittedFilter(extractQueryFilter());
     expect(filter.$and).toBeUndefined();
     expect(JSON.stringify(filter)).not.toContain("as_of_epoch_ms");
     expect(filter).toEqual({
       symbol: { $eq: "AAPL" },
-      $or: [{ scope: { $eq: "shared" } }, { userId: { $eq: "local" } }]
+      $or: [
+        { scope: { $eq: "shared" } },
+        { $and: [{ userId: { $eq: "local" } }, { scope: { $exists: false } }] }
+      ]
     });
   });
 });

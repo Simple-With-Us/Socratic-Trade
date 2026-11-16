@@ -37,6 +37,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# -- supported runtime guard -------------------------------------------------
+# `.nvmrc` is advisory unless the caller explicitly activates it. Refuse to
+# install, verify, or publish with a different Node ABI than production/CI.
+command -v node >/dev/null 2>&1 || die "Node is missing. Node 26.x is required."
+NODE_VERSION="$(node -p 'process.versions.node' 2>/dev/null || echo "")"
+case "$NODE_VERSION" in
+  26.*) ;;
+  *)
+    die "Node 26.x is required; found '${NODE_VERSION:-unknown}'.
+  On the deployment Mac run:
+    export PATH=\"/opt/homebrew/opt/node@26/bin:\$PATH\"
+  Then re-run bash scripts/land.sh."
+    ;;
+esac
+ok "Node v${NODE_VERSION} matches the supported Node 26 runtime."
+
 # ── 1. worktree / branch guards ────────────────────────────────────────────
 MAIN_INTEGRATION_WORKTREE="$HOME/Code/Agentic Trading"
 CURRENT_WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
@@ -54,6 +70,7 @@ if [[ -z "${LAND_FORCE_PUSH:-}" ]]; then
     Claude      → ~/apps/trading-claude   (branch agent/claude)
     Codex       → ~/apps/trading-codex    (branch agent/codex)
     Antigravity → ~/apps/trading-antigravity (branch agent/antigravity)
+    Kimi        -> ~/apps/trading-kimi     (branch agent/kimi-lane)
   To override in a genuine emergency: LAND_FORCE_PUSH=1 bash scripts/land.sh"
   fi
 
@@ -143,7 +160,7 @@ else
   ok "  tsc clean."
 
   info "  [2/3] npm test"
-  if ! npm test -- --run 2>&1; then
+  if ! VITEST_MAX_THREADS="${VITEST_MAX_THREADS:-4}" npm test -- --run 2>&1; then
     die "Tests failed.  Fix them, then re-run land.sh."
   fi
   ok "  tests pass."
@@ -189,7 +206,9 @@ if [[ -n "${1:-}" && "${1:-}" == "--pr-title" && -n "${2:-}" ]]; then
   PR_TITLE="${2}"
   shift 2
 elif [[ "$COMMIT_COUNT" -eq 1 ]]; then
-  PR_TITLE="$(echo "$COMMIT_SUBJECTS" | head -1)"
+  # Parameter expansion, not `echo | head` -- see the SIGPIPE note in
+  # scripts/alert-deploy-freshness.sh (FLEET-INFRA-BH).
+  PR_TITLE="${COMMIT_SUBJECTS%%$'\n'*}"
 else
   # Use first non-trivial commit subject; strip conventional commit prefix
   FIRST_SUBJECT="$(echo "$COMMIT_SUBJECTS" | tail -1)"
@@ -237,6 +256,14 @@ PR_URL="$(gh pr create \
 
 echo ""
 ok "PR ready: ${PR_URL}"
+
+info "Enabling auto-merge..."
+if gh pr merge "${PR_URL}" --auto --squash >/dev/null 2>&1; then
+  ok "Auto-merge enabled for ${PR_URL}"
+else
+  warn "Failed to enable auto-merge. You may need to merge manually."
+fi
+
 echo ""
 echo -e "${BOLD}Next steps for reviewer:${RESET}"
 echo "  1. Review the PR at the URL above"

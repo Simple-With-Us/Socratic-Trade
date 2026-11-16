@@ -11,10 +11,12 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_API_URL;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_URL;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_URL;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_URL;
 });
 
 // The single Red Team reviewer (post-consolidation): reviews are risk-adding OPENINGS only, the
@@ -36,17 +38,19 @@ const buyProposal = (): any => ({
 });
 
 /** Policy with an EXPLICIT Red model (no-defaults world: blank Red = not_configured before any fetch). */
-const policyWithRed = (accountNumber: string, redModel = "gpt-4.1-mini") => ({
+const policyWithRed = (accountNumber: string, redModel = "openai/gpt-4.1-mini") => ({
   ...DEFAULT_POLICY,
   accountNumber,
-  llmModel: "gpt-4.1-mini",
+  llmModel: "openai/gpt-4.1-mini",
   redTeamLlmModel: redModel
 });
 
 async function setupOpenAi(accountNumber: string, redModel?: string) {
   const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
   process.env.OPENAI_API_KEY = "test-key";
-  process.env.OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+  process.env.OPENAI_API_URL = "https://openrouter.ai/v1/chat/completions";
+  process.env.OPENROUTER_API_KEY = "test-key";
+  process.env.OPENROUTER_API_URL = "https://openrouter.ai/v1/chat/completions";
   setPolicy(policyWithRed(accountNumber, redModel));
   setStrategyPrompt("BASE STRATEGY");
 }
@@ -66,8 +70,8 @@ describe("debateProposal — function-contract fail direction", () => {
   it("reports not_configured when NO Red model is chosen (no fallback to Green, no default)", async () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    process.env.OPENAI_API_KEY = "test-key";
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOMODEL", llmModel: "gpt-4.1-mini" });
+    process.env.OPENROUTER_API_KEY = "test-key";
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_NOMODEL", llmModel: "openai/gpt-4.1-mini" });
     setStrategyPrompt("BASE STRATEGY");
     let fetched = false;
     vi.stubGlobal("fetch", async () => {
@@ -86,7 +90,7 @@ describe("debateProposal — function-contract fail direction", () => {
   it("reports not_configured when the Red model's provider has no key", async () => {
     const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
-    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
     setPolicy(policyWithRed("RT_NOKEY"));
     setStrategyPrompt("BASE STRATEGY");
 
@@ -204,7 +208,52 @@ describe("debateProposal — three-way verdict + shape-violation fail-closed (§
     expect(result.failureKind).toBe("malformed_response");
   });
 
-  it("classifies a persistent 429 as rate_limited (after the bounded retry)", async () => {
+  // Codex P1 (PR #1696): jsonrepair must never resurrect a TRUNCATED approval. A reply cut off
+  // mid-object is repairable into `{"verdict":"approve"}` syntactically — but this gate is
+  // fail-closed, so the parse stays strict and the review is unavailable.
+  it("fails closed (unavailable) on a truncated approval — repair is never applied here", async () => {
+    const { debateProposal } = await import("../src/lib/red-team");
+    await setupOpenAi("RT_TRUNCATED");
+    vi.stubGlobal("fetch", async () => new Response(
+      JSON.stringify({ choices: [{ message: { content: '{"verdict":"approve","reason":"looks fi' } }] }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+
+    const result = await debateProposal(buyProposal(), undefined);
+    expect(result.available).toBe(false);
+    expect(result.rejected).toBe(false);
+    expect(result.verdict).toBeUndefined();
+    expect(result.failureKind).toBe("malformed_response");
+  });
+
+  // Codex P1 (PR #1696): a reply carrying TWO verdict blocks must not resolve to whichever block
+  // is extracted first — ambiguous reviewer output is unavailable, whatever each block says.
+  it.each([
+    ["well-formed double block", '{"verdict":"approve","reason":"ok"} {"verdict":"reject","reason":"bad"}'],
+    ["single-quoted double block", "{'verdict':'approve','reason':'ok'} {'verdict':'reject','reason':'bad'}"],
+    ["multi-element conflicting array", '[{"verdict":"approve","reason":"ok"},{"verdict":"reject","reason":"bad"}]'],
+    // JSON \uXXXX escape in the second block's key — parses as "verdict" but evades a literal
+    // regex (Codex P1, round 3); the guard decodes escapes before counting.
+    ["escaped-key second block", '{"verdict":"approve","reason":"ok"} {"\\u0076erdict":"reject","reason":"bad"}'],
+    // Unquoted JSON5 key in the trailing block (Codex round 10) — must count as a verdict too.
+    ["unquoted-key second block", '{"verdict":"approve","reason":"ok"} {verdict: "reject", reason: "bad"}']
+  ])("fails closed on multiple verdict blocks (%s)", async (_label, content) => {
+    const { debateProposal } = await import("../src/lib/red-team");
+    await setupOpenAi("RT_AMBIGUOUS");
+    vi.stubGlobal("fetch", async () => new Response(
+      JSON.stringify({ choices: [{ message: { content } }] }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    ));
+
+    const result = await debateProposal(buyProposal(), undefined);
+    expect(result.available).toBe(false);
+    expect(result.rejected).toBe(false);
+    expect(result.verdict).toBeUndefined();
+    expect(result.failureKind).toBe("malformed_response");
+    expect(result.reason).toMatch(/ambiguous|multiple/i);
+  });
+
+  it("classifies a 429 as rate_limited (without bounded retry)", async () => {
     const { debateProposal } = await import("../src/lib/red-team");
     await setupOpenAi("RT_429");
     let calls = 0;
@@ -217,26 +266,7 @@ describe("debateProposal — three-way verdict + shape-violation fail-closed (§
     expect(result.available).toBe(false);
     expect(result.rejected).toBe(false);
     expect(result.failureKind).toBe("rate_limited");
-    expect(calls).toBe(2); // §4.3: exactly one bounded retry, then declare unavailable
-  });
-
-  it("recovers when a transient 429 is followed by a valid verdict (fetchLlmWithRetry)", async () => {
-    const { debateProposal } = await import("../src/lib/red-team");
-    await setupOpenAi("RT_RETRY_OK");
-    let calls = 0;
-    vi.stubGlobal("fetch", async () => {
-      calls += 1;
-      if (calls === 1) return new Response("Too Many Requests", { status: 429 });
-      return new Response(
-        JSON.stringify({ choices: [{ message: { content: JSON.stringify({ verdict: "approve", reason: "Solid." }) } }] }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    });
-
-    const result = await debateProposal(buyProposal(), undefined);
-    expect(calls).toBe(2);
-    expect(result.available).toBe(true);
-    expect(result.verdict).toBe("approve");
+    expect(calls).toBe(1); // §4.3: exactly one attempt, no bounded retry, then declare unavailable
   });
 
   it("classifies a 500 response as provider_error", async () => {
@@ -319,13 +349,13 @@ describe("debateProposal LLM request bounds", () => {
       rejected: false,
       available: true,
       reason: "No fatal flaw found.",
-      model: "gpt-4.1-mini"
+      model: "gpt-mini-latest"
     });
     expect(bodies).toHaveLength(1);
     expect(bodies[0].max_completion_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.adversaryReview);
     // Per-role sampling: the adversary samples at a non-zero temperature (vs the Bull's greedy 0).
     expect(bodies[0].temperature).toBe(LLM_REQUEST_DEFAULTS.adversaryTemperature);
-    expect(bodies[0].max_output_tokens).toBeUndefined();
+    expect(bodies[0].max_output_tokens).toBe(LLM_OUTPUT_TOKEN_CAPS.adversaryReview);
     // OpenAI-compatible providers request STRICT json_schema (not a bare json_object), so the
     // verdict is schema-enforced rather than regex/prose-parsed.
     expect(bodies[0].response_format).toEqual({
@@ -339,13 +369,14 @@ describe("debateProposal LLM request bounds", () => {
   });
 });
 
-describe("debateProposal — Claude Red Team (first-class anthropic routing)", () => {
-  it("routes a claude-* redTeamLlmModel to Anthropic Messages with a forced verdict tool", async () => {
-    const { setPolicy, setStrategyPrompt } = await import("../src/lib/db");
+describe("debateProposal — Claude Red Team (via OpenRouter)", () => {
+  it("routes a claude-* redTeamLlmModel via OpenRouter chat completions", async () => {
+    const { setPolicy, setStrategyPrompt, upsertUserApiKey } = await import("../src/lib/db");
     const { debateProposal } = await import("../src/lib/red-team");
 
-    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_CLAUDE", llmModel: "gpt-5.4-mini", redTeamLlmModel: "claude-opus-4-8" });
+    upsertUserApiKey("local", "openrouter", "sk-ant-test", "test");
+    process.env.OPENROUTER_API_KEY = "sk-ant-test";
+    setPolicy({ ...DEFAULT_POLICY, accountNumber: "RT_CLAUDE", llmModel: "gpt-5.4-mini", redTeamLlmModel: "anthropic/claude-opus-4-8" });
     setStrategyPrompt("BASE STRATEGY");
 
     const calls: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
@@ -355,11 +386,10 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
         headers: (init?.headers ?? {}) as Record<string, string>,
         body: JSON.parse(String(init?.body ?? "{}"))
       });
-      // Anthropic Messages tool_use response shape.
+      // OpenAI-compatible chat completion response shape.
       return new Response(
         JSON.stringify({
-          content: [{ type: "tool_use", name: "red_team_verdict", input: { verdict: "reject", reason: "Overbought into earnings." } }],
-          usage: { input_tokens: 100, output_tokens: 20 }
+          choices: [{ message: { content: JSON.stringify({ verdict: "reject", reason: "Overbought into earnings." }) } }]
         }),
         { status: 200, headers: { "content-type": "application/json" } }
       );
@@ -386,19 +416,20 @@ describe("debateProposal — Claude Red Team (first-class anthropic routing)", (
       rejected: true,
       available: true,
       reason: "Overbought into earnings.",
-      model: "claude-opus-4-8"
+      model: "claude-opus-latest"
     });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toContain("api.anthropic.com");
-    expect(calls[0].headers["x-api-key"]).toBe("sk-ant-test");
-    expect(calls[0].headers["anthropic-version"]).toBe("2023-06-01");
-    expect(calls[0].headers["anthropic-beta"]).toBe("prompt-caching-2024-07-31");
-    expect(calls[0].headers.authorization).toBeUndefined();
-    // Forced tool-use is how Claude returns guaranteed JSON. System is a single ephemeral cache
-    // block (Chat A item 3 prompt caching).
-    expect(calls[0].body.system[0].text).toContain("Red Team");
-    expect(calls[0].body.system[0].cache_control).toEqual({ type: "ephemeral" });
-    expect(calls[0].body.tool_choice).toEqual({ type: "tool", name: "red_team_verdict" });
-    expect(calls[0].body.max_tokens).toBeGreaterThan(0);
+    expect(calls[0].url).toContain("openrouter.ai");
+    expect(calls[0].headers.authorization).toBe("Bearer sk-ant-test");
+    // System is sent as a message in OpenAI format
+    expect(calls[0].body.messages[0].role).toBe("system");
+    expect(calls[0].body.messages[0].content).toContain("Red Team");
+    
+    // In chat-completions, max_completion_tokens (and max_output_tokens due to polyfill) is used
+    expect(calls[0].body.max_output_tokens).toBeGreaterThan(0);
+    expect(calls[0].body.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { name: "red_team_verdict", strict: true, schema: expect.any(Object) }
+    });
   });
 });

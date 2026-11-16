@@ -32,8 +32,11 @@ describe("G2: Robinhood OAuth token encryption at rest", () => {
     const rawJson = JSON.stringify(raw);
     expect(rawJson).not.toContain(ACCESS);
     expect(rawJson).not.toContain(REFRESH);
-    // The encrypted fields carry the iv:tag:ct envelope (3 colon-separated hex parts).
-    expect(String((raw as { accessToken?: string }).accessToken).split(":").length).toBe(3);
+    // The encrypted fields carry the versioned v1:iv:tag:ct envelope (a "v1" prefix followed by
+    // 3 colon-separated hex parts).
+    const encryptedAccessToken = String((raw as { accessToken?: string }).accessToken);
+    expect(encryptedAccessToken.startsWith("v1:")).toBe(true);
+    expect(encryptedAccessToken.slice("v1:".length).split(":").length).toBe(3);
 
     // Decrypt-on-read returns the originals + preserves non-secret metadata.
     const loaded = getStoredMcpOAuthTokens("local");
@@ -55,7 +58,7 @@ describe("G2: Robinhood OAuth token encryption at rest", () => {
     });
 
     const loaded = getStoredMcpOAuthTokens("local");
-    // decryptValue's non-envelope fallback returns the plaintext unchanged.
+    // decryptStoredTokens keeps legacy plaintext loadable (isEncryptedValue gate).
     expect(loaded?.accessToken).toBe(ACCESS);
     expect(loaded?.refreshToken).toBe(REFRESH);
     expect(loaded?.tokenType).toBe("Bearer");

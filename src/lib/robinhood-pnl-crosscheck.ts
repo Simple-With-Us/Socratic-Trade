@@ -57,7 +57,7 @@ export async function crossCheckRealizedPnl(
 }
 
 function calculateAppRealizedPnl(userId: string, accountNumber: string, span: string, nowInput?: Date | string): number {
-  const liveFills = listFillEvents(accountNumber, "live", 500, userId);
+  const liveFills = listFillEvents(accountNumber, "live", undefined, userId);
   const closedLots = calculatePnl(liveFills).closedLots;
   const start = spanStart(span, nowInput);
   const inSpan = start ? closedLots.filter((lot) => lot.exitAt !== undefined && lot.exitAt >= start) : closedLots;

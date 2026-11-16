@@ -239,7 +239,7 @@ deliverable (A, B, D) needed changes, since none of those relax an existing bloc
   and `validateRedTeamVerdictShape` helper, but remain textually duplicated across two
   functions in `red-team.ts`) — likely a natural side-effect of the not-yet-implemented
   single-adversary consolidation (design doc §3.1).
-  - Note logged in-thread for `#agent-sync`, no separate task filed.
+  - Note logged in-thread for `#ag***-s**c`, no separate task filed.
 - Net-exposure-aware side classification (a buy that covers an existing short is actually
   risk-reducing, not risk-increasing) would sharpen `routeOnAdversaryUnavailable` further —
   deferred per the lane spec's explicit "do NOT implement" list.

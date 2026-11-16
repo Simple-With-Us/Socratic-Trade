@@ -45,7 +45,7 @@ const sha256hex = (s: string): string => crypto.createHash("sha256").update(s).d
 const hmac = (key: crypto.BinaryLike, s: string): Buffer => crypto.createHmac("sha256", key).update(s).digest();
 
 /** GET a single S3 object via SigV4 (path-style). Returns the raw bytes, or null on any failure. */
-async function getObject(key: string, userId?: string): Promise<Buffer | null> {
+export async function getObject(key: string, userId?: string): Promise<Buffer | null> {
   const { accessKey, secret, host, bucket, region } = cfg(userId);
   if (!accessKey || !secret) return null;
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ""); // YYYYMMDDTHHMMSSZ

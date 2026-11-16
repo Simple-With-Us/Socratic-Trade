@@ -44,7 +44,7 @@ export function TrendsCard({ history }: { history?: Record<string, number[]> }) 
   return (
     <Card
       title={
-        <span title="Daily closes over roughly the last 90 days, from the same feeds as the tiles below. Shape and direction matter more than any single point.">
+        <span title="Daily closes over roughly the last 90 days, from the same feeds as the tiles below.  Shape and direction matter more than any single point.">
           Trends · ~90 days
         </span>
       }

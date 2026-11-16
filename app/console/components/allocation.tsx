@@ -11,7 +11,6 @@ import { useMemo, useState } from "react";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtMoney, fmtPct } from "../lib/format";
-import { usePersistedState } from "../lib/usePersistedState";
 import { Btn, Card, Chip, Empty } from "../ui/primitives";
 import { SymbolButton } from "../ui/symbol-drilldown";
 
@@ -30,7 +29,7 @@ interface Segment {
 const NO_SECTOR = "No sector data";
 
 export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
-  const [lens, setLens] = usePersistedState<"position" | "sector">("console:allocation:lens", "position");
+  const [lens, setLens] = useState<"position" | "sector">("position");
   const reality = deriveReality(snapshot);
 
   const { segments, total, hasSectorData } = useMemo(() => {
@@ -119,7 +118,7 @@ export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
               title={
                 hasSectorData
                   ? "Positions grouped by their sector, plus cash."
-                  : "Positions grouped by sector. No position carries sector data right now, so everything lands in one honest bucket."
+                  : "Positions grouped by sector.  No position carries sector data right now, so everything lands in one honest bucket."
               }
             >
               By sector
@@ -135,12 +134,12 @@ export function AllocationCard({ snapshot }: { snapshot: DashboardSnapshot }) {
           {segments.map((s) => (
             <div
               key={`${s.kind}-${s.label}`}
-              className="con-row rounded-md px-1.5 py-1.5"
+              className="con-row rounded-control px-1.5 py-1.5"
               title={`${s.detail ?? s.label} ${fmtPct(s.pct, 1)} of the account's total value.`}
             >
               <div className="flex items-baseline justify-between gap-3 text-[length:var(--con-fs-sm)]">
                 <span className={cx("truncate font-semibold", s.kind === "cash" && "text-[color:var(--con-muted)]")}>
-                  {s.symbol ? <SymbolButton symbol={s.symbol} showLogo={false} className="text-inherit" /> : s.label}
+                  {s.symbol ? <SymbolButton symbol={s.symbol} className="text-inherit" /> : s.label}
                   {s.kind === "sector" && typeof s.count === "number" && (
                     <span className="ml-1.5 font-normal text-[color:var(--con-faint)]">×{s.count}</span>
                   )}

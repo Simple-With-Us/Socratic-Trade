@@ -1,5 +1,20 @@
-import { decryptValue, deleteInternalSetting, encryptValue, getDb, getInternalSetting, setInternalSetting } from "./db";
+import {
+  decryptValue,
+  deleteInternalSetting,
+  encryptValue,
+  getDb,
+  getInternalSetting,
+  isEncryptedValue,
+  isValidEncryptionKeyHex,
+  setInternalSetting
+} from "./db";
 import { isLoopbackUrl, resolvePublicAppOrigin } from "./public-origin";
+import {
+  captureUserWriteEpoch,
+  runWithUserWriteEpoch,
+  withUserWriteOperation
+} from "./user-write-fence";
+import type { UserWriteEpoch } from "./user-write-fence";
 export { resolvePublicAppOrigin } from "./public-origin";
 
 // CLIENT registration is global (one OAuth app client shared across users).
@@ -106,30 +121,34 @@ function allowConfiguredLoopbackRedirect(): boolean {
 }
 
 export async function buildMcpAuthorizationUrl(userId: string, options: BuildMcpAuthorizationUrlOptions = {}): Promise<string> {
-  const config = await requireOAuthConfig(options);
-  const client = await getOrRegisterClient(config);
-  const randomPart = randomBase64Url(STATE_RANDOM_BYTES);
-  const codeVerifier = randomBase64Url(64);
-  const codeChallenge = await sha256Base64Url(codeVerifier);
+  return withUserWriteOperation(userId, "mcp-oauth-start", async (claim) => {
+    const config = await requireOAuthConfig(options);
+    const client = await getOrRegisterClient(config);
+    const randomPart = randomBase64Url(STATE_RANDOM_BYTES);
+    const codeVerifier = randomBase64Url(64);
+    const codeChallenge = await sha256Base64Url(codeVerifier);
 
-  setInternalSetting(stateSettingKey(userId, randomPart), {
-    state: randomPart,
-    userId,
-    codeVerifier,
-    redirectUri: config.redirectUri,
-    createdAt: new Date().toISOString()
-  } satisfies McpOAuthState);
+    runWithUserWriteEpoch(userId, claim.epoch, () => {
+      setInternalSetting(stateSettingKey(userId, randomPart), {
+        state: randomPart,
+        userId,
+        codeVerifier,
+        redirectUri: config.redirectUri,
+        createdAt: new Date().toISOString()
+      } satisfies McpOAuthState);
+    });
 
-  const url = new URL(config.authorizationUrl);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", client.clientId);
-  url.searchParams.set("redirect_uri", config.redirectUri);
-  url.searchParams.set("scope", config.scope);
-  url.searchParams.set("state", randomPart);
-  url.searchParams.set("code_challenge", codeChallenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  if (config.resource) url.searchParams.set("resource", config.resource);
-  return url.toString();
+    const url = new URL(config.authorizationUrl);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", client.clientId);
+    url.searchParams.set("redirect_uri", config.redirectUri);
+    url.searchParams.set("scope", config.scope);
+    url.searchParams.set("state", randomPart);
+    url.searchParams.set("code_challenge", codeChallenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    if (config.resource) url.searchParams.set("resource", config.resource);
+    return url.toString();
+  });
 }
 
 /** Recover a state by exact stored-value equality. The callback carries no userId, so the small
@@ -145,42 +164,45 @@ export async function completeMcpOAuthCallback(input: {
   /** The userId from a separately verified app session cookie, when the callback browser has one. */
   expectedUserId?: string;
 }): Promise<McpOAuthTokens> {
-  // Validate before any DB work, then atomically claim the exact state row. The immediate
-  // transaction serializes concurrent callback attempts across SQLite connections; only one can
-  // observe and delete the row. State remains the primary binding when no app session cookie is
-  // present, which OAuth provider callbacks must support.
+  // Validate before any DB work, then recover the owner without mutating state. We claim that
+  // user's write epoch before consuming the state row or making a token request. The guarded
+  // consume serializes concurrent callbacks across SQLite connections; only one can observe and
+  // delete the row. State remains the primary binding when no app session cookie is present,
+  // which OAuth provider callbacks must support.
   if (!isCanonicalOAuthState(input.state)) {
     throw new Error("Robinhood MCP OAuth state was not found or already used.");
   }
-  const found = consumeExactMcpOAuthState(input.state);
+  const found = findExactMcpOAuthState(input.state);
   if (!found) throw new Error("Robinhood MCP OAuth state was not found or already used.");
-  const { value: stateBlob } = found;
+  return withUserWriteOperation(found.value.userId, "mcp-oauth-callback", async (claim) => {
+    const consumed = consumeExactMcpOAuthState(input.state, found.value.userId, claim.epoch);
+    if (!consumed || consumed.value.state !== input.state) {
+      throw new Error("Robinhood MCP OAuth state was not found or already used.");
+    }
+    const { value: stateBlob } = consumed;
 
-  if (stateBlob.state !== input.state) {
-    throw new Error("Robinhood MCP OAuth state was not found or already used.");
-  }
+    // Cross-check the completing session against the initiating session. The state row is
+    // consumed above regardless, so a mismatched attempt can't be retried with the same state.
+    if (input.expectedUserId !== undefined && input.expectedUserId !== stateBlob.userId) {
+      throw new Error("Robinhood MCP OAuth state does not belong to the current session.");
+    }
 
-  // Cross-check the completing session against the initiating session. The state row is
-  // consumed above regardless, so a mismatched attempt can't be retried with the same state.
-  if (input.expectedUserId !== undefined && input.expectedUserId !== stateBlob.userId) {
-    throw new Error("Robinhood MCP OAuth state does not belong to the current session.");
-  }
+    const config = await requireOAuthConfig({ redirectUri: stateBlob.redirectUri });
+    const client = await getOrRegisterClient(config);
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: input.code,
+      redirect_uri: stateBlob.redirectUri,
+      client_id: client.clientId,
+      code_verifier: stateBlob.codeVerifier
+    });
+    if (config.resource) body.set("resource", config.resource);
+    if (client.clientSecret) body.set("client_secret", client.clientSecret);
 
-  const config = await requireOAuthConfig({ redirectUri: stateBlob.redirectUri });
-  const client = await getOrRegisterClient(config);
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    code: input.code,
-    redirect_uri: stateBlob.redirectUri,
-    client_id: client.clientId,
-    code_verifier: stateBlob.codeVerifier
+    const tokens = await exchangeToken(config.tokenUrl, body);
+    setMcpOAuthTokens(stateBlob.userId, tokens, claim.epoch);
+    return tokens;
   });
-  if (config.resource) body.set("resource", config.resource);
-  if (client.clientSecret) body.set("client_secret", client.clientSecret);
-
-  const tokens = await exchangeToken(config.tokenUrl, body);
-  setMcpOAuthTokens(stateBlob.userId, tokens);
-  return tokens;
 }
 
 /**
@@ -243,18 +265,26 @@ export async function getMcpAccessToken(userId: string): Promise<string | undefi
 export function migrateLocalRobinhoodToken(): boolean {
   const env = process.env.ROBINHOOD_MCP_AUTH_TOKEN?.trim();
   if (!env) return false;
-  if (getStoredMcpOAuthTokens("local")) return false;
-  setMcpOAuthTokens("local", { accessToken: env, tokenType: "Bearer" });
-  return true;
+  try {
+    const epoch = captureUserWriteEpoch("local");
+    // This migration is automatic startup behavior, not an explicit account recreation. Once a
+    // deletion tombstone exists, never let a still-configured legacy env token silently recreate
+    // the deleted credential row.
+    if (epoch.status === "completed" || getStoredMcpOAuthTokens("local")) return false;
+    setMcpOAuthTokens("local", { accessToken: env, tokenType: "Bearer" }, epoch);
+    return true;
+  } catch (error) {
+    if (isUserWriteFenceError(error)) return false;
+    throw error;
+  }
 }
 
 /**
  * Encrypt-on-write / decrypt-on-read helpers for the Robinhood OAuth token blob. Only the SECRET
  * fields (`accessToken`, `refreshToken`) are run through the shared AES-256-GCM field encryption
  * (encryptValue/decryptValue from db-api-keys) — the non-secret metadata (tokenType/scope/expiresAt)
- * stays plaintext for debuggability. `decryptValue` tolerates legacy plaintext (its 3-part
- * `iv:tag:ct` check returns non-envelope values unchanged), so tokens stored before this change still
- * load without a migration.
+ * stays plaintext for debuggability. `decryptStoredTokens` keeps legacy / no-key PLAINTEXT rows
+ * loadable (isEncryptedValue gate); `decryptValue` itself rejects non-envelope input (P0-5).
  *
  * Encryption is applied ONLY when a stable `ENCRYPTION_KEY` is configured. Without it, db-api-keys
  * falls back to a random in-memory key that is lost on restart — encrypting with it would give no
@@ -264,7 +294,11 @@ export function migrateLocalRobinhoodToken(): boolean {
  * those that don't.
  */
 function encryptionKeyConfigured(): boolean {
-  return Boolean(process.env.ENCRYPTION_KEY);
+  // Validity, not just presence: a SET-but-malformed ENCRYPTION_KEY makes db-api-keys.ts fall back
+  // to its own per-process ephemeral key, so treating "set" as "configured" here would silently
+  // encrypt tokens with that ephemeral key too (Item 14) — exactly the outcome this function's own
+  // docstring says to avoid.
+  return isValidEncryptionKeyHex(process.env.ENCRYPTION_KEY?.trim());
 }
 
 function encryptStoredTokens(tokens: McpOAuthTokens): McpOAuthTokens {
@@ -277,10 +311,17 @@ function encryptStoredTokens(tokens: McpOAuthTokens): McpOAuthTokens {
 }
 
 function decryptStoredTokens(tokens: McpOAuthTokens): McpOAuthTokens {
+  // Ciphertext → decryptValue. Legacy plaintext (pre-encryption or no ENCRYPTION_KEY) passes
+  // through unchanged — decryptValue itself rejects plaintext (P0-5 fail-closed for API keys).
+  const open = (value: string | undefined): string | undefined => {
+    if (!value) return value;
+    if (isEncryptedValue(value)) return decryptValue(value);
+    return value;
+  };
   return {
     ...tokens,
-    accessToken: tokens.accessToken ? decryptValue(tokens.accessToken) : tokens.accessToken,
-    refreshToken: tokens.refreshToken ? decryptValue(tokens.refreshToken) : tokens.refreshToken
+    accessToken: open(tokens.accessToken) ?? "",
+    refreshToken: open(tokens.refreshToken)
   };
 }
 
@@ -314,10 +355,13 @@ export function clearMcpOAuthForUser(userId: string): { tokenDeleted: number; st
   return { tokenDeleted, stateDeleted };
 }
 
-export function setMcpOAuthTokens(userId: string, tokens: McpOAuthTokens): void {
+export function setMcpOAuthTokens(userId: string, tokens: McpOAuthTokens, writeEpoch?: UserWriteEpoch): void {
   // Encrypt the secret fields at rest so a settings-row leak (backup, replica, casual DB read)
   // never exposes a live Robinhood bearer/refresh token in plaintext.
-  setInternalSetting(tokenSettingKey(userId), encryptStoredTokens(tokens));
+  const epoch = writeEpoch ?? captureUserWriteEpoch(userId);
+  runWithUserWriteEpoch(userId, epoch, () => {
+    setInternalSetting(tokenSettingKey(userId), encryptStoredTokens(tokens));
+  });
 }
 
 export function tokenResponseToTokens(raw: Record<string, unknown>, existing?: McpOAuthTokens): McpOAuthTokens {
@@ -334,18 +378,20 @@ export function tokenResponseToTokens(raw: Record<string, unknown>, existing?: M
 }
 
 async function refreshMcpAccessToken(userId: string, existing: McpOAuthTokens): Promise<string> {
-  const config = await requireOAuthConfig();
-  const client = await getOrRegisterClient(config);
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    refresh_token: existing.refreshToken ?? "",
-    client_id: client.clientId
+  return withUserWriteOperation(userId, "mcp-oauth-refresh", async (claim) => {
+    const config = await requireOAuthConfig();
+    const client = await getOrRegisterClient(config);
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: existing.refreshToken ?? "",
+      client_id: client.clientId
+    });
+    if (config.resource) body.set("resource", config.resource);
+    if (client.clientSecret) body.set("client_secret", client.clientSecret);
+    const tokens = await exchangeToken(config.tokenUrl, body, existing);
+    setMcpOAuthTokens(userId, tokens, claim.epoch);
+    return tokens.accessToken;
   });
-  if (config.resource) body.set("resource", config.resource);
-  if (client.clientSecret) body.set("client_secret", client.clientSecret);
-  const tokens = await exchangeToken(config.tokenUrl, body, existing);
-  setMcpOAuthTokens(userId, tokens);
-  return tokens.accessToken;
 }
 
 async function getOrRegisterClient(config: McpOAuthConfig): Promise<McpOAuthClient> {
@@ -594,14 +640,22 @@ function findExactMcpOAuthState(randomPart: string): { key: string; value: McpOA
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-function consumeExactMcpOAuthState(randomPart: string): { key: string; value: McpOAuthState } | undefined {
+function consumeExactMcpOAuthState(
+  randomPart: string,
+  userId: string,
+  writeEpoch: UserWriteEpoch
+): { key: string; value: McpOAuthState } | undefined {
   const db = getDb();
-  return db.transaction(() => {
+  return runWithUserWriteEpoch(userId, writeEpoch, () => {
     const found = findExactMcpOAuthState(randomPart);
-    if (!found) return undefined;
+    if (!found || found.value.userId !== userId) return undefined;
     if (db.prepare("DELETE FROM settings WHERE key = ?").run(found.key).changes !== 1) return undefined;
     return found;
-  }).immediate();
+  });
+}
+
+function isUserWriteFenceError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "status" in error && (error as { status?: unknown }).status === 409;
 }
 
 function isCanonicalOAuthState(value: string): boolean {

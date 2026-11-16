@@ -38,6 +38,19 @@ describe("execution mode persistence", () => {
       status: "proposed",
       executionMode: "broker/paper"
     });
+    db.upsertSocraticDecisionCase({
+      id: proposalId,
+      proposalId,
+      runId: "run-mode-1",
+      accountNumber,
+      symbol: "AAPL",
+      side: "buy",
+      status: "proposed",
+      authority: "decide",
+      thesis: "test",
+      rationale: "test",
+      action: "BUY AAPL $100"
+    });
 
     const pending = db.listPendingProposals(accountNumber);
     expect(pending.find((row) => row.id === proposalId)?.executionMode).toBe("broker/paper");

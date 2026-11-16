@@ -10,8 +10,8 @@ import {
   analystScoreFromCounts,
   analystScoreFromMean,
   apiKeyFingerprint,
-  callsPerSymbol,
   getEnrichmentProvider,
+  isLatchingEnrichmentTransportError,
   isTransientError,
   labelFromAnalystScore,
   mockEnrichmentProvider,
@@ -24,9 +24,21 @@ import {
   type EnrichmentContext,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
-import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
-import { CircuitOpenError } from "../src/lib/api-circuit-breaker";
 import { getServiceHealthLog } from "../src/lib/db-health";
+import { arbitrateFieldObservation } from "../src/lib/evidence-facts";
+import { deleteUserApiKey, migrateLocalEnvCredentials, upsertUserApiKey, LOCAL_USER } from "../src/lib/db-api-keys";
+import { __resetAlphaVantageDailyBudgetForTests, __resetKeyPoolRegistryForTests } from "../src/lib/alpha-vantage-key-pool";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
+
+/** Suppresses a provider's own `/calendar/earnings`-style daysToEarnings fallback fetch (Finnhub,
+ *  Alpha Vantage) by marking the field already-covered upstream — keeps pre-existing exact
+ *  fetch-count assertions in tests that predate that fallback unperturbed by it (same idiom already
+ *  used in milestone-4-challenger.test.ts's `skipCalendar`). */
+function skipDaysToEarningsCalendar(...symbols: string[]): EnrichmentContext {
+  const coveredFields: Record<string, Set<string>> = {};
+  for (const s of symbols) coveredFields[s] = new Set(["daysToEarnings"]);
+  return { coveredFields };
+}
 
 // Each test file gets its own isolated SQLite db so db module singleton state
 // (user API keys, consent records) does not leak between test files.
@@ -42,6 +54,10 @@ beforeAll(() => {
   process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
 });
 
+beforeEach(() => {
+  clearProviderFieldCacheForTests();
+});
+
 describe("market enrichment provider", () => {
   const originalFinnhubKey = process.env.FINNHUB_API_KEY;
   const originalFmpKey = process.env.FMP_API_KEY;
@@ -50,6 +66,17 @@ describe("market enrichment provider", () => {
   const originalFintechKey = process.env.FINTECH_STUDIOS_API_KEY;
   const originalFintechBase = process.env.FINTECH_STUDIOS_BASE_URL;
 
+  const originalRoicKey = process.env.ROIC_API_KEY;
+  const originalMassiveKey = process.env.MASSIVE_API_KEY;
+  const originalMassiveAltKey = process.env.MASSIVE_API_KEY_ALT;
+  const originalRapidApiKey = process.env.RAPIDAPI_KEY;
+  const originalTiingoKey = process.env.TIINGO_API_KEY;
+  const originalTwelveKey = process.env.TWELVEDATA_API_KEY;
+
+  const originalSecXbrl = process.env.SEC_XBRL_ENRICHMENT_ENABLED;
+  const originalFilingApi = process.env.FILINGAPI;
+  const originalFilingApiKey = process.env.FILINGAPI_KEY;
+
   beforeEach(() => {
     delete process.env.FINNHUB_API_KEY;
     delete process.env.FMP_API_KEY;
@@ -57,6 +84,16 @@ describe("market enrichment provider", () => {
     delete process.env.WEBULL_UNOFFICIAL_ENABLED;
     delete process.env.FINTECH_STUDIOS_API_KEY;
     delete process.env.FINTECH_STUDIOS_BASE_URL;
+    delete process.env.ROIC_API_KEY;
+    delete process.env.MASSIVE_API_KEY;
+    delete process.env.MASSIVE_API_KEY_ALT;
+    delete process.env.RAPIDAPI_KEY;
+    delete process.env.TIINGO_API_KEY;
+    delete process.env.TWELVEDATA_API_KEY;
+    delete process.env.FILINGAPI;
+    delete process.env.FILINGAPI_KEY;
+    // Isolate keyless-floor registration tests from default-ON SEC XBRL.
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "0";
   });
 
   afterEach(() => {
@@ -72,13 +109,35 @@ describe("market enrichment provider", () => {
     else delete process.env.FINTECH_STUDIOS_API_KEY;
     if (originalFintechBase) process.env.FINTECH_STUDIOS_BASE_URL = originalFintechBase;
     else delete process.env.FINTECH_STUDIOS_BASE_URL;
+    if (originalRoicKey) process.env.ROIC_API_KEY = originalRoicKey;
+    else delete process.env.ROIC_API_KEY;
+    if (originalMassiveKey) process.env.MASSIVE_API_KEY = originalMassiveKey;
+    else delete process.env.MASSIVE_API_KEY;
+    if (originalMassiveAltKey) process.env.MASSIVE_API_KEY_ALT = originalMassiveAltKey;
+    else delete process.env.MASSIVE_API_KEY_ALT;
+    if (originalRapidApiKey) process.env.RAPIDAPI_KEY = originalRapidApiKey;
+    else delete process.env.RAPIDAPI_KEY;
+    if (originalTiingoKey) process.env.TIINGO_API_KEY = originalTiingoKey;
+    else delete process.env.TIINGO_API_KEY;
+    if (originalTwelveKey) process.env.TWELVEDATA_API_KEY = originalTwelveKey;
+    else delete process.env.TWELVEDATA_API_KEY;
+    if (originalSecXbrl === undefined) delete process.env.SEC_XBRL_ENRICHMENT_ENABLED;
+    else process.env.SEC_XBRL_ENRICHMENT_ENABLED = originalSecXbrl;
+    if (originalFilingApi === undefined) delete process.env.FILINGAPI;
+    else process.env.FILINGAPI = originalFilingApi;
+    if (originalFilingApiKey === undefined) delete process.env.FILINGAPI_KEY;
+    else process.env.FILINGAPI_KEY = originalFilingApiKey;
   });
 
   it("uses Yahoo Finance provider when no API key is configured", async () => {
+    // Keyless free-wave floor; fundamentals from multi-source cascade (no FMP/Quiver/App A by default).
     const provider = getEnrichmentProvider();
-    // Yahoo Finance is always the final real tier — no API key required.
     expect(provider.configured).toBe(true);
-    expect(provider.name).toBe("yahoo-finance");
+    expect(provider.name).toContain("yahoo-finance");
+    expect(provider.name).toContain("nasdaq-quote");
+    expect(provider.name).not.toContain("congress.trade");
+    expect(provider.name).not.toMatch(/(^|\+)fmp($|\+)/);
+    expect(provider.name).not.toContain("quiverquant");
   });
 
   it("keeps the unofficial Webull quote bridge disabled by default", async () => {
@@ -140,6 +199,14 @@ describe("market enrichment provider", () => {
     expect(noopProvider.configured).toBe(true);
     const result = await noopProvider.enrich(["AAPL"]);
     expect(result.AAPL?.sector).toBe("Technology");
+  });
+});
+
+describe("apiKeyFingerprint", () => {
+  it("uses edge-safe SHA-256 without exposing the credential", async () => {
+    expect(await apiKeyFingerprint("abc")).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
   });
 });
 
@@ -222,11 +289,14 @@ describe("enrichment cache consent gate", () => {
 
   it("user-keyed data is private: invisible to a non-consenting second user", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { upsertUserApiKey } = await import("../src/lib/db");
+    const { upsertUserApiKey, setDataPoolConsent } = await import("../src/lib/db");
     clearEnrichmentCache();
 
     const userA = `cg-priv-a-${randomUUID()}`;
     const userB = `cg-priv-b-${randomUUID()}`;
+    // Unset users no longer silently share.  Explicit decline keeps user-keyed writes private.
+    setDataPoolConsent(userA, false);
+    setDataPoolConsent(userB, false);
     // userA has their own API key; userB does NOT have an API key
     upsertUserApiKey(userA, "finnhub", "user-a-finnhub-key");
 
@@ -242,7 +312,7 @@ describe("enrichment cache consent gate", () => {
 
     // userA fetches — source is "user", no consent → scope = "private"
     const providerA = new FinnhubEnrichmentProvider("user-a-finnhub-key", "user", userA);
-    const resA = await providerA.enrich(["AAPL"]);
+    const resA = await providerA.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(resA.AAPL?.companyName).toBe("Acme Corp");
     expect(fetchCount).toBe(5); // 5 Finnhub sub-calls (news, quote, rec, profile2, metric)
 
@@ -250,7 +320,7 @@ describe("enrichment cache consent gate", () => {
     // To isolate the cache check, we make fetch throw so any cache miss would propagate as empty
     vi.stubGlobal("fetch", async () => { throw new Error("no network"); });
     const providerB = new FinnhubEnrichmentProvider("some-env-key", "env", userB);
-    const resB = await providerB.enrich(["AAPL"]);
+    const resB = await providerB.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     // env-key provider reads shared scope — userA's private entry is not visible there
     expect(resB.AAPL?.companyName).toBeUndefined();
   });
@@ -640,7 +710,7 @@ describe("enrichment cache consent gate", () => {
         return new Response(JSON.stringify({}));
       });
       const provider = new FinnhubEnrichmentProvider(`env-key-${randomUUID()}`, "env");
-      const res = await provider.enrich(["AAPL"]);
+      const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
       return { urls, res };
     };
 
@@ -683,18 +753,18 @@ describe("enrichment cache consent gate", () => {
       // Flag ON: recommendation dropped, row cached under the flag-specific namespace.
       process.env.FINNHUB_DROP_RECOMMENDATION = "1";
       const onProvider = new FinnhubEnrichmentProvider("env-key", "env");
-      const on1 = await onProvider.enrich(["AAPL"]);
+      const on1 = await onProvider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
       expect(on1.AAPL?.analystBySource?.finnhub).toBeUndefined();
       expect(recFetches).toBe(0);
       // Same flag again → cache hit, still no recommendation fetch.
-      await onProvider.enrich(["AAPL"]);
+      await onProvider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
       expect(recFetches).toBe(0);
 
       // Flag OFF: distinct cache namespace → MISS → refetch, now including the recommendation, so the
       // blended analyst rating regains Finnhub's vote instead of serving the stale no-rec row until TTL.
       delete process.env.FINNHUB_DROP_RECOMMENDATION;
       const offProvider = new FinnhubEnrichmentProvider("env-key", "env");
-      const off1 = await offProvider.enrich(["AAPL"]);
+      const off1 = await offProvider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
       expect(recFetches).toBe(1);
       expect(off1.AAPL?.analystBySource?.finnhub?.score).toBeGreaterThan(0);
     } finally {
@@ -726,13 +796,13 @@ describe("enrichment cache consent gate", () => {
 
     // userA fetches — user-key + consent → scope = "pool"
     const providerA = new FinnhubEnrichmentProvider("user-a-finnhub-key", "user", userA);
-    const resA = await providerA.enrich(["AAPL"]);
+    const resA = await providerA.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(resA.AAPL?.companyName).toBe("Pool Corp");
     expect(fetchCount).toBe(5);
 
     // userB (consenting) reads from the pool — no fetch should be needed
     const providerB = new FinnhubEnrichmentProvider("user-b-finnhub-key", "user", userB);
-    const resB = await providerB.enrich(["AAPL"]);
+    const resB = await providerB.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(resB.AAPL?.companyName).toBe("Pool Corp");
     // Pool hit — no additional fetch calls
     expect(fetchCount).toBe(5);
@@ -756,12 +826,12 @@ describe("enrichment cache consent gate", () => {
 
     // userA uses env key — source = "env" → always shared scope
     const providerA = new FinnhubEnrichmentProvider("env-finnhub-key", "env", userA);
-    await providerA.enrich(["AAPL"]);
+    await providerA.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(fetchCount).toBe(5);
 
     // userB (no consent) uses env key — should hit the shared cache, no new fetch
     const providerB = new FinnhubEnrichmentProvider("env-finnhub-key", "env", userB);
-    const resB = await providerB.enrich(["AAPL"]);
+    const resB = await providerB.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(resB.AAPL?.companyName).toBe("Env Corp");
     expect(fetchCount).toBe(5); // shared cache hit — no additional fetches
   });
@@ -785,18 +855,18 @@ describe("enrichment cache consent gate", () => {
 
     // userA's user-key → forced to shared because of the env override
     const providerA = new FinnhubEnrichmentProvider("user-a-finnhub-key", "user", userA);
-    await providerA.enrich(["AAPL"]);
+    await providerA.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(fetchCount).toBe(5);
 
     // userB (no consent, no user key) can read from shared scope
     const providerB = new FinnhubEnrichmentProvider("user-a-finnhub-key", "user", userB);
-    const resB = await providerB.enrich(["AAPL"]);
+    const resB = await providerB.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(resB.AAPL?.companyName).toBe("Share Corp");
     expect(fetchCount).toBe(5); // shared cache hit
   });
 });
 
-describe("Finnhub & FMP Cache Poisoning Protection", () => {
+describe("Finnhub Cache Poisoning Protection", () => {
   it("prevents cache writes on Finnhub when a transient error occurs", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
@@ -811,11 +881,11 @@ describe("Finnhub & FMP Cache Poisoning Protection", () => {
     });
 
     const provider = new FinnhubEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(res1.AAPL).toEqual({});
     expect(fetchCount).toBe(6);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(res2.AAPL).toEqual({});
     expect(fetchCount).toBe(12);
   });
@@ -834,230 +904,353 @@ describe("Finnhub & FMP Cache Poisoning Protection", () => {
     });
 
     const provider = new FinnhubEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
+    const res1 = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(res1.AAPL).toEqual({ companyName: "Apple" });
     expect(fetchCount).toBe(5);
 
-    const res2 = await provider.enrich(["AAPL"]);
+    const res2 = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
     expect(res2.AAPL).toEqual({ companyName: "Apple" });
     expect(fetchCount).toBe(5);
   });
+});
 
-  it("prevents cache writes on FMP when a transient error occurs", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
+// NEWS_RELEVANCE_FILTER / NEWS_RELEVANCE_MIN_SCORE gating of Finnhub's /company-news headlines.
+// Finnhub's endpoint is already scoped to the symbol server-side but carries no native per-
+// headline relevance score, so this applies news-relevance.ts's headline-text rubric directly —
+// see the section comment above newsRelevanceFilterEnabled (data-providers.ts).
+describe("Finnhub company-news relevance gating", () => {
+  const originalFilter = process.env.NEWS_RELEVANCE_FILTER;
+  const originalMinScore = process.env.NEWS_RELEVANCE_MIN_SCORE;
 
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) {
-        return new Response("Gateway Timeout", { status: 504 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({});
-    // 4 sub-calls: ratios-ttm, grades-consensus, insider-trading, senate-trading.
-    expect(fetchCount).toBe(4);
-
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({});
-    expect(fetchCount).toBe(8);
+  beforeEach(() => {
+    delete process.env.NEWS_RELEVANCE_FILTER;
+    delete process.env.NEWS_RELEVANCE_MIN_SCORE;
   });
 
-  it("logs non-premium optional FMP failures while suppressing expected premium 403s", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { getDb } = await import("../src/lib/db");
-    clearEnrichmentCache();
-    getDb().prepare("DELETE FROM api_health_log WHERE service = ?").run("fmp");
-
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("insider-trading")) {
-        return new Response("server error", { status: 500 });
-      }
-      if (url.includes("senate-trading")) {
-        return new Response("premium endpoint", { status: 403 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    await provider.enrich(["AAPL"]);
-
-    const rows = getDb()
-      .prepare("SELECT ok, error_text FROM api_health_log WHERE service = ? ORDER BY ts")
-      .all("fmp") as Array<{ ok: number; error_text: string | null }>;
-    expect(rows.some((row) => row.ok === 0 && row.error_text === "HTTP 500")).toBe(true);
-    expect(rows.some((row) => row.error_text === "HTTP 403")).toBe(false);
+  afterEach(() => {
+    if (originalFilter) process.env.NEWS_RELEVANCE_FILTER = originalFilter;
+    else delete process.env.NEWS_RELEVANCE_FILTER;
+    if (originalMinScore) process.env.NEWS_RELEVANCE_MIN_SCORE = originalMinScore;
+    else delete process.env.NEWS_RELEVANCE_MIN_SCORE;
   });
 
-  it("caches normally on FMP when all queries succeed", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+  it("with the filter ON (default), drops an irrelevant headline that mentions neither the ticker nor the company name", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
 
-    let fetchCount = 0;
     vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) {
-        return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "25.5" }]));
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "AAPL reports record quarterly revenue" },
+          { headline: "Regional bakery chain opens new downtown location" }
+        ]));
       }
-      return new Response(JSON.stringify([]));
+      return new Response(JSON.stringify({}));
     });
 
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({ peRatio: 25.5 });
-    // 4 sub-calls: ratios-ttm, grades-consensus, insider-trading, senate-trading.
-    expect(fetchCount).toBe(4);
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toEqual(["AAPL reports record quarterly revenue"]);
+  });
 
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({ peRatio: 25.5 });
-    expect(fetchCount).toBe(4);
+  it("with the filter OFF, keeps every headline Finnhub returned (pre-filter byte-identical behavior)", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_FILTER = "0";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "AAPL reports record quarterly revenue" },
+          { headline: "Regional bakery chain opens new downtown location" }
+        ]));
+      }
+      return new Response(JSON.stringify({}));
+    });
+
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toEqual([
+      "AAPL reports record quarterly revenue",
+      "Regional bakery chain opens new downtown location"
+    ]);
+  });
+
+  it("an ambiguous company name (Apple) with no finance-event term is dropped even though Finnhub scoped the article to this symbol", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "She picked up an apple from the fruit stand on her walk" }
+        ]));
+      }
+      return new Response(JSON.stringify({}));
+    });
+
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toBeUndefined(); // zero surviving headlines -> no coverage, never fabricated
   });
 });
 
-describe("callsPerSymbol('fmp', …) — per-symbol request accounting", () => {
-  it("counts 2 unconditional (insider+senate) + ratios/consensus/targets one-for-one", () => {
-    // Nothing skipped, targets off → insider + senate + ratios-ttm + grades-consensus = 4.
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: false })).toBe(4);
-    expect(callsPerSymbol("fmp")).toBe(4);               // undefined flags are falsy → same as all-false
-    expect(callsPerSymbol("fmp", {})).toBe(4);
-    // + price-target-consensus when wantTargets → 5 (the full worst case).
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: true })).toBe(5);
-    // skipPe drops ratios-ttm.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: false, wantTargets: true })).toBe(4);
-    // skipPe + skipConsensus, targets off → only the 2 unconditional calls.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: false })).toBe(2);
-    // skipPe + skipConsensus, targets on → 2 unconditional + price-target = 3.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: true })).toBe(3);
-  });
-});
+describe("Finnhub /calendar/earnings — daysToEarnings fallback (2026-08-02)", () => {
+  // Real sample response shape from Finnhub's own docs schema (finnhub.io/docs/api/earnings-calendar,
+  // pulled 2026-08-02 via the page's embedded `window.docSchema` — no key needed to read the schema
+  // itself). Field names (symbol/date/hour/quarter/year/epsActual/epsEstimate/revenueActual/
+  // revenueEstimate) are Finnhub's own documented EarningRelease definition, not guessed.
+  const REAL_SAMPLE = {
+    earningsCalendar: [
+      {
+        date: "2020-01-28",
+        epsActual: 4.99,
+        epsEstimate: 4.5474,
+        hour: "amc",
+        quarter: 1,
+        revenueActual: 91819000000,
+        revenueEstimate: 88496400810,
+        symbol: "AAPL",
+        year: 2020
+      },
+      {
+        date: "2019-10-30",
+        epsActual: 3.03,
+        epsEstimate: 2.8393,
+        hour: "amc",
+        quarter: 4,
+        revenueActual: 64040000000,
+        revenueEstimate: 63032500000,
+        symbol: "AAPL",
+        year: 2019
+      }
+    ]
+  };
 
-describe("FMP request quota — defer / refund / breaker / cache-hit / per-credential", () => {
-  const QUOTA_ENV = ["PROVIDER_QUOTA_FMP_PER_MIN", "PROVIDER_QUOTA_FMP_PER_DAY", "FMP_PRICE_TARGETS_ENABLED"];
-  beforeEach(() => { for (const k of QUOTA_ENV) delete process.env[k]; resetProviderQuotaState(); });
-  afterEach(() => { for (const k of QUOTA_ENV) delete process.env[k]; resetProviderQuotaState(); });
-
-  // ratios-ttm returns a P/E so a fetched symbol yields non-empty, cacheable data; every other
-  // sub-call returns []. Each fetched symbol therefore costs 4 requests (targets off by default).
-  function stubPeFetch(): () => number {
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
-    });
-    return () => fetchCount;
-  }
-
-  it("fetches only the affordable best-first prefix, defers the tail as {} (uncached), and refunds the sub-symbol remainder", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "9"; // 9 requests; each symbol costs 4 → 2 whole symbols fit, 1 left over
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("q-key");
-    const res = await provider.enrich(["AAPL", "MSFT", "GOOG"]);
-    // admit min(12, 9) = 9. Greedy: AAPL(4)→rem5, MSFT(4)→rem1, GOOG(4) doesn't fit → deferred.
-    expect(res.AAPL).toEqual({ peRatio: 20 });
-    expect(res.MSFT).toEqual({ peRatio: 20 });
-    expect(res.GOOG).toEqual({}); // deferred this scan, NOT queried
-    expect(count()).toBe(8);      // exactly 2 symbols × 4 sub-calls
-    // The 8 dispatched were recorded; the 1-request remainder was refunded → 1 headroom remains this minute.
-    expect(admitProviderRequests("fmp", apiKeyFingerprint("q-key"), 100)).toBe(1);
-
-    // GOOG was deferred, never fetched → it must NOT have been cached. A fresh-budget rescan fetches it.
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    resetProviderQuotaState();
-    const res2 = await provider.enrich(["GOOG"]);
-    expect(count()).toBe(12);     // +4: GOOG actually fetched (not served from cache)
-    expect(res2.GOOG).toEqual({ peRatio: 20 });
-  });
-
-  it("refunds a breaker-skipped symbol's cost and does not cache it", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // room for exactly one symbol per minute
-    let phase: "open" | "ok" = "open";
-    let okCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (phase === "open") throw new CircuitOpenError("fmp", "env"); // breaker trips before any request leaves
-      okCalls++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
+  describe("looksLikeFinnhubEarningsCalendar / parseFinnhubEarningsCalendar", () => {
+    it("recognizes the documented { earningsCalendar: [...] } shape, including an empty array (a quiet reporting window, not an error)", async () => {
+      const { looksLikeFinnhubEarningsCalendar } = await import("../src/lib/data-providers");
+      expect(looksLikeFinnhubEarningsCalendar(REAL_SAMPLE)).toBe(true);
+      expect(looksLikeFinnhubEarningsCalendar({ earningsCalendar: [] })).toBe(true);
+      expect(looksLikeFinnhubEarningsCalendar({})).toBe(false);
+      expect(looksLikeFinnhubEarningsCalendar([])).toBe(false);
+      expect(looksLikeFinnhubEarningsCalendar(null)).toBe(false);
+      expect(looksLikeFinnhubEarningsCalendar("error")).toBe(false);
     });
 
-    const provider = new FmpEnrichmentProvider("brk-key");
-    const res = await provider.enrich(["ZZZ"]);
-    expect(res.ZZZ).toEqual({}); // all sub-calls CircuitOpenError → breaker-skipped
-
-    // If the cost were NOT refunded, the 4/min budget would be spent and this rescan would defer ZZZ
-    // as {} with zero fetches; if ZZZ had been cached, the rescan would serve {} from cache. Either
-    // failure mode yields no fetch. Getting real data back proves BOTH the refund and the no-cache.
-    phase = "ok";
-    const res2 = await provider.enrich(["ZZZ"]);
-    expect(res2.ZZZ).toEqual({ peRatio: 20 });
-    expect(okCalls).toBe(4);
-  });
-
-  it("does not spend the quota on a cache hit", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4";
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("cache-key");
-    await provider.enrich(["IBM"]); // fetches + caches, spends 4
-    expect(count()).toBe(4);
-
-    resetProviderQuotaState(); // clear the budget so any NEW spend on the rescan is detectable
-    const res2 = await provider.enrich(["IBM"]);
-    expect(count()).toBe(4);    // served from cache — no fetch
-    expect(res2.IBM).toEqual({ peRatio: 20 });
-    // The cache hit reserved nothing, so the whole fresh window is still available.
-    expect(admitProviderRequests("fmp", apiKeyFingerprint("cache-key"), 4)).toBe(4);
-  });
-
-  it("keeps a separate quota lane per credential (one key's spend never gates another)", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // each lane funds exactly one symbol/min
-    const count = stubPeFetch();
-
-    const provA = new FmpEnrichmentProvider("iso-A");
-    const provB = new FmpEnrichmentProvider("iso-B");
-    await provA.enrich(["AAPL"]); // spends lane A's whole minute
-    const resB = await provB.enrich(["MSFT"]); // lane B is untouched → still fetches
-    expect(resB.MSFT).toEqual({ peRatio: 20 });
-    expect(count()).toBe(8); // 4 (A) + 4 (B); a shared lane would have deferred B → only 4
-  });
-
-  it("retries:0 — a 429 does not emit a second (uncounted) call on any sub-endpoint", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    let ratiosCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("ratios-ttm")) { ratiosCalls++; return new Response("rate limited", { status: 429 }); }
-      return new Response(JSON.stringify([]));
+    it("parses symbol -> earliest report date from a real sample response", async () => {
+      const { parseFinnhubEarningsCalendar } = await import("../src/lib/data-providers");
+      const bySymbol = parseFinnhubEarningsCalendar(REAL_SAMPLE);
+      // AAPL appears twice (two historical quarters) — keeps the EARLIEST reportDate.
+      expect(bySymbol.size).toBe(1);
+      expect(bySymbol.get("AAPL")).toBe(Date.parse("2019-10-30T00:00:00Z"));
     });
 
-    const provider = new FmpEnrichmentProvider("retry-key");
-    await provider.enrich(["AAPL"]);
-    expect(ratiosCalls).toBe(1); // exactly one attempt — the built-in 429 retry (default 1) is disabled
+    it("keeps the EARLIEST date when a symbol appears more than once, regardless of row order", async () => {
+      const { parseFinnhubEarningsCalendar } = await import("../src/lib/data-providers");
+      const bySymbol = parseFinnhubEarningsCalendar({
+        earningsCalendar: [
+          { symbol: "MSFT", date: "2026-11-01" },
+          { symbol: "MSFT", date: "2026-08-05" }
+        ]
+      });
+      expect(bySymbol.get("MSFT")).toBe(Date.parse("2026-08-05T00:00:00Z"));
+    });
+
+    it("returns an empty map (never throws, never guesses) for malformed/unexpected shapes", async () => {
+      const { parseFinnhubEarningsCalendar } = await import("../src/lib/data-providers");
+      expect(parseFinnhubEarningsCalendar({}).size).toBe(0);
+      expect(parseFinnhubEarningsCalendar({ error: "Please use an API key." }).size).toBe(0);
+      expect(parseFinnhubEarningsCalendar(null).size).toBe(0);
+      expect(parseFinnhubEarningsCalendar({ earningsCalendar: [{ symbol: "BAD" }] }).size).toBe(0); // no date
+      expect(parseFinnhubEarningsCalendar({ earningsCalendar: [{ date: "2026-08-05" }] }).size).toBe(0); // no symbol
+    });
+  });
+
+  describe("enrich() integration", () => {
+    /** UTC calendar-date string exactly `daysFromToday` days from "now"'s UTC midnight — matches
+     *  alphaVantageDaysToEarnings' own truncation (shared by this fallback's day-math), so the
+     *  expected day count is exact regardless of what wall-clock time the test happens to run at. */
+    function utcDateString(daysFromToday: number): string {
+      const truncatedToday = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+      return new Date(truncatedToday + daysFromToday * 86_400_000).toISOString().slice(0, 10);
+    }
+
+    it("fetches the market-wide calendar ONCE (no symbol= param) and fills daysToEarnings for a miss", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const reportDate = utcDateString(12);
+      let calendarUrl: string | undefined;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          calendarUrl = u;
+          return new Response(JSON.stringify({ earningsCalendar: [{ symbol: "AAPL", date: reportDate }] }));
+        }
+        if (u.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL"]);
+      expect(res.AAPL?.daysToEarnings).toBe(12);
+      expect(res.AAPL?.companyName).toBe("Apple Inc."); // the rest of the row still populates alongside it
+      expect(calendarUrl).toBeDefined();
+      expect(calendarUrl).toContain("/calendar/earnings");
+      expect(calendarUrl).not.toContain("symbol=");
+    });
+
+    it("dispatches only ONE calendar call for a multi-symbol batch, filling every matched symbol from it", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const aaplDate = utcDateString(3);
+      const msftDate = utcDateString(9);
+      let calendarCalls = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          calendarCalls++;
+          return new Response(JSON.stringify({
+            earningsCalendar: [
+              { symbol: "AAPL", date: aaplDate },
+              { symbol: "MSFT", date: msftDate }
+            ]
+          }));
+        }
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL", "MSFT"]);
+      expect(res.AAPL?.daysToEarnings).toBe(3);
+      expect(res.MSFT?.daysToEarnings).toBe(9);
+      expect(calendarCalls).toBe(1); // ONE market-wide pull, not one per symbol
+    });
+
+    it("skips the calendar fetch entirely when the coveredFields hint already marks daysToEarnings covered", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      let calendarCalls = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          calendarCalls++;
+          throw new Error("must not be called — daysToEarnings was already covered upstream");
+        }
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const context: EnrichmentContext = { coveredFields: { AAPL: new Set(["daysToEarnings"]) } };
+      const res = await provider.enrich(["AAPL"], context);
+      expect(res.AAPL?.daysToEarnings).toBeUndefined(); // Finnhub added nothing — the hint source owns it
+      expect(calendarCalls).toBe(0);
+    });
+
+    it("a malformed/unusable calendar response never fabricates daysToEarnings and never crashes enrich()", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          // Not the documented shape at all (e.g. an unrelated error page).
+          return new Response(JSON.stringify({ error: "unexpected upstream failure" }));
+        }
+        if (u.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL"]);
+      expect(res.AAPL?.daysToEarnings).toBeUndefined();
+      // The rest of the row's own fields still came through — one field's failure doesn't blank the rest.
+      expect(res.AAPL?.companyName).toBe("Apple Inc.");
+    });
+
+    it("fills daysToEarnings even for a symbol served from Finnhub's OWN per-symbol row cache (decoupled from that row's TTL)", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const reportDate = utcDateString(5);
+      let calendarCalls = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          calendarCalls++;
+          return new Response(JSON.stringify({ earningsCalendar: [{ symbol: "AAPL", date: reportDate }] }));
+        }
+        if (u.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const res1 = await provider.enrich(["AAPL"]);
+      expect(res1.AAPL?.daysToEarnings).toBe(5);
+      expect(calendarCalls).toBe(1);
+
+      // Second call: the per-symbol Finnhub row (companyName etc.) is now a cache HIT — no new
+      // per-symbol network calls — but daysToEarnings still applies fresh from the still-warm
+      // shared calendar cache (no second calendar network call either, since it's within TTL).
+      const res2 = await provider.enrich(["AAPL"]);
+      expect(res2.AAPL?.companyName).toBe("Apple Inc.");
+      expect(res2.AAPL?.daysToEarnings).toBe(5);
+      expect(calendarCalls).toBe(1); // still just the one cold-cache pull
+    });
+
+    it("never fills a past/stale calendar entry (never fabricated)", async () => {
+      const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const pastDate = utcDateString(-10);
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("/calendar/earnings")) {
+          return new Response(JSON.stringify({ earningsCalendar: [{ symbol: "AAPL", date: pastDate }] }));
+        }
+        return new Response(JSON.stringify({}));
+      });
+
+      const provider = new FinnhubEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL"]);
+      expect(res.AAPL?.daysToEarnings).toBeUndefined();
+    });
   });
 });
 
 describe("Alpha Vantage Warning Detection", () => {
+  // The EARNINGS_CALENDAR fallback (below) reserves from the SAME persisted daily budget/key
+  // pool as NEWS_SENTIMENT — reset both before every test in this describe block so usage never
+  // silently accumulates across tests sharing this file's one temp DB (mirrors the pattern the
+  // reset helpers themselves document — no test here previously needed this because AV had only
+  // ONE call shape; now there are two sharing one budget).
+  beforeEach(() => {
+    __resetAlphaVantageDailyBudgetForTests();
+    __resetKeyPoolRegistryForTests();
+  });
+
   it("throws error and does not cache when Alpha Vantage returns HTTP 200 with Note", async () => {
     const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
 
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async () => {
-      fetchCount++;
+    let newsSentimentCount = 0;
+    let earningsCalendarCount = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("function=EARNINGS_CALENDAR")) {
+        earningsCalendarCount++;
+        // Header-only CSV ("no known upcoming earnings this pull") — a benign, valid response so
+        // this test stays focused on the NEWS_SENTIMENT Note/warning path; the calendar's OWN
+        // warning-detection path has a dedicated test below.
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      newsSentimentCount++;
       return new Response(JSON.stringify({
         Note: "Thank you for using Alpha Vantage! Standard rate limit is 25 requests per day..."
       }));
@@ -1066,20 +1259,31 @@ describe("Alpha Vantage Warning Detection", () => {
     const provider = new AlphaVantageEnrichmentProvider("test-key");
     const res1 = await provider.enrich(["AAPL"]);
     expect(res1.AAPL).toEqual({});
-    expect(fetchCount).toBe(1);
+    expect(newsSentimentCount).toBe(1);
+    // First enrich() call also triggers the ONE market-wide EARNINGS_CALENDAR pull (cold cache).
+    expect(earningsCalendarCount).toBe(1);
 
     const res2 = await provider.enrich(["AAPL"]);
     expect(res2.AAPL).toEqual({});
-    expect(fetchCount).toBe(2);
+    expect(newsSentimentCount).toBe(2); // Note never caches — NEWS_SENTIMENT retried every call
+    // Calendar cache is still warm (positive 24h TTL on the valid header-only pull above) — no
+    // second market-wide call this run.
+    expect(earningsCalendarCount).toBe(1);
   });
 
   it("caches normally on Alpha Vantage when response has news feed", async () => {
     const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
 
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async () => {
-      fetchCount++;
+    let newsSentimentCount = 0;
+    let earningsCalendarCount = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("function=EARNINGS_CALENDAR")) {
+        earningsCalendarCount++;
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      newsSentimentCount++;
       return new Response(JSON.stringify({
         feed: [
           {
@@ -1093,11 +1297,13 @@ describe("Alpha Vantage Warning Detection", () => {
     const provider = new AlphaVantageEnrichmentProvider("test-key");
     const res1 = await provider.enrich(["AAPL"]);
     expect(res1.AAPL).toEqual({ headlines: ["AAPL is doing great"], sentiment: 70 });
-    expect(fetchCount).toBe(1);
+    expect(newsSentimentCount).toBe(1);
+    expect(earningsCalendarCount).toBe(1); // cold calendar cache on the first call
 
     const res2 = await provider.enrich(["AAPL"]);
     expect(res2.AAPL).toEqual({ headlines: ["AAPL is doing great"], sentiment: 70 });
-    expect(fetchCount).toBe(1);
+    expect(newsSentimentCount).toBe(1); // NEWS_SENTIMENT cache hit — no re-fetch
+    expect(earningsCalendarCount).toBe(1); // calendar cache still warm — no re-fetch
   });
 
   // Composite review (e): Alpha Vantage's quota/error text has been observed echoing the
@@ -1116,6 +1322,9 @@ describe("Alpha Vantage Warning Detection", () => {
     });
 
     const provider = new AlphaVantageEnrichmentProvider(secretKey);
+    // This single call also triggers the cold-cache EARNINGS_CALENDAR pull (same mock, same
+    // Note-shaped response) — both call sites independently scrub the key before logging, which
+    // this test verifies across EVERY row it produced, not just the NEWS_SENTIMENT one.
     const res = await provider.enrich(["AAPL"]);
     expect(res.AAPL).toEqual({});
 
@@ -1129,9 +1338,191 @@ describe("Alpha Vantage Warning Detection", () => {
     expect(errorTexts.some((t) => t.includes("apikey=***"))).toBe(true);
   });
 
+  describe("suppliesFields", () => {
+    it("declares exactly the fields it can supply (sentiment/headlines/daysToEarnings)", async () => {
+      const { AlphaVantageEnrichmentProvider } = await import("../src/lib/data-providers");
+      const provider = new AlphaVantageEnrichmentProvider("test-key");
+      expect(provider.suppliesFields).toEqual(["sentiment", "headlines", "daysToEarnings"]);
+    });
+  });
+
+  describe("parseAlphaVantageEarningsCalendar / alphaVantageDaysToEarnings — EARNINGS_CALENDAR fallback", () => {
+    // Real header + rows from a live 2026-08-02 pull of
+    // https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&horizon=3month&apikey=demo
+    // (no `symbol` param — AV's documented market-wide default). BCC's quoted, comma-containing
+    // company name is a genuine field from that response, exercising the CSV quote-handling.
+    const REAL_CSV_SAMPLE =
+      "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+      "ABTC,AMERICAN BITCOIN CORPORATION,2026-08-03,2026-06-30,,USD,pre-market\n" +
+      "ADEA,ADEIA INCORPORATED,2026-08-03,2026-06-30,0.22,USD,post-market\n" +
+      "BCC,\"BOISE CASCADE, L.L.C.\",2026-08-03,2026-06-30,1.23,USD,post-market\n";
+
+    it("parses symbol -> reportDate from a real market-wide CSV pull, handling a quoted comma in a company name", async () => {
+      const { parseAlphaVantageEarningsCalendar } = await import("../src/lib/data-providers");
+      const bySymbol = parseAlphaVantageEarningsCalendar(REAL_CSV_SAMPLE);
+      expect(bySymbol.size).toBe(3);
+      expect(bySymbol.get("ABTC")).toBe(Date.parse("2026-08-03T00:00:00Z"));
+      expect(bySymbol.get("ADEA")).toBe(Date.parse("2026-08-03T00:00:00Z"));
+      // BCC's row survives the embedded comma inside its quoted company name — if the parser
+      // naively split on every comma, this row's columns would misalign and reportDate would
+      // parse as garbage (or the row would be dropped) instead of landing on the correct date.
+      expect(bySymbol.get("BCC")).toBe(Date.parse("2026-08-03T00:00:00Z"));
+    });
+
+    it("keeps the EARLIEST reportDate when a symbol appears more than once", async () => {
+      const { parseAlphaVantageEarningsCalendar } = await import("../src/lib/data-providers");
+      const csv =
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+        "AAPL,APPLE INC,2026-11-01,2026-09-30,1.50,USD,post-market\n" +
+        "AAPL,APPLE INC,2026-08-05,2026-06-30,1.40,USD,post-market\n";
+      const bySymbol = parseAlphaVantageEarningsCalendar(csv);
+      expect(bySymbol.get("AAPL")).toBe(Date.parse("2026-08-05T00:00:00Z"));
+    });
+
+    it("returns an empty map (never throws) for a header-only CSV", async () => {
+      const { parseAlphaVantageEarningsCalendar } = await import("../src/lib/data-providers");
+      const bySymbol = parseAlphaVantageEarningsCalendar(
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"
+      );
+      expect(bySymbol.size).toBe(0);
+    });
+
+    it("returns an empty map (never guesses) for a non-CSV / quota-message body", async () => {
+      const { parseAlphaVantageEarningsCalendar } = await import("../src/lib/data-providers");
+      const bySymbol = parseAlphaVantageEarningsCalendar(
+        JSON.stringify({ Information: "Thank you for using Alpha Vantage! This is a premium endpoint." })
+      );
+      expect(bySymbol.size).toBe(0);
+    });
+
+    it("looksLikeAlphaVantageEarningsCalendarCsv distinguishes the documented CSV header from anything else", async () => {
+      const { looksLikeAlphaVantageEarningsCalendarCsv } = await import("../src/lib/data-providers");
+      expect(looksLikeAlphaVantageEarningsCalendarCsv(REAL_CSV_SAMPLE)).toBe(true);
+      expect(looksLikeAlphaVantageEarningsCalendarCsv("{\"Note\":\"rate limited\"}")).toBe(false);
+      expect(looksLikeAlphaVantageEarningsCalendarCsv("")).toBe(false);
+    });
+
+    it("alphaVantageDaysToEarnings computes whole UTC calendar days, clamped and never fabricated for a past date", async () => {
+      const { alphaVantageDaysToEarnings } = await import("../src/lib/data-providers");
+      const now = Date.parse("2026-08-02T15:30:00Z"); // mid-day, not midnight — must not skew day math
+      expect(alphaVantageDaysToEarnings(Date.parse("2026-08-12T00:00:00Z"), now)).toBe(10);
+      expect(alphaVantageDaysToEarnings(Date.parse("2026-08-02T00:00:00Z"), now)).toBe(0); // today
+      expect(alphaVantageDaysToEarnings(Date.parse("2026-07-30T00:00:00Z"), now)).toBeUndefined(); // past
+    });
+  });
+
+  describe("EARNINGS_CALENDAR fallback — enrich() integration", () => {
+    /** UTC calendar-date string exactly `daysFromToday` days from "now"'s UTC midnight — matches
+     *  alphaVantageDaysToEarnings' own truncation, so the expected day count is exact and
+     *  deterministic regardless of what wall-clock time the test happens to run at. */
+    function utcDateString(daysFromToday: number): string {
+      const truncatedToday = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+      return new Date(truncatedToday + daysFromToday * 86_400_000).toISOString().slice(0, 10);
+    }
+
+    it("fetches the market-wide calendar ONCE (no `symbol=` param) and fills daysToEarnings for a miss, alongside NEWS_SENTIMENT", async () => {
+      const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const reportDate = utcDateString(10);
+      let calendarUrl: string | undefined;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("function=EARNINGS_CALENDAR")) {
+          calendarUrl = u;
+          return new Response(
+            "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+              `AAPL,APPLE INC,${reportDate},2026-06-30,1.50,USD,post-market\n`
+          );
+        }
+        return new Response(JSON.stringify({ feed: [] })); // valid, empty NEWS_SENTIMENT feed
+      });
+
+      const provider = new AlphaVantageEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL"]);
+      expect(res.AAPL?.daysToEarnings).toBe(10);
+      expect(calendarUrl).toBeDefined();
+      expect(calendarUrl).toContain("function=EARNINGS_CALENDAR");
+      expect(calendarUrl).toContain("horizon=3month");
+      expect(calendarUrl).not.toContain("symbol=");
+    });
+
+    it("dispatches only ONE calendar call for a multi-symbol batch, filling every matched symbol from it", async () => {
+      const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      const aaplDate = utcDateString(3);
+      const msftDate = utcDateString(7);
+      let calendarCalls = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("function=EARNINGS_CALENDAR")) {
+          calendarCalls++;
+          return new Response(
+            "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n" +
+              `AAPL,APPLE INC,${aaplDate},2026-06-30,1.50,USD,post-market\n` +
+              `MSFT,MICROSOFT CORP,${msftDate},2026-06-30,2.10,USD,post-market\n`
+          );
+        }
+        return new Response(JSON.stringify({ feed: [] }));
+      });
+
+      const provider = new AlphaVantageEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL", "MSFT"]);
+      expect(res.AAPL?.daysToEarnings).toBe(3);
+      expect(res.MSFT?.daysToEarnings).toBe(7);
+      expect(calendarCalls).toBe(1); // ONE market-wide pull, not one per symbol
+    });
+
+    it("skips the calendar fetch entirely when the free-wave coverage hint already filled daysToEarnings", async () => {
+      const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      let calendarCalls = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("function=EARNINGS_CALENDAR")) {
+          calendarCalls++;
+          throw new Error("must not be called — daysToEarnings was already covered upstream");
+        }
+        return new Response(JSON.stringify({ feed: [] }));
+      });
+
+      const provider = new AlphaVantageEnrichmentProvider("test-key");
+      const context: EnrichmentContext = { coveredFields: { AAPL: new Set(["daysToEarnings"]) } };
+      const res = await provider.enrich(["AAPL"], context);
+      expect(res.AAPL?.daysToEarnings).toBeUndefined(); // AV added nothing — the hint source owns it
+      expect(calendarCalls).toBe(0);
+    });
+
+    it("a malformed/unusable EARNINGS_CALENDAR response never fabricates daysToEarnings and never crashes enrich()", async () => {
+      const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+      clearEnrichmentCache();
+
+      vi.stubGlobal("fetch", async (url: string) => {
+        const u = String(url);
+        if (u.includes("function=EARNINGS_CALENDAR")) {
+          // Not the documented CSV shape at all (e.g. an unrelated JSON error page).
+          return new Response(JSON.stringify({ error: "unexpected upstream failure" }));
+        }
+        return new Response(JSON.stringify({
+          feed: [{ title: "AAPL headline", ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.1" }] }]
+        }));
+      });
+
+      const provider = new AlphaVantageEnrichmentProvider("test-key");
+      const res = await provider.enrich(["AAPL"]);
+      expect(res.AAPL?.daysToEarnings).toBeUndefined();
+      // NEWS_SENTIMENT's own fields still came through — one field's failure doesn't blank the rest.
+      expect(res.AAPL?.sentiment).toBeDefined();
+      expect(res.AAPL?.headlines).toEqual(["AAPL headline"]);
+    });
+  });
+
   describe("Fintech Studios / PowerIntell", () => {
     it("adds FintechStudiosEnrichmentProvider to cascade when key is set", async () => {
       process.env.FINTECH_STUDIOS_API_KEY = "test-key-fts";
+      migrateLocalEnvCredentials();
       const provider = getEnrichmentProvider();
       expect(provider.name).toContain("fintechstudios");
     });
@@ -1199,24 +1590,164 @@ describe("Alpha Vantage Warning Detection", () => {
   });
 });
 
-describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
-  const originalFinnhubKey = process.env.FINNHUB_API_KEY;
-  const originalFmpKey = process.env.FMP_API_KEY;
-  const originalAlphaVantageKey = process.env.ALPHAVANTAGE_API_KEY;
+// NEWS_RELEVANCE_FILTER / NEWS_RELEVANCE_MIN_SCORE gating of AV's NEWS_SENTIMENT feed — see the
+// section comment above alphaVantageItemIsRelevant (data-providers.ts) for the never-drop-
+// unscored-data contract this mirrors from marketaux-provider.ts's match_score gating.
+describe("Alpha Vantage NEWS_SENTIMENT relevance gating (relevance_score)", () => {
+  const originalFilter = process.env.NEWS_RELEVANCE_FILTER;
+  const originalMinScore = process.env.NEWS_RELEVANCE_MIN_SCORE;
 
   beforeEach(() => {
-    delete process.env.FINNHUB_API_KEY;
-    delete process.env.FMP_API_KEY;
-    delete process.env.ALPHAVANTAGE_API_KEY;
+    __resetAlphaVantageDailyBudgetForTests();
+    __resetKeyPoolRegistryForTests();
+    delete process.env.NEWS_RELEVANCE_FILTER;
+    delete process.env.NEWS_RELEVANCE_MIN_SCORE;
   });
 
   afterEach(() => {
-    if (originalFinnhubKey) process.env.FINNHUB_API_KEY = originalFinnhubKey;
-    else delete process.env.FINNHUB_API_KEY;
-    if (originalFmpKey) process.env.FMP_API_KEY = originalFmpKey;
-    else delete process.env.FMP_API_KEY;
-    if (originalAlphaVantageKey) process.env.ALPHAVANTAGE_API_KEY = originalAlphaVantageKey;
-    else delete process.env.ALPHAVANTAGE_API_KEY;
+    if (originalFilter) process.env.NEWS_RELEVANCE_FILTER = originalFilter;
+    else delete process.env.NEWS_RELEVANCE_FILTER;
+    if (originalMinScore) process.env.NEWS_RELEVANCE_MIN_SCORE = originalMinScore;
+    else delete process.env.NEWS_RELEVANCE_MIN_SCORE;
+  });
+
+  function feedResponse(items: Array<{ title: string; relevanceScore?: string; sentimentScore?: string }>) {
+    return new Response(JSON.stringify({
+      feed: items.map((it) => ({
+        title: it.title,
+        ticker_sentiment: [
+          {
+            ticker: "AAPL",
+            ...(it.sentimentScore !== undefined && { ticker_sentiment_score: it.sentimentScore }),
+            ...(it.relevanceScore !== undefined && { relevance_score: it.relevanceScore })
+          }
+        ]
+      }))
+    }));
+  }
+
+  it("with the filter ON (default), an item below the relevance threshold is dropped from BOTH headlines and the sentiment average", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL barely mentioned in roundup", relevanceScore: "0.1", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL).toEqual({}); // dropped entirely — never a fabricated partial row
+  });
+
+  it("with the filter ON (default), an item at/above the relevance threshold passes through normally", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL reports record quarterly revenue", relevanceScore: "0.9", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL reports record quarterly revenue"]);
+    expect(res.AAPL?.sentiment).toBe(100);
+  });
+
+  it("an item with NO relevance_score at all passes through even with the filter ON — never drop data AV didn't score", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail almost anything WITH a score
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL unscored mention", sentimentScore: "0.2" }]); // no relevance_score field
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL unscored mention"]);
+    expect(res.AAPL?.sentiment).toBe(70); // 50 + 0.2*100
+  });
+
+  it("with the filter OFF, a below-threshold relevance_score no longer drops the item", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_FILTER = "0";
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail the 0.1 relevance_score if filter were on
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL barely mentioned in roundup", relevanceScore: "0.1", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL barely mentioned in roundup"]);
+    expect(res.AAPL?.sentiment).toBe(100);
+  });
+
+  it("parseAlphaVantageNewsSentiment (RapidAPI failover lane) applies the same relevance gating", async () => {
+    const { parseAlphaVantageNewsSentiment } = await import("../src/lib/data-providers");
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+    const payload = {
+      feed: [
+        { title: "Relevant AAPL headline", ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.5", relevance_score: "0.9" }] },
+        { title: "Barely-relevant AAPL mention", ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.5", relevance_score: "0.05" }] }
+      ]
+    };
+    const parsed = parseAlphaVantageNewsSentiment(payload, "AAPL");
+    expect(parsed.headlines).toEqual(["Relevant AAPL headline"]);
+  });
+});
+
+describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
+  // Isolate Yahoo: clear every other enrichment key so the cascade cannot fill PE from
+  // Fintech/Finnhub/FMP/etc. when Yahoo handshake fails (CI runners often have keys in env).
+  const KEYS = [
+    "FINNHUB_API_KEY",
+    "FMP_API_KEY",
+    "ALPHAVANTAGE_API_KEY",
+    "FINTECH_STUDIOS_API_KEY",
+    "RAPIDAPI_KEY",
+    "POLYGON_API_KEY",
+    "ALPACA_API_KEY",
+    "ALPACA_API_SECRET",
+    "ROIC_API_KEY",
+    "MASSIVE_API_KEY",
+    "MASSIVE_API_KEY_ALT",
+    "TIINGO_API_KEY",
+    "TWELVEDATA_API_KEY",
+    "FILINGAPI",
+    "FILINGAPI_KEY",
+    "SEC_XBRL_ENRICHMENT_ENABLED",
+  ] as const;
+  const originals: Partial<Record<(typeof KEYS)[number], string | undefined>> = {};
+  for (const k of KEYS) originals[k] = process.env[k];
+
+  beforeEach(() => {
+    for (const k of KEYS) delete process.env[k];
+    // Keep Yahoo crumb tests free of SEC/FilingAPI network side-channels.
+    process.env.SEC_XBRL_ENRICHMENT_ENABLED = "0";
+  });
+
+  afterEach(() => {
+    for (const k of KEYS) {
+      const v = originals[k];
+      if (v) process.env[k] = v;
+      else delete process.env[k];
+    }
   });
 
   // Composite review (d): getCreds() used to be all-or-nothing — one failed handshake blanked
@@ -1227,15 +1758,20 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
 
     let cookieAttempts = 0;
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url === "https://fc.yahoo.com") {
+      const u = String(url);
+      // Free-wave nasdaq-quote may run alongside Yahoo — return empty so it doesn't win fields.
+      if (u.includes("api.nasdaq.com")) {
+        return new Response(JSON.stringify({ data: null }), { status: 200 });
+      }
+      if (u === "https://fc.yahoo.com") {
         cookieAttempts++;
         if (cookieAttempts === 1) throw new Error("network blip");
         return new Response(null, { status: 200, headers: { "set-cookie": "A=1; Path=/" } });
       }
-      if (url.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) {
+      if (u.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) {
         return new Response("test-crumb", { status: 200 });
       }
-      if (url.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
+      if (u.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
         return new Response(
           JSON.stringify({
             quoteSummary: {
@@ -1249,24 +1785,86 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
     });
 
     const provider = getEnrichmentProvider();
-    // Not an exact-match: unrelated describe blocks in this file may leave a provider key set
-    // (e.g. FINTECH_STUDIOS_API_KEY) depending on run order — irrelevant to what's under test
-    // here (Yahoo's own handshake retry), and any such extra provider's fetch calls are caught
-    // by CascadingEnrichmentProvider without affecting Yahoo's result.
     expect(provider.name).toContain("yahoo-finance");
 
-    vi.useFakeTimers();
-    try {
-      const resultPromise = provider.enrich(["AAPL"]);
-      // Let the failed first attempt run, then cross the retry backoff.
-      await vi.advanceTimersByTimeAsync(1000);
-      const result = await resultPromise;
-      expect(result.AAPL?.peRatio).toBe(31.4);
-      expect(result.AAPL?.sector).toBe("Technology");
-    } finally {
-      vi.useRealTimers();
-    }
+    // Real timers: free-wave nasdaq-quote runs alongside Yahoo; fake timers previously
+    // deadlocked the cascade Promise.race with Yahoo's 500ms crumb retry.
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.peRatio).toBe(31.4);
+    expect(result.AAPL?.sector).toBe("Technology");
     expect(cookieAttempts).toBe(2); // failed once, retried once, succeeded
+  });
+
+  it("maps analyst targets, revenue growth, and freeCashFlowYield from the already-fetched financialData module (free tier)", async () => {
+    // Owner directive 2026-08-01: with FMP suspended and no paid target source, the free Yahoo
+    // quoteSummary financialData module must populate target*/revenueGrowth/freeCashFlowYield.
+    const { clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.nasdaq.com")) return new Response(JSON.stringify({ data: null }), { status: 200 });
+      if (u === "https://fc.yahoo.com") return new Response(null, { status: 200, headers: { "set-cookie": "A=1; Path=/" } });
+      if (u.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) return new Response("test-crumb", { status: 200 });
+      if (u.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
+        return new Response(
+          JSON.stringify({
+            quoteSummary: {
+              result: [{
+                summaryDetail: { marketCap: { raw: 3_000_000_000_000 } },
+                financialData: {
+                  targetMeanPrice: { raw: 250.5 },
+                  targetHighPrice: { raw: 300 },
+                  targetLowPrice: { raw: 180 },
+                  targetMedianPrice: { raw: 247 },
+                  revenueGrowth: { raw: 0.094 }, // decimal fraction → 9.4 percentage points
+                  freeCashflow: { raw: 100_000_000_000 },
+                },
+                assetProfile: {},
+              }]
+            }
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+
+    const provider = getEnrichmentProvider();
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.targetMean).toBe(250.5);
+    expect(result.AAPL?.targetHigh).toBe(300);
+    expect(result.AAPL?.targetLow).toBe(180);
+    expect(result.AAPL?.targetMedian).toBe(247);
+    expect(result.AAPL?.revenueGrowth).toBeCloseTo(9.4, 5);
+    expect(result.AAPL?.fcfYield).toBeCloseTo(3.33, 2);
+    expect(result.AAPL?.freeCashFlowYield).toBe(result.AAPL?.fcfYield);
+  });
+
+  it("drops zero/negative analyst targets (sentinel values) instead of letting them win first-wins", async () => {
+    const { clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("api.nasdaq.com")) return new Response(JSON.stringify({ data: null }), { status: 200 });
+      if (u === "https://fc.yahoo.com") return new Response(null, { status: 200, headers: { "set-cookie": "A=1; Path=/" } });
+      if (u.startsWith("https://query1.finance.yahoo.com/v1/test/getcrumb")) return new Response("test-crumb", { status: 200 });
+      if (u.startsWith("https://query1.finance.yahoo.com/v10/finance/quoteSummary/")) {
+        return new Response(
+          JSON.stringify({
+            quoteSummary: { result: [{ financialData: { targetMeanPrice: { raw: 0 }, revenueGrowth: { raw: -0.02 } }, assetProfile: {} }] }
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+
+    const provider = getEnrichmentProvider();
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.targetMean).toBeUndefined();
+    expect(result.AAPL?.revenueGrowth).toBe(-2); // negative growth is real data, kept
   });
 
   it("still degrades to empty (never throws) when the retry also fails", async () => {
@@ -1274,21 +1872,18 @@ describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
     clearEnrichmentCache();
 
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url === "https://fc.yahoo.com") throw new Error("network down");
+      const u = String(url);
+      if (u.includes("api.nasdaq.com")) {
+        return new Response(JSON.stringify({ data: null }), { status: 200 });
+      }
+      if (u === "https://fc.yahoo.com") throw new Error("network down");
       throw new Error(`unexpected fetch to ${url}`);
     });
 
     const provider = getEnrichmentProvider();
-    vi.useFakeTimers();
-    try {
-      const resultPromise = provider.enrich(["AAPL"]);
-      await vi.advanceTimersByTimeAsync(1000);
-      const result = await resultPromise;
-      expect(result.AAPL?.peRatio).toBeUndefined();
-      expect(result.AAPL?.sector).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
+    const result = await provider.enrich(["AAPL"]);
+    expect(result.AAPL?.peRatio).toBeUndefined();
+    expect(result.AAPL?.sector).toBeUndefined();
   });
 });
 
@@ -1335,6 +1930,34 @@ describe("parseRobinhoodFundamentals", () => {
 });
 
 describe("parseAlpacaSnapshot", () => {
+  it("stamps the delayed-tape metadata onto the parsed snapshot", () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` tape carries a
+    // documented ~900s delay.  Without this metadata the ~900s-old print is
+    // treated as a realtime-stale observation downstream.
+    const result = parseAlpacaSnapshot(
+      { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } },
+      {
+        expectedDelaySec: 900,
+        delayToleranceSec: 120,
+        venuePriceAuthoritative: true,
+        fetchedAt: "2026-11-05T20:00:00.000Z"
+      }
+    );
+    expect(result.expectedDelaySec).toBe(900);
+    expect(result.delayToleranceSec).toBe(120);
+    expect(result.venuePriceAuthoritative).toBe(true);
+    // The retrieval stamp travels with the tape so it ages by fetch time.
+    expect(result.fetchedAt).toBe("2026-11-05T20:00:00.000Z");
+  });
+
+  it("leaves a realtime snapshot without any tape metadata", () => {
+    const result = parseAlpacaSnapshot({ latestTrade: { p: 195.5 } });
+    expect(result.expectedDelaySec).toBeUndefined();
+    expect(result.delayToleranceSec).toBeUndefined();
+    expect(result.venuePriceAuthoritative).toBeUndefined();
+    expect(result.fetchedAt).toBeUndefined();
+  });
+
   it("maps a full snapshot to the correct SymbolEnrichment fields", () => {
     const snap = {
       latestTrade: { p: 205.75 },
@@ -1383,16 +2006,17 @@ describe("parseAlpacaSnapshot", () => {
     expect(negVw).not.toHaveProperty("vwap");
   });
 
-  it("falls back to dailyBar.c for price when latestTrade is absent", () => {
+  it("uses the two-sided mid when latestTrade is absent and ignores the daily bar close", () => {
     const snap = {
       latestQuote: { bp: 100.00, ap: 100.10 },
-      dailyBar: { c: 100.05, v: 500_000 },
+      dailyBar: { c: 90, v: 500_000 },
       prevDailyBar: { c: 98.00 }
     };
     const result = parseAlpacaSnapshot(snap);
     expect(result.price).toBe(100.05);
-    // (100.05 - 98.00) / 98.00 * 100 ≈ 2.09%
-    expect(result.intradayChangePct).toBeCloseTo(2.09, 1);
+    expect(result.price).not.toBe(90);
+    // Change still uses the daily bar close as the session reference: (90 - 98) / 98.
+    expect(result.intradayChangePct).toBeCloseTo(-8.16, 1);
   });
 
   it("omits bid/ask when they are absent or zero", () => {
@@ -1440,13 +2064,22 @@ describe("parseAlpacaSnapshot", () => {
       expect(result.asOf).toBe("2026-07-04T14:30:00Z");
     });
 
-    it("stamps asOf from dailyBar.t when latestTrade is absent and dailyBar.c wins the price", () => {
+    it("stamps asOf from the quote time when the mid wins, not the daily bar time", () => {
       const result = parseAlpacaSnapshot({
-        latestQuote: { bp: 100.00, ap: 100.10 },
-        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" }
+        latestQuote: { bp: 100.00, ap: 100.10, t: "2026-07-04T14:30:00Z" },
+        dailyBar: { c: 90, v: 500_000, t: "2026-07-04T20:00:00Z" }
       });
       expect(result.price).toBe(100.05);
-      expect(result.asOf).toBe("2026-07-04T20:00:00Z");
+      expect(result.asOf).toBe("2026-07-04T14:30:00Z");
+    });
+
+    it("omits price and asOf when the snapshot only has a daily or previous close", () => {
+      const result = parseAlpacaSnapshot({
+        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" },
+        prevDailyBar: { c: 98 }
+      });
+      expect(result.price).toBeUndefined();
+      expect(result.asOf).toBeUndefined();
     });
 
     it("omits asOf when no timestamp backs the winning price field (never guesses)", () => {
@@ -1572,6 +2205,130 @@ describe("AlpacaSnapshotEnrichmentProvider", () => {
     const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
     await provider.enrich(["AAPL"]);
     expect(capturedUrl).toContain("feed=iex");
+  });
+
+  it("requests delayed_sip when the provider carries the ACCOUNT-SCOPED paper feed", async () => {
+    // The global env var stays on its default: the delayed tape is an ACCOUNT
+    // decision, never a process-wide flip.
+    const previousFeed = process.env.ALPACA_DATA_FEED;
+    delete process.env.ALPACA_DATA_FEED;
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      capturedUrl = url;
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    try {
+      const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+        feed: "delayed_sip",
+        cacheIdentity: "ap-paper:delayed_sip"
+      });
+      await provider.enrich(["AAPL"]);
+
+      expect(capturedUrl).toContain("feed=delayed_sip");
+      expect(capturedUrl).not.toContain("feed=iex");
+    } finally {
+      // Restore the mutated env var even when an assertion above throws.
+      if (previousFeed === undefined) delete process.env.ALPACA_DATA_FEED;
+      else process.env.ALPACA_DATA_FEED = previousFeed;
+    }
+  });
+
+  it("stamps the DELAYED-TAPE metadata on a delayed_sip snapshot", async () => {
+    // The scan must be able to age a ~900s-old print with the delayed-tape
+    // rules instead of the realtime-stale bar, so the tape metadata travels
+    // with the observation.
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+  });
+
+  it("does NOT stamp delayed-tape metadata on a realtime (iex) snapshot", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.price).toBe(195.5);
+    expect(result.AAPL?.expectedDelaySec).toBeUndefined();
+    expect(result.AAPL?.delayToleranceSec).toBeUndefined();
+    expect(result.AAPL?.venuePriceAuthoritative).toBeUndefined();
+  });
+
+  it("stamps the delayed-tape metadata onto the enriched snapshot", async () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` provider must
+    // hand the tape metadata (and the retrieval stamp) to the consumer, so a
+    // ~900s-old print is aged by the delayed-tape rules.
+    vi.stubGlobal("fetch", async () =>
+      new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } }
+        })
+      )
+    );
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+    expect(typeof result.AAPL?.fetchedAt).toBe("string");
+  });
+
+  it("keeps the delayed tape in its own cache entry (no cross-feed contamination)", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: urls.length === 1 ? 195.5 : 201.25 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    // First read: the live/iex tape.
+    const iexProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const iex = await iexProvider.enrich(["AAPL"]);
+    expect(iex.AAPL?.price).toBe(195.5);
+    expect(urls[0]).toContain("feed=iex");
+
+    // Second read: the Alpaca PAPER delayed tape.  It must NOT be served from
+    // the iex cache entry — its cache identity differs.
+    const delayedProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const delayed = await delayedProvider.enrich(["AAPL"]);
+    expect(delayed.AAPL?.price).toBe(201.25);
+    expect(urls[1]).toContain("feed=delayed_sip");
   });
 
   it("fetches the snapshots endpoint with correct headers and maps fields", async () => {
@@ -1896,6 +2653,46 @@ describe("freshness-tier ordering — real-time Alpaca wins price-family fields"
   });
 });
 
+// AV supplies ONLY NEWS_SENTIMENT; when Alpaca news is configured it already covers that field,
+// so registering AV too would just burn its 25/day free cap for nothing (see the registration
+// site comment in getEnrichmentProvider).
+describe("Alpha Vantage deregistration when Alpaca news is configured", () => {
+  const originalAlphaVantageKey = process.env.ALPHAVANTAGE_API_KEY;
+  const originalAlpacaKey = process.env.ALPACA_PAPER_API_KEY;
+  const originalAlpacaSecret = process.env.ALPACA_PAPER_SECRET_KEY;
+
+  beforeEach(() => {
+    process.env.ALPHAVANTAGE_API_KEY = "av-key";
+  });
+
+  afterEach(() => {
+    if (originalAlphaVantageKey) process.env.ALPHAVANTAGE_API_KEY = originalAlphaVantageKey;
+    else delete process.env.ALPHAVANTAGE_API_KEY;
+    if (originalAlpacaKey) process.env.ALPACA_PAPER_API_KEY = originalAlpacaKey;
+    else delete process.env.ALPACA_PAPER_API_KEY;
+    if (originalAlpacaSecret) process.env.ALPACA_PAPER_SECRET_KEY = originalAlpacaSecret;
+    else delete process.env.ALPACA_PAPER_SECRET_KEY;
+  });
+
+  it("registers alpha-vantage when Alpaca news is NOT configured", () => {
+    delete process.env.ALPACA_PAPER_API_KEY;
+    delete process.env.ALPACA_PAPER_SECRET_KEY;
+    const provider = getEnrichmentProvider();
+    expect(provider.name.split("+")).toContain("alpha-vantage");
+  });
+
+  it("does not register alpha-vantage when Alpaca news is configured", () => {
+    process.env.ALPACA_PAPER_API_KEY = "alpaca-key";
+    // AlpacaNewsEnrichmentProvider only requires the API key (secret is optional) — mirror that
+    // availability check here so this test doesn't accidentally depend on a stricter condition.
+    delete process.env.ALPACA_PAPER_SECRET_KEY;
+    const provider = getEnrichmentProvider();
+    const order = provider.name.split("+");
+    expect(order).toContain("alpaca-news");
+    expect(order).not.toContain("alpha-vantage");
+  });
+});
+
 describe("CascadingEnrichmentProvider.activeSources (honest source attribution)", () => {
   const stub = (name: string, data: Record<string, SymbolEnrichment>): MarketEnrichmentProvider => ({
     name,
@@ -1989,13 +2786,143 @@ describe("CascadingEnrichmentProvider.activeSources (honest source attribution)"
   });
 });
 
+describe("CascadingEnrichmentProvider evidence receipts and arbitration", () => {
+  const stub = (name: string, data: Record<string, SymbolEnrichment>): MarketEnrichmentProvider => ({
+    name,
+    configured: true,
+    async enrich() {
+      return data;
+    }
+  });
+
+  it("keeps a provider failure distinct from a successful no-match response", async () => {
+    const failed: MarketEnrichmentProvider = {
+      name: "failed-provider",
+      configured: true,
+      async enrich() {
+        throw new Error("upstream unavailable");
+      }
+    };
+    const mixed = new CascadingEnrichmentProvider([failed, stub("no-match-provider", {})]);
+    const mixedResult = await mixed.enrich(["AAPL"]);
+    expect(mixedResult.AAPL.fieldObservations?.peRatio?.status).toBe("no_match");
+    expect(mixedResult.AAPL.providerFailures?.["failed-provider"]).toMatchObject({
+      source: "failed-provider",
+      status: "failed",
+      errorKind: "Error"
+    });
+
+    const allFailed = new CascadingEnrichmentProvider([failed]);
+    const failedResult = await allFailed.enrich(["AAPL"]);
+    expect(failedResult.AAPL.fieldObservations?.peRatio?.status).toBe("failed");
+  });
+
+  it("derives marketCap from SEC XBRL shares times live price when cap is missing", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("yahoo-finance", { AAPL: { price: 200 } }),
+      stub("sec-xbrl", { AAPL: { sharesOutstanding: 1_000_000 } })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.marketCap).toBe(200_000_000);
+    expect(result.AAPL.sources?.marketCap).toBe("sec-xbrl");
+    expect(result.AAPL.sources?.sharesOutstanding).toBe("sec-xbrl");
+  });
+
+  it("preserves explicit field timestamps and upstream source metadata", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("redistributor", {
+        AAPL: {
+          peRatio: 22,
+          fieldObservations: {
+            peRatio: {
+              value: 22,
+              source: "sec-xbrl",
+              upstreamFamily: "sec",
+              observedAt: "2026-07-10T00:00:00.000Z",
+              effectiveAt: "2026-06-30T00:00:00.000Z",
+              fetchedAt: "2026-07-13T12:00:00.000Z",
+              expiresAt: "2026-07-14T12:00:00.000Z",
+              status: "ok",
+              confidence: 0.9,
+              reliability: 0.95,
+              directness: 1
+            }
+          }
+        }
+      })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.peRatio).toBe(22);
+    expect(result.AAPL.sources?.peRatio).toBe("redistributor");
+    expect(result.AAPL.fieldObservations?.peRatio).toMatchObject({
+      source: "sec-xbrl",
+      upstreamFamily: "sec",
+      observedAt: "2026-07-10T00:00:00.000Z",
+      effectiveAt: "2026-06-30T00:00:00.000Z",
+      fetchedAt: "2026-07-13T12:00:00.000Z",
+      expiresAt: "2026-07-14T12:00:00.000Z",
+      status: "ok"
+    });
+  });
+
+  it("arbitrates metadata-aware fields deterministically while retaining price registration priority", () => {
+    const candidates = [
+      {
+        providerName: "first",
+        registrationOrder: 0,
+        observation: {
+          value: 10,
+          source: "first",
+          status: "ok" as const,
+          reliability: 0.8,
+          directness: 1,
+          observedAt: "2026-07-12T00:00:00.000Z"
+        }
+      },
+      {
+        providerName: "second",
+        registrationOrder: 1,
+        observation: {
+          value: 20,
+          source: "second",
+          status: "ok" as const,
+          reliability: 0.8,
+          directness: 1,
+          observedAt: "2026-07-13T00:00:00.000Z"
+        }
+      }
+    ];
+    expect(arbitrateFieldObservation("peRatio", candidates)?.observation.value).toBe(20);
+    expect(arbitrateFieldObservation("price", candidates)?.observation.value).toBe(10);
+  });
+
+  it("deduplicates analyst votes by upstream family before blending", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("redistributor", {
+        AAPL: { analystBySource: { "syndicated-fmp": { score: 80, label: "Buy", upstreamFamily: "fmp" } } }
+      }),
+      stub("fmp", {
+        AAPL: { analystBySource: { "direct-fmp": { score: 20, label: "Sell", upstreamFamily: "fmp" } } }
+      })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.analystScore).toBe(20);
+    expect(result.AAPL.analystBySource).toEqual({
+      "direct-fmp": { score: 20, label: "Sell", upstreamFamily: "fmp" }
+    });
+    expect(cascade.activeSources).toEqual(["fmp"]);
+  });
+});
+
 describe("enrichment short-circuit (App A coverage hint → paid providers skip redundant sub-calls)", () => {
   const FLAG = "ENRICHMENT_SHORT_CIRCUIT_ENABLED";
   // The short-circuit now gates on the fundamentals tier flag, not the price-read flag.
   const READS = "CONGRESS_TRADE_FUNDAMENTALS_ENABLED";
+  const FREE_FIRST = "ENRICHMENT_FREE_FIRST_ENABLED";
   afterEach(() => {
     delete process.env[FLAG];
     delete process.env[READS];
+    delete process.env[FREE_FIRST];
   });
 
   function appA(fundamentals: Record<string, SymbolEnrichment>): MarketEnrichmentProvider {
@@ -2052,7 +2979,9 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
     expect(contexts[0]?.coveredFields?.AAA?.has("peRatio")).toBe(true);
     expect(contexts[0]?.coveredFields?.AAA?.has("analystRating")).toBe(true);
     expect(contexts[0]?.analystSource?.AAA).toBe("fmp");
-    expect(contexts[0]?.coveredFields?.BBB).toBeUndefined();
+    // Free-first (default ON) records an empty covered set for symbols the free wave
+    // returned nothing for — distinct from "key absent" under the legacy short-circuit path.
+    expect(contexts[0]?.coveredFields?.BBB?.size ?? 0).toBe(0);
   });
 
   it("preserves the paid provider's unique fields for covered symbols (nothing lost)", async () => {
@@ -2090,8 +3019,94 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
     expect(out.AAA.analystBySource && Object.keys(out.AAA.analystBySource).sort()).toEqual(["fmp", "yahoo-finance"]);
   });
 
+  it("does not fail the free wave when congress.trade 404s", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 404");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 12 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(12);
+  });
+
+  it("does not latch gather when congress.trade 502s on the free-first wave", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 502");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 18 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(18);
+  });
+
+  it("does not latch gather when congress.trade 502s on the legacy short-circuit path", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    process.env[FREE_FIRST] = "0";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 502");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 19 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(19);
+  });
+
+  it("treats 502/429/timeout as latching and 404 as a miss", () => {
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 502"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 429"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("The operation was aborted due to timeout"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 404"))).toBe(false);
+  });
+
   it("passes NO coverage hint when the flag is OFF (default)", async () => {
     process.env[READS] = "on"; // reads on, short-circuit off
+    // Free-first also injects coveredFields for paid waves — disable it here so this test
+    // asserts the legacy short-circuit-OFF contract in isolation.
+    process.env[FREE_FIRST] = "0";
     const calls: string[][] = [];
     const contexts: Array<EnrichmentContext | undefined> = [];
     const cascade = new CascadingEnrichmentProvider([
@@ -2208,6 +3223,22 @@ describe("short-interest second source (Massive) — cross-check + disagreement 
     const res = await provider.enrich(["NONE"]);
     expect(res.NONE).toEqual({});
   });
+
+  it("MassiveEnrichmentProvider stops remaining symbols after the first 429", async () => {
+    const { MassiveEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("rate limited", { status: 429 });
+    });
+    const provider = new MassiveEnrichmentProvider("massive-key", "env");
+    const symbols = Array.from({ length: 20 }, (_, i) => `M${i}`);
+    const res = await provider.enrich(symbols);
+    expect(res.M0).toEqual({});
+    expect(res.M19).toEqual({});
+    expect(calls).toBeLessThan(20);
+  });
 });
 
 describe("enrichment symbol budget covers the full scan candidate set (starvation regression)", () => {
@@ -2296,3 +3327,68 @@ describe("enrichment symbol budget covers the full scan candidate set (starvatio
     expect(fetched.size).toBe(120);
   });
 });
+
+
+describe("FMP / Quiver direct access retired (owner 2026-08-04)", () => {
+  it("never registers FMP or Quiver even when keys are present", async () => {
+    process.env.FMP_API_KEY = "should-not-register";
+    process.env.QUIVER_API_KEY = "should-not-register";
+    process.env.CONGRESS_TRADE_FUNDAMENTALS_ENABLED = "off"; // isolate cascade name
+    const { getEnrichmentProvider } = await import("../src/lib/data-providers");
+    const provider = getEnrichmentProvider();
+    expect(provider.name).not.toMatch(/(^|\+)fmp($|\+)/);
+    expect(provider.name).not.toContain("quiverquant");
+    expect(provider.name).not.toContain("fmp-rapidapi");
+    delete process.env.FMP_API_KEY;
+    delete process.env.QUIVER_API_KEY;
+    delete process.env.CONGRESS_TRADE_FUNDAMENTALS_ENABLED;
+  });
+});
+
+// ── Alpaca credential guard (Kody review on PR #5005) ───────────────────────
+// The connected-account lookup that decides the account-scoped tape may only
+// run when the Alpaca snapshot provider is actually registered.  Without the
+// guard, every scan — including one with no Alpaca credentials at all — paid
+// for a connected-account DB read on a path that has no snapshot provider.
+
+describe("getEnrichmentProvider — Alpaca credential guard", () => {
+  it("does NOT read the connected account when the Alpaca snapshot credentials are absent", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi
+      .spyOn(db, "resolveAlpacaMarketData")
+      .mockReturnValue({ source: "env" } as never);
+    const connectedSpy = vi.spyOn(db, "getConnectedAccount");
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).not.toHaveBeenCalled();
+      expect(activeSpy).not.toHaveBeenCalled();
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
+  });
+
+  it("reads the connected account when the Alpaca snapshot credentials ARE present", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi.spyOn(db, "resolveAlpacaMarketData").mockReturnValue({
+      apiKey: "k",
+      secretKey: "s",
+      source: "env"
+    } as never);
+    const connectedSpy = vi
+      .spyOn(db, "getConnectedAccount")
+      .mockReturnValue({ id: "ap-paper", broker: "alpaca", environment: "paper" } as never);
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).toHaveBeenCalledWith("ap-paper", "local");
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
+  });
+});
+

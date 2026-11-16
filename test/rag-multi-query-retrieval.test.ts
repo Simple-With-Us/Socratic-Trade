@@ -3,8 +3,8 @@
  * `retrieveContextDetailed` (vector-db.ts).
  *
  * Two things pinned here:
- *  1. Flags-off / `queries` omitted regression: EXACTLY one Voyage embed call and one Pinecone
- *     query call — byte-identical to the pre-multi-query single-query call pattern. This is the
+ *  1. Flags-off / `queries` omitted regression: EXACTLY one Voyage embed call and one independent
+ *     private/shared Pinecone query pair. This is the
  *     hard invariant: multi-query/HyDE must never change behavior for every existing caller that
  *     doesn't pass `queries`.
  *  2. When `options.queries` IS supplied (a caller opted in, e.g. strategy.ts behind
@@ -85,7 +85,7 @@ describe("retrieveContextDetailed: RetrieveOptions.queries wiring", () => {
     delete process.env.RAG_QUERY_EMBED_CACHE;
   });
 
-  it("flags-off / queries omitted: exactly ONE Voyage embed call and ONE Pinecone query call (byte-identical to pre-multi-query behavior)", async () => {
+  it("flags-off / queries omitted: exactly one Voyage embed and one private/shared Pinecone pair", async () => {
     mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
     mocks.query.mockResolvedValue({
       matches: [
@@ -98,11 +98,11 @@ describe("retrieveContextDetailed: RetrieveOptions.queries wiring", () => {
     const result = await retrieveContextDetailed("AAPL earnings", "AAPL", 2, "local");
 
     expect(mocks.embed).toHaveBeenCalledTimes(1);
-    expect(mocks.query).toHaveBeenCalledTimes(1);
+    expect(mocks.query).toHaveBeenCalledTimes(2);
     expect(result.length).toBe(2);
   });
 
-  it("queries: [] (explicitly empty array) behaves the same as omitted — single embed/query", async () => {
+  it("queries: [] behaves the same as omitted — one embed and one private/shared query pair", async () => {
     mocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
     mocks.query.mockResolvedValue({
       matches: [{ id: "a", score: 0.9, metadata: { text: "AAPL earnings", userId: "local", scope: "shared" } }]
@@ -112,7 +112,7 @@ describe("retrieveContextDetailed: RetrieveOptions.queries wiring", () => {
     await retrieveContextDetailed("AAPL earnings", "AAPL", 2, "local", { queries: [] });
 
     expect(mocks.embed).toHaveBeenCalledTimes(1);
-    expect(mocks.query).toHaveBeenCalledTimes(1);
+    expect(mocks.query).toHaveBeenCalledTimes(2);
   });
 
   it("with queries: [q1, q2, q3] supplied, embeds+matches each query independently PLUS the original primary query (one embed + one Pinecone query call per variant, plus one for the primary)", async () => {
@@ -134,7 +134,7 @@ describe("retrieveContextDetailed: RetrieveOptions.queries wiring", () => {
     // 4 embeds: one per variant query PLUS the original primary query (2026-07-05 review fix —
     // the primary query's dense recall is augmented, not replaced, by the fan-out).
     expect(mocks.embed).toHaveBeenCalledTimes(4);
-    expect(mocks.query).toHaveBeenCalledTimes(4);
+    expect(mocks.query).toHaveBeenCalledTimes(8);
     // All four fused matches should surface (distinct ids, RRF-merged pool).
     expect(result.length).toBe(4);
   });

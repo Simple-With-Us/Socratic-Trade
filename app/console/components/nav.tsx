@@ -1,13 +1,14 @@
 "use client";
 
 /** Destinations: left rail on desktop (≥1024px), bottom tab bar on mobile.
- *  Approvals carries the console's only red badge — its count is everything
- *  waiting for a decision there: pending trade proposals PLUS pending
- *  learned-context confirmations (one badge, one number, never two). */
+ *  Approvals carries a red badge for pending trade proposals.
+ *  Lessons handles pending/past learning (without a badge). */
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
+import { openSentryFeedback } from "../../../instrumentation-client";
+import { useOverlay } from "../ui/use-overlay";
 import {
   Activity as ActivityIcon,
   BarChart3,
@@ -16,59 +17,31 @@ import {
   Globe,
   Inbox,
   LayoutDashboard,
+  GraduationCap,
   LayoutGrid,
   ListChecks,
   MessageSquare,
   Pin,
+  Plug,
   Radar,
   ReceiptText,
   Settings as SettingsIcon,
   Shield,
   X
 } from "lucide-react";
-import { nextSheetFocusTarget } from "../ui/sheet";
+import { useFocusTrap } from "../ui/focus-trap";
 import { cx } from "../lib/format";
 import { useNavDirtyGuard } from "../lib/useDirtyGuard";
 import { DEFAULT_MOBILE_TAB_HREFS, MOBILE_TABS_MAX, MOBILE_TABS_MIN, useMobileTabs, type MobileTabsState } from "../lib/mobile-tabs";
 
-/** Pending learned-context confirmations (risk-tier queue). Not part of the
- *  dashboard snapshot, so it's polled here — cheap endpoint, 60s cadence,
- *  refreshed when the tab becomes visible. Errors leave the last good count. */
-function useLearnedPendingCount(): number {
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      void fetch("/api/learned-context/pending", { cache: "no-store" })
-        .then((r) => (r.ok ? (r.json() as Promise<unknown>) : null))
-        .then((rows) => {
-          if (!cancelled && Array.isArray(rows)) setCount(rows.length);
-        })
-        .catch(() => {});
-    };
-    load();
-    const interval = setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      load();
-    }, 60_000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") load();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
-  return count;
+function badgeTitle(proposals: number): string {
+  if (proposals > 0) return `${proposals} trade proposal${proposals === 1 ? "" : "s"} waiting for your decision`;
+  return "";
 }
 
-function badgeTitle(proposals: number, learned: number): string {
-  const parts: string[] = [];
-  if (proposals > 0) parts.push(`${proposals} trade proposal${proposals === 1 ? "" : "s"}`);
-  if (learned > 0) parts.push(`${learned} learned-context item${learned === 1 ? "" : "s"}`);
-  return `${parts.join(" and ")} waiting for your decision`;
+function unreadTitle(unread: number): string {
+  if (unread > 0) return `${unread} unread notification${unread === 1 ? "" : "s"}`;
+  return "";
 }
 
 interface Destination {
@@ -80,20 +53,32 @@ interface Destination {
 }
 
 export const DESTINATIONS: Destination[] = [
-  { href: "/console", label: "Thesis", icon: LayoutDashboard, desc: "Live thesis, actions, evidence, dissent, and framework learning." },
+  // Wave B / PR-B1: plain-language rail labels. Hover `desc` keeps the
+  // sophisticated Socratic metaphor (thesis / evidence / journal / regime / outcomes).
+  { href: "/console", label: "Home", icon: LayoutDashboard, desc: "Live thesis, actions, evidence, dissent, and framework learning." },
   { href: "/console/approvals", label: "Proposals", icon: Inbox, desc: "Trade proposals awaiting your judgment." },
-  { href: "/console/activity", label: "Journal", icon: ActivityIcon, desc: "Decision journal: everything the agent did, newest first." },
-  { href: "/console/scan", label: "Evidence", icon: Radar, desc: "The market scan: screened and scored symbols from the latest run." },
+  { href: "/console/lessons", label: "Lessons", icon: GraduationCap, desc: "Pending learning and past learning." },
+  { href: "/console/activity", label: "Activity", icon: ActivityIcon, desc: "Alerts Center, Notifications, Strategy Runs, Order Fills, and the Audit Log decision journal." },
+  { href: "/console/scan", label: "Scan", icon: Radar, desc: "The market scan: screened and scored symbols from the latest run." },
   { href: "/console/watchlist", label: "Watchlist", icon: Eye, desc: "Symbols the agent monitors, with price alerts that notify you when a level is crossed." },
-  { href: "/console/macro", label: "Regime", icon: Globe, desc: "Macro and market-regime board: rates, credit, volatility, breadth." },
+  { href: "/console/macro", label: "Macro", icon: Globe, desc: "Macro and market-regime board: rates, credit, volatility, breadth." },
   { href: "/console/orders", label: "Orders", icon: ListChecks, desc: "Order history and open orders at the broker." },
   { href: "/console/assistant", label: "Coach", icon: MessageSquare, desc: "Coach Socratic Trade about its reasoning, accounts, and market focus." },
-  { href: "/console/strategy", label: "Framework", icon: Brain, desc: "The agent framework: prompts, models, doctrine, and run cadence." },
-  { href: "/console/guardrails", label: "Mandates", icon: Shield, desc: "Delegated authority and hard constraints that bind every trade." },
-  { href: "/console/results", label: "Outcomes", icon: BarChart3, desc: "Realized performance, equity curve, thesis scorecards, and learning evidence." },
+  { href: "/console/strategy", label: "Strategy", icon: Brain, desc: "The agent's brain: instructions, models, scoring weights, presets." },
+  { href: "/console/guardrails", label: "Guardrails", icon: Shield, desc: "Autonomy, spending caps, protective stops, schedule, and the trading rulebook." },
+  { href: "/console/connections", label: "Connections", icon: Plug, desc: "Broker accounts and provider API keys." },
+  { href: "/console/results", label: "Results", icon: BarChart3, desc: "Realized performance, equity curve, thesis scorecards, and learning evidence." },
   { href: "/console/usage", label: "Usage", icon: ReceiptText, desc: "Your LLM usage and estimated model cost by key, model, and workflow." },
-  { href: "/console/settings", label: "Settings", icon: SettingsIcon, desc: "Accounts, notifications, API keys, and console preferences." }
+  { href: "/console/settings", label: "Settings", icon: SettingsIcon, desc: "Notifications, sharing, confirmations, and console preferences." }
 ];
+
+/** Canonical destination name for page titles. Every page h1 renders through this
+ *  (h1 === rail label, the 2026-07-16 naming canon) so nav and titles can't drift
+ *  apart again — Wave B / PR-B1 plain renames (Home/Scan/Activity/Results/Macro)
+ *  flow through here so the rail and h1 stay locked. */
+export function destinationLabel(href: string): string {
+  return DESTINATIONS.find((d) => d.href === href)?.label ?? href;
+}
 
 function isActive(pathname: string, href: string): boolean {
   return href === "/console" ? pathname === "/console" : pathname.startsWith(href);
@@ -107,10 +92,10 @@ function isActive(pathname: string, href: string): boolean {
  *  into the last group so a newly added destination stays reachable even if
  *  this list isn't updated in lockstep. */
 const GROUPED_DESTINATION_HREFS: { label: string; hrefs: string[] }[] = [
-  { label: "Core", hrefs: ["/console", "/console/approvals", "/console/activity"] },
+  { label: "Core", hrefs: ["/console", "/console/approvals", "/console/lessons", "/console/activity"] },
   { label: "Monitor", hrefs: ["/console/scan", "/console/watchlist", "/console/macro", "/console/orders"] },
   { label: "Review", hrefs: ["/console/assistant", "/console/results", "/console/usage"] },
-  { label: "Configure", hrefs: ["/console/strategy", "/console/guardrails", "/console/settings"] }
+  { label: "Configure", hrefs: ["/console/strategy", "/console/guardrails", "/console/connections", "/console/settings"] }
 ];
 
 export function groupedDestinations(destinations: Destination[]): { label: string; items: Destination[] }[] {
@@ -127,11 +112,14 @@ export function groupedDestinations(destinations: Destination[]): { label: strin
   return groups;
 }
 
-export function DesktopRail({ pendingCount }: { pendingCount: number }) {
+function triggerFeedback(onSuccess?: () => void) {
+  openSentryFeedback();
+  onSuccess?.();
+}
+
+export function DesktopRail({ pendingCount, unreadCount = 0 }: { pendingCount: number; unreadCount?: number }) {
   const pathname = usePathname() ?? "";
   const guardNav = useNavDirtyGuard();
-  const learnedCount = useLearnedPendingCount();
-  const decisionCount = pendingCount + learnedCount;
   return (
     <nav className="hidden w-52 shrink-0 flex-col gap-1 px-3 py-4 lg:flex border-r border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] shadow-sm mr-4" aria-label="Console navigation">
       {groupedDestinations(DESTINATIONS).map((group, i) => (
@@ -152,9 +140,14 @@ export function DesktopRail({ pendingCount }: { pendingCount: number }) {
               >
                 <Icon size={16} />
                 <span className="flex-1">{d.label}</span>
-                {d.href === "/console/approvals" && decisionCount > 0 && (
-                  <span className="con-badge" title={badgeTitle(pendingCount, learnedCount)}>
-                    {decisionCount}
+                {d.href === "/console/approvals" && pendingCount > 0 && (
+                  <span className="con-badge" title={badgeTitle(pendingCount)}>
+                    {pendingCount}
+                  </span>
+                )}
+                {d.href === "/console/activity" && unreadCount > 0 && (
+                  <span className="con-badge" title={unreadTitle(unreadCount)}>
+                    {unreadCount}
                   </span>
                 )}
               </Link>
@@ -162,12 +155,19 @@ export function DesktopRail({ pendingCount }: { pendingCount: number }) {
           })}
         </div>
       ))}
+      <div className="mt-auto pt-3 border-t border-[color:var(--con-line)]">
+        <button
+          type="button"
+          className="con-nav-item w-full text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] hover:text-[color:var(--con-fg)]"
+          onClick={() => triggerFeedback()}
+          title="Report a Problem"
+        >
+          <span className="flex-1 text-left">Report a Problem</span>
+        </button>
+      </div>
     </nav>
   );
 }
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Sheet stops just above the fixed tab bar (rather than covering it) so the
  * bar — and any pin toggle's live effect on it — stays visible the whole
@@ -200,26 +200,30 @@ function TabsSheet({
   pathname,
   guardNav,
   tabs,
-  decisionCount,
   pendingCount,
-  learnedCount,
-  barHeight
+  unreadCount = 0,
+  barHeight,
+  sheetId
 }: {
   open: boolean;
   onClose: () => void;
   pathname: string;
   guardNav: (event: { preventDefault: () => void } | undefined, href: string) => boolean;
   tabs: MobileTabsState;
-  decisionCount: number;
   pendingCount: number;
-  learnedCount: number;
+  unreadCount?: number;
   barHeight: number;
+  sheetId: string;
 }) {
+  const router = useRouter();
   const sheetRef = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
+  const overlayId = useId();
   const [entered, setEntered] = useState(false);
   const barOffset = Math.max(barHeight, TABS_SHEET_BAR_FLOOR);
+
+  useOverlay(overlayId, open, onClose);
+  useFocusTrap(sheetRef, open, { onEscape: onClose });
 
   useEffect(() => {
     if (!open) {
@@ -227,52 +231,8 @@ function TabsSheet({
       return;
     }
     const raf = requestAnimationFrame(() => setEntered(true));
-
-    const active = document.activeElement;
-    openerRef.current = active instanceof HTMLElement && active !== document.body && active !== document.documentElement ? active : null;
-    const sheet = sheetRef.current;
-    const focusables = sheet
-      ? Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"))
-      : [];
-    try {
-      (focusables[0] ?? sheet)?.focus({ preventScroll: true });
-    } catch {
-      (focusables[0] ?? sheet)?.focus();
-    }
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const current = sheetRef.current;
-      if (!current) return;
-      const tabbables = Array.from(current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((el) => !el.hasAttribute("disabled"));
-      const activeEl = document.activeElement;
-      const isInside = activeEl instanceof Node ? current.contains(activeEl) : false;
-      const target = nextSheetFocusTarget(
-        tabbables,
-        activeEl instanceof HTMLElement ? activeEl : null,
-        current,
-        e.shiftKey,
-        isInside
-      );
-      if (target) {
-        e.preventDefault();
-        target.focus({ preventScroll: true });
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("keydown", onKey);
-      const opener = openerRef.current;
-      openerRef.current = null;
-      if (opener && opener.isConnected) opener.focus({ preventScroll: true });
-    };
-  }, [open, onClose]);
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
 
   if (!open) return null;
 
@@ -283,6 +243,7 @@ function TabsSheet({
       <div className="con-scrim lg:hidden" style={{ bottom: barOffset }} onClick={onClose} aria-hidden />
       <div
         ref={sheetRef}
+        id={sheetId}
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingId}
@@ -293,24 +254,24 @@ function TabsSheet({
         )}
         style={{
           bottom: barOffset + TABS_SHEET_GAP,
-          maxHeight: `calc(100dvh - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px)`
+          maxHeight: `min(calc(var(--con-vv-height, 100dvh) - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px), calc(100dvh - ${barOffset + TABS_SHEET_GAP + TABS_SHEET_TOP_GAP}px))`
         }}
       >
         <header className="flex items-center justify-between gap-4 border-b border-[color:var(--con-line)] px-5 py-3.5 relative">
           <div className="absolute top-2 left-1/2 -translate-x-1/2 w-9 h-1.5 rounded-full bg-[color:var(--con-line-strong)] opacity-60"></div>
           <h2 id={headingId} className="text-[length:var(--con-fs-md)] font-semibold mt-2">
-            Tabs
+            More
           </h2>
           <button
             type="button"
             aria-label="Close"
-            className="text-[color:var(--con-faint)] transition-colors hover:text-[color:var(--con-fg)]"
+            className="con-icon-btn"
             onClick={onClose}
           >
             <X size={18} />
           </button>
         </header>
-        <div className="overflow-y-auto px-3 py-3">
+        <div className="overflow-y-auto overscroll-contain px-3 py-3">
           {groupedDestinations(DESTINATIONS).map((group) => (
             <div key={group.label} className="mb-4 last:mb-1">
               <div className="px-2 pb-1.5 text-[length:var(--con-fs-xs)] font-semibold uppercase tracking-[0.07em] text-[color:var(--con-faint)]">
@@ -338,14 +299,23 @@ function TabsSheet({
                         aria-current={active ? "page" : undefined}
                         title={d.desc}
                         onClick={(e) => {
-                          if (guardNav(e, d.href)) onClose();
+                          e.preventDefault();
+                          if (guardNav(e, d.href)) {
+                            router.push(d.href);
+                            onClose();
+                          }
                         }}
                       >
                         <Icon size={16} />
                         <span className="flex-1">{d.label}</span>
-                        {d.href === "/console/approvals" && decisionCount > 0 && (
-                          <span className="con-badge" title={badgeTitle(pendingCount, learnedCount)}>
-                            {decisionCount}
+                        {d.href === "/console/approvals" && pendingCount > 0 && (
+                          <span className="con-badge" title={badgeTitle(pendingCount)}>
+                            {pendingCount}
+                          </span>
+                        )}
+                        {d.href === "/console/activity" && unreadCount > 0 && (
+                          <span className="con-badge" title={unreadTitle(unreadCount)}>
+                            {unreadCount}
                           </span>
                         )}
                       </Link>
@@ -355,7 +325,7 @@ function TabsSheet({
                         aria-label={pinned ? `Remove ${d.label} from tabs` : `Add ${d.label} to tabs`}
                         title={pinTitle}
                         disabled={!canToggle}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--con-radius-sm)] text-[color:var(--con-faint)] transition-colors enabled:hover:bg-[color:var(--con-surface-2)] enabled:hover:text-[color:var(--con-fg)] disabled:opacity-40"
+                        className="con-icon-btn h-9 w-9 shrink-0 text-[color:var(--con-faint)] enabled:hover:text-[color:var(--con-fg)] disabled:opacity-40"
                         onClick={(e) => {
                           e.stopPropagation();
                           tabs.togglePin(d.href);
@@ -369,34 +339,61 @@ function TabsSheet({
               </div>
             </div>
           ))}
+          <div className="mt-2 pt-3 border-t border-[color:var(--con-line)]">
+            <button
+              type="button"
+              className="con-nav-item w-full text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)] hover:text-[color:var(--con-fg)]"
+              onClick={() => triggerFeedback(onClose)}
+              title="Report a Problem"
+            >
+              <span className="flex-1 text-left">Report a Problem</span>
+            </button>
+          </div>
         </div>
       </div>
     </>
   );
 }
 
-export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
+/* Tab bar stays at bottom:0. The 2026-08-05 measured-gap shift (negative
+ * `bottom`) is still forbidden: it slid labels under Safari's URL chrome.
+ * Browser padding is ~22% of env(safe-area-inset-bottom) so ~78% of the
+ * grey-blue band is gone; a solid --con-surface ::after paints the rest
+ * and the area around the URL pill (see .con-tabbar in console.css).
+ * Standalone/PWA still uses the full env() pad for the home indicator. */
+
+export function MobileTabBar({ pendingCount, unreadCount = 0 }: { pendingCount: number; unreadCount?: number }) {
   const pathname = usePathname() ?? "";
+  const moreSheetId = useId();
   const [tabsOpen, setTabsOpen] = useState(false);
   const guardNav = useNavDirtyGuard();
-  const learnedCount = useLearnedPendingCount();
-  const decisionCount = pendingCount + learnedCount;
   const tabsState = useMobileTabs(DESTINATIONS.map((d) => d.href));
   const navRef = useRef<HTMLElement>(null);
-  const [barHeight, setBarHeight] = useState(0);
+  /** Distance from layout-viewport bottom to the bar's top edge — TabsSheet
+   *  stops here. */
+  const [barOffset, setBarOffset] = useState(0);
 
-  // Real measured height (incl. the bar's own safe-area padding) so the
-  // TabsSheet can stop exactly above it on any device/font-scale, rather
-  // than guessing a fixed px offset.
+  // Real measured offset (bar top → layout bottom) so the TabsSheet can stop
+  // exactly above the bar on any device/font-scale/safe-area-inset, rather
+  // than guessing a fixed px offset from height alone.
   useEffect(() => {
     const el = navRef.current;
     if (!el) return;
-    const measure = () => setBarHeight(el.getBoundingClientRect().height);
+    const measure = () => {
+      const top = el.getBoundingClientRect().top;
+      setBarOffset(Math.max(0, Math.round(window.innerHeight - top)));
+    };
     measure();
     if (typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(measure);
       ro.observe(el);
-      return () => ro.disconnect();
+      window.addEventListener("resize", measure);
+      window.visualViewport?.addEventListener("resize", measure);
+      return () => {
+        ro.disconnect();
+        window.removeEventListener("resize", measure);
+        window.visualViewport?.removeEventListener("resize", measure);
+      };
     }
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
@@ -412,8 +409,7 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
     <>
       <nav
         ref={navRef}
-        className="fixed inset-x-0 bottom-0 z-50 border-t border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)]/85 backdrop-blur-xl supports-[backdrop-filter]:bg-[color:var(--con-surface)]/70 lg:hidden"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        className="con-tabbar fixed inset-x-0 bottom-0 z-50 border-t border-[color:var(--con-line-strong)] lg:hidden"
         aria-label="Console navigation"
       >
         <div className="flex">
@@ -440,9 +436,14 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
                   style={active ? { background: "var(--con-accent-soft)" } : undefined}
                 >
                   <Icon size={19} />
-                  {d.href === "/console/approvals" && decisionCount > 0 && (
-                    <span className="con-badge absolute -right-2.5 -top-1" title={badgeTitle(pendingCount, learnedCount)}>
-                      {decisionCount}
+                  {d.href === "/console/approvals" && pendingCount > 0 && (
+                    <span className="con-badge absolute -right-2.5 -top-1" title={badgeTitle(pendingCount)}>
+                      {pendingCount}
+                    </span>
+                  )}
+                  {d.href === "/console/activity" && unreadCount > 0 && (
+                    <span className="con-badge absolute -right-2.5 -top-1" title={unreadTitle(unreadCount)}>
+                      {unreadCount}
                     </span>
                   )}
                 </span>
@@ -454,8 +455,10 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
             type="button"
             className="con-tab-item"
             data-active={tabsButtonActive || tabsOpen}
-            title={tabsOpen ? "Close tabs menu" : "Choose which screens show up here, or jump to any screen"}
+            title={tabsOpen ? "Close more menu" : "Choose which screens show up here, or jump to any screen"}
             style={tabsButtonActive || tabsOpen ? { fontWeight: 800 } : undefined}
+            aria-expanded={tabsOpen}
+            aria-controls={moreSheetId}
             onClick={() => setTabsOpen(!tabsOpen)}
           >
             <span
@@ -464,7 +467,10 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
             >
               <LayoutGrid size={19} />
             </span>
-            Tabs
+            {/* Was "Tabs" — unclear for the standard mobile overflow-menu pattern this
+                is (the grid of every destination, with pin/unpin to customize the bar
+                above). "More" is the conventional label for this affordance. */}
+            More
           </button>
         </div>
       </nav>
@@ -475,10 +481,10 @@ export function MobileTabBar({ pendingCount }: { pendingCount: number }) {
         pathname={pathname}
         guardNav={guardNav}
         tabs={tabsState}
-        decisionCount={decisionCount}
         pendingCount={pendingCount}
-        learnedCount={learnedCount}
-        barHeight={barHeight}
+        unreadCount={unreadCount}
+        barHeight={barOffset}
+        sheetId={moreSheetId}
       />
     </>
   );

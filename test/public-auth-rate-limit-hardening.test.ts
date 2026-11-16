@@ -40,6 +40,12 @@ vi.mock("@/lib/db", () => ({
   setStrategyTuningReviewStatus: () => true
 }));
 
+vi.mock("@/lib/user-write-fence", () => ({
+  // These route-limit tests bypass middleware and do not exercise account recreation. Preserve the
+  // already-resolved test identity without requiring a full SQLite account-generation fixture.
+  resolveAuthenticatedAccountGeneration: (userId: string) => userId
+}));
+
 vi.mock("@/lib/tuning-invariants", () => ({
   validateTuningInvariants: () => ({ ok: true, violations: [] })
 }));

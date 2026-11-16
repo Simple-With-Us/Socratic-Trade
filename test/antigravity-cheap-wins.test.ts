@@ -197,4 +197,27 @@ describe("marketable-limit entry conversion", () => {
     expect(out.bracketStopLoss).toBeUndefined();
     expect(out.rationale).toContain("Native Alpaca bracket skipped");
   });
+
+  it("clears LLM bracket fields when a $4.60 Alpaca order cannot fund one $87.77 share", () => {
+    const scan = scanWith(quote({ symbol: "EXE", price: 87.77, ask: 87.8, volume: 1_000_000 }));
+    const out = enrichOpeningProposal(
+      buyProposal({
+        symbol: "EXE",
+        dollarAmount: 4.6,
+        referencePrice: 87.77,
+        bracketStopLoss: 86.1,
+        bracketTakeProfit: 94.2,
+        bracketStopLimit: 85.9
+      }),
+      policyOn,
+      scan
+    );
+
+    expect(out.type).toBe("market");
+    expect(out.dollarAmount).toBe(4.6);
+    expect(out.bracketStopLoss).toBeUndefined();
+    expect(out.bracketTakeProfit).toBeUndefined();
+    expect(out.bracketStopLimit).toBeUndefined();
+    expect(out.rationale).toContain("Native Alpaca bracket skipped");
+  });
 });

@@ -76,7 +76,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex when the flag is on but no LLM credential resolves (no key)", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: undefined, model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => {
       throw new Error("should not be called with no key");
     }) as any;
@@ -91,7 +91,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex when the LLM call throws (network error / timeout)", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.reject(new Error("network down"))) as any;
 
     const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
@@ -104,7 +104,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex on a non-OK HTTP response", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 429, json: async () => ({}) })) as any;
 
     const { extractLearnedCandidatesLLM } = await import("../src/lib/memory/salience-llm");
@@ -117,7 +117,7 @@ describe("extractLearnedCandidatesLLM: flag-off / fallback behavior (regex stays
 
   it("falls back to regex on malformed/unparseable LLM JSON", async () => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
     global.fetch = vi.fn(() =>
       Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: "not valid json {{{" } }] }) })
     ) as any;
@@ -143,7 +143,7 @@ describe("extractLearnedCandidatesLLM: ticker validation against the real known-
 
   beforeEach(() => {
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
-    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://api.openai.com/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
+    mocks.resolveLlmEndpoint.mockReturnValue({ provider: "openai", url: "https://openrouter.ai/v1/chat/completions", key: "sk-test", model: "gpt-5.4-mini", keySource: "user", transport: "chat-completions" });
   });
 
   it("attaches a REAL, known-universe ticker (e.g. AAPL) as the candidate's symbol", async () => {
@@ -203,7 +203,7 @@ describe("extractLearnedCandidatesLLM: usage ledger + telemetry recording", () =
     process.env.LLM_SALIENCE_EXTRACTOR = "on";
     mocks.resolveLlmEndpoint.mockReturnValue({
       provider: "openai",
-      url: "https://api.openai.com/v1/chat/completions",
+      url: "https://openrouter.ai/v1/chat/completions",
       key: "sk-test",
       model: "gpt-5.4-mini",
       keySource: "user",

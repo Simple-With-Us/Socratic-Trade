@@ -1,17 +1,21 @@
 "use client";
 
-/** Strategy — how this account trades: the strategist's written instructions
- *  (prompt), the models, the eight scoring-factor weights, the preset
- *  library, and the account's tax treatment. Always account-scoped; the
- *  header repeats the scope. Presets are copy-not-link and can never arm or
- *  disarm anything (server-enforced). */
+/** Strategy — how this account trades: the models, the strategist's written
+ *  instructions (prompt), the eight scoring-factor weights, AI review, and
+ *  the preset library. Always account-scoped; the header repeats the scope.
+ *  Progressive structure (PR-B3): Models + Instructions open by default;
+ *  Scoring weights collapsed; Presets collapsible open. No policy value changes.
+ *  Presets are copy-not-link and can never arm or disarm anything
+ *  (server-enforced). Tax treatment lives on Guardrails, not here (moved
+ *  there in the 2026-07-16 IA restructure — it sits next to the Tax rules
+ *  group that references it). */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight, Lock, Unlock } from "lucide-react";
-import type { LlmReasoningEffort, ScoringWeights, StrategyTuningPatch, TradingPolicy } from "@/lib/types";
-import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-request";
-import { reasoningAdviceForModel } from "@/lib/model-reasoning-recommendations";
+import type { ConnectedAccount, LlmReasoningEffort, ScoringWeights, StrategyProfile, StrategyTuningPatch, TradingPolicy } from "@/lib/types";
+import { isDisallowedInteractiveStrategyReasoningConfig, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
+import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import type { DashboardSnapshot } from "../../dashboard-types";
 import {
   normalizeReasoningValueForControl,
@@ -23,14 +27,18 @@ import {
 // Pure curated-model DATA (no legacy UI components) — the same catalog the rest
 // of the app offers, so the console review picker stays consistent with it.
 import { CURATED_LLM_MODEL_GROUPS, CURATED_LLM_MODEL_IDS, CUSTOM_MODEL_ID_SEED, ROTATE_ALL_MODELS_ID, ROTATE_ALL_MODELS_LABEL } from "../../ui/llm-model-catalog";
+import { isRetiredCatalogModel } from "@/lib/llm-model-catalog";
 import {
   activateProfile,
   copyProfileToAccount,
+  createProfile,
+  deleteProfile,
   fetchLatestTuneReview,
   importAccountSettings,
   resolveTuneReview,
   savePolicy,
   tuneStrategy,
+  updateProfile,
   ConsoleApiError,
   type StrategyTuneResult
 } from "../lib/api";
@@ -44,11 +52,14 @@ import { useUnsavedChanges } from "../lib/useDirtyGuard";
 import { ALL_DEFS } from "../guardrails/field-defs";
 import { TypedConfirm } from "../components/chrome";
 import { ModelStatsButton } from "../components/model-stats-drawer";
-import { TaxSettingsCard } from "./tax-settings";
+import { resolveScoringWeightCommit } from "../lib/number-commit";
 import { useToast } from "../ui/toast";
 import { Ago, Btn, Card, Chip, Empty, Field, LiveTag, RawNumInput, Select, TextArea, TextInput, Tooltip } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
 import { Sheet } from "../ui/sheet";
+import { OverlaysPanel } from "./overlays-panel";
+import { RotationModelChecklist } from "./rotation-models";
+import { TuningDryRunPanel } from "./tuning-dry-run";
 
 /** Shipped default weights (src/lib/defaults.ts) — shown as ghost reference. */
 const DEFAULT_WEIGHTS: ScoringWeights = {
@@ -69,35 +80,35 @@ const WEIGHT_KEYS = Object.keys(DEFAULT_WEIGHTS) as Array<keyof ScoringWeights>;
 const FACTOR_META: Record<keyof ScoringWeights, { name: string; tip: string }> = {
   liquidity: {
     name: "Liquidity",
-    tip: "How easily you can trade the stock, from recent share volume. More weight favors high-volume names you can enter and exit cleanly, and penalizes thin, illiquid ones."
+    tip: "How easily you can trade the stock, from recent share volume.  More weight favors high-volume names you can enter and exit cleanly, and penalizes thin, illiquid ones."
   },
   momentum: {
     name: "Momentum",
-    tip: "Recent trend strength: intraday move, position within the 52-week range, and technical signals (RSI/MACD/moving averages). More weight favors names that are rising and near their highs."
+    tip: "Recent trend strength: intraday move, position within the 52-week range, and technical signals (RSI/MACD/moving averages).  More weight favors names that are rising and near their highs."
   },
   value: {
     name: "Value",
-    tip: "Cheapness from P/E and free-cash-flow yield. More weight tilts toward low-multiple, cash-generative names and away from expensive ones."
+    tip: "Cheapness from P/E and free-cash-flow yield.  More weight tilts toward low-multiple, cash-generative names and away from expensive ones."
   },
   quality: {
     name: "Quality",
-    tip: "Financial sturdiness: company size, low debt, and earnings growth. More weight favors large, low-leverage, profitably growing companies."
+    tip: "Financial sturdiness: company size, low debt, and earnings growth.  More weight favors large, low-leverage, profitably growing companies."
   },
   volatility: {
     name: "Volatility",
-    tip: "Steadiness, not choppiness — the score is highest for calm, low-beta names. Counter-intuitively, more weight here favors steady stocks and penalizes sharp movers and high-beta risk."
+    tip: "Steadiness, not choppiness — the score is highest for calm, low-beta names.  Counter-intuitively, more weight here favors steady stocks and penalizes sharp movers and high-beta risk."
   },
   sentiment: {
     name: "Sentiment",
-    tip: "Aggregate news, analyst, and market sentiment (0–100). More weight favors positively-covered names and discounts negatively-covered ones."
+    tip: "Aggregate news, analyst, and market sentiment (0–100).  More weight favors positively-covered names and discounts negatively-covered ones."
   },
   positioning: {
     name: "Positioning",
-    tip: "Smart-money accumulation: net congressional buying, insider open-market purchases (SEC Form 4), and short-squeeze setups. More weight favors names insiders and Congress are buying."
+    tip: "Smart-money accumulation: net congressional buying, insider open-market purchases (SEC Form 4), and short-squeeze setups.  More weight favors names insiders and Congress are buying."
   },
   diversification: {
     name: "Diversification",
-    tip: "Portfolio fit: a name you don't already hold scores higher than one you do. More weight pushes toward new positions instead of adding to what you already own — it's held-vs-not, not sector spread."
+    tip: "Portfolio fit: a name you don't already hold scores higher than one you do.  More weight pushes toward new positions instead of adding to what you already own — it's held-vs-not, not sector spread."
   }
 };
 
@@ -145,7 +156,7 @@ function ModelSelect({
   /** Render the blank option as an unselectable placeholder (native "choose one" pattern) — for a
    *  seat where blank is NOT a valid choice to actively pick (the Proposer), only a display state
    *  for "unconfigured." Without this, a `<select value="">` with no matching `<option value="">`
-   *  falls back to visually showing its FIRST rendered option ("Rotate all models (testing)"),
+   *  falls back to visually showing its FIRST rendered option (the comparative rotation),
    *  making an unconfigured seat look like rotation is on even though nothing was ever chosen. */
   blankDisabled?: boolean;
   role: "proposer" | "red-team";
@@ -177,14 +188,20 @@ function ModelSelect({
         )}
         <option
           value={ROTATE_ALL_MODELS_ID}
-          title="Round-robins every curated model with a resolvable key — a different model each run, so comparative history accrues across models. Intended for paper/test accounts."
+          title="Rotates through every curated model with a resolvable key, favoring models with less accrued history (2x pick weight), so attributed comparative history accrues evenly.  Use only where model-to-model variation is acceptable."
         >
           {ROTATE_ALL_MODELS_LABEL}
         </option>
         {customCurrent && (
-          <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
-            {customCurrent} - custom id
-          </option>
+          isRetiredCatalogModel(customCurrent) ? (
+            <option value={customCurrent} title={"A model that left the curated list.  It keeps running exactly as stored until you pick another."}>
+              {customCurrent} - retired
+            </option>
+          ) : (
+            <option value={customCurrent} title="A model id outside the curated list, kept exactly as stored.">
+              {customCurrent} - custom id
+            </option>
+          )
         )}
         {CURATED_LLM_MODEL_GROUPS.map((group) => (
           <optgroup key={group.provider} label={group.label}>
@@ -337,9 +354,17 @@ function FallbackModelSelect({
       <TextInput
         id={id}
         value={value}
-        placeholder="e.g. gpt-4o, claude-3-5-sonnet-20240620"
+        placeholder="e.g. gpt-5.4-mini, claude-sonnet-5"
         onChange={(e) => onChange(e.target.value)}
         onFocus={() => setOpen(true)}
+        onBlur={() => {
+          // Defer commit to let any in-flight checkbox onChange events settle
+          // (e.g. toggling a model via keyboard while focus moves away).
+          setTimeout(() => {
+            onCommitRef.current();
+            setOpen(false);
+          }, 0);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             setOpen(false);
@@ -350,7 +375,7 @@ function FallbackModelSelect({
         autoComplete="off"
       />
       {open && (
-        <div className="absolute z-10 mt-1 w-full max-h-64 overflow-auto rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-1)] shadow-lg py-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-text)]">
+        <div className="absolute z-10 mt-1 w-full max-h-64 overflow-auto rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-1)] shadow-lg py-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-text)]">
           {CURATED_LLM_MODEL_GROUPS.map((group) => (
             <div key={group.label}>
               <div className="px-3 py-1 text-[length:var(--con-fs-xs)] font-semibold text-[color:var(--con-faint)] bg-[color:var(--con-surface-2)]">
@@ -421,6 +446,11 @@ function AccountScopedStrategyPage() {
   const [localRedTeamFallbackModels, setLocalRedTeamFallbackModels] = useState<string | null>(null);
   const autoSaveFallback = useAutoSave();
   const autoSaveRedTeamFallback = useAutoSave();
+  // Rotation Models checklists (ST-4589): optimistic local set per seat, saved on every tick.
+  const [localGreenRotationModels, setLocalGreenRotationModels] = useState<string[] | null>(null);
+  const [localRedRotationModels, setLocalRedRotationModels] = useState<string[] | null>(null);
+  const autoSaveGreenRotation = useAutoSave();
+  const autoSaveRedRotation = useAutoSave();
   // Per-team reasoning overlays (per-team split 2026-07-10). Proposer: plain optimistic value —
   // llmReasoningEffort always resolves (it has a "medium" default). Reviewer: "cleared" = an
   // optimistic explicit-unset (the "Same as Green Team" option) awaiting the server round-trip;
@@ -430,7 +460,7 @@ function AccountScopedStrategyPage() {
   const autoSaveModels = useAutoSave();
   // Scoring weights: local text while typing each factor, persist on blur (per-field patch —
   // the server deep-merges scoringWeights, see commitWeight below).
-  const [weightsOverlay, setWeightsOverlay] = useState<Partial<Record<keyof ScoringWeights, number>>>({});
+  const [weightsDrafts, setWeightsDrafts] = useState<Partial<Record<keyof ScoringWeights, string>>>({});
   const autoSaveWeights = useAutoSave();
   // Presets ("Apply to this account") is a discrete action button, not auto-saved.
   const [busy, setBusy] = useState<string | null>(null);
@@ -592,7 +622,7 @@ function AccountScopedStrategyPage() {
     const array = localFallbackModels.split(",").map(s => s.trim()).filter(Boolean);
     const prevArray = policy.llmFallbackModels || [];
     if (array.join(",") === prevArray.join(",")) return;
-    autoSaveFallback.save(() => savePolicy({ llmFallbackModels: array }).then(() => refresh()), {
+    autoSaveFallback.save(() => savePolicy({ llmFallbackModels: array }, policy.connectedAccountId).then(() => refresh()), {
       onError: () => setLocalFallbackModels(prevArray.join(", ")),
       errorTitle: "Fallback models not saved"
     });
@@ -603,27 +633,52 @@ function AccountScopedStrategyPage() {
     const array = localRedTeamFallbackModels.split(",").map(s => s.trim()).filter(Boolean);
     const prevArray = policy.redTeamFallbackModels || [];
     if (array.join(",") === prevArray.join(",")) return;
-    autoSaveRedTeamFallback.save(() => savePolicy({ redTeamFallbackModels: array }).then(() => refresh()), {
+    autoSaveRedTeamFallback.save(() => savePolicy({ redTeamFallbackModels: array }, policy.connectedAccountId).then(() => refresh()), {
       onError: () => setLocalRedTeamFallbackModels(prevArray.join(", ")),
       errorTitle: "Red Team fallback models not saved"
     });
   };
 
-  // Scoring weights: one factor per blur, skip the write if unchanged from the saved value.
-  const commitWeight = (key: keyof ScoringWeights, next: number, saved: number) => {
-    if (next === saved) return;
-    autoSaveWeights.save(() => savePolicy({ scoringWeights: { [key]: next } }, policy.connectedAccountId).then(() => refresh()), {
-      onError: () => setWeightsOverlay((d) => ({ ...d, [key]: saved }))
+  // Rotation Models (ST-4589): each tick saves the seat's whole set right away, like the model
+  // selects.  Writes are queued in order by savePolicy, so the last tick wins.
+  const greenRotationModels = localGreenRotationModels ?? policy.llmRotationModels ?? [];
+  const redRotationModels = localRedRotationModels ?? policy.redTeamRotationModels ?? [];
+  const commitGreenRotationModels = (next: string[]) => {
+    const prev = greenRotationModels;
+    setLocalGreenRotationModels(next);
+    autoSaveGreenRotation.save(() => savePolicy({ llmRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalGreenRotationModels(prev),
+      errorTitle: "Green Team rotation models not saved"
     });
+  };
+  const commitRedRotationModels = (next: string[]) => {
+    const prev = redRotationModels;
+    setLocalRedRotationModels(next);
+    autoSaveRedRotation.save(() => savePolicy({ redTeamRotationModels: next }, policy.connectedAccountId).then(() => refresh()), {
+      onError: () => setLocalRedRotationModels(prev),
+      errorTitle: "Red Team rotation models not saved"
+    });
+  };
+
+  // Scoring weights: one factor per blur, skip the write if unchanged, blank, or unparseable.
+  const commitWeight = (key: keyof ScoringWeights, saved: number) => {
+    const raw = weightsDrafts[key];
+    setWeightsDrafts((d) => {
+      if (!(key in d)) return d;
+      const copy = { ...d };
+      delete copy[key];
+      return copy;
+    });
+    if (raw === undefined) return;
+    const next = resolveScoringWeightCommit(raw, saved);
+    if (next === null) return;
+    autoSaveWeights.save(() => savePolicy({ scoringWeights: { [key]: next } }, policy.connectedAccountId).then(() => refresh()));
   };
 
   return (
     <div className={`${CONSOLE_PAGE_WIDTH} flex flex-col gap-4`}>
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-[length:var(--con-fs-lg)] font-bold">Strategy</h1>
-        <Chip tone={reality.tone}>
-          {reality.word} · {reality.phrase}
-        </Chip>
         <span className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           for {reality.account?.label ?? "no connected account"} — each account has its own strategy
         </span>
@@ -632,27 +687,14 @@ function AccountScopedStrategyPage() {
         </div>
       </div>
 
-      {/* Prompt */}
-      <Card title="The strategist's written instructions" action={<SaveStatus status={autoSavePrompt.status} />}>
-        <p className="mb-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-          Free-text brief the proposer LLM runs under: objective, selection logic, sell rules, sizing guidance, output
-          contract. The deterministic policy gate still constrains everything it proposes.
-        </p>
-        <TextArea
-          rows={16}
-          value={prompt}
-          onChange={(e) => setPromptDraft(e.target.value)}
-          onBlur={commitPrompt}
-          spellCheck={false}
-          title="Saves when you click away."
-        />
-      </Card>
-
       {/* Models — id anchor is a deep-link target (old Settings "#models" links
-          retargeted here in the 2026-07-10 Settings IA restructure). */}
+          retargeted here in the 2026-07-10 Settings IA restructure).
+          Progressive structure (PR-B3): open by default with Instructions. */}
       <div id="models" className="scroll-mt-28">
       <Card
         title="Models"
+        collapsible
+        defaultOpen
         action={
           <div className="flex items-center gap-3">
             <Link
@@ -699,6 +741,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="proposer" />
               </div>
             </Field>
+            {proposerRotates && (
+              <RotationModelChecklist
+                id="green-rotation-models"
+                seatLabel="Green Team"
+                value={greenRotationModels}
+                onChange={commitGreenRotationModels}
+                status={autoSaveGreenRotation.status}
+              />
+            )}
             {proposerRotates && <RotationEffortNote />}
             {proposerReasoningControl && (
               <SeatEffortSelect
@@ -723,7 +774,7 @@ function AccountScopedStrategyPage() {
                   <span className="text-[color:var(--con-neg)]">Red Team</span> Model
                 </>
               }
-              hint="The adversarial reviewer — reviews every proposal each run, and runs a deeper adversarial debate on high-conviction or dissent-flagged ideas. Blank = not configured: it does NOT inherit the Green Team model — every risk-adding opening routes to human review until a Red Team model is set."
+              hint="The adversarial reviewer — reviews every proposal each run, and runs a deeper adversarial debate on high-conviction or dissent-flagged ideas.  Blank = not configured: it does NOT inherit the Green Team model — every risk-adding opening routes to human review until a Red Team model is set."
               htmlFor="rt-model"
             >
               <div className="flex items-start gap-2">
@@ -747,6 +798,15 @@ function AccountScopedStrategyPage() {
                 <ModelStatsButton role="red-team" />
               </div>
             </Field>
+            {reviewerRotates && (
+              <RotationModelChecklist
+                id="red-rotation-models"
+                seatLabel="Red Team"
+                value={redRotationModels}
+                onChange={commitRedRotationModels}
+                status={autoSaveRedRotation.status}
+              />
+            )}
             {reviewerRotates && <RotationEffortNote />}
             {reviewerReasoningControl && (
               <SeatEffortSelect
@@ -770,7 +830,7 @@ function AccountScopedStrategyPage() {
             )}
             {reviewerNotConfigured && (
               <p className="text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
-                No Reviewer model set — it does not inherit the Proposer. Every risk-adding opening
+                No Reviewer model set — it does not inherit the Proposer.  Every risk-adding opening
                 routes to human review until a Reviewer model is chosen.
               </p>
             )}
@@ -816,32 +876,64 @@ function AccountScopedStrategyPage() {
           </Field>
         </div>
         {showCustomModelWarning && (
-          <div className="mt-3 text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/20 dark:text-amber-400 border border-amber-200 dark:border-amber-900/50 rounded-md p-2.5 flex items-start gap-1.5">
+          // con-warn tokens. The warning sits on the console surface, so it uses the
+          // console token pair. html.dark and data-theme are the same resolved theme.
+          <div className="mt-3 text-[length:var(--con-fs-xs)] rounded-[var(--con-radius-sm)] border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] text-[color:var(--con-warn)] p-2.5 flex items-start gap-1.5">
             <svg className="h-4 w-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
             </svg>
             <div>
-              Custom model selected. Cost tracking will use a conservative fallback rate to prevent budget bypass.
+              Custom model selected.  Cost tracking will use a conservative fallback rate to prevent budget bypass.
             </div>
           </div>
         )}
-        <div className="mt-3 rounded-md border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+        <div className="mt-3 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
           Green Team: {modelProviderLabel(proposerModel)}. Red Team: {modelProviderLabel(redTeamModel)}.
           {" "}
           {reasoningSummary(reasoningControl)}
           {rotationSelected && (
             <span className="block mt-2 pt-2 border-t border-[color:var(--con-line)]">
-              Rotation: each run picks the next curated model whose provider key resolves (round-robin per account,
-              audited). Every proposal records the concrete model that wrote it, so per-model history accrues
-              automatically.
+              Rotation: each run picks a curated model whose provider key resolves, weighted toward models
+              underrepresented in this account&apos;s recent rotation history (2x pick weight vs 1x, audited).
+              Every proposal records the concrete model that wrote it, so per-model history accrues
+              automatically. Use only where model-to-model variation is acceptable for that account.
             </span>
           )}
         </div>
       </Card>
       </div>
 
-      {/* Scoring weights */}
-      <Card title="Scoring-factor weights" action={<SaveStatus status={autoSaveWeights.status} />}>
+      {/* Instructions — primary brief; open on first paint (PR-B3). */}
+      <div id="instructions" className="scroll-mt-28">
+      <Card
+        title="Instructions"
+        collapsible
+        defaultOpen
+        action={<SaveStatus status={autoSavePrompt.status} />}
+      >
+        <p className="mb-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+          Free-text brief the proposer LLM runs under: objective, selection logic, sell rules, sizing guidance, output
+          contract.  The deterministic policy gate still constrains everything it proposes.
+        </p>
+        <TextArea
+          rows={16}
+          value={prompt}
+          onChange={(e) => setPromptDraft(e.target.value)}
+          onBlur={commitPrompt}
+          spellCheck={false}
+          title="Saves when you click away."
+        />
+      </Card>
+      </div>
+
+      {/* Scoring weights — advanced; collapsed on first paint (PR-B3). No policy value changes. */}
+      <div id="scoring" className="scroll-mt-28">
+      <Card
+        title="Scoring"
+        collapsible
+        defaultOpen={false}
+        action={<SaveStatus status={autoSaveWeights.status} />}
+      >
         <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           The market scan ranks candidates by these eight factors before the strategist ever sees them. Defaults shown
           under each field. Weights are relative — raising one factor increases its share of the score and lowers the
@@ -850,7 +942,7 @@ function AccountScopedStrategyPage() {
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {WEIGHT_KEYS.map((key) => {
             const saved = policy.scoringWeights?.[key] ?? DEFAULT_WEIGHTS[key];
-            const current = weightsOverlay[key] ?? saved;
+            const raw = weightsDrafts[key];
             const meta = FACTOR_META[key] ?? { name: key, tip: "A scoring factor used to rank market-scan candidates." };
             return (
               <Field
@@ -873,91 +965,227 @@ function AccountScopedStrategyPage() {
                   id={`w-${key}`}
                   step="0.1"
                   min="0"
-                  value={String(current)}
-                  emptyValue={DEFAULT_WEIGHTS[key]}
+                  value={raw ?? String(saved)}
+                  emptyValue={saved}
                   title="Saves when you click away."
-                  onValueChange={(parsed) => setWeightsOverlay((d) => ({ ...d, [key]: parsed }))}
-                  onBlur={() => commitWeight(key, current, saved)}
+                  onValueChange={(_parsed, r) => setWeightsDrafts((d) => ({ ...d, [key]: r }))}
+                  onBlur={() => commitWeight(key, saved)}
                 />
               </Field>
             );
           })}
         </div>
       </Card>
+      </div>
+
+      <OverlaysPanel policy={policy} onSaved={refresh} />
+
+      <div id="weight-tuning-preview" className="scroll-mt-28">
+        <TuningDryRunPanel />
+      </div>
 
       {/* AI review */}
       <AiReviewPanel policy={policy} strategyPrompt={snapshot.strategyPrompt} reality={reality} />
 
-      {/* Presets */}
-      <Card title="Preset library">
+      {/* Presets — collapsible; open so the library remains discoverable without scrolling past
+          advanced weights (PR-B3). */}
+      <div id="presets" className="scroll-mt-28">
+      <Card title="Presets" collapsible defaultOpen>
         <p className="mb-3 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
           Applying a preset copies its policy, prompt, and weights onto the active account — copy, not link: later edits
           to the preset never follow. A preset can never start or stop the strategy; your run state is always preserved.
         </p>
-        {snapshot.profiles.length === 0 ? (
-          <Empty>No presets saved yet.</Empty>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {snapshot.profiles.map((profile) => {
-              // "applied" = what THIS account is running (policy.activeProfileId,
-              // stamped by the copy/apply path). Fall back to the library active
-              // flag only when the account has never had a preset applied.
-              const applied = policy.activeProfileId ? policy.activeProfileId === profile.id : profile.active;
-              return (
-                <div key={profile.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[color:var(--con-line)] p-3">
-                  <div>
-                    <div className="flex items-center gap-2">
+        <PresetLibrary
+          profiles={snapshot.profiles}
+          policy={policy}
+          strategyPrompt={snapshot.strategyPrompt}
+          activeAccount={activeAccount}
+          busy={busy}
+          setBusy={setBusy}
+          refresh={refresh}
+        />
+      </Card>
+      </div>
+    </div>
+  );
+}
+
+function PresetLibrary({
+  profiles,
+  policy,
+  strategyPrompt,
+  activeAccount,
+  busy,
+  setBusy,
+  refresh
+}: {
+  profiles: StrategyProfile[];
+  policy: TradingPolicy;
+  strategyPrompt: string;
+  activeAccount?: ConnectedAccount;
+  busy: string | null;
+  setBusy: (value: string | null) => void;
+  refresh: () => Promise<void>;
+}) {
+  const toast = useToast();
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  const createPreset = async () => {
+    const name = newName.trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      await createProfile({ name, prompt: strategyPrompt, policy, active: false });
+      setNewName("");
+      toast.push("pos", "Preset saved", `“${name}” captures this account’s current strategy.`);
+      await refresh();
+    } catch (error) {
+      toast.push("neg", "Preset not saved", error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const applyPreset = async (profile: StrategyProfile) => {
+    setBusy(`profile-${profile.id}`);
+    try {
+      if (activeAccount) {
+        await copyProfileToAccount(profile.id, activeAccount.id);
+        toast.push("pos", `Applied “${profile.name}”`, "Copied onto this account.  Run state unchanged.");
+      } else {
+        await activateProfile(profile.id);
+        toast.push("pos", `Activated “${profile.name}”`, "Applied as the base strategy for new account scope.");
+      }
+      await refresh();
+    } catch (error) {
+      toast.push("neg", "Preset not applied", error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const commitRename = async (profile: StrategyProfile) => {
+    const name = renameDraft.trim();
+    setRenameId(null);
+    if (!name || name === profile.name) return;
+    setBusy(`rename-${profile.id}`);
+    try {
+      await updateProfile(profile.id, { name });
+      toast.push("pos", "Preset renamed", `Now “${name}”.`);
+      await refresh();
+    } catch (error) {
+      toast.push("neg", "Rename failed", error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removePreset = async (profile: StrategyProfile) => {
+    if (!window.confirm(`Delete preset “${profile.name}”?  This cannot be undone.`)) return;
+    setBusy(`delete-${profile.id}`);
+    try {
+      await deleteProfile(profile.id);
+      toast.push("pos", "Preset deleted", `“${profile.name}” removed from the library.`);
+      await refresh();
+    } catch (error) {
+      toast.push("neg", "Delete failed", error instanceof ConsoleApiError ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="mb-3 flex flex-wrap items-end gap-2">
+        <div className="min-w-[12rem] flex-1">
+          <Field label="Save current as preset" htmlFor="new-preset-name">
+            <TextInput
+              id="new-preset-name"
+              value={newName}
+              placeholder="e.g. Momentum swing"
+              disabled={creating || busy !== null}
+              onChange={(event) => setNewName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void createPreset();
+              }}
+            />
+          </Field>
+        </div>
+        <Btn size="sm" disabled={creating || busy !== null || !newName.trim()} onClick={() => void createPreset()}>
+          {creating ? "Saving…" : "Create preset"}
+        </Btn>
+      </div>
+      {profiles.length === 0 ? (
+        <Empty>No presets saved yet.</Empty>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {profiles.map((profile) => {
+            const applied = policy.activeProfileId ? policy.activeProfileId === profile.id : profile.active;
+            const renaming = renameId === profile.id;
+            return (
+              <div key={profile.id} className="flex flex-wrap items-center justify-between gap-2 rounded-control border border-[color:var(--con-line)] p-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {renaming ? (
+                      <TextInput
+                        aria-label="Preset name"
+                        value={renameDraft}
+                        autoFocus
+                        disabled={busy !== null}
+                        className="max-w-xs"
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        onBlur={() => void commitRename(profile)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void commitRename(profile);
+                          if (event.key === "Escape") setRenameId(null);
+                        }}
+                      />
+                    ) : (
                       <span className="font-semibold">{profile.name || EM_DASH}</span>
-                      {applied && <Chip tone="accent">applied here</Chip>}
-                    </div>
-                    <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-                      updated <Ago iso={profile.updatedAt} />
-                    </div>
+                    )}
+                    {applied && <Chip tone="accent">applied here</Chip>}
                   </div>
+                  <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
+                    updated <Ago iso={profile.updatedAt} />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
                   {!applied && (
-                    <Btn
-                      size="sm"
-                      disabled={busy !== null}
-                      onClick={async () => {
-                        setBusy(`profile-${profile.id}`);
-                        try {
-                          if (activeAccount) {
-                            // Preferred path: POST /api/profiles/[id]/copy — writes ONLY this
-                            // account's live strategy state and preserves its run-state and the
-                            // library active flag (applyProfileToAccount, server-enforced).
-                            await copyProfileToAccount(profile.id, activeAccount.id);
-                            toast.push("pos", `Applied “${profile.name}”`, "Copied onto this account. Run state unchanged.");
-                          } else {
-                            // No connected account (fresh local install): the copy route has no
-                            // target, so fall back to library activation of the base policy.
-                            await activateProfile(profile.id);
-                            toast.push("pos", `Activated “${profile.name}”`, "Applied as the base strategy for new account scope.");
-                          }
-                          await refresh();
-                        } catch (error) {
-                          toast.push("neg", "Preset not applied", error instanceof ConsoleApiError ? error.message : String(error));
-                        } finally {
-                          setBusy(null);
-                        }
-                      }}
-                    >
+                    <Btn size="sm" disabled={busy !== null} onClick={() => void applyPreset(profile)}>
                       {busy === `profile-${profile.id}` ? "Applying…" : "Apply to this account"}
                     </Btn>
                   )}
+                  {!renaming && (
+                    <Btn
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy !== null}
+                      onClick={() => {
+                        setRenameId(profile.id);
+                        setRenameDraft(profile.name);
+                      }}
+                    >
+                      Rename
+                    </Btn>
+                  )}
+                  <Btn
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={() => void removePreset(profile)}
+                  >
+                    {busy === `delete-${profile.id}` ? "Deleting…" : "Delete"}
+                  </Btn>
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-
-      {/* Tax treatment — account-scoped like the rest of this page; moved here
-          from Settings in the 2026-07-10 IA restructure (Settings is global-only).
-          The id anchor is a deep-link target. */}
-      <div id="tax" className="scroll-mt-28">
-        <TaxSettingsCard />
-      </div>
-    </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1028,7 +1256,7 @@ function ImportFromAccountControl({
           </Select>
         </Field>
         {source && (
-          <div className="mt-4 rounded-lg border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-3">
+          <div className="mt-4 rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] p-3">
             <p className="mb-2 text-[length:var(--con-fs-xs)] leading-relaxed">
               Copies strategy settings — models, prompt, guardrails, weights, watchlist, tax treatment — from
               “{source.label}” onto {currentLabel ? `“${currentLabel}”` : "this account"}. Does not touch broker
@@ -1218,8 +1446,13 @@ function AiReviewPanel({
       ? (policy.redTeamReasoningEffort ?? policy.llmReasoningEffort)
       : policy.llmReasoningEffort;
   const reviewerReasoningValue = reviewerReasoningControl
-    ? normalizeReasoningValueForControl([reviewerModel], reviewerReasoningControl, reviewReasoning ?? inheritedEffort)
+    ? normalizeReasoningValueForControl(
+        [reviewerModel],
+        reviewerReasoningControl,
+        reviewReasoning ?? (model ? recommendedReasoningEffortForModel(reviewerModel, "review") : inheritedEffort)
+      )
     : undefined;
+  const reviewerAdvice = reasoningAdviceForModel(reviewerModel);
   const changes = useMemo(() => (review ? reviewChanges(review.proposedPatch, policy) : []), [review, policy]);
   const promptChanged = Boolean(review?.proposedPatch.prompt && review.proposedPatch.prompt !== strategyPrompt);
   const hasAnyChange = changes.length > 0 || promptChanged;
@@ -1304,7 +1537,7 @@ function AiReviewPanel({
       </p>
 
       {review && restoredBanner && (
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)]">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2 text-[length:var(--con-fs-xs)]">
           <span>
             Restored unapplied review from <Ago iso={restoredBanner.createdAt} /> ({restoredBanner.model}).
           </span>
@@ -1332,14 +1565,22 @@ function AiReviewPanel({
               label="Strategist"
               hint={
                 rotationBlocksInheritance
-                  ? "Both team seats rotate, so there is no single model to inherit. Pick a strategist model here — left blank, the review runs on local rules (no LLM)."
-                  : `Blank = same as ${inheritedReviewerLabel}. AI Review has no separate account-level model.`
+                  ? "Both team seats rotate, so there is no single model to inherit.  Pick a strategist model here — left blank, the review runs on local rules (no LLM)."
+                  : `Blank = same as ${inheritedReviewerLabel}.  AI Review has no separate account-level model.`
               }
               htmlFor="ai-review-model"
             >
               <div className="flex items-start gap-2">
                 <div className="min-w-0 flex-1">
-                  <Select id="ai-review-model" value={model} onChange={(e) => { setModel(e.target.value); setReviewReasoning(undefined); }}>
+                  <Select
+                    id="ai-review-model"
+                    value={model}
+                    onChange={(e) => {
+                      const nextModel = e.target.value;
+                      setModel(nextModel);
+                      setReviewReasoning(nextModel ? recommendedReasoningEffortForModel(nextModel, "review") : undefined);
+                    }}
+                  >
                     <option value="">
                       {rotationBlocksInheritance ? "No model — local rules (no LLM)" : `Same As ${inheritedReviewerLabel}`}
                     </option>
@@ -1358,19 +1599,25 @@ function AiReviewPanel({
               </div>
             </Field>
             {reviewerReasoningControl && reviewerReasoningValue && (
-              <Field label={reviewerReasoningControl.label} hint={reviewerReasoningControl.hint} htmlFor="ai-review-effort">
-                <Select
-                  id="ai-review-effort"
-                  value={reviewerReasoningValue}
-                  onChange={(e) => setReviewReasoning(e.target.value as LlmReasoningEffort)}
-                >
-                  {reviewerReasoningControl.options.map((option) => (
-                    <option key={option.value} value={option.value} title={option.hint}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
+              <div>
+                <Field label={reviewerReasoningControl.label} hint={reviewerReasoningControl.hint} htmlFor="ai-review-effort">
+                  <Select
+                    id="ai-review-effort"
+                    value={reviewerReasoningValue}
+                    onChange={(e) => setReviewReasoning(e.target.value as LlmReasoningEffort)}
+                  >
+                    {reviewerReasoningControl.options.map((option) => (
+                      <option key={option.value} value={option.value} title={option.hint}>
+                        {option.label}
+                        {option.value === recommendedReasoningEffortForModel(reviewerModel, "review") ? " — recommended" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                {reviewerAdvice && (
+                  <p className="mt-1.5 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{reviewerAdvice}</p>
+                )}
+              </div>
             )}
           </div>
           <div className="flex justify-end">
@@ -1407,7 +1654,7 @@ function AiReviewPanel({
           )}
 
           {/* The diff — exactly what Apply would write. */}
-          <div className="rounded-lg border border-[color:var(--con-line)] p-3">
+          <div className="rounded-control border border-[color:var(--con-line)] p-3">
             <div className="con-card-title mb-1">Proposed changes</div>
             {!hasAnyChange ? (
               <p className="text-[color:var(--con-muted)]">No changes proposed — the reviewer left everything as is.</p>
@@ -1419,11 +1666,11 @@ function AiReviewPanel({
                     <div className="grid gap-2 pb-2 sm:grid-cols-2">
                       <div>
                         <div className="con-card-title mb-1">Current</div>
-                        <pre className="con-mono max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-[color:var(--con-surface-2)] p-2 text-[10px] leading-relaxed">{strategyPrompt}</pre>
+                        <pre className="con-mono max-h-48 overflow-auto whitespace-pre-wrap rounded-control bg-[color:var(--con-surface-2)] p-2 text-[length:var(--con-fs-2xs)] leading-relaxed">{strategyPrompt}</pre>
                       </div>
                       <div>
                         <div className="con-card-title mb-1">Proposed</div>
-                        <pre className="con-mono max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-[color:var(--con-surface-2)] p-2 text-[10px] leading-relaxed">{review.proposedPatch.prompt}</pre>
+                        <pre className="con-mono max-h-48 overflow-auto whitespace-pre-wrap rounded-control bg-[color:var(--con-surface-2)] p-2 text-[length:var(--con-fs-2xs)] leading-relaxed">{review.proposedPatch.prompt}</pre>
                       </div>
                     </div>
                   </details>
@@ -1456,7 +1703,7 @@ function AiReviewPanel({
                     Apply review changes <LiveTag />
                   </>
                 }
-                note="At least one proposed change expands authority on a brokerage account. Unlocking authority costs a typed word here exactly like it does in Guardrails."
+                note="At least one proposed change expands authority on a brokerage account.  Unlocking authority costs a typed word here exactly like it does in Guardrails."
                 onConfirm={() => void apply()}
               />
             ) : (

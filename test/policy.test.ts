@@ -39,7 +39,11 @@ const enabledPolicy: TradingPolicy = {
   strategyAuthority: "decide",
   accountNumber: "A1",
   includedIndices: [],
-  additionalSymbols: ["AAPL", "TSLA"]
+  additionalSymbols: ["AAPL", "TSLA"],
+  // maxQuoteAgeSec defaulted to 120 on 2026-07-28 (guard enablement); these tests exercise OTHER
+  // gates without a marketScan in context, so pin the staleness gate off — a missing timestamp is
+  // treated as stale while the gate is on.
+  maxQuoteAgeSec: 0
 };
 
 const proposal: TradeProposal = {
@@ -265,6 +269,7 @@ describe("evaluateTradeProposal", () => {
   it("blocks daily notional overflow", () => {
     const decision = evaluateTradeProposal(proposal, {
       ...context(),
+      policy: { ...enabledPolicy, maxDailyNotional: 500, maxDailyPctOfNav: undefined },
       dailyNotionalUsed: 495
     });
     expect(decision.approved).toBe(false);
@@ -547,6 +552,23 @@ describe("evaluateTradeProposal", () => {
   it("short without a mandatory stop-loss is rejected when short selling is enabled", () => {
     const decision = evaluateTradeProposal(
       { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000 },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.approved).toBe(false);
+    expect(decision.reasons.join(" ")).toContain("mandatory stop-loss");
+  });
+
+  it("an explicit stopPlan: 'none' short satisfies the mandatory-stop-loss gate (owner decision, 2026-07-15 — a deliberate no-stop choice is okay)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "none", rationale: "deliberately unhedged short thesis" } },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.reasons.join(" ")).not.toContain("mandatory stop-loss");
+  });
+
+  it("an explicit stopPlan: 'default' short does NOT satisfy the mandatory-stop-loss gate (defers to the account's own precedence, which here guarantees nothing)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "default" } },
       { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
     );
     expect(decision.approved).toBe(false);

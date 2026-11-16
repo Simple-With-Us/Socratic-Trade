@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
-# Codex Cloud setup: install deps, verify Slack coordination tools are reachable.
-# Runs on new containers after repo clone. Network access is always enabled.
-# Policy lives in AGENTS.md, not here.
+# Codex Cloud setup for Socratic-Trade. Secrets must be runtime environment variables
+# when the agent phase needs them; setup-only secrets are removed before the agent runs.
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
 
-echo "==> Running project cloud-setup"
-bash scripts/cloud-setup.sh
-
-echo ""
-echo "==> Verifying Slack coordination access"
-if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
-  bash scripts/slack-sync.sh test
-  echo "Slack coordination: OK"
+echo "==> Codex Cloud setup: Socratic-Trade"
+test -f AGENTS.md && echo "AGENTS.md: OK" || { echo "AGENTS.md: MISSING" >&2; exit 1; }
+test -f docs/EFFORT-LOG.md && echo "Effort-log mirror: OK" || { echo "docs/EFFORT-LOG.md: MISSING" >&2; exit 1; }
+git remote get-url origin >/dev/null 2>&1 && echo "Git origin: OK" || echo "Git origin: MISSING"
+if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
+  gh api user --jq .login >/dev/null 2>&1 && echo "GitHub API: OK" || echo "GitHub API: FAILED"
+  gh issue list --limit 1 >/dev/null 2>&1 && gh pr list --limit 1 >/dev/null 2>&1 && echo "GitHub issues/PRs: OK" || echo "GitHub issues/PRs: CHECK"
 else
-  echo "SLACK_BOT_TOKEN not set — Slack coordination disabled (silent no-op)."
-  echo "Set SLACK_BOT_TOKEN, SLACK_AGENT_NAME, and SLACK_TOPIC in Codex Cloud environment variables."
+  echo "GitHub API: GH_TOKEN is not a runtime environment variable"
 fi
-
-echo ""
-echo "==> Codex Cloud setup complete."
-echo "    At the start of every turn, run: bash scripts/slack-sync.sh read"
-echo "    To post to #agent-sync:       bash scripts/slack-sync.sh post \"[CODEX->FLEET] ...\""
+if [ -x scripts/codex-coordination.sh ]; then
+  scripts/codex-coordination.sh test || echo "Slack/GitHub coordination check incomplete; verify runtime variables"
+else
+  echo "scripts/codex-coordination.sh: MISSING" >&2
+  exit 1
+fi
+echo "Slack channel: ${SLACK_CHANNEL_ID:-C0BEZDJDNKV}"
+echo "Slack project: ${SLACK_PROJECT:-Socratic-Trade}"
+echo "Agent: ${SLACK_AGENT_NAME:-${AGENT_NAME:-CODEX}}"
+echo "Apple Notes: Mac-only; cloud completion docs must include the Notes handoff body."
+echo "Setup complete: Socratic-Trade"

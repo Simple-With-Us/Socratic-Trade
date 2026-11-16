@@ -8,6 +8,7 @@ import {
   fetchAlpacaMarketClock,
   fetchAlpacaPortfolioHistory,
 } from "../src/lib/alpaca-account-insights";
+import { getServiceHealthLog, isSoftHealthFailure } from "../src/lib/db-health";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-alpaca-insights-${randomUUID()}.db`)}`;
@@ -303,5 +304,142 @@ describe("alpaca-account-insights", () => {
 
     await fetchAlpacaMarketClock();
     expect(capturedUrl).toBe("https://api.alpaca.markets/v2/clock");
+  });
+
+  // SOCRATIC-TRADE-28 ("alpaca-account-insights connection failed", 9 events/12 days — genuinely
+  // low-volume, not a money-path emergency). A bare `err.message` on a Node fetch transport
+  // failure is frequently just "fetch failed", which loses the real cause and does not match any
+  // soft-failure text pattern db-health.ts recognizes, so a one-off network blip was logged
+  // exactly like a persistent outage. These assert the call-site fix: classify + one bounded
+  // retry, without touching the shared db-health.ts pipeline itself.
+  describe("getJson classification + bounded retry (SOCRATIC-TRADE-28)", () => {
+    const SERVICE = "alpaca-account-insights";
+
+    function transientNetworkError(): Error {
+      // Mirrors Node's real shape: fetch's own message is a content-free "fetch failed", with
+      // the actual reason nested in `err.cause` — see network-errors.ts / appendErrorCause.
+      return Object.assign(new TypeError("fetch failed"), { cause: new Error("ECONNRESET") });
+    }
+
+    it("retries once on a transient transport error and logs nothing for the discarded first attempt", async () => {
+      const before = getServiceHealthLog(SERVICE, 1000).length;
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(transientNetworkError())
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ timestamp: "t", is_open: true, next_open: "n", next_close: "c" }))
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const clock = await fetchAlpacaMarketClock();
+
+      expect(clock?.is_open).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const after = getServiceHealthLog(SERVICE, 1000);
+      // Exactly one new row: the eventual success. The retried-away first attempt never wrote a
+      // failure row, so the blip cannot contribute to a "last 5 consecutive failures" streak.
+      expect(after.length).toBe(before + 1);
+      expect(after[0]?.ok).toBe(1);
+    });
+
+    it("logs a hard (non-soft) failure with the network cause appended when the transient error survives the retry", async () => {
+      const before = getServiceHealthLog(SERVICE, 1000).length;
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(transientNetworkError()));
+
+      const clock = await fetchAlpacaMarketClock();
+
+      expect(clock).toBeUndefined();
+      const after = getServiceHealthLog(SERVICE, 1000);
+      // One row for the two attempts (attempt 0 is retried silently; only the final failure logs).
+      expect(after.length).toBe(before + 1);
+      const row = after[0]!;
+      expect(row.ok).toBe(0);
+      expect(row.error_text).toContain("fetch failed");
+      expect(row.error_text).toContain("ECONNRESET");
+      expect(isSoftHealthFailure(row.error_text)).toBe(false);
+    });
+
+    it("classifies its own request-timeout abort as soft, not a hard connection failure", async () => {
+      const before = getServiceHealthLog(SERVICE, 1000).length;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url: string, init: RequestInit) => {
+          // Hangs until GET's own AbortController fires (REQUEST_TIMEOUT_MS), simulating a
+          // slow-but-alive upstream rather than a transport error — advanced via fake timers below.
+          return new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              const err = new Error("This operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          });
+        })
+      );
+
+      // Fake ONLY the timer functions getJson's internal timeout actually uses — NOT Date.
+      // vi.useFakeTimers()'s default also mocks Date, and advancing it 8s here would stamp this
+      // test's health-log row 8s into the future, which then sorts ahead of later tests' real-time
+      // rows under `ORDER BY ts DESC` and reads back as this test's leftover row in THEIR `after[0]`.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const clockPromise = fetchAlpacaMarketClock();
+        await vi.advanceTimersByTimeAsync(8_000); // REQUEST_TIMEOUT_MS
+        const clock = await clockPromise;
+        expect(clock).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const after = getServiceHealthLog(SERVICE, 1000);
+      expect(after.length).toBe(before + 1);
+      const row = after[0]!;
+      expect(row.ok).toBe(0);
+      expect(isSoftHealthFailure(row.error_text)).toBe(true);
+    });
+
+    it("scrubs the account's secret key out of a logged transport error", async () => {
+      await seedConnectedAlpaca("u-secret-scrub", "paper", "leak-key-id", "super-secret-value");
+      const before = getServiceHealthLog(SERVICE, 1000).length;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(
+          Object.assign(new TypeError("fetch failed"), {
+            cause: new Error("upstream said: super-secret-value is not authorized"),
+          })
+        )
+      );
+
+      const activities = await fetchAlpacaAccountActivities("u-secret-scrub");
+
+      expect(activities).toEqual([]);
+      const after = getServiceHealthLog(SERVICE, 1000);
+      expect(after.length).toBe(before + 1);
+      expect(after[0]?.error_text).not.toContain("super-secret-value");
+      expect(after[0]?.error_text).toContain("***");
+    });
+
+    it("scrubs the account's API key out of a logged transport error too (not just the secret key)", async () => {
+      // apiKey is sent as auth material either way — APCA-API-KEY-ID alongside the secret key,
+      // or as the Bearer token when there is no secret key — so a cause echoing it back must be
+      // scrubbed exactly like the secret key above.
+      await seedConnectedAlpaca("u-apikey-scrub", "paper", "leak-api-key-value", "key-secret");
+      const before = getServiceHealthLog(SERVICE, 1000).length;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockRejectedValue(
+          Object.assign(new TypeError("fetch failed"), {
+            cause: new Error("upstream said: leak-api-key-value is not authorized"),
+          })
+        )
+      );
+
+      const activities = await fetchAlpacaAccountActivities("u-apikey-scrub");
+
+      expect(activities).toEqual([]);
+      const after = getServiceHealthLog(SERVICE, 1000);
+      expect(after.length).toBe(before + 1);
+      expect(after[0]?.error_text).not.toContain("leak-api-key-value");
+      expect(after[0]?.error_text).toContain("***");
+    });
   });
 });

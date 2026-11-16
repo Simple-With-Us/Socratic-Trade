@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { applyExecutionCost, estimateExecutionCostBps, executionCostConfig } from "../src/lib/execution-cost";
+import {
+  applyExecutionCost,
+  estimateExecutionCostBps,
+  executionCostConfig,
+  OOS_ROUND_TRIP_COST_BPS,
+  PAPER_DEFAULT_BASE_SLIPPAGE_BPS
+} from "../src/lib/execution-cost";
 
 describe("estimateExecutionCostBps", () => {
   it("is zero with no inputs (no base, no spread, no impact)", () => {
@@ -51,8 +57,11 @@ describe("executionCostConfig — default ON", () => {
   it("is ENABLED with no env set (default ON)", () => {
     const cfg = executionCostConfig();
     expect(cfg.enabled).toBe(true);
-    // Default base slippage is 1 bps (conservative, non-zero).
-    expect(cfg.baseSlippageBps).toBe(1);
+    // Paper default is the OOS 20 bps constant — paper trains live.
+    expect(cfg.baseSlippageBps).toBe(20);
+    expect(cfg.baseSlippageBps).toBe(OOS_ROUND_TRIP_COST_BPS);
+    expect(cfg.baseSlippageBps).toBe(PAPER_DEFAULT_BASE_SLIPPAGE_BPS);
+    expect(PAPER_DEFAULT_BASE_SLIPPAGE_BPS).toBe(OOS_ROUND_TRIP_COST_BPS);
     expect(cfg.impactCoeff).toBe(10); // default impact coeff
   });
 

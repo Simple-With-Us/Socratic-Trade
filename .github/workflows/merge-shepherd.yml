@@ -36,7 +36,10 @@ concurrency:
 
 jobs:
   call-shepherd:
-    uses: ./.github/workflows/_merge-shepherd-impl.yml@main
+    # Run the trusted default-branch implementation even when a maintainer dispatches
+    # this wrapper against another ref; the called workflow inherits write permissions
+    # and repository secrets.
+    uses: Simple-With-Us/Socratic-Trade/.github/workflows/_merge-shepherd-impl.yml@main
     with:
       dry_run: ${{ inputs.dry_run }}
     secrets: inherit

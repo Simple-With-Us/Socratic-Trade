@@ -1,5 +1,5 @@
 import { rateLimit, type RateLimitOptions } from "./rate-limit";
-import { resolveRequestUserId } from "./request-user";
+import { resolveRequestUserId, resolveRequestUserIdOrResponse } from "./request-user";
 import { withTuningSingleFlight } from "./tuning-singleflight";
 import { operationInFlightResponse, rateLimitedOperationResponse } from "./operation-guard-response";
 import {
@@ -37,7 +37,12 @@ export const ADMIN_OPERATION_LIMITS = {
   "congress-score-eval": { limit: 6, windowMs: 10 * 60_000, concurrencyGroup: "congress-score-eval", concurrencyScope: "admin" },
   "congress-share": { limit: 2, windowMs: 60 * 60_000, concurrencyGroup: "congress-share", concurrencyScope: "manual-admin" },
   "refresh-websource": { limit: 4, windowMs: 10 * 60_000, concurrencyGroup: "refresh-websource", concurrencyScope: "manual-admin" },
-  "robinhood-probe": { limit: 20, windowMs: 5 * 60_000, concurrencyGroup: "robinhood-probe", concurrencyScope: "admin" }
+  "robinhood-probe": { limit: 20, windowMs: 5 * 60_000, concurrencyGroup: "robinhood-probe", concurrencyScope: "admin" },
+  "sec-ingest-seed": { limit: 6, windowMs: 60 * 60_000, concurrencyGroup: "sec-ingest-seed", concurrencyScope: "manual-admin" },
+  // Shares the RAG_REINDEX durable group with the scheduled EarningsCalls pass (and every other
+  // Voyage/Pinecone-spending producer) — a manual burst/probe/clear-block action must never race
+  // the scheduler's own daily pass or another reindex job into duplicate embedding spend.
+  "earningscalls": { limit: 10, windowMs: 10 * 60_000, concurrencyGroup: "earningscalls", concurrencyScope: "manual-admin" }
 } as const satisfies Record<string, AdminOperationLimit>;
 
 export type AdminOperationName = keyof typeof ADMIN_OPERATION_LIMITS;
@@ -50,7 +55,9 @@ export interface AdminOperationGuardOptions {
 const FIXED_DURABLE_GROUPS: Partial<Record<AdminOperationName, OperationLeaseGroup>> = {
   "reindex-8k": OPERATION_LEASE_GROUPS.RAG_REINDEX,
   "reindex-10k": OPERATION_LEASE_GROUPS.RAG_REINDEX,
-  "congress-share": OPERATION_LEASE_GROUPS.CONGRESS_SHARE
+  "congress-share": OPERATION_LEASE_GROUPS.CONGRESS_SHARE,
+  "sec-ingest-seed": OPERATION_LEASE_GROUPS.SEC_INGEST_SEED,
+  "earningscalls": OPERATION_LEASE_GROUPS.RAG_REINDEX
 };
 
 type AdminOperationGuardHost = typeof globalThis & {
@@ -86,7 +93,10 @@ export async function withAdminOperationGuard(
   run: (claim?: OperationLeaseClaim) => Promise<Response>,
   options: AdminOperationGuardOptions = {}
 ): Promise<Response> {
-  const identity = adminOperationIdentity(request);
+  // Same trusted source as adminOperationIdentity, but identity/session denials become the API
+  // 401/409 JSON contract instead of escaping as an unhandled 500.
+  const identity = resolveRequestUserIdOrResponse(request);
+  if (identity instanceof Response) return identity;
   const config = ADMIN_OPERATION_LIMITS[operation];
 
   if ("sharedSingleFlight" in config) {

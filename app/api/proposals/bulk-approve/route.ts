@@ -1,14 +1,16 @@
 import { getActiveConnectedAccount, getPolicy, getProposalsByIds } from "@/lib/db";
 import { deriveExecutionState } from "@/lib/execution-mode";
+import { resolvePlacementOutcome } from "@/lib/placement-outcome";
 import {
   liveApprovalText,
   liveBatchApprovalText
 } from "@/lib/strategy";
 import { STOPPED_PROPOSAL_ACTION_MESSAGE, isProposalActionStopped } from "@/lib/proposal-actions";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { NextResponse } from "next/server";
 import { executeProposal, LiveApprovalConfirmationError, LiveApprovalConfirmation } from "@/lib/strategy-execution";
+import { LANE_WAITS } from "@/lib/account-mutation";
 
 export const dynamic = "force-dynamic";
 
@@ -61,7 +63,8 @@ export async function POST(request: Request) {
       liveConfirmation?: { typedText?: unknown };
       userId?: unknown;
     };
-    const userId = resolveRequestUserId(request, body);
+    const userId = resolveRequestUserIdOrResponse(request);
+    if (userId instanceof Response) return userId;
     const proposalIds = Array.isArray(body.proposalIds)
       ? Array.from(new Set(body.proposalIds.filter((id): id is string => typeof id === "string" && id.length > 0)))
       : [];
@@ -111,6 +114,13 @@ export async function POST(request: Request) {
       requireTypedConfirmation: policy.requireTypedConfirmation !== false
     });
 
+    // Share ONE lease-wait budget across the whole batch rather than paying up to
+    // LANE_WAITS.approvalPlacement per proposal serially — a full-batch worst case would otherwise
+    // approach BULK_APPROVE_MAX_REQUESTS × 30s of pure waiting inside one HTTP request, well past
+    // typical edge/proxy timeouts. Once the shared budget is exhausted, remaining calls in this
+    // batch become try-once (waitMs 0) and return an honest per-proposal busy result immediately.
+    const leaseDeadline = Date.now() + LANE_WAITS.approvalPlacement;
+
     const results = [];
     for (const id of proposalIds) {
       const row = rowsById.get(id);
@@ -121,18 +131,22 @@ export async function POST(request: Request) {
             proposalExecutionMode(row, executionState.mode) === "broker/live" &&
             policy.requireTypedConfirmation !== false
               ? perProposalLiveConfirmation(row)
-              : undefined
+              : undefined,
+          leaseWaitMs: Math.max(0, leaseDeadline - Date.now())
         });
-        results.push({ proposalId: id, symbol: row.proposal.symbol, ...result });
+        const placement = resolvePlacementOutcome(result);
+        results.push({ proposalId: id, symbol: row.proposal.symbol, ...placement });
       } catch (error) {
         if (error instanceof LiveApprovalConfirmationError) {
-          results.push({ proposalId: id, symbol: row.proposal.symbol, status: "error", reasons: error.reasons });
+          const placement = resolvePlacementOutcome({ status: "error", reasons: error.reasons });
+          results.push({ proposalId: id, symbol: row.proposal.symbol, ...placement });
         } else {
+          const reasons = [error instanceof Error ? error.message : "Failed to execute proposal."];
+          const placement = resolvePlacementOutcome({ status: "error", reasons });
           results.push({
             proposalId: id,
             symbol: row.proposal.symbol,
-            status: "error",
-            reasons: [error instanceof Error ? error.message : "Failed to execute proposal."]
+            ...placement
           });
         }
       }

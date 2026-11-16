@@ -63,7 +63,8 @@ describe("notify() push (ntfy) channel survives an em-dash title", () => {
     timeoutMs: 1000,
     retryAttempts: 1,
     retryDelayMs: 0,
-    push: { provider: "ntfy", ntfyServer: "https://ntfy.example", pushoverToken: "" },
+    push: { ntfyServer: "https://ntfy.example" },
+    pushover: { pushoverToken: "" },
     email: { provider: "resend", resendKey: "", from: "" },
     sms: { twilioSid: "", twilioToken: "", twilioFrom: "" }
   });

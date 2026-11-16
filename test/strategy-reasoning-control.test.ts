@@ -29,24 +29,24 @@ describe("reasoningControlForModels — rotation sentinel keeps the control visi
   });
 
   it("rotate + concrete model intersects down to the concrete model's own ladder", () => {
-    const control = reasoningControlForModels([ROTATE, "gpt-5.4-mini"]);
+    const control = reasoningControlForModels([ROTATE, "o1"]);
     expect(control).not.toBeNull();
     expect(control!.options.map((o) => o.value)).toEqual(["low", "medium", "high"]);
     expect(control!.label).toBe("Shared Reasoning / Thinking");
-    expect(normalizeReasoningValueForControl([ROTATE, "gpt-5.4-mini"], control, "medium")).toBe("medium");
+    expect(normalizeReasoningValueForControl([ROTATE, "o1"], control, "medium")).toBe("medium");
   });
 
   it("rotate + a model with NO reasoning capability still shows the rotation ladder", () => {
     // mistral-small-2603 takes no reasoning params (provider 400) — it contributes no capability,
     // so the rotating seat's full ladder is what remains.
-    const control = reasoningControlForModels([ROTATE, "mistral-small-2603"]);
+    const control = reasoningControlForModels([ROTATE, "mistral-small-latest"]);
     expect(control).not.toBeNull();
     expect(control!.options.map((o) => o.value)).toEqual([...ALL_LLM_REASONING_EFFORTS]);
   });
 
   it("models with no capability at all still yield no control (honest absence)", () => {
-    expect(reasoningControlForModels(["mistral-small-2603"])).toBeNull();
-    expect(reasoningControlForModels(["gpt-4.1-mini", "mistral-small-2603"])).toBeNull();
+    expect(reasoningControlForModels(["mistral-small-latest"])).toBeNull();
+    expect(reasoningControlForModels(["openai/gpt-4.1-mini", "mistral-small-latest"])).toBeNull();
   });
 });
 
@@ -95,9 +95,9 @@ describe("normalizeReasoningValueForControl — high-tier-only pairings (no sile
 
 describe("seatReasoningPatch — per-seat renormalization bundled into model saves", () => {
   it("clamps the seat's stored effort to the new model's own ladder", () => {
-    // gpt-5.4-mini's ladder is {low, medium, high}: "xhigh" clamps to "high" for the save.
-    expect(seatReasoningPatch("llmReasoningEffort", "gpt-5.4-mini", "xhigh")).toEqual({ llmReasoningEffort: "high" });
-    expect(seatReasoningPatch("llmReasoningEffort", "gpt-5.4-mini", "medium")).toEqual({ llmReasoningEffort: "medium" });
+    // o1's ladder is {low, medium, high}: "xhigh" clamps to "high" for the save.
+    expect(seatReasoningPatch("llmReasoningEffort", "o1", "xhigh")).toEqual({ llmReasoningEffort: "high" });
+    expect(seatReasoningPatch("llmReasoningEffort", "o1", "medium")).toEqual({ llmReasoningEffort: "medium" });
     // Writes the reviewer's own per-team field when asked to.
     expect(seatReasoningPatch("redTeamReasoningEffort", "claude-sonnet-5", "xhigh")).toEqual({ redTeamReasoningEffort: "xhigh" });
   });
@@ -115,12 +115,12 @@ describe("seatReasoningPatch — per-seat renormalization bundled into model sav
   });
 
   it("a model with no reasoning capability yields no patch (effort is ignored at call time)", () => {
-    expect(seatReasoningPatch("llmReasoningEffort", "mistral-small-2603", "high")).toEqual({});
+    expect(seatReasoningPatch("llmReasoningEffort", "mistral-small-latest", "high")).toEqual({});
   });
 
   it("the disallowed interactive gpt-5.5+high combo saves the run-time-honest medium instead", () => {
-    expect(seatReasoningPatch("llmReasoningEffort", "gpt-5.5", "high")).toEqual({ llmReasoningEffort: "medium" });
-    expect(seatReasoningPatch("redTeamReasoningEffort", "gpt-5.5", "high")).toEqual({ redTeamReasoningEffort: "medium" });
+    expect(seatReasoningPatch("llmReasoningEffort", "openai/gpt-5.5", "high")).toEqual({ llmReasoningEffort: "medium" });
+    expect(seatReasoningPatch("redTeamReasoningEffort", "openai/gpt-5.5", "high")).toEqual({ redTeamReasoningEffort: "medium" });
   });
 });
 
@@ -131,5 +131,25 @@ describe("resolveReviewerReasoningEffort — the reviewer's fallback lives in on
     expect(resolveReviewerReasoningEffort({})).toBeUndefined();
     expect(resolveReviewerReasoningEffort(undefined)).toBeUndefined();
     expect(resolveReviewerReasoningEffort(null)).toBeUndefined();
+  });
+});
+
+describe("seat effort control for MiniMax and Muse (ST-4589)", () => {
+  it("offers an effort control derived from the capability, never none, and never max for contributor models", () => {
+    const flash = reasoningControlForModels(["minimax-m3.1-flash"]);
+    expect(flash!.options.map((o) => o.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(normalizeReasoningValueForControl(["minimax-m3.1-flash"], flash, undefined)).toBe("medium");
+    const spark = reasoningControlForModels(["muse-spark-1.3"]);
+    expect(spark!.options.map((o) => o.value)).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+    const contributor = reasoningControlForModels(["muse-wonder-1.0-contributor"]);
+    expect(contributor!.options.map((o) => o.value)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+    expect(normalizeReasoningValueForControl(["muse-wonder-1.0-contributor"], contributor, "max")).toBe("xhigh");
+    // A shared control over Spark + a contributor model never offers max.
+    const shared = reasoningControlForModels(["muse-spark-1.3", "muse-spark-1.3-contributor"]);
+    expect(shared!.options.map((o) => o.value)).not.toContain("max");
+    // Saving a contributor model with a stored Max persists the clamped XHigh.
+    expect(seatReasoningPatch("llmReasoningEffort", "muse-spark-1.3-contributor", "max")).toEqual({ llmReasoningEffort: "xhigh" });
+    // MiniMax-M3 still has no knob.
+    expect(reasoningControlForModels(["minimax-m3"])).toBeNull();
   });
 });

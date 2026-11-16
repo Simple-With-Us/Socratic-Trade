@@ -40,6 +40,7 @@ import {
   buildLearningReviewContextPack,
   evaluateLearningReviewTrigger,
   isLearningReviewDue,
+  PAPER_ACCOUNT_LEARNING_PARITY_RULE,
   parseLearningReviewVerdicts,
   runDailyLearningReview,
   runDailyLearningReviewIfDue,
@@ -65,7 +66,11 @@ function seedLearnedRow(userId: string, overrides: Partial<LearnedContextRow> = 
     assertedAt: new Date(NOW - 2 * 86_400_000).toISOString(),
     supersededBy: null,
     expiresAt: null,
-    ...overrides
+    ...overrides,
+    connectedAccountId: overrides.connectedAccountId ?? null,
+    accountEnvironment: overrides.accountEnvironment ?? null,
+    learningScope: overrides.learningScope ?? "portfolio",
+    transferState: overrides.transferState ?? "not_applicable"
   };
   insertLearnedContext(row);
   return row;
@@ -87,7 +92,11 @@ function seedPendingRow(userId: string, overrides: Partial<LearnedContextPending
     createdAt: new Date(NOW - 86_400_000).toISOString(),
     status: "pending",
     resolvedAt: null,
-    ...overrides
+    ...overrides,
+    connectedAccountId: overrides.connectedAccountId ?? null,
+    accountEnvironment: overrides.accountEnvironment ?? null,
+    learningScope: overrides.learningScope ?? "portfolio",
+    transferState: overrides.transferState ?? "not_applicable"
   };
   insertPendingLearnedContext(row);
   return row;
@@ -297,13 +306,13 @@ describe("review trigger (learningReviewMinNewLessons / learningReviewMaxWaitDay
 // ── Defaults + no hidden model fallback (owner 2026-07-09) ───────────────────────
 
 describe("defaults and model requirement", () => {
-  it("defaults to decide mode and the claude-fable-5 model when nothing was explicitly set", () => {
+  it("defaults to decide mode and the claude-fable-latest model when nothing was explicitly set", () => {
     const userId = `lr-default-${randomUUID().slice(0, 8)}`;
     const policy = getPolicy(userId);
     // "decide" is the default; only an explicit "annotate" opts out.
     expect(policy.learningReviewMode ?? "decide").not.toBe("annotate");
     // The model default is a real, explicit value — never blank-means-Fable.
-    expect(policy.learningReviewModel).toBe("claude-fable-5");
+    expect(policy.learningReviewModel).toBe("claude-fable-latest");
   });
 
   it("skips with reason 'no-model' rather than silently substituting a model when blank", async () => {
@@ -313,6 +322,37 @@ describe("defaults and model requirement", () => {
     const summary = await runDailyLearningReview(userId, { now: NOW, llm: async () => "should-not-be-called" });
     expect(summary.skipped).toBe(true);
     expect(summary.reason).toBe("no-model");
+  });
+
+  it("canonicalizes a legacy catalog alias in review results and audits", async () => {
+    const userId = `lr-model-alias-${randomUUID().slice(0, 8)}`;
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "claude-fable-5" }, userId);
+    seedLearnedRow(userId);
+    const summary = await runDailyLearningReview(userId, { now: NOW, llm: keepAllLlm() });
+    expect(summary.model).toBe("claude-fable-latest");
+    const auditRow = listAuditByKind("learning_review_summary", 1, userId)[0];
+    expect((auditRow.payload as { model?: string; modelLabel?: string; servedModel?: string }).model).toBe("claude-fable-latest");
+    expect((auditRow.payload as { modelLabel?: string }).modelLabel).toContain("5.1");
+    expect((auditRow.payload as { servedModel?: string }).servedModel).toBeUndefined();
+  });
+
+  it("records an unlisted catalog model by its canonical identity", async () => {
+    const userId = `lr-model-astra-${randomUUID().slice(0, 8)}`;
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "openai/gpt-6-astra-pro" }, userId);
+    seedLearnedRow(userId);
+    const summary = await runDailyLearningReview(userId, { now: NOW, llm: keepAllLlm() });
+    expect(summary.model).toBe("gpt-6-astra-pro");
+    const auditRow = listAuditByKind("learning_review_summary", 1, userId)[0];
+    expect((auditRow.payload as { model?: string; modelLabel?: string }).model).toBe("gpt-6-astra-pro");
+    // 2026-09-18 catalog cleanup (docs/rollouts/2026-09-18-model-catalog-cleanup.md) retags the
+    // GPT-6 Astra Pro row as `gpt-6-astra-pro — GPT-6 Astra in pro reasoning mode` (pro is a
+    // request parameter, not a distinct SKU). The audit label therefore resolves to that
+    // canonical entry, not the legacy "GPT-6 Astra Pro" display name.
+    // ST-4589 (2026-11-04): gpt-6-astra-pro left the picker but stays a RETIRED catalog row, so a
+    // stored selection still resolves to its own identity and the retired row's label.
+    expect((auditRow.payload as { modelLabel?: string }).modelLabel).toBe(
+      "gpt-6-astra-pro — retired: the same model as gpt-6-astra in pro reasoning mode",
+    );
   });
 });
 
@@ -387,10 +427,17 @@ describe("skip unchanged sets", () => {
     expect(calls).toBe(2);
 
     // Same set, different reviewer model: the newly chosen model must actually run.
-    setPolicy({ ...getPolicy(userId), learningReviewModel: "gpt-5.5" }, userId);
+    setPolicy({ ...getPolicy(userId), learningReviewModel: "openai/gpt-5.5" }, userId);
     const day3 = await runDailyLearningReview(userId, { now: NOW + 2 * 86_400_000, llm });
     expect(day3.reason).not.toBe("unchanged");
     expect(calls).toBe(3);
+
+    // Same model, different reasoning effort is also a materially different review config.
+    setPolicy({ ...getPolicy(userId), learningReviewReasoningEffort: "high" }, userId);
+    const day4 = await runDailyLearningReview(userId, { now: NOW + 3 * 86_400_000, llm });
+    expect(day4.reason).not.toBe("unchanged");
+    expect(day4.reasoningEffort).toBe("high");
+    expect(calls).toBe(4);
   });
 
   it("does not cache the fingerprint when some shown items received no verdict (partial coverage)", async () => {
@@ -504,7 +551,7 @@ describe("user-level scoping", () => {
     const userId = `lr-scope-${randomUUID().slice(0, 8)}`;
     // Set the review config while account A1 is the scope.
     setPolicy(
-      { ...getPolicy(userId, "A1"), learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "gpt-5.5" },
+      { ...getPolicy(userId, "A1"), learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "openai/gpt-5.5" },
       userId,
       "A1"
     );
@@ -512,7 +559,7 @@ describe("user-level scoping", () => {
     const underA2 = getPolicy(userId, "A2");
     expect(underA2.learningReviewEnabled).toBe(true);
     expect(underA2.learningReviewMode).toBe("annotate");
-    expect(underA2.learningReviewModel).toBe("gpt-5.5");
+    expect(underA2.learningReviewModel).toBe("openai/gpt-5.5");
   });
 });
 
@@ -530,7 +577,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     // (setPolicy syncs it via pickAccountFields + mergePolicy), so it is the hazardous base.
     createStrategyProfile({ name: "Base", active: true }, userId);
     seedAccount(userId, acct);
-    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "gpt-5.5" }, userId);
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewModel: "openai/gpt-5.5" }, userId);
     expect(getPolicy(userId).learningReviewEnabled).toBe(true);
 
     // Remove the only account: getPolicy(userId) falls back to the profile base — the user-level
@@ -538,7 +585,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     deleteConnectedAccount(acct, userId);
     const policy = getPolicy(userId);
     expect(policy.learningReviewEnabled).toBe(true);
-    expect(policy.learningReviewModel).toBe("gpt-5.5");
+    expect(policy.learningReviewModel).toBe("openai/gpt-5.5");
   });
 
   it("activating or editing a profile does not clobber the user-level review config", () => {
@@ -547,7 +594,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     seedAccount(userId, acct);
     createStrategyProfile({ name: "P1", active: true }, userId);
     const p2 = createStrategyProfile({ name: "P2", active: false }, userId);
-    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "gpt-5.5" }, userId);
+    setPolicy({ ...getPolicy(userId), learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "openai/gpt-5.5" }, userId);
 
     // Activating another profile writes the full profile policy to user_settings.policy —
     // the stored user-level fields must be preserved through that write.
@@ -555,13 +602,13 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     const afterActivate = getPolicy(userId);
     expect(afterActivate.learningReviewEnabled).toBe(true);
     expect(afterActivate.learningReviewMode).toBe("annotate");
-    expect(afterActivate.learningReviewModel).toBe("gpt-5.5");
+    expect(afterActivate.learningReviewModel).toBe("openai/gpt-5.5");
 
     // Same for editing the ACTIVE profile.
     updateStrategyProfile(p2.id, { policy: { maxOrderNotional: 1234 } }, userId);
     const afterUpdate = getPolicy(userId);
     expect(afterUpdate.learningReviewEnabled).toBe(true);
-    expect(afterUpdate.learningReviewModel).toBe("gpt-5.5");
+    expect(afterUpdate.learningReviewModel).toBe("openai/gpt-5.5");
     expect(afterUpdate.maxOrderNotional).toBe(1234);
   });
 
@@ -571,7 +618,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     seedAccount(userId, acct);
     // Simulate a pre-#1278 deploy: the enabled review lives ONLY in the account row's policy
     // blob (the #1116 account-scoped layout); user_settings.policy never carried the keys.
-    const legacyPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "gpt-5.5" };
+    const legacyPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "openai/gpt-5.5" };
     getDb()
       .prepare(
         `INSERT INTO account_strategy_state
@@ -586,7 +633,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     const policy = getPolicy(userId);
     expect(policy.learningReviewEnabled).toBe(true);
     expect(policy.learningReviewMode).toBe("annotate");
-    expect(policy.learningReviewModel).toBe("gpt-5.5");
+    expect(policy.learningReviewModel).toBe("openai/gpt-5.5");
     // Idempotent: the seed persisted, later reads agree.
     expect(getPolicy(userId).learningReviewEnabled).toBe(true);
   });
@@ -596,7 +643,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     const acct = `acct-${randomUUID().slice(0, 8)}`;
     seedAccount(userId, acct);
     // Pre-cutover, the real ENABLED review lives account-scoped (#1116)…
-    const accountPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "gpt-5.5" };
+    const accountPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewMode: "annotate", learningReviewModel: "openai/gpt-5.5" };
     getDb()
       .prepare(
         `INSERT INTO account_strategy_state
@@ -613,7 +660,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     const policy = getPolicy(userId);
     expect(policy.learningReviewEnabled).toBe(true);
     expect(policy.learningReviewMode).toBe("annotate");
-    expect(policy.learningReviewModel).toBe("gpt-5.5");
+    expect(policy.learningReviewModel).toBe("openai/gpt-5.5");
     // One-time + idempotent: later reads agree (the seed persisted onto the same blob).
     expect(getPolicy(userId).learningReviewEnabled).toBe(true);
   });
@@ -623,7 +670,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     const acct = `acct-${randomUUID().slice(0, 8)}`;
     seedAccount(userId, acct);
     // A stale account_strategy_state row still carries an ENABLED review…
-    const accountPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewModel: "gpt-5.5" };
+    const accountPolicy = { ...DEFAULT_POLICY, learningReviewEnabled: true, learningReviewModel: "openai/gpt-5.5" };
     getDb()
       .prepare(
         `INSERT INTO account_strategy_state
@@ -638,7 +685,7 @@ describe("user-level persistence (PR #1278 review fixes)", () => {
     setUserSetting(userId, "policy", {
       learningReviewEnabled: false,
       learningReviewMode: "decide",
-      learningReviewModel: "gpt-5.5",
+      learningReviewModel: "openai/gpt-5.5",
       notificationSettings: DEFAULT_POLICY.notificationSettings
     });
 
@@ -1142,5 +1189,60 @@ describe("multi-day drain vs. the 7-day pack window (deferred finding #2/#3 hard
     for (const r of rows.slice(MAX_REVIEW_ITEMS)) expect(shownDay1.has(r.id)).toBe(true);
 
     expect(evaluateLearningReviewTrigger(userId, day1Now + 3_600_000, getPolicy(userId)).reason).toBe("no-new-items");
+  });
+
+  it("surfaces accountEnvironment on review items and pins paper-parity in the system prompt", async () => {
+    const userId = `lr-paper-parity-${randomUUID()}`;
+    const paperLesson = seedLearnedRow(userId, {
+      subject: "decision_lesson:MSFT:Momentum",
+      value: "DeepSeek outperformed Grok on earnings-catalyst entries (paper account closed lots).",
+      accountEnvironment: "paper",
+      learningScope: "portfolio",
+      assertedAt: new Date(NOW - 3_600_000).toISOString()
+    });
+    seedPendingRow(userId, {
+      subject: "model_task:red_team",
+      value: "Claude-as-reviewer had higher veto value-add on paper A/B runs.",
+      accountEnvironment: "paper",
+      learningScope: "portfolio"
+    });
+
+    // Contract the Learning Review Board must honor (owner 2026-08-04).
+    expect(PAPER_ACCOUNT_LEARNING_PARITY_RULE).toMatch(/FIRST-CLASS/i);
+    expect(PAPER_ACCOUNT_LEARNING_PARITY_RULE).toMatch(/PAPER-EXCLUSIVE/i);
+    expect(PAPER_ACCOUNT_LEARNING_PARITY_RULE).toMatch(/model/i);
+
+    const pack = await buildLearningReviewContextPack(userId, NOW);
+    const paperItem = pack.items.find((it) => it.id === paperLesson.id);
+    expect(paperItem).toMatchObject({
+      accountEnvironment: "paper",
+      learningScope: "portfolio"
+    });
+    expect(pack.items.some((it) => it.accountEnvironment === "paper" && it.table === "learned_context_pending")).toBe(true);
+
+    // The system prompt (not just a unit-test constant) must carry the rule into the LLM call.
+    let systemPromptSeen = "";
+    await runDailyLearningReview(userId, {
+      now: NOW,
+      llm: async (spec) => {
+        systemPromptSeen = spec.systemPrompt;
+        const items = (JSON.parse(spec.userContent) as { reviewItems: Array<{ id: string; table: LearningReviewVerdict["table"]; accountEnvironment?: string | null }> })
+          .reviewItems;
+        expect(items.some((it) => it.accountEnvironment === "paper")).toBe(true);
+        return JSON.stringify({
+          reviews: items.map((it) => ({
+            id: it.id,
+            table: it.table,
+            verdict: "keep",
+            confidence: 85,
+            reasoning: "Sample/attribution/still-true all pass; paper origin is first-class model evidence, not a defect."
+          })),
+          summary: "Kept paper-sourced model lessons."
+        });
+      }
+    });
+    expect(systemPromptSeen).toContain("PAPER-ACCOUNT PARITY");
+    expect(systemPromptSeen).toContain("FIRST-CLASS");
+    expect(systemPromptSeen).toMatch(/PAPER-EXCLUSIVE/i);
   });
 });

@@ -71,7 +71,11 @@ function makeRow(overrides: Partial<LearnedContextRow>): LearnedContextRow {
     assertedAt: new Date().toISOString(),
     supersededBy: null,
     expiresAt: null,
-    ...overrides
+    ...overrides,
+    connectedAccountId: overrides.connectedAccountId ?? null,
+    accountEnvironment: overrides.accountEnvironment ?? null,
+    learningScope: overrides.learningScope ?? "portfolio",
+    transferState: overrides.transferState ?? "not_applicable"
   };
 }
 
@@ -297,7 +301,7 @@ describe("retrieveLearnedContext inline provenance", () => {
     const line = lines.find((l) => l.includes("fact:AMD"));
     expect(line).toBeTruthy();
     expect(line).toContain("- [AMD] fact:AMD: AMD competes with NVDA in AI accelerators.");
-    expect(line).toContain("[origin=chat source=owner-chat asserted=2026-07-01 conf=0.8]");
+    expect(line).toContain("[origin=chat source=owner-chat asserted=2026-07-01 conf=0.8 scope=portfolio]");
   });
 
   it("retrieveLearnedContextDetailed returns the same lines plus the underlying rows", async () => {

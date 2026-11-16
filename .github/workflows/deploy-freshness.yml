@@ -1,0 +1,50 @@
+# Standing watchdog for the 2026-08-06 silent deploy freeze: Coolify SSH exec
+# streams died mid-build (exit 255) while GitHub webhooks returned 200 and
+# /api/health stayed green on the old sha. Nobody noticed for ~14h.
+#
+# This workflow does NOT deploy, does NOT call the Coolify API, and does NOT
+# post a deploy claim. It compares public /api/health .checks.release.sha to
+# origin/main. A stale verdict (oldest undeployed commit more than
+# DEPLOY_FRESHNESS_STALE_SECONDS past its deploy-due time: commit time, or for
+# a weekday RTH merge the later of session close and the 21:20 UTC drain; see
+# docs/deployment.md) fails the job
+# so the existing Sentry fleet-infra observer reports the verdict.
+# It needs no notification client or Zulip credentials.
+#
+# Unreachable health is treated as OK here: UptimeRobot already pages site-down.
+# This cron exists for the silent-green-on-old-sha class.
+name: Deploy freshness
+
+on:
+  schedule:
+    # Every 20 minutes, off the :00/:17/:30/:47 cluster used by other crons.
+    - cron: "13,33,53 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-freshness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+
+      - name: Check production release freshness
+        env:
+          DEPLOY_FRESHNESS_STALE_SECONDS: "3600"
+          DEPLOY_FRESHNESS_TREAT_UNREACHABLE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/alert-deploy-freshness.sh
+          bash scripts/alert-deploy-freshness.sh origin/main

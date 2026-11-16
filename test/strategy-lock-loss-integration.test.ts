@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+process.env.OPENROUTER_API_KEY = "test-key";
 
 const lockGuardMocks = vi.hoisted(() => ({
   assertOwned: vi.fn(),
@@ -66,6 +67,8 @@ vi.mock("../src/lib/broker", async (importOriginal) => {
 });
 
 vi.mock("../src/lib/vector-db", () => ({
+  managedVectorLedgerAuthority: vi.fn(),
+  getCurrentVectorProviderAuthority: vi.fn(),
   findRelevantExperiences: async () => [],
   upsertExperiences: async () => {},
   retrieveContext: async () => [],
@@ -150,7 +153,7 @@ beforeAll(() => {
 beforeEach(() => {
   marketMocks.scanMarket.mockReset().mockImplementation(async () => strategyMarketScan());
   notificationMocks.sendNotification.mockReset().mockResolvedValue(undefined);
-  macroMocks.fetchMacroData.mockReset().mockResolvedValue({
+  const blankMacro = {
     fedFundsRate: "",
     dgs3moTreasury: "",
     dgs2Treasury: "",
@@ -172,8 +175,11 @@ beforeEach(() => {
     vix3m: "",
     asOf: "unavailable",
     fredSourced: false
-  });
-  macroMocks.fetchMacroDataWithLiveVix.mockReset().mockResolvedValue(undefined);
+  };
+  macroMocks.fetchMacroData.mockReset().mockResolvedValue(blankMacro);
+  // proposeTrades now uses the live-VIX overlay path — stubbing this to undefined made
+  // pruneMacro throw mid-run and masked the ownership-loss assertions (#3392 verify).
+  macroMocks.fetchMacroDataWithLiveVix.mockReset().mockResolvedValue(blankMacro);
 });
 
 afterEach(() => {
@@ -360,7 +366,7 @@ async function arrangeStrategyRun(
     isActive: true
   });
   db.setActiveConnectedAccount(accountId, userId);
-  db.upsertUserApiKey(userId, "openai", "test-openai-key", "lease-loss fixture");
+  db.upsertUserApiKey(userId, "openrouter", "test-openai-key", "lease-loss fixture");
   db.setPolicy({
     ...DEFAULT_POLICY,
     connectedAccountId: accountId,
@@ -370,15 +376,15 @@ async function arrangeStrategyRun(
     strategyAuthority: options.strategyAuthority ?? "propose",
     includedIndices: [],
     additionalSymbols: ["AAPL"],
-    llmModel: "gpt-4.1-mini",
-    redTeamLlmModel: "gpt-4.1-mini"
+    llmModel: "openai/gpt-4.1-mini",
+    redTeamLlmModel: "openai/gpt-4.1-mini"
   }, userId);
   return accountId;
 }
 
 function stubStrategyLlm(): void {
   vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
-    if (!String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
+    if (!String(url).includes("openrouter.ai") && !String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
     const body = init?.body ? String(init.body) : "";
     if (body.includes("Red Team Risk Agent")) {
       return new Response(
@@ -442,15 +448,15 @@ describe("strategy-run ownership loss across broker awaits", () => {
       strategyAuthority: "propose",
       includedIndices: [],
       additionalSymbols: ["MSFT"],
-      llmModel: "gpt-4.1-mini",
-      redTeamLlmModel: "gpt-4.1-mini"
+      llmModel: "openai/gpt-4.1-mini",
+      redTeamLlmModel: "openai/gpt-4.1-mini"
     }, userId, accountB);
     db.setStrategyPrompt("ACCOUNT_B_STRATEGY_PROMPT", userId, accountB);
     db.setActiveConnectedAccount(accountA, userId);
     lockGuardMocks.onStart.mockImplementationOnce(() => db.setActiveConnectedAccount(accountB, userId));
     const requestBodies: string[] = [];
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
-      if (!String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
+      if (!String(url).includes("openrouter.ai") && !String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
       const body = init?.body ? String(init.body) : "";
       requestBodies.push(body);
       if (body.includes("Red Team Risk Agent")) {
@@ -558,7 +564,7 @@ describe("strategy-run ownership loss across broker awaits", () => {
       if (ownershipLost) throw new StrategyLockOwnershipLostError();
     });
     vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
-      if (!String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
+      if (!String(url).includes("openrouter.ai") && !String(url).includes("api.openai.com")) return new Response("not found", { status: 404 });
       const body = init?.body ? String(init.body) : "";
       if (body.includes("Red Team Risk Agent")) {
         ownershipLost = true;
@@ -646,10 +652,10 @@ describe("strategy-run ownership loss across broker awaits", () => {
     expect(result.status).toBe("failed");
     expect(result.summary).toMatch(/1 proposal result.*ownership was lost/i);
     expect(result.proposals).toEqual([
-      expect.objectContaining({ status: "placed", orderId: "placed-order" })
+      expect.objectContaining({ status: "filled", orderId: "placed-order" })
     ]);
     expect(db.listRecentProposals(STRATEGY_ACCOUNT, 100, userId)).toEqual([
-      expect.objectContaining({ status: "placed" })
+      expect.objectContaining({ status: "filled" })
     ]);
     expect(brokerMocks.placeEquityOrder).toHaveBeenCalledTimes(1);
   }, 30_000);
