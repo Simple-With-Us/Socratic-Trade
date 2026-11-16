@@ -5,14 +5,13 @@
    THEMING MODEL
    - Semantic tokens only (surface/fg/muted/line/accent/up-down/warn/reality).
      Components never hardcode raw hex — they reference the semantic console tokens.
-   - Light is the base set; dark overrides it. Resolution order:
-       1. explicit choice via [data-theme="light"|"dark"] on .console-root
-          (persisted in localStorage under a console-scoped key; default light
-          per owner 2026-08-10 — never invent dark from OS on first visit),
-       2. when unset (user chose System only): prefers-color-scheme,
-       3. otherwise stay on the light base tokens.
-     The dark token block therefore appears twice (explicit + media query) —
-     KEEP THE TWO BLOCKS IDENTICAL.
+   - Light is the base set; dark overrides it. One resolved value, written by
+     applyDocumentTheme (app/ui/theme.tsx) onto html.dark, html[data-theme],
+     and .console-root[data-theme] together. Stored choice is theme
+     (light | dark | system) under localStorage key "theme". Default is light
+     (owner 2026-08-10). System is resolved in that function, including when
+     the OS preference changes. There is no second prefers-color-scheme token
+     block, so an explicit Light choice stays light on a dark OS.
    - Soft fills and borders are derived from the base palette with color-mix,
      so they adapt to both themes automatically.
 
@@ -164,8 +163,11 @@
   --con-body-font: var(--con-font-mono);
 }
 
-/* ── DARK (explicit choice) — keep IDENTICAL to the media-query block below ──
-   Near-black neutral charcoal (no teal/navy cast). Surfaces step up in grey only. */
+/* ── DARK — one block for every signal applyDocumentTheme writes ──
+   Near-black neutral charcoal (no teal/navy cast). Surfaces step up in grey only.
+   html.dark covers the pre-paint window, before React sets the console attribute. */
+html.dark .console-root,
+html[data-theme="dark"] .console-root,
 .console-root[data-theme="dark"] {
   --con-bg: #0a0a0a;
   --con-surface: rgba(22, 22, 22, 0.78);
@@ -176,7 +178,7 @@
 
   --con-fg: #f0f0f0;
   --con-muted: #b0b0b0;
-  /* One step above the 4.5:1 line on surface-3 (#2561). Keep both dark blocks identical. */
+  /* One step above the 4.5:1 line on surface-3 (#2561). */
   --con-faint: #a3a3a3;
 
   --con-accent: var(--brand-accent-dark);
@@ -200,46 +202,6 @@
   --con-scrim: rgba(0, 0, 0, 0.72);
 
   color-scheme: dark;
-}
-
-/* ── DARK (system preference, unless explicitly light) — keep IDENTICAL to
-      the block above ── */
-@media (prefers-color-scheme: dark) {
-  .console-root:not([data-theme="light"]) {
-    --con-bg: #0a0a0a;
-    --con-surface: rgba(22, 22, 22, 0.78);
-    --con-surface-2: rgba(30, 30, 30, 0.72);
-    --con-surface-3: rgba(42, 42, 42, 0.68);
-    --con-line: rgba(255, 255, 255, 0.12);
-    --con-line-strong: rgba(255, 255, 255, 0.35);
-
-    --con-fg: #f0f0f0;
-    --con-muted: #b0b0b0;
-    /* One step above the 4.5:1 line on surface-3 (#2561). Keep both dark blocks identical. */
-    --con-faint: #a3a3a3;
-
-    --con-accent: var(--brand-accent-dark);
-    --con-accent-contrast: #04130d;
-    --con-pos: #34d399;
-    --con-pos-contrast: #04170e;
-    --con-neg: #fb5e74;
-    --con-neg-contrast: #1c0605;
-    --con-warn: #fbbf24;
-    --con-warn-contrast: #201302;
-    --con-info: #60a5fa;
-    --con-info-contrast: #061f26;
-
-    --con-none: #94a3b8;
-    --con-paper: #98a3ff;
-    --con-live: #fb5e74;
-
-    --con-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.7);
-    --con-shadow-lg: 0 28px 70px -20px rgba(0, 0, 0, 0.8);
-    --con-shadow-up: 0 -10px 30px -14px rgba(0, 0, 0, 0.7);
-    --con-scrim: rgba(0, 0, 0, 0.72);
-
-    color-scheme: dark;
-  }
 }
 
 .console-root ::selection {
@@ -1190,15 +1152,11 @@ body.con-overlay-open {
   background: #334155;
   color: rgba(255, 255, 255, 0.92);
 }
+html.dark .con-logo-tile,
+html[data-theme="dark"] .con-logo-tile,
 .console-root[data-theme="dark"] .con-logo-tile {
   background: color-mix(in oklab, var(--con-surface-3) 85%, transparent);
   color: var(--con-fg);
-}
-@media (prefers-color-scheme: dark) {
-  .console-root:not([data-theme="light"]) .con-logo-tile {
-    background: color-mix(in oklab, var(--con-surface-3) 85%, transparent);
-    color: var(--con-fg);
-  }
 }
 
 /* ── Model-attribution team blocks (approval cards) ──

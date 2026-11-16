@@ -2,9 +2,8 @@
 
 /** Company/ticker logo for the console, ported from app/ui/ticker-logo.tsx but
  *  themed with console tokens. Loads /api/logos/ticker?symbol=X&theme=… and
- *  falls back to a monogram tile (never a bare gap). Theme resolution follows
- *  the console model: data-theme on the closest .console-root ancestor, else
- *  prefers-color-scheme — NOT the legacy `.dark` class on <html>. */
+ *  falls back to a monogram tile (never a bare gap). Theme comes from the
+ *  shared resolver (the same light/dark value as html .dark and data-theme). */
 
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
@@ -16,8 +15,7 @@ import { useTheme } from "../../ui/theme";
 
 export type { TickerLogoDisplay };
 
-/** Resolved light/dark for the console subtree containing `ref`. Reacts to both
- *  the explicit data-theme attribute (chrome toggle) and system changes. */
+/** Resolved light/dark from the shared theme provider, including system changes. */
 export function useConsoleResolvedTheme(): "dark" | "light" {
   const { resolvedTheme } = useTheme();
   return resolvedTheme;
