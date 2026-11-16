@@ -30,3 +30,31 @@
 - Custom universe editing validates symbols, normalizes case, prevents duplicate
   tags, accepts quote-resolvable non-index tickers, and explains why a custom
   ticker cannot be saved when no quote is available.
+
+## Request-path efficiency + bundle code-split (2026-07-01, branch `claude/trading-audit-d-e-dpw0h7`)
+
+Audit work-split "Chat E" (`docs/reviews/2026-07-01-audit-work-split.md`) — pure
+performance refactors of the dashboard request path and client bundle, with no change to
+any user-visible number or trading behavior:
+
+- **One fill fetch per request.** `getDashboardSnapshot` now fetches live+paper
+  `listFillEvents` once and threads the parsed `FillEvent[]` into `getPerformanceSummary`,
+  `getThesisScorecard`, `getRegimeScorecard`, `getTaxSummary`,
+  `getClosedLotsDetailed`/`getOpenLots`, the paper-projection, and the unified feed
+  (collapsing ~9 redundant 500-row SELECT + FIFO replays to one live + one paper). All new
+  params are optional/backward-compatible so other callers are unchanged.
+- **Batched proposal lookups.** New `getProposalsByIds` (`WHERE id IN (...)`) replaces up to
+  ~150 per-row `getProposal` point-queries with one batched query feeding both feed builders.
+- **Unified feed capped at source** (`UNIFIED_FEED_MAX_GROUPS = 60`, newest-first).
+- **Client bundle code-split.** `StrategyFlow` (pulling `@xyflow/react`, ~3.9MB) and
+  `SymbolDrilldown`/`PriceChart` are now `next/dynamic(..., { ssr: false })` — verified out
+  of the dashboard route's initial first-load JS via the react-loadable manifest.
+- **DB pragmas** (`cache_size`, `mmap_size`) + a Playwright-CI `.next/cache` restore step.
+- **Deferred (track-only):** the monolithic-`snapshot` whole-tree re-render refactor
+  (audit §6.1) — a larger `React.memo`/selector-split effort, not attempted here.
+
+See `docs/rollouts/2026-07-01-performance-efficiency.md`.
+
+## 2026-11-12 — dashboard request single-flight (ST-4620)
+
+`getDashboardSnapshot` is unchanged.  `coalesceUserDashboardSnapshot` in `src/lib/dashboard-coalesce.ts` wraps it from `app/api/dashboard/route.ts` and `app/api/mobile/snapshot/route.ts`.  The key is the user id plus the selected account.  Concurrent callers share one compute.  A finished snapshot is remembered for 8 seconds.  `invalidateDashboardSnapshotCache` drops that memo.  The console shares one `fetchDashboard` per tab and skips a poll tick while a request is in flight or while a slow response is backing off.  Rollout: `docs/rollouts/2026-11-12-st-4620-dashboard-request-storm.md`.

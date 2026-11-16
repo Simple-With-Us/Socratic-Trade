@@ -1,0 +1,165 @@
+<title>Socratic Trade — live intro (canvas)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b1018}
+  body[data-bg="light"]{background:#f1f4f6}
+  body[data-bg="img"]{background:#20222a url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMjIyNTJlIi8+PHBhdGggZD0iTTAgMjBoNDBNMjAgMHY0MCIgc3Ryb2tlPSIjMzAzNDNmIiBzdHJva2Utd2lkdGg9IjEiLz48L3N2Zz4=")}
+  #c{display:block;width:100vw;height:100vh}
+  #ui{position:fixed;left:10px;bottom:10px;font:12px system-ui;color:#8aa;display:flex;gap:8px;z-index:9}
+  #ui button{font:12px system-ui;background:#1b2430;color:#cde;border:1px solid #33404f;border-radius:6px;padding:4px 8px;cursor:pointer}
+</style>
+<canvas id="c"></canvas>
+<div id="ui">
+  <button onclick="replay()">Replay</button>
+  <button onclick="cycleBg()">Background</button>
+  <span id="lbl"></span>
+</div>
+<script>
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let R=mulberry32(11);
+const rnd=(lo,hi)=>lo+(hi-lo)*R();
+function gauss(m,s){let u=0,v=0;while(!u)u=R();while(!v)v=R();return m+s*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+
+const off=document.createElement('canvas'), octx=off.getContext('2d',{willReadFrequently:true});
+function sampleCells(text, fontPx, tracking, pitch){
+  octx.font=`700 ${fontPx}px Arial, "Helvetica Neue", sans-serif`;
+  let widths=[...text].map(ch=>ch===' '?fontPx*0.45:octx.measureText(ch).width);
+  let total=widths.reduce((a,b)=>a+b,0)+tracking*(text.length-1);
+  const padX=Math.ceil(fontPx*0.35), H=Math.ceil(fontPx*1.5);
+  off.width=Math.ceil(total)+padX*2; off.height=H;
+  octx.clearRect(0,0,off.width,off.height);
+  octx.fillStyle='#fff'; octx.textBaseline='alphabetic'; octx.font=`700 ${fontPx}px Arial, "Helvetica Neue", sans-serif`;
+  let x=padX; const top=Math.round(fontPx*1.1);
+  for(let i=0;i<text.length;i++){ if(text[i]!==' ') octx.fillText(text[i],x,top); x+=widths[i]+tracking; }
+  const img=octx.getImageData(0,0,off.width,off.height).data, W=off.width;
+  let x0=W,x1=0,y0=H,y1=0;
+  for(let yy=0;yy<H;yy++)for(let xx=0;xx<W;xx++){if(img[(yy*W+xx)*4+3]>128){if(xx<x0)x0=xx;if(xx>x1)x1=xx;if(yy<y0)y0=yy;if(yy>y1)y1=yy;}}
+  const cells=[]; const half=Math.floor((pitch-4)/2);
+  for(let cx=x0+2; cx<x1; cx+=pitch){
+    let col=[];
+    for(let yy=0;yy<H;yy++){ let s=0,n=0; for(let xx=cx; xx<cx+pitch-4 && xx<W; xx++){ s+=img[(yy*W+xx)*4+3]; n++; } col.push(n? s/n/255 : 0); }
+    let yy=0;
+    while(yy<H){ if(col[yy]>0.42){ let s=yy; while(yy<H && col[yy]>0.42) yy++; if(yy-s>=Math.round(fontPx*0.03)) cells.push({cx:cx-x0+half, top:s-y0, h:yy-s}); } else yy++; }
+  }
+  return {cells, w:(x1-x0), h:(y1-y0)};
+}
+
+const REF_FONT=200;
+let SOC=sampleCells('SOCRATIC',REF_FONT,10,15), TRD=sampleCells('TRADE',REF_FONT,10,15);
+const gap=REF_FONT*0.34, blockW=Math.max(SOC.w,TRD.w), blockH=SOC.h+gap+TRD.h;
+let STACK=[];
+for(const c of SOC.cells) STACK.push({nx:(c.cx+(blockW-SOC.w)/2)/blockW, ntop:c.top/blockH, nh:c.h/blockH});
+for(const c of TRD.cells) STACK.push({nx:(c.cx+(blockW-TRD.w)/2)/blockW, ntop:(SOC.h+gap+c.top)/blockH, nh:c.h/blockH});
+const STACK_AR=blockW/blockH, M=STACK.length;
+
+function lineToM(text,M){
+  const s=sampleCells(text,REF_FONT,10,15); const runs=s.cells; const R2=runs.length;
+  const tot=runs.reduce((a,r)=>a+r.h,0);
+  let raw=runs.map(r=>1+(M-R2)*r.h/tot), alloc=raw.map(x=>Math.floor(x)), rem=M-alloc.reduce((a,b)=>a+b,0);
+  const ord=[...raw.keys()].sort((a,b)=>(raw[b]-alloc[b])-(raw[a]-alloc[a]));
+  for(let i=0;i<Math.max(0,rem);i++)alloc[ord[i]]++;
+  let out=[];
+  for(let i=0;i<runs.length;i++){let c=Math.max(1,alloc[i]);for(let k=0;k<c;k++)out.push({cx:runs[i].cx,top:runs[i].top,h:runs[i].h});} // overlap on the natural stroke (one clean candle), don't subdivide
+  while(out.length<M)out.push({...out[out.length-1]}); out=out.slice(0,M);
+  return {cells:out.map(c=>({nx:c.cx/s.w, ntop:c.top/s.h, nh:c.h/s.h})), ar:s.w/s.h};
+}
+const HL=lineToM('SOCRATIC TRADE',M), HEADER=HL.cells, HEADER_AR=HL.ar;
+
+let rw=[0]; for(let i=0;i<M;i++){let st=gauss(0,11); if(R()<0.16)st+=gauss(0,34); rw.push(rw[rw.length-1]+st);}
+{let n=rw.length, sx=0,sy=0,sxx=0,sxy=0; for(let i=0;i<n;i++){sx+=i;sy+=rw[i];sxx+=i*i;sxy+=i*rw[i];}
+ let a1=(n*sxy-sx*sy)/(n*sxx-sx*sx), a0=(sy-a1*sx)/n; rw=rw.map((v,i)=>v-(a1*i+a0));}
+let hi=[],lo=[]; for(let i=0;i<M;i++){hi.push(rnd(5,30));lo.push(rnd(5,30));}
+const RWs=Math.max(...rw.map(Math.abs))||1, WAMP=0.08;
+function chartPrice(i,t){ const trend=0.82-0.55*(i/M), wob=0.18*(rw[i]/RWs), u=i/M;
+  const wv=WAMP*(0.6*Math.sin(2*Math.PI*1.5*u - t*1.6)+0.4*Math.sin(2*Math.PI*2.6*u - t*1.05+0.7));
+  return Math.max(0.02,Math.min(0.98, trend+wob+wv)); }
+
+const G=['#0e9358','#12a565','#18b271'], RD=['#c22648','#d3365a','#dd4076'];
+const BL=[],FD=[],AR=[],WX2=[],WY2=[],P4s=[],P4e=[],WX4=[],WY4=[],INFRAC=[],INCOL=[];
+for(let j=0;j<M;j++){
+  BL.push(rnd(1.2,2.6)); FD.push(rnd(2.6,3.3)); AR.push(BL[j]+FD[j]);
+  let a=rnd(0,2*Math.PI), r=rnd(0.35,1)*0.11; WX2.push(Math.cos(a)*r); WY2.push(Math.sin(a)*r);
+  let s=rnd(0,0.26), e=rnd(0.8,1); if(e<s+0.42)e=Math.min(1,s+0.42); P4s.push(s);P4e.push(e);
+  let a2=rnd(0,2*Math.PI), r2=rnd(0.35,1)*0.06; WX4.push(Math.cos(a2)*r2); WY4.push(Math.sin(a2)*r2);
+  let o=chartPrice(j,BL[j]),c=chartPrice(Math.min(j+1,M),BL[j]); let mag=Math.min(1,Math.abs(c-o)/0.12);
+  INFRAC.push(0.34+0.60*mag); INCOL.push((c<o?G:RD)[Math.min(2,Math.floor(mag*3))]);
+}
+const T2B=Math.max(...AR), T3=T2B+0.75, T4=T3+2.25;   // hold halved
+
+// ---- header ticker: green-biased walk of P candle "units" (matches candle-tick.gif) ----
+const P=12; let hr=mulberry32(9);
+function hgauss(m,sd){let u=0,v=0;while(!u)u=hr();while(!v)v=hr();return m+sd*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+let hprice=[0]; for(let i=0;i<P;i++)hprice.push(hprice[hprice.length-1]+hgauss(0.16,0.9));
+const hrets=hprice.slice(1).map((v,i)=>v-hprice[i]), hmx=Math.max(...hrets.map(Math.abs))||1;
+const UNITS=hrets.map(r=>{const up=r>=0,mag=Math.abs(r)/hmx;return {col:(up?G:RD)[Math.min(2,Math.floor(mag*3))], frac:0.40+0.45*mag, off:up?0.30:0.62};});
+const hxKey=nx=>Math.round(nx*1000);
+const uniqHx=[...new Set(HEADER.map(c=>hxKey(c.nx)))].sort((a,b)=>a-b);
+const hColMap=new Map(uniqHx.map((v,i)=>[v,i]));
+const HCOL=HEADER.map(c=>hColMap.get(hxKey(c.nx))), HSHORT=HEADER.map(c=>c.nh<0.16), NCOL=uniqHx.length;
+
+function layout(vw,vh){
+  const portrait=vh>vw;
+  const stackW=Math.min(portrait?vw*0.9:vw*0.8, vh*STACK_AR*0.62), stackH=stackW/STACK_AR;
+  const stackX=(vw-stackW)/2, stackY=(vh-stackH)*0.46;
+  const cm=Math.max(18,vw*0.03);
+  const chart={x0:cm,x1:vw-cm,midY:vh*(portrait?0.42:0.5),amp:vh*(portrait?0.34:0.40)};
+  const pad=Math.max(14,vw*0.014), logoH=Math.min(Math.max(vh*0.05,24),42,(vw-2*pad)/HEADER_AR), headerW=logoH*HEADER_AR;
+  const header={x:pad,y:pad,w:headerW,h:logoH};
+  return {portrait,stackW,stackH,stackX,stackY,chart,header,sizeScale:stackW/blockW};
+}
+function chartGeom(j,t,L){ const c=L.chart, x=c.x0+(j+0.5)*(c.x1-c.x0)/M;
+  const o=c.midY+(chartPrice(j,t)-0.5)*c.amp, cl=c.midY+(chartPrice(j+1,t)-0.5)*c.amp;
+  const bt=Math.min(o,cl),bb=Math.max(o,cl), bw=(c.x1-c.x0)/M*0.55;
+  return {x,bt,bb,wt:bt-hi[j]*0.35*(c.amp/300),wb:bb+lo[j]*0.35*(c.amp/300),bw,up:(cl<o)}; }
+function stackGeom(j,L){ const s=STACK[j], top=L.stackY+s.ntop*L.stackH, h=s.nh*L.stackH;
+  const bh=Math.max(3,h*INFRAC[j]), bt=top+(h-bh)/2, bw=Math.max(2.4,L.sizeScale*15*0.34);
+  return {x:L.stackX+s.nx*L.stackW, bt, bb:bt+bh, wt:top, wb:top+h, bw}; }
+function headerGeom(j,L){ const s=HEADER[j], top=L.header.y+s.ntop*L.header.h, h=s.nh*L.header.h;
+  const bh=Math.max(1.6,h*INFRAC[j]), bt=top+(h-bh)/2, bw=Math.max(1.4,L.header.w/NCOL*0.55);
+  return {x:L.header.x+s.nx*L.header.w, bt, bb:bt+bh, wt:top, wb:top+h, bw}; }
+function smoother(p){p=Math.max(0,Math.min(1,p));return p*p*p*(p*(p*6-15)+10)}
+function magnetic(p){if(p<=0)return 0;if(p>=1)return 1;const ov=0.055*Math.sin(Math.PI*Math.max(0,(p-0.5))/0.5);return smoother(p)+ov}
+function fly(p,s,d,wx,wy,scale){p=Math.max(0,Math.min(1,p));const a=magnetic(p),bump=Math.sin(Math.PI*p),dy=wy*bump*scale;
+  return {x:s.x+(d.x-s.x)*a+wx*bump*scale, bt:s.bt+(d.bt-s.bt)*a+dy, bb:s.bb+(d.bb-s.bb)*a+dy,
+          wt:s.wt+(d.wt-s.wt)*a+dy, wb:s.wb+(d.wb-s.wb)*a+dy, bw:s.bw+(d.bw-s.bw)*a};}
+
+// ---- CENTER ripple (words only) + HEADER discrete unit ticker ----
+function waveY(col,t,amp){ return amp*(0.6*Math.sin(0.42*col-t*1.4)+0.4*Math.sin(0.72*col-t*1.02+0.5)); }
+// CENTER words + morph: gentle ripple only; formed bodies/colors kept (no field reshape).
+function waveRipple(s,t,L){ const amp=L.stackH*0.05*(t<T3?1:1-(t-T3)/(T4-T3)); const wy=waveY(s.x/24,t,amp); s.wt+=wy; s.wb+=wy; s.bt+=wy; s.bb+=wy; }
+// HEADER: discrete per-second candlestick ticker; each column shows its own varied unit and
+// the pattern marches one column left per second (never one big block of red/green). No wave.
+function headerTick(s,j,t){ const u=UNITS[(((HCOL[j]+Math.floor(t-T4))%P)+P)%P];
+  const wh=s.wb-s.wt, frac=HSHORT[j]?Math.max(u.frac,0.82):u.frac, bh=Math.max(1.4,wh*frac);
+  s.bt=s.wt+(wh-bh)*u.off; s.bb=s.bt+bh; s.col=u.col; }
+function candleAt(j,t,L){
+  let s;
+  if(t<BL[j]){ const g=chartGeom(j,t,L); return {...g,col:(g.up?'#18b271':'#d3365a')}; }
+  const stack={...stackGeom(j,L),col:INCOL[j]}, header={...headerGeom(j,L),col:INCOL[j]};
+  if(t<AR[j]){ const g=chartGeom(j,BL[j],L); return {...fly((t-BL[j])/FD[j],g,stack,WX2[j],WY2[j],L.stackW),col:INCOL[j]}; }
+  if(t<T3){ s={...stack}; }
+  else if(t<T4){ const a=(t-T3)/(T4-T3), pj=(a-P4s[j])/(P4e[j]-P4s[j]); s={...fly(pj,stack,header,WX4[j],WY4[j],L.stackW),col:INCOL[j]}; }
+  else { s={...header}; }
+  if(t<T4) waveRipple(s,t,L); else headerTick(s,j,t);
+  return s;
+}
+
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let DPR=Math.min(devicePixelRatio||1,2), VW=0,VH=0,L=null, start=null, frozen=null;
+const qp=new URLSearchParams(location.search); if(qp.has('t'))frozen=parseFloat(qp.get('t'));
+function resize(){ VW=innerWidth;VH=innerHeight; cv.width=VW*DPR;cv.height=VH*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); L=layout(VW,VH); }
+addEventListener('resize',resize); resize();
+function rr(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function draw(t){ ctx.clearRect(0,0,VW,VH);
+  for(let j=0;j<M;j++){ const c=candleAt(j,t,L);
+    ctx.strokeStyle=c.col; ctx.lineWidth=Math.max(1,c.bw*0.26); ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(c.x,c.wt); ctx.lineTo(c.x,c.wb); ctx.stroke();
+    ctx.fillStyle=c.col; const bh=Math.max(1.4,c.bb-c.bt); rr(ctx,c.x-c.bw/2,c.bt,c.bw,bh,Math.min(2,c.bw*0.25)); ctx.fill(); }
+  document.getElementById('lbl').textContent=`${VW}×${VH}  t=${t.toFixed(1)}s`;
+}
+const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+function loop(now){ if(start==null)start=now; draw((now-start)/1000); requestAnimationFrame(loop); }  // header ticks forever
+function replay(){ R=mulberry32(11); start=null; }
+if(frozen!=null){ draw(frozen); } else if(reduce){ draw(9999); } else requestAnimationFrame(loop);
+const bgs=['dark','light','img']; let bgi=0;
+function cycleBg(){ bgi=(bgi+1)%bgs.length; document.body.dataset.bg=bgs[bgi]==='dark'?'':bgs[bgi]; }
+</script>

@@ -1,18 +1,23 @@
 # Consuming congress.trade (App A) data — the receiving side
 
-**Status:** implemented (2026-06-22), **all paths default OFF**. Complements the push side
-(`docs/congress-trade-share.md`) and the push contract App A implements (`docs/push-to-app-b.md`).
+**Status:** implemented (2026-06-22); **defaults updated 2026-08-04** —
+`CONGRESS_TRADE_AS_CONGRESS_SOURCE` and `CONGRESS_ANALYTICS_ENABLED` default **ON**
+(congressional data from App A). **Fundamentals** stay on Socratic's multi-provider
+cascade (Yahoo / Finnhub / ROIC / SEC / …) — `CONGRESS_TRADE_FUNDAMENTALS_ENABLED`
+default **OFF**. Price/history cache-aside (`CONGRESS_TRADE_READS_ENABLED`) default OFF.
+Complements the push side (`docs/congress-trade-share.md`) and the push contract App A
+implements (`docs/push-to-app-b.md`).
 
-App A (congress.trade) is the system-of-record for congressional disclosures and also pulls FMP. App B
-consumes App A so it spends the shared FMP quota once and can retire its own scrapers. Three independent,
-flag-gated paths:
+App A (congress.trade) is the system-of-record for congressional disclosures. App B
+**must not** call FMP / QuiverQuant / Unusual Whales directly (owner 2026-08-04).
+Flag-gated paths:
 
 **Shared contract package (2026-06-30):** read-side App A/B types, API path constants, and runtime Zod
 schemas are imported from `@jaywedgeworth22/congress-trading-shared`. Local aliases remain only for
 backward-compatible App B naming.
 
 ## 1. Cache-aside market reads (`CONGRESS_TRADE_READS_ENABLED`)
-`src/lib/congress-trade-client.ts` reads App A's public endpoints (`/api/market/bundle|ref|refs|prices|spx`).
+`src/lib/api-clients/congress.ts` reads App A's public endpoints (`/api/market/bundle|ref|refs|prices|spx`).
 Wired as the **first tier** of `fetchDailyOHLC` (`src/lib/history.ts`): App B reuses App A's EOD closes
 before calling its own keyed history providers (Massive/Tradier/Marketstack), saving that quota. `^GSPC`
 flows through the same path via `/api/market/spx`.
@@ -34,7 +39,7 @@ flows through the same path via `/api/market/spx`.
 App A stores fundamentals + analyst consensus (its own enrichment + our donated push) and now serves them
 at **`GET /api/market/fundamentals/:ticker`** and **`GET /api/market/analyst/:ticker`** (date-ascending
 rows; `?from=&to=` like `/market/insider`). App B reads them via `getAppAFundamentals` / `getAppAAnalyst`
-(`congress-trade-client.ts`), surfaced through the **`CongressTradeEnrichmentProvider`** in
+(`src/lib/api-clients/congress.ts`), surfaced through the **`CongressTradeEnrichmentProvider`** in
 `src/lib/data-providers.ts`, registered ahead of the paid fundamentals providers (Finnhub/FMP/…) so App A's
 free, already-stored values win those fields. Maps onto existing `SymbolEnrichment` fields
 (peRatio, eps, beta, dividendYield, fiftyTwoWeekHigh/Low, fcfYield, debtToEquity, epsGrowth,
@@ -107,7 +112,7 @@ member's trades are scored (which needs the price push to fill in), so this ligh
 then the activity proxy carries it. No extra calls when there are no clusters.
 
 **New App A analytics endpoints (2026-06-25, App A PRs #77/#79/#80).** Three additional read functions
-wired into `congress-trade-client.ts` (all gated on `CONGRESS_ANALYTICS_ENABLED`):
+wired into `src/lib/api-clients/congress.ts` (all gated on `CONGRESS_ANALYTICS_ENABLED`):
 
 - **`getAppAConviction(opts)`** → `GET /api/analytics/conviction?window=&limit=` — composite 0–100
   conviction score per ticker (`convictionScore: number | null`, direction-aware BUY/SELL). `null` = thin
@@ -159,9 +164,22 @@ web-source datasets so the scan's `getSymbolWebSignals` overlay serves them unch
 
 - **Webhook:** `POST /api/webhooks/congress`, bearer-verified constant-time against `CONGRESS_WEBHOOK_SECRET`
   (`src/lib/congress-webhook-auth.ts`; default-closed when unset). Accepts one envelope or `{events:[...]}`.
-- **SSE:** `src/lib/congress-stream.ts` connects out to App A's `/api/stream` (started from `startStreams()`
-  when `CONGRESS_STREAM_ENABLED` is on), with a tested incremental frame parser, reconnect/backoff, and
-  `Last-Event-ID` resume.
+- **SSE (App A subscription model — repaired 2026-07-01):** `src/lib/congress-stream.ts` connects out to
+  App A's `/api/stream`, which **requires** `?subscription=<id>` and a per-subscription secret. The
+  consumer resolves a subscription — operator-provisioned via `CONGRESS_STREAM_SUBSCRIPTION_ID` +
+  `CONGRESS_STREAM_SUBSCRIPTION_TOKEN`, or auto-created against App A's public `POST /api/subscriptions`
+  when `CONGRESS_STREAM_AUTO_SUBSCRIBE` is on — then connects with `?subscription=` + the secret as
+  `Authorization: Bearer`. App A emits `event: trade.new` with the **raw Transaction** as data; the
+  consumer maps it explicitly into a `congress.trade` envelope (`toCongressEventEnvelope`) before
+  `applyCongressEvent`, and treats `cursor`/`ping`/`reconnect`/`error` as recognized control frames (no
+  per-heartbeat "dropped unparseable" noise). Tested incremental frame parser, reconnect/backoff, and
+  `Last-Event-ID` resume. Started from `startStreams()` when `CONGRESS_STREAM_ENABLED` is on; **inert**
+  until a subscription is provisioned. **Flap policy (2026-08-17, #2550):** connect abort at 8s;
+  backoff resets only after the stream has lived 30s; five short-lived connects in 10 minutes jump
+  to a 5-minute cap; disconnects log `soft: true` so they cannot hard-STOP the lane or bury the
+  console Attention list. HTTP reads fail fast with `AbortError` when the congress.trade p50 is
+  already > 2s. (Before the 2026-07-01 fix the consumer connected without `?subscription=`,
+  so App A returned `400 missing ?subscription=` and the push path never connected.)
 - **Idempotency:** events deduped by `id` (bounded in-memory set). `congress.trade` → `upsertCongressTrades`
   (deduped + pruned to 120d); `insider.update` → raw Form-4 filings *or* a precomputed `insiderSentiment`
   scalar (synthesized into a marker filing); `ref.upsert`/`price.eod`/`spx.eod` are acknowledged no-ops
@@ -178,8 +196,12 @@ web-source datasets so the scan's `getSymbolWebSignals` overlay serves them unch
 | `CONGRESS_WEBHOOK_SECRET` | shared bearer App A presents to the webhook (default-closed when blank) |
 | `CONGRESS_STREAM_ENABLED` | start the outbound SSE consumer |
 | `CONGRESS_TRADE_BASE_URL` | App A base (shared with the push side) |
-| `CONGRESS_TRADE_READ_TOKEN` | optional bearer for App A reads/SSE (reads are public) |
+| `CONGRESS_TRADE_READ_TOKEN` | optional bearer for App A reads (reads are public); also the fallback SSE subscription secret |
 | `CONGRESS_STREAM_PATH` | App A SSE path (default `/api/stream`) |
+| `CONGRESS_STREAM_SUBSCRIPTION_ID` | operator-provisioned App A SSE subscription id (added to `?subscription=`) |
+| `CONGRESS_STREAM_SUBSCRIPTION_TOKEN` | that subscription's secret (sent as `Authorization: Bearer`); also the desired secret when auto-creating |
+| `CONGRESS_STREAM_AUTO_SUBSCRIBE` | when no subscription id/token is set, auto-create one via App A's public `POST /api/subscriptions` (default off) |
+| `CONGRESS_STREAM_CLIENT_ID` | clientId used when auto-creating a subscription (default `app-b`) |
 
 ## Status of App A's endpoints (2026-06-22)
 App A's round-2 endpoints are **merged** and go live after its next deploy (a pending prod DB migration).

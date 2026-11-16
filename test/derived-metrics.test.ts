@@ -31,6 +31,17 @@ describe("deriveMetrics", () => {
     expect("roe" in deriveMetrics({ price: 100, eps: 5, pbRatio: 0 })).toBe(false);
   });
 
+  it("prefers the provider-reported returnOnEquity over the eps*pb approximation", () => {
+    // approximation would say 10%; the real reported value (already a percent) wins
+    expect(deriveMetrics({ price: 100, eps: 5, pbRatio: 2, returnOnEquity: 23.46 }).roe).toBe(23.5);
+    // sign-preserving: a real negative ROE is shown, not the positive approximation
+    expect(deriveMetrics({ price: 100, eps: 5, pbRatio: 2, returnOnEquity: -4.2 }).roe).toBe(-4.2);
+    // absent real value -> approximation fallback unchanged
+    expect(deriveMetrics({ price: 100, eps: 5, pbRatio: 2, returnOnEquity: undefined }).roe).toBe(10);
+    // real value present but approximation inputs missing -> still emitted
+    expect(deriveMetrics({ price: 100, returnOnEquity: 17.3 }).roe).toBe(17.3);
+  });
+
   it("computes dividend payout ratio % (dividendYield is already a percent)", () => {
     // div 2% of price 100 = $2 DPS; payout = 2 / 4 = 50%
     expect(deriveMetrics({ price: 100, eps: 4, dividendYield: 2 }).payout).toBe(50);

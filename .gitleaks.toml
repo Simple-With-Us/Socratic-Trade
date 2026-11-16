@@ -2,3 +2,15 @@ title = "Agentic Trading gitleaks config"
 
 [extend]
 useDefault = true
+
+# Known false positive: gitleaks' entropy-based `finnhub-access-token` rule flags the 20-char
+# TypeScript symbol `clearEnrichmentCache` when it is destructured alongside
+# `FinnhubEnrichmentProvider` in the enrichment-provider tests (e.g. test/data-providers.test.ts).
+# These are function/class identifiers imported from src/lib/data-providers.ts — never secrets.
+# The allowlist only suppresses findings whose detected "secret" is exactly this identifier; it
+# does not weaken detection of real tokens.
+[allowlist]
+description = "Ignore the TS identifier clearEnrichmentCache mis-detected as a finnhub-access-token"
+regexes = [
+  '''^clearEnrichmentCache$''',
+]

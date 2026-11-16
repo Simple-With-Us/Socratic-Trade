@@ -7,7 +7,7 @@
 - Middleware: `/api/ops` added to `PUBLIC_PREFIXES`; auth is token-only inside the handler.
 
 ## Why
-- Cursor cloud agent cannot OAuth into `trading.jays.services` or read `data/app.db` on the Mac.
+- Cursor cloud agent cannot OAuth into `socratictrade.com` or read `data/app.db` on the Mac.
 - Needed a safe way to inspect production strategy-run failures and per-account state remotely.
 
 ## Files
@@ -31,7 +31,7 @@
 5. Probe:
    ```bash
    curl -sS -H "x-ops-token: $OPS_DIAGNOSTIC_TOKEN" \
-     "https://trading.jays.services/api/ops/snapshot?runs=15&audit=30" | jq .
+     "https://socratictrade.com/api/ops/snapshot?runs=15&audit=30" | jq .
    ```
 6. Cursor Cloud runtime secret `OPS_DIAGNOSTIC_TOKEN` — **done 2026-06-29** (start a **new** agent session so it is injected into the shell).
 

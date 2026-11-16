@@ -39,5 +39,5 @@
 
 ## Follow-ups
 
-- Production still needs deployment/sync before `trading.jays.services` reflects this branch.
+- Production still needs deployment/sync before `socratictrade.com` reflects this branch.
 - If future broker integrations add account health checks, feed them into `accountReadinessForSnapshot` instead of adding another client-only readiness guess.

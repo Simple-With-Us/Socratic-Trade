@@ -10,7 +10,7 @@
 ## Why
 
 - Production reconnect still landed on `robinhood.com/oauth/error` after clearing stale OAuth client/state rows.
-- Live config already has `ROBINHOOD_MCP_REDIRECT_URI=https://trading.jays.services/api/auth/robinhood/callback`, dynamic registration enabled, and no static client id.
+- Live config already has `ROBINHOOD_MCP_REDIRECT_URI=https://socratictrade.com/api/auth/robinhood/callback`, dynamic registration enabled, and no static client id.
 - Live DB showed a freshly registered dynamic client and pending state for the public callback, so the failure was no longer stale loopback callback handling.
 - Robinhood MCP OAuth requires the protected resource indicator so the authorization server can bind the grant to `https://agent.robinhood.com/mcp/trading`.
 
@@ -27,7 +27,7 @@
 ## Verification
 
 - Inspected production Infisical via `scripts/infisical-run.mjs` without printing secret values: dynamic registration is set, static client id/secret are empty, and public redirect is set.
-- Inspected live SQLite OAuth rows: cached dynamic client + pending state both used `https://trading.jays.services/api/auth/robinhood/callback`.
+- Inspected live SQLite OAuth rows: cached dynamic client + pending state both used `https://socratictrade.com/api/auth/robinhood/callback`.
 - `npx vitest run test/mcp-oauth.test.ts` (13 passed)
 - `npx tsc --noEmit`
 - `npm test` (153 files / 1486 tests passed)
@@ -35,4 +35,4 @@
 
 ## Follow-ups
 
-- Deploy this patch to production, restart `trading`, clear the current failed Robinhood MCP OAuth client/state rows, then retry reconnect from `trading.jays.services`.
+- Deploy this patch to production, restart `trading`, clear the current failed Robinhood MCP OAuth client/state rows, then retry reconnect from `socratictrade.com`.

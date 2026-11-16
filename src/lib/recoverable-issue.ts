@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+import crypto from "crypto";
 import { audit } from "./db";
 import { getInternalSetting, setInternalSetting } from "./db-settings";
 

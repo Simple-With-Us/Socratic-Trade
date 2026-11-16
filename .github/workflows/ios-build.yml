@@ -1,0 +1,174 @@
+name: iOS build
+
+# Compile-check and run XCTests for the iOS app on GitHub-hosted macos-latest.
+# Do not run xcodebuild locally. Do not restart the retired self-hosted
+# mac-xcode26-socratic runner. xcodebuild output is redirected to a file so
+# SWBBuildService cannot hold the Actions step pipe open after the process exits.
+#
+# A binary built against a beta SDK passes TestFlight upload but is rejected at
+# App Store submission as INVALID_BINARY (Congress.Trade 1.0 hit this twice). CI
+# pins DEVELOPER_DIR to stable and asserts the version so a stray xcode-select
+# can never silently move builds onto the beta.
+#
+# Deliberately unsigned (CODE_SIGNING_ALLOWED=NO) and no archive/upload —
+# TestFlight shipping stays in the fleet ship script, which has its own guard.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  # Must match the caller (ci.yml `concurrency`): never cancel an in-flight lane.
+  # A ref-keyed predicate here diverged from ci.yml and could tear down the iOS
+  # lane of a workflow_dispatch re-kick while the rest of the suite kept running
+  # (Kody review, PR #4231). Pending duplicates still collapse per ref.
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: xcodebuild (unsigned)
+    # Hosted macos-latest: still skip fork PRs so we do not spend minutes on untrusted code.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    # Cold builds on cloud runners finish within a few minutes.
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # project.yml is the source of truth.  Linux seats cannot run xcodegen, and
+      # the Cursor hook blocks hand-edits of project.pbxproj, so this Mac job
+      # generates before build/test.  ios-ship.yml installs the same XcodeGen
+      # pin so the ship script can generate before archive.  After this job,
+      # commit the generated file from the artifact so the checked-in pbxproj
+      # stays in sync.
+      - name: Generate Xcode project from project.yml
+        run: |
+          set -euo pipefail
+          xcg=""
+          if command -v xcodegen >/dev/null 2>&1; then
+            xcg="$(command -v xcodegen)"
+          else
+            ver="2.46.0"
+            zip="$RUNNER_TEMP/xcodegen.zip"
+            dest="$RUNNER_TEMP/xcodegen-$ver"
+            curl -fsSL -o "$zip" \
+              "https://github.com/yonaskolb/XcodeGen/releases/download/${ver}/xcodegen.zip"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            unzip -q "$zip" -d "$dest"
+            if [ -x "$dest/bin/xcodegen" ]; then
+              xcg="$dest/bin/xcodegen"
+            elif [ -x "$dest/xcodegen/bin/xcodegen" ]; then
+              xcg="$dest/xcodegen/bin/xcodegen"
+            else
+              # NOT `find ... | head -1`: this step runs `set -euo pipefail`, so head
+              # closing the pipe makes find take SIGPIPE and the step exit 141 rather
+              # than reaching the clear "xcodegen binary not found" error below.
+              xcg_all="$(find "$dest" -type f -name xcodegen -perm -111)"
+              xcg="${xcg_all%%$'\n'*}"
+            fi
+            if [ -z "$xcg" ] || [ ! -x "$xcg" ]; then
+              echo "::error::xcodegen binary not found in release zip ${ver}"
+              find "$dest" -maxdepth 4 -type f
+              exit 1
+            fi
+          fi
+          echo "Using xcodegen: $xcg"
+          "$xcg" --version || "$xcg" version || true
+          ( cd ios && "$xcg" generate )
+          python3 ios/xcodegen-post.py
+          grep -F "LayoutMathTests.swift in Sources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
+          grep -F "AppUpdatePromptTests.swift in Sources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
+          grep -F "PrivacyInfo.xcprivacy in Resources" "ios/Socratic Trade.xcodeproj/project.pbxproj"
+
+      - name: Upload generated pbxproj
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: generated-pbxproj
+          path: ios/Socratic Trade.xcodeproj/project.pbxproj
+          if-no-files-found: error
+
+      - name: Assert stable Xcode (never beta)
+        run: |
+          echo "DEVELOPER_DIR=${DEVELOPER_DIR}"
+          xcodebuild -version
+          ver=$(xcodebuild -version | awk 'NR==1{print $2}')
+          echo "Xcode version: ${ver}"
+          case "$DEVELOPER_DIR" in
+            *[Bb]eta*)
+              echo "::error::DEVELOPER_DIR resolves to a beta Xcode: $DEVELOPER_DIR"
+              exit 1
+              ;;
+          esac
+
+      - name: Build SocraticTrade (generic iOS device, unsigned)
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/xcodebuild-build.log"
+          # SWBBuildService outlives xcodebuild and inherits its stdout.  Left on the
+          # runner's own pipe it holds the step open until timeout-minutes kills it,
+          # even on a build that already printed BUILD SUCCEEDED.  A file breaks that
+          # inheritance.  See docs/rollouts/2026-08-21-ios-adaptive-tabs-followups.md
+          # item C and docs/rollouts/2026-08-21-ios-ci-unhang.md.
+          set +e
+          xcodebuild build \
+            -project 'ios/Socratic Trade.xcodeproj' \
+            -scheme SocraticTrade \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            > "$log" 2>&1 < /dev/null
+          status=$?
+          set -e
+          tail -300 "$log"
+          exit $status
+
+      - name: Test SocraticTrade (iOS Simulator, unsigned)
+        run: |
+          set -o pipefail
+          # Prefer iPhone 17 Pro (AGENTS.md).  Fall back to any available iPhone so a
+          # missing named device cannot skip the lane.  Select by UUID ($sim_id) to avoid
+          # ambiguity when multiple simulators share the same display name.
+          sim_id=$(
+            xcrun simctl list devices available \
+              | awk -F '[()]' '
+                  /iPhone 17 Pro/ && /Booted/ { booted17 = $2 }
+                  /iPhone 17 Pro/ && p17 == "" { p17 = $2 }
+                  /iPhone 16 Pro/ && p16 == "" { p16 = $2 }
+                  /iPhone / && first == "" { first = $2 }
+                  END {
+                    if (booted17 != "") print booted17
+                    else if (p17 != "") print p17
+                    else if (p16 != "") print p16
+                    else print first
+                  }
+                '
+          )
+          if [ -z "$sim_id" ]; then
+            echo "::error::No available iPhone simulator on this runner."
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator ID: $sim_id"
+          xcrun simctl boot "$sim_id" 2>/dev/null || true
+          log="$RUNNER_TEMP/xcodebuild-test.log"
+          set +e
+          xcodebuild test \
+            -project 'ios/Socratic Trade.xcodeproj' \
+            -scheme SocraticTrade \
+            -destination "platform=iOS Simulator,id=$sim_id" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            > "$log" 2>&1 < /dev/null
+          status=$?
+          set -e
+          tail -300 "$log"
+          exit $status

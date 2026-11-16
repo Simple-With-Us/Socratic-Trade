@@ -13,7 +13,7 @@
 
 - After merging PR #48 the user asked to deploy to "the actual site." Merging to
   `main` does not deploy: there is no deploy workflow, and production is a
-  self-hosted PM2 box (`~/apps/trading-live`, app `trading`, trading.jays.services)
+  self-hosted PM2 box (`~/apps/trading-live`, app `trading`, socratictrade.com)
   unreachable from the cloud agent environment. This stages an automated path so
   future merges roll out without manual host steps.
 

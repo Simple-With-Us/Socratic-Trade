@@ -281,7 +281,7 @@ describe("flag gate: HYBRID_RETRIEVAL in retrieveContextDetailed", () => {
     });
 
     // Index already exists.
-    integrationMocks.listIndexes.mockResolvedValue({ indexes: [{ name: "robinhood-agentic" }] });
+    integrationMocks.listIndexes.mockResolvedValue({ indexes: [{ name: "socratic-trade" }] });
 
     // Embed returns a query vector.
     integrationMocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
@@ -371,7 +371,7 @@ describe("flag gate: HYBRID_RETRIEVAL in retrieveContextDetailed", () => {
       process.env.HYBRID_RETRIEVAL = val;
 
       integrationMocks.embed.mockResolvedValue({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
-      integrationMocks.listIndexes.mockResolvedValue({ indexes: [{ name: "robinhood-agentic" }] });
+      integrationMocks.listIndexes.mockResolvedValue({ indexes: [{ name: "socratic-trade" }] });
       integrationMocks.resolveApiKey.mockImplementation((service: string) => {
         if (service === "pinecone") return process.env.PINECONE_API_KEY;
         if (service === "voyage") return process.env.VOYAGE_API_KEY;

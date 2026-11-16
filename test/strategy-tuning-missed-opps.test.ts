@@ -52,3 +52,60 @@ describe("summarizeMissedOpportunities", () => {
     expect(summary.recurringFactor).toBeUndefined();
   });
 });
+
+// ── P2-1 / P2-2: missed-opportunity HIT-RATE gate (track skipped LOSERS, benchmark parity) ────────
+describe("summarizeMissedOpportunities — P2-1 hit-rate gate (opt-in)", () => {
+  it("DEFAULT (requireHitRate off) is byte-identical to the winners-only count", () => {
+    const rows: MissedOpportunityInput[] = [
+      { symbol: "A", returnPct: 10, dominantFactor: "momentum" },
+      { symbol: "B", returnPct: 8, dominantFactor: "momentum" },
+      { symbol: "C", returnPct: -4, dominantFactor: "momentum" }
+    ];
+    const s = summarizeMissedOpportunities(rows, { minRecurringCount: 2 });
+    // Winners-only count: momentum recurs across 2 WINNERS regardless of the loser.
+    expect(s.recurringFactor).toBe("momentum");
+    expect(s.recurringFactorCount).toBe(2);
+    expect(s.baseHitRate).toBeUndefined();
+  });
+
+  it("with requireHitRate: a factor that only RECURS AMONG WINNERS but LOSES on balance is NOT flagged", () => {
+    // 'momentum' appears in 2 winners but 8 losers → 20% hit rate, well below the base rate → not flagged.
+    const rows: MissedOpportunityInput[] = [
+      ...Array.from({ length: 2 }, (_, i) => ({ symbol: `MW${i}`, returnPct: 10, dominantFactor: "momentum" as const })),
+      ...Array.from({ length: 8 }, (_, i) => ({ symbol: `ML${i}`, returnPct: -6, dominantFactor: "momentum" as const })),
+      // 'value' is a genuine winner: 4 winners / 5 total = 80% hit rate.
+      ...Array.from({ length: 4 }, (_, i) => ({ symbol: `VW${i}`, returnPct: 7, dominantFactor: "value" as const })),
+      { symbol: "VL0", returnPct: -2, dominantFactor: "value" as const }
+    ];
+    const s = summarizeMissedOpportunities(rows, { requireHitRate: true, minRecurringCount: 2, minHitRateDenominator: 5 });
+    // base rate = 6 winners / 15 total = 0.4. 'momentum' 20% < base → excluded; 'value' 80% >= base → flagged.
+    expect(s.baseHitRate).toBeCloseTo(0.4, 3);
+    expect(s.recurringFactor).toBe("value");
+    expect(s.recurringFactorHitRate).toBeGreaterThanOrEqual(s.baseHitRate!);
+  });
+
+  it("with requireHitRate: a factor below the minimum denominator is not flagged even at 100% wins", () => {
+    const rows: MissedOpportunityInput[] = [
+      { symbol: "Q0", returnPct: 5, dominantFactor: "quality" },
+      { symbol: "Q1", returnPct: 6, dominantFactor: "quality" },
+      // Filler losers so the base rate is meaningful.
+      ...Array.from({ length: 6 }, (_, i) => ({ symbol: `F${i}`, returnPct: -3, dominantFactor: "sentiment" as const }))
+    ];
+    // quality has only 2 rows < minHitRateDenominator (5) → not trusted → not flagged.
+    const s = summarizeMissedOpportunities(rows, { requireHitRate: true, minRecurringCount: 2, minHitRateDenominator: 5 });
+    expect(s.recurringFactor).toBeUndefined();
+  });
+
+  it("P2-2: benchmark-relative classifies BOTH winners and losers net-of-benchmark", () => {
+    const rows: MissedOpportunityInput[] = [
+      // Beat SPY (winner): +9 vs +2.
+      ...Array.from({ length: 5 }, (_, i) => ({ symbol: `W${i}`, returnPct: 9, benchmarkReturnPct: 2, dominantFactor: "momentum" as const })),
+      // Rose but LAGGED SPY (net loser): +3 vs +6.
+      ...Array.from({ length: 5 }, (_, i) => ({ symbol: `L${i}`, returnPct: 3, benchmarkReturnPct: 6, dominantFactor: "momentum" as const }))
+    ];
+    const s = summarizeMissedOpportunities(rows, { requireHitRate: true, benchmarkRelative: true, minRecurringCount: 2, minHitRateDenominator: 5 });
+    // 5 of 10 momentum names beat SPY → 50% hit rate == base rate → flagged (shrunk ~0.5 >= 0.5).
+    expect(s.baseHitRate).toBeCloseTo(0.5, 3);
+    expect(s.recurringFactor).toBe("momentum");
+  });
+});

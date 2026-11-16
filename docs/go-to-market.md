@@ -134,7 +134,7 @@ non-speculative equity/SaaS keywords, hard-capped.
 
 ## How to flip it on (when ready)
 
-1. Set `NEXT_PUBLIC_SITE_URL=https://trading.jays.services` (or the real domain).
+1. Set `NEXT_PUBLIC_SITE_URL=https://socratictrade.com` (or the real domain).
 2. Set `LANDING_PAGE_ENABLED=true` → `/welcome` becomes reachable.
 3. Only when you truly want search visibility: `NEXT_PUBLIC_ALLOW_INDEXING=true` →
    robots allows `/welcome`, pages become indexable; submit the sitemap to Google Search Console.

@@ -33,23 +33,18 @@ market-data MCP tools inside scheduled trading runs.
 1. Keep direct APIs for production scan, scoring, history, and execution-adjacent
    quote data.
 2. Use MCP as an advisory/developer surface for sources with official MCP servers:
-   FMP, Alpha Vantage, Twelve Data, EODHD, Intrinio, Nasdaq Data Link,
+   FMP, Alpha Vantage, Twelve Data, EODHD, Nasdaq Data Link,
    FinancialData.net, Trading Volatility, and Unusual Whales.
 3. Do not add a generic Yahoo-backed MCP from MCP Market to production. The app
    already has Yahoo direct fallback, and a third-party Yahoo MCP adds trust and
    operational risk without a new signal class.
-4. Use the Intrinio trial aggressively before paying $150/month. Intrinio is the
-   best "could replace several sources" candidate, but only if the trial proves
-   that its data quality, entitlements, and latency beat the existing cheaper
-   stack. The Individual plan is no-redistribution/no-external-display, so a
-   public product needs Startup or Enterprise licensing.
-5. Add Tiingo as the first low-cost direct adapter if the current Tiingo key is
+4. Add Tiingo as the first low-cost direct adapter if the current Tiingo key is
    active. Tiingo has no obvious first-party MCP, but its direct REST API is a
    good fit for EOD prices, IEX intraday, news, corporate actions, and possibly a
    cleaner price-history fallback than free Yahoo/Stooq.
-6. Consider FinancialData.net or EODHD as lower-cost all-in-one replacements if
-   Intrinio is too expensive. Both have official MCP surfaces and broad coverage.
-7. Add Trading Volatility or Unusual Whales only if the strategy needs options
+5. Consider FinancialData.net or EODHD as lower-cost all-in-one replacements.
+   Both have official MCP surfaces and broad coverage.
+6. Add Trading Volatility or Unusual Whales only if the strategy needs options
    flow, gamma/skew, dark-pool, or unusual-activity signals. They are
    differentiated signals, not replacements for fundamentals or OHLC history.
 
@@ -61,9 +56,8 @@ market-data MCP tools inside scheduled trading runs.
 | Alpha Vantage | Official MCP | Free standard limit is 25 requests/day. Premium starts at $49.99/mo for 75 requests/min and no daily cap. | News sentiment, indicators, macro/FX/crypto experiments. | Keep as supplemental sentiment only unless paid. MCP is convenient, but quota is too tight for scan loops. |
 | Twelve Data | Official MCP | Basic free: 8 API credits/min and 800/day. Grow starts $29/mo; Pro $99/mo. | Technical indicators, global stocks, forex/crypto, WebSocket experiments. | Strong low-cost candidate for direct technical/indicator adapter. MCP good for Strategy Studio deep dives. |
 | Tiingo | Community MCP only found | $30/mo individual, $50/mo internal commercial; free and paid API tiers exist. | EOD, IEX intraday, news, corporate actions, fundamentals add-on. | Add direct adapter first. Do not rely on community MCP for production. |
-| Intrinio | Official MCP | Individual $150/mo with trial; Startup starts $333/mo then steps up. Individual is no external display/redistribution. | Unified high-quality fundamentals, stock prices, options, ETFs, estimates, filings. | Best paid replacement candidate. Trial should benchmark against the full current stack before subscribing. |
 | EODHD | Official MCP | Free limited plan; paid plans start around $19.99/mo. MCP consumes normal API credits. | EOD/global prices, fundamentals, technical indicators, macro, logos, CBOE/UST, options EOD. | Strong cheaper all-in-one backup candidate. Test direct API for history/fundamentals before replacing FMP/Yahoo. |
-| FinancialData.net | Official MCP | Free: 300 req/day. Standard $19/mo. Premium $49/mo. Professional $99/mo includes MCP/internal commercial. Enterprise $199/mo includes display/redistribution. | Fundamentals, real-time, intraday, insider, institutional, ETF, ESG, broad reference data. | Very attractive price/coverage. Worth trialing before Intrinio if external display licensing matters. |
+| FinancialData.net | Official MCP | Free: 300 req/day. Standard $19/mo. Premium $49/mo. Professional $99/mo includes MCP/internal commercial. Enterprise $199/mo includes display/redistribution. | Fundamentals, real-time, intraday, insider, institutional, ETF, ESG, broad reference data. | Very attractive price/coverage. Worth trialing if external display licensing matters. |
 | Nasdaq Data Link | Official MCP | Licensed-data surface; free trial/contact flow. | Licensed Nasdaq/economic/alternative datasets, institutional subscriptions. | Advisory/research only unless a specific subscribed Nasdaq dataset fills a gap. |
 | mcpmarket stock-price | Third-party Yahoo MCP | No clear direct cost; depends on server trust. | Quick ad-hoc quote lookup. | Do not use in-app. Duplicates Yahoo fallback with worse provenance/control. |
 | Tastytrade | Community MCPs; official API | Brokerage API and DXLink quote token; data charges may apply by account/professional status. | Options chains/IV, account-level research, possible future broker support. | Do not use MCP for autonomous execution. Direct read-only broker integration can be considered later. |
@@ -72,49 +66,13 @@ market-data MCP tools inside scheduled trading runs.
 | Unusual Whales | Official public API and MCP URL | API trial/basic/advanced: public page shows roughly $50/week trial, $150/mo basic, $375/mo advanced. | Options flow, dark pool, congressional/insider-style alternative data. | Differentiated signal source. Only add if options-flow features become part of scoring. |
 | Trading Volatility | Official API and MCP | Subscriber API; 60 calls/min and 1,000,000 calls/month; price not exposed in captured text. | Gamma exposure, skew, call pressure, dark pool, dealer-positioning context. | High-signal options overlay. Good candidate for Strategy Studio and later scoring factor, not core price data. |
 
-## Intrinio Trial Plan
-
-Use the trial as a replacement benchmark, not just a feature tour.
-
-Test symbols:
-
-- Large-cap tech: AAPL, MSFT, NVDA, GOOGL
-- Volatile/growth: TSLA, AMD
-- Financials/defensive: JPM, V, UNH, WMT
-- Energy/industrial: XOM, BA
-- ETFs/index proxies: SPY, QQQ, IWM
-
-For each symbol, compare Intrinio against current providers for:
-
-- Latest quote: price, bid, ask, volume, timestamp, delay label.
-- Daily OHLC history: 1 year, 5 years, adjusted close, splits/dividends.
-- Fundamentals: revenue, EPS, FCF, debt/equity, P/E, P/B, ROE, dividend yield,
-  company profile, sector/industry.
-- Analyst/estimates: ratings, price targets, EPS/revenue estimates if entitled.
-- Options: chain, IV, Greeks, unusual activity, put/call skew if entitled.
-- ETF data: holdings, weights, sector concentration for SPY/QQQ/IWM.
-- Failure behavior: out-of-plan errors, rate limits, timeout shapes, empty rows.
-- Licensing: whether the data can be displayed inside beta/production and whether
-  any downstream redistribution is prohibited.
-
-Pass/fail threshold for paying $150/month:
-
-- Pay if Intrinio replaces at least three paid/fragile sources, materially improves
-  fundamentals/options quality, and the Individual license is sufficient for the
-  current private/beta use.
-- Do not pay if it only duplicates Yahoo/FMP/Finnhub fields, blocks display under
-  the intended use, or fails to provide options/estimates/fundamentals under the
-  trial entitlement.
-
 ## Implementation Order If We Proceed
 
-1. Add `tiingo` and `intrinio` to `API_KEY_ENV_MAP`, aliases, tier map, and the
-   Settings -> Connections catalog.
+1. Add `tiingo` to `API_KEY_ENV_MAP`, aliases, tier map, and the Settings ->
+   Connections catalog.
 2. Add direct REST adapters:
    - `TiingoHistoryProvider` in `history.ts` before Yahoo/Stooq.
    - `TiingoEnrichmentProvider` for news/corporate actions if the key has access.
-   - `IntrinioEnrichmentProvider` for fundamentals/estimates/options metadata
-     behind an explicit env/user key and conservative rate limits.
 3. Add provider probes under admin-only routes that return field coverage,
    timestamps, entitlement errors, and response-shape samples with secrets redacted.
 4. Add provenance labels in `src/lib/dashboard-ui.ts` and source ordering tests.
@@ -139,11 +97,6 @@ Pass/fail threshold for paying $150/month:
   https://www.tiingo.com/about/pricing
   https://www.tiingo.com/documentation/
   https://www.tiingo.com/products/end-of-day-stock-price-data
-- Intrinio MCP, plans, and starter guide:
-  https://intrinio.com/mcp
-  https://intrinio.com/
-  https://intrinio.com/guides/starter-plan
-  https://intrinio.com/products/us-fundamentals
 - EODHD MCP and EOD docs:
   https://eodhd.com/financial-apis/mcp-server-for-financial-data-by-eodhd
   https://eodhd.com/financial-apis/api-for-historical-data-and-volumes

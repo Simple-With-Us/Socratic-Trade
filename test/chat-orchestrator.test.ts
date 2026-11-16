@@ -64,6 +64,34 @@ describe("chat orchestrator (MockLLM)", () => {
     const user = turns.find((t) => t.role === "user");
     expect(user?.model ?? null).toBeNull();
   });
+
+  it("a retry with the same clientTurnId records the user turn exactly once but still answers", async () => {
+    const userId = "o_idem";
+    const first = await orchestrate({ userId, message: "AAPL price", clientTurnId: "ct-retry-1" });
+    const retry = await orchestrate({ userId, message: "AAPL price", clientTurnId: "ct-retry-1" });
+    expect(first.text.length).toBeGreaterThan(0);
+    expect(retry.text.length).toBeGreaterThan(0); // the retry's point is getting a reply
+    const userTurns = listTurns(userId).filter((t) => t.role === "user");
+    expect(userTurns.length).toBe(1);
+    expect(userTurns[0]!.clientTurnId).toBe("ct-retry-1");
+    // Both provider calls produced an assistant turn — only the user turn is deduped.
+    expect(listTurns(userId).filter((t) => t.role === "assistant").length).toBe(2);
+  });
+
+  it("two sends with distinct clientTurnIds record two user turns", async () => {
+    const userId = "o_idem2";
+    await orchestrate({ userId, message: "AAPL price", clientTurnId: "ct-a" });
+    await orchestrate({ userId, message: "AAPL price", clientTurnId: "ct-b" });
+    const userTurns = listTurns(userId).filter((t) => t.role === "user");
+    expect(userTurns.length).toBe(2);
+  });
+
+  it("sends without a clientTurnId are never deduped (legacy behavior preserved)", async () => {
+    const userId = "o_idem3";
+    await orchestrate({ userId, message: "AAPL price" });
+    await orchestrate({ userId, message: "AAPL price" });
+    expect(listTurns(userId).filter((t) => t.role === "user").length).toBe(2);
+  });
 });
 
 describe("chat orchestrator — NOW-tranche fixes (I1/I2/I3)", () => {

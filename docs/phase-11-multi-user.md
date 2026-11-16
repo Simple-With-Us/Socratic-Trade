@@ -1,8 +1,24 @@
 # Phase 11 - Multi-user & API-key management (plan)
 
+**Isolation audit (2026-08-17):** session `userId` is the only identity source; proposal/order
+SQL is `user_id`-scoped; Pinecone private namespaces are `private:<sha256(userId)>`.  Residual
+cross-tenant surfaces are intentional (shared operator RAG) or token-gated (ops snapshot).
+Evidence: `docs/audits/2026-08-17-security-reliability.md` §5.3.
+
+**iOS session hardening (2026-11-11, ST-4594):** the native client calls `POST /api/mobile/auth/handoff-prepare` before Google/GitHub OAuth, fetches `GET /api/mobile/auth/apple/nonce` before Sign in with Apple, and sends `x-socratic-mobile-session-hardening: 1` on those auth requests.  Sign-out and a change of signed-in account delete the push token before the session cookies go away.  Broker-account switch keeps the same user, so it does not unregister.  The server's `__legacy_compat__` paths stay until this build is on TestFlight and the App Store.  Rollout: `docs/rollouts/2026-11-11-st-4594-ios-session-hardening.md`.
+
+## CI pin-check reliability (2026-07-22)
+
+The shared-package pin workflow runs on every pull request so the status cannot disappear for
+unrelated code changes. It installs the pinned Node 24 toolchain before the comparison script,
+which uses Node for GitHub API JSON parsing. Congress.Trade is public, so the script reads
+the vendor tree with the Actions installation token first and uses `GH_PACKAGES_TOKEN` only
+as a fallback. Putting the user PAT first made a burst of pull requests share one rate limit.
+
 Goal: let multiple users use the app — logging in at the same or different times —
 each getting analysis and trade proposals tailored to **their own preferences and
-their own API keys**. Test mode stays the default; no live-trading behavior change.
+their own API keys**. With no connected broker account the app cannot place any
+order by default; no live-trading behavior change.
 
 **Current identity model:** middleware derives the request user from a verified
 Auth.js v5 session. The Cloudflare tunnel may still expose the app, but
@@ -10,7 +26,10 @@ Cloudflare Access email headers are not trusted as app identity. The primary
 operator and configured aliases still map to the legacy `local` dataset; other
 allowed users map to isolated hashed user IDs only when present in
 `ALLOWED_EMAILS`. When auth is not configured locally, development falls back to
-`local`.
+`local`.  The live desk is single-user today, but it stays multi-user-capable
+for friends/family: do not 404 `/welcome`, and do not rewrite the product as
+owner-only forever.  A second allowed email must keep an isolated `u_<hash>`
+dataset (policy, consent, legal notice, profiles).
 
 ## What already exists (foundation)
 - `user_api_keys` table + `getUserApiKey`/`listUserApiKeys`/`upsertUserApiKey`/
@@ -28,15 +47,20 @@ allowed users map to isolated hashed user IDs only when present in
   key fields, and users may connect one or more supported account types from
   Accounts. Paper accounts are optional; users do not need to connect one unless
   they want broker-hosted sandbox execution.
-- Execution mode is now derived as `test/local`, `broker/paper`, or `broker/live`
-  from the local simulation toggle plus the active connected-account environment.
-  Active broker paper accounts no longer collapse back into local `paperMode`,
-  so LLM prompts, post-mortems, strategy tuning, red-team review, and dashboard
-  labels can distinguish Test from broker-hosted paper environments such as
-  Alpaca Paper, and Brokerage from live broker production accounts.
+- Execution mode is derived purely from the active connected account's
+  `environment` — `broker/paper` or `broker/live` — with no local-simulation
+  toggle in the mix. When there is no connected account, `deriveExecutionState`
+  (`src/lib/execution-mode.ts`) returns a distinct "No account" state
+  (`mode: undefined`, `submitsBrokerOrders: false`): the app simply cannot
+  place orders rather than falling back to a fake local fill. LLM prompts,
+  post-mortems, strategy tuning, red-team review, and dashboard labels
+  distinguish broker-hosted paper environments such as Alpaca Paper from live
+  broker production accounts.
 - Strategy-run audit lookups for Latest Decisions and Strategy Tuning are scoped
   by `connectedAccountId`, matching the per-account run lock/state model so a
-  stale failure from one account does not appear under another selected account.
+  stale failure from one account does not appear under another selected account. Each approval
+  invocation has its own owner token, and a heartbeat-loss guard refuses broker placement when
+  that account-scoped ownership can no longer be proved.
 - Dashboard Activity/Audit feeds and run history now follow the selected
   connected account as the default view, while retaining user-wide/system audit
   rows in account views for context. Rows display the account label when present,
@@ -60,7 +84,9 @@ allowed users map to isolated hashed user IDs only when present in
   rows visible for management while failing closed for actual execution readiness
   when OAuth/auth, broker account enumeration, selected-account availability,
   broker `agenticAllowed`, or portfolio/balance reads fail. This applies to
-  Robinhood and Alpaca paths.
+  Robinhood and Alpaca paths.  A single slow or hung first `getAccounts` (common
+  after a container swap) is retried once with a 15s combined budget before that
+  fail-close; a credential / 401 throw still fails immediately.
 - Strategy profiles and prompts are now consistently scoped by `userId` for the
   default-user path; active-profile persistence writes to `user_settings`.
 - Request-level user resolution now has central helpers,
@@ -68,6 +94,13 @@ allowed users map to isolated hashed user IDs only when present in
   read only middleware's trusted `x-authenticated-user-email` header. Body/query
   `userId` hints are ignored; local development falls back to `local` only when
   auth is not armed.
+- Per-user daily LLM + RAG spend caps live in `user_settings.llm_daily_budget`
+  (Settings → Daily LLM Budget / iOS Account & Settings / `GET|PATCH
+  /api/settings/llm-budget`).  They are not Infisical secrets.  When a cap is
+  set, strategy, chat, and RAG skip for the rest of the day (fail-closed if
+  today's ledger cannot be read).  Per-user RAG run-budget knobs
+  (`RAG_RUN_BUDGET_*`) are Data Sources settings.  System secrets stay in
+  Infisical (`ENCRYPTION_KEY`, `AUTH_SECRET`, broker host, `OPS_DIAGNOSTIC_TOKEN`).
 - Ops foundation is now scaffolded for hosted/multi-user readiness: Infisical CLI
   wrappers for secret injection, local Gitleaks scanning, Sentry runtime error
   capture, Langfuse LLM traces with redacted summary capture by default, npm
@@ -86,6 +119,13 @@ allowed users map to isolated hashed user IDs only when present in
   `market-data` SSE refresh. This back-populates only from shared facts: env-key,
   no-key/free, or explicitly opted-in user-keyed history. A private user-key fill
   does not satisfy another user's pending demand.
+- Mobile/PWA/native clients now share one backend command gateway rather than
+  talking to every web endpoint directly. `/api/mobile/*` exposes a
+  request-scoped snapshot, audited command queue/status model, SSE updates, and
+  a multi-step account deletion flow. The phone PWA at `/mobile` and the
+  SwiftUI starter in `ios/SocraticTrade/` both treat the backend as the source
+  of truth; broker/provider secrets, MCP calls, scraping, calculations, and
+  order placement stay server-side. See `docs/mobile-api-and-clients.md`.
 
 ## Milestones
 
@@ -107,17 +147,28 @@ per-user via `upsertUserApiKey` under the default user.
 
 Current implementation: Settings -> Connections lists OpenAI, Anthropic,
 xAI/Grok, Google Gemini, Mistral, DeepSeek, Finnhub, FMP, Alpha Vantage,
-Marketstack, Tradier, FRED, SEC EDGAR User-Agent, and Massive with Set / Using
+Marketstack, FRED, SEC EDGAR User-Agent, and Massive with Set / Using
 env / Not set badges, docs links, masked write-only inputs, Save, and Clear.
+**Tradier was removed from this generic key catalog on 2026-07-16** — it is
+sourced from the connected Tradier BROKER account (Settings -> Accounts)
+instead, per owner direction that a broker-connection-only source shouldn't
+also appear as a separate, duplicate "API key" (see
+`docs/rollouts/2026-07-16-tradier-connected-account-history-source.md`).
 Backend `GET/POST/DELETE /api/keys` serves the same catalog and never returns
-secret values. Strategy Studio lets each user choose a Green Team model for
-proposal generation and an optional separate Red Team model for Bear review; if
-no Red Team override is set, Red reuses Green. Connections
-shows a read-only model summary and a link back to Strategy Studio so provider
-keys and model behavior stay connected without making Connections the editing
-surface. The visible model list omits legacy `gpt-4.1-mini`, keeps
-`gpt-5.4-nano` as the cheapest listed OpenAI option, and labels Grok choices
-with the same cost/strength style as OpenAI. Settings -> Operate stays focused
+secret values. Strategy lets the selected account strategy choose a Green
+Team model for proposal generation and an optional separate Red Team model for
+Bear review; if no Red Team override is set, Red reuses Green. Connections owns
+provider API keys only, while Account Settings -> Strategy keeps model behavior
+account-scoped and credentials user-scoped.
+The visible model list omits legacy OpenAI `gpt-4o`/`o1`/`o3` options from curated selectors,
+keeps `gpt-5.4-nano` as the cheapest listed OpenAI option, offers Claude alongside
+OpenAI for Green/Red Team and review work, uses current Gemini 3 selections
+(`gemini-3.1-flash-lite`, `gemini-3.5-flash`, `gemini-3.1-pro-preview`), current
+Mistral Small/Medium selections (`mistral-small-2603`, `mistral-medium-3-5`), and
+current DeepSeek V4 selections (`deepseek-v4-flash` / `deepseek-v4-pro`) instead
+of the older DeepSeek aliases. Provider-specific reasoning/thinking controls are
+shown only for selected models that expose them.
+Settings -> Operate stays focused
 on universe, authority, horizon, and system Start/Stop controls. Settings ->
 Accounts continues to own brokerage-account credentials. Settings -> Accounts
 presents Robinhood through the same supported-account button
@@ -222,6 +273,13 @@ Real identity via Auth.js v5 sign-in. Key changes:
   Replaced with: `authConfigured = !!AUTH_SECRET`. This is evaluated at request
   time. The moment `AUTH_SECRET` is set, auth is armed.
 
+- **Admin authorization is independently fail-closed**: middleware forwards an identity-source
+  provenance header together with the authenticated email. `requireAdmin` accepts an allowlisted or
+  primary email only when its source is verified Cloudflare Access or Auth.js; the auth-unconfigured
+  `PRIMARY_USER_EMAIL` fallback never grants admin access. The timing-safe `x-admin-token` remains
+  the explicit non-session operator path. `NODE_ENV` and request hostnames are never authorization
+  signals, and there is no unauthenticated local bypass.
+
 - **Identity sources** (first match wins):
   1. Auth.js v5 session JWT cookie, verified through the shared edge-safe HS256 helper.
   2. `PRIMARY_USER_EMAIL` fallback — only when `authConfigured=false` (local dev/tests).
@@ -277,13 +335,25 @@ proposal is `placing`, or any broker-routed fill is still
 `pending_reconciliation`. The app does not auto-cancel broker orders or close
 broker positions during account deletion.
 
+Deletion permanently fences the prior opaque user generation. A later account is created only from a
+verified provider session issued after the deletion cutoff. Auth.js forwards its signed `loginAt`.
+Cloudflare Access application-token `iat` is deliberately not accepted as fresh-login proof because an
+application token may refresh without a new IdP sign-in; a Cloudflare-fronted request must also carry a
+matching signed Auth.js session with a post-cutoff `loginAt`. Missing or pre-cutoff claims fail closed
+instead of reopening the deleted generation.
+
 Deletion removes the user's private app rows from user API keys, connected
 accounts, strategy profiles/runs/settings, proposals, snapshots, fills,
 synthetic stops, notifications, watchlists, alerts, chat, user memory,
 learned-context pending rows, learned-context rows where they are either owner
 or contributor, LLM usage, market-data demands, and normal audit events. It also
+removes exact FMP-derived provenance rows and private-vector provider-work receipts after provider-first
+private-vector erasure succeeds. Those tables are part of the versioned schema so the account-deletion
+coverage test and database write-fence triggers cannot miss them. It also
 clears per-user Robinhood MCP OAuth tokens and pending OAuth states while
-preserving the global MCP client registration. The only retained deletion record
+preserving the global MCP client registration. One canonical ownership matcher also fences and erases
+user-owned internal settings, including provider/risk/learning state, model rotation, usage/health alerts,
+and broker-minimum alert cooldowns. The only retained deletion record
 is `account_deletion_audit`, which stores a non-reversible subject hash, schema
 version, timestamps, and row counts; it does not store raw email, raw userId,
 symbols, broker account numbers, chat text, proposal JSON, or credentials.
@@ -303,6 +373,37 @@ description changes. The Help modal should reflect the actual provider stack,
 avoid giving one provider special treatment unless the runtime does, and link
 source names to their provider or API-key pages when applicable.
 
+### M8 `[foundation]` Shared mobile API, PWA, and SwiftUI client
+
+The mobile path is intentionally a backend-mediated command system, not a second
+set of trading controls:
+
+- `mobile_commands` stores command id, authenticated user, idempotency key,
+  command type, payload, status, result/error, client metadata, and timing fields.
+- `POST /api/mobile/commands` validates and queues commands; the backend worker
+  claims queued rows, runs the existing server-side trading/account/watchlist/
+  alert/policy functions, audits success or failure, and emits status events.
+- `GET /api/mobile/snapshot` packages the dashboard snapshot into a phone-friendly
+  response with readiness, policy, portfolio, positions, proposals, accounts,
+  watchlist, alerts, and recent commands.
+- `GET /api/mobile/events` streams command and dashboard freshness updates for
+  the signed-in user.
+- `/mobile` redirects to `/console`.  The live phone surfaces are the website at
+  phone width and the native iOS app (`ios/SocraticTrade/`), both using the same
+  backend command model.
+- `ios/SocraticTrade/` uses the same endpoints and keeps only the backend session
+  on-device. User-visible copy is product copy only — coordinator or owner notes
+  belong in PRs and docs, not the iOS UI. Agent Controls expose Start / Stop /
+  Close Only / Wind Down (protective commands stay available even when the
+  snapshot is stale). Setup that the phone cannot edit (broker connect, strategy
+  universe) opens Safari to `/console/connections` and `/console/strategy` —
+  those paths are deliberately not AASA-claimed so the tap does not loop back
+  into a missing screen. Export compliance (`ITSAppUsesNonExemptEncryption=false`)
+  and `PrivacyInfo.xcprivacy` ship with the target.
+- Account deletion routes reuse the audited M7 deletion lifecycle: prepare first,
+  type the signed-in identity and required phrase, then confirm/sign out with
+  provider-side guidance for optional OAuth grant revocation.
+
 ## Sequencing & risk
 M1 → M2 are near-term and low-risk (additive; default user). M3–M5 are the real
 architectural lift (userId scoping across the DB + scheduler) and should land
@@ -318,4 +419,5 @@ commands must not overwrite an existing DB without a separate manual decision.
 Single-user behavior is byte-for-byte unchanged with the default user; adding a key
 in Settings makes that provider use it (verified via the source attribution string);
 two users with different policies produce different proposals from the same shared
-market data; secrets are never shown or logged; Test mode stays default.
+market data; secrets are never shown or logged; with no connected broker
+account the app cannot place orders by default.

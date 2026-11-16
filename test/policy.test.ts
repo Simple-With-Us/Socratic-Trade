@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { allowedSymbolsForPolicy, evaluateTradeProposal } from "../src/lib/policy";
+import { allowedSymbolsForPolicy, applyOpeningOrderHeadroom, evaluateTradeProposal } from "../src/lib/policy";
 import type { AccountCapabilities, EquityPosition, MarketQuote, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
-import { getUserWashSaleLockedSymbols } from "../src/lib/tax";
+import { getUserWashSaleLockProvenance } from "../src/lib/tax";
+import type { WashSaleLockMap } from "../src/lib/tax";
 
 // Mock the tax module so the authoritative wash-sale gate tests don't need a DB.
 vi.mock("../src/lib/tax", () => ({
   getUserWashSaleLockedSymbols: vi.fn((_userId: string) => new Set<string>()),
+  getUserWashSaleLockProvenance: vi.fn((_userId: string): WashSaleLockMap => new Map()),
 }));
 
 // Minimal AccountCapabilities that grants short-selling for tests that verify the enabled path.
@@ -34,11 +36,14 @@ const positions: EquityPosition[] = [{ symbol: "AAPL", quantity: 5, averageCost:
 const enabledPolicy: TradingPolicy = {
   ...DEFAULT_POLICY,
   systemState: "active",
-  paperMode: false,
   strategyAuthority: "decide",
   accountNumber: "A1",
   includedIndices: [],
-  additionalSymbols: ["AAPL", "TSLA"]
+  additionalSymbols: ["AAPL", "TSLA"],
+  // maxQuoteAgeSec defaulted to 120 on 2026-07-28 (guard enablement); these tests exercise OTHER
+  // gates without a marketScan in context, so pin the staleness gate off — a missing timestamp is
+  // treated as stale while the gate is on.
+  maxQuoteAgeSec: 0
 };
 
 const proposal: TradeProposal = {
@@ -96,9 +101,11 @@ describe("evaluateTradeProposal", () => {
     expect(decision.approved).toBe(true);
   });
 
-  it("blocks a buy of a wash-sale-locked symbol when the guard is on", () => {
+  it("blocks a buy of a wash-sale-locked symbol when the guard is on and handling is explicitly 'block'", () => {
+    // "auto" (the default since 2026-07-03) always proceeds — explicitly opt into "block" to
+    // exercise the hard-stop path this test is about.
     const decision = evaluateTradeProposal(proposal, {
-      policy: enabledPolicy,
+      policy: { ...enabledPolicy, taxSettings: { washSaleGuard: true, washSaleHandling: "block" as const, shortTermRatePct: 24, longTermRatePct: 15 } },
       portfolio,
       positions,
       dailyNotionalUsed: 0,
@@ -124,29 +131,35 @@ describe("evaluateTradeProposal", () => {
   });
 
   // Authoritative cross-account wash-sale gate (architecture-blueprint §3.3):
-  // the gate must block the buy even when the caller omits washSaleLockedSymbols,
-  // resolving the set via getUserWashSaleLockedSymbols(userId) itself.
+  // the gate must block the buy even when the caller omits the locked set/map,
+  // resolving the provenance via getUserWashSaleLockProvenance(userId) itself.
   it("blocks a buy of a wash-sale-locked symbol at the gate even when washSaleLockedSymbols is omitted", () => {
-    vi.mocked(getUserWashSaleLockedSymbols).mockReturnValueOnce(new Set(["TSLA"]));
+    vi.mocked(getUserWashSaleLockProvenance).mockReturnValueOnce(
+      new Map([["TSLA", { account: "ACC1", clearDate: new Date("2026-07-20T00:00:00.000Z"), lossUsd: 100 }]])
+    );
+    // "auto" (the default since 2026-07-03) always proceeds — explicitly opt into "block" to
+    // exercise the hard-stop path this test is about.
     const decision = evaluateTradeProposal(proposal, {
-      policy: enabledPolicy,
+      policy: { ...enabledPolicy, taxSettings: { washSaleGuard: true, washSaleHandling: "block" as const, shortTermRatePct: 24, longTermRatePct: 15 } },
       portfolio,
       positions,
       dailyNotionalUsed: 0,
       dailyOrderCount: 0,
       estimatedNotional: 10,
       userId: "user-test",
-      // intentionally omitting washSaleLockedSymbols — gate must resolve it itself
+      // intentionally omitting washSaleLocks/washSaleLockedSymbols — gate must resolve it itself
     });
-    expect(getUserWashSaleLockedSymbols).toHaveBeenCalledWith("user-test", expect.any(Date));
+    expect(getUserWashSaleLockProvenance).toHaveBeenCalledWith("user-test", expect.any(Date));
     expect(decision.approved).toBe(false);
     expect(decision.reasons.some((r) => r.includes("wash-sale"))).toBe(true);
   });
 
-  it("does not call getUserWashSaleLockedSymbols when washSaleLockedSymbols is pre-populated", () => {
-    vi.mocked(getUserWashSaleLockedSymbols).mockClear();
+  it("does not call getUserWashSaleLockProvenance when washSaleLockedSymbols is pre-populated", () => {
+    vi.mocked(getUserWashSaleLockProvenance).mockClear();
+    // "auto" (the default since 2026-07-03) always proceeds — explicitly opt into "block" to
+    // exercise the hard-stop path this test is about.
     const decision = evaluateTradeProposal(proposal, {
-      policy: enabledPolicy,
+      policy: { ...enabledPolicy, taxSettings: { washSaleGuard: true, washSaleHandling: "block" as const, shortTermRatePct: 24, longTermRatePct: 15 } },
       portfolio,
       positions,
       dailyNotionalUsed: 0,
@@ -156,7 +169,7 @@ describe("evaluateTradeProposal", () => {
       userId: "user-test",
     });
     // Pre-populated set is used directly; no extra DB call.
-    expect(getUserWashSaleLockedSymbols).not.toHaveBeenCalled();
+    expect(getUserWashSaleLockProvenance).not.toHaveBeenCalled();
     expect(decision.approved).toBe(false);
     expect(decision.reasons.some((r) => r.includes("wash-sale"))).toBe(true);
   });
@@ -242,9 +255,21 @@ describe("evaluateTradeProposal", () => {
     expect(decision.reasons.join(" ")).toContain("exceeds the maximum order limit");
   });
 
+  it("blocks opening orders that sit inside the max but leave no execution buffer", () => {
+    expect(applyOpeningOrderHeadroom(4.99)).toBe(4.74);
+    const decision = evaluateTradeProposal({ ...proposal, dollarAmount: 4.95 }, {
+      ...context(4.95),
+      policy: { ...enabledPolicy, maxOrderNotional: 4.99, maxOrderPctOfNav: undefined, maxDailyNotional: 100 }
+    });
+    expect(decision.approved).toBe(false);
+    expect(decision.reasons.join(" ")).toContain("less than 5% buffer");
+    expect(decision.reasons.join(" ")).toContain("$4.74");
+  });
+
   it("blocks daily notional overflow", () => {
     const decision = evaluateTradeProposal(proposal, {
       ...context(),
+      policy: { ...enabledPolicy, maxDailyNotional: 500, maxDailyPctOfNav: undefined },
       dailyNotionalUsed: 495
     });
     expect(decision.approved).toBe(false);
@@ -392,6 +417,28 @@ describe("evaluateTradeProposal", () => {
     expect(decision.approved).toBe(true);
   });
 
+  it("does not apply the crisis cap to a non-canonical free-text regime label (typed-enum hardening)", () => {
+    // Same over-cap opening exposure as the blocking case above, but with a bare non-canonical
+    // "Crisis" label. The old substring rule (includes("crisis")) would have capped it; the typed
+    // adoption maps any non-canonical string to `unknown`, so a stray label can never silently trip
+    // the crisis cap. Production always persists a canonical label via determineMarketRegime.
+    const decision = evaluateTradeProposal(
+      { ...proposal, entryMarketRegime: "Crisis", dollarAmount: 1200 },
+      {
+        ...context(1200),
+        policy: {
+          ...enabledPolicy,
+          maxOrderNotional: 2000,
+          maxOrderPctOfNav: 100,
+          maxDailyNotional: 5000,
+          maxSymbolExposurePct: 50,
+          tuning: { crisisMaxOpeningExposurePct: 5 }
+        }
+      }
+    );
+    expect(decision.approved).toBe(true);
+  });
+
   it("does not block risk-reducing sells or covers with the crisis exposure cap", () => {
     const sell = evaluateTradeProposal(
       { ...proposal, symbol: "AAPL", side: "sell", quantity: 1, dollarAmount: undefined, limitPrice: 1200, entryMarketRegime: "Crisis (Extreme Volatility)" },
@@ -505,6 +552,23 @@ describe("evaluateTradeProposal", () => {
   it("short without a mandatory stop-loss is rejected when short selling is enabled", () => {
     const decision = evaluateTradeProposal(
       { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000 },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.approved).toBe(false);
+    expect(decision.reasons.join(" ")).toContain("mandatory stop-loss");
+  });
+
+  it("an explicit stopPlan: 'none' short satisfies the mandatory-stop-loss gate (owner decision, 2026-07-15 — a deliberate no-stop choice is okay)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "none", rationale: "deliberately unhedged short thesis" } },
+      { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
+    );
+    expect(decision.reasons.join(" ")).not.toContain("mandatory stop-loss");
+  });
+
+  it("an explicit stopPlan: 'default' short does NOT satisfy the mandatory-stop-loss gate (defers to the account's own precedence, which here guarantees nothing)", () => {
+    const decision = evaluateTradeProposal(
+      { ...proposal, symbol: "MSFT", side: "short", dollarAmount: 1000, stopPlan: { style: "default" } },
       { ...context(1000), policy: { ...enabledPolicy, shortSellingEnabled: true, riskRules: { ...enabledPolicy.riskRules, shortStopLossPct: 0 } }, accountCapabilities: shortCapableAccount }
     );
     expect(decision.approved).toBe(false);
@@ -653,6 +717,45 @@ describe("evaluateTradeProposal", () => {
       estimatedNotional: 10
     });
     expect(decision.approved).toBe(true);
+  });
+
+  describe("bracket-order permission (Codex review, PR #1371)", () => {
+    // A bare account: no "bracket" in permittedOrderTypes, no stopLossPct configured — the two
+    // pre-existing green-lights for a bracket order.
+    const barePolicy: TradingPolicy = { ...enabledPolicy, riskRules: { ...enabledPolicy.riskRules, stopLossPct: 0 } };
+
+    it("still blocks a bracket with no explicit stop plan on a bare account (unchanged baseline)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9 },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.approved).toBe(false);
+      expect(decision.reasons.join(" ")).toContain("Bracket orders require");
+    });
+
+    it("permits a bracket on a bare account when the proposal carries an explicit 'fixed' stop plan (the plan guarantees the bracket via the universal-availability fallback)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "fixed" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).not.toContain("Bracket orders require");
+    });
+
+    it("permits a bracket on a bare account when the proposal carries an explicit 'atr' stop plan", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "atr" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).not.toContain("Bracket orders require");
+    });
+
+    it("does NOT permit a bracket on a bare account for a 'trailing'/'none'/'default' plan (those never attach a bracket leg in the first place, so this shouldn't matter, but the permission gate itself must not misread them as a green light)", () => {
+      const decision = evaluateTradeProposal(
+        { ...proposal, bracketStopLoss: 9, stopPlan: { style: "trailing" } },
+        { policy: barePolicy, portfolio, positions, dailyNotionalUsed: 0, dailyOrderCount: 0, estimatedNotional: 10 }
+      );
+      expect(decision.reasons.join(" ")).toContain("Bracket orders require");
+    });
   });
 });
 

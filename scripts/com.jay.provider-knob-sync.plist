@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<!--
+  TEMPLATE launchd job for scripts/sync-provider-knobs.sh (NOT installed by default).
+
+  Runs the provider-knob sync every 30 minutes with the apply flag, so the trading app's
+  Infisical prod knobs stay in sync with the plans tracked in the API-Usage-Monitor.
+
+  INSTALL (owner action; see docs/rollouts/2026-07-10-provider-knob-sync.md):
+    1. Edit the paths below if this repo does not live at /Users/jay/Code/Socratic-Trade.
+       SSH target is launchd-inherited from the script: Host coolify (Hetzner).
+    2. Applied changes are journaled to stderr; this job sends no Zulip message.
+       Historical FLEET_POST settings do not enable notification delivery.
+    3. cp scripts/com.jay.provider-knob-sync.plist ~/Library/LaunchAgents/
+       launchctl load  -w ~/Library/LaunchAgents/com.jay.provider-knob-sync.plist
+    4. Dry-run first WITHOUT the apply flag to confirm the diff before trusting the writer:
+       bash scripts/sync-provider-knobs.sh
+
+  UNINSTALL:
+    launchctl unload -w ~/Library/LaunchAgents/com.jay.provider-knob-sync.plist
+    rm ~/Library/LaunchAgents/com.jay.provider-knob-sync.plist
+
+  The job is safe to leave running: monitor-unreachable or in-sync runs exit 0
+  and write nothing; it only ever writes the allow-listed provider knobs.
+-->
+  <key>Label</key>
+  <string>com.jay.provider-knob-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jay/Code/Socratic-Trade/scripts/sync-provider-knobs.sh</string>
+    <string>--apply</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/jay/Code/Socratic-Trade</string>
+
+  <!-- launchd starts with a bare PATH; node/ssh/curl must be reachable. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>FLEET_POST_REPO</key>
+    <string>Socratic-Trade</string>
+    <!-- FLEET_POST_REPO is a retired compatibility value; it sends no message. -->
+  </dict>
+
+  <!-- Every 30 minutes. Does NOT run at load (avoid a surprise write on install). -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jay/Library/Logs/provider-knob-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jay/Library/Logs/provider-knob-sync.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

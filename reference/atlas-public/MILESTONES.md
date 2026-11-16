@@ -24,7 +24,7 @@ Reconciled the `codex/rag-knowledge-base` branch (built off an older `gh-pages`)
 
 ## 2026-06-20 (i) — Auto-deploy (self-update on merge) ✅
 
-Future merges to `gh-pages` now reach `trading.jays.services` with no manual steps.
+Future merges to `gh-pages` now reach `socratictrade.com` with no manual steps.
 
 - `deploy/auto-update.sh`: fetches the deploy branch (`DEPLOY_BRANCH`, default `gh-pages`); if the
   remote moved, fast-forward pulls and restarts the app service (`launchctl kickstart`, with an
@@ -73,9 +73,9 @@ Completes the trading loop (draft → confirm → **track to fill**) and makes t
 
 ## 2026-06-20 (e) — Self-host deploy scaffold (Mac + Cloudflare Tunnel) ✅
 
-Production target is the existing self-hosted setup — the BFF on the MacBook Air exposed at `trading.jays.services` via a Cloudflare Tunnel — **not** a new cloud host. Added the operational scaffolding for it. **34/34 tests still passing.**
+Production target is the existing self-hosted setup — the BFF on the MacBook Air exposed at `socratictrade.com` via a Cloudflare Tunnel — **not** a new cloud host. Added the operational scaffolding for it. **34/34 tests still passing.**
 
-- **`DEPLOY.md`** runbook: configure `.env` for prod (`HOST=127.0.0.1`, `STORE=file`, `CORS_ORIGIN`, `SESSION_SECRET`, optional Anthropic/Alpaca), keep-alive via `launchd`, expose via Cloudflare Tunnel, backups, updates, and a host-independent "production-ready" checklist. Documents the `trading.jays.services` (prod) / `claude-dev` etc. naming convention.
+- **`DEPLOY.md`** runbook: configure `.env` for prod (`HOST=127.0.0.1`, `STORE=file`, `CORS_ORIGIN`, `SESSION_SECRET`, optional Anthropic/Alpaca), keep-alive via `launchd`, expose via Cloudflare Tunnel, backups, updates, and a host-independent "production-ready" checklist. Documents the `socratictrade.com` (prod) / `claude-dev` etc. naming convention.
 - **`deploy/`**: `start.sh` (loads `.env`, finds node), `install-launchd.sh` (generates + loads a `com.jays.trading` LaunchAgent with RunAtLoad + KeepAlive), `cloudflared.config.example.yml` (ingress → `127.0.0.1:8787`), `backup-state.sh` (timestamped `.data/state.json` snapshots, keeps last 30).
 - **Config:** added `HOST` (default `0.0.0.0` for dev; set `127.0.0.1` in prod so only the local tunnel can reach the BFF); server binds it.
 - **Decision:** Cloudflare Tunnel confirmed as the right exposure method (no port-forward/CGNAT-friendly, edge TLS, optional Cloudflare Access as a future auth front door). Managed cloud hosting (Render/Fly) is explicitly **deferred as a future option** in `DEPLOY.md`, only if the laptop being off becomes unacceptable or 24/7 multi-user is needed.

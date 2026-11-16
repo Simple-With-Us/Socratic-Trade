@@ -20,12 +20,12 @@ The settings had two tiers but the code treated everything as one monolithic blo
 ## Phase 2: Settings UI split
 - Added top-level `Segmented` control for "User Settings" / "Account Settings" in `SettingsContent`
 - User tier: Connections, Display, Notifications, Data tabs + auto-resume toggle
-- Account tier: Operate, Safety, Tax, Tuning tabs + account picker dropdown
+- Account tier: Strategy, Operate, Safety, Tax, Tuning tabs + account picker dropdown
 - Account picker calls `POST /api/connected-accounts/:id/activate` to switch accounts
 - Added tier-based JSX wrapper fragments (`{settingsTier === "account" && <>...}`) to each section
 
 ## Phase 3: Persistence write-path refactor
-- Defined `USER_LEVEL_POLICY_FIELDS` set in `src/lib/db-profiles.ts`: `llmModel`, `redTeamLlmModel`, `llmReasoningEffort`, `notificationSettings`, `marketScanCandidateLimit`, `marketScanOutlierReserve`
+- Defined `USER_LEVEL_POLICY_FIELDS` set in `src/lib/db-profiles.ts`: `notificationSettings`, `marketScanCandidateLimit`, `marketScanOutlierReserve`
 - Added helper functions: `pickUserFields()`, `pickAccountFields()`, `readUserPolicyFields()`, `writeUserPolicyFields()`
 - Modified `setPolicy()`:
   - With connected account: writes user fields to `user_settings.policy`, account fields to `account_strategy_state.policy` + `strategy_profiles`
@@ -73,3 +73,31 @@ The settings had two tiers but the code treated everything as one monolithic blo
 - `npm test -- test/per-account-policy-isolation.test.ts` - first run failed because the regression setup inserted over an already lazily seeded account row; changed the setup to `INSERT OR REPLACE`, then passed with 10 tests.
 - `npx tsc --noEmit` - passed cleanly.
 - `npm run lint` - passed with 0 errors and 256 existing warnings.
+
+## 2026-06-30 Settings scope/help follow-up
+
+### Summary
+- Moved the Strategy Studio entry point out of User -> Connections and into Account -> Strategy.
+- Changed Green/Red model and reasoning effort persistence from user-level policy fields to account-scoped strategy fields, with a compatibility seed for older user-level model selections.
+- Added compact per-field help affordances and a Settings Glossary in System Help.
+
+### Why
+- Strategy prompt, model choice, reasoning effort, scoring weights, and tuning reviews all govern the selected account strategy. Provider API keys remain user-scoped credentials.
+
+### Files
+- `app/ui/primitives.tsx`
+- `app/dashboard-client.tsx`
+- `src/lib/db-profiles.ts`
+- `src/lib/types.ts`
+- `test/per-account-policy-isolation.test.ts`
+- `docs/phase-11-multi-user.md`
+- `docs/rollouts/2026-06-30-settings-scope-help-overhaul.md`
+- `STATUS.md`
+- `PLAN.md`
+
+### Verification
+- `npm test -- test/per-account-policy-isolation.test.ts` - passed, 10 tests.
+- `npm run lint` - passed with 0 errors and 255 existing warnings.
+- `npx tsc --noEmit` - passed.
+- `npm test` - passed, 160 files / 1555 tests.
+- `npm run build` - passed.

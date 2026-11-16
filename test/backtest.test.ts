@@ -3,12 +3,17 @@ import {
   computeFactorICs,
   computePerFactorIC,
   computeCompositeIC,
+  pairedICDiffStats,
   deriveWeightsFromICs,
   deriveWeightsFromIC,
   splitWalkForward,
+  formatOosWindow,
   adjustReturns,
   buildEquityCurve,
+  maxDrawdownOfCurve,
+  isPointInTimeForwardExit,
   MARKET_FACTORS,
+  type EquityCurvePoint,
   type FactorIC,
   type FactorObservation
 } from "../src/lib/backtest";
@@ -211,6 +216,55 @@ describe("splitWalkForward", () => {
   });
 });
 
+describe("splitWalkForward — boundary report (§6 slice 3)", () => {
+  const dates = [
+    "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05",
+    "2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10"
+  ];
+  const observations = dates.map((d) => obs(d, "A", 0.01, { momentum: 1 }));
+
+  it("reports exact fold indices with embargo only (default)", () => {
+    // 10 dates × 0.7 → cutIdx 7; embargo 2 date-buckets → test starts at index 9.
+    const { train, test, boundary } = splitWalkForward(observations, 0.7, 2);
+    expect(boundary).toEqual({ totalDates: 10, cutIdx: 7, trainCutIdx: 7, testCutIdx: 9 });
+    expect(new Set(train.map((o) => o.date)).size).toBe(7);
+    expect([...new Set(test.map((o) => o.date))]).toEqual(["2026-06-10"]);
+    // Derived window arithmetic: embargo = testCutIdx - cutIdx; purged = cutIdx - trainCutIdx.
+    expect(boundary.testCutIdx - boundary.cutIdx).toBe(2);
+    expect(boundary.cutIdx - boundary.trainCutIdx).toBe(0);
+  });
+
+  it("reports the purge shrinking the train side (P1-2 opt-in)", () => {
+    const { train, boundary } = splitWalkForward(observations, 0.7, 2, { purge: true });
+    expect(boundary).toEqual({ totalDates: 10, cutIdx: 7, trainCutIdx: 5, testCutIdx: 9 });
+    expect(new Set(train.map((o) => o.date)).size).toBe(5);
+    expect(boundary.cutIdx - boundary.trainCutIdx).toBe(2);
+  });
+
+  it("caps the embargo at the available dates", () => {
+    const { test, boundary } = splitWalkForward(observations, 0.7, 50);
+    expect(boundary.testCutIdx).toBe(10);
+    expect(test.length).toBe(0);
+  });
+});
+
+describe("formatOosWindow (§6 slice 3)", () => {
+  it("renders the held-out window, train window, embargo and purge in one clause", () => {
+    const clause = formatOosWindow(
+      {
+        trainStartDate: "2026-01-05", trainEndDate: "2026-05-29",
+        embargoDates: 5, purgedTrainDates: 0,
+        testStartDate: "2026-06-05", testEndDate: "2026-07-29"
+      },
+      34,
+      78
+    );
+    expect(clause).toBe(
+      "held-out window 2026-06-05→2026-07-29 (34 dates; train 2026-01-05→2026-05-29, 78 dates; embargo 5, purge 0)"
+    );
+  });
+});
+
 describe("adjustReturns", () => {
   it("subtracts cost and applies tax only to positive after-cost returns", () => {
     const observations: FactorObservation[] = [
@@ -280,6 +334,100 @@ describe("computeCompositeIC", () => {
     const { meanIC, icIR } = computeCompositeIC(observations, allMomentum);
     expect(meanIC).toBeCloseTo(0, 10); // mean of +1 and −1
     expect(Number.isFinite(icIR)).toBe(true);
+  });
+});
+
+// Panel P0-2: the paired per-date IC-difference significance basis for the autonomous gate.
+describe("pairedICDiffStats", () => {
+  const momentumWeights = (() => {
+    const w = { ...DEFAULT_SCORING_WEIGHTS };
+    for (const f of MARKET_FACTORS) w[f] = f === "momentum" ? 1 : 0;
+    return w;
+  })();
+  const valueWeights = (() => {
+    const w = { ...DEFAULT_SCORING_WEIGHTS };
+    for (const f of MARKET_FACTORS) w[f] = f === "value" ? 1 : 0;
+    return w;
+  })();
+
+  it("returns n=0 stats for empty input", () => {
+    expect(pairedICDiffStats([], momentumWeights, valueWeights)).toEqual({ n: 0, meanDiff: 0, stdDiff: 0, seDiff: 0, tStat: 0 });
+  });
+
+  it("candidate that predicts well vs a baseline that predicts poorly gives a large positive paired-t", () => {
+    // Momentum (candidate) ranks strongly with return (~+1 IC/date); value (baseline) is much weaker or
+    // inverse. Each date's paired diff is a large positive number; a little per-date jitter keeps the SE
+    // finite (a t-stat is undefined at exactly-zero variance) → a large, well-defined positive t-stat.
+    const observations: FactorObservation[] = [];
+    for (let d = 0; d < 6; d++) {
+      const date = `2026-06-${String(10 + d).padStart(2, "0")}`;
+      // momentum ↑ with return (strong), value roughly inverse; symbol C's value rank flips slightly per day
+      // so the baseline IC (and thus the paired diff) varies a touch date-to-date → non-zero SE.
+      observations.push(obs(date, "A", 0.01, { momentum: 10, value: 40 }));
+      observations.push(obs(date, "B", 0.02, { momentum: 20, value: 30 }));
+      observations.push(obs(date, "C", 0.03, { momentum: 30, value: d % 2 === 0 ? 20 : 35 }));
+      observations.push(obs(date, "D", 0.04, { momentum: 40, value: 10 }));
+    }
+    const stats = pairedICDiffStats(observations, momentumWeights, valueWeights);
+    expect(stats.n).toBe(6);
+    expect(stats.meanDiff).toBeGreaterThan(1.5); // candidate clearly beats baseline
+    expect(stats.tStat).toBeGreaterThan(5); // finite SE from per-date jitter → large positive t
+  });
+
+  it("identical candidate and baseline weights give meanDiff 0 and tStat 0 (no significance)", () => {
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.01, { momentum: 10 }),
+      obs("2026-06-10", "B", 0.02, { momentum: 20 }),
+      obs("2026-06-11", "A", 0.03, { momentum: 10 }),
+      obs("2026-06-11", "B", 0.05, { momentum: 20 })
+    ];
+    const stats = pairedICDiffStats(observations, momentumWeights, momentumWeights);
+    expect(stats.meanDiff).toBeCloseTo(0, 12);
+    expect(stats.tStat).toBe(0);
+  });
+
+  it("a single paired date yields tStat 0 (no SE from one point)", () => {
+    const observations: FactorObservation[] = [
+      obs("2026-06-10", "A", 0.01, { momentum: 10, value: 40 }),
+      obs("2026-06-10", "B", 0.04, { momentum: 40, value: 10 })
+    ];
+    const stats = pairedICDiffStats(observations, momentumWeights, valueWeights);
+    expect(stats.n).toBe(1);
+    expect(stats.tStat).toBe(0);
+  });
+
+  // Codex finding #7: a UNIFORM positive diff (candidate perfectly beats an inverse baseline on every date →
+  // per-date diff is a constant +2, variance 0) must be treated as SIGNIFICANT (+Infinity), NOT rejected as 0.
+  it("a uniform positive zero-variance diff yields +Infinity (significant), not 0", () => {
+    const observations: FactorObservation[] = [];
+    for (let d = 0; d < 4; d++) {
+      const date = `2026-06-${String(10 + d).padStart(2, "0")}`;
+      // momentum ↑ with return (+1 IC), value ↓ with return (−1 IC) on EVERY date → diff = +2 every date.
+      observations.push(obs(date, "A", 0.01, { momentum: 10, value: 40 }));
+      observations.push(obs(date, "B", 0.02, { momentum: 20, value: 30 }));
+      observations.push(obs(date, "C", 0.03, { momentum: 30, value: 20 }));
+      observations.push(obs(date, "D", 0.04, { momentum: 40, value: 10 }));
+    }
+    const stats = pairedICDiffStats(observations, momentumWeights, valueWeights);
+    expect(stats.n).toBe(4);
+    expect(stats.meanDiff).toBeCloseTo(2, 8);
+    expect(stats.seDiff).toBe(0);
+    expect(stats.tStat).toBe(Infinity); // a uniformly-better candidate clears ANY finite paired-t threshold
+  });
+
+  it("a uniform NEGATIVE zero-variance diff yields -Infinity (candidate uniformly worse)", () => {
+    const observations: FactorObservation[] = [];
+    for (let d = 0; d < 4; d++) {
+      const date = `2026-06-${String(10 + d).padStart(2, "0")}`;
+      // Swap roles: candidate=momentum tracks INVERSE of return, baseline=value tracks WITH return → diff −2.
+      observations.push(obs(date, "A", 0.04, { momentum: 10, value: 40 }));
+      observations.push(obs(date, "B", 0.03, { momentum: 20, value: 30 }));
+      observations.push(obs(date, "C", 0.02, { momentum: 30, value: 20 }));
+      observations.push(obs(date, "D", 0.01, { momentum: 40, value: 10 }));
+    }
+    const stats = pairedICDiffStats(observations, momentumWeights, valueWeights);
+    expect(stats.meanDiff).toBeCloseTo(-2, 8);
+    expect(stats.tStat).toBe(-Infinity); // uniformly worse → never passes a positive threshold
   });
 });
 
@@ -418,5 +566,95 @@ describe("deriveWeightsFromIC", () => {
     const qualifiedSum = MARKET_FACTORS.reduce((s, f) => s + (weights[f] ?? 0), 0);
     // All qualify, so total weight sum should equal DEFAULT sum.
     expect(qualifiedSum).toBeCloseTo(defaultSum, 5);
+  });
+});
+
+// ── P1-2: purged & embargoed walk-forward split ─────────────────────────────────────────────────
+describe("splitWalkForward — P1-2 purge (opt-in, default-off byte-identical)", () => {
+  const seven: FactorObservation[] = ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06", "2026-01-07"]
+    .map((d) => obs(d, "A", 0.01, { momentum: 1 }));
+
+  it("DEFAULT (no options): identical to the prior positional call — embargo only, no purge", () => {
+    // 7 dates × 0.7 = cut at 4 → train = first 4 dates; embargo horizonDays=2 → test drops the first 2 test buckets.
+    const legacy = splitWalkForward(seven, 0.7, 2);
+    const withEmptyOpts = splitWalkForward(seven, 0.7, 2, {});
+    expect(new Set(withEmptyOpts.train.map((o) => o.date))).toEqual(new Set(legacy.train.map((o) => o.date)));
+    expect(new Set(withEmptyOpts.test.map((o) => o.date))).toEqual(new Set(legacy.test.map((o) => o.date)));
+    // Train keeps the full first-4 prefix when purge is off.
+    expect(new Set(legacy.train.map((o) => o.date))).toEqual(new Set(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]));
+  });
+
+  it("PURGE on: drops the last `horizonDays` train-date buckets (the boundary-straddling rows)", () => {
+    const purged = splitWalkForward(seven, 0.7, 2, { purge: true });
+    // cutIdx=4, purge 2 → train = first 2 dates only; the boundary rows (dates 3 & 4) are purged.
+    expect(new Set(purged.train.map((o) => o.date))).toEqual(new Set(["2026-01-01", "2026-01-02"]));
+    // Test side is unchanged by the purge (still embargoed): dates 7 (indices 6) after testCut=4+2=6.
+    expect(new Set(purged.test.map((o) => o.date))).toEqual(new Set(["2026-01-07"]));
+  });
+
+  it("PURGE always keeps at least one train date even when horizonDays >= cutIdx", () => {
+    const purged = splitWalkForward(seven, 0.7, 10, { purge: true });
+    expect(purged.train.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── P2-4: IC-weight shrinkage toward the default prior ───────────────────────────────────────────
+describe("deriveWeightsFromICs — P2-4 shrinkage (default λ=0 no-op)", () => {
+  const spikyICs: FactorIC[] = MARKET_FACTORS.map((factor, i) => ({ factor, ic: i === 0 ? 1 : 0.0, n: 30 }));
+
+  it("λ=0 (default) is byte-identical to the unshrunk vector", () => {
+    const unshrunk = deriveWeightsFromICs(spikyICs);
+    const zeroLambda = deriveWeightsFromICs(spikyICs, DEFAULT_SCORING_WEIGHTS, 0);
+    expect(zeroLambda).toEqual(unshrunk);
+    // A single high-IC factor gets ALL the weight without shrinkage.
+    expect(unshrunk[MARKET_FACTORS[0]]).toBeCloseTo(1, 6);
+  });
+
+  it("λ>0 pulls the vector toward the default prior and still sums to 1", () => {
+    const shrunk = deriveWeightsFromICs(spikyICs, DEFAULT_SCORING_WEIGHTS, 0.5);
+    // The spiked factor is damped below its unshrunk 1.0.
+    expect(shrunk[MARKET_FACTORS[0]]).toBeLessThan(1);
+    expect(shrunk[MARKET_FACTORS[0]]).toBeGreaterThan(0.5);
+    // Other factors gain some prior mass (were 0 unshrunk).
+    expect(shrunk[MARKET_FACTORS[1]]).toBeGreaterThan(0);
+    const sum = MARKET_FACTORS.reduce((s, f) => s + shrunk[f], 0);
+    expect(sum).toBeCloseTo(1, 6);
+  });
+
+  it("λ=1 equals the unshrunk vector (all weight on the IC estimate)", () => {
+    expect(deriveWeightsFromICs(spikyICs, DEFAULT_SCORING_WEIGHTS, 1)).toEqual(deriveWeightsFromICs(spikyICs));
+  });
+});
+
+// ── P2-5: max-drawdown helper ────────────────────────────────────────────────────────────────────
+describe("maxDrawdownOfCurve — P2-5", () => {
+  const pt = (cumulativeReturn: number): EquityCurvePoint => ({
+    date: "2026-01-01", nNames: 1, periodReturn: 0, benchmarkReturn: null, cumulativeReturn, benchmarkCumulativeReturn: null
+  });
+  it("0 for an empty or monotonically-rising curve", () => {
+    expect(maxDrawdownOfCurve([])).toBe(0);
+    expect(maxDrawdownOfCurve([pt(0), pt(0.1), pt(0.2)])).toBe(0);
+  });
+  it("captures the deepest peak-to-trough decline as a %", () => {
+    // Peak equity 1.2 (cum +0.2), trough 0.9 (cum −0.1) → dd = (1.2−0.9)/1.2 = 0.25 → 25%.
+    expect(maxDrawdownOfCurve([pt(0), pt(0.2), pt(-0.1), pt(0.05)])).toBeCloseTo(25, 6);
+  });
+});
+
+// ── P1-4a: HARD look-ahead invariant (CI-failing on leakage) ─────────────────────────────────────
+// 2026-01-05 is a Monday with no US market holiday before 2026-01-12, so 5 TRADING days lands on
+// Mon 2026-01-12 (Tue/Wed/Thu/Fri/Mon) — not the calendar-day "Sat 2026-01-10" this test asserted
+// before the trading-day-horizon fix (see docs/rollouts/2026-07-04-w1-learning-loops.md).
+describe("isPointInTimeForwardExit — P1-4a leakage certification", () => {
+  it("a same-day exit is REJECTED as look-ahead", () => {
+    expect(isPointInTimeForwardExit("2026-01-05", 5, "2026-01-05")).toBe(false);
+  });
+  it("an exit before the horizon target is REJECTED", () => {
+    // horizon 5 trading days → target 2026-01-12; an exit at 2026-01-08 is too early.
+    expect(isPointInTimeForwardExit("2026-01-05", 5, "2026-01-08")).toBe(false);
+  });
+  it("an exit at/after the horizon target AND strictly after the snapshot is ACCEPTED", () => {
+    expect(isPointInTimeForwardExit("2026-01-05", 5, "2026-01-12")).toBe(true);
+    expect(isPointInTimeForwardExit("2026-01-05", 5, "2026-01-13")).toBe(true);
   });
 });

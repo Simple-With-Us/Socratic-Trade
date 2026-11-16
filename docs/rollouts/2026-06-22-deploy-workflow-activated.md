@@ -41,7 +41,7 @@ and debugged it end-to-end with the owner.
 
 **Result:** Deploy run #6 succeeded on `trading-live-mac` (all steps green;
 fetch → reset → `npm ci` → `npm run build` → `pm2 restart trading` → `pm2 save`).
-`https://trading.jays.services/` returns HTTP 302 (the prod auth gate), i.e. the
+`https://socratictrade.com/` returns HTTP 302 (the prod auth gate), i.e. the
 site is up and serving the merged code (transparent ticker-logo default + tile
 fallback, source-picker removal, strategic-framework docs/PDF).
 
@@ -67,7 +67,7 @@ fallback, source-picker removal, strategic-framework docs/PDF).
 ## Verification
 
 - Deploy run #6: success, all steps green on `trading-live-mac`.
-- `curl -I https://trading.jays.services/` → HTTP 302 (auth gate; site live).
+- `curl -I https://socratictrade.com/` → HTTP 302 (auth gate; site live).
 - CI `verify` + `gitleaks` green on PRs #79/#81/#82 before merge.
 
 ## Follow-ups / notes

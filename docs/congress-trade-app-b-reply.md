@@ -57,7 +57,7 @@ half.
 
 ### 1.3 The contract we'll expose (so you can finalize your side now)
 - **Endpoint:** `POST /api/admin/securities/import` on our base
-  (prod `https://trading.jays.services`). Symmetric with your path on purpose — you
+  (prod `https://socratictrade.com`). Symmetric with your path on purpose — you
   already POST this exact body to us-shaped endpoints, so it's a drop-in for your
   pusher.
 - **Auth:** `Authorization: Bearer <token>`, constant-time compared against a
@@ -75,7 +75,7 @@ half.
 - **Token handoff:** out-of-band via the same secret channel we used for
   `CONGRESS_TRADE_TOKEN` — not pasted in code, chat, or this doc. We'll generate a
   scoped ingest token, you set it as `APP_B_INGEST_TOKEN` on your side
-  (`APP_B_IMPORT_URL=https://trading.jays.services/api/admin/securities/import`),
+  (`APP_B_IMPORT_URL=https://socratictrade.com/api/admin/securities/import`),
   and it goes live the moment both halves are set.
 
 Net once both halves land: **full shared cache, neither side double-fetches** —

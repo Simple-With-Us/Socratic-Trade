@@ -3,7 +3,21 @@
 Forward plan consolidating every still-unimplemented idea, recommendation, and
 consideration from this work stream — the Codex "Stronger Trading Signals And
 Learning Loop" plan, the Codex optimization pass, the Codex review, and Claude's
-brainstorms. Test mode remains the default; **no live-trading behavior changes**.
+brainstorms. As of 2026-07-03, the older paper/Test-mode default framing in this
+document is stale: Socratic Trade treats connected broker account environment as
+the execution source of truth, and no connected account means no order placement.
+The Socratic autonomy implementation adds first-class surfaces and persistence
+for evidence contribution, dissent, outcome learning, coaching, and agent-authored
+framework improvements; `/design/socratic-trade` is now a coded public overview of those
+surfaces rather than a standalone mockup.
+See `docs/rollouts/2026-07-03-socratic-autonomy-ui.md`.
+As of 2026-07-04, `codex/console-ui-swimlane` adds the read-only decision trace inspector,
+coach-on-trace notes, approval receipt provenance/citations, and mobile LIVE phrase parity for
+those Socratic decision surfaces. See `docs/rollouts/2026-07-04-console-ui-swimlane.md`.
+As of 2026-07-04 later, `codex/coach-framework-primitives` lets the decision-trace coach flow
+promote directly into lesson/framework primitives, persists explicit framework rewrite verbs plus
+owner responses, and shows linked run metadata when the source `runId` is still resolvable. See
+`docs/rollouts/2026-07-04-coach-framework-primitives.md`.
 
 ## Status legend
 `[done]` shipped · `[todo]` not started · `[partial]` partly done.
@@ -130,7 +144,10 @@ Codex: "major planned sources remain unimplemented." Default to free/official fi
 - **C5 `[todo]` Analyst revisions / price-target changes / earnings calendar.** FMP
   endpoints are rate-limited on the current key → capability-gate behind a paid key,
   or find a free feed. M.
-- **C6 `[todo]` SEC XBRL company-facts** for richer/standardized fundamentals. M.
+- **C6 `[planned]` SEC XBRL company-facts** for richer/standardized fundamentals. The 2026-07-12
+  1,000-issuer plan makes this a persistent, accession/date/dimension-aware structured fact store rather than
+  raw-JSON embeddings or a one-ratio enrichment. It precedes the narrative bulk backfill. M. See
+  `docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`.
 - Each new source: persisted daily refresh, never-fabricate, evidence bulletins,
   source attribution, and a UI surface (Smart Money panel / scan column).
 
@@ -160,7 +177,15 @@ Codex: "make prompt compaction adaptive."
   pacing. Retrieved snippets are sent in the dynamic user payload as
   `retrievedFinancialContext`, not in the stable system prompt. Still open: full
   filing-text/news digests, stale-data flags, timeout budgets, and separate
-  public/private index routing for a production-grade document memory.
+  public/private index routing for a production-grade document memory. The 2026-07-12
+  1,000-issuer audit additionally makes occurrence-level provenance, durable artifact/job
+  state, historical/exhibit discovery, DOM/iXBRL tables, exact PIT dates, true corpus-wide
+  lexical recall, wide reranking/diversity, and real-EDGAR evaluation prerequisites to any
+  bulk backfill; raised caps alone do not satisfy this item. See
+  `docs/reviews/2026-07-12-sec-rag-1000-stock-backfill-plan.md`. The 2026-07-21
+  `corpus-wide-lexical.ts` foundation safely queries the existing FTS5 occurrence corpus with
+  strict `accepted_at` point-in-time behavior; it is not yet strategy-wired or fused with dense
+  retrieval, so it does not authorize a corpus write or broad backfill.
 - **D4 `[todo]` Cross-source agreement flags** when providers disagree on a value.
 
 ## Phase E — UI
@@ -206,8 +231,9 @@ Codex: "symbol drilldown drawer … learning matrix."
 1. **D1 + D2** (efficiency) before sources balloon the prompt further.
 2. **B3 + B4** (counterfactual skipped-name returns + factor-bucket learning).
 3. **E1/E2 completion** (true contribution math, raw evidence links, learning matrix).
-4. **C5 + C6** (analyst/earnings revisions and SEC XBRL facts).
-5. **D3/D4 + E3/E4** (production-grade digests/RAG, cross-source disagreement,
+4. **C6 + D3 foundations** (SEC manifest/XBRL facts, provenance-safe occurrence identity,
+   raw archive, parser/chunker, durable worker, and real-EDGAR evaluation) before bulk writes.
+5. **C5 + D3/D4 + E3/E4** (analyst/earnings revisions, production-grade digests/RAG, cross-source disagreement,
    UI polish and remaining scoring-threshold settings) as capacity allows.
 
 ## Cross-cutting acceptance (every phase)
@@ -215,3 +241,7 @@ Codex: "symbol drilldown drawer … learning matrix."
 `npm run build` ok · no synthetic/"mock" data shown user-facing or to the LLM ·
 missing provider keys → neutral/stale signals, never fake confidence · a
 `docs/rollouts/*` note + `STATUS.md`/`PLAN.md` update per commit (AGENTS.md).
+
+## Public description scope — 2026-09-27
+
+The welcome and framework pages describe evidence and outcomes as available records whose coverage depends on configured sources and completed workflows.  They do not promise complete traces for every proposal or improved future trading results.  Coaching and proposed changes remain reviewable features; this copy update does not alter learning-review modes or automatic application settings.  See `rollouts/2026-09-27-public-copy-scope.md`.

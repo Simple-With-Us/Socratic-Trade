@@ -3,15 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { applyDeterministicSizing, enrichOpeningProposal } from "../src/lib/strategy";
-import { redTeamProvider } from "../src/lib/red-team";
+import { enrichOpeningProposal } from "../src/lib/strategy";
 import type { MarketQuote, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
+import { applyDeterministicSizing } from "../src/lib/strategy-risk";
 
-// Covers the four functional "cheap wins" distilled from Antigravity's strategy critique:
+// Covers the functional "cheap wins" distilled from Antigravity's strategy critique:
 //   - ADV (market-impact) order-size cap in deterministic sizing
 //   - marketable-limit entry conversion in enrichOpeningProposal
-//   - the optional cross-provider Red Team provider selector
-// (The vol-panic brake is unit-tested in macro.test.ts; the ADV approval gate in policy.test.ts.)
+// (The vol-panic brake is unit-tested in macro.test.ts; the ADV approval gate in policy.test.ts.
+//  The former RED_TEAM_LLM_PROVIDER selector was DELETED 2026-07-07 — the single-adversary
+//  consolidation killed the env override; the reviewer's provider comes only from the user's
+//  explicit redTeamLlmModel.)
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-cheapwins-${randomUUID()}.db`)}`;
@@ -124,6 +126,46 @@ describe("ADV (market-impact) sizing cap", () => {
     expect(enriched.bracketStopLoss).toBeCloseTo(314.07, 2);
     expect(enriched.bracketTakeProfit).toBeCloseTo(394.26, 2);
   });
+
+  it("raises to a whole share for an explicit 'fixed'/'atr' stop plan even when the account's own stopLossPct/takeProfitPct are both 0 (the plan guarantees a bracket via the universal-availability fallback — Codex review, PR #1371)", () => {
+    const policy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      accountNumber: "BRACKET-MIN-PLAN",
+      activeBroker: "alpaca",
+      maxOrderNotional: 10_000,
+      maxOrderPctOfNav: undefined,
+      maxOrderPctOfAdv: undefined,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 0, takeProfitPct: 0 } // bare account
+    };
+    const scan = scanWith(quote({ symbol: "V", price: 334.12, volume: 1_000_000 }));
+    const sized = applyDeterministicSizing(
+      buyProposal({ symbol: "V", dollarAmount: 50, stopPlan: { style: "fixed" } }),
+      policy, PORTFOLIO, "paper", "local", [], scan
+    );
+    expect(sized.dollarAmount).toBe(335); // one whole share at $334.12, not left sub-share
+    expect(sized.rationale).toContain("whole-share bracket");
+    const enriched = enrichOpeningProposal(sized, policy, scan);
+    expect(enriched.bracketStopLoss).toBeCloseTo(307.39, 2); // STOP_PLAN_FALLBACK_STOP_PCT (8%) below entry
+  });
+
+  it("does NOT bump a sub-share order for a 'trailing'/'none' plan (no bracket is ever attached for these, so there's nothing to size a whole share for)", () => {
+    const policy: TradingPolicy = {
+      ...DEFAULT_POLICY,
+      accountNumber: "BRACKET-MIN-NOPLAN",
+      activeBroker: "alpaca",
+      maxOrderNotional: 10_000,
+      maxOrderPctOfNav: undefined,
+      maxOrderPctOfAdv: undefined,
+      riskRules: { ...DEFAULT_POLICY.riskRules, stopLossPct: 6, takeProfitPct: 18 }
+    };
+    const scan = scanWith(quote({ symbol: "V", price: 334.12, volume: 1_000_000 }));
+    const sized = applyDeterministicSizing(
+      buyProposal({ symbol: "V", dollarAmount: 50, stopPlan: { style: "trailing" } }),
+      policy, PORTFOLIO, "paper", "local", [], scan
+    );
+    expect(sized.dollarAmount).toBe(50); // left as-is, no whole-share bump
+    expect(sized.rationale).not.toContain("whole-share bracket");
+  });
 });
 
 describe("marketable-limit entry conversion", () => {
@@ -155,27 +197,27 @@ describe("marketable-limit entry conversion", () => {
     expect(out.bracketStopLoss).toBeUndefined();
     expect(out.rationale).toContain("Native Alpaca bracket skipped");
   });
-});
 
-describe("redTeamProvider selector", () => {
-  const original = process.env.RED_TEAM_LLM_PROVIDER;
-  afterEach(() => {
-    if (original === undefined) delete process.env.RED_TEAM_LLM_PROVIDER;
-    else process.env.RED_TEAM_LLM_PROVIDER = original;
-  });
+  it("clears LLM bracket fields when a $4.60 Alpaca order cannot fund one $87.77 share", () => {
+    const scan = scanWith(quote({ symbol: "EXE", price: 87.77, ask: 87.8, volume: 1_000_000 }));
+    const out = enrichOpeningProposal(
+      buyProposal({
+        symbol: "EXE",
+        dollarAmount: 4.6,
+        referencePrice: 87.77,
+        bracketStopLoss: 86.1,
+        bracketTakeProfit: 94.2,
+        bracketStopLimit: 85.9
+      }),
+      policyOn,
+      scan
+    );
 
-  it("defaults to openai", () => {
-    delete process.env.RED_TEAM_LLM_PROVIDER;
-    expect(redTeamProvider()).toBe("openai");
-  });
-
-  it("selects anthropic when explicitly set (case-insensitive)", () => {
-    process.env.RED_TEAM_LLM_PROVIDER = "Anthropic";
-    expect(redTeamProvider()).toBe("anthropic");
-  });
-
-  it("ignores unrecognized values", () => {
-    process.env.RED_TEAM_LLM_PROVIDER = "gemini";
-    expect(redTeamProvider()).toBe("openai");
+    expect(out.type).toBe("market");
+    expect(out.dollarAmount).toBe(4.6);
+    expect(out.bracketStopLoss).toBeUndefined();
+    expect(out.bracketTakeProfit).toBeUndefined();
+    expect(out.bracketStopLimit).toBeUndefined();
+    expect(out.rationale).toContain("Native Alpaca bracket skipped");
   });
 });

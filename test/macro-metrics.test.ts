@@ -21,6 +21,7 @@ function macro(overrides: Partial<MacroData> = {}): MacroData {
     wtiOil: "$75.00",
     housingStarts: "1.30M",
     consumerSentiment: "75.0",
+    nonfarmPayrollsChangeK: "+150K",
     vix: "15.00",
     vix3m: "17.00",
     asOf: "2026-06-17",
@@ -57,5 +58,22 @@ describe("deriveMacroMetrics", () => {
     expect(m.realFedFunds).toBeUndefined();
     expect(m.miseryIndex).toBeUndefined();
     expect(m.yieldCurveSpread).toBeUndefined(); // dgs10 unparseable
+  });
+
+  it("derives NOTHING from the VIX-only fallback shape (all FRED fields blank) except VIX-gated terms", () => {
+    // fetchVixOnlyFallback blanks every FRED field to "" — no derived metric may be computed
+    // off placeholder constants, so none of these can enter the strategy prompt or the console.
+    const blank = Object.fromEntries(
+      Object.entries(macro()).map(([k, v]) => [k, typeof v === "string" ? "" : v])
+    ) as unknown as MacroData;
+    const m = deriveMacroMetrics({ ...blank, vix: "22.50", asOf: "2026-06-21" }, { marketEarningsYield: 6 });
+    expect(m.curve3m10y).toBeUndefined();
+    expect(m.curve2s10s).toBeUndefined();
+    expect(m.yieldCurveSpread).toBeUndefined();
+    expect(m.real10Y).toBeUndefined();
+    expect(m.realFedFunds).toBeUndefined();
+    expect(m.miseryIndex).toBeUndefined();
+    expect(m.vixTermStructure).toBeUndefined(); // vix3m is blank — no fabricated term structure
+    expect(m.equityRiskPremium).toBeUndefined(); // 10Y is blank
   });
 });

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 180" role="img" aria-label="Speech-bubble chart mark with Socratic Trade wordmark">
+  <rect x="90" y="32" width="120" height="86" rx="24" fill="none" stroke="#0f1722" stroke-width="9"/>
+  <polygon points="114,116 114,150 150,116" fill="#0f1722"/>
+  <polyline points="114,92 138,72 154,82 184,54" fill="none" stroke="#0e9f6e" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="184" cy="54" r="8" fill="#0e9f6e"/>
+  <text x="252" y="104" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="46" font-weight="600" fill="#0f1722" textLength="310">Socratic Trade</text>
+</svg>

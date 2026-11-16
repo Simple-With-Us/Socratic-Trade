@@ -4,6 +4,31 @@ This document evaluates the trade-offs of using the official **Alpaca Model Cont
 
 ---
 
+## Update 2026-06-30 — two different "MCP" scenarios, don't conflate them
+
+This doc (below) is entirely about **Scenario 1**: an external chat client (Claude
+Desktop, Cursor) connecting *directly* to Alpaca's MCP server, bypassing this app. That
+framing is correct and the cautions below still apply to it.
+
+It does not cover **Scenario 2**, which already exists in this codebase: this app's own
+backend calling Alpaca's MCP server as a network transport instead of the REST SDK (the
+`alpaca-mcp` broker type / `AlpacaBrokerGateway`'s `isMcp` flag, see
+`docs/rollouts/2026-06-21-alpaca-mcp-integration.md`). In Scenario 2, MCP is fully wrapped
+by the same policy/cap/review/persistence pipeline as REST — every order still goes
+through `executeProposal`/the run-loop's guardrails before `gateway.placeEquityOrder()` is
+called; the "State Synchronization: Out-of-Sync" and "Safety & Guardrails: None" rows in
+the table below do **not** apply to it. It's a transport choice (REST vs. MCP-as-a-network-
+protocol to reach the same Alpaca API), not a safety bypass. Robinhood's entire
+integration is this same Scenario 2 pattern — Robinhood has no REST alternative, so MCP
+there is a network-transport default, not an optional add-on.
+
+Full cross-broker MCP evaluation (Alpaca, Robinhood, eToro, Public.com, IBKR) — including
+which brokers even *have* a trading-capable MCP server (eToro's official one is
+docs-only, for example) — lives in `docs/broker-capability-plan.md` §7. Read that doc
+first if the question is "should we use MCP for broker X."
+
+---
+
 ## 1. Architectural Roles
 
 - **Alpaca REST API**: Programmatic, deterministic access used by our server-side Next.js loops. All actions go through our local database, state tracker, and safety engines.

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
-import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, getThemeClasses, type ExecutionAccount } from "../src/lib/execution-mode";
-import type { ConnectedAccount } from "../src/lib/types";
+import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, type ExecutionAccount } from "../src/lib/execution-mode";
 
 const alpacaPaperAccount: ExecutionAccount = {
   id: "alpaca-paper",
@@ -19,92 +18,73 @@ const alpacaLiveAccount: ExecutionAccount = {
   label: "Alpaca Live"
 };
 
-const mockConnectedAccount: ConnectedAccount = {
-  id: "conn-1",
-  userId: "local",
-  broker: "alpaca",
+const tradierPaperAccount: ExecutionAccount = {
+  id: "tradier-paper",
+  broker: "tradier",
   environment: "paper",
-  accountNumber: "APCA-PAPER",
-  label: "Alpaca Paper",
-  isActive: true,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString()
+  accountNumber: "TRD-SANDBOX",
+  label: "Tradier Sandbox"
+};
+
+const tradierLiveAccount: ExecutionAccount = {
+  ...tradierPaperAccount,
+  id: "tradier-live",
+  environment: "live",
+  accountNumber: "TRD-LIVE",
+  label: "Tradier Brokerage"
 };
 
 describe("deriveExecutionState", () => {
-  it("keeps Test local even when a broker paper account is active", () => {
-    const state = deriveExecutionState({ ...DEFAULT_POLICY, paperMode: true }, alpacaPaperAccount);
-
-    expect(state.mode).toBe("test/local");
-    expect(state.label).toBe("Test");
-    expect(state.usesLocalSimulation).toBe(true);
-    expect(state.submitsBrokerOrders).toBe(false);
-    expect(llmExecutionMode(state)).toBe("test/local");
-    expect(llmModeClarification(state)).toContain("not Alpaca Paper");
+  it("derives Paper from a connected Tradier sandbox account with a Tradier clarification", () => {
+    const state = deriveExecutionState({ ...DEFAULT_POLICY, activeBroker: "tradier" }, tradierPaperAccount);
+    expect(state.mode).toBe("broker/paper");
+    expect(state.label).toBe("Paper");
+    expect(state.broker).toBe("tradier");
+    expect(state.clarification).toContain("Tradier Paper");
   });
 
-  it("derives Paper from broker-routed policy plus a paper account", () => {
-    const state = deriveExecutionState({ ...DEFAULT_POLICY, paperMode: false }, alpacaPaperAccount);
+  it("derives Brokerage from a connected Tradier production account with a Tradier clarification", () => {
+    const state = deriveExecutionState({ ...DEFAULT_POLICY, activeBroker: "tradier" }, tradierLiveAccount);
+    expect(state.mode).toBe("broker/live");
+    expect(state.label).toBe("Brokerage");
+    expect(state.clarification).toContain("Tradier Brokerage");
+  });
+
+  it("derives Paper from a connected broker paper account — an account is an account", () => {
+    const state = deriveExecutionState(DEFAULT_POLICY, alpacaPaperAccount);
 
     expect(state.mode).toBe("broker/paper");
     expect(state.label).toBe("Paper");
     expect(state.broker).toBe("alpaca");
     expect(state.environment).toBe("paper");
-    expect(state.usesLocalSimulation).toBe(false);
     expect(state.submitsBrokerOrders).toBe(true);
     expect(state.clarification).toContain("Alpaca Paper");
     expect(state.clarification).toContain("real capital is not at risk");
     expect(fillSourceForExecutionMode(state)).toBe("paper");
     expect(llmFillSource("paper", state)).toBe("broker/paper");
+    expect(llmExecutionMode(state)).toBe("broker/paper");
   });
 
-  it("derives Brokerage from broker-routed policy plus a live account", () => {
-    const state = deriveExecutionState({ ...DEFAULT_POLICY, paperMode: false }, alpacaLiveAccount);
+  it("derives Brokerage from a connected broker live account", () => {
+    const state = deriveExecutionState(DEFAULT_POLICY, alpacaLiveAccount);
 
     expect(state.mode).toBe("broker/live");
     expect(state.label).toBe("Brokerage");
     expect(state.environment).toBe("live");
-    expect(state.usesLocalSimulation).toBe(false);
     expect(state.submitsBrokerOrders).toBe(true);
     expect(state.clarification).toContain("real capital");
     expect(fillSourceForExecutionMode(state)).toBe("live");
     expect(llmFillSource("live", state)).toBe("broker/live");
   });
 
-  it("falls back to Test when broker-routed policy has no active account", () => {
-    const state = deriveExecutionState({ ...DEFAULT_POLICY, paperMode: false, activeBroker: "alpaca" }, undefined);
+  it("returns a 'No account' state with no local-simulation fallback when no account is connected", () => {
+    const state = deriveExecutionState({ ...DEFAULT_POLICY, activeBroker: "alpaca" }, undefined);
 
-    expect(state.mode).toBe("test/local");
-    expect(state.broker).toBe("alpaca");
-    expect(state.usesLocalSimulation).toBe(true);
+    expect(state.mode).toBeUndefined();
+    expect(state.label).toBe("No account");
     expect(state.submitsBrokerOrders).toBe(false);
-  });
-
-  it("supports the boolean overload (paperMode = true/false, activeAccount)", () => {
-    // 1. paperMode: true
-    expect(deriveExecutionState(true, mockConnectedAccount)).toBe("mock");
-    expect(deriveExecutionState(true, undefined)).toBe("mock");
-
-    // 2. paperMode: false, activeAccount environment = paper
-    expect(deriveExecutionState(false, mockConnectedAccount)).toBe("paper");
-
-    // 3. paperMode: false, activeAccount environment = live
-    const liveConnectedAccount: ConnectedAccount = {
-      ...mockConnectedAccount,
-      id: "conn-2",
-      environment: "live"
-    };
-    expect(deriveExecutionState(false, liveConnectedAccount)).toBe("live");
-
-    // 4. paperMode: false, activeAccount = undefined
-    expect(deriveExecutionState(false, undefined)).toBe("mock");
-  });
-});
-
-describe("getThemeClasses", () => {
-  it("returns correct styling classes for each state", () => {
-    expect(getThemeClasses("mock")).toContain("slate-500");
-    expect(getThemeClasses("paper")).toContain("emerald-500");
-    expect(getThemeClasses("live")).toContain("amber-500");
+    expect(fillSourceForExecutionMode(state)).toBe("paper");
+    expect(llmExecutionMode(state)).toBeUndefined();
+    expect(llmModeClarification(state)).toContain("Connect a broker account");
   });
 });

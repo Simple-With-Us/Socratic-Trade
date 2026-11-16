@@ -11,7 +11,8 @@ another platform (Codex/Antigravity) or a fresh session can pick up any item fro
 - **File-overlap is the constraint.** The RAG-retrieval items all rewrite the same regions of
   `vector-db.ts`; `strategy.ts` and `types.ts` are touched by several items; `db.ts migrate()` is the
   documented merge-conflict trap. Do NOT parallelize items that share a hot file — follow the order below.
-- Keep changes **additive + flag-gated** where they alter money-path behavior; never flip `paperMode`.
+- Keep changes **additive + flag-gated** where they alter money-path behavior. **STALE 2026-07-03:**
+  this program predated removal of the legacy paper-mode policy; use current AGENTS.md execution rules.
 
 ## Sequenced order (from the opus sequencer)
 1. **risk-tests** (tests-only, parallel-safe) — Batch 1
@@ -34,7 +35,7 @@ another platform (Codex/Antigravity) or a fresh session can pick up any item fro
 | 5 | **Market-data staleness gate** | ready | **DONE** — `maxQuoteAgeSec`/`maxFundamentalsAgeSec` on `TradingPolicy`; OPENING-only fail-safe gate in `evaluateTradeProposal` (stale/missing timestamp → block; reads `marketScan` asOf + `generatedAt`); default OFF; 9 tests. No defaults/market/strategy change needed (asOf already flows). Opus design + dual opus review. | `types.ts`, `policy.ts`, `app/api/policy/route.ts`, `test/staleness-gate.test.ts` |
 | 2 | **Query expansion / multi-query / RRF (RAG-Fusion)** | ready (opus) | **NOT STARTED (last item)** — build on `main` (needs #196 hybrid + #199 coarse-credit landed; reuses `rrfFuse`). See "Opus specs" + handoff note. | retrieval path in `vector-db.ts` + `strategy.ts`, `test/vector-db-fusion.test.ts` |
 | 7/#4 | **Coarse credit assignment + attribution** | ready (opus) | **IN REVIEW (PR #199, OPEN)** — code done + dual-opus-reviewed (all-green); awaiting Codex thread-resolution + merge. Dual-sided attribution (new `realizedPnlAsEntry`/`realizedPnlAsExit`), MAE/MFE read-path, OOS-withhold. 47 tests. | `performance.ts`, `types.ts`, `strategy-tuning.ts`, `db-fills.ts`, `test/coarse-credit.test.ts` |
-| 3/#3 | **Durable/locked autonomy scheduler** | ready (opus) | **DONE** — CAS lease in `settings` KV (no migration); tick per-account body gated behind `SCHEDULER_SINGLE_LEADER` (default OFF, byte-for-byte off-path); fail-closed; SIGTERM/SIGINT/beforeExit release; lease surfaced on /health + /ready; 9 tests. Opus-designed + dual opus review (correctness + money-safety). | new `scheduler-lease.ts`, `scheduler.ts`, `health`/`ready` routes, `.env.example`, `test/scheduler-lease.test.ts` |
+| 3/#3 | **Durable/locked autonomy scheduler** | ready (opus) | **DONE** — CAS lease in `settings` KV (no migration); tick per-account body gated behind `SCHEDULER_SINGLE_LEADER` (default ON as of 2026-07-11, including unset/empty; explicit false values disable); fail-closed; SIGTERM/SIGINT/beforeExit release; lease surfaced on /health + /ready. The 2026-07-11 correctness follow-up also gives approval calls unique strategy-lock owners and refuses broker placement after heartbeat ownership loss. | `scheduler-lease.ts`, `scheduler.ts`, `strategy-lock-guard.ts`, `health`/`ready` routes, `.env.example`, focused lease/default tests |
 | 5 | **Reconsider Self-RAG / HyDE / sentence-window / contextual compression** | ready (opus) | **DECISION: SKIP all four now** — see "Opus specs" below | n/a |
 | 9 | **karpathy/autoresearch review** | research | the planner agent MISREAD this as an "autonomous tuning loop" feature — IGNORE that; treat as a research read only (retry pending) | n/a |
 

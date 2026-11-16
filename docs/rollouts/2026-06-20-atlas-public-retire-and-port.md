@@ -13,7 +13,7 @@ dashboard, not the BFF); **delete the redundant `~/agentic-trading` clone**.
 Key discovery: `jaywedgeworth22/public` was not a dead repo — it was a **live, auto-deploying
 deployment** on this Mac (`~/Code/trading`, launchd `com.jays.trading` BFF on :8787, a 5-min
 `com.jays.trading.autoupdate` git-puller, a 30-min backup cron, behind the same
-`trading.jays.services` Cloudflare tunnel as the private dashboard). The tunnel was confirmed to
+`socratictrade.com` Cloudflare tunnel as the private dashboard). The tunnel was confirmed to
 serve the private dashboard on **:4000** (the BFF ran in full mock mode with zero request traffic;
 no ESTABLISHED connections to :8787; private docs all point the tunnel at :4000).
 
@@ -66,7 +66,7 @@ no ESTABLISHED connections to :8787; private docs all point the tunnel at :4000)
 
 ## Follow-ups / risks
 
-- **User to confirm:** `https://trading.jays.services` still loads the dashboard after the BFF stop
+- **User to confirm:** `https://socratictrade.com` still loads the dashboard after the BFF stop
   (Cloudflare Access blocks automated checks). If off, relaunch from `~/.atlas-retired/`. After
   confirmation, `rm -rf ~/Code/trading` for final cleanup.
 - **UI wiring deferred (backends ported):** the chat panel, memory panel, notify-prefs settings,

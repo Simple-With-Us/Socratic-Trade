@@ -5,12 +5,22 @@ import type { TradingPolicy } from "./types";
  * rows can still carry both values, which lets a hidden smaller value bind.
  * Normalize policy API writes so runtime behavior matches the visible control.
  */
-export function normalizeExclusivePolicyCaps<T extends TradingPolicy>(policy: T): T {
+type CapPreference = Partial<
+  Pick<TradingPolicy, "maxOrderNotional" | "maxOrderPctOfNav" | "maxDailyNotional" | "maxDailyPctOfNav">
+>;
+
+function positive(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+export function normalizeExclusivePolicyCaps<T extends TradingPolicy>(policy: T, preference: CapPreference = policy): T {
   if (policy.maxOrderPctOfNav != null && policy.maxOrderNotional != null) {
-    delete policy.maxOrderNotional;
+    if (positive(preference.maxOrderNotional) && !positive(preference.maxOrderPctOfNav)) delete policy.maxOrderPctOfNav;
+    else delete policy.maxOrderNotional;
   }
   if (policy.maxDailyNotional != null && policy.maxDailyPctOfNav != null) {
-    delete policy.maxDailyPctOfNav;
+    if (positive(preference.maxDailyNotional) && !positive(preference.maxDailyPctOfNav)) delete policy.maxDailyPctOfNav;
+    else delete policy.maxDailyNotional;
   }
   if (policy.riskRules.stopLossPct != null && policy.riskRules.stopLossNotional != null) {
     delete policy.riskRules.stopLossNotional;

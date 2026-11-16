@@ -120,7 +120,7 @@ Legend: `[ ]` to verify · `[x]` confirmed ported · `[~]` partial · `[-]` inte
 - [ ] **Append-only audit log** — records every LLM turn, tool call, draft, confirmation, fill,
   alert, and notification.
 - [ ] **Self-host deploy scaffold** — `launchd` keep-alive (`com.jays.trading`), **Cloudflare
-  Tunnel** to `trading.jays.services`, `HOST=127.0.0.1` in prod, state backups, and **auto-deploy
+  Tunnel** to `socratictrade.com`, `HOST=127.0.0.1` in prod, state backups, and **auto-deploy
   on merge** (`com.jays.trading.autoupdate`). *(May be N/A if Agentic Trading deploys differently —
   decide consciously. Note: the `backup-state.sh` cron is what's generating local mail; silence it
   with `>/dev/null 2>&1` or remove if Atlas is retired.)*

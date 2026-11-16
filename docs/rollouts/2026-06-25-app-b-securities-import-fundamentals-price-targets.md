@@ -114,7 +114,7 @@ and several touch the money/learning paths or need an owner decision:
 ## Operator / cross-app actions
 
 - Generate a scoped ingest token, set `APP_B_INGEST_TOKEN` on App B; hand App A the
-  token + `APP_B_IMPORT_URL=https://trading.jays.services/api/admin/securities/import`
+  token + `APP_B_IMPORT_URL=https://socratictrade.com/api/admin/securities/import`
   out-of-band. Enable serving with `SECURITIES_IMPORT_HISTORY_TIER_ENABLED=on`.
 - To send fundamentals/analyst: set `CONGRESS_SHARE_FUNDAMENTALS=on` (after App A's
   PR #46 migration is applied). For numeric targets: `FMP_PRICE_TARGETS_ENABLED=on`

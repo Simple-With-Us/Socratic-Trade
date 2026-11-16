@@ -40,6 +40,11 @@ export interface ToolDeps {
   getPortfolioPnl?(userId: string): Promise<PortfolioPnlResult | null>;
   getPerformanceSummary?(userId: string): PerformanceSummaryResult | null;
   getReflection?(userId: string): string;
+  // Robinhood-backed read-only research (optional; the tool returns a clear "not supported"/"not
+  // connected" message when the dep isn't wired or the user has no Robinhood connection).
+  getEarningsCalendar?(userId: string, args: { start_date?: string; days?: number; high_market_cap?: boolean }): Promise<any>;
+  getOptionChain?(userId: string, underlyingSymbol: string): Promise<any>;
+  searchInstrument?(userId: string, args: { query: string; asset_type?: string; limit?: number }): Promise<any>;
   accountLabel?: string;
 }
 
@@ -64,6 +69,25 @@ const DRAFT_ORDER_SCHEMA: Record<string, unknown> = {
   }
 };
 
+export function normalizeDraftSide(raw: unknown): "buy" | "sell" | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "buy") return "buy";
+  if (value === "sell") return "sell";
+  return null;
+}
+
+export function normalizeOrderType(raw: unknown): "market" | "limit" | null {
+  const value = String(raw ?? "market").trim().toLowerCase();
+  if (value === "market") return "market";
+  if (value === "limit") return "limit";
+  return null;
+}
+
+function clampKbSearchK(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 5;
+  return Math.min(Math.max(Math.trunc(raw), 1), 20);
+}
+
 export function buildTools(): Record<string, ToolDef> {
   return {
     get_quote: {
@@ -84,11 +108,35 @@ export function buildTools(): Record<string, ToolDef> {
       async execute(input, ctx) {
         // Server-side validation — the model's input is untrusted regardless of any schema claim.
         const symbol = canonicalTicker(String(input.symbol ?? ""));
-        const side = input.side === "sell" ? "sell" : "buy";
+        const side = normalizeDraftSide(input.side);
+        if (!side) {
+          return {
+            error: "INVALID_SIDE",
+            details: `side must be "buy" or "sell" (got ${JSON.stringify(input.side)})`
+          };
+        }
         const qty = Number(input.qty);
-        const order_type = input.order_type === "limit" ? "limit" : "market";
-        if (!symbol || !Number.isFinite(qty) || qty <= 0) return { error: "INVALID_DRAFT", details: "symbol and positive qty required" };
-        const limit_usd = order_type === "market" || input.limit_usd == null ? null : Number(input.limit_usd);
+        const order_type = normalizeOrderType(input.order_type);
+        if (!order_type) {
+          return {
+            error: "INVALID_ORDER_TYPE",
+            details: `order_type must be "market" or "limit" (got ${JSON.stringify(input.order_type)})`
+          };
+        }
+        if (!symbol || !Number.isFinite(qty) || qty <= 0) {
+          return { error: "INVALID_DRAFT", details: "symbol and positive qty required" };
+        }
+        let limit_usd: number | null = null;
+        if (order_type === "limit") {
+          const limit = Number(input.limit_usd);
+          if (!Number.isFinite(limit) || limit <= 0) {
+            return {
+              error: "INVALID_LIMIT",
+              details: `limit_usd must be a positive number for limit orders (got ${JSON.stringify(input.limit_usd)})`
+            };
+          }
+          limit_usd = limit;
+        }
         const draft: ChatDraft = {
           draft_id: randomUUID(),
           symbol,
@@ -147,7 +195,7 @@ export function buildTools(): Record<string, ToolDef> {
           ticker: { type: "string" },
           doc_type: { type: "string" },
           as_of: { type: "string" },
-          k: { type: "integer", minimum: 1 }
+          k: { type: "integer", minimum: 1, maximum: 20 }
         }
       },
       async execute(input, ctx) {
@@ -157,7 +205,7 @@ export function buildTools(): Record<string, ToolDef> {
             ticker: input.ticker ? canonicalTicker(String(input.ticker)) : undefined,
             doc_type: typeof input.doc_type === "string" ? input.doc_type : undefined,
             as_of: typeof input.as_of === "string" ? input.as_of : undefined,
-            k: typeof input.k === "number" ? input.k : 5
+            k: clampKbSearchK(input.k)
           },
           ctx.userId
         );
@@ -273,6 +321,81 @@ export function buildTools(): Record<string, ToolDef> {
       async execute(_input, ctx) {
         const reflection = ctx.deps.getReflection ? ctx.deps.getReflection(ctx.userId) : "";
         return { reflection: reflection || null };
+      }
+    },
+
+    get_earnings_calendar: {
+      readOnly: true,
+      description:
+        "List earnings reports scheduled across the market over a date window (up to 31 days), " +
+        "optionally limited to high-market-cap names. Call for 'what reports this week', 'upcoming " +
+        "earnings', 'who reports on <date>' questions. For a specific known ticker, prefer fundamentals.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          start_date: { type: "string" },
+          days: { type: "integer", minimum: -31, maximum: 31 },
+          high_market_cap: { type: "boolean" }
+        }
+      },
+      async execute(input, ctx) {
+        if (!ctx.deps.getEarningsCalendar) return { error: "NOT_SUPPORTED" };
+        // Server-side validation — the model's input is untrusted regardless of any schema claim.
+        const days = Number(input.days);
+        return ctx.deps.getEarningsCalendar(ctx.userId, {
+          start_date: typeof input.start_date === "string" ? input.start_date : undefined,
+          days: Number.isInteger(days) && days !== 0 && days >= -31 && days <= 31 ? days : undefined,
+          high_market_cap: input.high_market_cap === true
+        });
+      }
+    },
+
+    get_option_chain: {
+      readOnly: true,
+      description:
+        "Look up the option chain (expiration dates + contract set) for an underlying ticker. Research " +
+        "and discovery only — this NEVER places, modifies, or prices an option order. Call for 'what " +
+        "expirations/strikes does <symbol> have', 'show me <symbol> options' questions.",
+      input_schema: { type: "object", additionalProperties: false, required: ["symbol"], properties: { symbol: { type: "string" } } },
+      async execute(input, ctx) {
+        if (!ctx.deps.getOptionChain) return { error: "NOT_SUPPORTED" };
+        const symbol = canonicalTicker(String(input.symbol ?? ""));
+        if (!symbol) return { error: "INVALID_INPUT", details: "symbol required" };
+        return ctx.deps.getOptionChain(ctx.userId, symbol);
+      }
+    },
+
+    search_instrument: {
+      readOnly: true,
+      description:
+        "Resolve a natural-language company name, ticker, crypto pair, or index to concrete instruments. " +
+        "Call when the user names an asset by (partial) name rather than a ticker, or you need to " +
+        "disambiguate which symbol they mean before answering.",
+      input_schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["query"],
+        properties: {
+          query: { type: "string" },
+          asset_type: { type: "string", enum: ["instrument", "currency_pair", "market_index"] },
+          limit: { type: "integer", minimum: 1, maximum: 20 }
+        }
+      },
+      async execute(input, ctx) {
+        if (!ctx.deps.searchInstrument) return { error: "NOT_SUPPORTED" };
+        const query = String(input.query ?? "").trim();
+        if (!query) return { error: "INVALID_INPUT", details: "query required" };
+        const assetType =
+          input.asset_type === "instrument" || input.asset_type === "currency_pair" || input.asset_type === "market_index"
+            ? input.asset_type
+            : undefined;
+        const limit = Number(input.limit);
+        return ctx.deps.searchInstrument(ctx.userId, {
+          query,
+          asset_type: assetType,
+          limit: Number.isInteger(limit) && limit >= 1 && limit <= 20 ? limit : undefined
+        });
       }
     }
   };

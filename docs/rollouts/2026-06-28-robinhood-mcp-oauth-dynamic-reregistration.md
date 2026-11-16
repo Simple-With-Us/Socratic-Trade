@@ -1,7 +1,7 @@
 # Rollout Note: Robinhood MCP OAuth Dynamic Re-registration on Hostname Change
 
 ## Summary
-- Diagnosed the root cause of the `robinhood.com/oauth/error` ("Uh oh! Something's gone wrong") page encountered during user account connection/re-authorization when switching between different preview hostnames (e.g. `trading.jays.services`, `trading-beta.jays.services`, `antigravity.jays.services`).
+- Diagnosed the root cause of the `robinhood.com/oauth/error` ("Uh oh! Something's gone wrong") page encountered during user account connection/re-authorization when switching between different preview hostnames (e.g. `socratictrade.com`, `trading-beta.jays.services`, `antigravity.jays.services`).
 - Fixed `getOrRegisterClient` in `src/lib/mcp-oauth.ts` to store and validate the `redirectUri` that the dynamic client registration was created for. If the requested `redirectUri` differs from the registered one (such as when switching preview worktrees or hostnames), it dynamically registers a new client ID at the registration endpoint.
 - Added a unit test verifying dynamic re-registration is triggered when `redirectUri` changes.
 

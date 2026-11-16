@@ -26,7 +26,7 @@ don't re-derive them. Two ideas run through everything here:
 (deltas not snapshots), fewer wasted API calls against rate limits, lower latency.
 
 **Costs / when NOT to push:**
-- Needs a public, authenticated endpoint (webhooks) — we have the `trading.jays.services`
+- Needs a public, authenticated endpoint (webhooks) — we have the `socratictrade.com`
   tunnel + the fail-closed shared-secret + dedup pattern (see the TradingView route).
 - Delivery is at-least-once and unordered → **idempotency/dedup is mandatory**.
 - The source must actually offer push. SEC filings, congressional disclosures, FRED macro,

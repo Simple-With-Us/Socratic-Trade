@@ -65,8 +65,48 @@ function nycDateString(date: Date): string {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-/** True when today is a trading day (not a weekend or full-close holiday), regardless of current time. */
-export function isTradingDay(date: Date = new Date()): boolean {
+/**
+ * The America/New_York calendar date ('YYYY-MM-DD') of an instant, for anchoring
+ * trading-day arithmetic (`addTradingDays`) to the MARKET day rather than the UTC day.
+ * An after-hours ET timestamp (e.g. Mon 19:30 ET = Tue 00:30 UTC) must count trading
+ * sessions from Monday, not Tuesday — deriving the date via `toISOString().slice(0, 10)`
+ * silently shifts every evening/after-hours snapshot one session forward (Codex review
+ * on PR #365). Date-only inputs (already a calendar date, no time component) pass through
+ * unchanged rather than being parsed as UTC midnight — which is 19:00/20:00 ET the PRIOR
+ * day and would shift them one day BACK. Invalid input returns undefined.
+ */
+export function marketDateOf(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const time = Date.parse(trimmed);
+  if (!Number.isFinite(time)) return undefined;
+  return nycDateString(new Date(time));
+}
+
+/**
+ * True when the given day (default: today) is a trading day — not a weekend or full-close holiday,
+ * regardless of the time of day.
+ *
+ * Test-determinism seam: the strategy/scheduler tests call the no-argument form and assert a run
+ * executed. On a real market holiday isTradingDay() is false, so runStrategyOnce()'s market-closed
+ * guard skips the run and those wall-clock-independent assertions flake (e.g. the observed July 4
+ * closure turns the whole suite red). When AGENTIC_TEST_FORCE_TRADING_DAY=1 the no-argument "today"
+ * check returns true so the suite never depends on the calendar. An explicit-date call ALWAYS uses
+ * the real calendar, so the calendar's own tests are unaffected.
+ *
+ * Safety: the override is ALSO gated on process.env.VITEST — a signal the Vitest runner sets itself
+ * and that is never present in a dev/prod runtime. So even if AGENTIC_TEST_FORCE_TRADING_DAY leaks
+ * into a shell/.env that reaches production, the real market-closed guard is NOT defeated: the seam is
+ * inert unless the process is genuinely running under Vitest.
+ */
+export function isTradingDay(date?: Date): boolean {
+  if (
+    date === undefined &&
+    process.env.VITEST &&
+    process.env.AGENTIC_TEST_FORCE_TRADING_DAY === "1"
+  ) {
+    return true;
+  }
   const fmt = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
@@ -74,13 +114,57 @@ export function isTradingDay(date: Date = new Date()): boolean {
     month: "2-digit",
     day: "2-digit"
   });
-  const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+  const parts = Object.fromEntries(fmt.formatToParts(date ?? new Date()).map((p) => [p.type, p.value]));
   const weekday = parts.weekday;
   if (weekday === "Sat" || weekday === "Sun") return false;
   const dateStr = `${parts.year}-${parts.month}-${parts.day}`;
   const year = parseInt(parts.year, 10);
   const holidays = getMarketHolidays(year);
   return !holidays.has(dateStr);
+}
+
+const ONE_DAY_MS = 86_400_000;
+
+/**
+ * Add `horizonDays` TRADING days (not calendar days) to a 'YYYY-MM-DD' date, honoring
+ * `isTradingDay` (weekends + full-close holidays). Returns the resulting date as
+ * 'YYYY-MM-DD'.
+ *
+ * Historical note: prior to 2026-07, both `counterfactual-learning.ts` and
+ * `backtest.ts` computed this as `snapshotDate + horizonDays * 86_400_000` ms of
+ * CALENDAR time under a "business date" name — so a Friday snapshot matured after
+ * only 3 trading days (Sat/Sun absorbed into the horizon) while a Monday snapshot
+ * matured after the full 5, introducing weekday-dependent noise into every downstream
+ * IC/counterfactual metric. This function is the single shared replacement; it always
+ * lands exactly `horizonDays` TRADING sessions after the input date regardless of which
+ * weekday the snapshot fell on. Switching to it shifts historical target dates for
+ * snapshots taken on Thu/Fri (and around holidays) — see
+ * docs/rollouts/2026-07-04-w1-learning-loops.md for the one-time discontinuity note.
+ *
+ * `horizonDays <= 0` returns the input date unchanged. Uses UTC-midnight date-only
+ * arithmetic (the input/output are calendar date strings, not timestamps), so DST does
+ * not affect day-stepping.
+ */
+export function addTradingDays(dateStr: string, horizonDays: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return dateStr;
+  // Anchor at UTC noon (not midnight): isTradingDay() reads the America/New_York wall-clock
+  // date, and NY is always behind UTC (UTC-4/-5), so a UTC-midnight anchor rolls back into
+  // the PRIOR NY calendar day. Noon UTC is always still the same NY date year-round.
+  let cursor = new Date(Date.UTC(y, m - 1, d, 12));
+  if (!Number.isFinite(cursor.getTime())) return dateStr;
+  let remaining = Math.max(0, Math.floor(horizonDays));
+  // Bound the walk generously (10x the requested horizon, min 30) so a pathological
+  // input can never spin forever; isTradingDay() only ever excludes a small fraction
+  // of days so this is never reached in practice.
+  const maxSteps = Math.max(30, remaining * 10 + 30);
+  let steps = 0;
+  while (remaining > 0 && steps < maxSteps) {
+    cursor = new Date(cursor.getTime() + ONE_DAY_MS);
+    steps += 1;
+    if (isTradingDay(cursor)) remaining -= 1;
+  }
+  return nycDateString(cursor);
 }
 
 /** True when the US equity market is open for regular trading right now. */
@@ -118,6 +202,83 @@ export function isMarketOpen(date: Date = new Date()): boolean {
   const closeTime = earlyCloseDays.has(dateStr) ? EARLY_CLOSE : REGULAR_CLOSE;
 
   return totalMinutes >= OPEN && totalMinutes < closeTime;
+}
+
+type EtDateParts = {
+  year: number;
+  month: number;
+  day: number;
+};
+
+function etDatePartsFromInstant(date: Date): EtDateParts {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+  return {
+    year: parseInt(parts.year, 10),
+    month: parseInt(parts.month, 10),
+    day: parseInt(parts.day, 10)
+  };
+}
+
+/** UTC epoch ms for hour:minute ET on an ET calendar date (DST-safe; matches market-hours). */
+function etWallClockToUtcMs(parts: EtDateParts, hour: number, minute: number): number {
+  const approxUtcMs = Date.UTC(parts.year, parts.month - 1, parts.day, hour, minute, 0);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  const p = Object.fromEntries(fmt.formatToParts(new Date(approxUtcMs)).map((x) => [x.type, x.value]));
+  const approxAsUtcMs = Date.UTC(
+    parseInt(p.year, 10),
+    parseInt(p.month, 10) - 1,
+    parseInt(p.day, 10),
+    parseInt(p.hour === "24" ? "0" : p.hour, 10),
+    parseInt(p.minute, 10),
+    parseInt(p.second, 10)
+  );
+  const offsetMs = approxAsUtcMs - approxUtcMs;
+  return approxUtcMs - offsetMs;
+}
+
+/**
+ * When the regular US equity session ends on the ET calendar day of `instant`.
+ * Returns null on weekends and full-close holidays. Uses the same early-close
+ * table as `isMarketOpen` (13:00 ET vs 16:00 ET).
+ */
+export function regularSessionCloseUtcMs(instant: Date = new Date()): number | null {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(instant).map((p) => [p.type, p.value]));
+  const weekday = parts.weekday;
+  if (weekday === "Sat" || weekday === "Sun") return null;
+
+  const dateStr = `${parts.year}-${parts.month}-${parts.day}`;
+  const year = parseInt(parts.year, 10);
+  const holidays = getMarketHolidays(year);
+  if (holidays.has(dateStr)) return null;
+
+  const earlyCloseDays = getEarlyCloseDays(year);
+  const closeHour = earlyCloseDays.has(dateStr) ? 13 : 16;
+  const closeMinute = 0;
+  const etParts = etDatePartsFromInstant(instant);
+  return etWallClockToUtcMs(etParts, closeHour, closeMinute);
 }
 
 /**

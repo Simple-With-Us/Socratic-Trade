@@ -36,7 +36,12 @@ feature, keep it on its own `cursor/*` branch and merge it like any `agent/*` br
 `npm run build` wipes and regenerates `.next/`; restart any running dev server afterward.
 
 ## Hard guardrails
-- Never place real trades or set `paperMode: false` while testing — Paper is the default.
+- Real trading app, owner accepts 100% risk (see AGENTS.md "Product philosophy — real trading,
+  owner's risk"). There is NO Test-mode/local-sim and NO `paperMode` default — an account is an
+  account (a broker paper account is just a connected account by `environment`). Test against a
+  connected broker account; keep the existing typed-confirm ritual before toggling an account live.
+  Do NOT re-add paper-as-default or "protect the owner's money from your bugs" paternalism — harden
+  CORRECTNESS + multi-user safety, not obedience.
 - No destructive git (`reset --hard`, force-push, branch deletion) without explicit
   confirmation in the current conversation.
 - Edit only your own worktree; do not edit another tool's `agent/*` worktree.

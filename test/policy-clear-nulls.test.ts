@@ -9,7 +9,7 @@ beforeAll(() => {
 
 describe("stripNullsDeep (clearing an optional policy field)", () => {
   it("deletes null keys at the top level and inside nested objects, leaving real values + arrays intact", async () => {
-    const { stripNullsDeep } = await import("../app/api/policy/route");
+    const { stripNullsDeep } = await import("../src/lib/policy-null-stripping");
     const obj: Record<string, unknown> = {
       maxGrossExposurePct: null, // cleared → should vanish
       maxNetExposurePct: 80, // kept

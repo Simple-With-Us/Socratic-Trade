@@ -17,7 +17,7 @@ const DATASET_KEY = "webSource:finra:dataset";
 const ATTEMPT_KEY = "webSource:finra:lastAttempt";
 const DEFAULT_TTL_MS = 24 * 60 * 60_000; // daily file
 const BASE = "https://cdn.finra.org/equity/regsho/daily";
-const UA = "RobinhoodAgenticTrading/1.0 (contact: admin@localhost)";
+const UA = "SocraticTrade/1.0 (contact: admin@localhost)";
 /** Short-volume ratio above this (% of the day's volume) is flagged as elevated short pressure. */
 const ELEVATED_PCT = 55;
 

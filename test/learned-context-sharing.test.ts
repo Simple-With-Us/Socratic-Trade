@@ -41,7 +41,11 @@ function makeFactRow(overrides: Partial<LearnedContextRow>): LearnedContextRow {
     assertedAt: new Date().toISOString(),
     supersededBy: null,
     expiresAt: null,
-    ...overrides
+    ...overrides,
+    connectedAccountId: overrides.connectedAccountId ?? null,
+    accountEnvironment: overrides.accountEnvironment ?? null,
+    learningScope: overrides.learningScope ?? "portfolio",
+    transferState: overrides.transferState ?? "not_applicable"
   };
 }
 

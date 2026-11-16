@@ -43,6 +43,7 @@ describe("scoreCongressSignal", () => {
     const result = scoreCongressSignal({
       congressAnalytics: {
         netFlowUsd: 1_000_000_000,
+        memberCount: 1,
         topMemberScore: 100,
         convictionScore: 100,
         convictionDirection: "BUY"
@@ -152,6 +153,43 @@ describe("evaluateCongressScore", () => {
     expect(result.rankIC.meanIC).toBeLessThan(0);
     expect(result.goNoGo.pass).toBe(false);
     expect(result.goNoGo.reasons).toContain("rank IC is not positive");
+  });
+
+  // ── P2-3: signed/directional top-bucket gate (require the long leg's own edge, not just the spread) ──
+  it("P2-3: a positive top-minus-bottom spread carried by the SHORT leg is BLOCKED when requireTopBucketPositive", () => {
+    // 3 dates × 4 names/date. Score ranks names; TOP bucket names are slightly NEGATIVE while BOTTOM bucket
+    // names are strongly negative — so the top-minus-bottom SPREAD is positive but the long (top) leg loses.
+    const build = (d: string) => [
+      { date: d, symbol: `T1-${d}`, congressScore: 90, congressDirection: "BUY" as const, forwardReturn: -0.005, benchmarkReturn: 0 },
+      { date: d, symbol: `T2-${d}`, congressScore: 80, congressDirection: "BUY" as const, forwardReturn: -0.004, benchmarkReturn: 0 },
+      { date: d, symbol: `B1-${d}`, congressScore: 20, congressDirection: "BUY" as const, forwardReturn: -0.05, benchmarkReturn: 0 },
+      { date: d, symbol: `B2-${d}`, congressScore: 10, congressDirection: "BUY" as const, forwardReturn: -0.06, benchmarkReturn: 0 }
+    ];
+    const observations: CongressScoreObservation[] = [...build("2026-01-02"), ...build("2026-01-03"), ...build("2026-01-04")];
+    const opts = { quantiles: 2, minNamesPerDate: 4, minObservations: 3, minDates: 1, minTickers: 3, minTopBucketObservations: 1, requireBenchmarkReturn: false };
+
+    // Without the flag: the top-minus-bottom spread is positive (top ~−0.0045 vs bottom ~−0.055).
+    const off = evaluateCongressScore(observations, opts);
+    expect(off.topMinusBottomReturn).toBeGreaterThan(0);
+    expect(off.goNoGo.reasons).not.toContain(off.goNoGo.reasons.find((r) => r.startsWith("top-bucket long-leg")) ?? "__none__");
+
+    // With the flag: the TOP bucket's own excess return is negative → a new blocking reason appears.
+    const on = evaluateCongressScore(observations, { ...opts, requireTopBucketPositive: true });
+    expect(on.goNoGo.reasons.some((r) => r.startsWith("top-bucket long-leg excess return is not positive"))).toBe(true);
+    expect(on.goNoGo.pass).toBe(false);
+  });
+
+  it("P2-3: a genuinely long-positive top bucket PASSES the requireTopBucketPositive check", () => {
+    const build = (d: string) => [
+      { date: d, symbol: `T1-${d}`, congressScore: 90, congressDirection: "BUY" as const, forwardReturn: 0.05, benchmarkReturn: 0 },
+      { date: d, symbol: `T2-${d}`, congressScore: 80, congressDirection: "BUY" as const, forwardReturn: 0.04, benchmarkReturn: 0 },
+      { date: d, symbol: `B1-${d}`, congressScore: 20, congressDirection: "BUY" as const, forwardReturn: 0.0, benchmarkReturn: 0 },
+      { date: d, symbol: `B2-${d}`, congressScore: 10, congressDirection: "BUY" as const, forwardReturn: -0.01, benchmarkReturn: 0 }
+    ];
+    const observations: CongressScoreObservation[] = [...build("2026-01-02"), ...build("2026-01-03"), ...build("2026-01-04")];
+    const on = evaluateCongressScore(observations, { quantiles: 2, minNamesPerDate: 4, minObservations: 3, minDates: 1, minTickers: 3, minTopBucketObservations: 1, requireBenchmarkReturn: false, requireTopBucketPositive: true });
+    // The top bucket's own excess return is clearly positive → the P2-3 reason must NOT be present.
+    expect(on.goNoGo.reasons.some((r) => r.startsWith("top-bucket long-leg excess return is not positive"))).toBe(false);
   });
 });
 

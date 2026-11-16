@@ -3,6 +3,8 @@
 // fresh streamed news. globalThis-pinned for the same Next.js module-duplication reason as the
 // SSE event bus (see src/lib/events.ts).
 
+import { fromAlpacaSymbol } from "../money";
+
 interface StoredNews {
   headlines: string[];
   updatedAt: number;
@@ -22,7 +24,9 @@ export function recordStreamedArticle(symbols: string[], headline: string, id: s
   const dedup = id || clean;
   const now = Date.now();
   for (const raw of symbols) {
-    const symbol = String(raw).trim().toUpperCase();
+    // Alpaca tags streamed articles with its own dot notation (BRK.B) — store under our
+    // hyphenated internal format (BRK-B) so getStreamedHeadlines lookups actually match.
+    const symbol = fromAlpacaSymbol(String(raw));
     if (!symbol) continue;
     let entry = store.get(symbol);
     if (!entry) {

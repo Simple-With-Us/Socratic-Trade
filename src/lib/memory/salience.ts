@@ -76,7 +76,35 @@ export function extractCandidates(message: string): MemoryCandidate[] {
 }
 
 // A ticker-like token (1–5 uppercase letters) used to attach a learned fact to a symbol.
-const TICKER_RE = /\b([A-Z]{1,5})\b/;
+const TICKER_RE = /\b([A-Z]{1,5})\b/g;
+
+// Cheap, pure (no DB) first-pass complement: common uppercase words/acronyms that are NOT tickers
+// but match TICKER_RE's shape (1-5 uppercase letters) and would otherwise mis-bind a learned fact
+// to a fake symbol. This is deliberately small/conservative — it does not replace a real
+// known-universe validator (see salience-llm.ts's injected validateSymbol), just filters the most
+// common false positives so the pure regex path is safer even with no validator injected.
+const TICKER_STOPWORDS = new Set([
+  "I", "A", "CEO", "CFO", "COO", "CTO", "ESG", "USA", "EPS", "ETF", "IPO", "AI", "US", "UK", "EU",
+  "GDP", "FOMC", "FED", "SEC", "IRS", "CPI", "PPI", "GAAP", "IFRS", "YOY", "QOQ"
+]);
+
+/**
+ * Pick the first ticker-shaped token from `text` that passes validation, using `matchAll` (not the
+ * first-match-only `text.match` this replaced) — a sentence like "NVDA is the sole supplier, not
+ * AMD or INTC" must not mis-bind to whichever CAPS token happens to appear first if that token
+ * fails validation (e.g. a leading "I" or "CEO"). `validate` is injected so this stays pure/DB-free:
+ * callers needing real known-universe validation (salience-llm.ts) pass a stricter predicate;
+ * omitting it applies only the built-in stopword denylist.
+ */
+export function firstValidTicker(text: string, validate?: (candidate: string) => boolean): string | null {
+  for (const match of text.matchAll(TICKER_RE)) {
+    const candidate = match[1];
+    if (!candidate || TICKER_STOPWORDS.has(candidate)) continue;
+    if (validate && !validate(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
 
 /**
  * Extract durable learned-FACT candidates (the dormant `pattern`/`decision` salience kinds) from a
@@ -87,13 +115,19 @@ const TICKER_RE = /\b([A-Z]{1,5})\b/;
  *
  * `pattern`  — a recurring, symbol-specific behavioral observation (e.g. post-earnings drift).
  * `decision` — a durable named fact / stable truth about a name or the market structure.
+ *
+ * `validateSymbol` is an optional injected predicate for stricter (e.g. real known-universe)
+ * ticker validation — kept optional/injected so this module never imports a DB. Omitting it still
+ * applies the built-in stopword denylist (firstValidTicker's default behavior).
  */
-export function extractLearnedCandidates(message: string): LearnedContextCandidate[] {
+export function extractLearnedCandidates(
+  message: string,
+  validateSymbol?: (candidate: string) => boolean
+): LearnedContextCandidate[] {
   const text = String(message);
   const lc = text.toLowerCase();
   const out: LearnedContextCandidate[] = [];
-  const symbolMatch = text.match(TICKER_RE);
-  const symbol = symbolMatch ? symbolMatch[1] : null;
+  const symbol = firstValidTicker(text, validateSymbol);
 
   // Pattern: an explicitly stated recurring/behavioral observation worth remembering.
   if (/\b(always|usually|tends? to|historically|every time|seasonal|pattern|typically|drifts?|fades?)\b/.test(lc)) {

@@ -11,7 +11,7 @@ stopped-system proposal action gating.
 ## Why
 
 The user asked to commit and integrate the current Codex preview changes with
-`codex.jays.services`, `trading-beta.jays.services`, and `trading.jays.services`
+`codex.jays.services`, `trading-beta.jays.services`, and `socratictrade.com`
 as appropriate. This repo does not hand-copy files between those sites:
 `codex.jays.services` is the Codex worktree preview, beta is the `main`
 integration worktree, and production deploys from `main` through the existing
@@ -98,5 +98,5 @@ GitHub Actions/self-hosted runner path.
 
 - After the PR merges, sync/restart the beta integration preview if its
   worktree is clean.
-- Confirm the production deploy run is green and smoke `trading.jays.services`
+- Confirm the production deploy run is green and smoke `socratictrade.com`
   after the main-branch deploy completes.

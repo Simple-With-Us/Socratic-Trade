@@ -25,6 +25,8 @@ beforeEach(async () => {
   delete process.env.WEB_SOURCE_CONGRESS;
   delete process.env.WEB_SOURCE_CONGRESS_TTL_MS;
   delete process.env.WEB_SOURCE_RETRY_BACKOFF_MS;
+  // Scraper-path tests need App A default-OFF so senate-efd / Apify mocks run.
+  process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "off";
 });
 
 afterEach(() => {
@@ -214,7 +216,18 @@ describe("getSymbolWebSignals (persisted overlay)", () => {
 });
 
 describe("refreshCongress (live flow, mocked fetch)", () => {
+  function recentMdY(daysAgo: number): string {
+    const d = new Date(Date.now() - daysAgo * 24 * 60 * 60_000);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    return `${mm}/${dd}/${d.getUTCFullYear()}`;
+  }
+
   function stubEfdSuccess() {
+    // Keep these inside the 60-day default congress window. Hardcoded 2026-06-16
+    // aged out on 2026-08-15 UTC and failed CI on main after #2720.
+    const filed = recentMdY(3);
+    const traded = recentMdY(7);
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       const u = String(url);
       const method = init?.method ?? "GET";
@@ -229,13 +242,13 @@ describe("refreshCongress (live flow, mocked fetch)", () => {
       }
       if (u.endsWith("/search/report/data/") && method === "POST") {
         return new Response(
-          JSON.stringify({ data: [["John", "Boozman", "Boozman, John (Senator)", '<a href="/search/view/ptr/abc-1/">PTR for 06/16/2026</a>', "06/16/2026"]] }),
+          JSON.stringify({ data: [["John", "Boozman", "Boozman, John (Senator)", `<a href="/search/view/ptr/abc-1/">PTR for ${filed}</a>`, filed]] }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
       if (u.includes("/search/view/ptr/")) {
         return new Response(
-          `<tbody><tr><td>1</td><td>06/10/2026</td><td>Joint</td><td>NVDA</td><td>NVIDIA</td><td>Stock</td><td>Purchase</td><td>$1,001 - $15,000</td><td>--</td></tr></tbody>`,
+          `<tbody><tr><td>1</td><td>${traded}</td><td>Joint</td><td>NVDA</td><td>NVIDIA</td><td>Stock</td><td>Purchase</td><td>$1,001 - $15,000</td><td>--</td></tr></tbody>`,
           { status: 200 }
         );
       }
@@ -277,5 +290,78 @@ describe("refreshCongress (live flow, mocked fetch)", () => {
     // Prior dataset must still be intact (never wiped to empty on a transient outage).
     const ds = getInternalSetting<{ recordCount: number }>("webSource:congress:dataset");
     expect(ds?.recordCount).toBe(1);
+  });
+
+  it("falls back to Senate eFD when Congress.Trade fails, including the agreement cookie", async () => {
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const { deleteInternalSetting } = await import("../src/lib/db");
+    deleteInternalSetting("webSource:congress:cursor");
+    const filed = recentMdY(3);
+    const traded = recentMdY(7);
+    const bodies: string[] = [];
+    const cookies: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = init?.method ?? "GET";
+      if (u.includes("congress.trade")) return new Response("down", { status: 503 });
+      if (u.endsWith("/search/") && method === "GET") {
+        return new Response('<form><input name="csrfmiddlewaretoken" value="tok1"></form>', {
+          status: 200,
+          headers: { "set-cookie": "csrftoken=tok1; Path=/" }
+        });
+      }
+      if (u.endsWith("/search/home/") && method === "POST") {
+        bodies.push(String(init?.body ?? ""));
+        return new Response("", { status: 302, headers: { "set-cookie": "csrftoken=tok2; Path=/" } });
+      }
+      if (u.endsWith("/search/report/data/") && method === "POST") {
+        cookies.push(String((init?.headers as Record<string, string> | undefined)?.cookie ?? ""));
+        return new Response(
+          JSON.stringify({ data: [["John", "Boozman", "Boozman, John (Senator)", `<a href="/search/view/ptr/abc-1/">PTR for ${filed}</a>`, filed]] }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (u.includes("/search/view/ptr/")) {
+        return new Response(
+          `<tbody><tr><td>1</td><td>${traded}</td><td>Joint</td><td>NVDA</td><td>NVIDIA</td><td>Stock</td><td>Purchase</td><td>$1,001 - $15,000</td><td>--</td></tr></tbody>`,
+          { status: 200 }
+        );
+      }
+      return new Response("unavailable", { status: 503 });
+    });
+
+    const result = await refreshCongress(Date.now(), true);
+    expect(result.ok).toBe(true);
+    expect(result.sources).toContain("senate-efd");
+    expect(result.sources).not.toContain("congress-trade");
+    expect(bodies.some((body) => body.includes("prohibition_agreement=1"))).toBe(true);
+    expect(cookies.some((cookie) => cookie.includes("csrftoken=tok2"))).toBe(true);
+    const overlay = getSymbolWebSignals(["NVDA"]);
+    expect(overlay.NVDA?.congress?.buyCount).toBe(1);
+  });
+
+  it("does not scrape Senate eFD when Congress.Trade already returned trades", async () => {
+    process.env.CONGRESS_TRADE_AS_CONGRESS_SOURCE = "on";
+    const { deleteInternalSetting } = await import("../src/lib/db");
+    deleteInternalSetting("webSource:congress:cursor");
+    const traded = new Date(Date.now() - 3 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      if (u.includes("congress.trade")) {
+        return new Response(
+          JSON.stringify({
+            cursor: 4,
+            transactions: [{ symbol: "AAPL", side: "buy", tradedAt: traded, member: "Pat", chamber: "senate", cursorSeq: 4 }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (u.includes("efdsearch.senate.gov")) return new Response("should not run", { status: 500 });
+      return new Response("nope", { status: 404 });
+    });
+    const result = await refreshCongress(Date.now(), true);
+    expect(result.ok).toBe(true);
+    expect(result.sources).toContain("congress-trade");
+    expect(result.sources).not.toContain("senate-efd");
   });
 });

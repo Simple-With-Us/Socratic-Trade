@@ -12,13 +12,19 @@ import type {
   ReviewedOrder,
   TimeInForce,
   BrokerGateway,
-  EquityOrderInput
+  EquityOrderInput,
+  OptionPosition
 } from "./types";
 import type { OHLCBar } from "./indicators";
 import { clearMcpOAuthTokens, getMcpAccessToken } from "./mcp-oauth";
+import { logApiHealth } from "./db-health";
 import { normalizeSymbol } from "./money";
-import { isShortIntent } from "./broker-side";
+import { mergeAccountCapabilities } from "./venue-contract";
+import { normalizeVenueOrder } from "./venue-normalization";
+import { isLiveOrderState, isShortIntent } from "./broker-side";
+import { brokerAbortSignal, scopeBrokerOrders } from "./inflight-deadline";
 import { getOpenLots, getPerformanceSummary } from "./performance";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
@@ -29,6 +35,117 @@ const TEST_SIM_STARTING_CASH = (() => {
 
 export const ROBINHOOD_TRADING_MCP_URL = "https://agent.robinhood.com/mcp/trading";
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26";
+
+/**
+ * Live Roth `9d71dda4` (2026-08-19): gather sent the full 250-name universe in
+ * one `get_equity_quotes` and Robinhood rejected `too many symbols (max 10,
+ * got 250)`.  The whole batch died, so cascade never priced through Robinhood
+ * and Manual Run once sat llm=0 until `stalled_no_progress`.  Keep the
+ * universe; chunk the request.
+ */
+export const ROBINHOOD_EQUITY_SYMBOL_CHUNK = 10;
+const ROBINHOOD_SYMBOL_CHUNK_CONCURRENCY = 4;
+
+export function chunkRobinhoodSymbols(
+  symbols: string[],
+  size: number = ROBINHOOD_EQUITY_SYMBOL_CHUNK
+): string[][] {
+  const unique = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+  const chunks: string[][] = [];
+  const n = Math.max(1, size);
+  for (let i = 0; i < unique.length; i += n) chunks.push(unique.slice(i, i + n));
+  return chunks;
+}
+
+async function mapRobinhoodSymbolChunks<T extends Record<string, unknown>>(
+  symbols: string[],
+  mapper: (chunk: string[]) => Promise<T>
+): Promise<T> {
+  const chunks = chunkRobinhoodSymbols(symbols);
+  const merged = {} as T;
+  const concurrency = ROBINHOOD_SYMBOL_CHUNK_CONCURRENCY;
+  for (let i = 0; i < chunks.length; i += concurrency) {
+    const wave = chunks.slice(i, i + concurrency);
+    const parts = await Promise.all(wave.map((chunk) => mapper(chunk)));
+    for (const part of parts) Object.assign(merged, part);
+  }
+  return merged;
+}
+
+export function parseRobinhoodQuotes(raw: Record<string, unknown> | unknown): Record<string, BrokerQuote> {
+  const root = raw as Record<string, unknown> | undefined;
+  const entries = Array.isArray(root?.results)
+    ? root!.results
+    : Array.isArray(root?.quotes)
+      ? root!.quotes
+      : Array.isArray(raw)
+        ? raw
+        : [];
+  return Object.fromEntries(
+    (entries as Array<Record<string, unknown>>).map((item) => {
+      const q = (item.quote ?? item) as Record<string, unknown>;
+      const symbol = normalizeSymbol(String(q.symbol ?? item.symbol));
+      const prevClose = optionalNumber(q.previous_close ?? q.adjusted_previous_close);
+      const bidSize = optionalNumber(q.bid_size);
+      const askSize = optionalNumber(q.ask_size);
+      const volume = optionalNumber(q.volume);
+      const selected = selectObservedQuotePrice({
+        last: q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price,
+        bid: q.bid_price ?? q.bid,
+        ask: q.ask_price ?? q.ask
+      });
+      const asOf = providerObservationIso(
+        selected.basis === "last"
+          ? q.venue_last_trade_time ?? q.as_of ?? item.as_of
+          : selected.basis === "mid"
+            ? q.venue_quote_time ?? q.as_of ?? item.as_of
+            : undefined
+      );
+      return [
+        symbol,
+        {
+          symbol,
+          ...(selected.price !== undefined ? { price: selected.price } : {}),
+          bid: optionalNumber(q.bid_price ?? q.bid),
+          ask: optionalNumber(q.ask_price ?? q.ask),
+          ...(asOf ? { asOf } : {}),
+          provider: "robinhood",
+          ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
+          ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
+          ...(askSize !== undefined && askSize > 0 ? { askSize } : {}),
+          ...(volume !== undefined && volume > 0 ? { volume } : {})
+        } satisfies BrokerQuote
+      ];
+    })
+  );
+}
+
+function parseRobinhoodTradability(
+  raw: Record<string, unknown>
+): Record<string, { tradable: boolean; fractional: boolean; reason?: string }> {
+  const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
+  return Object.fromEntries(
+    (entries as Array<Record<string, unknown>>).map((item) => {
+      const symbol = normalizeSymbol(String(item.symbol));
+      const active = item.state ? item.state === "active" : true;
+      const tradable = Boolean(item.tradeable ?? item.tradable ?? item.is_tradable ?? true) && active;
+      const fractional =
+        item.fractional_tradability !== undefined
+          ? item.fractional_tradability === "tradable"
+          : Boolean(item.fractional ?? item.fractional_tradable);
+      return [
+        symbol,
+        {
+          tradable,
+          fractional,
+          reason: tradable
+            ? (item.reason ? String(item.reason) : undefined)
+            : String(item.reason ?? `${symbol} is ${String(item.state ?? "not tradable")}.`)
+        }
+      ];
+    })
+  );
+}
 
 export interface RobinhoodMcpHealth {
   adapter: "mcp";
@@ -44,14 +161,61 @@ export interface RobinhoodMcpHealth {
   warning?: string;
 }
 
+/**
+ * Robinhood's minimum dollar-based/fractional equity order size. Below this, `review_equity_order`
+ * returns an `order_checks` alertType telling us the order will be rejected outright (see
+ * ROBINHOOD_SUB_MINIMUM_ALERT_TYPES). Exposed as a named per-broker constant — never hardcode the
+ * literal `1` in a caller for this.
+ */
+export const ROBINHOOD_MIN_ORDER_NOTIONAL = 1;
+
+/**
+ * `order_checks.alertType` values that mean the order is a GUARANTEED reject for being below
+ * Robinhood's minimum order size — not a soft warning, an unconditional floor no sizing/retry can
+ * satisfy for the same notional. `review_equity_order` is a genuine pre-flight: if either of these
+ * comes back, placing the order anyway will fail every time.
+ */
+export const ROBINHOOD_SUB_MINIMUM_ALERT_TYPES = new Set([
+  "EQUITY_DOLLAR_BASED_MINIMUM_AMOUNT_ERROR",
+  "EQUITY_SUB_DOLLAR_SHARE_BASED_ORDER"
+]);
+
+/**
+ * Tolerantly normalize Robinhood's `review_equity_order` `order_checks` field, which can come back
+ * as a single check object, an array of check objects, or be absent entirely — the MCP server's
+ * exact envelope isn't documented, so this is deliberately liberal about shape. Extracts every
+ * present alertType-shaped value plus any human-readable message/description/reason so callers can
+ * build a pre-flight rejection signal without depending on one exact schema.
+ */
+export function parseRobinhoodOrderChecks(raw: unknown): { alertTypes: string[]; messages: string[] } {
+  const root = raw as Record<string, unknown> | undefined;
+  const rawChecks = root?.order_checks ?? (root as Record<string, unknown> | undefined)?.orderChecks;
+  const rows: unknown[] = Array.isArray(rawChecks)
+    ? rawChecks
+    : rawChecks && typeof rawChecks === "object"
+      ? [rawChecks]
+      : [];
+  const alertTypes: string[] = [];
+  const messages: string[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const check = row as Record<string, unknown>;
+    const alertType = check.alertType ?? check.alert_type ?? check.type;
+    if (alertType !== undefined && alertType !== null && alertType !== "") alertTypes.push(String(alertType));
+    const message = check.message ?? check.description ?? check.detail ?? check.reason;
+    if (message !== undefined && message !== null && message !== "") messages.push(String(message));
+  }
+  return { alertTypes, messages };
+}
+
 export function getRobinhoodGateway(userId: string): BrokerGateway {
   // Robinhood is MCP-only. When it isn't connected, the MCP gateway surfaces honest
   // errors and the health card shows "not connected" — it never returns fabricated data.
   return new HttpMcpRobinhoodGateway(userId);
 }
 
-// Local "Test" broker: real market quotes (Yahoo) + simulated fills, no real broker.
-// Honestly labeled "Test — Local Sim" — it never impersonates Robinhood or any real account.
+// Test broker: real market quotes (Yahoo) + deterministic simulated fills for tests/dev.
+// It never impersonates Robinhood or any real brokerage account.
 export function getTestGateway(userId: string = "local"): BrokerGateway {
   return new TestBrokerGateway(userId);
 }
@@ -130,6 +294,11 @@ export function portfolioFromRobinhoodRaw(accountNumber: string, raw: Record<str
 }
 
 class HttpMcpRobinhoodGateway implements BrokerGateway {
+  // ordersListIncludesTerminal is DELIBERATELY left unset (⇒ conservative/false): Robinhood's
+  // get_equity_orders terminal-inclusion window can't be verified without a live token, so
+  // reconcilePlacementError must NOT conclude not_placed from an absent order here (a placed order
+  // that already filled and aged out of a live-only list would be wrongly dropped, then duplicated
+  // next run). Absent-from-list ⇒ uncertain (protected). Flip to `true` only once verified live.
   private readonly userId: string;
 
   constructor(userId: string) {
@@ -157,18 +326,18 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
         : rawBrokerageType.includes("ira") || rawBrokerageType.includes("traditional") ? "traditional_ira"
         : "brokerage";
 
-      const capabilities: AccountCapabilities = {
+      const capabilities: AccountCapabilities = mergeAccountCapabilities("robinhood", {
         equityTrading: true,
-        // Robinhood MCP does not support short selling. The MCP's review_equity_order
-        // docs explicitly state "no short sells". Hardcoded false regardless of account type.
+        // Live MCP place/review side enum is buy|sell only — no short/cover.
         shortSelling: false,
         optionsTrading,
         optionsLevel: optionsTrading ? optionsLevel : undefined,
+        optionsOrders: false,
         futuresTrading: false,
         cryptoTrading: false,
         marginEnabled,
         accountType
-      };
+      });
 
       return {
         accountNumber: String(item.account_number ?? item.accountNumber),
@@ -246,10 +415,38 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     return positions;
   }
 
-  async getEquityOrders(accountNumber: string): Promise<EquityOrder[]> {
-    const raw = await this.callTool("get_equity_orders", { account_number: accountNumber }) as Record<string, unknown>;
-    const orders = Array.isArray(raw?.orders) ? raw.orders : Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
-    return orders.map((item: Record<string, unknown>) => ({
+  async getOptionPositions(accountNumber: string): Promise<OptionPosition[]> {
+    const raw = await this.callTool("get_option_positions", { account_number: accountNumber }) as Record<string, unknown>;
+    const rows = Array.isArray(raw?.positions) ? raw.positions : Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
+    
+    return rows.map((item: any) => {
+      const underlying = String(item.chain_symbol ?? item.symbol ?? "");
+      const expDate = String(item.expiration_date ?? item.expiry_date ?? "");
+      const type = String(item.option_type ?? item.type ?? "call").toLowerCase() === "put" ? "put" as const : "call" as const;
+      const strike = number(item.strike_price ?? item.strike ?? 0);
+      const qty = number(item.quantity ?? 0);
+      const avgPrice = number(item.average_price ?? item.average_buy_price ?? item.averageCost ?? 0);
+      
+      const symbol = buildOccSymbol(underlying, expDate, type, strike);
+      const marketValue = number(item.market_value ?? item.marketValue ?? (qty * avgPrice * 100));
+
+      return {
+        symbol,
+        underlyingSymbol: normalizeSymbol(underlying),
+        expirationDate: expDate,
+        optionType: type,
+        strikePrice: strike,
+        quantity: qty,
+        averageCost: avgPrice,
+        marketValue: marketValue
+      } satisfies OptionPosition;
+    }).filter((p) => p.underlyingSymbol && p.expirationDate && p.quantity !== 0);
+  }
+
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
+    const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
+    const orders = extractRobinhoodOrderCollection(raw);
+    const mapped = orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
       side: item.side as OrderSide,
@@ -259,95 +456,96 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
       dollarAmount: optionalNumber(item.dollar_based_amount ?? item.dollar_amount ?? item.dollarAmount),
       filledQuantity: optionalNumber(item.cumulative_quantity ?? item.filled_quantity ?? item.filledQuantity),
       averagePrice: optionalNumber(item.average_price ?? item.averagePrice),
+      // Robinhood reports the resting limit as `price` (no dedicated limit_price field).
+      limitPrice: optionalNumber(item.price ?? item.limit_price ?? item.limitPrice),
+      stopPrice: optionalNumber(item.stop_price ?? item.stopPrice),
+      timeInForce: optionalString(item.time_in_force ?? item.timeInForce),
       createdAt: String(item.created_at ?? item.createdAt ?? ""),
       updatedAt: optionalString(item.last_transaction_at ?? item.updated_at ?? item.updatedAt),
       clientOrderId: optionalString(item.ref_id ?? item.client_order_id ?? item.clientOrderId),
       placedAgent: optionalString(item.placed_agent ?? item.placedAgent)
     }));
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
-    try {
-      const raw = await this.callTool("get_equity_quotes", {
-        symbols: symbols.map(normalizeSymbol)
-      }) as Record<string, unknown>;
-      const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw?.quotes) ? raw.quotes : Array.isArray(raw) ? raw : [];
-      return Object.fromEntries(
-        entries.map((item: Record<string, unknown>) => {
-          // Robinhood nests the live quote under `quote` and pairs it with `close`.
-          const q = (item.quote ?? item) as Record<string, unknown>;
-          const symbol = normalizeSymbol(String(q.symbol ?? item.symbol));
-          return [
-            symbol,
-            {
-              symbol,
-              price: optionalNumber(q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price),
-              bid: optionalNumber(q.bid_price ?? q.bid),
-              ask: optionalNumber(q.ask_price ?? q.ask),
-              asOf: optionalString(q.venue_last_trade_time ?? q.as_of ?? item.as_of),
-              provider: "robinhood"
-            } satisfies BrokerQuote
-          ];
-        })
-      );
-    } catch (error) {
-      recordRecoverableIssue({
-        source: "broker",
-        operation: "robinhood.getEquityQuotes",
-        message: messageFromUnknownError(error),
-        fallback: "Returning no Robinhood quotes; downstream logic may use another quote source or omit prices.",
-        userId: this.userId,
-        broker: "robinhood",
-        accountNumber,
-        details: { symbols: symbols.map(normalizeSymbol) }
-      });
-      return {};
-    }
+    return mapRobinhoodSymbolChunks(symbols, async (chunk) => {
+      try {
+        const raw = (await this.callTool("get_equity_quotes", { symbols: chunk })) as Record<string, unknown>;
+        return parseRobinhoodQuotes(raw);
+      } catch (error) {
+        recordRecoverableIssue({
+          source: "broker",
+          operation: "robinhood.getEquityQuotes",
+          message: messageFromUnknownError(error),
+          fallback: "Returning no Robinhood quotes for this chunk; other chunks and later cascade sources still run.",
+          userId: this.userId,
+          broker: "robinhood",
+          accountNumber,
+          details: { symbols: chunk, chunkSize: chunk.length, maxSymbols: ROBINHOOD_EQUITY_SYMBOL_CHUNK }
+        });
+        return {};
+      }
+    });
   }
 
   async getEquityTradability(accountNumber: string, symbols: string[]) {
-    const raw = await this.callTool("get_equity_tradability", {
-      account_number: accountNumber,
-      symbols: symbols.map(normalizeSymbol)
-    }) as Record<string, unknown>;
-    const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
-    return Object.fromEntries(
-      entries.map((item: Record<string, unknown>) => {
-        const symbol = normalizeSymbol(String(item.symbol));
-        const active = item.state ? item.state === "active" : true;
-        // Robinhood spells the flag `tradeable`; fractional is a string enum ("tradable").
-        const tradable = Boolean(item.tradeable ?? item.tradable ?? item.is_tradable ?? true) && active;
-        const fractional =
-          item.fractional_tradability !== undefined
-            ? item.fractional_tradability === "tradable"
-            : Boolean(item.fractional ?? item.fractional_tradable);
-        return [
-          symbol,
-          {
-            tradable,
-            fractional,
-            reason: tradable ? (item.reason ? String(item.reason) : undefined) : String(item.reason ?? `${symbol} is ${String(item.state ?? "not tradable")}.`)
-          }
-        ];
-      })
-    );
+    return mapRobinhoodSymbolChunks(symbols, async (chunk) => {
+      try {
+        const raw = (await this.callTool("get_equity_tradability", {
+          account_number: accountNumber,
+          symbols: chunk
+        })) as Record<string, unknown>;
+        return parseRobinhoodTradability(raw);
+      } catch {
+        return {};
+      }
+    });
   }
 
   async reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder> {
-    const raw = await this.callTool("review_equity_order", toMcpOrder(input)) as Record<string, unknown>;
+    // Review the SAME order placeEquityOrder will send.  The fractional/extended-hours limit ->
+    // regular-hours market coercion lives in normalizeVenueOrder (not toMcpOrder), so without this
+    // a fractional limit buy is reviewed as a limit (cost estimate and order checks) but placed as
+    // a market order.  audit:false -- placement writes the single normalization receipt.
+    const reviewInput = normalizeVenueOrder(input, "robinhood", this.userId, { audit: false });
+    const raw = await this.callTool("review_equity_order", toMcpOrder(reviewInput)) as Record<string, unknown>;
+    // Robinhood's own pre-flight review already tells us when an order is a guaranteed reject (e.g.
+    // the sub-$1 minimum) via `order_checks`, not the top-level `alerts` array read below — surface
+    // it as a structured signal so callers can skip a doomed order instead of placing (and
+    // rejecting, and alerting on) it anyway.
+    const { alertTypes, messages } = parseRobinhoodOrderChecks(raw);
+    const blockingAlertTypes = alertTypes.filter((alertType) => ROBINHOOD_SUB_MINIMUM_ALERT_TYPES.has(alertType));
     return {
       estimatedNotional: number(
         raw.estimated_cost ?? raw.estimated_notional ?? raw.notional ?? raw.total ?? raw.estimated_amount ?? input.dollarAmount ?? 0
       ),
       alerts: Array.isArray(raw.alerts) ? raw.alerts.map(String) : [],
+      ...(blockingAlertTypes.length > 0
+        ? {
+            preflightBlock: {
+              alertTypes: blockingAlertTypes,
+              message: messages[0] ?? `Robinhood rejects this order (${blockingAlertTypes.join(", ")}).`
+            }
+          }
+        : {}),
       raw
     };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const raw = await this.callTool("place_equity_order", { ...toMcpOrder(input), ref_id: input.refId }) as Record<string, unknown>;
+    const orderId = raw.id ?? raw.order_id;
+    // A response with no order id can't be tracked or reconciled against Robinhood's real order
+    // list — String(undefined) would silently become the literal string "undefined" and the
+    // caller would record this as a confirmed "placed" order that can never be matched later.
+    // Throw so the caller's placement try/catch treats this as placement-uncertain instead.
+    if (orderId === undefined || orderId === null || orderId === "") {
+      throw new Error(`Robinhood place_equity_order response had no order id: ${JSON.stringify(raw)}`);
+    }
     return {
-      orderId: String(raw.id ?? raw.order_id),
+      orderId: String(orderId),
       refId: input.refId,
       state: String(raw.state ?? "submitted"),
       filledQuantity: optionalNumber(raw.cumulative_quantity ?? raw.filled_quantity ?? raw.filledQuantity),
@@ -405,7 +603,7 @@ export async function getRobinhoodMcpHealth(userId: string): Promise<RobinhoodMc
     await callRobinhoodMcpMethod(userId, "initialize", {
       protocolVersion,
       capabilities: {},
-      clientInfo: { name: "Trading Dashboard", version: "0.1.0" }
+      clientInfo: { name: "Socratic Trade", version: "0.1.0" }
     });
   } catch (error) {
     // Some HTTP MCP proxies accept direct tools/list calls. Keep this diagnostic
@@ -433,20 +631,39 @@ export async function getRobinhoodMcpHealth(userId: string): Promise<RobinhoodMc
 }
 
 export async function callRobinhoodMcpTool(userId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
-  const result = await callRobinhoodMcpMethod(userId, "tools/call", { name, arguments: args });
-  return unpackMcpToolResult(result);
+  // Every Robinhood MCP call (trading + reads) funnels through here, so this single wrap
+  // gives the admin connections-health page a "robinhood-broker" signal for whether the
+  // broker gateway is reachable. The token is per-user, so key the lane by userId.
+  // logApiHealth swallows its own errors and is only ever called around the real call, so
+  // health logging can never throw or block the broker call.
+  const start = Date.now();
+  try {
+    const result = await callRobinhoodMcpMethod(userId, "tools/call", { name, arguments: args });
+    logApiHealth({ service: "robinhood-broker", ok: true, latencyMs: Date.now() - start, keySource: "user", userId });
+    return unpackMcpToolResult(result);
+  } catch (err) {
+    logApiHealth({
+      service: "robinhood-broker",
+      ok: false,
+      latencyMs: Date.now() - start,
+      errorText: err instanceof Error ? err.message : String(err),
+      keySource: "user",
+      userId
+    });
+    throw err;
+  }
 }
 
 export async function callRobinhoodMcpMethod(userId: string, method: string, params: Record<string, unknown>): Promise<unknown> {
   const token = await getMcpAccessToken(userId);
   if (!token) {
-    throw new Error("Robinhood not connected — reconnect your account in Settings → Connections");
+    throw new Error("Robinhood not connected — reconnect your account in Connections");
   }
   const response = await fetch(getRobinhoodMcpUrl(), {
     method: "POST",
     // Bound every Robinhood MCP call (incl. place_equity_order) so a hung connection can't block
     // the order path / strategy run indefinitely.
-    signal: AbortSignal.timeout(30_000),
+    signal: brokerAbortSignal(),
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -463,7 +680,7 @@ export async function callRobinhoodMcpMethod(userId: string, method: string, par
 
   if (response.status === 401) {
     clearMcpOAuthTokens(userId);
-    throw new Error("Robinhood session expired — reconnect your account in Settings → Connections");
+    throw new Error("Robinhood session expired — reconnect your account in Connections");
   }
 
   const body = await response.text();
@@ -521,6 +738,21 @@ function parseSseMcpResponse(body: string): { result?: unknown; error?: unknown 
 
 function unpackMcpToolResult(raw: unknown): unknown {
   const rawObj = raw as Record<string, unknown> | undefined;
+  // A tools/call result can report a TOOL-LEVEL failure via `isError: true` on an otherwise-2xx
+  // JSON-RPC success (distinct from a JSON-RPC-level `error`, which callRobinhoodMcpMethod already
+  // throws on). Surface it as a THROW so a broker-side failure (rate limit, auth lapse, upstream
+  // 5xx surfaced by the MCP proxy) can never be silently unwrapped into an error-shaped payload
+  // that a reader (e.g. getEquityOrders) then coalesces to an empty list. Booking a placement
+  // reconcile off a masked error is the phantom-fill / dropped-order money-path hazard this guards.
+  if (rawObj?.isError === true) {
+    const contentText = Array.isArray(rawObj.content)
+      ? (rawObj.content as Array<{ text?: unknown }>)
+          .map((c) => (typeof c?.text === "string" ? c.text : ""))
+          .filter(Boolean)
+          .join("; ")
+      : undefined;
+    throw new Error(`Robinhood MCP tool reported an error${contentText ? `: ${contentText}` : ""}`);
+  }
   const result = rawObj?.structuredContent ?? (rawObj?.content as Array<{ text?: unknown }>)?.[0]?.text ?? raw;
   let parsed: unknown = result;
   if (typeof result === "string") {
@@ -536,6 +768,36 @@ function unpackMcpToolResult(raw: unknown): unknown {
     return (parsed as { data: unknown }).data;
   }
   return parsed;
+}
+
+/**
+ * Pull the order array out of Robinhood's get_equity_orders response, distinguishing an
+ * AUTHORITATIVE empty list (a real "no orders" account state) from a malformed / error-shaped
+ * response. A shape that carries no recognizable orders/results collection must THROW — never
+ * coalesce to `[]` — because a placement reconcile (reconcilePlacementError / flagStalePlacingIntents)
+ * reads `[]` as "the broker has no such order" and would mark a genuinely-placed order not_placed,
+ * drop its durable 'placing' intent, and let the next run DUPLICATE the position. After this guard,
+ * a returned `[]` means Robinhood authoritatively returned an empty order list. Tool-level broker
+ * errors already throw earlier in unpackMcpToolResult (isError), so a well-formed collection here is
+ * a genuine success payload.
+ */
+function extractRobinhoodOrderCollection(raw: unknown): Record<string, unknown>[] {
+  if (Array.isArray(raw)) return raw as Record<string, unknown>[];
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.orders)) return obj.orders as Record<string, unknown>[];
+    if (Array.isArray(obj.results)) return obj.results as Record<string, unknown>[];
+  }
+  const preview = (() => {
+    try {
+      return JSON.stringify(raw)?.slice(0, 200) ?? String(raw);
+    } catch {
+      return String(raw);
+    }
+  })();
+  throw new Error(
+    `Robinhood get_equity_orders returned an unrecognized shape (no orders/results array) — treating as an error, not an empty account: ${preview}`
+  );
 }
 
 function mcpErrorMessage(payload: { error?: unknown }): string | undefined {
@@ -576,6 +838,10 @@ const MOCK_PRICES: Record<string, number> = {
 };
 
 class TestBrokerGateway implements BrokerGateway {
+  // The local deterministic sim has full knowledge of its own order history (nothing ages out), so
+  // its order list is authoritative for terminal orders. (Moot in practice — TestBroker fills
+  // synchronously and never throws on placement — but correct, and keeps sim reconciles precise.)
+  readonly ordersListIncludesTerminal = true;
   private readonly userId: string;
 
   constructor(userId: string = "local") {
@@ -585,18 +851,23 @@ class TestBrokerGateway implements BrokerGateway {
   async getAccounts(): Promise<BrokerageAccount[]> {
     return [{
       accountNumber: "TEST",
-      label: "Test — Local Sim",
+      label: "Test broker",
       agenticAllowed: true,
       capabilities: {
         equityTrading: true,
-        shortSelling: false,
-        optionsTrading: false,
+        shortSelling: true,
+        optionsTrading: true,
+        optionsOrders: true,
         futuresTrading: false,
         cryptoTrading: false,
-        marginEnabled: false,
+        marginEnabled: true,
         accountType: "brokerage"
       }
     }];
+  }
+
+  async probeOrderCapability(_accountNumber: string): Promise<{ ok: boolean; reason?: string }> {
+    return { ok: true };
   }
 
   async getEquityPositions(accountNumber: string): Promise<EquityPosition[]> {
@@ -637,6 +908,8 @@ class TestBrokerGateway implements BrokerGateway {
     };
   }
 
+  // The Test broker (test infrastructure) simulates fills instantly (placeEquityOrder returns
+  // "filled"), so no order ever rests here — there is deliberately no limit/stop/TIF data to surface.
   async getEquityOrders(): Promise<EquityOrder[]> {
     return [];
   }
@@ -658,8 +931,11 @@ class TestBrokerGateway implements BrokerGateway {
               bid: yf.bid,
               ask: yf.ask,
               volume: yf.volume > 0 ? yf.volume : undefined,
-              asOf: yf.asOf || new Date().toISOString(),
-              provider: "yahoo-finance"
+              ...(yf.asOf ? { asOf: yf.asOf } : {}),
+              provider: "yahoo-finance",
+              ...(yf.syntheticBid ? { syntheticBid: true } : {}),
+              ...(yf.syntheticAsk ? { syntheticAsk: true } : {}),
+              ...(yf.syntheticSpread ? { syntheticSpread: true } : {})
             };
           } else {
             remainingSymbols.push(symbol);
@@ -694,7 +970,14 @@ class TestBrokerGateway implements BrokerGateway {
           provider: "test"
         };
       } else {
-        throw new Error(`Real-time quote for symbol ${symbol} is unavailable.`);
+        result[symbol] = {
+          symbol,
+          price: 100,
+          bid: 99.9,
+          ask: 100.1,
+          asOf: new Date().toISOString(),
+          provider: "test-fallback"
+        };
       }
     }
 
@@ -712,15 +995,23 @@ class TestBrokerGateway implements BrokerGateway {
     return { estimatedNotional: input.dollarAmount ?? (input.quantity ?? 0) * estPrice, alerts: [], raw: { test: true } };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const quotes = await this.getEquityQuotes(input.accountNumber, [input.symbol]);
     const price = quotes[normalizeSymbol(input.symbol)]?.price ?? 100;
     const estPrice = input.limitPrice ?? input.stopPrice ?? price;
-    const quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let state = "filled";
+    if (input.symbol === "REJECT") {
+      throw new Error("Simulated rejection for REJECT symbol");
+    } else if (input.symbol === "PARTIAL") {
+      state = "partially_filled";
+      quantity = quantity ? quantity / 2 : undefined;
+    }
     return {
       orderId: `test-${input.refId}`,
       refId: input.refId,
-      state: "filled",
+      state,
       filledQuantity: quantity,
       averagePrice: estPrice,
       raw: { test: true }
@@ -728,6 +1019,30 @@ class TestBrokerGateway implements BrokerGateway {
   }
 
   async cancelEquityOrder(_accountNumber: string, orderId: string): Promise<ExecutedOrder> {
+    return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { test: true } };
+  }
+
+  async placeOptionOrder(input: {
+    accountNumber: string;
+    occSymbol: string;
+    intent: "buy_to_open" | "sell_to_close" | "buy_to_close" | "sell_to_open";
+    quantity: number;
+    type: "market" | "limit";
+    limitPrice?: number;
+    timeInForce?: import("./types").TimeInForce;
+    refId: string;
+  }): Promise<ExecutedOrder> {
+    return {
+      orderId: `test-opt-${input.refId}`,
+      refId: input.refId,
+      state: "filled",
+      filledQuantity: input.quantity,
+      averagePrice: input.limitPrice ?? 2.5,
+      raw: { test: true }
+    };
+  }
+
+  async cancelOptionOrder(_accountNumber: string, orderId: string): Promise<ExecutedOrder> {
     return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { test: true } };
   }
 }
@@ -745,17 +1060,53 @@ export function toMcpOrder(input: EquityOrderInput): Record<string, unknown> {
       `Robinhood does not support short selling (side="${input.side}"). Short/cover orders must not reach the broker.`
     );
   }
+  // The Robinhood MCP exposes no verified native trailing-stop parameter. A trailPercent order must
+  // never silently degrade into a plain stop here — the protective-stop reconciler emulates trailing
+  // on Robinhood itself (a stop_market it ratchets upward each tick) and deliberately omits this
+  // field. If Robinhood's MCP adds a trailing peg, translate it here instead of throwing.
+  if (input.trailPercent != null && input.trailPercent > 0) {
+    throw new Error(
+      "Robinhood MCP does not support native trailing stops. Place a stop_market and ratchet it (see broker-protective-stops.ts)."
+    );
+  }
+  // FRACTIONAL / NOTIONAL ENTRIES ARE MARKET-ONLY ON ROBINHOOD. A fractional order -- a dollar_amount
+  // order OR a sub-whole-share quantity (e.g. 0.5 sh) -- sent as a LIMIT (or in extended hours) is
+  // accepted by the API but never fills: it shows "Placed"/working while the cash is never spent (the
+  // $1 GOOG/AMAT symptom). Robinhood fills fractional/notional orders only as regular-hours MARKET
+  // orders. So coerce a fractional ENTRY to a regular-hours market order and drop the limit modifier.
+  //
+  // Three things we deliberately do NOT coerce:
+  //   - STOPS (stop_market/stop_limit): converting a protective/trailing stop to a market order would
+  //     sell immediately instead of resting until the stop triggers. Robinhood can't place a notional
+  //     stop, so a dollar-sized stop must be caught upstream by policy, never silently reshaped here.
+  //   - EXITS (sell): a limit/take-profit exit must rest at its requested price or be rejected upstream;
+  //     silently turning it into market would liquidate immediately.
+  //   - Whole-share orders (integer quantity >= 1): preserved as-is so marketable-limit entries work.
+  //
+  // This is the same coercion `normalizeVenueOrder()` performs for the audited
+  // entry-point call in `placeEquityOrder()`; we keep it inline here too so direct
+  // callers (tests, the `reviewEquityOrder()` pre-flight, anything that bypasses
+  // the gateway) get the same shape the broker will eventually receive. The two
+  // paths are idempotent — calling normalizeVenueOrder first and then toMcpOrder
+  // is a no-op the second time.
+  const wholeShare = input.quantity != null && Number.isInteger(input.quantity) && input.quantity >= 1;
+  const fractional =
+    !wholeShare && ((input.dollarAmount != null && input.dollarAmount > 0) || (input.quantity != null && input.quantity > 0));
+  const isStop = input.type === "stop_market" || input.type === "stop_limit";
+  const isOpening = input.side === "buy";
+  const coerceFractional = isOpening && fractional && !isStop;
+
   return {
     account_number: input.accountNumber,
     symbol: normalizeSymbol(input.symbol),
     side: input.side,
-    type: input.type,
+    type: coerceFractional ? "market" : input.type,
     quantity: input.quantity?.toString(),
     dollar_amount: input.dollarAmount?.toFixed(2),
-    limit_price: input.limitPrice?.toFixed(2),
-    stop_price: input.stopPrice?.toFixed(2),
-    time_in_force: input.timeInForce,
-    market_hours: input.marketHours
+    limit_price: coerceFractional ? undefined : input.limitPrice?.toFixed(2),
+    stop_price: coerceFractional ? undefined : input.stopPrice?.toFixed(2),
+    time_in_force: coerceFractional ? "gfd" : input.timeInForce,
+    market_hours: coerceFractional ? "regular_hours" : input.marketHours
   };
 }
 
@@ -779,12 +1130,23 @@ export function robinhoodMcpDataEnabled(): boolean {
  * a missing userId used to silently resolve the operator's ('local') broker token for
  * every tenant (cross-user credential leak). Background/shared callers that have no
  * user in scope must NOT call this at all (see `fetchDailyOHLC`, which omits the
- * private broker tier when no userId is provided). When `ROBINHOOD_MCP_AUTH_TOKEN`
- * is set the per-user lookup is bypassed anyway.
+ * private broker tier when no userId is provided).  `ROBINHOOD_MCP_AUTH_TOKEN` is a
+ * boot seed into the operator (`local`) stored row, not a live getMcpAccessToken
+ * bypass.  Peer intraday may pass userId `local` only after APP_B_INGEST_TOKEN.
  */
 export async function fetchRobinhoodHistoricals(
   symbol: string,
-  opts: { interval?: string; span?: string; userId: string }
+  opts: {
+    interval?: string;
+    span?: string;
+    userId: string;
+    /** Explicit RFC3339 window. When given, `startTime` wins over the `span` shorthand and
+     *  `endTime` bounds the far end — required for INTRADAY reads, where "5 years back until
+     *  now" would blow past the row cap long before reaching the minute of interest. */
+    startTime?: string;
+    endTime?: string;
+    bounds?: string;
+  }
 ): Promise<OHLCBar[] | null> {
   if (!robinhoodMcpDataEnabled()) return null;
   const sym = normalizeSymbol(symbol);
@@ -793,16 +1155,35 @@ export async function fetchRobinhoodHistoricals(
   try {
     const raw = await callRobinhoodMcpTool(userId, "get_equity_historicals", {
       symbols: [sym],
-      symbol: sym,
+      start_time: opts.startTime ?? robinhoodHistoricalsStartTime(opts.span ?? "5year"),
+      ...(opts.endTime ? { end_time: opts.endTime } : {}),
       interval: opts.interval ?? "day",
-      span: opts.span ?? "5year",
-      bounds: "regular"
+      bounds: opts.bounds ?? "regular"
     });
     const bars = parseRobinhoodHistoricals(raw, sym);
-    return bars.length >= 2 ? bars : null;
+    // The >=2 floor exists so a single stale print cannot satisfy the DAILY cascade. An explicit
+    // intraday window is a different question ("what traded between 14:40 and 15:40"), where one
+    // bar is a legitimate answer for a thin name — so only apply the floor to span-style reads.
+    const minBars = opts.startTime ? 1 : 2;
+    return bars.length >= minBars ? bars : null;
   } catch {
     return null;
   }
+}
+
+/** Convert the legacy `span` knob (e.g. `5year`) into the RFC3339 `start_time` the live MCP requires. */
+export function robinhoodHistoricalsStartTime(span: string, nowMs = Date.now()): string {
+  const raw = String(span || "5year").trim().toLowerCase();
+  const match = raw.match(/^(\d+)?(year|month|week|day)s?$/);
+  const count = match?.[1] ? Number(match[1]) : 1;
+  const unit = match?.[2] ?? "year";
+  const dayMs = 24 * 60 * 60 * 1000;
+  const ms =
+    unit === "year" ? count * 365.25 * dayMs
+    : unit === "month" ? count * 30 * dayMs
+    : unit === "week" ? count * 7 * dayMs
+    : count * dayMs;
+  return new Date(nowMs - ms).toISOString();
 }
 
 /** Defensive parser for Robinhood historicals — tolerates several envelope shapes. */
@@ -850,26 +1231,122 @@ export function parseRobinhoodHistoricals(raw: unknown, symbol: string): OHLCBar
  * the request-scoped identity. There is deliberately no `DEV_USER_ID` default: a missing
  * userId used to silently resolve the operator's ('local') broker token for every tenant
  * (cross-user credential leak). Enrichment callers with no user in scope must fail closed
- * rather than borrow 'local' (see `RobinhoodEnrichmentProvider`). When
- * `ROBINHOOD_MCP_AUTH_TOKEN` is set the per-user lookup is bypassed anyway.
+ * rather than borrow 'local' (see `RobinhoodEnrichmentProvider`).  There is no
+ * env-token bypass of getMcpAccessToken.
  */
 export async function fetchRobinhoodFundamentals(symbols: string[], userId: string): Promise<Record<string, Record<string, unknown>>> {
   if (!robinhoodMcpDataEnabled()) return {};
   const wanted = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
   if (wanted.length === 0) return {};
-  try {
-    const raw = await callRobinhoodMcpTool(userId, "get_equity_fundamentals", { symbols: wanted });
-    const root = raw as Record<string, unknown> | undefined;
-    const rows = Array.isArray(root?.results) ? root!.results : Array.isArray(root?.fundamentals) ? root!.fundamentals : Array.isArray(raw) ? (raw as unknown[]) : [];
-    const out: Record<string, Record<string, unknown>> = {};
-    for (const row of rows as Array<Record<string, unknown>>) {
-      const sym = normalizeSymbol(String(row.symbol ?? row.ticker ?? ""));
-      if (sym) out[sym] = row;
+  return mapRobinhoodSymbolChunks(wanted, async (chunk) => {
+    try {
+      const raw = await callRobinhoodMcpTool(userId, "get_equity_fundamentals", { symbols: chunk });
+      const root = raw as Record<string, unknown> | undefined;
+      const rows = Array.isArray(root?.results)
+        ? root!.results
+        : Array.isArray(root?.fundamentals)
+          ? root!.fundamentals
+          : Array.isArray(raw)
+            ? (raw as unknown[])
+            : [];
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const row of rows as Array<Record<string, unknown>>) {
+        const sym = normalizeSymbol(String(row.symbol ?? row.ticker ?? ""));
+        if (sym) out[sym] = row;
+      }
+      return out;
+    } catch {
+      return {};
     }
-    return out;
+  });
+}
+
+/**
+ * Fetch the option chain for a symbol via Robinhood MCP `get_option_chains`, optionally narrowing to
+ * specific instruments via `get_option_instruments`. Returns the raw MCP payloads for a caller-side
+ * parser (see robinhood-options.ts). Returns null when Robinhood isn't connected or the call fails —
+ * so the options enrichment tier degrades to contributing nothing, exactly like other optional tiers.
+ *
+ * SECURITY: `userId` is REQUIRED (per-user OAuth token). No 'local' fallback — a missing userId must
+ * not resolve the operator's broker token for a shared/background scan.
+ */
+export async function fetchRobinhoodOptionChain(
+  symbol: string,
+  userId: string,
+  opts: { expiration?: string; type?: "call" | "put" } = {}
+): Promise<{ chains: unknown; instruments: unknown; underlyingPrice?: number } | null> {
+  if (!robinhoodMcpDataEnabled()) return null;
+  const sym = normalizeSymbol(symbol);
+  if (!sym || !userId) return null;
+  try {
+    // Live MCP schemas are additionalProperties:false. get_option_chains accepts only
+    // ids / underlying_symbol; get_option_instruments wants chain_symbol (not symbol/symbols).
+    // Sending both shapes used to 400 the whole lane: unexpected additional properties
+    // ["symbol" "symbols"] — Pushover/Sentry SOCRATIC-TRADE-K / GH #2576.
+    const chains = await callRobinhoodMcpTool(userId, "get_option_chains", {
+      underlying_symbol: sym
+    });
+    let instruments: unknown = undefined;
+    try {
+      instruments = await callRobinhoodMcpTool(userId, "get_option_instruments", {
+        chain_symbol: sym,
+        ...(opts.expiration ? { expiration_dates: opts.expiration } : {}),
+        ...(opts.type ? { type: opts.type } : {})
+      });
+    } catch {
+      // get_option_instruments is best-effort; the chain payload often already carries what we need.
+      instruments = undefined;
+    }
+    // Best-effort underlying price so the caller can pick the true near-the-money strike and apply its
+    // ±20% around-the-money filter. Without it, "near-the-money" IV / put-call ratio are basis-less and
+    // far-OTM strikes can dominate; a failure here simply omits the price (metrics fall back / suppress).
+    let underlyingPrice: number | undefined;
+    try {
+      const quote = await callRobinhoodMcpTool(userId, "get_equity_quotes", { symbols: [sym] });
+      underlyingPrice = extractUnderlyingPrice(quote, sym);
+    } catch {
+      underlyingPrice = undefined;
+    }
+    return { chains, instruments, ...(underlyingPrice !== undefined ? { underlyingPrice } : {}) };
   } catch {
-    return {};
+    return null;
   }
+}
+
+/** Tolerantly pull a positive underlying last/mark price for `sym` from a get_equity_quotes payload. */
+export function extractUnderlyingPrice(raw: unknown, sym: string): number | undefined {
+  const root = raw as Record<string, unknown> | undefined;
+  const rows: unknown[] = Array.isArray(root?.results)
+    ? (root!.results as unknown[])
+    : Array.isArray(root?.quotes)
+      ? (root!.quotes as unknown[])
+      : Array.isArray(raw)
+        ? (raw as unknown[])
+        : root && typeof root === "object"
+          ? [root]
+          : [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const outer = r as Record<string, unknown>;
+    // Robinhood commonly wraps the quote in a `quote` envelope (mirrors `item.quote ?? item` used by
+    // the equity-quote parser elsewhere in this file); read that nested shape, not just the top level.
+    const inner =
+      outer.quote && typeof outer.quote === "object" ? (outer.quote as Record<string, unknown>) : outer;
+    const rsym = normalizeSymbol(
+      String(inner.symbol ?? inner.ticker ?? outer.symbol ?? outer.ticker ?? "")
+    );
+    if (rows.length > 1 && rsym && rsym !== sym) continue;
+    const price = firstNum(inner, [
+      "last_trade_price",
+      "last_non_reg_trade_price",
+      "mark_price",
+      "adjusted_mark_price",
+      "price",
+      "last_price"
+    ]);
+    if (price !== undefined && price > 0) return price;
+  }
+  return undefined;
 }
 
 function firstNum(row: Record<string, unknown>, keys: string[]): number | undefined {
@@ -933,3 +1410,16 @@ function optionalString(value: unknown): string | undefined {
 }
 
 export { fetchYahooFinanceQuote } from "./yahoo-finance";
+
+export function buildOccSymbol(underlying: string, expirationDate: string, type: "call" | "put", strike: number): string {
+  const parts = expirationDate.split("-");
+  if (parts.length !== 3) {
+    return underlying.toUpperCase() + expirationDate;
+  }
+  const yy = parts[0].slice(2, 4);
+  const mm = parts[1].padStart(2, "0");
+  const dd = parts[2].padStart(2, "0");
+  const cp = type === "put" ? "P" : "C";
+  const strikeDigits = Math.round(strike * 1000).toString().padStart(8, "0");
+  return `${underlying.toUpperCase()}${yy}${mm}${dd}${cp}${strikeDigits}`;
+}

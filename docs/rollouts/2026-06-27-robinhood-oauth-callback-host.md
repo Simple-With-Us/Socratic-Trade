@@ -8,7 +8,7 @@ middleware response.
 
 ## Why
 
-Production runs behind the public `trading.jays.services` tunnel while the Node
+Production runs behind the public `socratictrade.com` tunnel while the Node
 process listens on localhost. The OAuth start flow trusted a configured
 loopback `ROBINHOOD_MCP_REDIRECT_URI`, and `/api/auth/robinhood/callback` was
 not on the middleware public allowlist. That combination could produce exactly
@@ -74,4 +74,4 @@ identity headers, but completion must still be state-bound.
 - If production secrets still contain a loopback `ROBINHOOD_MCP_REDIRECT_URI`,
   the code now overrides it for hosted flows, but the cleaner secret-store state
   is to leave it blank or set it to
-  `https://trading.jays.services/api/auth/robinhood/callback`.
+  `https://socratictrade.com/api/auth/robinhood/callback`.

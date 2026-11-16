@@ -72,7 +72,7 @@ or more formally branded than intended.
   - Help modal opens and does not contain the temporary app-name wording.
 - GitHub PR smoke initially failed because `test/e2e/dashboard-smoke.spec.ts`
   still expected the temporary app-name text. Updated the smoke assertion to
-  expect `Trading Dashboard`.
+  expect `Socratic Trade`.
 - `npm run test:e2e` using Playwright's managed web server timed out waiting
   for its production server after 240s. Retried against an already-started
   production server with `PLAYWRIGHT_BASE_URL=http://127.0.0.1:4201 npm run test:e2e`

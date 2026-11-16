@@ -51,13 +51,17 @@ describe("per-account policy isolation (PR 1)", () => {
     expect(db.getPolicy(userId, a2).systemState).toBe("halted");
   });
 
-  it("paperMode is derived from each account's broker", async () => {
+  it("activeBroker is derived from each account's own broker — an account is an account", async () => {
     const db = await import("../src/lib/db");
     const testAcct = `acct-test-${randomUUID()}`;
     db.upsertConnectedAccount({ id: testAcct, userId, broker: "test", environment: "paper", label: "Sim", isActive: false });
 
-    expect(db.getPolicy(userId, testAcct).paperMode).toBe(true);   // Test broker = local sim
-    expect(db.getPolicy(userId, a1).paperMode).toBe(false);        // Alpaca paper = real broker path
+    expect(db.getPolicy(userId, testAcct).activeBroker).toBe("test");
+    expect(db.getPolicy(userId, a1).activeBroker).toBe("alpaca");
+    // No policy-level paperMode override exists anymore: paper vs live is purely the connected
+    // account's own `environment`, never a policy flag.
+    expect((db.getPolicy(userId, testAcct) as unknown as Record<string, unknown>).paperMode).toBeUndefined();
+    expect((db.getPolicy(userId, a1) as unknown as Record<string, unknown>).paperMode).toBeUndefined();
   });
 
   it("run-lock is per account — one account's lock doesn't block another", async () => {
@@ -66,16 +70,17 @@ describe("per-account policy isolation (PR 1)", () => {
     const x = `acct-x-${randomUUID()}`;
     const y = `acct-y-${randomUUID()}`;
 
-    expect(db.acquireStrategyLock(u, x)).toBe(true);
-    expect(db.acquireStrategyLock(u, x)).toBe(false); // same account re-lock blocked
-    expect(db.acquireStrategyLock(u, y)).toBe(true);  // different account NOT blocked
+    expect(db.acquireStrategyLock("owner1", u, x)).toBe(true);
+    expect(db.acquireStrategyLock("owner2", u, x)).toBe(false); // same account re-lock blocked
+    expect(db.acquireStrategyLock("owner3", u, y)).toBe(true);  // different account NOT blocked
 
-    db.releaseStrategyLock(u, x);
-    expect(db.acquireStrategyLock(u, x)).toBe(true);
+    db.releaseStrategyLock("owner1", u, x);
+    expect(db.acquireStrategyLock("owner4", u, x)).toBe(true);
 
-    db.releaseStrategyLock(u); // no account → releases ALL of the user's locks
-    expect(db.acquireStrategyLock(u, x)).toBe(true);
-    expect(db.acquireStrategyLock(u, y)).toBe(true);
+    db.releaseStrategyLock("owner4", u, x);
+    db.releaseStrategyLock("owner3", u, y);
+    expect(db.acquireStrategyLock("owner5", u, x)).toBe(true);
+    expect(db.acquireStrategyLock("owner6", u, y)).toBe(true);
   });
 
   it("strategy runs and the cadence clock are per account", async () => {
@@ -107,6 +112,40 @@ describe("per-account policy isolation (PR 1)", () => {
     expect(db.getPolicy(u, other).systemState).toBe("halted");
   });
 
+  it("requireTypedConfirmation is user-level — one switch spans every account", async () => {
+    // Promoted to USER_LEVEL_POLICY_FIELDS in the 2026-07-10 Settings IA restructure: the
+    // typed-phrase ceremony is an owner preference, not a per-account guardrail.
+    const db = await import("../src/lib/db");
+    const u = `typeduser-${randomUUID()}`;
+    const p = `tacct-p-${randomUUID()}`;
+    const q = `tacct-q-${randomUUID()}`;
+
+    db.upsertConnectedAccount({ id: p, userId: u, broker: "alpaca", environment: "paper", accountNumber: "TP1", label: "P", isActive: true });
+    db.upsertConnectedAccount({ id: q, userId: u, broker: "alpaca", environment: "live", accountNumber: "TQ1", label: "Q", isActive: false });
+
+    // Default: required (true) on every account.
+    expect(db.getPolicy(u, p).requireTypedConfirmation).toBe(true);
+    expect(db.getPolicy(u, q).requireTypedConfirmation).toBe(true);
+
+    // Turning it off through ONE account applies to the whole login…
+    db.setPolicy({ ...db.getPolicy(u, p), requireTypedConfirmation: false }, u, p);
+    expect(db.getPolicy(u, p).requireTypedConfirmation).toBe(false);
+    expect(db.getPolicy(u, q).requireTypedConfirmation).toBe(false);
+
+    // …and a stale divergent per-account value (pre-promotion legacy row) is
+    // superseded by the user-level overlay on read, never resurrected.
+    const raw = db
+      .getDb()
+      .prepare("SELECT policy FROM account_strategy_state WHERE user_id = ? AND connected_account_id = ?")
+      .get(u, q) as { policy: string };
+    const legacy = JSON.parse(raw.policy) as Record<string, unknown>;
+    legacy.requireTypedConfirmation = true; // divergent account-scoped leftover
+    db.getDb()
+      .prepare("UPDATE account_strategy_state SET policy = ? WHERE user_id = ? AND connected_account_id = ?")
+      .run(JSON.stringify(legacy), u, q);
+    expect(db.getPolicy(u, q).requireTypedConfirmation).toBe(false);
+  });
+
   it("deleting a connected account purges its per-account isolated state", async () => {
     const db = await import("../src/lib/db");
     const u = `deluser-${randomUUID()}`;
@@ -122,7 +161,7 @@ describe("per-account policy isolation (PR 1)", () => {
     db.insertStrategyRun(randomUUID(), u, drop);
     db.setCounterfactualLearningWatermark({ userId: u, connectedAccountId: drop, lastAuditRowid: 42 });
 
-    expect(db.deleteConnectedAccount(drop, u)).toBe(true);
+    expect(db.purgeConnectedAccount(drop, u)).toBe(true);
 
     // Dropped account's isolated state is gone…
     expect(db.getLastStrategyRunStartedAt(u, drop)).toBeNull();
@@ -131,16 +170,25 @@ describe("per-account policy isolation (PR 1)", () => {
     expect(db.getPolicy(u, keep).maxOrderNotional).toBe(500);
   });
 
-  it("cleared user-level fields do not resurrect from stale account rows", async () => {
+  it("strategy model choices are account-scoped with a one-time legacy user seed", async () => {
     const db = await import("../src/lib/db");
-    const u = `tiereduser-${randomUUID()}`;
-    const active = `tiered-active-${randomUUID()}`;
-    const other = `tiered-other-${randomUUID()}`;
+    const u = `modeluser-${randomUUID()}`;
+    const active = `model-active-${randomUUID()}`;
+    const other = `model-other-${randomUUID()}`;
 
     db.upsertConnectedAccount({ id: active, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-A", label: "Active", isActive: true });
     db.upsertConnectedAccount({ id: other, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-O", label: "Other", isActive: false });
 
-    const stalePolicy = { ...db.getPolicy(u, other), redTeamLlmModel: "grok-4.3" };
+    db.setUserSetting(u, "policy", {
+      llmModel: "xai/grok-4.3",
+      redTeamLlmModel: "anthropic/claude-opus-4-8",
+      llmReasoningEffort: "high"
+    });
+
+    const stalePolicy = { ...db.getPolicy(u, other) };
+    delete stalePolicy.llmModel;
+    delete stalePolicy.redTeamLlmModel;
+    delete stalePolicy.llmReasoningEffort;
     db.getDb()
       .prepare(
         `INSERT OR REPLACE INTO account_strategy_state
@@ -158,16 +206,82 @@ describe("per-account policy isolation (PR 1)", () => {
         new Date().toISOString()
       );
 
-    db.setPolicy({ ...db.getPolicy(u, active), redTeamLlmModel: undefined }, u, active);
+    expect(db.getPolicy(u, other).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
+    expect(db.getPolicy(u, other).llmReasoningEffort).toBe("high");
 
+    db.setPolicy({ ...db.getPolicy(u, active), llmModel: "openai/gpt-5.5", redTeamLlmModel: "gpt-5.4" }, u, active);
+    db.setPolicy({ ...db.getPolicy(u, other), llmModel: "gemini-2.5-flash", redTeamLlmModel: undefined }, u, other);
+
+    expect(db.getPolicy(u, active).llmModel).toBe("openai/gpt-5.5");
+    expect(db.getPolicy(u, active).redTeamLlmModel).toBe("gpt-5.4");
+    expect(db.getPolicy(u, other).llmModel).toBe("gemini-2.5-flash");
     expect(db.getPolicy(u, other).redTeamLlmModel).toBeUndefined();
-    expect(db.peekPolicy(u, other).redTeamLlmModel).toBeUndefined();
 
-    db.setPolicy({ ...db.getPolicy(u, other), maxOrderNotional: 777 }, u, other);
+    const userPolicy = db.getUserSetting<Record<string, unknown>>(u, "policy", {});
+    expect(userPolicy.llmModel).toBeUndefined();
+    expect(userPolicy.redTeamLlmModel).toBeUndefined();
+    expect(userPolicy.llmReasoningEffort).toBeUndefined();
+
     const row = db.getDb()
       .prepare("SELECT policy FROM account_strategy_state WHERE user_id = ? AND connected_account_id = ?")
       .get(u, other) as { policy: string };
+    expect(JSON.parse(row.policy).llmModel).toBe("gemini-2.5-flash");
     expect(JSON.parse(row.policy).redTeamLlmModel).toBeUndefined();
+  });
+
+  it("migrates legacy model choices to every account before clearing user policy", async () => {
+    const db = await import("../src/lib/db");
+    const u = `legacy-migrate-${randomUUID()}`;
+    const active = `legacy-active-${randomUUID()}`;
+    const other = `legacy-other-${randomUUID()}`;
+    const untouched = `legacy-untouched-${randomUUID()}`;
+
+    db.upsertConnectedAccount({ id: active, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-A", label: "Active", isActive: true });
+    db.upsertConnectedAccount({ id: other, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-O", label: "Other", isActive: false });
+    db.upsertConnectedAccount({ id: untouched, userId: u, broker: "alpaca", environment: "paper", accountNumber: "PA-U", label: "Untouched", isActive: false });
+
+    db.setUserSetting(u, "policy", {
+      llmModel: "xai/grok-4.3",
+      redTeamLlmModel: "anthropic/claude-opus-4-8",
+      llmReasoningEffort: "high"
+    });
+
+    const stalePolicy = { ...db.getPolicy(u, active) };
+    delete stalePolicy.llmModel;
+    delete stalePolicy.redTeamLlmModel;
+    delete stalePolicy.llmReasoningEffort;
+    db.getDb()
+      .prepare(
+        `INSERT OR REPLACE INTO account_strategy_state
+           (user_id, connected_account_id, policy, prompt, scoring_weights, system_state, derived_from_profile_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        u,
+        other,
+        JSON.stringify(stalePolicy),
+        "Prompt",
+        JSON.stringify(stalePolicy.scoringWeights),
+        stalePolicy.systemState,
+        null,
+        new Date().toISOString()
+      );
+
+    db.setPolicy({ ...db.getPolicy(u, active), maxOrderNotional: 1234 }, u, active);
+
+    const userPolicy = db.getUserSetting<Record<string, unknown>>(u, "policy", {});
+    expect(userPolicy.llmModel).toBeUndefined();
+    expect(userPolicy.redTeamLlmModel).toBeUndefined();
+    expect(userPolicy.llmReasoningEffort).toBeUndefined();
+
+    expect(db.getPolicy(u, other).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, other).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
+    expect(db.getPolicy(u, other).llmReasoningEffort).toBe("high");
+
+    expect(db.getPolicy(u, untouched).llmModel).toBe("xai/grok-4.3");
+    expect(db.getPolicy(u, untouched).redTeamLlmModel).toBe("anthropic/claude-opus-4-8");
+    expect(db.getPolicy(u, untouched).llmReasoningEffort).toBe("high");
   });
 
   it("counterfactual learning watermark is isolated per account", async () => {

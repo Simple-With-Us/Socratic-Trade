@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentic Trading — redesign prototype</title>
+<style>
+  :root{
+    --bg:#0b0e13; --surface:#131822; --surface2:#1a2130; --line:#26303f; --line2:#334156;
+    --fg:#e6ecf5; --muted:#9fb0c6; --faint:#697d97;
+    --accent:#4c8dff; --accent2:#1f2a3d;
+    --green:#37d39b; --red:#ff5c6c; --amber:#ffb84d; --grey:#7b8aa0; --paperblue:#4c8dff;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  button{font:inherit;color:inherit;cursor:pointer;background:none;border:none}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .muted{color:var(--muted)} .faint{color:var(--faint)}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  a{color:var(--accent);text-decoration:none}
+
+  /* ---- Prototype banner ---- */
+  .protobar{background:#1a1405;border-bottom:1px solid #3a2e0a;color:#ffcf7a;font-size:12px;padding:5px 14px;text-align:center}
+
+  /* ---- Live real-money hairline ---- */
+  #app.live{box-shadow:inset 0 0 0 2px var(--red)}
+  #app{min-height:calc(100vh - 27px);display:flex;flex-direction:column;transition:box-shadow .15s}
+  #realbanner{display:none;background:#2a0d10;color:#ffd0d5;border-bottom:1px solid #5a1a20;font-size:12px;font-weight:600;padding:4px 14px;text-align:center;letter-spacing:.3px}
+  #app.live #realbanner{display:block}
+
+  /* ---- Top bar / three zones ---- */
+  header.shell{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr) auto;align-items:center;gap:10px;
+    background:var(--surface);border-bottom:1px solid var(--line);padding:8px 12px;position:sticky;top:0;z-index:30}
+
+  /* LEFT: account switcher chip */
+  .chip{display:flex;flex-direction:column;gap:2px;background:var(--surface2);border:1px solid var(--line);border-radius:var(--radius);padding:7px 10px;width:100%;text-align:left;position:relative}
+  .chip:hover{border-color:var(--line2)}
+  .chip .row1{display:flex;align-items:center;gap:7px}
+  .chip .name{font-weight:600}
+  .chip .caret{margin-left:auto;color:var(--faint)}
+  .chip .row2{display:flex;align-items:center;gap:8px;font-size:12px}
+  .chip .equity{margin-left:auto;font-size:12px}
+
+  .badge{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:2px 6px;border-radius:5px;white-space:nowrap;text-transform:uppercase}
+  .badge.paper{background:#12233f;color:#8fb6ff;border:1px solid #234a80}
+  .badge.test{background:#20262f;color:#9fb0c6;border:1px solid #33404f}
+  .badge.live{background:#2a0d10;color:#ff9aa4;border:1px solid #6a1f27}
+  .authority{font-size:11px;color:var(--muted);border:1px solid var(--line2);border-radius:5px;padding:1px 6px}
+  .state-suffix{font-size:11px;font-weight:700}
+  .halted{color:var(--amber)}
+
+  /* CENTER: spine nav */
+  nav.spine{display:flex;align-items:center;gap:2px;min-width:0;overflow:hidden}
+  nav.spine button{padding:7px 9px;border-radius:8px;color:var(--muted);white-space:nowrap;font-weight:500}
+  nav.spine button:hover{background:var(--surface2);color:var(--fg)}
+  nav.spine button.active{background:var(--accent2);color:#cfe0ff}
+  nav.spine .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+  nav.spine .secondary{color:var(--faint);font-size:13px}
+  .navbadge{display:inline-block;min-width:16px;text-align:center;font-size:10px;font-weight:700;background:var(--accent);color:#04122e;border-radius:9px;padding:0 4px;margin-left:6px}
+
+  /* RIGHT: verbs + risk */
+  .rightzone{display:flex;align-items:center;gap:8px;justify-self:end}
+  .riskstrip{display:flex;gap:12px;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:8px;padding:4px 9px;background:var(--surface2)}
+  .riskstrip b{color:var(--fg);font-weight:600}
+  .btn{border:1px solid var(--line2);border-radius:8px;padding:6px 10px;color:var(--fg);background:var(--surface2)}
+  .btn:hover{border-color:var(--accent)}
+  .btn.run{background:#12233f;border-color:#234a80;color:#bcd6ff}
+  .btn.stop{background:#2a0d10;border-color:#6a1f27;color:#ff9aa4;font-weight:700}
+  .btn.icon{padding:6px 8px}
+
+  /* Switcher dropdown */
+  .menu{position:absolute;top:calc(100% + 6px);left:0;width:360px;background:var(--surface);border:1px solid var(--line2);border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.5);z-index:50;overflow:hidden;display:none}
+  .menu.open{display:block}
+  .menu .grouplabel{font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);padding:9px 12px 4px}
+  .acctrow{display:flex;align-items:center;gap:8px;padding:9px 12px;width:100%;text-align:left;border-top:1px solid var(--line)}
+  .acctrow:hover{background:var(--surface2)}
+  .acctrow .dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+  .acctrow .an{font-weight:600}
+  .acctrow .meta{margin-left:auto;text-align:right;font-size:11px;color:var(--muted)}
+  .acctrow.fleet{background:var(--accent2)}
+  .menu .foot{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line2);background:var(--surface2)}
+  .menu .foot .btn{flex:1;text-align:center;font-size:12px}
+
+  /* Content */
+  main{padding:20px;max-width:1180px;width:100%;margin:0 auto;flex:1}
+  h1.dt{font-size:19px;margin:0 0 2px} .sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+  .scopehdr{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  .scopehdr .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+
+  .grid{display:grid;gap:14px}
+  .cols3{grid-template-columns:repeat(3,1fr)} .cols2{grid-template-columns:repeat(2,1fr)} .cols4{grid-template-columns:repeat(4,1fr)}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+  .card h3{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.2px}
+  .kpi{font-size:24px;font-weight:700} .kpi.small{font-size:18px}
+  .metaline{font-size:12px;color:var(--faint);margin-top:3px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--faint);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  tr:hover td{background:var(--surface2)}
+
+  .gauge{height:8px;border-radius:5px;background:var(--surface2);overflow:hidden;margin-top:6px}
+  .gauge > span{display:block;height:100%;background:var(--accent)}
+  .gauge.warn > span{background:var(--amber)} .gauge.bad > span{background:var(--red)}
+
+  /* Approvals card */
+  .appcard{border:1px solid var(--line2);border-radius:12px;padding:0;overflow:hidden;background:var(--surface)}
+  .appcard .top{display:flex;justify-content:space-between;align-items:flex-start;padding:14px;border-bottom:1px solid var(--line)}
+  .appcard .side{font-weight:700;font-size:16px}
+  .appcard .body{display:grid;grid-template-columns:1fr 300px;gap:0}
+  .gate{padding:14px;border-right:1px solid var(--line)}
+  .gate .g{display:flex;gap:8px;align-items:center;padding:3px 0;font-size:13px}
+  .g .ok{color:var(--green)} .g .block{color:var(--red)}
+  .evid{padding:14px;font-size:12px;color:var(--muted);background:var(--surface2)}
+  .lockcard{background:#2a0d10;border:1px solid #6a1f27;border-radius:8px;padding:8px 10px;color:#ffb3ba;font-size:12px;margin-top:8px}
+  .actions{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);flex-wrap:wrap}
+  .approve{background:#0f2a1e;border:1px solid #1f6b4a;color:#8ff0c4;font-weight:700;border-radius:8px;padding:8px 12px}
+  .approve .mb{font-size:10px;font-weight:800;padding:1px 5px;border-radius:4px;margin-left:6px}
+  .approve.livebtn{background:#2a0d10;border-color:#6a1f27;color:#ff9aa4}
+
+  /* forms */
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+  .field label{font-size:12px;color:var(--muted)}
+  .field .hint{font-size:11px;color:var(--faint)}
+  input[type=text],input[type=number],textarea,select{background:var(--surface2);border:1px solid var(--line2);border-radius:8px;color:var(--fg);padding:8px 10px;font:inherit;width:100%}
+  textarea{min-height:70px;resize:vertical}
+  .slider{display:grid;grid-template-columns:120px 1fr 46px;gap:10px;align-items:center;font-size:12px;padding:5px 0}
+  input[type=range]{width:100%}
+  .pill{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--surface2);border:1px solid var(--line2);color:var(--muted)}
+  .pill.changed{background:#132a1f;border-color:#1f6b4a;color:#8ff0c4}
+  .pill.acct{background:#12233f;border-color:#234a80;color:#8fb6ff}
+  .pill.user{background:#241a33;border-color:#4a3480;color:#c8a8ff}
+  .pill.couple{background:#2a1a0d;border-color:#805a24;color:#ffcf9a}
+
+  .toggle{display:inline-flex;align-items:center;gap:8px}
+  .switch{display:inline-block;vertical-align:middle;width:38px;height:22px;border-radius:12px;background:var(--surface2);border:1px solid var(--line2);position:relative;flex:0 0 auto}
+  .switch.on{background:#1f6b4a;border-color:#2a8f63}
+  .switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#cfe0ff;transition:left .12s}
+  .switch.on i{left:18px}
+
+  .adv-toggle{margin:6px 0 14px;color:var(--accent);font-size:13px}
+  .advbox{border-left:2px solid var(--line2);padding-left:14px;margin-left:2px}
+  details>summary{cursor:pointer;color:var(--muted);padding:8px 0;font-weight:600}
+  .note{font-size:12px;color:var(--faint);border:1px dashed var(--line2);border-radius:8px;padding:8px 10px;margin-top:10px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .signpost{background:var(--surface2);border:1px dashed var(--line2)}
+
+  /* command palette */
+  .overlay{position:fixed;inset:0;background:rgba(4,7,12,.6);display:none;align-items:flex-start;justify-content:center;z-index:80}
+  .overlay.open{display:flex}
+  .palette{margin-top:12vh;width:560px;background:var(--surface);border:1px solid var(--line2);border-radius:12px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+  .palette input{border:none;border-bottom:1px solid var(--line);border-radius:0}
+  .palette .opt{padding:10px 14px;border-top:1px solid var(--line)}
+  .palette .opt:hover{background:var(--surface2)}
+  .palette .opt small{color:var(--faint);float:right}
+  .kbd{font-size:11px;border:1px solid var(--line2);border-radius:4px;padding:0 5px;color:var(--muted)}
+
+  .empty{text-align:center;color:var(--faint);padding:40px;border:1px dashed var(--line2);border-radius:12px}
+  @media(max-width:1460px){ .riskstrip{display:none} }
+  @media(max-width:900px){
+    header.shell{grid-template-columns:1fr auto}
+    nav.spine{grid-column:1/-1;order:3;overflow-x:auto}
+    .riskstrip{display:none}
+    .appcard .body{grid-template-columns:1fr}.split{grid-template-columns:1fr}.cols3,.cols4{grid-template-columns:1fr 1fr}
+  }
+</style>
+</head>
+<body>
+<div class="protobar">Interactive prototype — mock data. Demonstrates the redesigned IA in <b>docs/settings-navigation-redesign/</b>. Not the live app. Click the account chip, the nav, and try Guardrails “Advanced” + the Approve buttons.</div>
+
+<div id="app">
+  <div id="realbanner">● YOU ARE ACTING ON REAL MONEY — LIVE ACCOUNT IN VIEW</div>
+
+  <header class="shell">
+    <!-- LEFT: scope -->
+    <div style="position:relative">
+      <button class="chip" id="chip" onclick="toggleMenu(event)">
+        <div class="row1"><span class="name" id="chip-name">Roth IRA</span><span class="faint">· Alpaca</span><span class="caret">▾</span></div>
+        <div class="row2"><span class="badge paper" id="chip-badge">PAPER · practice</span><span class="authority" id="chip-auth">Propose</span><span class="state-suffix halted" id="chip-state"></span><span class="equity mono" id="chip-eq">$48,210 <span class="pos">▲ +1.2%</span></span></div>
+      </button>
+      <div class="menu" id="menu">
+        <button class="acctrow fleet" onclick="selectAccount('fleet')"><span class="an">▸ All accounts (Fleet)</span><span class="meta">net worth $312,540</span></button>
+        <div class="grouplabel">Live — real money</div>
+        <button class="acctrow" onclick="selectAccount('rh')"><span class="dot"></span><span class="an">Robinhood · Individual</span><span class="badge live">LIVE</span><span class="meta">Decide · ▲+0.8% · ⚑2</span></button>
+        <div class="grouplabel">Paper — practice money</div>
+        <button class="acctrow" onclick="selectAccount('roth')"><span class="dot"></span><span class="an">Roth IRA · Alpaca</span><span class="badge paper">PAPER</span><span class="meta">Propose · ▲+1.2% · ⚑0</span></button>
+        <button class="acctrow" onclick="selectAccount('taxable')"><span class="dot"></span><span class="an">Alpaca · Taxable</span><span class="badge paper">PAPER</span><span class="meta">Propose · 0.0% · ⚑1</span></button>
+        <div class="grouplabel">Sandbox — test / local sim (excluded from Fleet &amp; wash-sale)</div>
+        <button class="acctrow" onclick="selectAccount('test')"><span class="dot" style="background:var(--grey)"></span><span class="an">Test Sim</span><span class="badge test">TEST</span><span class="meta">fake &amp; safe</span></button>
+        <div class="foot"><button class="btn">+ Connect account</button><button class="btn" onclick="go('settings');closeMenu()">Settings</button></div>
+      </div>
+    </div>
+
+    <!-- CENTER: spine -->
+    <nav class="spine" id="spine">
+      <button data-dest="dashboard" onclick="go('dashboard')">Dashboard</button>
+      <button data-dest="approvals" onclick="go('approvals')">Approvals<span class="navbadge" id="apbadge">1</span></button>
+      <button data-dest="strategy" onclick="go('strategy')">Strategy</button>
+      <button data-dest="guardrails" onclick="go('guardrails')">Guardrails</button>
+      <button data-dest="results" onclick="go('results')">Results</button>
+      <span class="sep"></span>
+      <button data-dest="scan" class="secondary" onclick="go('scan')">Scan ›</button>
+    </nav>
+
+    <!-- RIGHT: verbs + risk -->
+    <div class="rightzone">
+      <div class="riskstrip" id="riskstrip"><span>used <b>2k</b>/10k</span><span>net <b>0.4x</b></span><span id="rs-regime">Neutral</span></div>
+      <button class="btn run" id="runbtn">▶ Run — <span id="run-target">Roth IRA·PAPER</span></button>
+      <button class="btn stop" onclick="showStop()">■ STOP</button>
+      <button class="btn icon" title="Alerts">🔔</button>
+      <button class="btn icon" title="Command palette (⌘K)" onclick="openPalette()">⌘K</button>
+      <button class="btn icon" title="Help">?</button>
+      <button class="btn icon" title="Preferences / identity" onclick="go('settings')">⦿</button>
+    </div>
+  </header>
+
+  <main id="view"><!-- rendered --></main>
+</div>
+
+<!-- Command palette -->
+<div class="overlay" id="paletteOverlay" onclick="if(event.target.id==='paletteOverlay')closePalette()">
+  <div class="palette">
+    <input type="text" placeholder="Jump to…  (Dashboard, Approvals, Strategy, open a setting, run once)" autofocus />
+    <button class="opt" onclick="go('dashboard');closePalette()">Go to Dashboard <small>destination</small></button>
+    <button class="opt" onclick="go('approvals');closePalette()">Go to Approvals <small>destination</small></button>
+    <button class="opt" onclick="go('guardrails');closePalette()">Open Guardrails → Autonomy <small>setting</small></button>
+    <button class="opt" onclick="go('strategy');closePalette()">Open Strategy → Signals <small>setting</small></button>
+    <button class="opt" onclick="closePalette()">Run once — inherits money-reality gating <small>action</small></button>
+  </div>
+</div>
+
+<script>
+const ACCOUNTS = {
+  roth:   {name:"Roth IRA", broker:"Alpaca", reality:"paper", realityClass:"practice", authority:"Propose", equity:"$48,210", day:"+1.2%", dayPos:true, pending:0, preset:"Momentum-v3", regime:"Neutral", state:""},
+  taxable:{name:"Alpaca · Taxable", broker:"Alpaca", reality:"paper", realityClass:"practice", authority:"Propose", equity:"$22,540", day:"0.0%", dayPos:true, pending:1, preset:"Value-v2", regime:"Neutral", state:""},
+  rh:     {name:"Robinhood · Individual", broker:"Robinhood", reality:"live", realityClass:"real", authority:"Decide", equity:"$134,900", day:"+0.8%", dayPos:true, pending:2, preset:"Momentum-v3", regime:"Risk-off", state:""},
+  test:   {name:"Test Sim", broker:"Local", reality:"test", realityClass:"practice", authority:"Propose", equity:"$100,000", day:"0.0%", dayPos:true, pending:0, preset:"—", regime:"Neutral", state:""},
+};
+let current = "roth";       // account id or "fleet"
+let dest = "dashboard";
+let showAdvanced = false;
+
+const REALITY_LABEL = {paper:"PAPER · practice", live:"LIVE · real money", test:"TEST · sandbox"};
+
+function acct(){ return ACCOUNTS[current]; }
+
+function toggleMenu(e){ e.stopPropagation(); document.getElementById('menu').classList.toggle('open'); }
+function closeMenu(){ document.getElementById('menu').classList.remove('open'); }
+document.addEventListener('click',()=>closeMenu());
+
+function selectAccount(id){
+  current = id; closeMenu();
+  if(id==="fleet"){ dest="dashboard"; }
+  renderChip(); render();
+}
+
+function renderChip(){
+  const app = document.getElementById('app');
+  if(current==="fleet"){
+    document.getElementById('chip-name').textContent = "All accounts";
+    document.getElementById('chip').querySelector('.faint').textContent = "· Fleet";
+    document.getElementById('chip-badge').className="badge test";
+    document.getElementById('chip-badge').textContent="FLEET";
+    document.getElementById('chip-auth').style.display="none";
+    document.getElementById('chip-eq').innerHTML='$312,540';
+    app.classList.remove('live');
+    document.getElementById('run-target').textContent="pick an account";
+    return;
+  }
+  const a=acct();
+  document.getElementById('chip-name').textContent=a.name.split(" · ")[0].replace(" · Alpaca","");
+  document.getElementById('chip').querySelector('.faint').textContent="· "+a.broker;
+  const b=document.getElementById('chip-badge');
+  b.className="badge "+a.reality; b.textContent=REALITY_LABEL[a.reality];
+  const au=document.getElementById('chip-auth'); au.style.display=""; au.textContent=a.authority;
+  document.getElementById('chip-eq').innerHTML=a.equity+' <span class="'+(a.dayPos?'pos':'neg')+'">'+(a.dayPos?'▲ ':'▼ ')+a.day+'</span>';
+  document.getElementById('run-target').textContent=a.name.split(" · ")[0]+"·"+a.reality.toUpperCase();
+  document.getElementById('rs-regime').textContent=a.regime;
+  document.getElementById('apbadge').textContent=a.pending; document.getElementById('apbadge').style.display=a.pending?'':'none';
+  // Live real-money treatment
+  app.classList.toggle('live', a.reality==="live");
+}
+
+function go(d){ dest=d; document.getElementById('menu').classList.remove('open'); render(); }
+
+function setNav(){ document.querySelectorAll('#spine button').forEach(b=>b.classList.toggle('active', b.dataset.dest===dest)); }
+
+/* ---------- Screens ---------- */
+function scopeHeader(title, sub){
+  if(current==="fleet") return `<h1 class="dt">${title}</h1><div class="sub">${sub}</div>`;
+  const a=acct();
+  const badge=`<span class="badge ${a.reality}">${REALITY_LABEL[a.reality]}</span>`;
+  return `<div class="scopehdr"><h1 class="dt" style="margin:0">${title}</h1><span class="tag">${a.name} · ${a.broker}</span>${badge}<span class="tag">${a.authority}</span></div><div class="sub">${sub}</div>`;
+}
+
+function view_dashboard(){
+  if(current==="fleet") return view_fleet();
+  const a=acct();
+  return scopeHeader("Dashboard", "What is this account's agent doing right now, and does anything need me?")+`
+  <div class="grid cols4">
+    <div class="card"><h3>Equity</h3><div class="kpi mono">${a.equity}</div><div class="metaline">day <span class="${a.dayPos?'pos':'neg'}">${a.day}</span></div></div>
+    <div class="card"><h3>Agent state</h3><div class="kpi small">${a.authority==='Decide'?'Running · Decide':'Running · Propose'}</div><div class="metaline">next run in 04:12</div></div>
+    <div class="card"><h3>Pending approvals</h3><div class="kpi">${a.pending}</div><div class="metaline">${a.pending?'needs your decision':'nothing waiting'}</div></div>
+    <div class="card"><h3>Regime</h3><div class="kpi small">${a.regime}</div><div class="metaline">VIX 17.4 · trend up</div></div>
+  </div>
+  <div class="grid cols3" style="margin-top:14px">
+    <div class="card"><h3>Daily notional budget</h3><div class="mono">$2,000 / $10,000</div><div class="gauge"><span style="width:20%"></span></div></div>
+    <div class="card"><h3>Drawdown vs high-water</h3><div class="mono">-1.8% / -8% limit</div><div class="gauge warn"><span style="width:22%"></span></div></div>
+    <div class="card"><h3>Net exposure</h3><div class="mono">0.4x / 0.8x cap</div><div class="gauge"><span style="width:50%"></span></div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Open positions (attributed to producing strategy)</h3>
+    <table><thead><tr><th>Symbol</th><th>Qty</th><th>Mkt value</th><th>Unrealized</th><th>Strategy</th><th>Stop</th></tr></thead><tbody>
+      <tr><td class="mono">NVDA</td><td>18</td><td class="mono">$2,540</td><td class="pos">+4.1%</td><td>${a.preset}</td><td class="mono">$134 (app)</td></tr>
+      <tr><td class="mono">MSFT</td><td>6</td><td class="mono">$2,610</td><td class="pos">+1.2%</td><td>${a.preset}</td><td class="mono">$402 (app)</td></tr>
+      <tr><td class="mono">PG</td><td>9</td><td class="mono">$1,480</td><td class="neg">-0.6%</td><td>Value-v2</td><td class="mono">—</td></tr>
+    </tbody></table>
+  </div>
+  <div class="note">Macro/regime is a strip here, not a tab. Assistant (⌘K or the rail) overlays this screen without losing your place.</div>`;
+}
+
+function view_fleet(){
+  const rows = Object.entries(ACCOUNTS).filter(([id])=>id!=="test").map(([id,a])=>`
+    <tr onclick="selectAccount('${id}')" style="cursor:pointer">
+      <td><b>${a.name}</b></td><td><span class="badge ${a.reality}">${a.reality.toUpperCase()}</span></td>
+      <td>${a.authority}</td><td class="mono">${a.equity}</td><td class="${a.dayPos?'pos':'neg'}">${a.day}</td>
+      <td>${a.pending?('⚑ '+a.pending):'—'}</td><td>${a.preset}</td></tr>`).join("");
+  return `<h1 class="dt">Fleet — all accounts</h1><div class="sub">Read-and-triage. No trade can be placed from this roll-up — drill into an account to act.</div>
+  <div class="grid cols3">
+    <div class="card"><h3>Aggregate net worth</h3><div class="kpi mono">$312,540</div><div class="metaline">3 broker accounts + 1 sandbox</div></div>
+    <div class="card"><h3>Accounts needing you</h3><div class="kpi">2</div><div class="metaline">Robinhood ⚑2 · Taxable ⚑1</div></div>
+    <div class="card"><h3>Fleet emergency controls</h3>
+      <button class="btn stop" onclick="showStop()" style="width:100%;margin-bottom:6px">■ STOP all (Live + Paper)</button>
+      <div class="metaline">Test/Sandbox excluded — nothing real to stop.</div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Accounts</h3>
+    <table><thead><tr><th>Account</th><th>Mode</th><th>Autonomy</th><th>Equity</th><th>Day</th><th>Pending</th><th>Preset</th></tr></thead><tbody>${rows}</tbody></table>
+  </div>`;
+}
+
+function view_approvals(){
+  if(current==="fleet") return `<h1 class="dt">Approvals — All accounts</h1><div class="sub">Per-row account tags shown; drill into an account to keep a single scope.</div>`+approvalCard(true);
+  const a=acct();
+  if(a.pending===0 && current!=="rh") return scopeHeader("Approvals","What is the AI asking me to decide, and why?")+`<div class="empty">Nothing waiting for this account.<br><span class="faint">In Decide mode this becomes the ledger of what auto-executed.</span></div>`;
+  return scopeHeader("Approvals","What is the AI asking me to decide, and why?")+approvalCard(false);
+}
+function approvalCard(fleet){
+  const a=current==="fleet"?ACCOUNTS.rh:acct();
+  const live=a.reality==="live";
+  const modeBadge=`<span class="mb badge ${a.reality}">${a.reality.toUpperCase()}</span>`;
+  return `<div class="appcard">
+    <div class="top">
+      <div><div class="side">BUY · NVDA · 120 sh <span class="faint mono">(~$14,400)</span></div>
+        <div class="faint" style="font-size:12px">thesis: momentum-breakout · confidence 0.72 ${fleet?'· <span class="pill acct">'+a.name+'</span>':''}</div></div>
+      <div class="faint mono" style="font-size:12px">expires 14:30</div>
+    </div>
+    <div class="body">
+      <div class="gate">
+        <div class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Policy gate</div>
+        <div class="g"><span class="ok">✓</span> size ≤ 15% NAV</div>
+        <div class="g"><span class="ok">✓</span> daily notional ok</div>
+        <div class="g"><span class="ok">✓</span> sector cap</div>
+        <div class="g"><span class="ok">✓</span> stop-loss attached</div>
+        <div class="g"><span class="block">⛔</span> wash-sale lockout</div>
+        <div class="lockcard">Locked by a loss in <b>Robinhood · LIVE</b> · clears Jul 24 · <span class="pill couple">cross-account tax coupling</span></div>
+      </div>
+      <div class="evid">
+        <b style="color:var(--fg)">Bull → Bear → Red-Team</b><br>“conviction 0.68 &gt; 0.60 threshold ✓”<br><br>
+        Entry anchor <span class="mono">$141.20</span> · drift <span class="pos">+0.4%</span><br>
+        Bracket: TP <span class="mono">$151</span> / SL <span class="mono">$134</span><br>
+        <span class="pill">prompt v7</span> <span class="faint">provenance</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="approve ${live?'livebtn':''}">Approve ${modeBadge}</button>
+      <button class="btn">Adjust &amp; approve <span class="faint">(re-runs full gate)</span></button>
+      <button class="btn">Reject</button><button class="btn">Snooze</button>
+      ${live?'<span class="faint" style="align-self:center;font-size:12px">first Live approval this session asks for confirmation</span>':''}
+    </div>
+  </div>`;
+}
+
+function view_scan(){
+  return scopeHeader("Scan","What did research surface, independent of any one proposal?").replace("Scan","Scan · read-only")+`
+  <div class="note">Secondary, read-only research surface — never edits config, never places trades.</div>
+  <div class="card" style="margin-top:12px"><h3>Ranked candidates</h3>
+  <table><thead><tr><th>#</th><th>Symbol</th><th>Score</th><th>Fund.</th><th>Tech.</th><th>Macro</th><th>Sent.</th><th>Signal</th></tr></thead><tbody>
+    <tr><td>1</td><td class="mono">NVDA</td><td class="pos mono">0.81</td><td>0.78</td><td>0.90</td><td>0.71</td><td>0.74</td><td>breakout on volume</td></tr>
+    <tr><td>2</td><td class="mono">AVGO</td><td class="mono">0.74</td><td>0.80</td><td>0.72</td><td>0.71</td><td>0.66</td><td>—</td></tr>
+    <tr><td>3</td><td class="mono">COST</td><td class="mono">0.69</td><td>0.72</td><td>0.61</td><td>0.71</td><td>0.70</td><td>insider buy</td></tr>
+    <tr><td class="faint">—</td><td class="mono faint">TSLA</td><td class="faint">skipped</td><td colspan="5" class="faint">below min-score 0.55 after volatility penalty</td></tr>
+  </tbody></table></div>`;
+}
+
+function view_strategy(){
+  if(current==="fleet") return pickAccountNote("Strategy");
+  const a=acct();
+  return scopeHeader("Strategy","How should the AI think — on this account, or as a reusable recipe?")+`
+  <div class="card" style="margin-bottom:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span class="faint">Preset:</span> <b>${a.preset}</b> <span class="pill changed">diverged: 6 fields</span>
+    <span style="margin-left:auto"></span>
+    <button class="btn">Start from preset…</button><button class="btn">Capture current as preset…</button><button class="btn">Copy to accounts…</button>
+  </div>
+  <div class="card"><h3>Thesis</h3>
+    <div class="field"><textarea>Favor liquid large-caps breaking out on above-average volume; avoid chasing extended names; require a fundamental floor.</textarea></div>
+    <div class="field" style="max-width:260px"><label>Holding horizon</label><select><option>swing (2–10 days)</option><option>intraday</option><option>position</option><option>long-term</option></select></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Signals · 8 scoring weights</h3>
+    ${weight("momentum",0.28,true,true)}${weight("value",0.10,false,false)}${weight("quality",0.16,true,false)}${weight("volatility",0.08,false,true)}
+    <div class="faint" style="font-size:12px;margin-top:8px">min-score 0.55 · universe: S&P 500 + 3 · blocklist: 2 · floors: $5 / $100M / $1M · <a href="#">show all 8 ›</a></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>AI Review <span class="faint" style="font-weight:400">(overrides global default)</span></h3>
+    <div class="grid cols4">
+      <div class="field"><label>Bull model</label><select><option>gpt-x</option></select></div>
+      <div class="field"><label>Red-Team model</label><select><option>gpt-y</option></select></div>
+      <div class="field"><label>Conviction ≥</label><input type="number" value="0.60" step="0.05"></div>
+      <div class="field"><label>Reasoning effort</label><select><option>high</option><option>medium</option><option>low</option></select></div>
+    </div>
+    <div class="field" style="margin-top:4px"><label>Fallback models <span class="pill">optional · advanced</span></label><input type="text" placeholder="none — add an ordered fallback chain"></div>
+  </div>
+  <div class="note">ⓘ Autonomy (Propose ↔ Decide) is <b>not</b> here — it lives in <a href="#" onclick="go('guardrails');return false">Guardrails</a>, next to the breakers that bound it. Arming the AI is a containment decision, not a mandate edit.</div>`;
+}
+function weight(name,cur,changed,tunable){
+  return `<div class="slider"><span>${name} ${changed?'<span class="pill changed">from preset</span>':''}</span>
+    <input type="range" min="0" max="0.5" step="0.01" value="${cur}"><span class="mono">${cur.toFixed(2)}</span></div>`;
+}
+
+function view_guardrails(){
+  if(current==="fleet") return pickAccountNote("Guardrails");
+  const a=acct(); const live=a.reality==="live";
+  return scopeHeader("Guardrails","What can the AI never do on this account, and how much rope does it have?")+`
+  <div class="card"><h3>Essentials</h3>
+    ${essential("Max order size", '<input type="number" value="10" style="max-width:110px"> <span class="faint">USD — caps any single order</span>', "acct")}
+    ${essential("Daily-loss stop", '<input type="number" value="500" style="max-width:110px"> <span class="faint">USD → switch to close-only</span>', "acct")}
+    ${essential("Stop-loss", switchHTML(true)+' <span class="faint">attach a protective stop to every entry</span>', "acct")}
+    ${essential("Autonomy", '<select style="max-width:150px"><option>Propose (you approve)</option>'+(live?'<option>Decide (auto-execute)</option>':'')+'</select> '+(live?'<span class="pill couple">resets to Propose on restart</span>':''), "acct")}
+    ${essential("Extended-hours", switchHTML(false)+' <span class="faint">allow pre/post-market orders</span>', "acct")}
+  </div>
+  <button class="adv-toggle" onclick="showAdvanced=!showAdvanced;render()">${showAdvanced?'▾ Hide advanced':'▸ Show advanced (30+ controls)'}</button>
+  ${showAdvanced?`<div class="advbox">
+    <div class="card"><h3>Autonomy</h3>${row("Propose ↔ Decide dial")}${row("System state (active / halted / close-only / liquidating)")}${row("Kill-switch thresholds")}</div>
+    <div class="card" style="margin-top:12px"><h3>Sizing</h3>${row("Max order % NAV / % ADV")}${row("Daily & hourly caps · max orders")}${row("Sell-to-fund-buys")}</div>
+    <div class="card" style="margin-top:12px"><h3>Exposure</h3>${row("Per-symbol / per-sector caps")}${row("Gross / net / beta / correlation caps")}</div>
+    <div class="card" style="margin-top:12px"><h3>Circuit breakers <span class="faint" style="font-weight:400">— cards double as armed / tripped status</span></h3>${row("Max drawdown · max daily loss")}${row("Vol-panic brake · VIX / VVIX / SKEW")}</div>
+    <div class="card" style="margin-top:12px"><h3>Tax RULES</h3>${row("Tax treatment (taxable / Roth / traditional)")}<div class="slider" style="grid-template-columns:1fr auto"><span>Wash-sale guard <span class="pill couple">cross-account coupling</span></span>${switchHTML(true)}</div></div>
+    <div class="card" style="margin-top:12px"><h3>Learning / tuning params</h3>${row("Shrinkage prior · min lots for weight shift")}<div class="slider" style="grid-template-columns:1fr auto"><span>Gate on rationale collapse <span class="pill">optional · advanced</span></span>${switchHTML(false)}</div></div>
+  </div>`:''}
+  <div class="note">Loosening a limit is frictionless; raising a Live cap, disabling a stop, or arming Decide triggers an inline consequence-labeled confirm (type-to-confirm for the one-way doors).</div>`;
+}
+function essential(label,control,scope){
+  return `<div class="slider" style="grid-template-columns:170px 1fr"><span>${label} <span class="pill ${scope}">${scope==='acct'?'THIS ACCOUNT':'ALL ACCOUNTS'}</span></span><span>${control}</span></div>`;
+}
+function row(t){ return `<div class="g" style="justify-content:space-between"><span>${t}</span><span class="faint">›</span></div>`; }
+function switchHTML(on){ return `<span class="switch ${on?'on':''}" onclick="this.classList.toggle('on')"><i></i></span>`; }
+
+function view_results(){
+  if(current==="fleet") return pickAccountNote("Results");
+  return scopeHeader("Results","How did this account actually do, and should I keep trusting it?")+`
+  <div class="grid cols4">
+    <div class="card"><h3>Realized P&L</h3><div class="kpi pos mono">+$1,284</div><div class="metaline">vs SPY +0.4%</div></div>
+    <div class="card"><h3>Win rate</h3><div class="kpi small">54%</div><div class="metaline">37 closed lots</div></div>
+    <div class="card"><h3>Net of tax</h3><div class="kpi small mono">+$1,010</div><div class="metaline">ST 24% assumed</div></div>
+    <div class="card"><h3>Harvest candidates</h3><div class="kpi">3</div><div class="metaline">unrealized losses</div></div>
+  </div>
+  <div class="grid cols2" style="margin-top:14px">
+    <div class="card"><h3>Thesis scorecard</h3><table><tbody>
+      <tr><td>momentum-breakout</td><td class="pos">+$720</td><td class="faint">18 lots</td></tr>
+      <tr><td>value-reversion</td><td class="pos">+$410</td><td class="faint">11 lots</td></tr>
+      <tr><td>news-catalyst</td><td class="neg">-$140</td><td class="faint">8 lots</td></tr>
+    </tbody></table></div>
+    <div class="card"><h3>Tuning queue <span class="faint" style="font-weight:400">— review like a code review</span></h3>
+      <div class="g" style="justify-content:space-between"><span>Raise momentum weight 0.28 → 0.31</span><button class="btn" style="padding:3px 8px">Review</button></div>
+      <div class="g" style="justify-content:space-between"><span>Lower sentiment weight 0.20 → 0.16</span><button class="btn" style="padding:3px 8px">Review</button></div>
+      <div class="metaline" style="margin-top:8px">Alert history &amp; audit → <a href="#">Results → History</a> (single canonical home)</div>
+    </div>
+  </div>`;
+}
+
+function view_settings(){
+  return `<h1 class="dt">Settings</h1><div class="sub">user-scope · <b>ALL ACCOUNTS</b> · reached from the account chip / ⦿ avatar — not the primary rail</div>
+  <div class="field" style="max-width:420px"><input type="text" placeholder="🔍 Search all settings… (indexes every field + synonym + scope)"></div>
+  <div class="split">
+    <div class="card"><h3>Scope B · USER-GLOBAL <span class="pill user">this menu</span></h3>
+      ${sitem("Account &amp; Security","identity · auth · sessions · deletion")}
+      ${sitem("Connections","brokers · environment · confirmed capabilities")}
+      ${sitem("Keys &amp; Models","LLM / data keys · default model · MCP tools")}
+      ${sitem("Alert delivery","channels · routing · test-send (rules only)")}
+      ${sitem("Data &amp; Privacy","web-sources · scan breadth (all accounts) · consent · export")}
+      ${sitem("Presets","library CRUD — rename / version / share")}
+      ${sitem("Appearance","theme · density · default landing account (non-Live)")}
+      ${sitem("Admin","allowlist · usage · health · rag · transcript · system halt")}
+    </div>
+    <div class="card signpost"><h3>Scope A · ACCOUNT-SCOPED <span class="pill acct">not here</span></h3>
+      <p class="muted" style="font-size:13px">These live <b>with</b> the account, on the primary rail:</p>
+      <div class="g" style="justify-content:space-between"><span>→ <b>Strategy</b> — thesis · signals · AI review · presets</span><button class="btn" style="padding:3px 8px" onclick="go('strategy')">open ›</button></div>
+      <div class="g" style="justify-content:space-between"><span>→ <b>Guardrails</b> — sizing · risk · breakers · autonomy · tax</span><button class="btn" style="padding:3px 8px" onclick="go('guardrails')">open ›</button></div>
+      <div class="note" style="margin-top:14px"><b>Governing rule:</b> if a setting changes <i>how a trade is decided or placed</i>, it belongs to the account. Otherwise it's user-global and lives here.</div>
+    </div>
+  </div>`;
+}
+function sitem(t,d){ return `<div class="g" style="justify-content:space-between;border-bottom:1px solid var(--line);padding:9px 0"><span><b>${t}</b><br><span class="faint" style="font-size:12px">${d}</span></span><span class="faint">›</span></div>`; }
+
+function pickAccountNote(name){ return `<h1 class="dt">${name}</h1><div class="empty">${name} is account-scoped.<br><span class="faint">Pick an account from the switcher to configure it — Fleet is read-and-triage only.</span></div>`; }
+
+const VIEWS={dashboard:view_dashboard,approvals:view_approvals,scan:view_scan,strategy:view_strategy,guardrails:view_guardrails,results:view_results,settings:view_settings};
+function render(){ setNav(); document.getElementById('view').innerHTML=(VIEWS[dest]||view_dashboard)(); }
+
+/* palette + stop */
+function openPalette(){document.getElementById('paletteOverlay').classList.add('open');}
+function closePalette(){document.getElementById('paletteOverlay').classList.remove('open');}
+function showStop(){ alert("■ STOP — halts new activity for this scope in one click. Always safe. Never sells.\n\nSelling positions is a separate 'Flatten / sell positions' action (confirm; type-to-confirm on Live)."); }
+document.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette();} if(e.key==='Escape')closePalette(); });
+
+// deep-link support (?acct=roth|taxable|rh|test|fleet & ?dest=dashboard|approvals|…) — also lets you share a screen
+(function(){ const p=new URLSearchParams(location.search);
+  const a=p.get('acct'); if(a && (ACCOUNTS[a]||a==='fleet')) current=a;
+  const d=p.get('dest'); if(d && (VIEWS[d])) dest=d;
+  if(p.get('adv')==='1') showAdvanced=true;
+})();
+renderChip(); render();
+</script>
+</body>
+</html>

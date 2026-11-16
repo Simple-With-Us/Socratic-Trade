@@ -2,7 +2,7 @@
 
 ## Summary
 
-Updated the root and welcome-route metadata so the browser tab document title is exactly `Trading Dashboard`.
+Updated the root and welcome-route metadata so the browser tab document title is exactly `Socratic Trade`.
 
 ## Why
 
@@ -24,8 +24,8 @@ The browser tab/hover text comes from the HTML `<title>` element. In Next.js App
 - `npm test` - first run hit a load-sensitive timeout in `test/persistence-notification.test.ts`; targeted rerun passed 17/17.
 - `npm test` - full rerun passed 159 files / 1538 tests.
 - `npm run build` - passed; existing Next middleware-to-proxy deprecation warning only.
-- Generated `/welcome` HTML title extraction - `.next/server/app/welcome.html: Trading Dashboard`.
+- Generated `/welcome` HTML title extraction - `.next/server/app/welcome.html: Socratic Trade`.
 
 ## Follow-ups
 
-- After merge/deploy, verify `trading.jays.services` serves `<title>Trading Dashboard</title>` or equivalent browser title behavior.
+- After merge/deploy, verify `socratictrade.com` serves `<title>Socratic Trade</title>` or equivalent browser title behavior.

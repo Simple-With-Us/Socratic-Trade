@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { computeTechnicals, emaSeries, macdSeries, rsiSeries, sma, type OHLCBar } from "../src/lib/indicators";
+import { computeTechnicals, emaSeries, macdSeries, rocPct, rsiSeries, sma, type OHLCBar } from "../src/lib/indicators";
 
 const bars = (closes: number[]): OHLCBar[] => closes.map((close, i) => ({ time: 1_700_000_000_000 + i * 86_400_000, close }));
 const upTrend = (n: number): number[] => Array.from({ length: n }, (_, i) => 100 + i * 0.5);
 const downTrend = (n: number): number[] => Array.from({ length: n }, (_, i) => 200 - i * 0.5);
+
+describe("rocPct", () => {
+  it("returns the percent change over period bars and stays undefined when the lookback is missing", () => {
+    expect(rocPct([100, 110], 1)).toBeCloseTo(10);
+    expect(rocPct([80, 84, 88, 92, 96, 100], 5)).toBeCloseTo(25);
+    expect(rocPct([100], 1)).toBeUndefined();
+    expect(rocPct([0, 10], 1)).toBeUndefined();
+    expect(rocPct([100, 110], 0)).toBeUndefined();
+  });
+});
 
 describe("sma", () => {
   it("averages the trailing window and returns undefined when too few bars", () => {

@@ -8,7 +8,7 @@ beforeAll(() => {
   // (vitest already runs with NODE_ENV=test; the no-fills cases below never fetch quotes.)
 });
 
-describe("TestBrokerGateway — funded local simulator", () => {
+describe("TestBrokerGateway — funded test broker", () => {
   it("returns starting cash as buyingPower, cash, and totalMarketValue when there are no fills", async () => {
     const { getTestGateway } = await import("../src/lib/robinhood");
     const gateway = getTestGateway("local");
@@ -32,14 +32,14 @@ describe("TestBrokerGateway — funded local simulator", () => {
     expect(positions).toEqual([]);
   });
 
-  it("returns 'Test — Local Sim' as the account label", async () => {
+  it("returns 'Test broker' as the account label", async () => {
     const { getTestGateway } = await import("../src/lib/robinhood");
     const gateway = getTestGateway("local");
 
     const accounts = await gateway.getAccounts();
 
     expect(accounts).toHaveLength(1);
-    expect(accounts[0]?.label).toBe("Test — Local Sim");
+    expect(accounts[0]?.label).toBe("Test broker");
     expect(accounts[0]?.accountNumber).toBe("TEST");
   });
 });

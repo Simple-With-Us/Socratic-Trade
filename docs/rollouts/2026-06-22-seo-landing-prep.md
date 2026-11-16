@@ -20,7 +20,7 @@ memory.
 ## Files
 
 - `app/layout.tsx` — replaced the 2-line `metadata` with full SEO metadata: `metadataBase`
-  (env `NEXT_PUBLIC_SITE_URL`, default `https://trading.jays.services`), title template,
+  (env `NEXT_PUBLIC_SITE_URL`, default `https://socratictrade.com`), title template,
   compliance-safe description, keywords, canonical, OpenGraph, Twitter, and **env-gated
   robots** (noindex/nofollow unless `NEXT_PUBLIC_ALLOW_INDEXING=true`). `viewport` + layout
   body unchanged.

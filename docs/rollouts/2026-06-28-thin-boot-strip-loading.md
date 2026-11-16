@@ -39,4 +39,4 @@ the brief initial state feel intentional on mobile and desktop.
 ## Follow-ups
 
 - After merge, let the normal production deploy workflow run and verify
-  `trading.jays.services` reaches the auth gate or health endpoint as expected.
+  `socratictrade.com` reaches the auth gate or health endpoint as expected.

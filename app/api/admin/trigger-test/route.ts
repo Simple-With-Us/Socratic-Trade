@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { admitRun, submitMaterialEvent, triggerEngineEnabled, triggerMode } from "@/lib/triggers";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { requireAdmin } from "@/lib/auth/admin";
 
 export const dynamic = "force-dynamic";
@@ -8,12 +8,13 @@ export const runtime = "nodejs";
 
 // Dev/ops route to inspect the event-driven trigger engine and preview the admitRun gate.
 // GET = show engine state + the admit decision for a sample event. POST = submit a test event
-// (no-op unless TRIGGER_ENGINE=on and mode != interval). Admin-gated: verified ADMIN_USER_EMAILS /
-// primary operator, or x-admin-token, or non-production.
+// (no-op unless TRIGGER_ENGINE=on and mode != interval). Admin-gated by a middleware-verified
+// primary/allowlisted admin email or a timing-safe x-admin-token; there is no environment bypass.
 export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json({
     ok: true,
     engineEnabled: triggerEngineEnabled(),
@@ -25,7 +26,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   let symbol = "AAPL";
   try {
     const body = (await request.json()) as { symbol?: string };

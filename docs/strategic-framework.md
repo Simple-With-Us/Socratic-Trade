@@ -38,38 +38,30 @@ market. It can:
   *place small orders automatically*.
 - Record everything it does and grade its own past decisions so it can improve.
 
-### Three levels of "real money," on purpose
+### Two levels of "real money," on purpose
 
-It is built so that **doing nothing dangerous is the default.** There are three
-modes, and you have to deliberately move up each step:
+It is built so that **doing nothing dangerous is the default.** Execution mode
+is derived purely from the `environment` of whichever broker account you've
+connected — there is no local simulator and no separate "Test mode" toggle:
 
-1. **Test mode (default) — "Test — Local Sim":** A funded local simulator on your
-   own computer. Simulated cash (a configurable starting balance, default
-   $100,000), simulated fills, real market data — no real money can move and no
-   broker connection is required. This is where it lives unless you change it.
-   **Caveat:** it is a *simplified* simulation — market impact, partial fills, and
-   realistic slippage are not modeled, so a third-party paper account (Paper mode,
-   below) is **likely more realistic** than this local simulation. Do not treat
-   local-sim results as predictive of real performance.
-2. **Paper mode (recommended for realistic practice):** A practice account hosted
-   by a real broker (e.g. Alpaca's "paper" sandbox). Still fake money, but the
-   order actually travels to a broker's system — realistic fills, latency, and
-   market hours — so it is a **more realistic rehearsal than the local simulator**.
-3. **Brokerage mode:** A real account with real money. Orders here can actually
-   buy and sell, and only when *every* safety rule allows it. Approving a live
-   proposal now also requires a typed confirmation tied to the proposal, account,
-   execution mode, and estimated order size, so a stale tab or script cannot
-   approve a real-money order with an empty POST.
+1. **Paper / sandbox account:** A practice environment hosted by a real broker
+   (e.g. Alpaca Paper, Tradier Sandbox). Not production capital, but orders
+   still go to that broker's system — realistic fills, latency, and market hours.
+   With no connected account, the app **cannot place any orders** — there is no
+   fake local-simulation fallback.
+2. **Live / production brokerage:** A real account with real money (e.g. Alpaca
+   live, Tradier production, Robinhood MCP). Orders can buy and sell only when
+   every safety rule allows. Approving a production proposal may require typed
+   confirmation tied to proposal, account, mode, and size so a stale tab cannot
+   approve with an empty POST.
 
-The app records the exact execution mode (`test/local`, `broker/paper`, or
-`broker/live`) next to proposals, fills, and portfolio snapshots. This matters
-because both local Test and broker Paper are "not real money," but they are not
-the same thing; the learning and accounting layers now keep that distinction.
+The app records execution mode (`broker/paper` or `broker/live`) on proposals,
+fills, and portfolio snapshots so paper and live activity stay separate in
+learning and accounting.
 
-> **Honesty note:** Most of the value and most of the testing happens in Test
-> and Paper mode. Real-money mode is intentionally hard to reach and wrapped in
-> limits. Treat this whole system as **experimental**. It is not a product that
-> promises profits, and nothing here is investment advice.
+> **Honesty note:** Treat this system as **experimental**. It is not a product
+> that promises profits, and nothing here is investment advice. Guardrails are
+> owner preferences with overrides — not an immovable cage.
 
 ---
 
@@ -299,7 +291,7 @@ This section is the point of the document. Read it.
 - **The factor weights are unproven guesses** (see Section 4).
 - **There is no real backtester.** The strategy has **not** been rigorously
   tested against decades of historical data to see how it *would* have performed.
-  It is validated mostly by running forward in Test/Paper mode. This is a **major**
+  It is validated mostly by running forward in Paper mode. This is a **major**
   limitation: a strategy can look fine in a few weeks of calm markets and fall
   apart in a crash. Treat any short-term results with heavy skepticism.
 - **Cold start.** With fewer than 20 completed trades, the "learning" is barely
@@ -370,6 +362,12 @@ This section is the point of the document. Read it.
 
 ## Changelog
 
+- **2026-07-03** — Removed the local "Test mode" simulator and `policy.paperMode`
+  from the codebase (see `docs/rollouts/2026-07-03-remove-paper-default-test-mode.md`).
+  Updated the "Three levels of real money" section to the two modes that
+  actually exist now — Paper and Brokerage/Live — both derived purely from a
+  connected broker account's `environment`; with no connected account the app
+  cannot place any orders (no fake local-simulation fallback).
 - **2026-06-23** — Expert safety/UI pass: persisted execution mode separately
   from paper/live source buckets; hardened Alpaca bracket-dollar orders; kept
   close-only protective stop/reconciliation maintenance alive; added server-side

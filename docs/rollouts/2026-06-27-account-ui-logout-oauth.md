@@ -52,8 +52,8 @@ client during the provider callback.
 
 ## Follow-ups
 
-- After this lands, verify `https://trading.jays.services/logout` redirects
-  through `https://trading.jays.services/cdn-cgi/access/logout?...`, not
+- After this lands, verify `https://socratictrade.com/logout` redirects
+  through `https://socratictrade.com/cdn-cgi/access/logout?...`, not
   `https://localhost:4000/...`.
 - Re-test Robinhood reconnect on production after deploy. If Robinhood still
   returns `/oauth/error`, inspect the provider-side registration/client policy

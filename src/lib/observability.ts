@@ -1,9 +1,13 @@
 import { redactForTelemetry, safeErrorMessage } from "./telemetry-sanitize";
+import { assertWithinLlmBudget } from "./llm-budget";
+import { otelResourceAttributes, resolveSentryRelease } from "./sentry-release";
 
 type LlmGenerationOptions<T> = {
   name: string;
   model: string;
   userId?: string;
+  /** The targeted account, so the budget backstop resolves THAT account's ceiling (not the active one). */
+  connectedAccountId?: string;
   sessionId?: string;
   input?: unknown;
   metadata?: Record<string, unknown>;
@@ -15,7 +19,7 @@ type TraceProvider = {
   register: () => void;
 };
 
-type TraceProviderConstructor = new (config: { spanProcessors: unknown[] }) => TraceProvider;
+type TraceProviderConstructor = new (config: { spanProcessors: unknown[]; resource?: unknown }) => TraceProvider;
 type SpanProcessorConstructor = new (config: Record<string, unknown>) => unknown;
 type LangfuseGeneration = {
   update: (fields: Record<string, unknown>) => void;
@@ -31,11 +35,11 @@ type LangfuseTracing = {
 };
 
 declare global {
-  // eslint-disable-next-line no-var
+   
   var __tradingObservabilityStarted: boolean | undefined;
-  // eslint-disable-next-line no-var
+   
   var __tradingObservabilitySdk: unknown | undefined;
-  // eslint-disable-next-line no-var
+   
   var __tradingObservabilityWarned: boolean | undefined;
 }
 
@@ -45,19 +49,22 @@ export async function startObservability(): Promise<void> {
   if (!langfuseConfigured() || globalThis.__tradingObservabilityStarted) return;
 
   try {
-    const [{ NodeTracerProvider }, { LangfuseSpanProcessor }] = await Promise.all([
+    const [{ NodeTracerProvider }, { LangfuseSpanProcessor }, { resourceFromAttributes }] = await Promise.all([
       runtimeImport<{ NodeTracerProvider: TraceProviderConstructor }>("@opentelemetry/sdk-trace-node"),
-      runtimeImport<{ LangfuseSpanProcessor: SpanProcessorConstructor }>("@langfuse/otel")
+      runtimeImport<{ LangfuseSpanProcessor: SpanProcessorConstructor }>("@langfuse/otel"),
+      runtimeImport<{ resourceFromAttributes: (attrs: Record<string, string>) => unknown }>("@opentelemetry/resources")
     ]);
 
+    const sentryRelease = resolveSentryRelease();
     const provider = new NodeTracerProvider({
+      resource: resourceFromAttributes(otelResourceAttributes(sentryRelease)),
       spanProcessors: [
         new LangfuseSpanProcessor({
           publicKey: process.env.LANGFUSE_PUBLIC_KEY,
           secretKey: process.env.LANGFUSE_SECRET_KEY,
           baseUrl: process.env.LANGFUSE_BASE_URL,
           environment: process.env.LANGFUSE_TRACING_ENVIRONMENT || process.env.NODE_ENV || "development",
-          release: process.env.LANGFUSE_RELEASE || process.env.VERCEL_GIT_COMMIT_SHA || process.env.npm_package_version,
+          release: process.env.LANGFUSE_RELEASE || sentryRelease || process.env.npm_package_version,
           mask: ({ data }: { data: unknown }) => redactForTelemetry(data)
         })
       ]
@@ -72,6 +79,12 @@ export async function startObservability(): Promise<void> {
 }
 
 export async function withLlmGeneration<T>(options: LlmGenerationOptions<T>, run: () => Promise<T>): Promise<T> {
+  // Durable budget backstop: EVERY LLM generation flows through here (bull, bear, red-team,
+  // revalidation, reflection, tuning, and any future one), so throwing when the user is over their
+  // daily budget guarantees no model spend slips past the ceiling — even from a call site that forgot
+  // its own gate. No-op when no ceiling is configured (default). Runs BEFORE the Langfuse short-circuit
+  // so it applies whether or not tracing is enabled.
+  if (options.userId) assertWithinLlmBudget(options.userId, options.connectedAccountId);
   if (!langfuseConfigured()) return run();
 
   let attemptedRun = false;
@@ -94,7 +107,7 @@ export async function withLlmGeneration<T>(options: LlmGenerationOptions<T>, run
           generation = startObservation(
             options.name,
             {
-              model: options.model,
+              model: options.model.includes("/") ? options.model.slice(options.model.indexOf("/") + 1) : options.model,
               input: redactForTelemetry(options.input),
               metadata: observationMetadata
             },
@@ -138,6 +151,47 @@ export async function withLlmGeneration<T>(options: LlmGenerationOptions<T>, run
     if (attemptedRun) throw error;
     warnOnce(`Langfuse manual tracing failed: ${safeErrorMessage(error)}`);
     return run();
+  }
+}
+
+/**
+ * Emit a lightweight, standalone Langfuse observation for a non-LLM decision point (e.g. a Bear
+ * veto or a rationale diversity-collapse) so it's queryable alongside the traced generations. This
+ * is a fire-and-forget span with metadata/tags — no model input/output. It is a hard no-op when
+ * Langfuse is not configured (`langfuseConfigured()` is false), so it never adds runtime cost or a
+ * dependency when Langfuse isn't set up. Errors are swallowed (warn-once) so telemetry can never break a run.
+ */
+export async function recordDecisionObservation(options: {
+  name: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  tags?: string[];
+}): Promise<void> {
+  if (!langfuseConfigured()) return;
+  try {
+    const { propagateAttributes, startObservation } = await runtimeImport<LangfuseTracing>("@langfuse/tracing");
+    await propagateAttributes(
+      {
+        userId: options.userId,
+        traceName: options.name,
+        tags: options.tags,
+        metadata: compactTraceMetadata(options.metadata)
+      },
+      async () => {
+        try {
+          const observation = startObservation(
+            options.name,
+            { metadata: redactForTelemetry(options.metadata) as Record<string, unknown> | undefined },
+            { asType: "event" }
+          );
+          observation.end();
+        } catch (error) {
+          warnOnce(`Langfuse decision observation failed: ${safeErrorMessage(error)}`);
+        }
+      }
+    );
+  } catch (error) {
+    warnOnce(`Langfuse decision observation failed: ${safeErrorMessage(error)}`);
   }
 }
 

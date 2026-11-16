@@ -8,7 +8,7 @@
   removed one real drift item (the dead `paperMode` toggle).
 - **Verified the audit against real code before acting** and caught several false positives; the
   codebase is further along than the audit's bug-list implied.
-- Deployed `5747770` to `trading.jays.services` (prod healthy, still defaulting to Test).
+- Deployed `5747770` to `socratictrade.com` (prod healthy, still defaulting to Test).
 
 ## Why
 User asked to "spin up a team of agents to review the work that Antigravity began and Codex

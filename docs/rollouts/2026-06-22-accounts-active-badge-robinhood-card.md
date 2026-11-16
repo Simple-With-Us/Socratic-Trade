@@ -37,4 +37,4 @@ Two Accounts-tab UX fixes:
   the three "Connect …" action buttons are unchanged so connecting is still
   one click.
 - Deploy verification for the prior batch (PR #98): Deploy run #16 succeeded on
-  the latest `main`; `trading.jays.services` returns HTTP 302 (auth gate) = live.
+  the latest `main`; `socratictrade.com` returns HTTP 302 (auth gate) = live.

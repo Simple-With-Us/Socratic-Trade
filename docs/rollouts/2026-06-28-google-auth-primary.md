@@ -49,16 +49,16 @@ kept reintroducing the old Access-owned session path.
   `42c4adc9-1421-416b-b744-f291afc87938` named
   `Bypass Cloudflare Access; app Google auth handles login`.
 - Live public checks passed:
-  - `https://trading.jays.services/` returns app `307 /login`, not a Cloudflare Access login.
-  - `https://trading.jays.services/login` returns the app login page with `Sign in with Google`.
-  - `https://trading.jays.services/api/auth/providers` returns the Google provider and callback URL.
-  - `https://trading.jays.services/api/dashboard` returns app `401 Unauthorized`.
-  - `https://trading.jays.services/logout` clears Auth.js cookies and redirects to app `/login`.
+  - `https://socratictrade.com/` returns app `307 /login`, not a Cloudflare Access login.
+  - `https://socratictrade.com/login` returns the app login page with `Sign in with Google`.
+  - `https://socratictrade.com/api/auth/providers` returns the Google provider and callback URL.
+  - `https://socratictrade.com/api/dashboard` returns app `401 Unauthorized`.
+  - `https://socratictrade.com/logout` clears Auth.js cookies and redirects to app `/login`.
 - 2026-06-29 follow-up after later production deploys:
   - Live public checks still pass: `/` reaches app `/login`, `/login` shows Google sign-in,
     `/api/auth/providers` exposes Google, and unauthenticated `/api/dashboard` returns app `401`.
   - Sanitized Infisical verification through `scripts/infisical-run.mjs` confirmed prod has
-    `NEXT_PUBLIC_SITE_URL=https://trading.jays.services`, `AUTH_URL=https://trading.jays.services`,
+    `NEXT_PUBLIC_SITE_URL=https://socratictrade.com`, `AUTH_URL=https://socratictrade.com`,
     `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`, `PRIMARY_USER_EMAIL=<configured>`,
     `PRIMARY_USER_EMAIL_ALIASES=<configured>`, and `ALLOWED_EMAILS=<configured>`. Concrete account
     values were intentionally omitted from the public rollout note.

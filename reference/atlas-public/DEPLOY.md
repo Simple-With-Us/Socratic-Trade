@@ -1,11 +1,11 @@
 # Deploy — self-hosted (MacBook + Cloudflare Tunnel)
 
 This is the **current** production approach: run the BFF on the Mac, kept alive by a `launchd`
-agent, and expose it at **`trading.jays.services`** via a **Cloudflare Tunnel** (no router/port
+agent, and expose it at **`socratictrade.com`** via a **Cloudflare Tunnel** (no router/port
 changes, free TLS at Cloudflare's edge). "Production-ready" here is about the app's operational
 properties, not about which machine runs it — see the checklist at the bottom.
 
-> **Naming convention:** `trading.jays.services` = production. Per-app dev/instances use their own
+> **Naming convention:** `socratictrade.com` = production. Per-app dev/instances use their own
 > subdomain (e.g. `claude-dev`, `trading-beta`) → a different local port + tunnel ingress rule, and a
 > matching launchd label (`com.jays.<app>-dev`). The app hardcodes no hostname; set `CORS_ORIGIN`.
 
@@ -25,7 +25,7 @@ HOST=127.0.0.1                 # only cloudflared (same machine) can reach the B
 PORT=8787
 STORE=file                    # durable snapshot at .data/state.json
 DATA_DIR=.data
-CORS_ORIGIN=https://trading.jays.services
+CORS_ORIGIN=https://socratictrade.com
 SESSION_SECRET=<paste: openssl rand -hex 32>
 
 # LLM (optional — defaults to the offline mock)
@@ -76,15 +76,15 @@ sudo pmset -a sleep 0 disablesleep 1     # or run under `caffeinate -s`
 brew install cloudflared
 cloudflared tunnel login
 cloudflared tunnel create trading                     # note the UUID + creds path
-cloudflared tunnel route dns trading trading.jays.services
+cloudflared tunnel route dns trading socratictrade.com
 cp deploy/cloudflared.config.example.yml ~/.cloudflared/config.yml
 # edit ~/.cloudflared/config.yml: set tunnel UUID, credentials-file, and
-#   ingress: trading.jays.services -> http://127.0.0.1:8787
+#   ingress: socratictrade.com -> http://127.0.0.1:8787
 cloudflared tunnel run trading                        # test in foreground
 sudo cloudflared service install                      # then run as a background service
 ```
 
-Open `https://trading.jays.services` — the console should load and `/api/health` should respond.
+Open `https://socratictrade.com` — the console should load and `/api/health` should respond.
 
 ## 4. Backups (until Postgres)
 
@@ -99,7 +99,7 @@ crontab -e
 
 **Automatic (recommended):** install the self-updater once — it pulls the deploy branch and
 reloads the app on a timer (default every 5 min), so a merge to `gh-pages` lands on
-`trading.jays.services` with no manual steps:
+`socratictrade.com` with no manual steps:
 
 ```bash
 bash deploy/install-autoupdate.sh        # or: bash deploy/install-autoupdate.sh 120   (2 min)
@@ -132,7 +132,7 @@ Most of this is already built into the app; the rest is operational:
 - [x] Auto-restart / start-at-login (`launchd`)
 - [x] Auto-deploy on merge (`deploy/install-autoupdate.sh`)
 - [ ] **Backups** scheduled (step 4)
-- [ ] **Real login/auth** front door before multi-user — e.g. **Cloudflare Access** in front of `trading.jays.services` (SSO/email gate), in addition to the app's sessions
+- [ ] **Real login/auth** front door before multi-user — e.g. **Cloudflare Access** in front of `socratictrade.com` (SSO/email gate), in addition to the app's sessions
 - [ ] **Postgres** when the file store outgrows itself (Deep Dives 7, 8, 12 specify the schemas)
 - [ ] **`ALLOW_LIVE_TRADING=true` only** after deliberate review; connect Alpaca **paper** first
 

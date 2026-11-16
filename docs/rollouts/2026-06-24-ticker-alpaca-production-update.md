@@ -38,6 +38,6 @@ the Alpaca dashboard lists live keys against `https://api.alpaca.markets`.
 
 ## Follow-ups
 
-- Production update was requested after this patch. Landing through `main` should trigger the self-hosted Deploy workflow for `trading.jays.services`.
+- Production update was requested after this patch. Landing through `main` should trigger the self-hosted Deploy workflow for `socratictrade.com`.
 - Alpaca account type can only be automatic when Alpaca returns subtype fields such
   as `account_type` / `account_sub_type`; otherwise tax treatment remains manual.

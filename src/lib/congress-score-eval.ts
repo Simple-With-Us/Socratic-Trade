@@ -63,6 +63,15 @@ export interface EvaluateCongressScoreOptions {
   minTopBucketObservations?: number;
   requireBenchmarkReturn?: boolean;
   placeboSeed?: number;
+  /**
+   * P2-3 (default false): when true, the go/no-go additionally requires the TOP score bucket's OWN excess
+   * return (top.avgReturn − bottom.avgReturn, i.e. the long-leg edge) to be strictly positive with at least
+   * `minTopBucketObservations` names. This blocks a symmetric top-minus-bottom spread whose edge lives
+   * entirely in the (short) bottom leg from promoting a long-biased congress signal. Off by default → the
+   * verdict is unchanged. (The bottom-inclusive `topMinusBottomReturn > 0` check already runs; this adds a
+   * check that the TOP bucket itself carries positive edge, not just that the spread is positive.)
+   */
+  requireTopBucketPositive?: boolean;
 }
 
 export interface CongressScoreExportParseOptions {
@@ -182,6 +191,11 @@ export function evaluateCongressScore(
   if (rankIC.meanIC <= 0) reasons.push("rank IC is not positive");
   if (rankIC.tStat < 2) reasons.push("rank IC t-stat is below 2");
   if (topMinusBottomReturn == null || topMinusBottomReturn <= 0) reasons.push("top-minus-bottom quantile spread is not positive");
+  // P2-3 (opt-in): the LONG-leg edge must be positive on its own — the top bucket's own excess return (not
+  // just the top-minus-bottom spread, which can be carried entirely by the short bottom leg). Off by default.
+  if ((options.requireTopBucketPositive ?? false) && (top == null || !(top.avgReturn > 0) || (top.n ?? 0) < minTopBucketObservations)) {
+    reasons.push(`top-bucket long-leg excess return is not positive (avgReturn ${top ? round6(top.avgReturn) : "n/a"}, n ${top?.n ?? 0})`);
+  }
   if (placebo && rankIC.meanIC <= placebo.rankIC.meanIC) reasons.push("placebo IC is not lower than real IC");
 
   return {
