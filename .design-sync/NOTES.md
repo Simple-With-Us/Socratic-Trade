@@ -37,7 +37,7 @@ The synced "design system" is the two hand-built primitive sets:
   (`bg-accent`, `text-fg`, `border-line`, …). Dark mode = a `.dark` ancestor class.
 - `app/console/*` uses **bespoke `con-*` classes** defined in `app/console/console.css`
   (`.con-card`, `.con-btn-*`, `.con-chip-*`) PLUS Tailwind layout utilities, all scoped
-  under **`.console-root`**. Dark = `.console-root[data-theme="dark"]` (or `prefers-color-scheme`).
+  under **`.console-root`**. Dark = one resolved value on `html.dark`, `html[data-theme="dark"]`, and `.console-root[data-theme="dark"]`.
 - `cfg.cssEntry` = `.ds-sync/compiled.css`, produced by the Tailwind v4 CLI from the
   committed input `.design-sync/tailwind-input.css` (imports `globals.css` + `console.css`,
   `@source`s the two primitive files). **Regenerate it before every build:**

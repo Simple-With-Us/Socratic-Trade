@@ -1,5 +1,5 @@
 import { updateSocraticFrameworkProposalStatus } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import type { SocraticFrameworkOwnerVerb, SocraticFrameworkProposalStatus } from "@/lib/types";
 import { NextResponse } from "next/server";
 
@@ -21,7 +21,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     return NextResponse.json({ error: "rewrite requires ownerResponse" }, { status: 400 });
   }
   const { id } = await context.params;
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const proposal = updateSocraticFrameworkProposalStatus(id, status, userId, ownerResponse, ownerVerb);
   if (!proposal) return NextResponse.json({ error: "framework proposal not found" }, { status: 404 });
   return NextResponse.json(proposal);

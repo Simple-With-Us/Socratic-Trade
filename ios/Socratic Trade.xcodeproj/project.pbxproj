@@ -10,6 +10,7 @@
 		00A64670386CFB976BCA05B3 /* ProposalPriceReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5106B1DF419D29BCC1717594 /* ProposalPriceReview.swift */; };
 		06E671465D00C0E5D6FE1552 /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F19EB749596630BC4A2EF149 /* ScanView.swift */; };
 		07819F3774A506ECF52D5F38 /* ControlCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4EC1C98F388A1CA9E6334EB /* ControlCatalogTests.swift */; };
+		0ABE1736221AEBDF2F0C6C3A /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 327D8707A33A290BEF61F44F /* Sentry */; };
 		0D33482A75E80E8B8393568C /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1414766425B708D8C45691ED /* HomeView.swift */; };
 		16C32102BDAA57BDDC9BC51E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 64D21DA3DA51118F65691FBE /* Assets.xcassets */; };
 		18483B89B5039BD1C62B723D /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F73B7DC3AC7076311C24456 /* PushNotifications.swift */; };
@@ -49,6 +50,7 @@
 		AD51C8FEF98EF6F4E763A044 /* MarketsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D351D03CEAFD6CD1EB4536FD /* MarketsView.swift */; };
 		B1F8A39D5E855B1CEC1264C1 /* ResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 881F862498FE996BFC88C037 /* ResultsView.swift */; };
 		B4F889FDC384BEA36BB16F23 /* DeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31CAA55DF67299F539BE8ECC /* DeepLink.swift */; };
+		B672EA90196A695CBECBC1ED /* SentryTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A60E3A755915BCEE4FB04DB /* SentryTelemetry.swift */; };
 		BF68D663A3173029BEEC52D8 /* DeepLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6AA7A53A726CB69203EDD4 /* DeepLinkTests.swift */; };
 		C39AC4C21712AD198B7A1753 /* CandleWordmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 511D91AD0BC588F44749DC59 /* CandleWordmarkTests.swift */; };
 		C3BB26F6D86DD0C45B1EBEFC /* TabPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 728EAC5AE3C4358672EBAEED /* TabPreferencesTests.swift */; };
@@ -102,6 +104,7 @@
 		5106B1DF419D29BCC1717594 /* ProposalPriceReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProposalPriceReview.swift; sourceTree = "<group>"; };
 		511D91AD0BC588F44749DC59 /* CandleWordmarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandleWordmarkTests.swift; sourceTree = "<group>"; };
 		552372DC3315B434227861EE /* Lato-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Lato-Regular.ttf"; sourceTree = "<group>"; };
+		5A60E3A755915BCEE4FB04DB /* SentryTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentryTelemetry.swift; sourceTree = "<group>"; };
 		5F94CABB7BE5CB871622BADD /* SocraticTradeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocraticTradeApp.swift; sourceTree = "<group>"; };
 		64D21DA3DA51118F65691FBE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		64FD6B1AE752DEF0DB8C719D /* LATO-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LATO-OFL.txt"; sourceTree = "<group>"; };
@@ -137,6 +140,17 @@
 		F465E5B4A0E3C941A01A8640 /* OrderCancel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderCancel.swift; sourceTree = "<group>"; };
 		FC9F509664B51F30B581932B /* AppTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTypography.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		3E2722BF6F11D366C77D87E0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0ABE1736221AEBDF2F0C6C3A /* Sentry in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		008B71438D3CFDB4D27347DF = {
@@ -183,6 +197,7 @@
 				3F73B7DC3AC7076311C24456 /* PushNotifications.swift */,
 				881F862498FE996BFC88C037 /* ResultsView.swift */,
 				F19EB749596630BC4A2EF149 /* ScanView.swift */,
+				5A60E3A755915BCEE4FB04DB /* SentryTelemetry.swift */,
 				5F94CABB7BE5CB871622BADD /* SocraticTradeApp.swift */,
 				A3125CC92E339D3923013056 /* SymbolInfoSheet.swift */,
 			);
@@ -272,6 +287,7 @@
 			buildPhases = (
 				B9EA7039E595AD8D53B6B2F3 /* Sources */,
 				3E11AAB697E85D67C9C0A9F7 /* Resources */,
+				3E2722BF6F11D366C77D87E0 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -279,6 +295,7 @@
 			);
 			name = SocraticTrade;
 			packageProductDependencies = (
+				327D8707A33A290BEF61F44F /* Sentry */,
 			);
 			productName = SocraticTrade;
 			productReference = 04FCAD7405F1B4180574C644 /* SocraticTrade.app */;
@@ -299,7 +316,6 @@
 					};
 					D2582043B5817BEFCDC92620 = {
 						DevelopmentTeam = CC8UTF7ATG;
-						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -312,6 +328,9 @@
 			);
 			mainGroup = 008B71438D3CFDB4D27347DF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C706C5E14BEC9D14AA1991CD /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 20E63D98EDABA6D29C136796 /* Products */;
 			projectDirPath = "";
@@ -407,6 +426,7 @@
 				18483B89B5039BD1C62B723D /* PushNotifications.swift in Sources */,
 				B1F8A39D5E855B1CEC1264C1 /* ResultsView.swift in Sources */,
 				06E671465D00C0E5D6FE1552 /* ScanView.swift in Sources */,
+				B672EA90196A695CBECBC1ED /* SentryTelemetry.swift in Sources */,
 				20459811A20F559A78FC18B3 /* SocraticTradeApp.swift in Sources */,
 				27D79C4CCEC77B61D399EE85 /* SymbolInfoSheet.swift in Sources */,
 			);
@@ -457,7 +477,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 202608132022;
+				CURRENT_PROJECT_VERSION = 202610290000;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -473,11 +493,12 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.finance";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.8;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SENTRY_DSN = "";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.9;
@@ -496,7 +517,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = trade.socratic.app.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.socratictrade.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Socratic Trade.app/Socratic Trade";
@@ -537,7 +558,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 202608132022;
+				CURRENT_PROJECT_VERSION = 202610290000;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -559,12 +580,13 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.finance";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.8;
+				MARKETING_VERSION = 0.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SENTRY_DSN = "";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.9;
@@ -583,7 +605,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = trade.socratic.app.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.socratictrade.ios.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Socratic Trade.app/Socratic Trade";
@@ -603,7 +625,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = trade.socratic.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.socratictrade.ios;
 				PRODUCT_MODULE_NAME = SocraticTrade;
 				PRODUCT_NAME = "Socratic Trade";
 				SDKROOT = iphoneos;
@@ -617,17 +639,18 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SocraticTrade/SocraticTrade.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Apple Distribution";
+				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = CC8UTF7ATG;
 				INFOPLIST_FILE = SocraticTrade/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = trade.socratic.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.socratictrade.ios;
 				PRODUCT_MODULE_NAME = SocraticTrade;
 				PRODUCT_NAME = "Socratic Trade";
+				PROVISIONING_PROFILE_SPECIFIER = "Socratic Trade App Store (API) 2";
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = YES;
 				TARGETED_DEVICE_FAMILY = "1,2,6";
@@ -665,6 +688,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C706C5E14BEC9D14AA1991CD /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.30.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		327D8707A33A290BEF61F44F /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C706C5E14BEC9D14AA1991CD /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 65FE2CDE64D62422A77294E0 /* Project object */;
 }

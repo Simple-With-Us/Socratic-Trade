@@ -83,7 +83,12 @@ afterEach(() => {
 
 describe("resolveServerKnob precedence", () => {
   it("resolves catalog default when neither override nor env is set", () => {
-    expect(resolveServerKnob("SEC_INGEST_WORKER_ENABLED")).toBe(false);
+    expect(resolveServerKnob("SEC_INGEST_WORKER_ENABLED")).toBe(true);
+    expect(resolveServerKnob("SEC_INGEST_DAYTIME_ENABLED")).toBe(true);
+    expect(resolveServerKnob("SEC_INGEST_TASKS_PER_TICK_RTH")).toBe(1);
+    expect(resolveServerKnob("SEC_INGEST_TASKS_PER_TICK_OFF_HOURS")).toBe(5);
+    expect(resolveServerKnob("TRANSCRIPTS_DAYTIME_ENABLED")).toBe(true);
+    expect(resolveServerKnob("CONGRESS_SHARE_FUNDAMENTALS_ENABLED")).toBe(true);
     expect(resolveServerKnob("RAG_INGEST_BUDGET_ENABLED")).toBe(true);
     expect(resolveServerKnob("SEC_FILING_RAG_MAX_PER_RUN")).toBe(25);
   });
@@ -139,16 +144,16 @@ describe("resolveServerKnob precedence", () => {
 
 describe("read cache TTL + invalidation on write", () => {
   it("a direct store write is invisible until invalidation, while setServerKnobOverride applies immediately", () => {
-    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(false); // primes the cache
+    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(true); // primes the cache
     // Bypass the setter (simulates another process / stale cache): cached read still wins.
-    setInternalSetting(SERVER_KNOBS_SETTING_KEY, { SEC_INGEST_WORKER_ENABLED: true });
-    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(false);
-    invalidateServerKnobCache();
+    setInternalSetting(SERVER_KNOBS_SETTING_KEY, { SEC_INGEST_WORKER_ENABLED: false });
     expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(true);
+    invalidateServerKnobCache();
+    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(false);
 
     // The real write path invalidates on its own — no TTL wait.
-    setServerKnobOverride("SEC_INGEST_WORKER_ENABLED", false);
-    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(false);
+    setServerKnobOverride("SEC_INGEST_WORKER_ENABLED", true);
+    expect(serverKnobBool("SEC_INGEST_WORKER_ENABLED")).toBe(true);
   });
 });
 
@@ -171,10 +176,11 @@ describe("fail-open on store error", () => {
 
 describe("SEC ingest worker park/resume", () => {
   it("parks while the knob resolves off and resumes within one interval of a flip on", async () => {
+    setServerKnobOverride("SEC_INGEST_WORKER_ENABLED", false);
     const worker = new SecIngestWorker(20);
     const tick = vi.spyOn(worker, "runTick").mockResolvedValue(undefined);
     // The interval gate calls the module-level secIngestWorkerEnabled(); park/resume is observed
-    // through whether ticks run. Knob starts off (no env, no override).
+    // through whether ticks run. Knob is overridden to off.
     expect(secIngestWorkerEnabled()).toBe(false);
     await worker.start();
     try {
@@ -196,6 +202,7 @@ describe("SEC ingest worker park/resume", () => {
 
   it("startSecIngestWorker starts the loop even while disabled (so a later flip on needs no reboot)", async () => {
     // The starter must not early-return on a disabled knob anymore — the loop parks instead.
+    setServerKnobOverride("SEC_INGEST_WORKER_ENABLED", false);
     expect(secIngestWorkerEnabled()).toBe(false);
     startSecIngestWorker();
     const host = globalThis as typeof globalThis & { __secIngestWorkerInstance?: SecIngestWorker };
@@ -298,11 +305,11 @@ describe("admin server-knobs route", () => {
     expect((await knobsGet(anon)).status).toBe(403);
     const anonPost = new Request("https://trading.example.com/api/admin/server-knobs", {
       method: "POST",
-      body: JSON.stringify({ id: "SEC_INGEST_WORKER_ENABLED", value: true })
+      body: JSON.stringify({ id: "STREAMS_ALPACA_NEWS_ENABLED", value: true })
     });
     expect((await knobsPost(anonPost)).status).toBe(403);
     // The denied write must not have landed.
-    expect(resolveServerKnob("SEC_INGEST_WORKER_ENABLED")).toBe(false);
+    expect(resolveServerKnob("STREAMS_ALPACA_NEWS_ENABLED")).toBe(false);
   });
 
   it("GET returns the catalog with effective values and provenance", async () => {
@@ -338,7 +345,7 @@ describe("admin server-knobs route", () => {
     expect((await knobsPost(adminReq("POST", { id: "NOT_A_KNOB", value: true }))).status).toBe(400);
     expect((await knobsPost(adminReq("POST", { id: "SEC_INGEST_WORKER_ENABLED", value: 7 }))).status).toBe(400);
     expect((await knobsPost(adminReq("POST", { id: "SEC_FILING_RAG_MAX_PER_RUN", value: "many" }))).status).toBe(400);
-    expect(resolveServerKnob("SEC_INGEST_WORKER_ENABLED")).toBe(false);
+    expect(resolveServerKnob("SEC_INGEST_WORKER_ENABLED")).toBe(true);
     expect(resolveServerKnob("SEC_FILING_RAG_MAX_PER_RUN")).toBe(25);
   });
 });

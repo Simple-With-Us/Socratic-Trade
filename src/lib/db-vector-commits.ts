@@ -803,6 +803,32 @@ export function committedManagedVectorReceipts(vectorIds: string[], asOf?: strin
   }]));
 }
 
+/**
+ * Resolve the provider authority from durable committed vector records.
+ * Used when in-memory provider authority cache is uninitialized (e.g. Qdrant read backend without Pinecone).
+ */
+export function durableProviderAuthority(ledgerAuthority?: string): string | undefined {
+  const database = getDb();
+  if (ledgerAuthority) {
+    const row = database
+      .prepare(
+        `SELECT provider_authority FROM vector_ingest_commits
+         WHERE ledger_authority = ? AND provider_authority IS NOT NULL AND TRIM(provider_authority) != '' AND state = 'committed'
+         ORDER BY committed_at DESC LIMIT 1`
+      )
+      .get(ledgerAuthority) as { provider_authority: string } | undefined;
+    if (row?.provider_authority?.trim()) return row.provider_authority.trim();
+  }
+  const fallback = database
+    .prepare(
+      `SELECT provider_authority FROM vector_ingest_commits
+       WHERE provider_authority IS NOT NULL AND TRIM(provider_authority) != '' AND state = 'committed'
+       ORDER BY committed_at DESC LIMIT 1`
+    )
+    .get() as { provider_authority: string } | undefined;
+  return fallback?.provider_authority?.trim() || undefined;
+}
+
 export interface PendingVectorCommit {
   id: string;
   state: VectorCommitState;

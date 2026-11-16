@@ -48,7 +48,7 @@ rate-limited per-request, not by the Voyage free-tier trickle this gate was writ
 - Landing was blocked purely by the shared self-hosted CI runner's queue depth at the time
   of this note (20-30 jobs queued fleet-wide, ~7h wait observed on one job; runner itself
   confirmed alive/draining, not hung) — an infrastructure capacity issue unrelated to this
-  change's correctness, posted to #agent-sync separately. `scripts/land.sh` will push and
+  change's correctness, posted to #ag***-s**c separately. `scripts/land.sh` will push and
   open the PR once local verify passes; the PR's own CI checks then queue like everyone
   else's.
 - The module-header comment block (lines 7-13) still frames the gate as purely

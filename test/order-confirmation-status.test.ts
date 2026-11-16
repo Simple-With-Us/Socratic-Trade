@@ -41,7 +41,10 @@ vi.mock("../src/lib/approval-quote-scan", async (importOriginal) => {
     ...actual,
     loadApprovalQuoteScan: async () =>
       actual.buildApprovalQuoteScan(
-        { AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan" } },
+        {
+          AAPL: { symbol: "AAPL", price: 200, bid: 199, ask: 200, provider: "test-scan", asOf: new Date().toISOString() },
+          MSFT: { symbol: "MSFT", price: 400, bid: 399, ask: 400, provider: "test-scan", asOf: new Date().toISOString() }
+        },
         []
       )
   };
@@ -85,8 +88,7 @@ let lastCreateOrderOpts: Record<string, unknown> | null = null;
 let mockOrderSeq = 0;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "ACC-CONFIRM", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "40000" };
       }
@@ -95,6 +97,20 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
       }
       async getOrders() {
         return [];
+      }
+      async getAsset(symbol: string) {
+        // PR #3380 turned getEquityTradability into a real Alpaca asset lookup; without this
+        // stub every order gets blocked as not-tradable.  Reflect Alpaca's "default" tradable
+        // shape so the test exercises the same code path it did before the refactor.
+        return {
+          symbol,
+          tradable: true,
+          fractionable: true,
+          shortable: true,
+          easy_to_borrow: true,
+          marginable: true,
+          status: "active"
+        };
       }
       async getLatestQuotes(symbols: string[]) {
         if (symbols.includes("BRK.B")) return { "BRK.B": { bp: 409, ap: 410, t: new Date().toISOString() } };
@@ -113,8 +129,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return { id: `order-confirm-${mockOrderSeq}`, status: mockOrderStatus, qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() {}
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 const ACCOUNT = "ACC-CONFIRM";
@@ -197,10 +213,13 @@ describe("executeProposal — broker-agnostic order-placement confirmation", () 
     const { executeProposal } = await import("../src/lib/strategy");
     const { getProposal } = await import("../src/lib/db");
 
-    const result = await executeProposal(proposalId, userId);
-
-    expect(result.status).toBe("error");
-    expect(result.brokerState).toBe("rejected");
+    // #3343: a broker synchronous decline surfaces as a thrown Error with the broker state
+    // persisted on the row. The Error's message carries the decline reason.
+    const result: Error = await executeProposal(proposalId, userId).then(
+      (v) => { throw new Error(`expected throw, got ${JSON.stringify(v)}`); },
+      (e) => e
+    );
+    expect(result.message).toContain("Broker declined the order");
     expect(lastCreateOrderOpts).not.toBeNull();
 
     const row = getProposal(proposalId, userId);
@@ -310,8 +329,9 @@ describe("executeProposal — broker-agnostic order-placement confirmation", () 
     const { getAlpacaGateway } = await import("../src/lib/alpaca");
     const quotes = await getAlpacaGateway(userId, connectedAccountId).getEquityQuotes(ACCOUNT, ["BRK.B"]);
 
-    expect(quotes["BRK-B"]?.price).toBe(410);
-    expect(quotes["BRK.B"]?.price).toBe(410);
+    // bp 409 / ap 410: displayed price is the mid, not the ask.
+    expect(quotes["BRK-B"]?.price).toBe(409.5);
+    expect(quotes["BRK.B"]?.price).toBe(409.5);
     expect(quotes["BRK.B"]?.symbol).toBe("BRK.B");
   });
 });

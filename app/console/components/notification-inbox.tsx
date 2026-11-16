@@ -4,6 +4,7 @@
  *  Reuses the same persisted notification_events the Activity Alert Center shows. */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Bell, Check } from "lucide-react";
 import { formatNotificationDisplay } from "@/lib/dashboard-ui";
@@ -15,6 +16,7 @@ import { cx } from "../lib/format";
 import { useConsoleData } from "../lib/useConsoleData";
 import { Ago, Btn } from "../ui/primitives";
 import { useToast } from "../ui/toast";
+import { useAnchoredMenu, useMenuInitialFocus } from "../ui/use-anchored-menu";
 
 const INBOX_PREVIEW = 8;
 
@@ -22,6 +24,10 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
   const [open, setOpen] = useState(false);
   const [ackingIds, setAckingIds] = useState<Set<string>>(new Set());
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portaled + fixed: the header bar's overflow-x guard would clip an
+  // absolutely positioned panel to the bar height (ST-4544).
+  const menu = useAnchoredMenu(triggerRef, open, { align: "right", width: 380, gap: 2 });
+  const panelRef = useMenuInitialFocus(open, Boolean(menu.style));
   const { refresh } = useConsoleData();
   const toast = useToast();
   const activeAccountId = activeConnectedAccount(snapshot)?.id;
@@ -86,11 +92,16 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={close} aria-hidden />
-          <div
-            role="dialog"
-            aria-label="Notifications"
-            className="con-menu-drop absolute right-2 top-[calc(100%+2px)] z-50 w-[min(92vw,380px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
-          >
+          {menu.style && menu.container &&
+            createPortal(
+              <div
+                ref={panelRef}
+                tabIndex={-1}
+                role="dialog"
+                aria-label="Notifications"
+                style={menu.style}
+                className="con-menu-drop w-[min(92vw,380px)] rounded-card border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] p-3 shadow-xl"
+              >
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="text-[length:var(--con-fs-sm)] font-semibold">Notifications</div>
               <Link
@@ -115,7 +126,10 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
                       key={event.id}
                       className={cx(
                         "rounded-control border border-[color:var(--con-line)] bg-[color:var(--con-surface-2)] px-3 py-2.5",
-                        read && "opacity-60"
+                        // WCAG AA on muted surface: opacity-60 collapses the 13.5px title to 4.24:1
+                        // and the muted body to 2.79:1. opacity-70 lifts both above 4.5:1 (5.86:1
+                        // measured in light mode; dark theme unaffected).
+                        read && "opacity-70"
                       )}
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -146,7 +160,9 @@ export function NotificationInbox({ snapshot }: { snapshot: DashboardSnapshot })
                 })}
               </ul>
             )}
-          </div>
+              </div>,
+              menu.container
+            )}
         </>
       )}
     </div>

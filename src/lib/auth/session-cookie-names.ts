@@ -1,4 +1,5 @@
 import type { JWTPayload } from "jose";
+import type { NextResponse } from "next/server";
 import { decodeSessionToken, encodeSessionToken } from "./session-token";
 
 /** Auth.js v5 session cookie names, in preference order. */
@@ -32,6 +33,14 @@ export function isKnownSessionCookieName(name: string): name is KnownSessionCook
   return (KNOWN_SESSION_COOKIE_NAMES as readonly string[]).includes(name);
 }
 
+/** Clear Auth.js v5 and legacy NextAuth session cookies (including chunked variants). */
+export function appendClearAllSessionCookies(response: NextResponse): void {
+  for (const name of KNOWN_SESSION_COOKIE_NAMES) {
+    response.cookies.delete(name);
+    for (let i = 0; i < 8; i += 1) response.cookies.delete(`${name}.${i}`);
+  }
+}
+
 /**
  * First matching Auth.js / NextAuth session cookie.  Does not accept an
  * arbitrary name that merely contains "session-token".
@@ -57,7 +66,7 @@ export async function sessionTokenForCurrentCookie(input: {
   cookieName: string;
   secret: string | undefined;
   env?: NodeJS.ProcessEnv;
-}): Promise<{ cookieName: KnownSessionCookieName; token: string } | undefined> {
+}): Promise<{ cookieName: KnownSessionCookieName; token: string; maxAge?: number } | undefined> {
   const currentName = currentAuthjsSessionCookieName(input.env);
   if (!input.sessionToken) return undefined;
   if (input.cookieName === currentName) {
@@ -71,11 +80,16 @@ export async function sessionTokenForCurrentCookie(input: {
     salt: input.cookieName,
   });
   if (!payload) return undefined;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== "number") return undefined;
+  const maxAge = Math.floor(payload.exp - nowSeconds);
+  if (maxAge <= 0) return undefined;
   const { iat: _iat, exp: _exp, nbf: _nbf, ...claims } = payload;
   const token = await encodeSessionToken({
     token: claims as JWTPayload,
     secret: input.secret,
     salt: currentName,
+    maxAge,
   });
-  return { cookieName: currentName, token };
+  return { cookieName: currentName, token, maxAge };
 }

@@ -5,17 +5,19 @@ import {
   seedStrategyOverlayTemplates
 } from "@/lib/db-overlays";
 import { parseOverlayRegimes, type OverlayRegimeTag } from "@/lib/overlay-router";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json({ overlays: listStrategyOverlays(userId) });
 }
 
 export async function POST(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") {
     return NextResponse.json({ error: "Body must be a JSON object." }, { status: 400 });

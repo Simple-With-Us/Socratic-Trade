@@ -26,4 +26,4 @@ Resolved several P0 and P1 issues discovered during the whole-app audit, specifi
 
 ## Follow-ups
 - Merge this branch to `main`.
-- Update `#agent-sync` slack channel and effort logs.
+- Update `#ag***-s**c` slack channel and effort logs.

@@ -1,3 +1,4 @@
+import { llmFetch } from "../llm-request";
 /**
  * HyDE + evidence-derived multi-query retrieval for the filings RAG pass (hyde-multiquery-retrieval,
  * 2026-07-05). Flag-gated, DEFAULT OFF — every helper here is additive; the existing single-static-
@@ -231,7 +232,7 @@ export async function generateHydePassages(
       }
     );
 
-    const response = await fetch(endpoint.url, {
+    const response = await llmFetch(endpoint.url, {
       method: "POST",
       headers: llmAuthHeaders({ provider: endpoint.provider, key: endpoint.key }),
       body: JSON.stringify(body),

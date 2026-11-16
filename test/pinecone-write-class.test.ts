@@ -11,12 +11,14 @@ import { insertChunkOccurrences, insertDocumentChunkFts, insertSecFiling } from 
 import { chunkDocument, type ChunkInput } from "../src/lib/rag/chunk";
 import { searchCorpusWideLexicalCandidates } from "../src/lib/rag/corpus-wide-lexical";
 import { persistLocalComplete } from "../src/lib/rag/persist-local-complete";
-import {
+import * as pineconeWriteClassApi from "../src/lib/rag/pinecone-write-class";
+
+const {
   parseItemCodeFromSection,
   pineconeWriteClass,
   sectionDocumentKey,
   selectSignalChunks
-} from "../src/lib/rag/pinecone-write-class";
+} = pineconeWriteClassApi;
 import { buildSignalSectionDocuments } from "../src/lib/rag/processed-corpus-write";
 import { roleOfSpeaker } from "../src/lib/web-sources/roic-transcripts";
 
@@ -230,5 +232,12 @@ describe("persistLocalComplete + section key", () => {
     `).run("commit-signal-1", ACCESSION, documentKey, NOW, NOW, NOW);
     expect(processedCommitCoversAccession("NVDA", ACCESSION, "embed-test")).toBe(true);
     expect(processedCommitCoversAccession("NVDA", "0000000000-00-000000", "embed-test")).toBe(false);
+  });
+
+  it("does not export the unused write-class helpers", () => {
+    const api = pineconeWriteClassApi as Record<string, unknown>;
+    expect(api.writesProcessedToPinecone).toBeUndefined();
+    expect(api.isTranscriptRoleCode).toBeUndefined();
+    expect(api.filingTextFromParsedSections).toBeUndefined();
   });
 });

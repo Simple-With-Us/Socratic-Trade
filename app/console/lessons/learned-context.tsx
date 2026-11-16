@@ -8,6 +8,8 @@
  *  note: an approved 'risk' observation is recorded durably (advisory row) but
  *  is NOT yet retrieved into runs — listLearnedContextForDecision only reads
  *  fact-tier rows — so the copy says "recorded", never "the AI reads it".
+ *  (The daily Learning Review can also approve queued items in "decide" mode;
+ *  the stored row does not record whether a human or the review approved it.)
  *
  *  Console rules honored: asymmetric friction (reject is one tap; approve —
  *  which adds standing influence — shows exactly what will be applied first),

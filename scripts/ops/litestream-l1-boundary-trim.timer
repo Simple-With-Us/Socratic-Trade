@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Litestream L1 boundary trim after the L9 snapshot
+Documentation=https://github.com/Simple-With-Us/Socratic-Trade/blob/main/docs/litestream.md
+
+[Timer]
+# Nightly snapshot lands ~00:00-00:03 UTC.  00:04 is the first ST oneshot
+# already armed for 2026-09-02; keep that minute so we do not fight it.
+OnCalendar=*-*-* 00:04:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

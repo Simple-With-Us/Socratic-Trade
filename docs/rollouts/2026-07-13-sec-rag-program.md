@@ -3,7 +3,7 @@
 ## Summary
 
 Started the owner-directed implementation train for all nine packages in the 1,000-stock SEC/RAG plan. Reserved
-the work on both effort boards, announced the fileset claim in `#agent-sync`, re-audited the merged P0/P1
+the work on both effort boards, announced the fileset claim in `#ag***-s**c`, re-audited the merged P0/P1
 baselines, and split the first code wave into three isolated lanes: durable ingest state, historical SEC
 discovery/pacing, and DOM/iXBRL parsing/chunking.
 
@@ -49,7 +49,7 @@ The discovery and parser lane files will be appended after adversarial integrati
 - `git status --short --branch` - clean baseline before board/docs edits.
 - `gh pr view 1494 --json ...` - confirmed merged with green checks.
 - `gh pr view 1533 --json ...` - confirmed open fileset KEEPOUT.
-- `python3 /Users/jay/apps/codex-coordination-audit.py --repo /Users/jay/Code/Socratic.Trade` - read-only audit;
+- `python3 /Users/jay/apps/codex-coordination-audit.py --repo /Users/jay/Code/Socratic-Trade` - read-only audit;
   reported the canonical live-board filename incorrectly, so no `--apply` was used.
 - `node --version` - host default `v26.5.0`.
 - `/opt/homebrew/opt/node@24/bin/node --version` - supported runtime `v24.18.0`.
@@ -67,7 +67,7 @@ The discovery and parser lane files will be appended after adversarial integrati
 - Replaced that import with the repository's build-safe `crypto` form, reran the production build successfully,
   then reran the entire ordered Node 24 gate: lint 0 errors / 447 warnings, TypeScript clean, 352 files / 3,950
   tests passed, and production build passed.
-- `#agent-sync` receipts: posted `gating now` before the full gate and `gate clear` only after the green rerun.
+- `#ag***-s**c` receipts: posted `gating now` before the full gate and `gate clear` only after the green rerun.
 - Merged `origin/main@1a90281b`, then `scripts/land.sh` repeated clean TypeScript, 352 files / 3,950 tests, and
   production build; ready PR #1543 was opened. Hosted checks and review remain; nothing is merged or deployed.
 

@@ -5,7 +5,7 @@
 > missing Alpaca regression test (§5), ran the full Node 24 gate, and landed via
 > `scripts/land.sh`. The handoff framing below is preserved as the rollout record;
 > the "REMAINING" items in §6 were executed by CLAUDE, not MONET. A `[CLAUDE->MONET]
-> STAND DOWN` was posted to `#agent-sync` when MONET attempted to pick up the same lane
+> STAND DOWN` was posted to `#ag***-s**c` when MONET attempted to pick up the same lane
 > from the (now-stale) handoff. See the "Completion" section at the bottom for the
 > final verification receipt.
 
@@ -13,7 +13,7 @@
 **From seat:** CLAUDE (Fable)
 **To seat:** MONET (superseded — CLAUDE completed in-session)
 **Branch:** `claude/todays-app-errors-716a45`
-**Worktree:** `/Users/jay/.claude/projects/Claude-Isolated-Code-Worktrees/Socratic.Trade/todays-app-errors-716a45`
+**Worktree:** `/Users/jay/.claude/projects/Claude-Isolated-Code-Worktrees/Socratic-Trade/todays-app-errors-716a45`
 **Base:** `origin/main@294694ae`
 **Status:** Code complete + focused-green + `tsc` clean; **NOT** lint-full / full-test / build / merged / deployed.
 
@@ -303,12 +303,12 @@ action; nothing left open. If they recur, it's the usage-monitor service, not th
 - **Do NOT edit `src/lib/strategy.ts` or `src/lib/types.ts`** — `agent/ag-safety-maintenance`
   (AG) holds them. The buying-power-not-decremented issue (§5) lives there; flag it, don't
   fix it here.
-- I posted two claims to `#agent-sync` (`C0BEZDJDNKV`): the initial file claim and the P1
+- I posted two claims to `#ag***-s**c` (`C0BEZDJDNKV`): the initial file claim and the P1
   RAG-outage find. Post a handoff/land claim when you resume.
 - Fable=RAG swimlane, Monet=risk (per the swimlanes memory) — the RAG fix (§3) is squarely
   Fable's lane; if that matters to attribution, note it. The rest is notification/alert
   plumbing.
-- The realtime `#agent-sync` watcher is armed in my session; it'll stop when my session ends.
+- The realtime `#ag***-s**c` watcher is armed in my session; it'll stop when my session ends.
 
 ---
 

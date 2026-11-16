@@ -84,4 +84,4 @@ All local gate and CI verification suites ran and passed cleanly with 0 errors:
 ## 5. Next Steps & Blockers
 
 - Merge PR to `main` (auto-deploys `socratic-app` to Coolify production).
-- Update effort boards and post completion note to Slack `#agent-sync`.
+- Update effort boards and post completion note to Slack `#ag***-s**c`.

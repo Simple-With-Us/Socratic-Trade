@@ -204,6 +204,83 @@ export function isMarketOpen(date: Date = new Date()): boolean {
   return totalMinutes >= OPEN && totalMinutes < closeTime;
 }
 
+type EtDateParts = {
+  year: number;
+  month: number;
+  day: number;
+};
+
+function etDatePartsFromInstant(date: Date): EtDateParts {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(date).map((p) => [p.type, p.value]));
+  return {
+    year: parseInt(parts.year, 10),
+    month: parseInt(parts.month, 10),
+    day: parseInt(parts.day, 10)
+  };
+}
+
+/** UTC epoch ms for hour:minute ET on an ET calendar date (DST-safe; matches market-hours). */
+function etWallClockToUtcMs(parts: EtDateParts, hour: number, minute: number): number {
+  const approxUtcMs = Date.UTC(parts.year, parts.month - 1, parts.day, hour, minute, 0);
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  const p = Object.fromEntries(fmt.formatToParts(new Date(approxUtcMs)).map((x) => [x.type, x.value]));
+  const approxAsUtcMs = Date.UTC(
+    parseInt(p.year, 10),
+    parseInt(p.month, 10) - 1,
+    parseInt(p.day, 10),
+    parseInt(p.hour === "24" ? "0" : p.hour, 10),
+    parseInt(p.minute, 10),
+    parseInt(p.second, 10)
+  );
+  const offsetMs = approxAsUtcMs - approxUtcMs;
+  return approxUtcMs - offsetMs;
+}
+
+/**
+ * When the regular US equity session ends on the ET calendar day of `instant`.
+ * Returns null on weekends and full-close holidays. Uses the same early-close
+ * table as `isMarketOpen` (13:00 ET vs 16:00 ET).
+ */
+export function regularSessionCloseUtcMs(instant: Date = new Date()): number | null {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(instant).map((p) => [p.type, p.value]));
+  const weekday = parts.weekday;
+  if (weekday === "Sat" || weekday === "Sun") return null;
+
+  const dateStr = `${parts.year}-${parts.month}-${parts.day}`;
+  const year = parseInt(parts.year, 10);
+  const holidays = getMarketHolidays(year);
+  if (holidays.has(dateStr)) return null;
+
+  const earlyCloseDays = getEarlyCloseDays(year);
+  const closeHour = earlyCloseDays.has(dateStr) ? 13 : 16;
+  const closeMinute = 0;
+  const etParts = etDatePartsFromInstant(instant);
+  return etWallClockToUtcMs(etParts, closeHour, closeMinute);
+}
+
 /**
  * The next date+time the US equity market opens for regular trading.
  * If `after` is during a session, returns that same time (the market is already open).

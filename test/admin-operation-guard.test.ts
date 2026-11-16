@@ -9,7 +9,7 @@ import {
   resetAdminOperationInFlight,
   withAdminOperationGuard
 } from "../src/lib/admin-operation-guard";
-import { resetRateLimiter } from "../src/lib/rate-limit";
+import { rateLimiterBucketCount, resetRateLimiter } from "../src/lib/rate-limit";
 import { resetTuningSingleFlight } from "../src/lib/tuning-singleflight";
 import { rateLimitedOperationResponse } from "../src/lib/operation-guard-response";
 import { OPERATION_LEASE_GROUPS, runWithOperationLease } from "../src/lib/operation-lease";
@@ -271,6 +271,49 @@ describe("admin operation guard", () => {
     );
     expect(limited.status).toBe(429);
     await expect(limited.json()).resolves.toMatchObject({ code: "rate_limited" });
+  });
+
+  it("returns an identity denial before creating any lease or debiting rate-limit quota", async () => {
+    const inFlight = (globalThis as { __socraticAdminOperationsInFlight?: Map<string, unknown> })
+      .__socraticAdminOperationsInFlight;
+    // Code CLI mode refuses a request with no verified email, so resolveRequestUserIdOrResponse
+    // returns the 401 identity denial instead of a user id.
+    vi.stubEnv("CODE_CLI_ENABLED", "true");
+    const operations = ["reindex-8k", "congress-score-eval", "tuning-dry-run"] as const;
+    for (const operation of operations) {
+      for (let i = 0; i <= ADMIN_OPERATION_LIMITS[operation].limit; i += 1) {
+        const run = vi.fn(async () => new Response("must-not-run"));
+        const denied = await withAdminOperationGuard(
+          new Request("https://socratictrade.com/api/admin/test"),
+          operation,
+          run
+        );
+        expect(denied.status, operation).toBe(401);
+        await expect(denied.json()).resolves.toMatchObject({ ok: false, error: "verified_identity_required" });
+        expect(run, operation).not.toHaveBeenCalled();
+      }
+    }
+    // No rate-limit bucket was touched and no in-process single-flight entry was claimed.
+    expect(rateLimiterBucketCount()).toBe(0);
+    expect(inFlight?.size ?? 0).toBe(0);
+
+    // No durable lease is held: the RAG reindex group is still free.
+    const probe = await runWithOperationLease(
+      { group: OPERATION_LEASE_GROUPS.RAG_REINDEX, operation: "identity-denial-probe" },
+      async () => "free"
+    );
+    expect(probe.acquired).toBe(true);
+
+    // The same unauthenticated caller, once allowed (local identity), still has its full budget.
+    vi.unstubAllEnvs();
+    const operation = "congress-score-eval" as const;
+    for (let i = 0; i < ADMIN_OPERATION_LIMITS[operation].limit; i += 1) {
+      expect((await withAdminOperationGuard(
+        new Request("https://socratictrade.com/api/admin/test"),
+        operation,
+        async () => new Response("ok")
+      )).status).toBe(200);
+    }
   });
 
   it("does not let an old completion release a successor claim", async () => {

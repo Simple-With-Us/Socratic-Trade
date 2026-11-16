@@ -58,14 +58,37 @@ socket:
 validation:
   interval: 1h
 
+# Product compaction is L0 + bounded L1 + 24h snapshots.  L2 and L3 are OFF.
+#
+# Litestream 0.5.12 (pinned; do not upgrade -- tcp_mem 2026-07-10) has no
+# disable-L2 flag.  cmd/litestream/main.go Config.Levels is L1..N in list order
+# (CompactionLevels() prepends L0).  DefaultConfig() otherwise starts monitors
+# at 30s / 5m / 1h (compaction_level.go DefaultCompactionLevels).  One entry
+# here is how 0.5.12 turns L2/L3 off: MaxLevel() becomes 1 and NextLevel(1) is
+# the snapshot level.  Do NOT add a second or third item without restoring L2/L3
+# health grading in src/lib/runtime-health.ts.
+#
+# There is also no compaction-backoff yaml key.  store.go monitorCompactionLevel
+# retries on the level interval with no exponential delay.  The L2 mega-retry
+# storm (re-download the whole L1 chain, upload one giant L2, 403 on B2 Class B/C,
+# repeat) is what burned the shared daily cap.  Removing L2/L3 is the backoff.
+# Remaining L1 retries every 30s against a small L0 window, which is cheap.
+# Nightly L1 boundary-trim (scripts/ops/litestream-l1-boundary-trim.timer) keeps
+# L1 from growing into a mega-file of its own.
+#
+# Do NOT add verify-compaction: true (ListObjects after every compact).
+levels:
+  - interval: 30s
+
 dbs:
   - path: /app/data/app.db
     # PITR snapshot policy (Litestream 0.5.x): snapshot interval + retention are
     # DB-level `snapshot:` settings.
     snapshot:
       interval: 24h
-      # B2 is paid capacity (not CF free-tier) — keep 7d of LTX for restore headroom.
-      retention: 168h
+      # Jay 2026-10-29: keep 3d (72h) of LTX snapshot history.  Must match
+      # BACKUP_RETENTION_HOURS in src/lib/legal-notice.ts (privacy-policy copy).
+      retention: 72h
     replicas:
       - type: s3
         # Litestream 0.5.x can leak sockets at very short sync intervals against some

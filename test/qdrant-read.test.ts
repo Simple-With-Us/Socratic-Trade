@@ -1,6 +1,6 @@
 /**
  * STAGE-1 Qdrant read backend (src/lib/vector-store/qdrant-read.ts):
- *   - backend knob resolution: default pinecone; DB override > env boolean > env string; the
+ *   - backend knob resolution: default qdrant when QDRANT_URL is set; DB override > env boolean > env string; the
  *     qdrant choice additionally requires QDRANT_URL
  *   - Pinecone-namespace -> ns tenant mapping (default namespace == "" on this index, verified live)
  *   - qdrantQueryTier request shape + response mapping (pc_id becomes the match id; pc_id/ns are
@@ -48,11 +48,13 @@ describe("backend knob resolution", () => {
   it("is a catalogued server knob (runtime-flippable without redeploy)", () => {
     const spec = serverKnobById(QDRANT_READ_KNOB_ID);
     expect(spec?.type).toBe("boolean");
-    expect(spec?.defaultValue).toBe(false);
+    expect(spec?.defaultValue).toBe(true);
   });
 
-  it("defaults to pinecone with nothing set", () => {
+  it("defaults to qdrant when QDRANT_URL is set, falls back to pinecone when unconfigured", () => {
     expect(vectorReadBackend()).toBe("pinecone");
+    process.env.QDRANT_URL = "http://qdrant.example:6333";
+    expect(vectorReadBackend()).toBe("qdrant");
   });
 
   it("boolean env turns qdrant on (with QDRANT_URL) and explicit falsy keeps pinecone", () => {
@@ -90,6 +92,24 @@ describe("backend knob resolution", () => {
     process.env[QDRANT_READ_KNOB_ID] = "true";
     expect(qdrantConfigured()).toBe(false);
     expect(vectorReadBackend()).toBe("pinecone");
+  });
+
+  it("requires QDRANT_API_KEY on remote endpoints in production", () => {
+    const originalEnv = process.env.NODE_ENV;
+    try {
+      (process.env as unknown as { NODE_ENV: string }).NODE_ENV = "production";
+      process.env.QDRANT_URL = "https://qdrant.remote.example:6333";
+      delete process.env.QDRANT_API_KEY;
+      delete process.env.QDRANT_ALLOW_ANONYMOUS;
+      expect(qdrantConfigured()).toBe(false);
+      expect(vectorReadBackend()).toBe("pinecone");
+
+      process.env.QDRANT_API_KEY = "live-key";
+      expect(qdrantConfigured()).toBe(true);
+      expect(vectorReadBackend()).toBe("qdrant");
+    } finally {
+      (process.env as unknown as { NODE_ENV: string }).NODE_ENV = originalEnv;
+    }
   });
 });
 
@@ -253,8 +273,47 @@ describe("qdrantQueryTier", () => {
   });
 
   it("throws on a non-OK response (the caller owns per-tier fail-open)", async () => {
-    stubFetch({ ok: false, status: 503, text: "service unavailable" });
-    await expect(qdrantQueryTier("socratic-abc", { vector: [0.1], topK: 5 })).rejects.toThrow(/HTTP 503/);
+    vi.useFakeTimers();
+    try {
+      const { fetchMock } = stubFetch({ ok: false, status: 503, text: "service unavailable" });
+      const pending = qdrantQueryTier("socratic-abc", { vector: [0.1], topK: 5 });
+      const assertion = expect(pending).rejects.toThrow(/HTTP 503/);
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a transient fetch failed then returns hits", async () => {
+    vi.useFakeTimers();
+    try {
+      process.env.QDRANT_URL = "http://qdrant.example:6333/";
+      process.env.QDRANT_API_KEY = "test-key";
+      let attempts = 0;
+      const fetchMock = vi.fn(async () => {
+        attempts += 1;
+        if (attempts < 2) throw new TypeError("fetch failed");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            result: [{ id: "x", score: 0.5, payload: { pc_id: "occ:v3:retry-1", symbol: "AAPL" } }]
+          }),
+          text: async () => ""
+        } as unknown as Response;
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = qdrantQueryTier("", { vector: [0.1], topK: 5 });
+      const resultPromise = pending.then((result) => result);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+      expect(attempts).toBe(2);
+      expect(result.matches[0].id).toBe("occ:v3:retry-1");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throws on an unimplemented filter operator instead of querying with a widened filter", async () => {

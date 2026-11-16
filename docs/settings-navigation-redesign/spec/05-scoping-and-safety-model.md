@@ -1,7 +1,7 @@
 # Multi-Account Scoping & Safety Model
 
 > **Section owner:** Multi-account scoping & safety correctness.
-> **Canonical parent:** [`docs/settings-navigation-redesign.md`](./settings-navigation-redesign.md) (v2). This section goes deep on Principles **2, 3, 7, 8**, Open Questions **2/3/7**, and Part III gaps; it does not restate the IA, wireframes, or vocabulary — those are locked in the parent. Where the parent says "spec it here," this is here.
+> **Canonical parent:** [`docs/settings-navigation-redesign.md`](../../settings-navigation-redesign.md) (v2). This section goes deep on Principles **2, 3, 7, 8**, Open Questions **2/3/7**, and Part III gaps; it does not restate the IA, wireframes, or vocabulary — those are locked in the parent. Where the parent says "spec it here," this is here.
 > **Grounding baseline:** verified against the live tree this session — `src/lib/db-profiles.ts`, `src/lib/tax.ts`, `src/lib/scheduler.ts`, `src/lib/db-settings.ts`, `src/lib/db-api-keys.ts`, `src/lib/db.ts`, `src/lib/types.ts`. Every `file:line` below is real.
 
 ---

@@ -29,7 +29,6 @@ export type RapidApiProviderKey =
   | "mboum-finance"
   | "yahoo-finance15"
   | "alpha-vantage-rapidapi"
-  | "fmp-rapidapi"
   | "insiders-rapidapi"
   | "twelvedata-rapidapi"
   | "yh-finance-apidojo"
@@ -40,7 +39,6 @@ const DEFAULT_PER_PROVIDER_DAILY_CAP: Record<RapidApiProviderKey, number> = {
   "mboum-finance": 16,
   "yahoo-finance15": 3,
   "alpha-vantage-rapidapi": 500,
-  "fmp-rapidapi": 50000,
   "insiders-rapidapi": 100,
   "twelvedata-rapidapi": 100,
   // Free Basic tiers — keep small until owner confirms higher plan caps.
@@ -53,7 +51,6 @@ const ENV_KEY_FOR_PROVIDER: Record<RapidApiProviderKey, string> = {
   "mboum-finance": "PROVIDER_QUOTA_MBOUM_PER_DAY",
   "yahoo-finance15": "PROVIDER_QUOTA_YAHOO_FINANCE15_PER_DAY",
   "alpha-vantage-rapidapi": "PROVIDER_QUOTA_ALPHA_VANTAGE_RAPIDAPI_PER_DAY",
-  "fmp-rapidapi": "PROVIDER_QUOTA_FMP_RAPIDAPI_PER_DAY",
   "insiders-rapidapi": "PROVIDER_QUOTA_INSIDERS_RAPIDAPI_PER_DAY",
   "twelvedata-rapidapi": "PROVIDER_QUOTA_TWELVEDATA_RAPIDAPI_PER_DAY",
   "yh-finance-apidojo": "PROVIDER_QUOTA_YH_FINANCE_APIDOJO_PER_DAY",

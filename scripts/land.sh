@@ -40,18 +40,18 @@ cd "$REPO_ROOT"
 # -- supported runtime guard -------------------------------------------------
 # `.nvmrc` is advisory unless the caller explicitly activates it. Refuse to
 # install, verify, or publish with a different Node ABI than production/CI.
-command -v node >/dev/null 2>&1 || die "Node is missing. Node 24.x is required."
+command -v node >/dev/null 2>&1 || die "Node is missing. Node 26.x is required."
 NODE_VERSION="$(node -p 'process.versions.node' 2>/dev/null || echo "")"
 case "$NODE_VERSION" in
-  24.*) ;;
+  26.*) ;;
   *)
-    die "Node 24.x is required; found '${NODE_VERSION:-unknown}'.
+    die "Node 26.x is required; found '${NODE_VERSION:-unknown}'.
   On the deployment Mac run:
-    export PATH=\"/opt/homebrew/opt/node@24/bin:\$PATH\"
+    export PATH=\"/opt/homebrew/opt/node@26/bin:\$PATH\"
   Then re-run bash scripts/land.sh."
     ;;
 esac
-ok "Node v${NODE_VERSION} matches the supported Node 24 runtime."
+ok "Node v${NODE_VERSION} matches the supported Node 26 runtime."
 
 # ── 1. worktree / branch guards ────────────────────────────────────────────
 MAIN_INTEGRATION_WORKTREE="$HOME/Code/Agentic Trading"
@@ -206,7 +206,9 @@ if [[ -n "${1:-}" && "${1:-}" == "--pr-title" && -n "${2:-}" ]]; then
   PR_TITLE="${2}"
   shift 2
 elif [[ "$COMMIT_COUNT" -eq 1 ]]; then
-  PR_TITLE="$(echo "$COMMIT_SUBJECTS" | head -1)"
+  # Parameter expansion, not `echo | head` -- see the SIGPIPE note in
+  # scripts/alert-deploy-freshness.sh (FLEET-INFRA-BH).
+  PR_TITLE="${COMMIT_SUBJECTS%%$'\n'*}"
 else
   # Use first non-trivial commit subject; strip conventional commit prefix
   FIRST_SUBJECT="$(echo "$COMMIT_SUBJECTS" | tail -1)"

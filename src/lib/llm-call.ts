@@ -249,7 +249,7 @@ export function llmAuthHeaders(endpoint: Pick<LlmEndpoint, "provider" | "key">):
       "content-type": "application/json",
       authorization: `Bearer ${endpoint.key ?? ""}`,
       "HTTP-Referer": "https://socratictrade.com",
-      "X-Title": "Socratic.Trade"
+      "X-Title": "Socratic-Trade"
     };
   }
   return {
@@ -269,7 +269,8 @@ export function buildLlmRequestBody(
     maxOutputTokens: spec.maxOutputTokens,
     model: spec.model,
     reasoningEffort: spec.reasoningEffort,
-    temperature: spec.temperature
+    temperature: spec.temperature,
+    endpointProvider: endpoint.provider
   };
 
   // Best-effort fallback for call sites that don't yet pass an explicit `feature` tag. Prefer the
@@ -348,6 +349,7 @@ export function buildLlmRequestBody(
           input_schema: schema.schema
         }
       ];
+      // Known limitation: Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced tool use (400); native structured outputs are a tracked follow-up.
       base.tool_choice = { type: "tool", name: schema.name };
     }
     injectCommonFields(base);
@@ -357,12 +359,18 @@ export function buildLlmRequestBody(
   }
 
   const messages = [
-    { role: "system", content: systemPrompt },
+    {
+      role: "system",
+      content: (endpoint.provider === "minimax" || /^(?:minimax\/)?minimax-/i.test(spec.model)) && schema
+        ? `${systemPrompt}\n\nReturn only JSON matching this schema:\n${JSON.stringify(schema.schema)}`
+        : systemPrompt
+    },
     { role: "user", content: userContent }
   ];
 
   if (transport === "chat-completions") {
     const base: Record<string, unknown> = { model: spec.model, messages };
+    if (endpoint.provider === "minimax") base.reasoning_split = true;
     const responseFormat = openAiChatResponseFormat(endpoint.provider, schema, openAiJsonObject, spec.model);
     if (responseFormat) base.response_format = responseFormat;
     injectCommonFields(base);
@@ -498,7 +506,16 @@ function openAiChatResponseFormat(
   model?: string
 ): Record<string, unknown> | undefined {
   const isGemini = provider === "gemini" || (model && /^google\//i.test(model));
-  const isDeepSeek = provider === "deepseek" || (model && /^deepseek\//i.test(model));
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest, which
+  // must still get json_object (DeepSeek has no strict json_schema), not the strict schema.
+  const isDeepSeek = provider === "deepseek" || (model && /^~?deepseek\//i.test(model));
+  const isMiniMax = provider === "minimax";
+
+  // MiniMax's documented OpenAI-compatible request fields include messages, tools, sampling,
+  // thinking, and max_completion_tokens, but not response_format/json_schema.  Omit the
+  // undocumented field so native requests are accepted; callers still require and parse JSON
+  // from their schema-bearing prompt.
+  if (isMiniMax) return undefined;
 
   if (schema && !openAiJsonObject && isGemini) {
     const { schema: geminiSchema, unsupported } = toGeminiJsonSchema(schema.schema);

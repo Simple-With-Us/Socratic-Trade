@@ -21,12 +21,33 @@ beforeAll(() => {
 
 /** Stub global fetch: FRED calls (api.stlouisfed.org) return a constant reading; the Yahoo ^VIX
  *  chart call (query1.finance.yahoo.com) returns the given VIX close (or fails when null); the
- *  Cboe _VIX delayed quote (cdn.cboe.com) behaves likewise.
+ *  Cboe history CSV (cdn-api.cboe.com) and delayed JSON (cdn.cboe.com) behave likewise.
  *  Any unlisted host 404s — so a source left unspecified is simply "down" for that test. */
-function stubFetch(opts: { fredValue?: string; yahooVix?: number | null; cboeVix?: number | null }) {
+function stubFetch(opts: {
+  fredValue?: string;
+  yahooVix?: number | null;
+  cboeVix?: number | null;
+  cboeHistoryVix?: number | null;
+}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.includes("VIX_History") || url.includes("cdn-api.cboe.com")) {
+        const vix =
+          opts.cboeHistoryVix !== undefined
+            ? opts.cboeHistoryVix
+            : opts.cboeVix !== undefined
+              ? opts.cboeVix
+              : opts.yahooVix;
+        if (vix === null || vix === undefined) {
+          return { ok: false, status: 500, text: async () => "", json: async () => ({}) };
+        }
+        return {
+          ok: true,
+          text: async () => `DATE,CLOSE\n2026-01-02,${vix}\n`,
+          json: async () => ({})
+        };
+      }
       if (url.includes("cdn.cboe.com")) {
         const vix = opts.cboeVix !== undefined ? opts.cboeVix : opts.yahooVix;
         if (vix === null || vix === undefined) {
@@ -60,7 +81,9 @@ async function resetVixLaneState() {
   resetApiCircuitBreaker();
   const { getDb } = await import("../src/lib/db");
   getDb()
-    .prepare("DELETE FROM api_health_log WHERE service IN ('vix-yahoo', 'vix-cboe')")
+    .prepare(
+      "DELETE FROM api_health_log WHERE service IN ('vix-yahoo', 'vix-cboe', 'vix-cboe-history', 'vix-fred')"
+    )
     .run();
 }
 
@@ -140,17 +163,16 @@ describe("fetchMacroDataWithLiveVix", () => {
     expect(result.fedFundsRate).toBe("5.00%");
   });
 
-  it("falls back to the cached macro's own VIX when the live fetch fails", async () => {
+  it("overlays live FRED VIXCLS when the keyless cascade reaches FRED after CSV/Cboe fail", async () => {
     process.env.FRED_API_KEY = "env-key-live-vix-fallback";
-    stubFetch({ fredValue: "5.00", yahooVix: null });
+    stubFetch({ fredValue: "5.00", yahooVix: null, cboeHistoryVix: null, cboeVix: null });
 
     const { fetchMacroDataWithLiveVix, clearMacroCacheForTests } = await import("../src/lib/macro");
     clearMacroCacheForTests();
     const result = await fetchMacroDataWithLiveVix("user-live-vix-2");
 
-    // Live fetch failed -> falls back to whatever fetchMacroData resolved (the FRED-sourced VIX).
     expect(result.vix).toBe("5.00");
-    expect(result.vixAsOf).toBeUndefined();
+    expect(result.vixAsOf).toBeDefined();
   });
 
   it("promotes an 'unavailable' macro snapshot to live when the VIX overlay succeeds", async () => {
@@ -179,7 +201,7 @@ describe("fetchMacroDataWithLiveVix", () => {
   });
 });
 
-describe("keyless VIX cascade (Cboe -> Yahoo)", () => {
+describe("keyless VIX cascade (Cboe history -> FRED -> Cboe JSON -> Yahoo)", () => {
   beforeEach(async () => {
     delete process.env.FRED_API_KEY;
     const { clearMacroCacheForTests } = await import("../src/lib/macro");
@@ -191,20 +213,19 @@ describe("keyless VIX cascade (Cboe -> Yahoo)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("serves the Cboe delayed _VIX quote first, falling back to Yahoo if Cboe is down", async () => {
-    stubFetch({ cboeVix: null, yahooVix: 27.5 });
+  it("serves Cboe VIX_History.csv first, falling back to Yahoo when history and delayed JSON fail", async () => {
+    stubFetch({ cboeHistoryVix: null, cboeVix: null, yahooVix: 27.5 });
     const { fetchLiveVix } = await import("../src/lib/macro");
     const result = await fetchLiveVix();
     expect(result.vix).toBe(27.5);
     expect(result.asOf).not.toBeNull();
-    // Cboe was tried first, Yahoo second — the two-lane cascade stops at the first success.
     const urls = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
-    expect(urls.some((u) => u.includes("cdn.cboe.com"))).toBe(true);
+    expect(urls.some((u) => u.includes("VIX_History") || u.includes("cdn-api.cboe.com"))).toBe(true);
     expect(urls.some((u) => u.includes("query1.finance.yahoo.com"))).toBe(true);
   });
 
-  it("with no FRED key, a Cboe-only VIX still yields a timestamped macro snapshot (not 'unavailable')", async () => {
-    stubFetch({ yahooVix: null, cboeVix: 22.0 });
+  it("with no FRED key, a Cboe history VIX still yields a timestamped macro snapshot (not 'unavailable')", async () => {
+    stubFetch({ yahooVix: null, cboeVix: null, cboeHistoryVix: 22.0 });
     const { fetchMacroData } = await import("../src/lib/macro");
     const macro = await fetchMacroData("user-cascade-cboe");
     expect(macro.vix).toBe("22.00");
@@ -213,7 +234,7 @@ describe("keyless VIX cascade (Cboe -> Yahoo)", () => {
   });
 
   it("all sources dead -> honest 'unavailable' (never a fabricated VIX)", async () => {
-    stubFetch({ yahooVix: null, cboeVix: null });
+    stubFetch({ yahooVix: null, cboeVix: null, cboeHistoryVix: null });
     const { fetchMacroData, fetchLiveVix } = await import("../src/lib/macro");
     const macro = await fetchMacroData("user-cascade-dead");
     expect(macro.asOf).toBe("unavailable");
@@ -224,7 +245,7 @@ describe("keyless VIX cascade (Cboe -> Yahoo)", () => {
   });
 
   it("trips the per-lane circuit breaker after 5 hard consecutive failures (not soft yellow alone)", async () => {
-    stubFetch({ yahooVix: null, cboeVix: null });
+    stubFetch({ yahooVix: null, cboeVix: null, cboeHistoryVix: null });
     const { fetchLiveVix } = await import("../src/lib/macro");
     const { getLaneHealth, HEALTH_REASON_CONSECUTIVE_FAILURES } = await import("../src/lib/db-health");
     const mock = fetch as unknown as ReturnType<typeof vi.fn>;
@@ -235,20 +256,21 @@ describe("keyless VIX cascade (Cboe -> Yahoo)", () => {
     // on a backoff cadence rather than hammered every tick.
     const base = Date.now();
     await fetchLiveVix(base);
-    expect(mock.mock.calls.length).toBe(2);
+    const afterFirst = mock.mock.calls.length;
+    expect(afterFirst).toBeGreaterThanOrEqual(2);
     // One fail each lane → soft yellow possible, but no hard consecutive-failures yet.
-    for (const lane of ["vix-yahoo", "vix-cboe"]) {
+    for (const lane of ["vix-yahoo", "vix-cboe-history", "vix-cboe"]) {
       const h = getLaneHealth(lane, null);
       expect(h.stoppedWorking).toBe(true);
       expect(h.reason).not.toBe(HEALTH_REASON_CONSECUTIVE_FAILURES);
     }
     // Still allowed through (no circuit skip on soft yellow alone).
     await fetchLiveVix(base + 11 * 60_000);
-    expect(mock.mock.calls.length).toBe(4);
+    expect(mock.mock.calls.length).toBeGreaterThan(afterFirst);
 
     // Seed 5 hard failures so the transport breaker trips.
     const { logApiHealth } = await import("../src/lib/db-health");
-    for (const lane of ["vix-yahoo", "vix-cboe"]) {
+    for (const lane of ["vix-yahoo", "vix-cboe-history", "vix-cboe"]) {
       for (let i = 0; i < 5; i++) {
         logApiHealth({ service: lane, ok: false, errorText: "HTTP 500" });
       }
@@ -279,7 +301,9 @@ describe("fetchVixLane HTTP 429 hardening (Yahoo/Cboe bot-rate-limiting)", () =>
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        if (url.includes("cdn.cboe.com")) return { ok: false, status: 500, json: async () => ({}) };
+        if (url.includes("cdn-api.cboe.com") || url.includes("cdn.cboe.com")) {
+          return { ok: false, status: 500, text: async () => "", json: async () => ({}) };
+        }
         if (url.includes("query1.finance.yahoo.com")) {
           yahooCalls++;
           if (yahooCalls < 3) return { ok: false, status: 429, json: async () => ({}) };
@@ -308,7 +332,9 @@ describe("fetchVixLane HTTP 429 hardening (Yahoo/Cboe bot-rate-limiting)", () =>
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        if (url.includes("cdn.cboe.com")) return { ok: false, status: 500, json: async () => ({}) };
+        if (url.includes("cdn-api.cboe.com") || url.includes("cdn.cboe.com")) {
+          return { ok: false, status: 500, text: async () => "", json: async () => ({}) };
+        }
         if (url.includes("query1.finance.yahoo.com")) {
           yahooCalls++;
           return { ok: false, status: 429, json: async () => ({}) };

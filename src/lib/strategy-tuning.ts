@@ -15,7 +15,7 @@ import {
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "./llm-usage";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, type ExecutionState } from "./execution-mode";
 import { policyUniverseSymbolCount } from "./index-universes";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
+import { LLM_OUTPUT_TOKEN_CAPS, interactiveLlmTimeoutMs, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { humanizeLlmError } from "./llm-errors";
@@ -846,14 +846,24 @@ function compactFill(fill: FillEvent, executionState: ExecutionState) {
   };
 }
 
-function compactMarketScan(scan?: MarketScan) {
-  if (!scan) return undefined;
+/** Exported for a focused unit test (test/strategy-tuning-compact-market-scan.test.ts) — the rest
+ *  of this module needs a full DB + LLM-mocked integration harness that a shape-guard regression
+ *  test does not. */
+export function compactMarketScan(scan?: MarketScan) {
+  // `scan` is typed MarketScan but actually arrives as `latestDecision.marketScan` — an unchecked
+  // cast of a `strategy_run` audit payload (see the `as LatestDecisionPayload` cast above). Since
+  // 2026-08-01 (audit-bounded-run.ts) every `strategy_run` row stores a `BoundedMarketScanSummary`
+  // (`{ omitted: true, source, generatedAt, scannedSymbols, returnedQuotes, candidateCount,
+  // topSymbols }`) instead of the full scan — it has NO `topCandidates` array, so
+  // `scan.topCandidates.slice(...)` below would throw. Guard on the field this function actually
+  // needs rather than trusting the static type.
+  if (!scan || !Array.isArray(scan.topCandidates)) return undefined;
   return {
     source: scan.source,
     generatedAt: scan.generatedAt,
     scannedSymbols: scan.scannedSymbols,
     returnedQuotes: scan.returnedQuotes,
-    warnings: scan.warnings,
+    warnings: Array.isArray(scan.warnings) ? scan.warnings : [],
     topCandidates: scan.topCandidates.slice(0, 10).map((quote, index) => ({
       rank: index + 1,
       symbol: quote.symbol,
@@ -1008,7 +1018,10 @@ async function requestLlmTuning(
       const response = await llmFetch(url, {
         method: "POST",
         headers: llmAuthHeaders({ provider, key: openaiKey }),
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        // A thinking model gets 90s instead of 60s, capped under Cloudflare's ~100s edge budget
+        // because the browser awaits this request (POST /api/strategy/tune).
+        signal: AbortSignal.timeout(interactiveLlmTimeoutMs(model, reasoningEffortOverride ?? policyForResolution.llmReasoningEffort))
       });
 
       if (!response.ok) {

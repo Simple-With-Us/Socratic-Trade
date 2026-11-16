@@ -1,5 +1,9 @@
 # Phase 4 - Market Data And Multi-Factor Scoring
 
+## Daily history beyond two years (2026-10-14)
+
+`fetchDailyOHLC` (`src/lib/history.ts`) defaults to about five years.  Massive free aggregates stop near two years, and Stooq stays out of the cascade (bot wall).  A lookback longer than 730 days skips Massive and tries Yahoo chart `range=max` (paced), then Tradier history, then Twelve Data, then the remaining broker and keyed tiers.  A shorter lookback keeps Massive and uses Yahoo `range=1y`.  Both Yahoo ranges share the chart-host pacer, and the abort timer starts after a slot is acquired.  Twelve Data JSON is parsed with `TwelveDataTimeSeriesSchema` before any bar is stored.  SQLite `history_cache_eod` rows are permanent.  A fresh series is served with no network when its oldest bar reaches the requested start, or when a prior `range=max` response recorded that the listing starts later.  A two-year cache with no marker cannot block `range=max`.
+
 ## Goals
 
 - Introduce a provider abstraction without removing the current delayed Nasdaq fallback.
@@ -130,6 +134,9 @@ An empty abort row is not last-good.  An empty `seedEnrichment: {}` does
 not 200 `cached=true`.  iOS Scan seeds from compact `latestScan` on
 `/api/mobile/snapshot` and keeps that universe when live Refresh 503s,
 same as the website.  It does not blame Guardrails or the watchlist.
+
+**Interactive snapshot first (2026-11-11, ST-4599):** the paragraph above records the 2026-08-18 incident and the recovery that followed.  On the interactive path (`GET /api/scan`, `previewSeedBeforeLiveRecovery`), a down screener with a usable saved snapshot now returns that snapshot immediately, with `pricesAsOf` and `refreshPending`, and the website and iOS Scan label the age.  Yahoo whole-set pricing, then broker recovery, still runs afterward and replaces the snapshot when it returns quotes.  If that live recovery fails, the snapshot stays, with the age and without the updating sentence.  The blocking helper `recoverQuotesWhenScreenerEmpty` is still Yahoo, then broker, then seed.  Freshness does not set the preview flag and still passes `allowWholeSetYahooFallback: false`.  A live screener that simply misses the allowed universe does not preview a snapshot.
+
 
 **Expanded dynamic universes (2026-06-23):** Base universe selection now covers
 small and broad indexes without sending the whole market to the LLM. Static
@@ -277,7 +284,9 @@ enrichment checklist (`SymbolEnrichment` → `EnrichmentSourcedField` → `takeS
 - **Enrichment coverage report** — after each cascade run, Admin → Enrichment Coverage
   (`/admin/enrichment-coverage`), `/api/admin/enrichment-coverage`, and ops snapshot
   `enrichmentCoverage` show per-field fill rate, winning/most-frequent source, missing
-  fields, and provider failures. `applyEnrichment` preserves `fieldObservations` /
+  fields, and provider failures.  Reports persist in SQLite (`enrichment_coverage_runs` /
+  `enrichment_coverage_fields`, migration 94) so redeploys still serve the last run until
+  the next enrich. `applyEnrichment` preserves `fieldObservations` /
   `providerFailures` on `MarketQuote`.
 
 See `docs/rollouts/2026-07-01-data-sources-breadth.md`,
@@ -296,3 +305,13 @@ not a broken cascade:
 - Approval cards (website + iOS) stamp user-facing **Delayed Quote**.
 
 See `docs/rollouts/2026-08-18-delayed-yahoo-fallback-stamp.md`.
+
+## Quote observation time (2026-10-15, ST-2584)
+
+The price is the provider's last print, then the mid of a two-sided book.  A size, a one-sided bid or ask, a prior close, and a fabricated 0 are not the price.  `asOf` is the provider's own observation time.  The wall clock is never substituted.  A quote with no parseable observation time is unknown age.  The staleness gate blocks that opening.  A known-old observation still converts to a limit and stays approved.  Exits stay ungated.  `maxQuoteAgeSec` 0 still turns the gate off.  A chat draft preview has no scan, so a draft blocked only by `quote_age_unknown` still stages.  Approve time re-runs the gate and blocks the order if the fresh scan is still undated.
+
+Tradier paper stays `venue_delayed` (age the fetch when `asOf` parses, no Alpaca or Yahoo overlay).  Tradier live is `venue_locked`: the Tradier quote is the price, later cascade levels do not replace it, and the real `asOf` still hits the 120s gate.  Alpaca last prints come from Alpaca's own latest-trades call on the existing market-data client.  No new vendor was added.  `fillMissingQuotesWithClose` remains exported and is no longer called from Alpaca or Tradier quote reads.
+
+Price, bid, and ask rows in `symbol_field_latest` are skipped when they have no provider observation.  `stampFieldObservation` still falls back to `fetchedAt` for non-quote evidence.
+
+See `docs/rollouts/2026-10-15-quote-observation-staleness.md`.  The 2026-10-05 anchors (Yahoo `asOf`, ROIC unset `asOf`) still hold.  The earlier Alpaca mid-then-ask rule does not.

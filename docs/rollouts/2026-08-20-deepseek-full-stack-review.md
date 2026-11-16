@@ -2,18 +2,18 @@
 
 ## 1. Context & Objective
 
-Owner asked DEEPSEEK (new fleet seat) to run a top-to-bottom review of Socratic.Trade across the desktop website, the phone-width website, and the native iOS app, and to outline the fixes/improvements that can and should be made.  This is a review-only (zero-code) unit: the deliverable is a prioritized outline, board findings, and this paper trail.
+Owner asked DEEPSEEK (new fleet seat) to run a top-to-bottom review of Socratic-Trade across the desktop website, the phone-width website, and the native iOS app, and to outline the fixes/improvements that can and should be made.  This is a review-only (zero-code) unit: the deliverable is a prioritized outline, board findings, and this paper trail.
 
 ## 2. Changes Made
 
-- **New seat:** DEEPSEEK onboarded (tag `DEEPSEEK`, notes name DeepSeek, lane `~/apps/trading-deepseek`, branch prefix `deepseek/`).  Seat row added to `fleet-apps.json` and both `AGENT-SYNC.md` copies; landed via ai-fleet-coordinator PR #55 (merged).
-- **Coordination:** board umbrella item `682e7e3467cd4def97a13ee67335cbb1` (claimed, in_progress); Slack intro + claim posted to #agent-sync; effort-log rows added (Planned/In Progress) to `/Users/jay/apps/TRADING-EFFORT-LOG.md` and `docs/EFFORT-LOG.md`.
+- **New seat:** DEEPSEEK onboarded (tag `DEEPSEEK`, notes name DeepSeek, lane `~/apps/trading-deepseek`, branch prefix `deepseek/`).  Seat row added to `fleet-apps.json` and both `AG***-S**C.md` copies; landed via ai-fleet-coordinator PR #55 (merged).
+- **Coordination:** board umbrella item `682e7e3467cd4def97a13ee67335cbb1` (claimed, in_progress); Slack intro + claim posted to #ag***-s**c; effort-log rows added (Planned/In Progress) to `/Users/jay/apps/TRADING-EFFORT-LOG.md` and `docs/EFFORT-LOG.md`.
 - **Review doc:** `docs/reviews/2026-08-20-deepseek-full-review.md` — live measurements, state verifications of open board findings, and the prioritized fix/improvement outline.
 - **Touched files (lane):** `docs/reviews/2026-08-20-deepseek-full-review.md` (new), `docs/EFFORT-LOG.md` (row), `STATUS.md` (row, this commit), `PLAN.md` (row, this commit).
 
 ## 3. Decisions & Trade-offs
 
-- Review base = the clean lane at `origin/main` `41a7a438d`, NOT the dirty main worktree (`/Users/jay/Code/Socratic.Trade` has another agent's uncommitted work — left untouched).
+- Review base = the clean lane at `origin/main` `41a7a438d`, NOT the dirty main worktree (`/Users/jay/Code/Socratic-Trade` has another agent's uncommitted work — left untouched).
 - Findings already on the board (Kimi audit, MONET expert review) are referenced by id and verified against current main, not re-filed; state changes are recorded (89249c60 and 3b343933 look fixed on main; 830c892f, 410bda84, LIVE-02 confirmed open).
 - No code changes made (zero-code review).  No production writes.
 

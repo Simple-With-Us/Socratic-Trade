@@ -10,6 +10,7 @@ import {
   resolveTraceSampleRate,
   shouldUseAgentlessExporter
 } from "./datadog-env";
+import { datadogLlmObsInitOptions } from "./datadog-llmobs";
 import { startDatadogLogShipping } from "./datadog-logs";
 
 declare global {
@@ -50,7 +51,8 @@ export async function startDatadogServer(): Promise<void> {
       appsec: false,
       startupLogs: false,
       sampleRate: resolveTraceSampleRate(),
-      ingestion: { sampleRate: resolveTraceSampleRate() }
+      ingestion: { sampleRate: resolveTraceSampleRate() },
+      llmobs: datadogLlmObsInitOptions()
     });
     globalThis.__tradingDatadogApmStarted = true;
   } catch (error) {

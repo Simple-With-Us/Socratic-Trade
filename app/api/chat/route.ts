@@ -1,8 +1,7 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { buildProductionDeps, makeOrchestrator } from "@/lib/chat/orchestrator";
 import {
   AnthropicLLM,
-  chatProviderForModel,
   getLLM,
   llmForModel,
   MockLLM,
@@ -11,6 +10,7 @@ import {
   type LlmUsageOpts
 } from "@/lib/chat/llm";
 import { resolveLlmCredential } from "@/lib/db";
+import { modelCredentialService } from "@/lib/llm-provider";
 import { enforceRateLimit, RATE_LIMITS } from "@/lib/rate-limit";
 import { isOverLlmBudget } from "@/lib/llm-budget";
 import { LLM_REQUIRED_CHAT_MESSAGE } from "@/lib/llm-required";
@@ -19,6 +19,7 @@ import type { LlmReasoningEffort } from "@/lib/types";
 import { NextResponse } from "next/server";
 import { registerChatTurn, releaseChatTurn } from "@/lib/chat/turn-registry";
 import { getPolicy } from "@/lib/db";
+import { safeErrorMessage } from "@/lib/telemetry-sanitize";
 
 /** The explicit offline path: the deterministic MockLLM, intentionally keyless. Anything else is a real
  *  provider and must resolve a credential. An empty/absent hint is NOT mock and is accepted only when
@@ -28,17 +29,17 @@ function isOfflineMockRequest(modelHint: string | undefined, providerHint: strin
 }
 
 /**
- * Resolve the chat provider this request will ACTUALLY call, mirroring the LLM-selection precedence
- * below: an explicit model routes to its provider (chatProviderForModel), else a legacy provider hint
- * (openai/anthropic) is used directly, else the provider for the explicit CHAT_LLM_MODEL
- * (CHAT_LLM selects Anthropic; otherwise the compatibility transport is OpenAI).
- * The 412 gate checks THIS provider's credential — not "any provider" — so an Anthropic-only user who
- * requests an OpenAI model is blocked instead of silently degrading to MockLLM.
+ * Resolve the credential service this request will ACTUALLY use.  Explicit models follow
+ * llmForModel's OpenRouter-first/native-fallback precedence; legacy provider hints and CHAT_LLM keep
+ * their direct-provider behavior.  The 412 gate therefore checks the same tenant-scoped key that
+ * execution will use instead of disabling a model that OpenRouter can serve.
  */
-function resolveChatProvider(modelHint: string | undefined, providerHint: string | undefined): ChatProvider {
-  if (modelHint) return chatProviderForModel(modelHint);
+function resolveChatCredentialService(modelHint: string | undefined, providerHint: string | undefined, userId: string): ChatProvider {
+  if (modelHint) return modelCredentialService(modelHint, userId);
   if (providerHint === "openai" || providerHint === "anthropic") return providerHint;
-  return process.env.CHAT_LLM === "anthropic" ? "anthropic" : "openai";
+  return process.env.CHAT_LLM === "anthropic" || process.env.CHAT_LLM === "minimax" || process.env.CHAT_LLM === "openrouter"
+    ? process.env.CHAT_LLM
+    : "openai";
 }
 
 export const dynamic = "force-dynamic";
@@ -74,10 +75,11 @@ function llmFromProvider(hint: string | undefined, userId: string, reasoningEffo
 }
 
 export async function POST(request: Request) {
-  // Identity comes from the trusted header (resolveRequestUserId ignores the body), so rate-limit
+  // Identity comes from the trusted header ( ignores the body), so rate-limit
   // BEFORE parsing the request body — an over-limit caller must not be able to force server-side
   // JSON parsing/allocation of an oversized payload just to be rejected. Returns 429 + Retry-After.
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   const limited = enforceRateLimit(userId, "chat", RATE_LIMITS.chat);
   if (limited) return limited;
   const body = (await request.json().catch(() => ({}))) as {
@@ -128,7 +130,7 @@ export async function POST(request: Request) {
   // the fail-loud hole where an Anthropic-only user requesting an OpenAI model passed and llmForModel
   // silently returned MockLLM. Without the key we 412 with a clear "connect a provider" message.
   if (!isOfflineMockRequest(modelHint, providerHint)) {
-    const provider = resolveChatProvider(modelHint, providerHint);
+    const provider = resolveChatCredentialService(modelHint, providerHint, userId);
     if (!resolveLlmCredential(provider, userId).key) {
       return NextResponse.json({ error: "llm_credential_required", message: LLM_REQUIRED_CHAT_MESSAGE }, { status: 412 });
     }
@@ -178,10 +180,8 @@ export async function POST(request: Request) {
       releaseChatTurn(turnKey);
     }
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+    const message = safeErrorMessage(e);
     console.error("[chat] orchestrator error:", message);
-    // Single-operator app: forward the actual error (e.g. "invalid_api_key") so the
-    // operator can act on it. Not a multi-user SaaS where internal details must be hidden.
     return NextResponse.json({ error: "chat_failed", message }, { status: 500 });
   }
 }

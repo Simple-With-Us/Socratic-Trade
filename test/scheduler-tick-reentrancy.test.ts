@@ -32,6 +32,14 @@ vi.mock("../src/lib/db-task-journal", async (importOriginal) => {
   return { ...actual, pruneTaskJournal: journalMocks.pruneTaskJournal };
 });
 
+const metricsMocks = vi.hoisted(() => ({
+  logWarn: vi.fn(),
+  logError: vi.fn(),
+  recordSchedulerTick: vi.fn()
+}));
+
+vi.mock("../src/lib/sentry-metrics", () => metricsMocks);
+
 beforeEach(() => {
   vi.resetModules();
   vi.unstubAllEnvs();
@@ -41,10 +49,22 @@ beforeEach(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-tick-reentry-${randomUUID()}.db`)}`;
   triggerMocks.drainMaterialEventQueue.mockReset();
   journalMocks.pruneTaskJournal.mockReset();
+  metricsMocks.logWarn.mockReset();
+  metricsMocks.logError.mockReset();
+  metricsMocks.recordSchedulerTick.mockReset();
   // Defensive reset: the guard is globalThis-pinned (by design — see scheduler.ts's tickGuardHost
   // comment) so it survives module reset and could otherwise leak from another test file sharing
   // this worker process.
-  (globalThis as { __tickInFlight?: boolean }).__tickInFlight = false;
+  const host = globalThis as {
+    __tickInFlight?: boolean;
+    __tickStartedAtMs?: number;
+    __tickGeneration?: number;
+    __tickSentryCheckInId?: string;
+  };
+  host.__tickInFlight = false;
+  host.__tickStartedAtMs = undefined;
+  host.__tickGeneration = 0;
+  host.__tickSentryCheckInId = undefined;
 });
 
 afterEach(() => {
@@ -61,8 +81,6 @@ describe("scheduler tick() re-entrancy guard", () => {
       () => new Promise<void>((resolve) => { releaseDrain = resolve; })
     );
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
     const first = _runSchedulerTickForTest();
     // Let the first tick actually reach and hang on the mocked lane before firing the second.
     await vi.waitFor(() => expect(triggerMocks.drainMaterialEventQueue).toHaveBeenCalledTimes(1));
@@ -72,7 +90,8 @@ describe("scheduler tick() re-entrancy guard", () => {
     // the sweep/per-account body -- drainMaterialEventQueue must NOT be called a second time.
     await _runSchedulerTickForTest();
     expect(triggerMocks.drainMaterialEventQueue).toHaveBeenCalledTimes(1);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("still in flight"));
+    expect(metricsMocks.logWarn).toHaveBeenCalledWith("scheduler.overrun", { reason: "in_flight" });
+    expect(metricsMocks.recordSchedulerTick).toHaveBeenCalledWith("overrun");
 
     // Let the first tick's hung lane resolve and the tick finish. Reconfigure the mock to resolve
     // immediately from here on -- the earlier hanging implementation would otherwise also hang the
@@ -86,8 +105,6 @@ describe("scheduler tick() re-entrancy guard", () => {
     // normally again (not be permanently wedged by the earlier overlap).
     await _runSchedulerTickForTest();
     expect(triggerMocks.drainMaterialEventQueue).toHaveBeenCalledTimes(2);
-
-    warnSpy.mockRestore();
   });
 
   it("clears the guard via finally even when tickInner throws past its own error handling", async () => {

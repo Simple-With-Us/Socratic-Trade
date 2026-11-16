@@ -21,8 +21,7 @@ function deadSocketError(): Error {
 }
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         getAccountCalls += 1;
         if (getAccountSlowSocketFailMs > 0) {
@@ -55,8 +54,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         if (createOrderHang) return new Promise(() => undefined);
         return { id, status: "cancelled" };
       }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 beforeEach(async () => {

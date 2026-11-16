@@ -19,7 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { deleteUserApiKey, getDb, upsertUserApiKey } from "../src/lib/db";
-import { AnthropicLLM, chatProviderForModel, llmForModel, MockLLM, OpenAILLM } from "../src/lib/chat/llm";
+import { AnthropicLLM, chatProviderForModel, getLLM, llmForModel, MockLLM, OpenAILLM } from "../src/lib/chat/llm";
 import { getLlmUsageSummary } from "../src/lib/llm-usage";
 import { normalizeOpenRouterModelId, OPENROUTER_GEMINI_FLASH } from "../src/lib/llm-provider";
 import type { LlmRunArgs } from "../src/lib/chat/types";
@@ -100,14 +100,134 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
       const fakeTransport = vi.fn().mockResolvedValue(fakeChatResponse());
       const llm = llmForModel("gemini-2.5-flash", userId, { openAITransport: fakeTransport });
       expect(llm).toBeInstanceOf(OpenAILLM);
-      // Native path keeps the model id AS GIVEN (no OpenRouter normalization) — behavior unchanged.
-      expect(llm.modelName).toBe("gemini-2.5-flash");
+      // The native catalog column resolves the persisted family alias.
+      expect(llm.modelName).toBe("gemini-flash-latest");
       await llm.run(baseArgs);
       const rows = getLlmUsageSummary({ userId });
       expect(rows.some((r) => r.provider === "gemini")).toBe(true);
       expect(rows.some((r) => r.provider === "openrouter")).toBe(false);
     } finally {
       deleteUserApiKey(userId, "gemini");
+    }
+  });
+
+  it("preserves adaptive thinking after resolving the native Opus model ID", async () => {
+    const userId = `u_opus_${randomUUID()}`;
+    upsertUserApiKey(userId, "anthropic", "anthropic-placeholder");
+    const transport = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "Answer" }], stop_reason: "end_turn" });
+    try {
+      const llm = llmForModel("claude-opus-latest", userId, { transport, reasoningEffort: "high" });
+      await llm.run(baseArgs);
+      const body = transport.mock.calls[0][0];
+      expect(body.model).toBe("claude-opus-5-5");
+      expect(body.thinking).toEqual({ type: "adaptive" });
+      expect(body.output_config).toEqual({ effort: "high" });
+      expect(body.max_tokens).toBeGreaterThanOrEqual(4096);
+    } finally {
+      deleteUserApiKey(userId, "anthropic");
+    }
+  });
+
+  it("keeps Meta credentials away from the OpenAI fallback", () => {
+    const userId = `u_meta_${randomUUID()}`;
+    upsertUserApiKey(userId, "meta", "meta-placeholder");
+    try {
+      expect(llmForModel("muse-spark-1.3", userId)).toBeInstanceOf(MockLLM);
+      upsertUserApiKey(userId, "openrouter", "openrouter-placeholder");
+      const llm = llmForModel("muse-spark-1.3", userId);
+      expect(llm).toBeInstanceOf(OpenAILLM);
+      expect(llm.modelName).toBe("meta/muse-spark-1.3");
+    } finally {
+      deleteUserApiKey(userId, "meta");
+      deleteUserApiKey(userId, "openrouter");
+    }
+  });
+
+  it("uses native MiniMax IDs and preserves reasoning across tool turns", async () => {
+    const userId = `u_minimax_${randomUUID()}`;
+    upsertUserApiKey(userId, "minimax", "minimax-test-placeholder");
+    const reasoning = [{ type: "reasoning.text", text: "tool context", index: 0 }];
+    const requests: Array<Record<string, any>> = [];
+    const transport = vi.fn(async (body) => {
+      requests.push(JSON.parse(JSON.stringify(body)));
+      return requests.length === 1
+        ? { choices: [{ finish_reason: "tool_calls", message: {
+            content: null,
+            reasoning_details: reasoning,
+            tool_calls: [{ id: "call_1", type: "function", function: { name: "get_quote", arguments: "{}" } }]
+          } }] }
+        : fakeChatResponse("Visible answer");
+    });
+    try {
+      const llm = llmForModel("minimax-m3.1-flash", userId, { openAITransport: transport });
+      const result = await llm.run({ ...baseArgs, tools: [{ name: "get_quote", description: "Quote", input_schema: { type: "object" } }] });
+      expect(requests).toHaveLength(2);
+      expect(requests[0].model).toBe("MiniMax-M3.1-Flash");
+      expect(requests[0].reasoning_split).toBe(true);
+      expect(requests[0].max_completion_tokens).toBe(9_024);
+      expect(requests[1].messages.find((m: { role: string }) => m.role === "assistant").reasoning_details).toEqual(reasoning);
+      expect(result.text).toBe("Visible answer");
+    } finally {
+      deleteUserApiKey(userId, "minimax");
+    }
+  });
+
+  it("does not native-fallback an explicit OpenRouter MiniMax id", () => {
+    const userId = `u_explicit_or_minimax_${randomUUID()}`;
+    upsertUserApiKey(userId, "minimax", "minimax-test-placeholder");
+    try {
+      expect(llmForModel("openrouter/minimax/minimax-m3.1-flash", userId)).toBeInstanceOf(MockLLM);
+    } finally {
+      deleteUserApiKey(userId, "minimax");
+    }
+  });
+
+  it("normalizes the env-default OpenRouter model in the emitted request", async () => {
+    const userId = `u_env_or_minimax_${randomUUID()}`;
+    const savedProvider = process.env.CHAT_LLM;
+    const savedModel = process.env.CHAT_LLM_MODEL;
+    process.env.CHAT_LLM = "openrouter";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
+    upsertUserApiKey(userId, "openrouter", "openrouter-test-placeholder");
+    const transport = vi.fn().mockResolvedValue(fakeChatResponse());
+    try {
+      const llm = getLLM(userId, { openAITransport: transport });
+      expect(llm).toBeInstanceOf(OpenAILLM);
+      await llm.run(baseArgs);
+      expect(transport.mock.calls[0][0].model).toBe("minimax/minimax-m3.1-flash");
+    } finally {
+      deleteUserApiKey(userId, "openrouter");
+      if (savedProvider === undefined) delete process.env.CHAT_LLM;
+      else process.env.CHAT_LLM = savedProvider;
+      if (savedModel === undefined) delete process.env.CHAT_LLM_MODEL;
+      else process.env.CHAT_LLM_MODEL = savedModel;
+    }
+  });
+
+  it("uses the native MiniMax env-default transport with tenant usage and reasoning", async () => {
+    const userId = `u_env_native_minimax_${randomUUID()}`;
+    const savedProvider = process.env.CHAT_LLM;
+    const savedModel = process.env.CHAT_LLM_MODEL;
+    process.env.CHAT_LLM = "minimax";
+    process.env.CHAT_LLM_MODEL = "minimax-m3.1-flash";
+    upsertUserApiKey(userId, "minimax", "minimax-test-placeholder");
+    const transport = vi.fn().mockResolvedValue(fakeChatResponse());
+    try {
+      const llm = getLLM(userId, { openAITransport: transport, reasoningEffort: "high" });
+      expect(llm).toBeInstanceOf(OpenAILLM);
+      await llm.run(baseArgs);
+      const body = transport.mock.calls[0][0];
+      expect(body.model).toBe("MiniMax-M3.1-Flash");
+      expect(body.reasoning_split).toBe(true);
+      expect(body.max_completion_tokens).toBeGreaterThan(1024);
+      expect(body.max_tokens).toBeUndefined();
+      expect(getLlmUsageSummary({ userId }).some((row) => row.provider === "minimax")).toBe(true);
+    } finally {
+      deleteUserApiKey(userId, "minimax");
+      if (savedProvider === undefined) delete process.env.CHAT_LLM;
+      else process.env.CHAT_LLM = savedProvider;
+      if (savedModel === undefined) delete process.env.CHAT_LLM_MODEL;
+      else process.env.CHAT_LLM_MODEL = savedModel;
     }
   });
 
@@ -137,16 +257,15 @@ describe("llmForModel — OpenRouter-first routing (review finding llm-12)", () 
     expect(chatProviderForModel("llama-3.3-70b-instruct")).not.toBe("openai");
   });
 
-  it("routes a llama model through a meta key (not an openai key) and records provider=meta", async () => {
+  it("does not invoke an OpenAI transport with a standalone Meta key", async () => {
     const userId = `u_meta_${randomUUID()}`;
     upsertUserApiKey(userId, "meta", "meta-test-key");
     try {
       const fakeTransport = vi.fn().mockResolvedValue(fakeChatResponse());
       const llm = llmForModel("llama-3.3-70b-instruct", userId, { openAITransport: fakeTransport });
-      expect(llm).toBeInstanceOf(OpenAILLM);
+      expect(llm).toBeInstanceOf(MockLLM);
       await llm.run(baseArgs);
-      const rows = getLlmUsageSummary({ userId });
-      expect(rows.some((r) => r.provider === "meta")).toBe(true);
+      expect(fakeTransport).not.toHaveBeenCalled();
     } finally {
       deleteUserApiKey(userId, "meta");
     }
