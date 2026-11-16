@@ -5,15 +5,15 @@ The user requested: "admin.socratictrade.com needs to have dns fixed so it works
 Upon inspection, curling `https://admin.socratictrade.com` failed with **Cloudflare Error 525 (SSL Handshake Failed)**.
 
 ## 2. Root Cause Analysis
-1. **Cloudflare DNS**: `admin.socratictrade.com` A record pointed to `141.148.182.224` (the Oracle Cloud Coolify box) with `proxied: true` (orange cloud). Cloudflare SSL mode is set to **Full**.
-2. **Server Reverse Proxy (Caddy on Oracle Cloud `141.148.182.224`)**:
+1. **Cloudflare DNS**: `admin.socratictrade.com` A record pointed to `<ORACLE_IP_RETIRED>` (the Oracle Cloud Coolify box) with `proxied: true` (orange cloud). Cloudflare SSL mode is set to **Full**.
+2. **Server Reverse Proxy (Caddy on Oracle Cloud `<ORACLE_IP_RETIRED>`)**:
    - `oracle-caddy-1` listened on ports 80/443.
    - `/etc/usage-monitor/Caddyfile` defined virtual hosts for `socratictrade.com, www.socratictrade.com`, `host.jays.services`, `socratic.trade`, and `congress.trade`.
    - `admin.socratictrade.com` was missing from the `socratictrade.com` site block.
-   - When Cloudflare initiated the TLS handshake to `141.148.182.224:443` for `admin.socratictrade.com`, Caddy had no matching site block or certificate, returning a TLS alert internal error which Cloudflare surfaced as HTTP 525.
+   - When Cloudflare initiated the TLS handshake to `<ORACLE_IP_RETIRED>:443` for `admin.socratictrade.com`, Caddy had no matching site block or certificate, returning a TLS alert internal error which Cloudflare surfaced as HTTP 525.
 
 ## 3. Changes Made
-- **Server Infrastructure (Caddy on `141.148.182.224`)**:
+- **Server Infrastructure (Caddy on `<ORACLE_IP_RETIRED>`)**:
   - Updated `/etc/usage-monitor/Caddyfile` to include `admin.socratictrade.com` and `*.socratictrade.com` under the `socratic-app:4000` block:
     ```caddyfile
     socratictrade.com, www.socratictrade.com, admin.socratictrade.com, *.socratictrade.com {
@@ -42,7 +42,7 @@ Upon inspection, curling `https://admin.socratictrade.com` failed with **Cloudfl
 - `npm run build` -> Full Next.js production build succeeded.
 
 ## 5. Files Touched
-- `/etc/usage-monitor/Caddyfile` (on Oracle Cloud host `141.148.182.224`)
+- `/etc/usage-monitor/Caddyfile` (on Oracle Cloud host `<ORACLE_IP_RETIRED>`)
 - `middleware.ts`
 - `test/middleware-auth.test.ts`
 - `docs/rollouts/2026-07-31-admin-dns-routing-fix.md`

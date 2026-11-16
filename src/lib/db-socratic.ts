@@ -1,4 +1,5 @@
 // db-socratic.ts — durable Socratic decision case files, coaching, and framework proposals.
+import "server-only";
 import crypto from "crypto";
 import { audit, getDb } from "./db";
 import { mergeHorizonRows } from "./outcome-horizons";

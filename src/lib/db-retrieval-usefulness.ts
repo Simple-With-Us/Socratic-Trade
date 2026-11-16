@@ -4,6 +4,7 @@
 // injected into a decision's prompts (ragAttributions on socratic_decisions) with that decision's
 // matured multi-horizon outcome, exactly once per decision (the credited ledger makes passes
 // idempotent). Aggregates are advisory observability + a bounded ranking nudge — never a gate.
+import "server-only";
 import { getDb } from "./db";
 
 /** How an injected chunk reached the prompt. Derived deterministically from doc_type (the split
@@ -18,7 +19,8 @@ export interface RetrievalUsefulnessStatRow {
   /** '' = the (docType, memoryKind) kind-level aggregate; otherwise a specific vector/chunk id. */
   docId: string;
   /** Outcome horizon this row aggregates ('15m'|'1h'|'1d'|'1w' or 'headline' = the case's
-   * top-level returnPct). */
+   * top-level returnPct). Alpha-companion rows carry a ':alpha' suffix (e.g. '1d:alpha') and
+   * aggregate spyExcessPct instead of returnPct — free-text column, no schema change. */
   horizon: string;
   samples: number;
   wins: number;
@@ -49,7 +51,7 @@ export interface DecisionForUsefulnessJoin {
   outcome: {
     status: string;
     returnPct?: number;
-    outcomes?: Array<{ horizon: string; returnPct?: number; resolution: string }>;
+    outcomes?: Array<{ horizon: string; returnPct?: number; spyExcessPct?: number; resolution: string }>;
   };
 }
 

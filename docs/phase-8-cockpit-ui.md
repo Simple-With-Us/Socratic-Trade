@@ -15,6 +15,17 @@
 > `docs/rollouts/2026-06-18-glassmorphism-ui.md`. The sections below describe
 > the prior panel-based cockpit and current semantics that still matter.
 >
+> 2026-08-21: Native iOS / Mac Catalyst chrome now follows the website header on
+> every tab: bell (notifications inbox) leading, settings gear trailing.  Regular
+> width uses `tabViewStyle(.sidebarAdaptable)` plus the existing card-column
+> scaffold so an iPad Air 11" and a resized Mac window reflow; compact keeps the
+> phone tab bar.  Admin Portal is a first-class tab gated on `currentUser.isAdmin`,
+> with a native rail of the eleven website admin pages and a fenced WKWebView that
+> intercepts "Back to Console" instead of loading `/console` inside the app.
+> The Assets price-alert composer is removed.  PR #3028 merged to `main` as squash
+> `a851a68d` (2026-08-22).  iOS-only; TestFlight is separate.  Rollout:
+> `docs/rollouts/2026-08-21-ios-wide-layout-admin-tab.md`.
+>
 > 2026-06-28: The SSR first-paint dashboard shell now uses a thin boot strip
 > instead of repeated visible loading labels or quiet skeleton tiles. The loader
 > keeps one screen-reader status and still renders an explicit alert card when
@@ -86,12 +97,26 @@
 > A broker cancellation after partial execution is shown as a completed partial execution—not a
 > total rejection—and current partial quantity enters exposure immediately.
 >
+> 2026-08-18: the console mobile tab bar (Safari browser, not PWA) keeps `bottom:0`
+> and does not shift labels into the URL chrome. Browser `padding-bottom` is
+> `calc(env(safe-area-inset-bottom) * 0.22)` so ~78% of the grey-blue band between
+> the tab labels and the floating URL pill is gone; the bar and a `::after`
+> underlay paint solid `--con-surface` so the remaining strip and the area around
+> the URL chrome match the tab strip, not `--con-bg` `#f1f4f6`. Standalone/PWA
+> still uses the full env() pad. See `docs/rollouts/2026-08-18-mobile-tabbar-chrome-gap.md`.
+>
 > 2026-07-14: the decision trace treats the structured Red Team verdict card as the
 > canonical explanation. Exact generic dissent copies and known generated policy
 > wrappers around that same reason are hidden, while genuinely distinct policy
 > objections and override context remain visible. The canonical card owns the explicit
 > verdict status too, preserving “Approved at half size” and “Rejected by Red Team”
 > without restoring duplicate rationale rows.
+>
+> 2026-08-17: console a11y batch (#2561).  Light tonal chip text is validated on the
+> matching soft fill (WCAG AA at 11px/600).  `Sheet`, nav `TabsSheet`, and the scan
+> Columns popover share `useFocusTrap` so only the topmost surface handles Escape.
+> Tooltip explanations are keyboard-reachable and announced via `aria-describedby`.
+> `Meter` accepts an accessible name.  See `docs/rollouts/2026-08-17-console-a11y-batch.md`.
 
 
 This phase restructures the dashboard from a long vertical page into a
@@ -136,6 +161,12 @@ screen.
 - **Feed tabs (4):** `Activity`, `Runs`, `Notifications`, `Audit` (`FeedTab`
   union, `app/dashboard-client.tsx`). These render in the feed slide-over rather
   than an always-on bottom drawer.
+- **Console mobile tab bar (2026-08-18):** `MobileTabBar` stays `bottom:0`. In a
+  normal Safari tab the safe-area pad is 22% of `env(safe-area-inset-bottom)` so
+  the band above the floating URL chrome shrinks ~78%; a solid `--con-surface`
+  `::after` covers the chrome halo. Do not reintroduce a negative-`bottom` gap
+  shift (that hid labels on 2026-08-05). Installed/standalone still uses the
+  full env() pad for the home indicator.
 
 The `Decision` tab remains the default because the app's core value is showing
 what the agent recommends or decided, not hiding that output in logs.
@@ -240,8 +271,15 @@ across panels, feeds, popovers, or status chips.
   direction or a buy/sell signal.
 - Top status values are kept visible in the command bar: Mock/Local/Live mode,
   autonomy/setup state, market session, daily risk, and allowed universe.
-- Settings → Operate groups the tradable universe controls together: Base
-  indexes are large multi-select toggle buttons, S&P 500 is selected by
+- Settings → Operate groups the tradable universe controls together: Indices
+  (Guardrails → Universe, same name on iOS Guardrails and Desk) show the
+  selected-set as common names (`S&P 500, Nasdaq Composite, Dow 30, NYSE
+  Composite`, never `sp500, nasdaqComposite, dow30, nyseComposite`) plus
+  multi-select toggles labeled the same way. iOS Home Desk is a heading plus
+  the Coach / Scan / Guardrails / Results buttons — it does not repeat those
+  four names as a subtitle.  Empty-universe copy on iOS Home / Insights points
+  at Guardrails with the `S&P 500` example (web `/console/guardrails`); there
+  is no iOS Strategy tab.  S&P 500 is selected by
   default, Additional Watchlist adds explicit tickers, and Ignore List subtracts
   symbols from the final universe. S&P 100 and S&P 500 are mutually exclusive;
   Nasdaq 100 and Nasdaq Composite are mutually exclusive. The backend normalizes

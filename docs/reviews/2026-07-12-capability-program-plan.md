@@ -171,7 +171,7 @@ flag; owner enables per account in the UI). Box builds serialize
 
 **ACTIVE KEEPOUTS** (from the live board, 2026-07-12): AG owns
 `ios/SocraticTrade/**` (native rebuild) — no CLAUDE edits there, coordinate via
-#agent-sync. CODEX owns the notification system. CLAUDE in-progress claims block
+#ag***-s**c. CODEX owns the notification system. CLAUDE in-progress claims block
 `strategy.ts` (PR #1371 stop-plans + ~54-site attribution sweep),
 `broker-protective-stops.ts`, `synthetic-stops.ts`, `data-providers.ts` (FMP
 quota PR), and `tradier.ts` (adapter live-token validation pending). Any package
@@ -376,7 +376,7 @@ green, dormant, default-off.
 
 - **I1 Mobile auth contract** (M, F design + S impl): session/API-token
   endpoints for `ASWebAuthenticationSession`, scoped tokens, DTO versioning —
-  coordinated with AG via #agent-sync before code. **I2** Xcode project
+  coordinated with AG via #ag***-s**c before code. **I2** Xcode project
   decision support (S, H): if owner confirms native, adopt the Congress.Trade
   checked-in xcodegen pattern (AG executes). **I3** Push notification plumbing
   (M, S, later — behind CODEX notification-truth work).

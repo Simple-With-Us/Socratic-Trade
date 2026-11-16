@@ -6,7 +6,7 @@
 
 import { memo, useMemo } from "react";
 import type { EquityCurvePoint } from "@/lib/types";
-import { fmtExact, fmtMoney, fmtPct, fmtSignedMoney } from "../lib/format";
+import { dayKey, fmtExact, fmtMoney, fmtPct, fmtSignedMoney } from "../lib/format";
 
 const W = 640;
 const H = 140;
@@ -53,23 +53,24 @@ export const EquityChart = memo(function EquityChart({ points, label }: { points
   const path = data.map((d, i) => `${i === 0 ? "M" : "L"}${x(d.t).toFixed(1)},${y(d.v).toFixed(1)}`).join(" ");
   const rising = data[data.length - 1].v >= data[0].v;
   const stroke = rising ? "var(--con-pos)" : "var(--con-neg)";
-  const sameDay = new Date(tMin).toDateString() === new Date(tMax).toDateString();
+  const sameDay = dayKey(new Date(tMin).toISOString()) === dayKey(new Date(tMax).toISOString());
   const move = data[data.length - 1].v - data[0].v;
   const movePct = data[0].v !== 0 ? (move / data[0].v) * 100 : undefined;
   const tickLabel = (timestamp: number) =>
     sameDay
-      ? new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-      : new Date(timestamp).toLocaleDateString();
+      ? new Date(timestamp).toLocaleTimeString([], { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })
+      : new Date(timestamp).toLocaleDateString(undefined, { timeZone: "America/Chicago" });
 
   return (
     <figure>
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="h-auto w-full"
+        preserveAspectRatio="none"
+        className="w-full h-[120px] sm:h-auto"
         role="img"
         aria-label={`${label} equity from ${fmtMoney(data[0].v)} to ${fmtMoney(data[data.length - 1].v)}`}
       >
-        <path d={path} fill="none" stroke={stroke} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={path} fill="none" stroke={stroke} strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
       </svg>
       <figcaption className="con-num mt-1 flex justify-between text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
         <span title={fmtExact(points[0]?.timestamp)}>

@@ -51,17 +51,22 @@ describe("pivotDayAggsToSeries", () => {
 import { isBarSeriesFresh, mergeOHLCBars, type OHLCBar } from "../src/lib/history";
 
 describe("isBarSeriesFresh & mergeOHLCBars", () => {
-  const refNow = new Date("2026-08-03T12:00:00Z").getTime();
+  it("isBarSeriesFresh evaluates series freshness by trading session, not calendar days", () => {
+    const mondayBar: OHLCBar = { time: "2026-08-03", close: 100 }; // Monday
+    const fridayBar: OHLCBar = { time: "2026-07-31", close: 90 };
+    const wednesdayNow = new Date("2026-08-05T16:00:00Z").getTime(); // Wed during session
 
-  it("isBarSeriesFresh evaluates series freshness correctly", () => {
-    const freshBar: OHLCBar = { time: "2026-08-02", close: 100 };
-    const olderBar: OHLCBar = { time: "2026-08-01", close: 99 };
-    const staleBar: OHLCBar = { time: "2026-07-20", close: 90 };
-
-    expect(isBarSeriesFresh([olderBar, freshBar], 3, refNow)).toBe(true);
-    expect(isBarSeriesFresh([staleBar, { time: "2026-07-21", close: 91 }], 3, refNow)).toBe(false);
+    expect(isBarSeriesFresh([fridayBar, mondayBar], wednesdayNow)).toBe(false);
+    expect(isBarSeriesFresh([mondayBar, { time: "2026-08-04", close: 101 }], wednesdayNow)).toBe(true);
     expect(isBarSeriesFresh(null)).toBe(false);
     expect(isBarSeriesFresh([])).toBe(false);
+  });
+
+  it("isBarSeriesFresh treats a recent session bar as fresh across a weekend gap", () => {
+    const thursdayBar: OHLCBar = { time: "2026-08-20", close: 99 };
+    const fridayBar: OHLCBar = { time: "2026-08-21", close: 100 };
+    const mondayMorning = new Date("2026-08-24T14:00:00Z").getTime(); // Mon 10:00 ET (EDT)
+    expect(isBarSeriesFresh([thursdayBar, fridayBar], mondayMorning)).toBe(true);
   });
 
   it("mergeOHLCBars deduplicates by YYYY-MM-DD date and sorts ascending", () => {

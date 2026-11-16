@@ -19,22 +19,46 @@
  */
 
 import { audit } from "../db";
+import { resolveSourceBool, resolveSourceNumber } from "../source-settings";
 import { envFlagOn } from "./env-flag";
 
 const DEFAULT_CEILING = 5000; // "very high" — many multiples of a normal single-user session's call volume
 const DEFAULT_WINDOW_MS = 60 * 60_000; // 1 hour rolling window
 
-/** Returns true when RAG_RUN_BUDGET_ENABLED is truthy. Default ON (owner enablement 2026-07-24). */
-export function runBudgetEnabled(): boolean {
+/** Returns true when the per-user (or env) RAG run budget is on. Default ON. */
+export function runBudgetEnabled(userId?: string): boolean {
+  if (userId) {
+    try {
+      return resolveSourceBool("RAG_RUN_BUDGET_ENABLED", userId);
+    } catch {
+      // Settings store unavailable — env/default still bind.
+    }
+  }
   return envFlagOn("RAG_RUN_BUDGET_ENABLED", true);
 }
 
-function ceiling(): number {
+function ceiling(userId?: string): number {
+  if (userId) {
+    try {
+      const n = resolveSourceNumber("RAG_RUN_BUDGET_CEILING", userId);
+      if (Number.isFinite(n) && n > 0) return Math.floor(n);
+    } catch {
+      // fall through to env
+    }
+  }
   const parsed = Number(process.env.RAG_RUN_BUDGET_CEILING ?? DEFAULT_CEILING);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_CEILING;
 }
 
-function windowMs(): number {
+function windowMs(userId?: string): number {
+  if (userId) {
+    try {
+      const n = resolveSourceNumber("RAG_RUN_BUDGET_WINDOW_MS", userId);
+      if (Number.isFinite(n) && n > 0) return n;
+    } catch {
+      // fall through to env
+    }
+  }
   const parsed = Number(process.env.RAG_RUN_BUDGET_WINDOW_MS ?? DEFAULT_WINDOW_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_WINDOW_MS;
 }
@@ -44,8 +68,8 @@ let opTimestamps: number[] = [];
 let hasAuditedTrip = false;
 
 /** Prune timestamps outside the current rolling window. */
-function pruneWindow(now: number): void {
-  const cutoff = now - windowMs();
+function pruneWindow(now: number, userId?: string): void {
+  const cutoff = now - windowMs(userId);
   if (opTimestamps.length === 0 || opTimestamps[0]! >= cutoff) return;
   opTimestamps = opTimestamps.filter((t) => t >= cutoff);
 }
@@ -54,9 +78,9 @@ function pruneWindow(now: number): void {
  * Record one RAG "operation" (an embed or rerank call) against the rolling-window counter.
  * No-op when RAG_RUN_BUDGET_ENABLED is off — the counter never grows when disabled.
  */
-export function recordRagOperation(now: number = Date.now()): void {
-  if (!runBudgetEnabled()) return;
-  pruneWindow(now);
+export function recordRagOperation(now: number = Date.now(), userId?: string): void {
+  if (!runBudgetEnabled(userId)) return;
+  pruneWindow(now, userId);
   opTimestamps.push(now);
 }
 
@@ -66,14 +90,18 @@ export function recordRagOperation(now: number = Date.now()): void {
  * recall. Emits exactly one `rag_run_budget_tripped` audit row the FIRST time the ceiling is
  * crossed per process lifetime (not once per call) — best-effort, never throws.
  */
-export function shouldDegradeForBudget(now: number = Date.now()): boolean {
-  if (!runBudgetEnabled()) return false;
-  pruneWindow(now);
-  const tripped = opTimestamps.length >= ceiling();
+export function shouldDegradeForBudget(now: number = Date.now(), userId?: string): boolean {
+  if (!runBudgetEnabled(userId)) return false;
+  pruneWindow(now, userId);
+  const tripped = opTimestamps.length >= ceiling(userId);
   if (tripped && !hasAuditedTrip) {
     hasAuditedTrip = true;
     try {
-      audit("rag_run_budget_tripped", { ceiling: ceiling(), windowMs: windowMs(), count: opTimestamps.length }, "local");
+      audit(
+        "rag_run_budget_tripped",
+        { ceiling: ceiling(userId), windowMs: windowMs(userId), count: opTimestamps.length },
+        userId ?? "local"
+      );
     } catch {
       // best-effort telemetry only
     }

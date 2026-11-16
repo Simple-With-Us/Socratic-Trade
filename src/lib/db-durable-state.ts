@@ -2,6 +2,7 @@
 // src/lib/durable-state.ts's createDurableMap. Not queried directly by feature code; go through
 // createDurableMap instead, which layers hydrate-once + debounced/immediate write-behind on top of
 // these raw CRUD calls so hot callers don't pay a synchronous DB write on every access.
+import "server-only";
 import { getDb } from "./db";
 
 export function getDurableStateValue<T>(namespace: string, key: string): T | undefined {

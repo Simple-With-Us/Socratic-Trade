@@ -20,7 +20,7 @@ Ops (no code):
   `SEC_INGEST_WORKER_ENABLED=on`. (`PINECONE_MONTHLY_WU_BUDGET` deliberately left at 0/off during
   the trial; set it to ~1600000 when dropping to a paid/free tier per the throughput rollout note.)
 - Copied `data/rag-universe-manifest.json` from the repo onto the prod data volume
-  (`/var/lib/docker/volumes/d83b1aykr03uwr32yhgzaiay-prod-app-data/_data/`). The volume mounted at
+  (`/var/lib/docker/volumes/<ST_COOLIFY_APP_UUID>-prod-app-data/_data/`). The volume mounted at
   `/app/data` shadows the image's `data/` directory, so the seeder's default
   `path.resolve("data/rag-universe-manifest.json")` hit ENOENT in production. Any future refresh of
   the manifest must be re-copied to the volume (or the seeder taught an image-path fallback).

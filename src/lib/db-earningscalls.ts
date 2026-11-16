@@ -13,8 +13,10 @@
 //     transcript not yet available. `fetched_at` anchors the negative TTL.
 //   - `ingested_at` tracks the separate downstream RAG-ingest step: content can be cached
 //     (no more provider spend) while ingest retries later for free.
+import "server-only";
 import { getDb } from "./db";
 import { normalizeSymbol } from "./money";
+import { decodeTextPayload, encodeTextPayload, textPayloadCodecTag } from "./text-payload-codec";
 
 export interface EarningsCallsTranscriptRow {
   symbol: string;
@@ -52,7 +54,7 @@ function toRow(raw: RawRow): EarningsCallsTranscriptRow {
     fiscalQuarter: raw.fiscal_quarter,
     eventId: raw.event_id ?? undefined,
     eventDate: raw.event_date ?? undefined,
-    content: raw.content ?? undefined,
+    content: raw.content == null ? undefined : decodeTextPayload(raw.content),
     fetchedAt: raw.fetched_at,
     sourceMeta: raw.source_meta ?? undefined,
     ingestedAt: raw.ingested_at ?? undefined
@@ -80,11 +82,14 @@ export function getEarningsCallsTranscript(
  * actually changed from empty to real (fresh content resets it so the ingest step runs).
  */
 export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptRow, "ingestedAt">): void {
+  const trimmed = row.content?.trim() ?? "";
+  const encodedContent = trimmed ? encodeTextPayload(row.content as string) : null;
+  const plainLength = trimmed ? trimmed.length : null;
   getDb()
     .prepare(
       `INSERT INTO earningscalls_transcripts
-         (symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at, source_meta, ingested_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+         (symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at, source_meta, ingested_at, text_codec, plaintext_length)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
        ON CONFLICT(symbol, fiscal_year, fiscal_quarter) DO UPDATE SET
          event_id = COALESCE(excluded.event_id, earningscalls_transcripts.event_id),
          event_date = COALESCE(excluded.event_date, earningscalls_transcripts.event_date),
@@ -94,6 +99,14 @@ export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptR
          ingested_at = CASE
            WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN NULL
            ELSE earningscalls_transcripts.ingested_at
+         END,
+         text_codec = CASE
+           WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN excluded.text_codec
+           ELSE earningscalls_transcripts.text_codec
+         END,
+         plaintext_length = CASE
+           WHEN earningscalls_transcripts.content IS NULL AND excluded.content IS NOT NULL THEN excluded.plaintext_length
+           ELSE earningscalls_transcripts.plaintext_length
          END`
     )
     .run(
@@ -102,9 +115,11 @@ export function upsertEarningsCallsTranscript(row: Omit<EarningsCallsTranscriptR
       row.fiscalQuarter,
       row.eventId ?? null,
       row.eventDate ?? null,
-      row.content && row.content.trim() ? row.content : null,
+      encodedContent,
       row.fetchedAt,
-      row.sourceMeta ?? null
+      row.sourceMeta ?? null,
+      encodedContent ? textPayloadCodecTag(encodedContent) : null,
+      plainLength
     );
 }
 
@@ -281,4 +296,75 @@ export function hasAnyEarningsCallsEventForSymbol(symbol: string): boolean {
     .prepare(`SELECT 1 AS present FROM earningscalls_event_index WHERE symbol = ? LIMIT 1`)
     .get(normalizeSymbol(symbol)) as { present: number } | undefined;
   return row !== undefined;
+}
+
+const CONTENT_SELECT =
+  `SELECT symbol, fiscal_year, fiscal_quarter, event_id, event_date, content, fetched_at, source_meta, ingested_at
+   FROM earningscalls_transcripts`;
+
+/** Cached transcript rows for one symbol, newest fiscal period first. */
+export function listEarningsCallsTranscriptsForSymbol(symbol: string): EarningsCallsTranscriptRow[] {
+  const rows = getDb()
+    .prepare(
+      `${CONTENT_SELECT}
+       WHERE symbol = ?
+       ORDER BY fiscal_year DESC, fiscal_quarter DESC`
+    )
+    .all(normalizeSymbol(symbol)) as RawRow[];
+  return rows.map(toRow);
+}
+
+export interface EarningsCallsCoverageBucket {
+  symbol: string;
+  count: number;
+}
+
+export interface EarningsCallsTranscriptCoverage {
+  transcriptsWithContent: number;
+  symbolsWithContent: number;
+  symbolsAtDepth: number;
+  symbolsPartial: number;
+  perSymbol: EarningsCallsCoverageBucket[];
+}
+
+/**
+ * Local Individual-archive inventory: rows with non-null transcript text.
+ *
+ * Do not filter with `length(content)`.  SQLite reads every transcript body to
+ * compute it, and GET /api/ops/snapshot runs this synchronously on the serving
+ * thread.  The 2026-10-05 82s stall profile has that route, better-sqlite3
+ * `prepare`, and the ROIC `YYYYQn.json` walk from the same snapshot on one busy
+ * run.  Empty bodies are stored as NULL, so `content IS NOT NULL` is the
+ * inventory without touching the blobs.
+ */
+export function summarizeEarningsCallsTranscriptCoverage(
+  depth: number = 20
+): EarningsCallsTranscriptCoverage {
+  const cap = Math.max(1, Math.floor(depth));
+  const rows = getDb()
+    .prepare(
+      `SELECT symbol, COUNT(*) AS count
+       FROM earningscalls_transcripts
+       WHERE content IS NOT NULL
+       GROUP BY symbol
+       ORDER BY count ASC, symbol ASC`
+    )
+    .all() as Array<{ symbol: string; count: number }>;
+  let transcriptsWithContent = 0;
+  let symbolsAtDepth = 0;
+  let symbolsPartial = 0;
+  const perSymbol: EarningsCallsCoverageBucket[] = [];
+  for (const row of rows) {
+    transcriptsWithContent += row.count;
+    perSymbol.push({ symbol: row.symbol, count: row.count });
+    if (row.count >= cap) symbolsAtDepth += 1;
+    else symbolsPartial += 1;
+  }
+  return {
+    transcriptsWithContent,
+    symbolsWithContent: rows.length,
+    symbolsAtDepth,
+    symbolsPartial,
+    perSymbol
+  };
 }

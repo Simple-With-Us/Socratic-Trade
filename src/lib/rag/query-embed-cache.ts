@@ -14,12 +14,14 @@
  * entirely in the Pinecone filter, applied AFTER a cache hit exactly as it would be after a fresh
  * embed.
  *
- * Consolidated with G8b (PR #293): the key is NORMALIZED (trim + lowercase + collapsed whitespace)
- * so trivial casing/spacing variants of the same question share a hit, and the cache is Default ON.
- * Disable with RAG_QUERY_EMBED_CACHE=off (or 0/false/no) — then `getCachedQueryEmbedding` always
- * returns `undefined` (forcing a live embed) and `setCachedQueryEmbedding` is a no-op.
+ * Consolidated with G8b (PR #293): the key is a content hash of the NORMALIZED query (trim +
+ * lowercase + collapsed whitespace) so trivial casing/spacing variants share a hit, and the cache
+ * is Default ON.  Disable with RAG_QUERY_EMBED_CACHE=off (or 0/false/no) — then
+ * `getCachedQueryEmbedding` always returns `undefined` (forcing a live embed) and
+ * `setCachedQueryEmbedding` is a no-op.
  */
 
+import { hashContent } from "./chunk";
 import { envFlagOn } from "./env-flag";
 
 /**
@@ -32,7 +34,10 @@ export function queryEmbedCacheEnabled(): boolean {
 }
 
 const DEFAULT_MAX_ENTRIES = 200;
-const DEFAULT_TTL_MS = 5 * 60_000; // 5 minutes — long enough to dedupe a strategy-scan fan-out burst.
+// A strategy run is 5–12 minutes and re-asks near-identical queries per symbol.  30 minutes
+// covers that run.  The cached value is only the query vector, which does not go stale when
+// the index changes.
+const DEFAULT_TTL_MS = 30 * 60_000;
 
 interface CacheEntry {
   embedding: number[];
@@ -67,11 +72,13 @@ export function normalizeQueryCacheKey(query: string): string {
 
 /**
  * Build the cache key. Deliberately omits userId and any per-user/filter context — the key is ONLY
- * `${model}:${normalizeQueryCacheKey(query)}`, which is the entire point: the query vector is the
+ * `${model}:${hash(normalized query)}`, which is the entire point: the query vector is the
  * same regardless of who's asking or what Pinecone filter will be applied afterward.
  */
 export function queryEmbedCacheKey(model: string, query: string): string {
-  return `${model}:${normalizeQueryCacheKey(query)}`;
+  // Content hash of the normalized query.  Casing and whitespace still share one entry, and
+  // the map does not retain the query text.
+  return `${model}:${hashContent(normalizeQueryCacheKey(query))}`;
 }
 
 /** Look up a cached query embedding. Returns `undefined` on a miss, expiry, or when the flag is off. */

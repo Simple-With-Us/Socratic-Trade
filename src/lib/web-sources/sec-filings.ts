@@ -6,10 +6,11 @@
 //
 // KEY DESIGN DECISIONS (owner-resolved 2026-06-21; gate made provider-aware 2026-07-19):
 //  • Incremental ingest only: 1 filing per scheduler tick on free tier (Voyage, unpaid key).
-//  • Recency window: 1 most-recent 10-K + 2 most-recent 10-Qs per symbol.
+//  • Recency window: latest 10-K + latest 10-Q for the universe; extra 10-Qs/Ks
+//    only for held/watchlist/technical names (rankHighInterestSymbols).
 //  • De-dup: ingested_accessions (accession + doc_type) is the sole gate — never re-embed.
 //  • All corpus writes use userId='local' (cleanMetadata → scope:'shared', app-funded).
-//  • CIK map: reused from sec8k.ts loadCikMap (named export).
+//  • CIK map: ticker→CIK via sec8k.ts loadTickerCikMap (dual-class safe). Unknown CIK skips ingest.
 //  • Gate: paid-tier cap applies whenever the active embedding provider is openrouter/siliconflow
 //    (their rate limits are per-request, not the Voyage free-tier trickle this gate was written
 //    for) OR the legacy VECTOR_EMBED_BATCH_DELAY_MS ≤ 5000 signal is set for a paid Voyage key.
@@ -37,65 +38,73 @@ import {
 import { politeFetchText, runRateLimited, secUserAgent, sleep } from "./http";
 import { activeEmbeddingProvider } from "../vector-db";
 import { resolveSourceNumber } from "../source-settings";
-import { loadCikMap } from "./sec8k";
+import { rankHighInterestSymbols } from "../rag/demand-first-symbols";
+import { chunkDocument } from "../rag/chunk";
+import { persistLocalComplete } from "../rag/persist-local-complete";
+import { mirrorFtsChunksBounded } from "../rag/mirror-fts-bounded";
+import {
+  parseItemCodeFromSection,
+  pineconeWriteClass,
+  writesFullBodyToPinecone
+} from "../rag/pinecone-write-class";
+import { storeSignalSectionDocuments } from "../rag/processed-corpus-write";
+import { loadTickerCikMap } from "./sec8k";
 import { parseFilingHtml } from "./sec-parser";
+import { buildSecDocument } from "../rag/sec-document";
+import { normalizeSymbol } from "../money";
 import { timeSync, yieldEventLoop } from "../slow-sync-guard";
-import * as fs from "fs";
-import * as path from "path";
+import {
+  readFirstExisting,
+  secArtifactReadPaths,
+  secArtifactWritePath,
+  writeCorpusFile
+} from "../rag/corpus-layout";
 
-function getLocalArtifactPath(cik: string, accession: string, sequence: number, documentName: string): string {
-  const paddedCik = padCik(cik);
-  const cleanDocName = documentName.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const dataDir = process.env.DATA_DIR ?? "data";
-  return path.join(dataDir, "sec-artifacts", paddedCik, accession, `${sequence}-${cleanDocName}`);
+export function getLocalArtifactPath(cik: string, accession: string, sequence: number, documentName: string): string {
+  return secArtifactWritePath(cik, accession, sequence, documentName);
 }
 
 export async function readLocalArtifact(cik: string, accession: string, sequence: number, documentName: string): Promise<string | null> {
-  const filePath = getLocalArtifactPath(cik, accession, sequence, documentName);
+  const candidates = secArtifactReadPaths(cik, accession, sequence, documentName);
   try {
-    if (fs.existsSync(filePath)) {
-      return await fs.promises.readFile(filePath, "utf8");
-    }
+    return await readFirstExisting(candidates);
   } catch (err) {
-    console.warn(`[sec-filings] readLocalArtifact failed for ${filePath}:`, err);
+    console.warn(`[sec-filings] readLocalArtifact failed for ${candidates[0]}:`, err);
+    return null;
   }
-  return null;
 }
 
 export async function writeLocalArtifact(cik: string, accession: string, sequence: number, documentName: string, content: string): Promise<void> {
-  const filePath = getLocalArtifactPath(cik, accession, sequence, documentName);
+  const filePath = secArtifactWritePath(cik, accession, sequence, documentName);
   try {
-    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.writeFile(filePath, content, "utf8");
+    await writeCorpusFile(filePath, content);
   } catch (err) {
     console.warn(`[sec-filings] writeLocalArtifact failed for ${filePath}:`, err);
   }
 }
 
-async function getCikForTicker(ticker: string): Promise<string> {
+/** Ticker → 10-digit CIK.  Returns null when unknown — never the sentinel 0000000000. */
+export async function getCikForTicker(ticker: string): Promise<string | null> {
   try {
-    const cikMap = await loadCikMap(Date.now());
-    if (cikMap && typeof cikMap === "object") {
-      for (const [cik, tick] of Object.entries(cikMap)) {
-        if (tick && tick.toUpperCase() === ticker.toUpperCase()) {
-          return cik;
-        }
-      }
+    const cikMap = await loadTickerCikMap(Date.now());
+    const raw = cikMap[normalizeSymbol(ticker)];
+    if (typeof raw === "string" && /^\d+$/.test(raw) && Number(raw) > 0) {
+      return raw.padStart(10, "0");
     }
   } catch (err) {
     console.warn(`[sec-filings] getCikForTicker failed for ${ticker}:`, err);
   }
-  return "0000000000";
+  return null;
 }
 
 const SEC_BASE = "https://www.sec.gov";
 const EDGAR_DATA_BASE = "https://data.sec.gov";
 
-// The TTL for the per-symbol "last attempted filing ingest" stamp.
-// Weekly by default: 10-K/10-Q cadence is quarterly, so a free-tier corpus doesn't need
-// re-checking sooner. Operators draining the ingest backlog (paid Voyage key) lower it via
-// SEC_FILING_INGEST_TTL_HOURS (e.g. 24) so the capped per-run ingest runs daily instead.
-const DEFAULT_FILING_INGEST_TTL_HOURS = 7 * 24;
+// Cadence stamp for the last filing-ingest attempt (one global lastAttempt key).
+// Default 24h: paid OpenRouter/bge-m3 can drain the backlog daily. The old 168h weekly pin
+// was a Voyage-free-tier artifact. An Infisical value of 87600 is an emergency pause, not
+// a product default — do not copy it forward.
+const DEFAULT_FILING_INGEST_TTL_HOURS = 24;
 function filingIngestTtlMs(): number {
   const hours = resolveSourceNumber("SEC_FILING_INGEST_TTL_HOURS");
   return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_FILING_INGEST_TTL_HOURS) * 60 * 60_000;
@@ -119,9 +128,98 @@ const PAID_KEY_THRESHOLD_MS = 5_000;
 const DEFAULT_MAX_FILINGS_PER_RUN = 1;
 const DEFAULT_PAID_MAX_FILINGS_PER_RUN = 200;
 
+/**
+ * EDGAR form types the filing-discovery layer knows about.
+ *
+ * This used to be the literal `"10-K" | "10-Q"` inline in `FilingRef.docType`, which meant adding
+ * DEF 14A, S-1, 8-K or 13F to the backfill required a type change in three signatures plus every
+ * persisted value to be re-read. The list is the union of the forms this app can discover, fetch,
+ * parse and route; `(string & {})` keeps it OPEN on purpose, so a form EDGAR adds (or one already
+ * persisted by an earlier ingest) is a valid value rather than a type error — the open member
+ * preserves the old assignability of `FilingRef.docType` from any string, so every existing
+ * caller and every stored `doc_type` keeps working unchanged.
+ */
+export type FormType =
+  | "10-K"
+  | "10-K/A"
+  | "10-Q"
+  | "10-Q/A"
+  | "8-K"
+  | "8-K/A"
+  | "DEF 14A"
+  | "DEFA14A"
+  | "PRE 14A"
+  | "S-1"
+  | "S-1/A"
+  | "S-1MEF"
+  | "S-3"
+  | "S-3ASR"
+  | "424B4"
+  | "424B5"
+  | "20-F"
+  | "40-F"
+  | "6-K"
+  | "13F-HR"
+  | "13F-HR/A"
+  | "13F-NT"
+  | "3"
+  | "4"
+  | "4/A"
+  | "5"
+  | (string & {});
+
+/** Form types the SEC filings API is asked for by default (unchanged historical behavior). */
+export const DEFAULT_FETCH_FORM_TYPES: FormType[] = ["10-K", "10-Q"];
+
+/**
+ * `sourceType` key for the extractive document-abstract store. EXISTING ABSTRACTS DEPEND ON THIS
+ * STRING: `document_abstracts` is keyed by (accessionOrEventId, sourceType), so 10-K and 10-Q
+ * must keep mapping to their historical values or every stored abstract is orphaned and silently
+ * re-generated. New form types get their own key so they never collide with a 10-K abstract.
+ */
+export function secAbstractSourceType(docType: string): string {
+  switch (docType) {
+    case "10-Q":
+    case "10-Q/A":
+      return "10q-delta";
+    case "8-K":
+    case "8-K/A":
+      return "8k-brief";
+    case "DEF 14A":
+    case "DEFA14A":
+    case "PRE 14A":
+      return "def14a-delta";
+    case "S-1":
+    case "S-1/A":
+    case "S-1MEF":
+      return "s1-delta";
+    default:
+      // 10-K and every unrecognised form keep the historical 10-K key.
+      return "10k-delta";
+  }
+}
+
+/** Prior for the extractive highlighter's form-specific lexicons. Forms with no tuned lexicon
+ *  ("generic") still get ranked highlights — they are not silently dropped. */
+export function secAbstractFormHint(docType: string): "10-K" | "10-Q" | "8-K" | "earnings" | "generic" {
+  switch (docType) {
+    case "10-Q":
+    case "10-Q/A":
+      return "10-Q";
+    case "8-K":
+    case "8-K/A":
+      return "8-K";
+    case "10-K":
+    case "10-K/A":
+      return "10-K";
+    default:
+      return "generic";
+  }
+}
+
 export interface FilingRef {
   accession: string;   // dashed form: NNNNNNNNNN-YY-NNNNNN
-  docType: "10-K" | "10-Q";
+  docType: FormType;
   filedAt: string;           // ISO date (YYYY-MM-DD)
   acceptanceDateTime: string; // ISO datetime
   primaryDoc: string;         // filename inside the filing (e.g. "aapl-20231231.htm")
@@ -136,6 +234,8 @@ export interface IngestResult {
    *  unconfigured) — every later filing in this run would meet the same fate, so bulk
    *  loops should stop instead of fetching/chunking documents that cannot embed. */
   budgetExhausted?: boolean;
+  /** FTS mirror paused because a strategy run is in flight — accession stays un-ledgered. */
+  deferredStrategy?: boolean;
 }
 
 export interface RefreshFilingBodiesResult {
@@ -201,12 +301,12 @@ interface SubmissionsJson {
  * seeder's "latest 10-K + latest 4 10-Qs" baseline) can discover both in ONE submissions-API
  * call instead of one call per docType against the identical CIK URL.
  */
-export type FilingTypeLimits = number | Partial<Record<"10-K" | "10-Q", number>>;
+export type FilingTypeLimits = number | Partial<Record<FormType, number>>;
 
 const DEFAULT_FILING_LIMIT_PER_TYPE = 2;
 
 function resolveFilingLimits(
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitPerType: FilingTypeLimits
 ): Record<string, number> {
   const limits: Record<string, number> = {};
@@ -220,7 +320,7 @@ function resolveFilingLimits(
 function parseFilingBlock(
   recent: SubmissionsRecent | undefined,
   cik: string,
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitsByType: Record<string, number>,
   countPerType: Record<string, number>
 ): FilingRef[] {
@@ -234,7 +334,7 @@ function parseFilingBlock(
 
   const out: FilingRef[] = [];
   for (let i = 0; i < accessions.length; i++) {
-    const form = forms[i] as "10-K" | "10-Q" | undefined;
+    const form = forms[i] as FormType | undefined;
     if (!form || !docTypes.includes(form)) continue;
     if ((countPerType[form] ?? 0) >= (limitsByType[form] ?? 0)) continue;
 
@@ -265,7 +365,7 @@ function parseFilingBlock(
 export function parseRecentFilings(
   json: SubmissionsJson,
   cik: string,
-  docTypes: Array<"10-K" | "10-Q">,
+  docTypes: FormType[],
   limitPerType: FilingTypeLimits
 ): FilingRef[] {
   const limitsByType = resolveFilingLimits(docTypes, limitPerType);
@@ -288,7 +388,7 @@ export function parseRecentFilings(
  */
 export async function fetchRecentFilings(
   cik: string,
-  docTypes: Array<"10-K" | "10-Q"> = ["10-K", "10-Q"],
+  docTypes: FormType[] = DEFAULT_FETCH_FORM_TYPES,
   limitPerType: FilingTypeLimits = DEFAULT_FILING_LIMIT_PER_TYPE
 ): Promise<FilingRef[]> {
   const limitsByType = resolveFilingLimits(docTypes, limitPerType);
@@ -460,7 +560,7 @@ export async function maybeRefreshSecFilingAbstract(
   filingRef: FilingRef,
   _userId: string = "local"
 ): Promise<void> {
-  const sourceType = filingRef.docType === "10-Q" ? "10q-delta" : "10k-delta";
+  const sourceType = secAbstractSourceType(filingRef.docType);
   const { abstractNeedsUpgrade, generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } =
     await import("../rag/document-summarizer");
   if (!abstractNeedsUpgrade(filingRef.accession, sourceType)) return;
@@ -477,7 +577,7 @@ export async function maybeRefreshSecFilingAbstract(
 
   const { text, sections } = parseFilingHtml(html, { formType: filingRef.docType });
   if (text.length < 100) return;
-  const formHint = filingRef.docType === "10-Q" ? "10-Q" : "10-K";
+  const formHint = secAbstractFormHint(filingRef.docType);
   await generateAndStoreDocumentAbstract({
     ticker,
     accessionOrEventId: filingRef.accession,
@@ -531,22 +631,28 @@ export async function ingestFiling(
   // budget-skip it (and emit a budget warning per filing; prod 2026-07-10 saw a 20-event
   // burst from exactly this). Deferring here costs nothing: the accession stays
   // un-recorded and retries at the next tick.
-  const { hasIngestTextBudget } = await import("../vector-db");
+  const { hasIngestTextBudget, hasVectorIngestWriteBudget } = await import("../vector-db");
   assertSecFilingLease(leaseGuard);
-  if (!hasIngestTextBudget(userId)) {
+  if (!hasIngestTextBudget(userId) || !hasVectorIngestWriteBudget(userId)) {
     return { skipped: true, chunks: 0, budgetExhausted: true };
   }
   // Same preflight for the MONTHLY Pinecone write-unit breaker: while it is active every
   // storeDocument call is refused before embedding anyway, so skip the EDGAR fetch/chunk work
   // entirely and let the bulk loop stop (budgetExhausted semantics — the accession stays
-  // un-recorded and retries after the marker expires).
-  const { pineconeWuExhaustedUntil } = await import("../pinecone-wu-breaker");
-  if (pineconeWuExhaustedUntil()) {
-    return { skipped: true, chunks: 0, budgetExhausted: true };
+  // un-recorded and retries after the marker expires).  Qdrant writes ignore this park.
+  const { vectorWriteBackend } = await import("../vector-store/qdrant-write");
+  if (vectorWriteBackend() === "pinecone") {
+    const { pineconeWuExhaustedUntil } = await import("../pinecone-wu-breaker");
+    if (pineconeWuExhaustedUntil()) {
+      return { skipped: true, chunks: 0, budgetExhausted: true };
+    }
   }
 
   let html: string | null = null;
   const cik = await getCikForTicker(ticker);
+  if (!cik) {
+    return { skipped: false, chunks: 0, error: `unknown CIK for ${ticker}` };
+  }
   try {
     assertSecFilingLease(leaseGuard);
     html = await readLocalArtifact(cik, filingRef.accession, 1, filingRef.primaryDoc || "main.html");
@@ -561,6 +667,10 @@ export async function ingestFiling(
     assertSecFilingLease(leaseGuard);
     const error = err instanceof Error ? err.message : String(err);
     return { skipped: false, chunks: 0, error: `fetch failed: ${error}` };
+  }
+
+  if (!html) {
+    return { skipped: false, chunks: 0, error: "fetch failed: empty body" };
   }
 
   // Pass the form type so Item-title canonicalization is form-aware (the 10-K
@@ -599,18 +709,139 @@ export async function ingestFiling(
   assertSecFilingLease(leaseGuard);
   const { storeDocument } = await import("../vector-db");
   assertSecFilingLease(leaseGuard);
-  const document = {
-      text,
-      sections,
-      doc_id: `${ticker}:${filingRef.accession}:${filingRef.docType}`,
-      ticker,
-      title: `${ticker} ${filingRef.docType} (${filingRef.filedAt})`,
-      doc_type: filingRef.docType.toLowerCase(),
-      published_at: filingRef.filedAt,
-      acceptance_datetime: filingRef.acceptanceDateTime,
-      source: "sec-edgar",
-      url: filingRef.url
+  const writeClass = pineconeWriteClass();
+  const document = buildSecDocument({
+    rawContent: html,
+    sections,
+    documentName: filingRef.primaryDoc || "main.html",
+    ticker,
+    docId: `${ticker}:${filingRef.accession}:${filingRef.docType}`,
+    title: `${ticker} ${filingRef.docType} (${filingRef.filedAt})`,
+    docType: filingRef.docType.toLowerCase(),
+    publishedAt: filingRef.filedAt,
+    ...(filingRef.acceptanceDateTime ? { acceptanceDateTime: filingRef.acceptanceDateTime } : {}),
+    url: filingRef.url
+  });
+  const localChunks = chunkDocument(document, {});
+  try {
+    await writeLocalArtifact(
+      cik,
+      filingRef.accession,
+      1,
+      "sections.json",
+      JSON.stringify(
+        sections.map((section) => ({
+          itemCode: section.itemCode,
+          itemTitle: section.itemTitle,
+          text: section.text
+        }))
+      )
+    );
+    await writeLocalArtifact(
+      cik,
+      filingRef.accession,
+      1,
+      "chunks.json",
+      JSON.stringify(
+        localChunks.map((chunk) => ({
+          text: chunk.text,
+          parent_text: chunk.parent_text ?? chunk.text,
+          content_hash: chunk.content_hash,
+          section: chunk.section,
+          itemCode: parseItemCodeFromSection(chunk.section)
+        }))
+      )
+    );
+  } catch (err) {
+    console.warn(
+      `[sec-filings] sections/chunks sidecar failed for ${filingRef.accession}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+  const localComplete = await persistLocalComplete({
+    ticker,
+    accession: filingRef.accession,
+    docType: filingRef.docType,
+    chunks: localChunks,
+    pineconeWriteClass: writeClass,
+    recordLedger: writeClass !== "full-body"
+  });
+  if (!localComplete.ftsMirrorComplete) {
+    return {
+      skipped: true,
+      chunks: 0,
+      ...(localComplete.abortedByStrategy ? { deferredStrategy: true } : {})
     };
+  }
+  assertSecFilingLease(leaseGuard);
+  try {
+    const { generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } = await import(
+      "../rag/document-summarizer"
+    );
+    const sourceType = secAbstractSourceType(filingRef.docType);
+    const formHint = secAbstractFormHint(filingRef.docType);
+    await generateAndStoreDocumentAbstract({
+      ticker,
+      accessionOrEventId: filingRef.accession,
+      sourceType,
+      headline: `${ticker} ${filingRef.docType} highlights (${filingRef.filedAt})`,
+      chunks: tradeHighlightChunksFromText(document.text, {
+        maxChunks: 8,
+        formHint,
+        sections: (document.sections ?? sections).map((s) => ({
+          itemCode: s.itemCode,
+          itemTitle: s.itemTitle,
+          text: s.text
+        })),
+        sourceChunks: localChunks.map((chunk) => ({
+          content_hash: chunk.content_hash,
+          text: chunk.text,
+          section: chunk.section
+        }))
+      }),
+      publishedAt: filingRef.filedAt,
+      acceptanceDatetime: filingRef.acceptanceDateTime ?? filingRef.filedAt
+    });
+  } catch (err) {
+    console.warn(
+      `[sec-filings] abstract failed for ${filingRef.accession}:`,
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+  assertSecFilingLease(leaseGuard);
+  // Default full-body already upserts the whole filing.  Extra signal-section
+  // documents would double WU this week (write-class flip still forbidden).
+  if (!writesFullBodyToPinecone()) {
+    const signal = await storeSignalSectionDocuments({
+      ticker,
+      accession: filingRef.accession,
+      form: filingRef.docType,
+      title: document.title,
+      publishedAt: filingRef.filedAt,
+      acceptanceDatetime: filingRef.acceptanceDateTime ?? filingRef.filedAt,
+      source: "sec-edgar",
+      url: filingRef.url,
+      chunks: localChunks,
+      userId,
+      ...(leaseGuard ? { leaseGuard } : {})
+    }, storeDocument);
+    assertSecFilingLease(leaseGuard);
+    insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, localChunks.length, {
+      pineconeWriteClass: writeClass,
+      pineconeVectorCount: signal.indexed
+    });
+    audit("sec_filing_ingest", {
+      ticker,
+      accession: filingRef.accession,
+      docType: filingRef.docType,
+      filedAt: filingRef.filedAt,
+      chunks: localChunks.length,
+      attempted: localChunks.length,
+      pinecone_write_class: writeClass,
+      pinecone_vector_count: signal.indexed
+    });
+    return { skipped: false, chunks: signal.indexed };
+  }
   const result = await storeDocument(document, userId, {
     parserRevision: "sec-edgar-filing-v2",
     ...(leaseGuard ? { leaseGuard } : {})
@@ -652,77 +883,42 @@ export async function ingestFiling(
   }
 
   try {
-    const { chunkDocument } = await import("../rag/chunk");
-    const { insertDocumentChunkFts } = await import("../db");
-    // Chunk BEFORE entering the commit-proof transaction: chunkDocument is multi-second
-    // synchronous CPU on a big filing, and running it inside `runWithActiveVectorCommitProof`
-    // (which wraps its callback in ONE SQLite write transaction) held the write lock for the
-    // whole chunking pass — queueing every other writer (including request-path telemetry)
-    // behind it for the duration (2026-08-10 event-loop/lock stall incident).
-    const ftsChunks = chunkDocument(document, {});
-    runWithActiveVectorCommitProof(result.managedCommitProof, () => timeSync(
-      "filingFtsMirror",
-      `${document.doc_id} ${ftsChunks.length} chunks`,
-      () => {
-      // Mirror the committed chunks into the local FTS table so hybrid/lexical retrieval covers the
-      // PRODUCTION filing-body path. Must run inside the transaction so FTS failures rollback
-      // and allow the filing ingestion to be retried on subsequent ticks.
-      // Use the same managed document key storeDocument writes on chunk_occurrences.accession
-      // (doc_id). Bare SEC accessions in FTS cannot join to composite occurrence keys.
-      const managedAccession = document.doc_id;
-      for (const chunk of ftsChunks) {
-        insertDocumentChunkFts(
-          chunk.content_hash,
-          chunk.ticker[0] ?? ticker,
-          "sec-edgar",
-          managedAccession,
-          chunk.text
-        );
-      }
-      insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.attempted);
+    const managedAccession = document.doc_id ?? `${ticker}:${filingRef.accession}:${filingRef.docType}`;
+    const ftsRows = localChunks.map((chunk) => ({
+      contentHash: chunk.content_hash,
+      symbol: chunk.ticker[0] ?? ticker,
+      source: "sec-edgar" as const,
+      accession: managedAccession,
+      text: chunk.text
+    }));
+    const mirror = await mirrorFtsChunksBounded(ftsRows, {
+      resumeKey: { symbol: ticker, source: "sec-edgar", accession: managedAccession }
+    });
+    if (!mirror.complete) {
+      return {
+        skipped: true,
+        chunks: result.indexed,
+        ...(mirror.abortedByStrategy ? { deferredStrategy: true } : {})
+      };
+    }
+    runWithActiveVectorCommitProof(result.managedCommitProof, () => {
+      insertIngestedAccession(filingRef.accession, filingRef.docType, ticker, result.attempted, {
+        pineconeWriteClass: writeClass,
+        pineconeVectorCount: result.attempted
+      });
       audit("sec_filing_ingest", {
         ticker,
         accession: filingRef.accession,
         docType: filingRef.docType,
         filedAt: filingRef.filedAt,
         chunks: result.attempted,
-        attempted: result.attempted
+        attempted: result.attempted,
+        pinecone_write_class: writeClass,
+        pinecone_vector_count: result.attempted
       });
-    }));
-  } catch (err) {
-    return { skipped: true, chunks: result.indexed, error: err instanceof Error ? err.message : "document-commit-proof-lost" };
-  }
-
-  // Compact document-summary for LLM trade use (full 10-K/10-Q body stays in the corpus).
-  // Extractive highlights only — no extra LLM spend on the ingest path.
-  try {
-    const { generateAndStoreDocumentAbstract, tradeHighlightChunksFromText } = await import(
-      "../rag/document-summarizer"
-    );
-    const sourceType = filingRef.docType === "10-Q" ? "10q-delta" : "10k-delta";
-    const formHint = filingRef.docType === "10-Q" ? "10-Q" : "10-K";
-    await generateAndStoreDocumentAbstract({
-      ticker,
-      accessionOrEventId: filingRef.accession,
-      sourceType,
-      headline: `${ticker} ${filingRef.docType} highlights (${filingRef.filedAt})`,
-      chunks: tradeHighlightChunksFromText(text, {
-        maxChunks: 8,
-        formHint,
-        sections: sections.map((s) => ({
-          itemCode: s.itemCode,
-          itemTitle: s.itemTitle,
-          text: s.text
-        }))
-      }),
-      publishedAt: filingRef.filedAt,
-      acceptanceDatetime: filingRef.acceptanceDateTime ?? filingRef.filedAt
     });
   } catch (err) {
-    console.warn(
-      `[sec-filings] abstract failed for ${filingRef.accession}:`,
-      err instanceof Error ? err.message : String(err)
-    );
+    return { skipped: true, chunks: result.indexed, error: err instanceof Error ? err.message : "document-commit-proof-lost" };
   }
 
   return { skipped: false, chunks: result.attempted };
@@ -756,7 +952,7 @@ function maxFilingsPerRunFromEnv(): number {
   return isFreeTier() ? DEFAULT_MAX_FILINGS_PER_RUN : DEFAULT_PAID_MAX_FILINGS_PER_RUN;
 }
 
-/** Whether we're due for a filing ingest check (TTL per SEC_FILING_INGEST_TTL_HOURS, default weekly). */
+/** Whether we're due for a filing ingest check (TTL per SEC_FILING_INGEST_TTL_HOURS, default 24h). */
 export function isFilingIngestDue(now: number = Date.now()): boolean {
   const last = getInternalSetting<unknown>(ATTEMPT_KEY);
   if (!isValidPersistedTimestamp(last)) return true;
@@ -846,21 +1042,15 @@ async function refreshFilingBodiesUnlocked(
         ? DEFAULT_MAX_FILINGS_PER_RUN
         : maxFilingsPerRunFromEnv();
 
-  let cikMap: Record<string, string>;
+  let tickerToCik: Record<string, string>;
   try {
     throwIfOperationLeaseCancelled(operationLeaseSignal);
-    cikMap = await loadCikMap(now);
+    tickerToCik = await loadTickerCikMap(now);
   } catch (err) {
     throwIfOperationLeaseCancelled(operationLeaseSignal);
     const msg = err instanceof Error ? err.message : String(err);
-    result.errors.push(`loadCikMap failed: ${msg}`);
+    result.errors.push(`loadTickerCikMap failed: ${msg}`);
     return result;
-  }
-
-  // Build a reverse map: ticker → CIK
-  const tickerToCik: Record<string, string> = {};
-  for (const [cik, ticker] of Object.entries(cikMap)) {
-    tickerToCik[ticker] = cik;
   }
 
   // Collect (ticker, FilingRef) pairs that need ingesting.
@@ -888,7 +1078,7 @@ async function refreshFilingBodiesUnlocked(
           ticker: row.ticker,
           ref: {
             accession: row.accession,
-            docType: row.form as "10-K" | "10-Q",
+            docType: row.form as FormType,
             filedAt: row.filed_at,
             acceptanceDateTime: row.accepted_at,
             primaryDoc,
@@ -920,7 +1110,7 @@ async function refreshFilingBodiesUnlocked(
       result.errors.push(`ingestFundamentalsCard(${symbol}) threw: ${msg}`);
     }
 
-    const cik = tickerToCik[symbol];
+    const cik = tickerToCik[normalizeSymbol(symbol)] ?? tickerToCik[symbol];
     if (!cik) continue;
 
     try {
@@ -969,8 +1159,10 @@ async function refreshFilingBodiesUnlocked(
     await sleep(CIK_POLITE_DELAY_MS);
   }
 
-  // 3. Sort pending breadth-first globally so newest annual reports are ingested first
-  const sortedPending = sortBreadthFirst(pending);
+  // 3. Sort pending breadth-first globally so newest annual reports are ingested first.
+  // Extra history (2nd+ 10-Q / older 10-K) only for held/watchlist/technical names.
+  const deepenTickers = new Set(rankHighInterestSymbols({ now }));
+  const sortedPending = sortBreadthFirst(pending, deepenTickers);
   pending.splice(0, pending.length, ...sortedPending);
 
   // Process pending filings sequentially (EDGAR + Voyage both require polite pacing).
@@ -993,10 +1185,16 @@ async function refreshFilingBodiesUnlocked(
         result.deferredForBudget = Math.max(0, Math.min(pending.length, cap) - processed);
         break;
       }
-      if (ingestResult.skipped) {
-        result.skipped++;
-      } else if (ingestResult.error) {
+      // Check `error` BEFORE `skipped`: ingestFiling can return `{ skipped: true, error: ... }`
+      // (e.g. "document-commit-proof-missing"/"document-commit-proof-lost" below) for a genuine
+      // failure that also happened to stop short of a full ingest. The old `skipped`-first order
+      // took that branch and silently dropped the error — `result.errors` stayed empty and this
+      // refresh reported success (skipped: true is normally benign) while it had actually failed,
+      // so monitoring never fired (P1, 2026-08-23).
+      if (ingestResult.error) {
         result.errors.push(`ingestFiling(${ticker} ${ref.accession}): ${ingestResult.error}`);
+      } else if (ingestResult.skipped) {
+        result.skipped++;
       } else {
         result.ingested++;
       }
@@ -1153,8 +1351,9 @@ export async function ingestFundamentalsCard(
   }
 }
 
-function sortBreadthFirst(
-  filings: Array<{ ticker: string; ref: FilingRef }>
+export function sortBreadthFirst(
+  filings: Array<{ ticker: string; ref: FilingRef }>,
+  deepenTickers?: Set<string>
 ): Array<{ ticker: string; ref: FilingRef }> {
   // Group by ticker
   const byTicker: Record<string, { k: FilingRef[]; q: FilingRef[] }> = {};
@@ -1186,21 +1385,26 @@ function sortBreadthFirst(
     if (lists.q.length > 0) {
       priorityLevels[1].push({ ticker, ref: lists.q[0] });
     }
-    // Level 2: second newest 10-Q
-    if (lists.q.length > 1) {
+    const deepen = !deepenTickers || deepenTickers.has(ticker);
+    // Level 2: second newest 10-Q (depth — high-interest names only)
+    if (deepen && lists.q.length > 1) {
       priorityLevels[2].push({ ticker, ref: lists.q[1] });
     }
     // Level 3: third newest 10-Q
-    if (lists.q.length > 2) {
+    if (deepen && lists.q.length > 2) {
       priorityLevels[3].push({ ticker, ref: lists.q[2] });
     }
     // Level 4: remaining 10-Ks
-    for (let i = 1; i < lists.k.length; i++) {
-      priorityLevels[4].push({ ticker, ref: lists.k[i] });
+    if (deepen) {
+      for (let i = 1; i < lists.k.length; i++) {
+        priorityLevels[4].push({ ticker, ref: lists.k[i] });
+      }
     }
     // Level 5: remaining 10-Qs
-    for (let i = 3; i < lists.q.length; i++) {
-      priorityLevels[5].push({ ticker, ref: lists.q[i] });
+    if (deepen) {
+      for (let i = 3; i < lists.q.length; i++) {
+        priorityLevels[5].push({ ticker, ref: lists.q[i] });
+      }
     }
   }
 

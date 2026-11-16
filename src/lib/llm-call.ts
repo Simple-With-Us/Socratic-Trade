@@ -9,7 +9,7 @@
 // JSON, content-block responses). Centralizing the per-transport shaping here lets Claude be a
 // first-class Green/Red team model everywhere those sites run, instead of OpenAI-only.
 
-import { withLlmRequestBounds, type LlmTransport } from "./llm-request";
+import { reasoningCapabilityForModel, withLlmRequestBounds, type LlmTransport } from "./llm-request";
 import type { LlmEndpoint } from "./llm-provider";
 import type { LlmReasoningEffort } from "./types";
 import { getGitSha } from "./git-sha";
@@ -136,6 +136,47 @@ export function applyOpenRouterClassifierEnrichment(base: Record<string, unknown
   }
 }
 
+/**
+ * OpenRouter `require_parameters` (docs 2026-08-18, default false): when true,
+ * endpoints that do not advertise EVERY request field never receive the call,
+ * then chat/completions 404s "No endpoints found matching your request" in
+ * ~80ms.  `allow_fallbacks` only covers 5xx / rate-limit within a model — it
+ * does not revive that empty set.
+ *
+ * Coolify receipts 2026-08-18 (sha cda485ff, SELECT-only): Green 404'd valid
+ * public slugs `google/gemini-3.7-flash` (86ms) and `mistralai/mistral-medium-3-5`
+ * (82ms).  7d also `mistralai/mistral-small-2603`.  Those ids exist on
+ * /api/v1/models.  Live #2771 set require_parameters=true on every OpenRouter
+ * body; strategy also sends response_format + max_completion_tokens +
+ * classifier user/session_id/trace.  That is today's Green fail, not a missing
+ * tilde and not an account allowlist miss.
+ *
+ * Keep require_parameters only for the #2771 nano case: OpenAI reasoning models
+ * send `max_completion_tokens`, and the native OpenAI endpoint may only list
+ * `max_tokens` (that was a 400, not today's 404).  Gemini / Mistral / Claude
+ * omit the flag so OpenRouter's default false can pick an endpoint.
+ */
+export function shouldRequireOpenRouterParameters(body: Record<string, unknown>): boolean {
+  if (typeof body.max_completion_tokens !== "number") return false;
+  const model = typeof body.model === "string" ? body.model : "";
+  return reasoningCapabilityForModel(model)?.provider === "openai";
+}
+
+export function applyOpenRouterProviderRouting(base: Record<string, unknown>): void {
+  const existingProvider =
+    base.provider && typeof base.provider === "object" && !Array.isArray(base.provider)
+      ? (base.provider as Record<string, unknown>)
+      : {};
+  const requireParameters = shouldRequireOpenRouterParameters(base);
+  const provider: Record<string, unknown> = {
+    ...existingProvider,
+    allow_fallbacks: existingProvider.allow_fallbacks ?? true
+  };
+  if (requireParameters) provider.require_parameters = true;
+  else delete provider.require_parameters;
+  base.provider = provider;
+}
+
 /** A JSON schema plus the name/description used to label it (OpenAI json_schema / Anthropic tool). */
 export interface LlmJsonSchema {
   name: string;
@@ -208,7 +249,7 @@ export function llmAuthHeaders(endpoint: Pick<LlmEndpoint, "provider" | "key">):
       "content-type": "application/json",
       authorization: `Bearer ${endpoint.key ?? ""}`,
       "HTTP-Referer": "https://socratictrade.com",
-      "X-Title": "Socratic.Trade"
+      "X-Title": "Socratic-Trade"
     };
   }
   return {
@@ -228,7 +269,8 @@ export function buildLlmRequestBody(
     maxOutputTokens: spec.maxOutputTokens,
     model: spec.model,
     reasoningEffort: spec.reasoningEffort,
-    temperature: spec.temperature
+    temperature: spec.temperature,
+    endpointProvider: endpoint.provider
   };
 
   // Best-effort fallback for call sites that don't yet pass an explicit `feature` tag. Prefer the
@@ -307,23 +349,34 @@ export function buildLlmRequestBody(
           input_schema: schema.schema
         }
       ];
+      // Known limitation: Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced tool use (400); native structured outputs are a tracked follow-up.
       base.tool_choice = { type: "tool", name: schema.name };
     }
     injectCommonFields(base);
-    return withLlmRequestBounds(base, transport, bounds);
+    const bounded = withLlmRequestBounds(base, transport, bounds);
+    if (endpoint.provider === "openrouter") applyOpenRouterProviderRouting(bounded);
+    return bounded;
   }
 
   const messages = [
-    { role: "system", content: systemPrompt },
+    {
+      role: "system",
+      content: (endpoint.provider === "minimax" || /^(?:minimax\/)?minimax-/i.test(spec.model)) && schema
+        ? `${systemPrompt}\n\nReturn only JSON matching this schema:\n${JSON.stringify(schema.schema)}`
+        : systemPrompt
+    },
     { role: "user", content: userContent }
   ];
 
   if (transport === "chat-completions") {
     const base: Record<string, unknown> = { model: spec.model, messages };
+    if (endpoint.provider === "minimax") base.reasoning_split = true;
     const responseFormat = openAiChatResponseFormat(endpoint.provider, schema, openAiJsonObject, spec.model);
     if (responseFormat) base.response_format = responseFormat;
     injectCommonFields(base);
-    return withLlmRequestBounds(base, transport, bounds);
+    const bounded = withLlmRequestBounds(base, transport, bounds);
+    if (endpoint.provider === "openrouter") applyOpenRouterProviderRouting(bounded);
+    return bounded;
   }
 
   // responses transport (OpenAI)
@@ -331,7 +384,9 @@ export function buildLlmRequestBody(
   const textFormat = openAiResponsesTextFormat(schema, openAiJsonObject);
   if (textFormat) base.text = { format: textFormat };
   injectCommonFields(base);
-  return withLlmRequestBounds(base, transport, bounds);
+  const bounded = withLlmRequestBounds(base, transport, bounds);
+  if (endpoint.provider === "openrouter") applyOpenRouterProviderRouting(bounded);
+  return bounded;
 }
 
 /**
@@ -451,7 +506,16 @@ function openAiChatResponseFormat(
   model?: string
 ): Record<string, unknown> | undefined {
   const isGemini = provider === "gemini" || (model && /^google\//i.test(model));
-  const isDeepSeek = provider === "deepseek" || (model && /^deepseek\//i.test(model));
+  // `~?`: the Flash row's OpenRouter id is the family alias ~deepseek/deepseek-flash-latest, which
+  // must still get json_object (DeepSeek has no strict json_schema), not the strict schema.
+  const isDeepSeek = provider === "deepseek" || (model && /^~?deepseek\//i.test(model));
+  const isMiniMax = provider === "minimax";
+
+  // MiniMax's documented OpenAI-compatible request fields include messages, tools, sampling,
+  // thinking, and max_completion_tokens, but not response_format/json_schema.  Omit the
+  // undocumented field so native requests are accepted; callers still require and parse JSON
+  // from their schema-bearing prompt.
+  if (isMiniMax) return undefined;
 
   if (schema && !openAiJsonObject && isGemini) {
     const { schema: geminiSchema, unsupported } = toGeminiJsonSchema(schema.schema);

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Owner ruling (2026-07-09, in-session, relayed on #agent-sync): a fractional or
+Owner ruling (2026-07-09, in-session, relayed on #ag***-s**c): a fractional or
 dollar-based order that lands below the active broker's minimum order size
 (Robinhood's $1 floor — typically a pct-of-NAV-clamped trim on a small account)
 is **bumped up to the floor and placed**, not skipped. The pre-flight skip
@@ -83,7 +83,7 @@ this branch now fixes:
 - The other Monet lane's empty claimed branch `monet/broker-min-bump-to-floor`
   (zero commits) can be deleted once this lands.
 
-## Codex review round (2026-07-10, triaged by the MONET bump-lane per #agent-sync handoff)
+## Codex review round (2026-07-10, triaged by the MONET bump-lane per #ag***-s**c handoff)
 
 - Full short-COVER exemption via magnitudes + mixed-form dollar orders never shrink to the floor
   (threads 2+7, fixed by the authoring lane at da79264a).

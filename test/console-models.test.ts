@@ -6,6 +6,11 @@ import { isOpenRouterRouted, modelDisplayName, providerForModel } from "../app/c
 // raw model id is read back — decisions, usage, approval cards. Before this fix, providerForModel
 // and modelDisplayName only handled bare ids, so an OpenRouter-routed Grok or Gemini call branded
 // as OpenAI and every routed id showed its raw vendor-qualified string instead of a display name.
+it("attributes Muse models to Meta", () => {
+  expect(providerForModel("meta/muse-spark-1.3")).toBe("meta");
+  expect(modelDisplayName("muse-spark-1.3")).toBe("Muse Spark 1.3");
+});
+
 describe("providerForModel — OpenRouter vendor-routing prefixes", () => {
   it("brands bare (pre-routing) ids correctly, unaffected by the fix", () => {
     expect(providerForModel("claude-sonnet-5")).toBe("anthropic");
@@ -13,6 +18,7 @@ describe("providerForModel — OpenRouter vendor-routing prefixes", () => {
     expect(providerForModel("gemini-3.5-flash")).toBe("gemini");
     expect(providerForModel("mistral-medium-3-5")).toBe("mistral");
     expect(providerForModel("deepseek-v4-pro")).toBe("deepseek");
+    expect(providerForModel("minimax-m2.7")).toBe("minimax");
     expect(providerForModel("gpt-5.6-terra")).toBe("openai");
   });
 
@@ -24,6 +30,7 @@ describe("providerForModel — OpenRouter vendor-routing prefixes", () => {
     expect(providerForModel("google/gemini-3.5-flash")).toBe("gemini");
     expect(providerForModel("mistralai/mistral-medium-3-5")).toBe("mistral");
     expect(providerForModel("deepseek/deepseek-v4-pro")).toBe("deepseek");
+    expect(providerForModel("minimax/minimax-m2.7")).toBe("minimax");
   });
 
   it("handles the legacy explicit openrouter/vendor/model override shape", () => {
@@ -40,9 +47,9 @@ describe("providerForModel — OpenRouter vendor-routing prefixes", () => {
 
 describe("modelDisplayName — strips the OpenRouter routing prefix before the curated lookup", () => {
   it("resolves a curated model routed through OpenRouter to its curated display name, not the raw id", () => {
-    expect(modelDisplayName("x-ai/grok-4.5")).toBe("Grok 4.5");
+    expect(modelDisplayName("x-ai/grok-4.5")).toBe("Grok");
     expect(modelDisplayName("google/gemini-3.5-flash")).toBe("Gemini Flash");
-    expect(modelDisplayName("anthropic/claude-sonnet-4-6")).toBe("Claude Sonnet 5");
+    expect(modelDisplayName("anthropic/claude-sonnet-4-6")).toBe("Claude Sonnet");
   });
 
   it("falls back to the bare id (prefix stripped) for a routed but uncatalogued model", () => {
@@ -50,7 +57,7 @@ describe("modelDisplayName — strips the OpenRouter routing prefix before the c
   });
 
   it("is unaffected for bare ids (pre-routing / direct calls)", () => {
-    expect(modelDisplayName("grok-4.5")).toBe("Grok 4.5");
+    expect(modelDisplayName("grok-4.5")).toBe("Grok");
     expect(modelDisplayName("")).toBe("");
     expect(modelDisplayName(null)).toBe("");
   });

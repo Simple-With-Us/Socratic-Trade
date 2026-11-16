@@ -76,7 +76,7 @@ before merging:
   confirmed `deleteLearnedContext` intact afterward.
 - `AGENTS.md` / `docs/EFFORT-LOG.md` — genuine adjacent-insertion conflicts (both sides added rows
   at the same position); resolved by keeping both sides' content. Also folded in CURSOR's new 4103
-  fleet-table row (the missing piece flagged in my own earlier #agent-sync ask) and corrected a
+  fleet-table row (the missing piece flagged in my own earlier #ag***-s**c ask) and corrected a
   stray 4104→4103 typo in another agent's Coolify-migration effort-log row to match the
   owner-confirmed port assignment.
 

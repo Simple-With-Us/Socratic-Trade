@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { getDb, getNotifyPrefs, setNotifyPrefs } from "../src/lib/db";
-import { describeChannels, notify, type NotifyConfig } from "../src/lib/notify";
+import { describeChannels, formatNotifyEmailText, NOTIFY_EMAIL_SENT_BY, notify, type NotifyConfig } from "../src/lib/notify";
 
 // notify()'s webhook channel now re-validates the target with a real DNS lookup on every
 // send (SSRF/rebinding hardening — src/lib/egress-guard.ts). These tests use the
@@ -91,6 +91,49 @@ describe("notify multi-channel delivery", () => {
     const results = await notify("u5", { title: "T", body: "B", kind: "block" }, { config: baseCfg(), fetchImpl, resolveHost });
     expect(results[0]!.ok).toBe(false);
     expect(attempts).toBe(1); // 4xx is permanent — retrying just wastes attempts
+  });
+
+  it("skips Resend when Pushover can deliver", async () => {
+    setNotifyPrefs("u-prefer-pushover", {
+      channels: ["email", "pushover"],
+      email: "ops@example.test",
+      pushoverTarget: "u1userkey"
+    });
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL) => {
+      calls.push(String(url));
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    const cfg = { ...baseCfg(), pushover: { pushoverToken: "pv-token" } };
+    const results = await notify(
+      "u-prefer-pushover",
+      { title: "Storage Warning: litestream tier 2 stale", body: "Deep compaction is stale." },
+      { config: cfg, fetchImpl, resolveHost }
+    );
+    expect(results.find((r) => r.channel === "pushover")?.ok).toBe(true);
+    expect(calls).toEqual(["https://api.pushover.net/1/messages.json"]);
+  });
+
+  it("email body ends with a Socratic-Trade sign-off", async () => {
+    setNotifyPrefs("u-email-signoff", { channels: ["email"], email: "ops@example.test" });
+    const calls: Array<{ text?: string; subject?: string }> = [];
+    const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+      calls.push(JSON.parse(String(init?.body)) as { text?: string; subject?: string });
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const results = await notify(
+      "u-email-signoff",
+      { title: "Storage Warning: litestream tier 2 stale", body: "Deep compaction is stale." },
+      { config: baseCfg(), fetchImpl, resolveHost }
+    );
+    expect(results[0]?.ok).toBe(true);
+    expect(calls[0]?.subject).toBe("[Socratic-Trade] Storage Warning: litestream tier 2 stale");
+    expect(calls[0]?.text).toBe(
+      formatNotifyEmailText("Storage Warning: litestream tier 2 stale", "Deep compaction is stale.")
+    );
+    expect(calls[0]?.text).toMatch(/\n\(sent by Socratic-Trade\)$/);
+    expect(formatNotifyEmailText("T", "B")).toBe(`T\n\nB\n\n${NOTIFY_EMAIL_SENT_BY}`);
   });
 
   it("describeChannels reflects admin availability", () => {

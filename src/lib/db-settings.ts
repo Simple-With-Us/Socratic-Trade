@@ -1,11 +1,13 @@
 // db-settings.ts — user/global settings, internal settings, DataPoolConsent, MarketDataDemand
 // All functions depend on getDb() and audit() from "./db" (the core barrel).
-import { audit } from "./db";
+import "server-only";
+import { audit, getDb } from "./db";
 import { activeAlertMutes, ALERT_MUTE_DURATION_MS, ALERT_MUTE_SETTING_KEY, type AlertMuteMap } from "./alert-mutes";
 import { getDrizzle } from "./db/client";
 import { settings, userSettings, marketDataDemands } from "./db/schema";
 import { eq, and, lte, gt } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { LEGAL_NOTICE_VERSION } from "./legal-notice";
 
 // ── Global settings (legacy/internal) ─────────────────────────────────────────
 
@@ -54,6 +56,21 @@ export function setInternalSetting(key: string, value: unknown): void {
 
 export function deleteInternalSetting(key: string): void {
   getDrizzle().delete(settings).where(eq(settings.key, key)).run();
+}
+
+/**
+ * Exact-prefix scan over internal setting keys.  Deliberately `substr(...) = ?` rather than
+ * `LIKE 'prefix%'`: our internal keys contain `_`, which SQLite's LIKE treats as a
+ * single-character wildcard, so a LIKE prefix would over-match neighbouring key families.
+ */
+export function listInternalSettingKeysByPrefix(prefix: string): string[] {
+  if (!prefix) return [];
+  const rows = getDrizzle()
+    .select({ key: settings.key })
+    .from(settings)
+    .where(sql`substr(${settings.key}, 1, ${prefix.length}) = ${prefix}`)
+    .all();
+  return rows.map((row) => row.key);
 }
 
 // ── Per-user settings ──────────────────────────────────────────────────────────
@@ -124,15 +141,15 @@ export interface DataPoolConsent {
   version: number;
 }
 /** Bump when the consent terms materially change so prior acceptances must be re-confirmed. */
-export const DATA_POOL_CONSENT_VERSION = 1;
+export const DATA_POOL_CONSENT_VERSION = 2;
 
 /**
- * Unset users: version 0 + acceptedAt null. Pooling defaults ON (owner 2026-08-05) via
- * hasDataPoolConsent, while the first-run gate still uses version < CURRENT to re-prompt.
- * Prior default accepted:false made shared fundamentals look broken.
+ * Mandatory share (owner 2026-08-17): unset users do NOT silently pool.
+ * hasDataPoolConsent is true only after an explicit accept at the current version.
+ * The first-run gate is accept-or-cannot-use — decline does not resolve it.
  */
 const DATA_POOL_CONSENT_DEFAULT: DataPoolConsent = {
-  accepted: true,
+  accepted: false,
   acceptedAt: null,
   version: 0
 };
@@ -154,18 +171,63 @@ export function setDataPoolConsent(userId: string, accepted: boolean): DataPoolC
 
 /**
  * True when market-data pooling is allowed for cache scope (shared store / pool tier).
- * - Explicit accept at current version → true
- * - Never decided (version 0, no acceptedAt) → true (default share)
- * - Explicit decline at current version → false
- * - Stale accept under older version → false (re-prompt; gate uses version)
+ * Explicit accept at the current version only.  Unset / declined / stale version → false.
  */
 export function hasDataPoolConsent(userId: string = "local"): boolean {
   const c = getDataPoolConsent(userId);
-  if (c.accepted === true && (c.version ?? 0) >= DATA_POOL_CONSENT_VERSION) return true;
-  // Unset / default shell: share market data by default across users.
-  if ((c.version ?? 0) === 0 && c.acceptedAt == null) return true;
-  if (c.accepted === false) return false;
-  return false;
+  return c.accepted === true && (c.version ?? 0) >= DATA_POOL_CONSENT_VERSION;
+}
+
+/** First-run / version-bump gate: true until the user accepts the current terms. */
+export function needsDataPoolConsent(userId: string = "local"): boolean {
+  return !hasDataPoolConsent(userId);
+}
+
+// ── Versioned legal clickwrap ─────────────────────────────────────────────────
+// Same {accepted, acceptedAt, version} record as the data-pool gate.  Accepting
+// the current LEGAL_NOTICE_VERSION dismisses the notice until the copy bumps.
+
+export interface LegalNoticeConsent {
+  accepted: boolean;
+  acceptedAt: string | null;
+  version: number;
+}
+
+const LEGAL_NOTICE_SETTING_KEY = "legal_notice_consent";
+
+const LEGAL_NOTICE_CONSENT_DEFAULT: LegalNoticeConsent = {
+  accepted: false,
+  acceptedAt: null,
+  version: 0
+};
+
+export function getLegalNoticeConsent(userId: string = "local"): LegalNoticeConsent {
+  return getUserSetting<LegalNoticeConsent>(userId, LEGAL_NOTICE_SETTING_KEY, LEGAL_NOTICE_CONSENT_DEFAULT);
+}
+
+export function setLegalNoticeConsent(userId: string, accepted: boolean): LegalNoticeConsent {
+  const record: LegalNoticeConsent = {
+    accepted,
+    acceptedAt: accepted ? new Date().toISOString() : null,
+    version: LEGAL_NOTICE_VERSION
+  };
+  setUserSetting(userId, LEGAL_NOTICE_SETTING_KEY, record);
+  audit("legal_notice_consent", { userId, accepted, version: LEGAL_NOTICE_VERSION }, userId);
+  return record;
+}
+
+export function hasLegalNoticeConsent(userId: string = "local"): boolean {
+  const c = getLegalNoticeConsent(userId);
+  return c.accepted === true && (c.version ?? 0) >= LEGAL_NOTICE_VERSION;
+}
+
+export function needsLegalNoticeConsent(userId: string = "local"): boolean {
+  return !hasLegalNoticeConsent(userId);
+}
+
+/** Combined first-use gate: legal clickwrap + mandatory data-pool. */
+export function needsAppConsent(userId: string = "local"): boolean {
+  return needsLegalNoticeConsent(userId) || needsDataPoolConsent(userId);
 }
 
 // ── Learned-context sharing preferences ──────────────────────────────────────
@@ -248,31 +310,40 @@ export function recordMarketDataDemand(input: {
   const ttlMs = Number.isFinite(input.ttlMs) && input.ttlMs! > 0 ? input.ttlMs! : marketDataDemandTtlMs();
   const expiresAt = new Date(Date.parse(nowIso) + ttlMs).toISOString();
   const id = `${kind}:${symbol}:${userId}`;
-  
-  pruneExpiredMarketDataDemands(nowIso);
-  
-  // Note: ON CONFLICT DO UPDATE SET requested_at = CASE ... END is somewhat complex in Drizzle.
-  // We can use sql\`\` operator to achieve the same result.
-  getDrizzle().insert(marketDataDemands).values({
-    id,
-    kind,
-    symbol,
-    user_id: userId,
-    status: 'pending',
-    requested_at: nowIso,
-    last_requested_at: nowIso,
-    fulfilled_at: null,
-    expires_at: expiresAt
-  }).onConflictDoUpdate({
-    target: [marketDataDemands.kind, marketDataDemands.symbol, marketDataDemands.user_id],
-    set: {
-      status: 'pending',
-      requested_at: sql`CASE WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at ELSE ${nowIso} END`,
-      last_requested_at: nowIso,
-      fulfilled_at: null,
-      expires_at: expiresAt
-    }
-  }).run();
+
+  const persist = () => {
+    pruneExpiredMarketDataDemands(nowIso);
+
+    // Note: ON CONFLICT DO UPDATE SET requested_at = CASE ... END is somewhat complex in Drizzle.
+    // We can use sql\`\` operator to achieve the same result.
+    getDrizzle()
+      .insert(marketDataDemands)
+      .values({
+        id,
+        kind,
+        symbol,
+        user_id: userId,
+        status: "pending",
+        requested_at: nowIso,
+        last_requested_at: nowIso,
+        fulfilled_at: null,
+        expires_at: expiresAt
+      })
+      .onConflictDoUpdate({
+        target: [marketDataDemands.kind, marketDataDemands.symbol, marketDataDemands.user_id],
+        set: {
+          status: "pending",
+          requested_at: sql`CASE WHEN market_data_demands.status = 'pending' THEN market_data_demands.requested_at ELSE ${nowIso} END`,
+          last_requested_at: nowIso,
+          fulfilled_at: null,
+          expires_at: expiresAt
+        }
+      })
+      .run();
+  };
+
+  // BEGIN IMMEDIATE: prune UPDATE + upsert read-then-write under WAL (ST-2240 class).
+  getDb().transaction(persist).immediate();
 }
 
 export function fulfillMarketDataDemand(input: {
@@ -284,40 +355,59 @@ export function fulfillMarketDataDemand(input: {
   const symbol = normalizeDemandSymbol(input.symbol);
   if (!symbol) return undefined;
   const fulfilledAt = isoFromNow(input.now ?? new Date());
-  pruneExpiredMarketDataDemands(fulfilledAt);
-  
-  const rows = getDrizzle()
-    .select({ user_id: marketDataDemands.user_id, requested_at: marketDataDemands.requested_at, last_requested_at: marketDataDemands.last_requested_at })
-    .from(marketDataDemands)
-    .where(and(
-      eq(marketDataDemands.kind, kind),
-      eq(marketDataDemands.symbol, symbol),
-      eq(marketDataDemands.status, 'pending'),
-      gt(marketDataDemands.expires_at, fulfilledAt)
-    ))
-    .all();
 
-  if (rows.length === 0) return undefined;
+  return getDb()
+    .transaction(() => {
+      pruneExpiredMarketDataDemands(fulfilledAt);
 
-  getDrizzle()
-    .update(marketDataDemands)
-    .set({ status: 'fulfilled', fulfilled_at: fulfilledAt })
-    .where(and(
-      eq(marketDataDemands.kind, kind),
-      eq(marketDataDemands.symbol, symbol),
-      eq(marketDataDemands.status, 'pending'),
-      gt(marketDataDemands.expires_at, fulfilledAt)
-    ))
-    .run();
+      const rows = getDrizzle()
+        .select({
+          user_id: marketDataDemands.user_id,
+          requested_at: marketDataDemands.requested_at,
+          last_requested_at: marketDataDemands.last_requested_at
+        })
+        .from(marketDataDemands)
+        .where(
+          and(
+            eq(marketDataDemands.kind, kind),
+            eq(marketDataDemands.symbol, symbol),
+            eq(marketDataDemands.status, "pending"),
+            gt(marketDataDemands.expires_at, fulfilledAt)
+          )
+        )
+        .all();
 
-  return {
-    kind,
-    symbol,
-    pendingUserCount: new Set(rows.map((row) => row.user_id)).size,
-    oldestRequestedAt: rows.reduce((min, row) => (row.requested_at < min ? row.requested_at : min), rows[0].requested_at),
-    latestRequestedAt: rows.reduce((max, row) => (row.last_requested_at > max ? row.last_requested_at : max), rows[0].last_requested_at),
-    fulfilledAt
-  };
+      if (rows.length === 0) return undefined;
+
+      getDrizzle()
+        .update(marketDataDemands)
+        .set({ status: "fulfilled", fulfilled_at: fulfilledAt })
+        .where(
+          and(
+            eq(marketDataDemands.kind, kind),
+            eq(marketDataDemands.symbol, symbol),
+            eq(marketDataDemands.status, "pending"),
+            gt(marketDataDemands.expires_at, fulfilledAt)
+          )
+        )
+        .run();
+
+      return {
+        kind,
+        symbol,
+        pendingUserCount: new Set(rows.map((row) => row.user_id)).size,
+        oldestRequestedAt: rows.reduce(
+          (min, row) => (row.requested_at < min ? row.requested_at : min),
+          rows[0].requested_at
+        ),
+        latestRequestedAt: rows.reduce(
+          (max, row) => (row.last_requested_at > max ? row.last_requested_at : max),
+          rows[0].last_requested_at
+        ),
+        fulfilledAt
+      } satisfies MarketDataDemandFill;
+    })
+    .immediate();
 }
 
 export function clearMarketDataDemandsForTests(): void {

@@ -6,6 +6,7 @@
 // `learning-ledger.ts` wraps these primitives with the setPolicy-based capture/revert semantics; this
 // module is intentionally thin (persistence only, module-per-concern).
 
+import "server-only";
 import { getDb } from "./db";
 
 /** A recorded learning mutation. `beforeState`/`afterState`/`evidence` are already JSON-parsed. */

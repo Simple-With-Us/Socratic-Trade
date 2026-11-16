@@ -10,7 +10,7 @@ Completed the three host follow-ups after the disk-full / reboot-storm incident:
 
 ## Does the watchdog run on the Mac?
 
-**No.** It runs only on the **Hetzner production box** (`135.181.192.190` / `host.jays.services`).
+**No.** It runs only on the **Hetzner production box** (`<HETZNER_OLD_IP_RETIRED>` / `host.jays.services`).
 
 | Layer | Where | Boot behavior |
 |-------|--------|----------------|
@@ -76,7 +76,7 @@ PR #714 merged: snapshot retention **720h → 168h (7d)** so Garage on the share
 ## Verification
 
 ```bash
-ssh -i ~/.ssh/hetzner root@135.181.192.190 'systemctl is-enabled fleet-watchdog; systemctl is-active fleet-watchdog; journalctl -u fleet-watchdog -n 20 --no-pager'
+ssh -i ~/.ssh/hetzner root@<HETZNER_OLD_IP_RETIRED> 'systemctl is-enabled fleet-watchdog; systemctl is-active fleet-watchdog; journalctl -u fleet-watchdog -n 20 --no-pager'
 curl -sS https://socratictrade.com/api/health | head -c 200
 df -h /
 ```

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resetFilingApiAuthStateForTests } from "../src/lib/filingapi-auth";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,9 @@ import {
   parseKnownUnavailabilityUntil,
   openHardStopReprobeWindow,
   healthReprobeLaneSettingKey,
+  usageMonitorProbeUrls,
+  probeFnForService,
+  backupLanePrimaryIsServing,
 } from "../src/lib/health-lane-reprobe";
 import {
   logApiHealth,
@@ -25,6 +29,7 @@ describe("health-lane-reprobe", () => {
     prevDb = process.env.DATABASE_URL;
     process.env.DATABASE_URL = `file:${join(dir, "test.db")}`;
     process.env.HEALTH_LANE_REPROBE_ENABLED = "on";
+    resetFilingApiAuthStateForTests();
     resetDbForTesting();
   });
 
@@ -37,6 +42,21 @@ describe("health-lane-reprobe", () => {
     } catch {
       /* ignore */
     }
+  });
+
+  it("does not treat Yahoo VIX as a probe target while Cboe history is serving", () => {
+    expect(
+      backupLanePrimaryIsServing("vix-yahoo", [
+        { service: "vix-cboe-history", keySource: null, stoppedWorking: false },
+        { service: "vix-yahoo", keySource: null, stoppedWorking: true }
+      ])
+    ).toBe(true);
+    expect(
+      backupLanePrimaryIsServing("vix-yahoo", [
+        { service: "vix-cboe-history", keySource: null, stoppedWorking: true },
+        { service: "vix-yahoo", keySource: null, stoppedWorking: true }
+      ])
+    ).toBe(false);
   });
 
   it("parseKnownUnavailabilityUntil honors Retry-After and AV daily language", () => {
@@ -110,5 +130,65 @@ describe("health-lane-reprobe", () => {
     expect(r.due).toBe(false);
     expect(r.reason).toBe("waiting_quota_or_known_until");
     expect(healthReprobeLaneSettingKey("alpha-vantage", "env")).toContain("alpha-vantage");
+  });
+
+  it("probes Usage Monitor at /api/ready then /api/health, never /health or /", () => {
+    expect(usageMonitorProbeUrls("https://usage.jays.services")).toEqual([
+      "https://usage.jays.services/api/ready",
+      "https://usage.jays.services/api/health",
+    ]);
+    const prev = process.env.USAGE_MONITOR_BASE_URL;
+    process.env.USAGE_MONITOR_BASE_URL = "https://usage.example.test/";
+    try {
+      expect(usageMonitorProbeUrls()).toEqual([
+        "https://usage.example.test/api/ready",
+        "https://usage.example.test/api/health",
+      ]);
+    } finally {
+      if (prev === undefined) delete process.env.USAGE_MONITOR_BASE_URL;
+      else process.env.USAGE_MONITOR_BASE_URL = prev;
+    }
+  });
+
+  it("usage-monitor probe succeeds on /api/ready 200 and ignores a login 307", async () => {
+    const seen: string[] = [];
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.endsWith("/api/ready")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response(null, { status: 307, headers: { Location: "/login" } });
+    }) as typeof fetch;
+    try {
+      const probe = probeFnForService("usage-monitor");
+      expect(probe).not.toBeNull();
+      const result = await probe!();
+      expect(result.ok).toBe(true);
+      expect(seen[0]).toMatch(/\/api\/ready$/);
+      expect(seen.some((u) => u.endsWith("/health") || /usage\.jays\.services\/$/.test(u))).toBe(false);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+
+  it("filingapi lane is retired and probes ok without any network call", async () => {
+    const prevFetch = globalThis.fetch;
+    let hits = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      hits += 1;
+      return new Response("nope", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const probe = probeFnForService("filingapi");
+      expect(probe).not.toBeNull();
+      const result = await probe!();
+      expect(result.ok).toBe(true);
+      expect(result.detail).toMatch(/retired/);
+      expect(hits).toBe(0);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
   });
 });

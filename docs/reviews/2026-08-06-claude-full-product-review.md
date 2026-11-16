@@ -35,7 +35,7 @@ Coolify restart (up 5 days). Correlation: Congress.Trade's `scan-cpu-worker` OCR
 ran on the same 4-core A1 box all day, and Uptime-Robot flapped on all three sites hosted
 there all day. Working theory: host contention kills Coolify's multiplexed SSH exec
 stream. Second redelivery on a quiet box (21:19, `hphdauml77lu3ebmyj3rj95r`) survived
-past every earlier failure point (result recorded in the rollout note / #agent-sync).
+past every earlier failure point (result recorded in the rollout note / #ag***-s**c).
 Follow-ups filed: isolate or `cpuset`/`nice` the CT scan worker vs deploy builds;
 alert on "main ahead of prod release sha for >1h" (a `verify-deploy-sha` cron would have
 caught this at 06:00 instead of 19:40).

@@ -11,7 +11,7 @@ Agents mixed Coolify tokens and dumped Infisical secret *values* via `infisical 
 | `COOLIFY_API_TOKEN` | **Legacy alias** for apps that still read this name | Infisical **must** equal `COOLIFY_SERVER_STATS` never `COOLIFY_AGENTS` |
 
 ## Infisical
-Set on Socratic.Trade + Congress.Trade `prod` `/`:
+Set on Socratic-Trade + Congress.Trade `prod` `/`:
 - `COOLIFY_SERVER_STATS`, `COOLIFY_AGENTS`, `COOLIFY_API_TOKEN` (= stats), `COOLIFY_SERVER_UUID`, `COOLIFY_HOST`, `SERVER_METRICS_TARGET_ENVIRONMENT`
 
 ## Code
@@ -20,7 +20,7 @@ Set on Socratic.Trade + Congress.Trade `prod` `/`:
 ## Agent rules
 - Never run bare `infisical secrets` (lists values).
 - Use `scripts/infisical-secrets-safe.sh` for set/has/names.
-- Canonical rules: `/Users/jay/apps/AGENT-SYNC.md` Secret handoff + Infisical section; `secret-safety` skill.
+- Canonical rules: `/Users/jay/apps/AG***-S**C.md` Secret handoff + Infisical section; `secret-safety` skill.
 
 ## Verification
 - Stats token cannot deploy (403 missing deploy permission); agents token can.

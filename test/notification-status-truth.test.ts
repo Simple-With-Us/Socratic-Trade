@@ -70,6 +70,7 @@ function guardedNotifyPrefs(userId: string): NotifyPrefs {
     twilioAccountSidSet: false,
     twilioAuthTokenSet: false,
     twilioFromSet: false,
+    watchlistDigestEnabled: false,
     updatedAt: null
   };
 }

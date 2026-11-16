@@ -33,8 +33,24 @@ describe("listDormantFeatureStatus", () => {
     expect(byId["csp-report-only"]?.readyToEnable).toBe(true);
     expect(byId["usage-budget-enforce"]?.readyToEnable).toBe(true);
     expect(byId["vector-embed-clean-text"]?.readyToEnable).toBe(true);
-    expect(byId["vector-asof-strict"]?.readyToEnable).toBe(false);
-    expect(byId["rag-hyde"]?.readyToEnable).toBe(false);
+    expect(byId["vector-asof-strict"]?.readyToEnable).toBe(true);
+    expect(byId["vector-asof-strict"]?.enabled).toBe(false);
+    expect(byId["rag-multiquery"]?.readyToEnable).toBe(true);
+    expect(byId["rag-hyde"]?.readyToEnable).toBe(true);
+    expect(byId["sec8k-full-body"]?.readyToEnable).toBe(true);
+    expect(byId["congress-share-outbound"]?.readyToEnable).toBe(true);
+    expect(byId["apple-web-signin"]?.readyToEnable).toBe(false);
     expect(byId["fmp-transcripts"]?.readyToEnable).toBe(false);
+  });
+
+  it("marks web Apple ready only when AUTH_APPLE_* can arm the provider", () => {
+    const off = listDormantFeatureStatus({});
+    expect(off.find((i) => i.id === "apple-web-signin")?.enabled).toBe(false);
+    const on = listDormantFeatureStatus({
+      AUTH_APPLE_ID: "com.example.web",
+      AUTH_APPLE_SECRET: "jwt"
+    });
+    expect(on.find((i) => i.id === "apple-web-signin")?.enabled).toBe(true);
+    expect(on.find((i) => i.id === "apple-web-signin")?.readyToEnable).toBe(true);
   });
 });

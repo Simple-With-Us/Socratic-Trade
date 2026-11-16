@@ -1,8 +1,13 @@
 // db-proposals.ts — trade proposal CRUD
-import { getDb } from "./db";
+import "server-only";
+import { audit, getDb } from "./db";
 import { scopeAccount } from "./db-execution";
+import { canonicalModelId } from "./model-identity";
+import { normalizeSymbol } from "./money";
 import type {
+  DecisionStep,
   ExecutionMode,
+  OrderSide,
   PendingProposal,
   PolicyDecision,
   RecentProposal,
@@ -12,6 +17,53 @@ import type {
   SocraticEvidenceItem,
   TradeProposal
 } from "./types";
+
+const DECISION_STEPS: ReadonlySet<string> = new Set<DecisionStep>([
+  "proposed",
+  "red_team_reject",
+  "override_requested",
+  "override_applied",
+  "human_approved",
+  "final"
+]);
+
+/**
+ * Pure structural check of a scorecard decision chain: every step must be a known DecisionStep,
+ * consecutive steps must change, and "override_applied" requires a PRECEDING "override_requested".
+ * Persistence NEVER rejects a proposal over its chain — a malformed one logs an audit receipt
+ * (auditMalformedDecisionChain below) and the proposal is stored as-is.
+ */
+export function validateDecisionChain(chain: unknown): { ok: boolean; problems: string[] } {
+  if (chain === undefined) return { ok: true, problems: [] };
+  if (!Array.isArray(chain)) return { ok: false, problems: ["not_an_array"] };
+  const problems: string[] = [];
+  let sawOverrideRequested = false;
+  for (let i = 0; i < chain.length; i++) {
+    const step = chain[i];
+    if (typeof step !== "string" || !DECISION_STEPS.has(step)) {
+      problems.push(`unknown_step:${String(step)}`);
+      continue;
+    }
+    if (i > 0 && chain[i - 1] === step) problems.push(`repeated_step:${step}`);
+    if (step === "override_requested") sawOverrideRequested = true;
+    if (step === "override_applied" && !sawOverrideRequested) problems.push("override_applied_without_request");
+  }
+  return { ok: problems.length === 0, problems };
+}
+
+/** Receipt (never a block): a malformed decision chain reached persistence. Best-effort — an
+ * audit failure must never fail the proposal write it accompanies. */
+function auditMalformedDecisionChain(proposalId: string, proposal: unknown, userId: string): void {
+  const chain = (proposal as { scorecard?: { decisionChain?: unknown } } | null | undefined)?.scorecard?.decisionChain;
+  if (chain === undefined) return;
+  const verdict = validateDecisionChain(chain);
+  if (verdict.ok) return;
+  try {
+    audit("proposal_decision_chain_malformed", { proposalId, chain, problems: verdict.problems }, userId);
+  } catch {
+    // receipts never fail the write
+  }
+}
 
 /**
  * Thesis-tag split-brain fallback (2026-07-10 audit fix): `trade_thesis_tag` / `entry_market_regime`
@@ -32,6 +84,14 @@ function proposalTagFallbacks(parsedProposal: unknown): { tradeThesisTag?: strin
     tradeThesisTag: nonEmptyString(record?.tradeThesisTag),
     entryMarketRegime: nonEmptyString(record?.entryMarketRegime)
   };
+}
+
+/** Extract+normalize the symbol off the (already-parsed) proposal object for the dedicated
+ *  `symbol` column (see db.ts migration 72) — mirrors proposalTagFallbacks' derivation shape. */
+function deriveProposalSymbol(parsedProposal: unknown): string | undefined {
+  const record = parsedProposal as { symbol?: unknown } | null | undefined;
+  const raw = nonEmptyString(record?.symbol);
+  return raw ? normalizeSymbol(raw) : undefined;
 }
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
@@ -276,6 +336,17 @@ export function listPendingProposals(accountNumber: string, userId: string = "lo
   }));
 }
 
+/** Cheap COUNT-only sibling to listPendingProposals — used for per-account pending-proposal
+ *  chips (Settings > Broker connections' "Other Accounts" rows) where the caller only needs a
+ *  number, not the full proposal/decision JSON blobs, for potentially several connected
+ *  accounts on every dashboard snapshot. */
+export function countPendingProposals(accountNumber: string, userId: string = "local"): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM trade_proposals WHERE account_number = ? AND user_id = ? AND status = 'proposed'")
+    .get(scopeAccount(accountNumber), userId) as { n: number };
+  return row.n;
+}
+
 export function listRecentProposals(accountNumber: string, limit: number = 100, userId: string = "local"): RecentProposal[] {
   type RawRow = {
     id: string;
@@ -498,6 +569,7 @@ export function claimProposalForExecution(
   // (flagStalePlacingIntents) books fills from this stored JSON, so it must reflect the order
   // actually sent to the broker, not the original ask — and Recent/Activity hydrate from it too.
   const database = getDb();
+  if (opts.proposal) auditMalformedDecisionChain(id, opts.proposal, userId);
   const rollbackLostFallbackClaim = new Error("proposal claim lost after fallback case creation");
   let result: { claimed: boolean; decisionId: string | undefined };
   try {
@@ -700,7 +772,7 @@ export function getRedTeamCriticFailureStats(userId: string = "local", windowDay
     failures += 1;
     const kind = typeof verdict.failureKind === "string" && verdict.failureKind ? verdict.failureKind : "unavailable";
     byKind[kind] = (byKind[kind] ?? 0) + 1;
-    const model = typeof verdict.model === "string" && verdict.model.trim() ? verdict.model.trim() : undefined;
+    const model = typeof verdict.model === "string" && verdict.model.trim() ? canonicalModelId(verdict.model) || undefined : undefined;
     const attributionKey = `${model ?? ""}|${kind}`;
     const entry = byAttribution.get(attributionKey) ?? { model, kind, count: 0 };
     entry.count += 1;
@@ -777,10 +849,12 @@ export function insertProposal(input: {
   // proposal object itself so the dedicated columns (which the learning loop's SQL reads) don't stay
   // NULL forever while the same data sits unread inside the `proposal` blob.
   const { tradeThesisTag: derivedThesisTag, entryMarketRegime: derivedRegime } = proposalTagFallbacks(input.proposal);
+  const symbol = deriveProposalSymbol(input.proposal);
+  auditMalformedDecisionChain(input.id, input.proposal, input.userId ?? "local");
 
   getDb()
     .prepare(
-      "INSERT INTO trade_proposals (id, user_id, run_id, account_number, created_at, proposal, decision, review, estimated_notional, ref_id, order_id, status, trade_thesis_tag, entry_market_regime, execution_mode, prompt_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO trade_proposals (id, user_id, run_id, account_number, created_at, proposal, decision, review, estimated_notional, ref_id, order_id, status, trade_thesis_tag, entry_market_regime, execution_mode, prompt_version, symbol) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .run(
       input.id,
@@ -798,6 +872,84 @@ export function insertProposal(input: {
       input.tradeThesisTag ?? derivedThesisTag ?? null,
       input.entryMarketRegime ?? derivedRegime ?? null,
       input.executionMode ?? null,
-      input.promptVersion ?? null
+      input.promptVersion ?? null,
+      symbol ?? null
     );
+}
+
+/** One row of a symbol's proposal trajectory (watchlist digest lesson: digest — src/lib/report-context.ts).
+ *  Deliberately narrower than TradeProposal: only what a trajectory table/summary needs to render. */
+export interface SymbolProposalTrajectoryRow {
+  id: string;
+  createdAt: string;
+  /** The proposal's terminal/current lifecycle status (trade_proposals.status — e.g. "placed",
+   *  "blocked", "proposed"), NOT the PolicyDecision JSON blob. Format with feedStatusLabel
+   *  (dashboard-ui.ts) for display. */
+  decision: string;
+  side: OrderSide;
+  tradeThesisTag?: string;
+  entryMarketRegime?: string;
+  confidenceScore?: number;
+  referencePrice?: number;
+}
+
+/**
+ * Recent proposals for one symbol, newest first — the per-symbol lookback the watchlist digest
+ * (and any future per-symbol history view) needs without scanning every proposal's JSON blob.
+ * `accountNumber` narrows to one account when given; omitted, it spans every account the user has
+ * (a symbol digest is inherently cross-account). `excludeRunId` drops one run's own rows — for a
+ * caller building "history before this run" mid-strategy-tick without its own just-inserted
+ * proposal leaking into its own trajectory.
+ */
+export function listProposalsBySymbol(input: {
+  symbol: string;
+  accountNumber?: string;
+  userId?: string;
+  limit?: number;
+  excludeRunId?: string;
+}): SymbolProposalTrajectoryRow[] {
+  const symbol = normalizeSymbol(input.symbol);
+  const userId = input.userId ?? "local";
+  const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 5)));
+
+  const conditions = ["symbol = ?", "user_id = ?"];
+  const params: Array<string | number> = [symbol, userId];
+  if (input.accountNumber !== undefined) {
+    conditions.push("account_number = ?");
+    params.push(scopeAccount(input.accountNumber));
+  }
+  if (input.excludeRunId) {
+    conditions.push("run_id != ?");
+    params.push(input.excludeRunId);
+  }
+  params.push(limit);
+
+  type RawRow = {
+    id: string;
+    created_at: string;
+    status: string;
+    proposal: string;
+    trade_thesis_tag: string | null;
+    entry_market_regime: string | null;
+  };
+  const rows = getDb()
+    .prepare(
+      `SELECT id, created_at, status, proposal, trade_thesis_tag, entry_market_regime FROM trade_proposals WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`
+    )
+    .all(...params) as RawRow[];
+
+  return rows.map((r) => {
+    const parsedProposal = parseJson<Partial<TradeProposal>>(r.proposal, {});
+    const fallback = proposalTagFallbacks(parsedProposal);
+    return {
+      id: r.id,
+      createdAt: r.created_at,
+      decision: r.status,
+      side: (parsedProposal.side ?? "buy") as OrderSide,
+      tradeThesisTag: r.trade_thesis_tag ?? fallback.tradeThesisTag ?? undefined,
+      entryMarketRegime: r.entry_market_regime ?? fallback.entryMarketRegime ?? undefined,
+      confidenceScore: typeof parsedProposal.confidenceScore === "number" ? parsedProposal.confidenceScore : undefined,
+      referencePrice: typeof parsedProposal.referencePrice === "number" ? parsedProposal.referencePrice : undefined
+    };
+  });
 }

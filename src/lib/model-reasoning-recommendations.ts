@@ -15,6 +15,7 @@
 // guidance + rotation defaults, not a wire contract. Keep entries keyed by the exact curated
 // catalog ids (app/ui/llm-model-catalog.ts CURATED_LLM_MODEL_GROUPS / MODEL_ROTATION_POOL).
 
+import { displaySlugFor } from "./llm-model-catalog";
 import type { LlmReasoningEffort } from "./types";
 
 export interface ModelReasoningRecommendation {
@@ -50,8 +51,34 @@ const MISTRAL_MEDIUM_ADVICE =
   "every round; High actually proposed (schema-valid, brackets included) but took ~50s/~$0.07 " +
   "per call, and one of two benchmarked calls exceeded even the widened reasoning timeout.";
 
+const MINIMAX_FLASH_ADVICE =
+  "MiniMax M3.1 Flash always thinks and runs at Max when no effort is sent, so the app always " +
+  "sends one.\u00A0 Medium (recommended) keeps latency and cost down; Max is the slowest.";
+
+const MUSE_CONTRIBUTOR_ADVICE =
+  "Muse contributor models always reason and do not accept Max; a stored Max runs as XHigh.\u00A0 " +
+  "Meta trains on contributor prompts and completions.";
+
 export const MODEL_REASONING_RECOMMENDATIONS: Record<string, ModelReasoningRecommendation> = {
-  // GPT-5.6 / latest OpenAI
+  // Retired 2026-11-04 (kept so a stored selection keeps its guidance).
+  "gpt-6-astra-pro": { effort: "medium" },
+  "gpt-6-astra": { effort: "medium" },
+  // GPT-6.1 / GPT-6 (2026-11-04): the Sol and Luna guidance carries forward to the new generation.
+  "gpt-6.1-sol": {
+    effort: "medium",
+    roleEfforts: { red: "high", review: "high", chat: "medium" },
+    advice: "Sol: Medium for Green/Coach; High for Red Team or one-off strategy/learning review."
+  },
+  "gpt-6.1-terra": {
+    effort: "medium",
+    roleEfforts: { red: "medium", review: "medium", chat: "low" }
+  },
+  "gpt-6-luna": {
+    effort: "medium",
+    roleEfforts: { red: "medium", review: "medium", chat: "low" },
+    advice: "Luna: Low for chat/high-volume synthesis; Medium for Green."
+  },
+  // GPT-5.6 (gpt-5.6-sol / gpt-5.6-luna retired 2026-11-04)
   "gpt-5.6": {
     effort: "medium",
     roleEfforts: { red: "high", review: "high", chat: "medium" },
@@ -62,47 +89,47 @@ export const MODEL_REASONING_RECOMMENDATIONS: Record<string, ModelReasoningRecom
     roleEfforts: { red: "high", review: "high", chat: "medium" },
     advice: "Sol: Medium for Green/Coach; High for Red Team or one-off strategy/learning review."
   },
-  "gpt-5.6-terra": {
-    effort: "medium",
-    roleEfforts: { red: "high", review: "high", chat: "medium" },
-    advice: "Terra: Medium is recommended for Green Team and Coach balance."
-  },
   "gpt-5.6-luna": {
     effort: "medium",
     roleEfforts: { red: "medium", review: "medium", chat: "low" },
     advice: "Luna: Low for chat/high-volume synthesis; Medium for Green."
   },
-  "gpt-5.4-nano": { effort: "low", advice: "Nano at Low: best for extraction and cheap chat." },
-  "gpt-5.4-mini": {
-    effort: "medium",
-    roleEfforts: { chat: "low", red: "high", review: "high" },
-    advice: "Mini: Low for Coach/chat, Medium for a low-cost Green Team."
-  },
-  "gpt-4o": { effort: "medium" },
   // Anthropic
-  "claude-haiku-4.5": { effort: "medium" },
-  "claude-sonnet-5": { effort: "medium" },
-  "claude-opus-5": { effort: "medium" },
-  "claude-fable-5": { effort: "medium" },
+  "claude-haiku-latest": { effort: "medium" },
+  "claude-sonnet-latest": { effort: "medium" },
+  "claude-opus-latest": { effort: "medium" },
+  "claude-fable-latest": { effort: "medium" },
   // xAI
-  "grok-4.5": { effort: "medium" },
-  "grok-build-latest": { effort: "medium" },
+  "grok-latest": { effort: "medium" },
   // Gemini
   "gemini-flash-lite-latest": { effort: "medium" },
   "gemini-flash-latest": { effort: "medium" },
   "gemini-pro-latest": { effort: "medium" },
   // DeepSeek
-  "deepseek-v4-flash": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
-  "deepseek-v4-pro": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
-  "deepseek-reasoner": { effort: "high" },
+  "deepseek-flash-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
+  "deepseek-pro-latest": { effort: "none", advice: DEEPSEEK_OPT_IN_ADVICE },
   // Mistral
   "mistral-small-latest": { effort: "none" },
   "mistral-medium-latest": { effort: "none", advice: MISTRAL_MEDIUM_ADVICE },
-  // Meta
-  "llama-70b-latest": { effort: "medium" }
+  // Large 4 reasons by default; High is the only effort both OpenRouter and Mistral document.
+  "mistral-large-latest": { effort: "high" },
+  // MiniMax (M3 has no documented effort; the entry only matters for M3.1 Flash)
+  "minimax-m3": { effort: "medium" },
+  "minimax-m3.1-flash": { effort: "medium", roleEfforts: { chat: "low" }, advice: MINIMAX_FLASH_ADVICE },
+  // Meta Muse: never "none" (a provider 400); contributor models never "max".
+  "muse-wonder-1.0": { effort: "medium" },
+  "muse-spark-1.3": { effort: "medium" },
+  "muse-spark-1.3-contributor": { effort: "medium", roleEfforts: { chat: "low" }, advice: MUSE_CONTRIBUTOR_ADVICE },
+  "muse-glimmer-30b": { effort: "medium", roleEfforts: { chat: "low" } },
+  "muse-wonder-1.0-contributor": { effort: "medium", advice: MUSE_CONTRIBUTOR_ADVICE },
+  "muse-wonder-full-1.0-contributor": { effort: "medium", advice: MUSE_CONTRIBUTOR_ADVICE }
 };
 
 function lookup(model: string | undefined): ModelReasoningRecommendation | undefined {
+  const display = displaySlugFor(model);
+  if (display && MODEL_REASONING_RECOMMENDATIONS[display]) {
+    return MODEL_REASONING_RECOMMENDATIONS[display];
+  }
   let id = (model ?? "").trim();
   if (id.includes("/")) {
     id = id.split("/").pop()!;

@@ -157,7 +157,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "fedFunds",
       label: "Fed funds",
       value: mv(macro.fedFundsRate),
-      what: "The Fed's overnight policy rate — the anchor every other borrowing cost prices off. Higher means tighter financial conditions.",
+      what: "The Fed's overnight policy rate — the anchor every other borrowing cost prices off.  Higher means tighter financial conditions.",
       reading:
         typeof realFF === "number"
           ? realFF > 1
@@ -172,7 +172,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "dgs3mo",
       label: "3M T-bill",
       value: mvRate(macro.dgs3moTreasury),
-      what: "Three-month Treasury yield — the near risk-free return on cash and the short leg of the Fed's preferred recession curve. Higher raises the bar every risky asset must clear.",
+      what: "Three-month Treasury yield — the near risk-free return on cash and the short leg of the Fed's preferred recession curve.  Higher raises the bar every risky asset must clear.",
       asOf: rateAsOf
     },
     {
@@ -186,7 +186,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "dgs10",
       label: "10Y Treasury",
       value: mvRate(macro.dgs10Treasury),
-      what: "Ten-year Treasury yield — the long-term discount rate on future profits. When it rises, expensive growth stocks feel it most.",
+      what: "Ten-year Treasury yield — the long-term discount rate on future profits.  When it rises, expensive growth stocks feel it most.",
       asOf: rateAsOf
     },
     {
@@ -194,7 +194,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "Curve 3m/10y",
       value: fmtSigned(curve3m10y, " pp"),
       tone: typeof curve3m10y === "number" ? (curve3m10y < 0 ? "neg" : "pos") : undefined,
-      what: "10Y yield minus 3-month yield, in percentage points — the Fed's preferred recession curve. Below zero = inverted.",
+      what: "10Y yield minus 3-month yield, in percentage points — the Fed's preferred recession curve.  Below zero = inverted.",
       reading: curveReading(curve3m10y),
       asOf: rateAsOf
     },
@@ -203,7 +203,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "Curve 2s10s",
       value: fmtSigned(curve2s10s, " pp"),
       tone: typeof curve2s10s === "number" ? (curve2s10s < 0 ? "neg" : "pos") : undefined,
-      what: "10Y yield minus 2Y yield — the canonical “2s10s” curve traders quote. Below zero = inverted, a recession signal with a long lead.",
+      what: "10Y yield minus 2Y yield — the canonical “2s10s” curve traders quote.  Below zero = inverted, a recession signal with a long lead.",
       reading: curveReading(curve2s10s),
       asOf: rateAsOf
     },
@@ -226,7 +226,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "cpi",
       label: "CPI (YoY)",
       value: mvLabor(macro.cpiInflation),
-      what: "Consumer-price inflation over the last year. Hot inflation squeezes margins and valuation multiples.",
+      what: "Consumer-price inflation over the last year.  Hot inflation squeezes margins and valuation multiples.",
       reading:
         typeof cpi === "number"
           ? cpi > 4
@@ -288,7 +288,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "Real Fed funds",
       value: fmtSigned(realFF, " pp"),
       tone: typeof realFF === "number" && realFF > 1 ? "warn" : undefined,
-      what: "Policy rate minus CPI inflation. Above zero, the Fed is actively braking the economy.",
+      what: "Policy rate minus CPI inflation.  Above zero, the Fed is actively braking the economy.",
       reading:
         typeof realFF === "number"
           ? realFF > 1
@@ -303,7 +303,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "gdp",
       label: "Real GDP",
       value: mv(macro.realGDPGrowth),
-      what: "Inflation-adjusted economic growth, annualized. Around 2% is trend for the U.S.",
+      what: "Inflation-adjusted economic growth, annualized.  Around 2% is trend for the U.S.",
       reading:
         typeof gdp === "number"
           ? gdp < 0
@@ -366,7 +366,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "VIX term",
       value: fmtPlain(vixTerm, 2, "×"),
       tone: typeof vixTerm === "number" ? (vixTerm > 1 ? "neg" : "pos") : undefined,
-      what: "VIX divided by 3-month VIX. Above 1, near-term fear exceeds longer-term fear (backwardation) — a stress signature.",
+      what: "VIX divided by 3-month VIX.  Above 1, near-term fear exceeds longer-term fear (backwardation) — a stress signature.",
       reading:
         typeof vixTerm === "number"
           ? vixTerm > 1
@@ -380,7 +380,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "SKEW",
       value: fmtPlain(signals.skew, 1),
       tone: typeof signals.skew === "number" ? (signals.skew > 145 ? "neg" : signals.skew > 135 ? "warn" : undefined) : undefined,
-      what: "Cboe SKEW — how much investors pay for crash protection in S&P options. Around 100 is normal.",
+      what: "Cboe SKEW — how much investors pay for crash protection in S&P options.  Around 100 is normal.",
       reading:
         typeof signals.skew === "number"
           ? signals.skew > 145
@@ -463,7 +463,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       label: "S&P spec net",
       value: typeof signals.cotSpNonCommNet === "number" ? signals.cotSpNonCommNet.toLocaleString() : EM_DASH,
       tone: toneSign(signals.cotSpNonCommNet),
-      what: "Large speculators' net position in E-mini S&P 500 futures (CFTC, weekly and lagged). Positive = net long.",
+      what: "Large speculators' net position in E-mini S&P 500 futures (CFTC, weekly and lagged).  Positive = net long.",
       reading:
         typeof signals.cotSpNonCommNet === "number"
           ? signals.cotSpNonCommNet >= 0
@@ -480,7 +480,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
           ? `${signals.cotSpNonCommNetPctOI >= 0 ? "+" : ""}${signals.cotSpNonCommNetPctOI.toFixed(1)}%`
           : EM_DASH,
       tone: toneSign(signals.cotSpNonCommNetPctOI),
-      what: "The same net position as a share of total open interest — comparable across time. Regime context, never a single-stock trigger.",
+      what: "The same net position as a share of total open interest — comparable across time.  Regime context, never a single-stock trigger.",
       asOf: signals.cotReportDate
     },
     {
@@ -549,7 +549,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "usd",
       label: "Broad USD",
       value: mv(macro.usdIndex),
-      what: "Broad trade-weighted dollar index (FRED DTWEXBGS, ~120 scale — not DXY). A strong dollar pressures multinationals' overseas earnings and commodities.",
+      what: "Broad trade-weighted dollar index (FRED DTWEXBGS, ~120 scale — not DXY).  A strong dollar pressures multinationals' overseas earnings and commodities.",
       asOf: mAsOf
     },
     {
@@ -571,7 +571,7 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
       key: "unemployment",
       label: "Unemployment",
       value: mvLabor(macro.unemploymentRate),
-      what: "Share of the labor force out of work. A sustained rise is the classic recession confirmation.",
+      what: "Share of the labor force out of work.  A sustained rise is the classic recession confirmation.",
       reading:
         typeof unemp === "number"
           ? unemp < 4
@@ -635,31 +635,31 @@ export function buildSections(board: Board, sourcing: MacroSourcing): TileSectio
     {
       id: "rates",
       title: "Rates & yield curve",
-      desc: "Treasury yields and curve spreads from FRED (3M/2Y/10Y and their curves also have a key-free Treasury.gov fallback). An inverted curve (short rates above long rates) is the classic recession warning and feeds the regime label.",
+      desc: "Treasury yields and curve spreads from FRED (3M/2Y/10Y and their curves also have a key-free Treasury.gov fallback).  An inverted curve (short rates above long rates) is the classic recession warning and feeds the regime label.",
       tiles: rates
     },
     {
       id: "inflation",
       title: "Inflation & growth",
-      desc: "Inflation gauges, real (inflation-adjusted) rates, and growth from FRED (CPI also has a key-free BLS fallback — see the misery index below and the labor tiles under Liquidity & economy). Real rates set the valuation backdrop for stocks.",
+      desc: "Inflation gauges, real (inflation-adjusted) rates, and growth from FRED (CPI also has a key-free BLS fallback — see the misery index below and the labor tiles under Liquidity & economy).  Real rates set the valuation backdrop for stocks.",
       tiles: inflationGrowth
     },
     {
       id: "risk",
       title: "Risk & volatility",
-      desc: "Fear gauges (Cboe), credit spreads (FRED), and the stocks-vs-bonds premium. This group moves first when markets get stressed.",
+      desc: "Fear gauges (Cboe), credit spreads (FRED), and the stocks-vs-bonds premium.  This group moves first when markets get stressed.",
       tiles: risk
     },
     {
       id: "positioning",
       title: "Positioning & factor regime",
-      desc: "Who is positioned where (CFTC futures data, weekly) and which equity styles are being paid (Kenneth French factors, ~6-week lag). Context, not triggers.",
+      desc: "Who is positioned where (CFTC futures data, weekly) and which equity styles are being paid (Kenneth French factors, ~6-week lag).  Context, not triggers.",
       tiles: positioning
     },
     {
       id: "liquidity",
       title: "Liquidity & economy",
-      desc: "Money supply, the dollar, oil, and the labor/housing pulse — the slower-moving backdrop behind everything above. Unemployment and nonfarm payrolls also have a key-free BLS fallback when no FRED key is configured.",
+      desc: "Money supply, the dollar, oil, and the labor/housing pulse — the slower-moving backdrop behind everything above.  Unemployment and nonfarm payrolls also have a key-free BLS fallback when no FRED key is configured.",
       tiles: liquidity
     }
   ];
@@ -680,6 +680,12 @@ export interface RegimeInfo {
 // a substring match for anything `regimeFromLabel` doesn't recognize as one of the five canonical
 // labels (older snapshot payloads, or a future/unexpected label) so this card degrades gracefully
 // instead of collapsing every unrecognized string to "no data".
+import {
+  REGIME_BELOW_MEDIAN_CRISIS,
+  REGIME_BELOW_MEDIAN_RISK_OFF,
+  REGIME_GATES_ENTRIES
+} from "@/lib/guardrail-copy";
+
 export function regimeInfo(regime: string): RegimeInfo {
   const enumRegime = regimeFromLabel(regime);
   const l = regime.toLowerCase();
@@ -694,16 +700,14 @@ export function regimeInfo(regime: string): RegimeInfo {
     return {
       chipTone: "neg",
       chipWord: "escalation",
-      meaning:
-        "VIX above 30 — panic-level volatility. Buy ideas scoring below the scan median are hard-vetoed, and the optional crisis exposure cap can shrink every newly opened position."
+      meaning: REGIME_BELOW_MEDIAN_CRISIS
     };
   }
   if (isRiskOff) {
     return {
       chipTone: "neg",
       chipWord: "escalation",
-      meaning:
-        "VIX above 20 (or above 17 with an inverted yield curve) — stressed markets. Buy ideas scoring below the scan median are hard-vetoed, and a flip into this regime can trigger an immediate strategy run."
+      meaning: REGIME_BELOW_MEDIAN_RISK_OFF
     };
   }
   if (isCautiousInverted) {
@@ -711,7 +715,7 @@ export function regimeInfo(regime: string): RegimeInfo {
       chipTone: "warn",
       chipWord: "escalation",
       meaning:
-        "Volatility is calm, but the 10Y Treasury yields less than the Fed's policy rate — a classic late-cycle recession warning. The optional crisis/inverted exposure cap applies to new positions."
+        "Volatility is calm, but the 10Y Treasury yields less than the Fed's policy rate — a classic late-cycle recession warning.  The optional crisis/inverted exposure cap applies to new positions."
     };
   }
   if (isRiskOn) {
@@ -719,7 +723,7 @@ export function regimeInfo(regime: string): RegimeInfo {
       chipTone: "pos",
       chipWord: "calm",
       meaning:
-        "VIX below 13 with a normal yield curve — unusually calm, trend-friendly markets. No regime-specific vetoes or caps apply."
+        "VIX below 13 with a normal yield curve — unusually calm, trend-friendly markets.  No regime-specific vetoes or caps apply."
     };
   }
   if (isUnknown) {
@@ -727,14 +731,14 @@ export function regimeInfo(regime: string): RegimeInfo {
       chipTone: "muted",
       chipWord: "no data",
       meaning:
-        "No macro feed is available (no FRED key and the key-free VIX lookup failed), so the classifier refuses to guess. Regime-conditioned caps and vetoes stay neutral."
+        "No macro feed is available (no FRED key and the key-free VIX lookup failed), so the classifier refuses to guess.  Regime-conditioned caps and vetoes stay neutral."
     };
   }
   return {
     chipTone: "accent",
     chipWord: "normal",
     meaning:
-      "Volatility is in its normal band and the yield curve is not inverted. No regime-specific vetoes or caps apply."
+      "Volatility is in its normal band and the yield curve is not inverted.  No regime-specific vetoes or caps apply."
   };
 }
 
@@ -750,11 +754,11 @@ export const REGIME_USAGE: Array<{ title: string; body: string }> = [
   },
   {
     title: "It gates entries",
-    body: "In Risk-Off or Crisis, buys scoring below the scan median are vetoed outright, and an optional cap limits how large any new position may open in Crisis/Inverted regimes."
+    body: REGIME_GATES_ENTRIES
   },
   {
     title: "Flips are watched",
-    body: "The scheduler re-checks the label on every tick. A change is recorded to the audit log, and a flip into Risk-Off / Crisis / Inverted can broadcast a material event that triggers a run."
+    body: "The scheduler re-checks the label on every tick.  A change is recorded to the audit log, and a flip into Risk-Off / Crisis / Inverted can broadcast a material event that triggers a run."
   }
 ];
 

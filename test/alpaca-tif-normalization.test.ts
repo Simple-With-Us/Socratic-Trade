@@ -16,8 +16,7 @@ import { resolveAlpacaTimeInForce } from "../src/lib/alpaca";
 let lastCreateOrderOpts: any = null;
 
 vi.mock("@alpacahq/alpaca-trade-api", () => {
-  return {
-    default: class MockAlpaca {
+  class MockAlpaca {
       async getAccount() {
         return { account_number: "MOCK_ACC", portfolio_value: "50000", buying_power: "25000", equity: "40000", cash: "10000" };
       }
@@ -28,8 +27,8 @@ vi.mock("@alpacahq/alpaca-trade-api", () => {
         return { id: "tif_order_1", status: "accepted", qty: opts.qty, filled_qty: "0", filled_avg_price: null };
       }
       async cancelOrder() { /* not exercised here */ }
-    }
-  };
+  }
+  return { Alpaca: MockAlpaca, default: MockAlpaca };
 });
 
 async function lastAuditPayload(kind: string): Promise<Record<string, unknown> | undefined> {
@@ -96,6 +95,19 @@ describe("resolveAlpacaTimeInForce (pure resolution matrix)", () => {
   it("a whole-share quantity with no notional stays GTC even when notional is explicitly undefined", () => {
     const r = resolveAlpacaTimeInForce({ requestedTimeInForce: "gtc", isBracket: false, quantity: 5, notional: undefined });
     expect(r.timeInForce).toBe("gtc");
+    expect(r.normalized).toBe(false);
+  });
+
+  it("an extended-hours GTC order normalizes to day (Alpaca extended-hours is day-only)", () => {
+    const r = resolveAlpacaTimeInForce({ requestedTimeInForce: "gtc", isBracket: false, quantity: 10, extendedHours: true });
+    expect(r.timeInForce).toBe("day");
+    expect(r.normalized).toBe(true);
+    expect(r.reason).toBe("extended_hours");
+  });
+
+  it("an extended-hours gfd order resolves to day but is not flagged normalized (nothing was overridden)", () => {
+    const r = resolveAlpacaTimeInForce({ requestedTimeInForce: "gfd", isBracket: false, quantity: 10, extendedHours: true });
+    expect(r.timeInForce).toBe("day");
     expect(r.normalized).toBe(false);
   });
 });

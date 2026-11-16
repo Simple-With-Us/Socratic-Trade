@@ -5,6 +5,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY } from "../src/lib/defaults";
 import type { EquityPosition, MarketScan, Portfolio, TradeProposal, TradingPolicy } from "../src/lib/types";
 import { applyDeterministicSizing } from "../src/lib/strategy-risk";
+import { setInternalSetting } from "../src/lib/db-settings";
+import { SIGNAL_HEALTH_HORIZONS } from "../src/lib/signal-health";
 
 // Conviction-size cap (panel finding): AI confidenceScore is a direct linear multiplier on size and
 // a learned "fact" can inflate it. The 20-lot evidence floor only protects UNPROVEN theses, so a
@@ -74,15 +76,20 @@ async function seedClosedLots(opts: {
   wins: number;
   winPct: number;
   lossPct: number;
+  /** Defaults to insertFillEvent's own "local" default — pass explicitly only when a test needs
+   *  fills scoped to a non-default userId (e.g. to isolate per-test drift-alarm state, which is
+   *  keyed by the SAME userId passed to applyDeterministicSizing). */
+  userId?: string;
 }) {
   const { insertFillEvent } = await import("../src/lib/db");
-  const { account, count, wins, winPct, lossPct } = opts;
+  const { account, count, wins, winPct, lossPct, userId } = opts;
   let t = 0;
   for (let i = 0; i < count; i++) {
     const sym = `SYM${i}`;
     const entry = 100;
     const exit = i < wins ? entry * (1 + winPct / 100) : entry * (1 - lossPct / 100);
     insertFillEvent({
+      userId,
       accountNumber: account,
       source: "paper",
       symbol: sym,
@@ -95,6 +102,7 @@ async function seedClosedLots(opts: {
       raw: { proposal: { tradeThesisTag: THESIS, entryMarketRegime: REGIME } }
     });
     insertFillEvent({
+      userId,
       accountNumber: account,
       source: "paper",
       symbol: sym,
@@ -327,5 +335,107 @@ describe("conviction-size cap", () => {
 
     expect(notionalFromRationale(a)).toBe(notionalFromRationale(b));
     expect(a.rationale).toBe(b.rationale);
+  });
+});
+
+// Signal-health auto-throttle (opt-in — policy.tuning.signalHealthAutoThrottle, default OFF):
+// while a CONFIRMED drift alarm is active (src/lib/signal-health.ts's signalHealthDriftActive,
+// read at strategy-risk.ts ~lines 541-547), conviction's upside is capped at the SAME
+// convictionCapUncorroborated value even for a thesis that WOULD otherwise be corroborated by
+// realized edge. Seeds the drift alarm exactly the way production reads it: a `settings` row at
+// signal-health.ts's private driftStateKey format (`signal_health:drift:{userId}:{horizon}`) —
+// there is no public seam to inject drift state, so this mirrors the on-disk contract directly
+// rather than running the full observation → detectDrift → runSignalHealthRefresh pipeline.
+function seedActiveDriftAlarm(userId: string, horizon: string = SIGNAL_HEALTH_HORIZONS[0]): void {
+  setInternalSetting(`signal_health:drift:${userId}:${horizon}`, {
+    active: true,
+    horizon,
+    detectedAt: "2026-06-01",
+    rankIC: -0.2,
+    slope: -0.01,
+    trailingDeclines: 3
+  });
+}
+
+describe("signal-health auto-throttle (drift alarm caps conviction upside)", () => {
+  // Corroborated stats identical in shape to case (b) above: 18 winners (+5%) / 2 losers (-1%)
+  // clears both the win-rate and edge corroboration gates, so WITHOUT the throttle raw conviction
+  // 0.95 rides through uncapped. Fills are seeded under `userId` explicitly — the scorecard lookup
+  // (getThesisRegimeScorecard/getThesisScorecard) is scoped by (account, userId), and it's the SAME
+  // userId that signalHealthDriftActive reads the drift alarm under, so both must line up.
+  async function seedCorroboratedStats(account: string, userId: string) {
+    await seedClosedLots({ account, count: 20, wins: 18, winPct: 5, lossPct: 1, userId });
+  }
+
+  it("(f) ACTIVE drift + throttle ON caps conviction upside at convictionCapUncorroborated on an otherwise-corroborated thesis, with a confidence_capped_signal_drift receipt", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "CAP-DRIFT-F";
+    const userId = `drift-throttle-${randomUUID()}`;
+    await seedCorroboratedStats(account, userId);
+    setPolicy(policyFor(account), userId);
+    seedActiveDriftAlarm(userId);
+
+    const throttled = applyDeterministicSizing(
+      buyProposal(95),
+      policyFor(account, { signalHealthAutoThrottle: true }),
+      PORTFOLIO,
+      "paper",
+      userId,
+      NO_POSITIONS
+    );
+    // Same corroborated inputs, throttle knob OFF — the pre-existing corroborated-thesis behavior
+    // (case (b)): raw conviction rides through uncapped despite the active drift row in the DB.
+    const baseline = applyDeterministicSizing(
+      buyProposal(95),
+      policyFor(account),
+      PORTFOLIO,
+      "paper",
+      userId,
+      NO_POSITIONS
+    );
+
+    expect(notionalFromRationale(throttled)).toBeGreaterThan(0);
+    expect(notionalFromRationale(throttled)).toBeLessThan(notionalFromRationale(baseline));
+    expect(throttled.rationale).toContain("60% AI conviction"); // convictionCapUncorroborated default 0.6
+    expect(baseline.rationale).toContain("95% AI conviction"); // uncapped — proves the throttle, not the stats, did this
+    expect(throttled.dataAdjustments?.some((note) => note.startsWith("confidence_capped_signal_drift"))).toBe(true);
+    expect(baseline.dataAdjustments ?? []).not.toEqual(expect.arrayContaining([expect.stringMatching(/^confidence_capped_signal_drift/)]));
+  });
+
+  it("(g) throttle knob OFF (default): an active drift alarm never caps sizing — corroborated-thesis behavior is untouched", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "CAP-DRIFT-G";
+    const userId = `drift-throttle-off-${randomUUID()}`;
+    await seedCorroboratedStats(account, userId);
+    setPolicy(policyFor(account), userId);
+    seedActiveDriftAlarm(userId); // active drift row present for this exact userId
+
+    const sized = applyDeterministicSizing(buyProposal(95), policyFor(account), PORTFOLIO, "paper", userId, NO_POSITIONS);
+
+    expect(sized.rationale).toContain("95% AI conviction"); // uncapped — the drift row is never read
+    expect(sized.rationale).not.toContain("Conviction capped");
+    expect(sized.dataAdjustments ?? []).toEqual([]);
+  });
+
+  it("(h) throttle knob ON but NO active drift: sizing is unchanged from the knob-off case", async () => {
+    const { setPolicy } = await import("../src/lib/db");
+    const account = "CAP-DRIFT-H";
+    const userId = `drift-throttle-nodrift-${randomUUID()}`; // no seedActiveDriftAlarm call for this userId
+    await seedCorroboratedStats(account, userId);
+    setPolicy(policyFor(account), userId);
+
+    const throttleOnNoDrift = applyDeterministicSizing(
+      buyProposal(95),
+      policyFor(account, { signalHealthAutoThrottle: true }),
+      PORTFOLIO,
+      "paper",
+      userId,
+      NO_POSITIONS
+    );
+    const throttleOff = applyDeterministicSizing(buyProposal(95), policyFor(account), PORTFOLIO, "paper", userId, NO_POSITIONS);
+
+    expect(notionalFromRationale(throttleOnNoDrift)).toBe(notionalFromRationale(throttleOff));
+    expect(throttleOnNoDrift.rationale).toContain("95% AI conviction");
+    expect(throttleOnNoDrift.dataAdjustments ?? []).toEqual([]);
   });
 });

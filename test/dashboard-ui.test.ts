@@ -48,13 +48,26 @@ describe("dashboard UI provenance helpers", () => {
     ).toBe("NASDAQ Delayed Screener, Congress.Trade, Tiingo, Finnhub, FMP, Yahoo Finance, FINRA, Computed, SEC EDGAR, BlackRock Holdings, Yahoo Finance Delayed Quotes");
   });
 
-  it("labels the camelCase dynamic-universe source tags market.ts actually emits, not a garbled title-case fallback", () => {
-    // market.ts builds these as `${universe}-universe` from the raw IndexUniverse config id
-    // (see loadDynamicUniverseQuotes) — nasdaqComposite/nyseComposite/ftWilshire5000 are the only
-    // camelCase compound ids, and a mismatched/missing label-map key used to fall through to
-    // titleizeSource's raw-string fallback ("Nasdaqcomposite Universe").
-    expect(formatSourceList("nasdaqComposite-universe")).toBe("NASDAQ Composite Universe");
+  it("labels every IndexUniverse scan source from the shared product names, not slugs", () => {
+    // market.ts builds these as `${universe}-universe` from the raw IndexUniverse id.
+    // camelCase ids lowercase to nasdaqcomposite-universe; missing keys used to
+    // titleize as "Nasdaqcomposite Universe" or leak "dow30-universe" via friendlySource.
+    expect(formatSourceList("sp100-universe")).toBe("S&P 100 Universe");
+    expect(formatSourceList("sp500-universe")).toBe("S&P 500 Universe");
+    expect(formatSourceList("nasdaq100-universe")).toBe("Nasdaq 100 Universe");
+    expect(formatSourceList("nasdaqComposite-universe")).toBe("Nasdaq Composite Universe");
+    expect(formatSourceList("dow30-universe")).toBe("Dow 30 Universe");
+    expect(formatSourceList("russell2000-universe")).toBe("Russell 2000 Universe");
     expect(formatSourceList("nyseComposite-universe")).toBe("NYSE Composite Universe");
     expect(formatSourceList("ftWilshire5000-universe")).toBe("FT Wilshire 5000 Universe");
+    expect(formatSourceList("sp500-universe+nasdaqComposite-universe+dow30-universe+nyseComposite-universe")).toBe(
+      "S&P 500 Universe, Nasdaq Composite Universe, Dow 30 Universe, NYSE Composite Universe"
+    );
+    expect(formatSourceList("sp500-universe+nasdaqComposite-universe+dow30-universe+nyseComposite-universe")).not.toMatch(
+      /sp500|nasdaqComposite|dow30|nyseComposite/
+    );
+    expect(friendlySource("dow30-universe")).toBe("Dow 30 Universe");
+    expect(friendlySource("russell2000-universe")).toBe("Russell 2000 Universe");
+    expect(friendlySource("nasdaqComposite-universe")).toBe("Nasdaq Composite Universe");
   });
 });

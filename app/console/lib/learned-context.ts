@@ -80,9 +80,11 @@ export function rejectPendingLearnedContext(id: string): Promise<void> {
  *  RIGHT NOW. The server stamps the block with the APPROVAL date (see
  *  mergeStrategyDirectiveBlock in src/lib/learned-context/store.ts), so the
  *  preview uses today — not createdAt, which the legacy UI showed and which
- *  could not match what actually lands. */
+ *  could not match what actually lands. The row's source/origin are passed for
+ *  the same reason: the server stamps a provenance line and, when the text is
+ *  not owner-authored, contains it — the preview must show both. */
 export function directiveBlockPreview(item: PendingLearnedItem): string {
-  return formatStrategyDirectiveBlock(item.id, new Date().toISOString(), item.value);
+  return formatStrategyDirectiveBlock(item.id, new Date().toISOString(), item.value, item.source, item.origin);
 }
 
 /** Everything durably recorded for this user: silent fact-tier rows (never queued, never

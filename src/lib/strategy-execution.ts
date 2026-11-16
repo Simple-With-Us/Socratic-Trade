@@ -1,9 +1,16 @@
 import { LANE_WAITS, withAccountMutation } from "./account-mutation";
-import { fetchFreshQuotesCascade } from "./quotes-cascade";
+import { loadApprovalQuoteScan } from "./approval-quote-scan";
 import { repriceStoredLimitProposal } from "./approval-reprice";
 import { getBrokerGateway } from "./broker";
+import {
+  heldPositionFor,
+  isRetryablePositionInvariantError,
+  normalizeExitSidesForHeldPositions
+} from "./order-position-invariant";
 import { evaluateBrokerHeldExitAvailability, brokerHeldExitBlockReason } from "./broker-held-orders";
-import { describeBrokerMinimumOrderBlock, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { isRetryableExitStopReleaseError, placeExitReleasingOwnStops, planExitStopRelease, retryableExitStopReleaseTitle } from "./exit-stop-release";
+import { describeBrokerMinimumOrderBlock, detectBrokerMinimumPlacementError, planBrokerMinimumBump, shouldAlertBrokerMinimumOrderBlock } from "./broker-minimum-guard";
+import { clearAccountActionRequired, detectRobinhoodAccountQuestionnaireError, markAccountActionRequired, shouldAlertAccountActionRequired } from "./broker-account-questionnaire";
 import { hasBrokerReportedFill, hasBrokerReportedPricedFill, isLiveOrderState, isRejectedOrCanceledState } from "./broker-side";
 import { audit, clearStopPlans, deriveExitContractFromOpening, getDb, recordStopPlan } from "./db";
 import { auditDeduped } from "./audit-dedupe";
@@ -30,13 +37,12 @@ import {
   redTeamSizingFromSnapshot,
   stampRedTeamResult
 } from "./finalized-sizing-review";
-import { dynamicIndexUniversesForPolicy } from "./index-universes";
-import { scanMarket, mergeQuoteData } from "./market";
+import { currentMarketSession } from "./market-hours";
 import { normalizeSymbol } from "./money";
 import { sendNotification } from "./notifications";
 import { OperationLeaseOwnershipError } from "./operation-lease";
 import { recordFillFromProposal } from "./performance";
-import { allowedSymbolsForPolicy, estimateNotional, applyOpeningOrderHeadroom, evaluateTradeProposal } from "./policy";
+import { estimateNotional, applyOpeningOrderHeadroom, evaluateTradeProposal } from "./policy";
 import { effectiveDailyOpeningNotionalCap } from "./policy-caps";
 import { assertLivePreflight } from "./preflight-live-guard";
 import { repriceStoredProtectiveExit, assessProtectiveExitRepriceDrift } from "./protective-exit-routing";
@@ -46,14 +52,31 @@ import { buildSocraticDecisionCase } from "./socratic-runtime";
 import { notifyStaleLimitOrders } from "./stale-limit-orders";
 import { freshPlacementBlockReason } from "./system-state-placement-guard";
 import { getUserWashSaleLockProvenance } from "./tax";
-import { ExecutionMode, FillEvent, OrderValidationError, PolicyDecision, BrokerGateway, TradeProposal, ReviewedOrder, MarketScan, EquityOrder, EquityPosition, FillSource } from "./types";
+import { ExecutionMode, FillEvent, OrderValidationError, PolicyDecision, BrokerGateway, BrokerOrderLookup, TradeProposal, ReviewedOrder, MarketScan, EquityOrder, EquityPosition, FillSource } from "./types";
+import {
+  DEFAULT_ORDER_LOOKUP_BUDGET,
+  LIVE_MATCH_RECHECK_AGE_MS,
+  bookBracketExitLegs,
+  bump,
+  linkReplacementExecution,
+  lookupBrokerOrder,
+  runBrokerTruthSweeps,
+  type BrokerTruthContext,
+  type FillReconcileSummary,
+  type OrderLookupBudget
+} from "./fill-reconciliation";
 import { applyRedTeamHalfSize, approvedEscalationsFromDecision, isRiskAddingOpening, shouldEscalateDecision } from "./strategy-risk";
 import {
   createExecuteProposalLockOwner,
   startStrategyLockGuard,
   StrategyLockOwnershipLostError
 } from "./strategy-lock-guard";
-import { assertLiveApprovalConfirmation, uniqueSymbols, currentPricesFromScan, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
+import {
+  classifyPlaceOrderError,
+  mustReconcileRetryablePlaceError,
+  type ExecuteProposalResult
+} from "./placement-outcome";
+import { appendDecisionStep, assertLiveApprovalConfirmation, protectiveExitQuoteFromScan, openingPolicyNotionalCap, autoRevertOnCapBreach, auditWashSaleProceed } from "./strategy";
 
 export interface LiveApprovalConfirmation {
   proposalId?: string;
@@ -202,10 +225,17 @@ async function commitRecoveredOpeningStopPlan(input: {
     let basis = input.price;
     try {
       const positions = await input.gateway.getEquityPositions(input.accountNumber);
-      basis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost ?? basis;
+      // Only a positive broker averageCost replaces the fill-price basis: a position
+      // reporting 0 (e.g. just-opened, not yet priced) must not discard a usable basis.
+      const brokerBasis = positions.find((position) => normalizeSymbol(position.symbol) === normalizeSymbol(proposal.symbol))?.averageCost;
+      if (brokerBasis != null && brokerBasis > 0) basis = brokerBasis;
     } catch {
       // The broker fill price remains a valid fallback for a fresh position.
     }
+    // No positive anchor (broker omitted averagePrice, proposal had no referencePrice, and no
+    // live position basis): a stop plan recorded at avg_cost 0 prices every derived stop at $0.
+    // Skip the plan rather than persist a zero-basis plan; the fill receipt itself stays booked.
+    if (!(basis > 0)) return;
     const openingOrderId = (proposal.bracketStopLoss != null || proposal.bracketTakeProfit != null) ? input.orderId : undefined;
     const contract = deriveExitContractFromOpening({
       side: proposal.side === "short" ? "short" : "buy",
@@ -238,13 +268,7 @@ export async function executeProposal(
   // proposal in the request (computed once before its loop) instead of paying up to
   // LANE_WAITS.approvalPlacement per proposal serially — see app/api/proposals/bulk-approve/route.ts.
   options: { liveConfirmation?: LiveApprovalConfirmation; leaseWaitMs?: number } = {}
-): Promise<{
-  status: string;
-  orderId?: string;
-  brokerState?: string;
-  fillStatus?: string;
-  reasons?: string[];
-}> {
+): Promise<ExecuteProposalResult> {
   const policy = getPolicy(userId);
   const activeAccount = getActiveConnectedAccount(userId);
   const executionState = deriveExecutionState(policy, activeAccount);
@@ -308,25 +332,44 @@ export async function executeProposal(
       gateway.getEquityPositions(policy.accountNumber),
       gateway.getEquityOrders(policy.accountNumber)
     ]);
-    const allowedSymbols = allowedSymbolsForPolicy(policy);
-    const approvalScanBase = await scanMarket(allowedSymbols, positions, policy.scoringWeights, userId, dynamicIndexUniversesForPolicy(policy), {
-      candidateLimit: policy.marketScanCandidateLimit,
-      outlierReserve: policy.marketScanOutlierReserve,
-      universeFloor: policy.universeFloor
+    // Quote the proposal + held names only. A full-universe scanMarket here is why
+    // Approve sat on "Sending approve…" for tens of seconds (NASDAQ screener + enrich).
+    const approvalScan = await loadApprovalQuoteScan({
+      proposal,
+      positions,
+      userId,
+      accountNumber: policy.accountNumber,
+      connectedAccountId: policy.connectedAccountId
     });
-    const approvalQuoteSymbols = uniqueSymbols([...approvalScanBase.topCandidates.map((quote) => quote.symbol), proposal.symbol]);
-    const approvalScan = mergeQuoteData(
-      approvalScanBase,
-      await fetchFreshQuotesCascade(approvalQuoteSymbols, userId, policy.accountNumber, policy.connectedAccountId)
-    );
 
     // An account is an account: the approval is always evaluated against the real broker-reported
     // portfolio and positions for the active account — there is no local-simulation alternative.
-    const currentPrices = currentPricesFromScan(approvalScan);
     const account = { portfolio, positions };
     lockGuard.assertOwned();
     await notifyStaleLimitOrders({ userId, policy, orders });
     lockGuard.assertOwned();
+
+    // A stored bracketed "buy" of at most a held SHORT is a cover (same wire direction, so the
+    // owner's approval still describes the order): re-verb it against the fresh positions and drop
+    // its legs before policy, and persist it so the card shows what the broker receives — the PG
+    // short's twelve 422 "bracket orders must be entry orders".  A stored "sell" of a held short
+    // is NOT flipped here (that reverses the direction the owner approved); the placement choke
+    // point refuses it with the correct verb instead.
+    {
+      const [sideNormalized] = normalizeExitSidesForHeldPositions(
+        [proposal],
+        positions,
+        { userId, connectedAccountId: policy.connectedAccountId, lane: "approval", proposalId },
+        { convertSellToCover: false }
+      );
+      if (sideNormalized !== proposal) {
+        proposal = sideNormalized;
+        if (!updatePendingProposalReprice(proposalId, { proposal }, userId)) {
+          const current = getProposal(proposalId, userId)?.status ?? "removed";
+          throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
+        }
+      }
+    }
 
     // Approval-held protective exits: an extended-hours marketable-limit stored on the card was
     // priced off the generation-time quote and goes stale while it waits for a human — a quote that
@@ -370,7 +413,7 @@ export async function executeProposal(
         audit("protective_exit_reprice_reapproval", { ...repriceChange, reason, persisted }, userId, policy.connectedAccountId);
         if (!persisted) {
           const current = getProposal(proposalId, userId)?.status ?? "removed";
-          return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+          throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
         }
         await sendNotification(
           {
@@ -380,7 +423,7 @@ export async function executeProposal(
           },
           { policy, userId }
         );
-        return { status: "proposed", reasons: [reason] };
+        throw new Error([reason].join(" "));
       }
       // Persist the repriced order BEFORE claiming/placing so trade_proposals.proposal (Recent,
       // Activity, getProposal) shows the order the broker actually received, never the stale
@@ -388,7 +431,7 @@ export async function executeProposal(
       // this approval was in flight, stop here like the other pending guards.
       if (!updatePendingProposalReprice(proposalId, { proposal, estimatedNotional: repricedNotional }, userId)) {
         const current = getProposal(proposalId, userId)?.status ?? "removed";
-        return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+        throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
       }
       audit("protective_exit_repriced", repriceChange, userId, policy.connectedAccountId);
     }
@@ -462,7 +505,7 @@ export async function executeProposal(
           audit("approval_limit_reprice_reapproval", { ...repriceChange, reason, persisted }, userId, policy.connectedAccountId);
           if (!persisted) {
             const current = getProposal(proposalId, userId)?.status ?? "removed";
-            return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+            throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
           }
           await sendNotification(
             {
@@ -472,13 +515,13 @@ export async function executeProposal(
             },
             { policy, userId }
           );
-          return { status: "proposed", reasons: [reason] };
+          throw new Error([reason].join(" "));
         }
         // Persist the repriced order BEFORE claiming/placing (same CAS-on-'proposed' rationale as
         // the protective reprice): the row must show the order the broker actually received.
         if (!updatePendingProposalReprice(proposalId, { proposal, estimatedNotional: repricedNotional }, userId)) {
           const current = getProposal(proposalId, userId)?.status ?? "removed";
-          return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+          throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
         }
         audit("approval_limit_repriced", repriceChange, userId, policy.connectedAccountId);
       }
@@ -499,7 +542,7 @@ export async function executeProposal(
         },
         { policy, userId }
       );
-      return { status: "blocked", reasons: [reason] };
+      throw new Error([reason].join(" "));
     }
 
     let review = await gateway.reviewEquityOrder({ accountNumber: policy.accountNumber, ...proposal });
@@ -720,7 +763,7 @@ export async function executeProposal(
               );
               if (!persisted) {
                 const current = getProposal(proposalId, userId)?.status ?? "removed";
-                return { status: current, reasons: [`Proposal was ${current} before the final-size review could be saved.`] };
+                throw new Error([`Proposal was ${current} before the final-size review could be saved.`].join(" "));
               }
               await sendNotification(
                 {
@@ -730,7 +773,7 @@ export async function executeProposal(
                 },
                 { policy, userId }
               );
-              return { status: "proposed", reasons: [ownerApprovalReason] };
+              throw new Error([ownerApprovalReason].join(" "));
             }
           }
 
@@ -738,7 +781,7 @@ export async function executeProposal(
           // checks blocks, the ledger/case still describes the exact order it evaluated.
           if (!updatePendingProposalReprice(proposalId, { proposal, review, estimatedNotional: review.estimatedNotional }, userId)) {
             const current = getProposal(proposalId, userId)?.status ?? "removed";
-            return { status: current, reasons: [`Proposal was ${current} before the broker-adjusted size could be saved.`] };
+            throw new Error([`Proposal was ${current} before the broker-adjusted size could be saved.`].join(" "));
           }
         } else {
           Object.assign(proposal, originalSizing);
@@ -767,7 +810,7 @@ export async function executeProposal(
           { policy, userId }
         );
       }
-      return { status: "blocked", reasons: [brokerMinimumBlockReason] };
+      throw new Error([brokerMinimumBlockReason].join(" "));
     }
 
     if (ownerApprovedStoredFinalSize) {
@@ -820,7 +863,7 @@ export async function executeProposal(
         );
         if (!persisted) {
           const current = getProposal(proposalId, userId)?.status ?? "removed";
-          return { status: current, reasons: [`Proposal was ${current} before the updated owner consent could be saved.`] };
+          throw new Error([`Proposal was ${current} before the updated owner consent could be saved.`].join(" "));
         }
         await sendNotification(
           {
@@ -830,7 +873,7 @@ export async function executeProposal(
           },
           { policy, userId }
         );
-        return { status: "proposed", reasons: [driftReason] };
+        throw new Error([driftReason].join(" "));
       }
 
       const approvedAt = new Date().toISOString();
@@ -841,10 +884,12 @@ export async function executeProposal(
       };
       if (proposal.redTeamVerdict) {
         proposal.redTeamVerdict = { ...proposal.redTeamVerdict, humanOverrideApplied: true };
+        // Scorecard lifecycle receipt — appended exactly where humanOverrideApplied is set.
+        appendDecisionStep(proposal, "human_approved");
       }
       if (!updatePendingProposalReprice(proposalId, { proposal, review, estimatedNotional: review.estimatedNotional }, userId)) {
         const current = getProposal(proposalId, userId)?.status ?? "removed";
-        return { status: current, reasons: [`Proposal was ${current} before owner approval could be recorded.`] };
+        throw new Error([`Proposal was ${current} before owner approval could be recorded.`].join(" "));
       }
       audit(
         "final_size_red_review_owner_override",
@@ -907,21 +952,23 @@ export async function executeProposal(
         userId,
         policy.connectedAccountId
       );
-      await sendNotification(
-        {
-          type: "provider_degraded",
-          title: `Stale Quote Warning: ${proposal.symbol} quote was ${ageText}`,
-          payload: {
-            proposalId,
-            symbol: proposal.symbol,
-            side: proposal.side,
-            ageSec: decision.quoteStale.ageSec,
-            limitPrice: proposal.limitPrice,
-            referencePrice: decision.quoteStale.referencePrice
-          }
-        },
-        { policy, userId }
-      );
+      if (currentMarketSession() === "regular") {
+        await sendNotification(
+          {
+            type: "provider_degraded",
+            title: `Stale Quote Warning: ${proposal.symbol} quote was ${ageText}`,
+            payload: {
+              proposalId,
+              symbol: proposal.symbol,
+              side: proposal.side,
+              ageSec: decision.quoteStale.ageSec,
+              limitPrice: proposal.limitPrice,
+              referencePrice: decision.quoteStale.referencePrice
+            }
+          },
+          { policy, userId }
+        );
+      }
     }
 
     // Auditable wash-sale trail on the approval path — never silent. For honored overrides the
@@ -1024,7 +1071,7 @@ export async function executeProposal(
           },
           { policy, userId }
         );
-        return { status: "proposed", reasons: decision.reasons };
+        throw new Error(decision.reasons.join(" "));
       }
 
       // Same in-flight window as the re-escalation above: retire the card as blocked only if it
@@ -1088,17 +1135,30 @@ export async function executeProposal(
     const stillPending = getProposal(proposalId, userId);
     if (!stillPending || stillPending.status !== "proposed") {
       const current = stillPending?.status ?? "removed";
-      return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+      throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
     }
 
-    const heldExit = evaluateBrokerHeldExitAvailability(proposal, account.positions, orders);
-    if (heldExit) {
-      const heldReason = brokerHeldExitBlockReason(heldExit);
+    // Held exit: blocked unless the ONLY holder is the app's own resting protective stop and the
+    // owner toggle "Exits release the app's own stop" is on (default) — then the stop is released
+    // inside the placement lease below, the approved exit placed, and protection re-placed for any
+    // remainder (src/lib/exit-stop-release.ts).
+    const heldExitDecision = planExitStopRelease({
+      proposal,
+      positions: account.positions,
+      orders,
+      policy,
+      userId,
+      accountNumber: policy.accountNumber
+    });
+    const exitStopRelease = heldExitDecision.kind === "release" ? heldExitDecision.plan : undefined;
+    if (heldExitDecision.kind === "blocked") {
+      const heldExit = heldExitDecision.heldExit;
+      const heldReason = heldExitDecision.reason;
       const heldDecision: PolicyDecision = { approved: false, reasons: [heldReason] };
       updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, undefined, heldDecision);
       audit(
         "proposal_approved",
-        { proposalId, symbol: proposal.symbol, side: proposal.side, action: "approval", result: "blocked", reasons: heldDecision.reasons, heldExit },
+        { proposalId, symbol: proposal.symbol, side: proposal.side, action: "approval", result: "blocked", reasons: heldDecision.reasons, heldExit, appStopOrderIds: heldExitDecision.appStopOrderIds },
         userId,
         policy.connectedAccountId
       );
@@ -1110,7 +1170,7 @@ export async function executeProposal(
         },
         { policy, userId }
       );
-      return { status: "blocked", reasons: heldDecision.reasons };
+      throw new Error(heldDecision.reasons.join(" "));
     }
 
     // Pre-flight live-order guard on the human-approval path too (parity with the autonomous run
@@ -1133,7 +1193,7 @@ export async function executeProposal(
         { type: "block", title: `${proposal.symbol} live order blocked (pre-flight)`, payload: { proposalId, proposal, review, reason: message, decision: blockedDecision } },
         { policy, userId }
       );
-      return { status: "blocked", reasons: [message] };
+      throw new Error([message].join(" "));
     }
 
     // Re-prove ownership at the final safe boundary. A lost/failed lease leaves the proposal
@@ -1144,6 +1204,9 @@ export async function executeProposal(
     // idempotency-keyed intent (status "placing" + refId) BEFORE the broker call so a crash or
     // lost broker response can't leave an untracked real order.
     const refId = crypto.randomUUID();
+    // Terminal scorecard lifecycle step: the human-approved decision is final — the placing claim
+    // below persists the proposal JSON (chain included) before the broker call.
+    appendDecisionStep(proposal, "final");
     // Atomic compare-and-swap BEFORE the broker call: only the caller that flips this proposal
     // proposed -> placing proceeds to placeEquityOrder, so concurrent approvals (double-click, two
     // tabs, from-draft) can't both place a real order (defense in depth with the run-lock above).
@@ -1199,11 +1262,11 @@ export async function executeProposal(
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           audit("proposal_claim_receipt_failed", { proposalId, symbol: proposal.symbol, side: proposal.side, error: message }, userId, policy.connectedAccountId);
-          return { status: "error", reasons: [`Decision receipt could not be persisted; no order was submitted: ${message}`] };
+          throw new Error([`Decision receipt could not be persisted; no order was submitted: ${message}`].join(" "));
         }
         if (!claimed) {
           const current = getProposal(proposalId, userId)?.status ?? "removed";
-          return { status: current, reasons: [`Proposal was ${current} before it could be executed.`] };
+          throw new Error([`Proposal was ${current} before it could be executed.`].join(" "));
         }
 
         // Stop/close-only/liquidating is authoritative even for an approval that was already in
@@ -1212,7 +1275,8 @@ export async function executeProposal(
         const protectiveStateBlock = freshPlacementBlockReason({
           userId,
           connectedAccountId: policy.connectedAccountId,
-          side: proposal.side
+          side: proposal.side,
+          source: "owner_approval"
         });
         if (protectiveStateBlock) {
           const blockedDecision: PolicyDecision = {
@@ -1245,17 +1309,107 @@ export async function executeProposal(
             },
             { policy, userId }
           );
-          return { status: "blocked", reasons: [protectiveStateBlock] };
+          throw new Error([protectiveStateBlock].join(" "));
         }
 
         let execution: Awaited<ReturnType<typeof gateway.placeEquityOrder>>;
         try {
           // Mutation-lease fence: fail closed if the window lost its lease before the risk-creating call.
           mutationCtx.assertOwned();
-          execution = await gateway.placeEquityOrder({ accountNumber, ...proposal, refId });
+          // An exit carries the position this approval read at its start (same call, under the
+          // strategy lock) as the caller-verified hint: the placement choke point still reads the
+          // position FRESH and uses the hint only if that read fails, so one read timeout cannot
+          // kill an owner-approved exit (PR #3759 review round).
+          //
+          // Only the fallback leg needs it. When a stop-release plan exists, `placeExitReleasingOwnStops`
+          // runs inside the same placement lease, re-reads the position itself, and hands its own
+          // verified quantity to the `place` callback — feeding the start-of-call hint there would
+          // substitute a staler number for a fresher one (#3793 review round).
+          const verifiedPositionHint =
+            proposal.side === "sell" || proposal.side === "cover"
+              ? { verifiedPositionQuantity: heldPositionFor(positions, proposal.symbol).signedQuantity }
+              : {};
+          execution = exitStopRelease
+            ? await placeExitReleasingOwnStops(
+                {
+                  userId,
+                  policy,
+                  accountNumber,
+                  connectedAccountId: policy.connectedAccountId,
+                  gateway,
+                  executionMode,
+                  proposal,
+                  plan: exitStopRelease,
+                  lane: "approval",
+                  proposalId,
+                  runId: row.runId,
+                  assertOwned: () => mutationCtx.assertOwned(),
+                  // Same durable-state fence as above, re-read after the release and immediately
+                  // before the exit leaves (#3793 review round).
+                  placementBlockReason: () =>
+                    freshPlacementBlockReason({ userId, connectedAccountId: policy.connectedAccountId, side: proposal.side, source: "owner_approval" })
+                },
+                (verifiedPositionQuantity) => gateway.placeEquityOrder({ accountNumber, ...proposal, refId, verifiedPositionQuantity })
+              )
+            : await gateway.placeEquityOrder({ accountNumber, ...proposal, refId, ...verifiedPositionHint });
         } catch (placeError) {
           const message = placeError instanceof Error ? placeError.message : String(placeError);
           const sym = proposal.symbol;
+          // Robinhood refusing this order because the ACCOUNT needs the owner's questionnaire answers
+          // (broker-account-questionnaire.ts): record it so autonomous runs pause new entries too and
+          // re-probe on the retry interval, and book THIS approval like the autonomous loop does.
+          // The refusal is not an HTTP status, so without the early exit below it would fall through to
+          // reconcilePlacementError, resolve "uncertain" (Robinhood's order list omits terminal orders),
+          // and leave the card in `placing` behind a "verify with broker" alert -- while the owner
+          // never hears that the account itself needs their action.
+          const accountQuestionnaireReason = detectRobinhoodAccountQuestionnaireError(message);
+          if (accountQuestionnaireReason && accountNumber) {
+            markAccountActionRequired(userId, accountNumber, accountQuestionnaireReason);
+            const heldDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, accountQuestionnaireReason] };
+            updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, heldDecision);
+            audit(
+              "proposal_blocked_account_action_required",
+              { proposalId, refId, symbol: sym, side: proposal.side, accountNumber, error: message.slice(0, 400), path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            if (shouldAlertAccountActionRequired(userId, accountNumber)) {
+              await sendNotification(
+                {
+                  type: "run_failed",
+                  title: `${accountNumber} needs your action on Robinhood`,
+                  payload: { proposalId, refId, reason: accountQuestionnaireReason, error: message, reconcile: "account_action_required" }
+                },
+                { policy, userId }
+              );
+            }
+            throw new Error([accountQuestionnaireReason].join(" "));
+          }
+          // Placement-time backstop for the broker's minimum order size (broker-minimum-guard.ts): the
+          // refusal names the minimum, so it is deterministic.  Book it like the pre-flight skip
+          // instead of letting it resolve "uncertain" (the same non-HTTP refusal shape as above).
+          const belowMinimumReason = detectBrokerMinimumPlacementError(message);
+          if (belowMinimumReason) {
+            const blockedDecision: PolicyDecision = { ...decision, approved: false, reasons: [...decision.reasons, belowMinimumReason] };
+            updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, blockedDecision);
+            audit(
+              "order_skipped_broker_minimum",
+              { proposalId, symbol: sym, side: proposal.side, estimatedNotional: review.estimatedNotional, reason: belowMinimumReason, action: "approval", phase: "placement", error: message.slice(0, 400) },
+              userId,
+              policy.connectedAccountId
+            );
+            if (shouldAlertBrokerMinimumOrderBlock(userId, accountNumber, proposal.symbol)) {
+              await sendNotification(
+                {
+                  type: "block",
+                  title: `${proposal.side.charAt(0).toUpperCase() + proposal.side.slice(1)} ${proposal.symbol} skipped (below broker minimum)`,
+                  payload: { proposalId, decision: blockedDecision, review, proposal }
+                },
+                { policy, userId }
+              );
+            }
+            throw new Error([belowMinimumReason].join(" "));
+          }
           if (isOrderPlacementInfrastructureFailure(message) && policy.connectedAccountId) {
             audit(
               "order_place_infrastructure_failed",
@@ -1269,35 +1423,104 @@ export async function executeProposal(
           // happened is pointless and, worse, concludes not_placed ("safe to retry") for an order
           // that will be refused identically every retry. Mirror the autonomous lane's short-circuit
           // (strategy.ts) and the protective-state block above: honest terminal "blocked".
-          // P2.6 / #1319: pre-flight validation AND definitive broker HTTP 4xx are never
-          // "uncertain". Mirror the autonomous lane (strategy.ts): OrderValidationError → blocked;
-          // broker 4xx (order never accepted) → rejected_by_broker. Reserve uncertain for
-          // timeouts / 5xx / undecodable broker state.
-          if (placeError instanceof OrderValidationError || /\bHTTP 4\d\d\b/i.test(message)) {
-            const isValidation = placeError instanceof OrderValidationError;
-            if (isValidation) {
-              const blockedDecision: PolicyDecision = {
-                ...decision,
-                approved: false,
-                reasons: [...decision.reasons, message]
-              };
-              updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, blockedDecision);
-              audit(
-                "order_blocked_validation",
-                { proposalId, refId, symbol: sym, side: proposal.side, reason: message, path: "approval" },
-                userId,
-                policy.connectedAccountId
-              );
-              await sendNotification(
-                {
-                  type: "block",
-                  title: `${sym} order blocked before submission`,
-                  payload: { proposalId, refId, proposal, reason: message, decision: blockedDecision }
-                },
-                { policy, userId }
-              );
-              return { status: "blocked", reasons: [message] };
-            }
+          // P2.6 / #1319: pre-flight validation and definitive broker HTTP 4xx are never
+          // "uncertain". OrderValidationError → blocked; terminal 4xx → rejected_by_broker;
+          // HTTP 429 → not_placed (retryable, the request was refused). HTTP 408,
+          // other timeouts, and HTTP 5xx fall through to reconcilePlacementError
+          // with HTTP 409 (duplicate client_order_id): executeProposal mints a new
+          // refId per call, so booking those as not_placed can duplicate a live order.
+          // Tradier's HTTP 400 "Unexpected server error" falls through the same way.
+          // The adapter already returns a tag hit as success; an escaped sentence
+          // means the POST may still be live.  A 5xx is retryable here and can
+          // still halt: it is not the #4668 sandbox-400 retry.
+          // Reserve uncertain for an unreachable broker list.
+          // The one transient OrderValidationError: the placement-time position read failed and
+          // the sell/cover failed closed.  Nothing reached the broker — retryable not_placed.
+          if (isRetryablePositionInvariantError(placeError)) {
+            updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, message);
+            audit(
+              "order_not_placed_position_unverified",
+              { proposalId, refId, symbol: sym, side: proposal.side, error: message, path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "run_failed",
+                title: `${sym} order not placed — position unverified (safe to retry)`,
+                payload: { proposalId, refId, error: message, reconcile: "not_placed" }
+              },
+              { policy, userId }
+            );
+            throw new Error([message].join(" "));
+          }
+          // Same for the exit-stop release (#4005 review round): a post-cancel position read that
+          // failed, or a stop cancel that never settled, sent nothing and rolled the stop back.
+          // The cause is transient, so the approved exit is retryable not_placed, never "blocked".
+          if (isRetryableExitStopReleaseError(placeError)) {
+            updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, message);
+            audit(
+              "order_not_placed_exit_stop_release",
+              { proposalId, refId, symbol: sym, side: proposal.side, code: placeError.code, error: message, path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "run_failed",
+                title: retryableExitStopReleaseTitle(sym, placeError.code),
+                payload: { proposalId, refId, error: message, code: placeError.code, reconcile: "not_placed" }
+              },
+              { policy, userId }
+            );
+            throw new Error([message].join(" "));
+          }
+          if (placeError instanceof OrderValidationError) {
+            const blockedDecision: PolicyDecision = {
+              ...decision,
+              approved: false,
+              reasons: [...decision.reasons, message]
+            };
+            updateProposalStatus(proposalId, "blocked", undefined, review, review.estimatedNotional, userId, undefined, message, blockedDecision);
+            audit(
+              "order_blocked_validation",
+              { proposalId, refId, symbol: sym, side: proposal.side, reason: message, path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "block",
+                title: `${sym} order blocked before submission`,
+                payload: { proposalId, refId, proposal, reason: message, decision: blockedDecision }
+              },
+              { policy, userId }
+            );
+            throw new Error([message].join(" "));
+          }
+          const placeClass = classifyPlaceOrderError(message);
+          // 408, other timeouts, HTTP 5xx, and Tradier's transient sentence stay
+          // classified retryable but must not book not_placed before reconcile.
+          if (placeClass === "retryable" && !mustReconcileRetryablePlaceError(message)) {
+            const note = `Broker rate-limited or timed out (${message}). Safe to retry.`;
+            updateProposalStatus(proposalId, "not_placed", undefined, review, review.estimatedNotional, userId, undefined, note);
+            audit(
+              "order_not_placed_retryable_http",
+              { proposalId, refId, symbol: sym, side: proposal.side, error: message.slice(0, 400), path: "approval" },
+              userId,
+              policy.connectedAccountId
+            );
+            await sendNotification(
+              {
+                type: "run_failed",
+                title: `${sym} order not placed — safe to retry`,
+                payload: { proposalId, refId, error: message, reconcile: "not_placed" }
+              },
+              { policy, userId }
+            );
+            throw new Error([note].join(" "));
+          }
+          if (placeClass === "rejected_terminal") {
             updateProposalStatus(proposalId, "rejected_by_broker", undefined, review, review.estimatedNotional, userId, undefined, message);
             audit(
               "order_rejected_by_broker",
@@ -1313,7 +1536,7 @@ export async function executeProposal(
               },
               { policy, userId }
             );
-            return { status: "error", reasons: [message] };
+            throw new Error([message].join(" "));
           }
           // A lost mutation lease (mutationCtx.assertOwned() above) is ALSO a deterministic
           // pre-submission refusal — the order provably never reached the broker — so it gets the
@@ -1332,7 +1555,7 @@ export async function executeProposal(
               { type: "run_failed", title: `${sym} order not placed — mutation lease lost (safe to retry)`, payload: { proposalId, refId, error: message } },
               { policy, userId }
             );
-            return { status: "not_placed", reasons: [note] };
+            throw new Error([note].join(" "));
           }
           // Ask the broker what actually happened (via the refId idempotency key) rather than firing a
           // perpetual "verify with broker" alert. Mirrors the autonomous run-loop catch above.
@@ -1378,7 +1601,7 @@ export async function executeProposal(
               { type: "run_failed", title: `${sym} order declined by broker (${outcome.state})`, payload: { proposalId, refId, orderId: outcome.orderId, state: outcome.state, reconcile: "declined" } },
               { policy, userId }
             );
-            return { status: "error", reasons: [declinedMsg], orderId: outcome.orderId, brokerState: outcome.state };
+            throw new Error([declinedMsg].join(" "));
           }
           if (outcome.kind === "not_placed") {
             const note = "Broker reachable; no order carries our idempotency key — the order never reached the broker. Safe to retry.";
@@ -1388,7 +1611,7 @@ export async function executeProposal(
               { type: "run_failed", title: `${sym} order was NOT placed — safe to retry`, payload: { proposalId, refId, error: message, reconcile: "not_placed" } },
               { policy, userId }
             );
-            return { status: "not_placed", reasons: [`Order not placed (safe to retry): ${message}`] };
+            throw new Error([`Order not placed (safe to retry): ${message}`].join(" "));
           }
           // uncertain: broker unreachable — KEEP status 'placing' so flagStalePlacingIntents retries.
           updateProposalStatus(proposalId, "placing", undefined, review, review.estimatedNotional, userId, undefined, outcome.error);
@@ -1397,7 +1620,7 @@ export async function executeProposal(
             { type: "run_failed", title: `${sym} order placement uncertain — verify with broker`, payload: { proposalId, refId, error: outcome.error, reconcile: "uncertain" } },
             { policy, userId }
           );
-          return { status: "error", reasons: [`Order placement failed/uncertain: ${outcome.error}`] };
+          throw new Error([`Order placement failed/uncertain: ${outcome.error}`].join(" "));
         }
 
         // See the matching comment in the autonomous run-loop placement path above: a non-throwing
@@ -1411,7 +1634,7 @@ export async function executeProposal(
             { type: "run_failed", title: `${proposal.symbol} order declined by broker (${execution.state})`, payload: { proposalId, refId, orderId: execution.orderId, state: execution.state } },
             { policy, userId }
           );
-          return { status: "error", reasons: [message], orderId: execution.orderId, brokerState: execution.state };
+          throw new Error([message].join(" "));
         }
 
         const fillStatus = reconciledFillStatus(execution);
@@ -1424,7 +1647,7 @@ export async function executeProposal(
             { type: "run_failed", title: `${proposal.symbol} order accepted without broker id — recovery pending`, payload: { proposalId, refId, state: execution.state, reconcile: "uncertain" } },
             { policy, userId }
           );
-          return { status: "error", reasons: [message], brokerState: execution.state };
+          throw new Error([message].join(" "));
         }
         const executedNotional = brokerExecutedNotional(execution);
         const preFillPosition = positions.find((p) => normalizeSymbol(p.symbol) === normalizeSymbol(proposal.symbol));
@@ -1467,7 +1690,14 @@ export async function executeProposal(
             { type: "run_failed", title: `${proposal.symbol} broker order confirmed — local receipt recovery pending`, payload: { proposalId, refId, orderId: execution.orderId, state: execution.state, error: detail, reconcile: "uncertain" } },
             { policy, userId }
           );
-          return { status: "error", reasons: [message], orderId: execution.orderId, brokerState: execution.state };
+          throw new Error([message].join(" "));
+        }
+        // An OPENING order just cleared the broker on the human-approval path: the only reliable
+        // in-app signal that an earlier account-questionnaire hold was resolved on Robinhood's side.
+        // (The autonomous loop clears it the same way; without this an owner who fixed the account
+        // and approved a card by hand would still find autonomous entries paused.)
+        if ((proposal.side === "buy" || proposal.side === "short") && accountNumber) {
+          clearAccountActionRequired(userId, accountNumber);
         }
         audit("proposal_approved", {
           proposalId,
@@ -1514,7 +1744,60 @@ export async function executeProposal(
     releaseStrategyLock(lockOwner, userId, policy.connectedAccountId);
   }
 }
-export async function reconcilePendingFills(gateway: BrokerGateway, accountNumber: string, userId: string = "local", connectedAccountId?: string): Promise<void> {
+export interface PendingFillReconcileOptions {
+  /** Per-order broker lookups allowed this pass (default DEFAULT_ORDER_LOOKUP_BUDGET). */
+  lookupBudget?: number;
+  /** Ops backfill: ignore the per-order and per-account throttles (the budget still applies). */
+  ignoreThrottle?: boolean;
+  /** Filled with counters (ops backfill route, tests). */
+  summary?: FillReconcileSummary;
+}
+
+/**
+ * Converge local fills and proposals with broker truth for one account.  Runs every scheduler tick.
+ *  1. Pending receipts (pending_reconciliation / partially_filled) are matched against the order
+ *     listing; a receipt whose order is absent from it — or still reads as working after
+ *     LIVE_MATCH_RECHECK_AGE_MS — is looked up by id when the gateway supports it
+ *     (BrokerGateway.getEquityOrder).  Tradier's listing is current-session only, so without the
+ *     lookup a receipt that missed its session could never reconcile.
+ *  2. Broker-truth sweeps (fill-reconciliation.ts): bracket exit legs, broker-originated executions
+ *     from the listing, and "placed" proposals whose order already reached a final state.
+ * Every broker lookup is budgeted and throttled; every booking is deduped by broker order id.
+ */
+export async function reconcilePendingFills(
+  gateway: BrokerGateway,
+  accountNumber: string,
+  userId: string = "local",
+  connectedAccountId?: string,
+  options: PendingFillReconcileOptions = {}
+): Promise<void> {
+  const ctx: BrokerTruthContext = {
+    gateway,
+    accountNumber,
+    userId,
+    connectedAccountId,
+    budget: { remaining: options.lookupBudget ?? DEFAULT_ORDER_LOOKUP_BUDGET },
+    ignoreThrottle: options.ignoreThrottle,
+    summary: options.summary
+  };
+  await reconcilePendingReceipts(ctx);
+  await runBrokerTruthSweeps(ctx);
+}
+
+/** Should a pending receipt be looked up by id this pass?  Only when the listing cannot settle it:
+ *  the order is absent, or it still reads as working (or final without a price) past the recheck
+ *  age — a bracket container's listing row can show the container while its entry already filled. */
+function pendingReceiptNeedsLookup(gateway: BrokerGateway, fill: FillEvent, matched: EquityOrder | undefined): boolean {
+  if (typeof gateway.getEquityOrder !== "function") return false;
+  if (!matched) return true;
+  if (hasBrokerReportedPricedFill(matched) && !isLiveOrderState(matched.state)) return false;
+  const placedAtMs = Date.parse(fill.filledAt);
+  return Number.isFinite(placedAtMs) && Date.now() - placedAtMs >= LIVE_MATCH_RECHECK_AGE_MS;
+}
+
+async function reconcilePendingReceipts(ctx: BrokerTruthContext): Promise<void> {
+  const { gateway, accountNumber, userId, connectedAccountId } = ctx;
+  const budget: OrderLookupBudget = ctx.budget;
   // Forward guard: fills with empty/literal-"undefined" broker_order_id can never match a broker
   // order (historical String(undefined) bug; insertion path fixed in PR #284). Flip to terminal
   // unreconcilable so they leave the pending list and stop forcing reconcile work every run.
@@ -1561,16 +1844,28 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
     };
     const escalationCandidates = new Map<string, PendingFillEscalationCandidate>();
     for (const fill of pending) {
-      const matched = brokerOrders.find((bo) => bo.id === fill.brokerOrderId);
-      if (!matched) {
-        // Absent from the order listing. fill_events is NOT a complete ledger of the broker
+      let resolvedOrder: EquityOrder | undefined = brokerOrders.find((bo) => bo.id === fill.brokerOrderId);
+      let lookup: BrokerOrderLookup | undefined;
+      if (budget.remaining > 0 && pendingReceiptNeedsLookup(gateway, fill, resolvedOrder)) {
+        const result = await lookupBrokerOrder(ctx, fill.brokerOrderId!);
+        if (result.kind === "found") {
+          lookup = result.lookup;
+          resolvedOrder = result.lookup.order;
+          const executionMode: ExecutionMode = fill.executionMode ?? (fill.source === "live" ? "broker/live" : "broker/paper");
+          bookBracketExitLegs(ctx, result.lookup, executionMode);
+        }
+      }
+      if (!resolvedOrder) {
+        // Absent from the order listing (and, when the gateway supports it, not resolvable by a
+        // per-order lookup this pass). fill_events is NOT a complete ledger of the broker
         // account — the owner trades manually and via the Robinhood MCP outside the app, and
         // pre-app holdings exist — so no amount of position arithmetic can prove THIS order
         // executed: an identical position delta is produced by an external trade plus this order
         // canceling/expiring, and flipping on it would fabricate a fill (wrong P&L, phantom
-        // opening-stop plans). No gateway exposes a direct per-order lookup that could supply
-        // broker truth for a single order id either (BrokerGateway has no getOrder-style method).
-        // So an absent order NEVER auto-flips: the receipt stays pending and, past the age
+        // opening-stop plans). Broker truth for this ONE order id can only come from a per-order
+        // lookup (BrokerGateway.getEquityOrder, Tradier today); when that is unsupported, throttled,
+        // out of budget, or reports the id not found, an absent order NEVER auto-flips: the receipt
+        // stays pending and, past the age
         // threshold, escalates to the owner with the observed position evidence attached
         // (collectAbsentOrderPositionEvidence) so one look at the broker resolves it.
         escalationCandidates.set(fill.id, {
@@ -1579,6 +1874,7 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
         });
         continue;
       }
+      const matched: EquityOrder = resolvedOrder;
 
       // The stop plan couldn't be committed at placement time — this order was still
       // pending_reconciliation then, and a canceled/expired-with-nothing-executed order must never
@@ -1598,7 +1894,12 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
             if (openingProposal.stopPlan.style === "default") {
               clearStopPlans(accountNumber, [fill.symbol], userId);
             } else {
-              const basis = (await liveBasisFor(fill.symbol)) ?? price;
+              // Same guard as recordFillFromProposal: only a positive broker averageCost
+              // replaces the fill-price basis, and with no positive anchor at all we skip
+              // the plan rather than persist a zero-basis one (the fill stays booked).
+              const liveBasis = await liveBasisFor(fill.symbol);
+              const basis = liveBasis != null && liveBasis > 0 ? liveBasis : price;
+              if (!(basis > 0)) return;
               // See performance.ts's identical reasoning: bracket fields survive on the proposal
               // only when a broker-native bracket was (or was meant to be) attached, so this
               // naturally scopes to fixed/atr plans.
@@ -1634,6 +1935,16 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
       const merged = mergedExecutionTruth(matched, fill);
       const receiptStatus = reconciledFillStatus(matched, fill);
       const raw = reconciliationRaw(fill, matched, merged.knownQuantity);
+      const executedPerBroker = Boolean(merged.truth) && (receiptStatus === "filled" || receiptStatus === "partially_filled");
+      const replacement = !executedPerBroker && fill.proposalId && isRejectedOrCanceledState(matched.state) && merged.knownQuantity <= 0
+        ? linkReplacementExecution({
+            userId,
+            accountNumber,
+            proposalId: fill.proposalId,
+            orderIds: [fill.brokerOrderId, lookup?.entryLegId],
+            proposal: (fill.raw as { proposal?: TradeProposal } | undefined)?.proposal
+          })
+        : undefined;
 
       if (merged.truth && (receiptStatus === "filled" || receiptStatus === "partially_filled")) {
         const truth = merged.truth;
@@ -1696,6 +2007,22 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
               });
           }
         }
+      } else if (replacement) {
+        // The app's own cancel-and-replace canceled this order and booked the market replacement as
+        // a separate fill (order-replacement.ts): the proposal's intent executed through that
+        // replacement, so it must not read "rejected_by_broker".  linkReplacementExecution tied the
+        // replacement fill to this proposal; flip the proposal once the replacement has executed.
+        getDb().transaction(() => {
+          updateFillEvent(fill.id, { status: matched.state, raw: { ...raw, replacedBy: replacement.replacementOrderId ?? null } }, userId);
+          if (replacement.status === "filled" && fill.proposalId) {
+            updateProposalStatus(fill.proposalId, "filled", undefined, undefined, replacement.notional, userId);
+          }
+        }).immediate();
+        audit("fill_reconciled", { fillId: fill.id, symbol: fill.symbol, status: matched.state, replacedBy: replacement.replacementOrderId ?? null, replacementStatus: replacement.status }, userId, connectedAccountId);
+        bump(ctx.summary, "receiptsReplaced");
+        if (replacement.status === "filled" && fill.proposalId) {
+          resolveBrokerVerificationNotifications(userId, { proposalId: fill.proposalId, resolution: "placed" });
+        }
       } else if (isRejectedOrCanceledState(matched.state) && merged.knownQuantity <= 0) {
         const declinedMessage = `Broker terminated the order without a fill (state: ${matched.state}).`;
         getDb().transaction(() => {
@@ -1711,17 +2038,25 @@ export async function reconcilePendingFills(gateway: BrokerGateway, accountNumbe
         // state with an unpriced cumulative quantity larger than the already-booked partial). Keep
         // the prior accounting truth and leave this receipt eligible for another reconciliation.
         updateFillEvent(fill.id, { raw }, userId);
-        // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
-        // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
-        auditDeduped("fill_reconciliation_pending_price", {
-          fillId: fill.id,
-          symbol: fill.symbol,
-          brokerState: matched.state,
-          brokerQuantity: matched.filledQuantity,
-          knownBrokerQuantity: merged.knownQuantity,
-          priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
-          unresolvedGrowth: merged.unresolvedGrowth
-        }, [fill.id, matched.state], { userId, connectedAccountId });
+        // "Pending price" means executed-but-unpriced.  A LIVE order with nothing executed has no
+        // price to wait for: it is simply still working (a resting GTC limit, or one whose cancel
+        // Tradier has not confirmed yet and so reports as "pending").  Auditing those every pass
+        // mislabeled healthy working orders as unpriced executions (Tradier Sandbox, 2026-09-29
+        // 22:41Z: four cancel-requested GTC buy limits, brokerQuantity 0).
+        const brokerReportsExecution = hasBrokerReportedFill(matched) || merged.knownQuantity > 0;
+        if (brokerReportsExecution || !isLiveOrderState(matched.state)) {
+          // Steady-state per-tick spam guard (~4.5k identical rows/day in prod):
+          // first occurrence per (fillId, brokerState) logs immediately, then ≤1/6h.
+          auditDeduped("fill_reconciliation_pending_price", {
+            fillId: fill.id,
+            symbol: fill.symbol,
+            brokerState: matched.state,
+            brokerQuantity: matched.filledQuantity,
+            knownBrokerQuantity: merged.knownQuantity,
+            priorBookedQuantity: bookedExecutionTruth(fill)?.quantity,
+            unresolvedGrowth: merged.unresolvedGrowth
+          }, [fill.id, matched.state], { userId, connectedAccountId });
+        }
         // A matched order still LIVE at the broker (working day limit, queued stop, ...) is
         // healthy — it simply hasn't executed yet, and stale-limit-orders.ts owns the alerting
         // for a far-from-market resting order. Only a matched order in a TERMINAL state that
@@ -2058,7 +2393,13 @@ export async function flagStalePlacingIntents(gateway: BrokerGateway, accountNum
   try {
     brokerOrders = await gateway.getEquityOrders(accountNumber);
   } catch (e) {
-    console.error("[placing-sweep] broker unreachable for recovery; will retry next run:", e);
+    const { logError, recordBrokerCall } = await import("./sentry-metrics");
+    recordBrokerCall("unknown", "getEquityOrders", 0, "failure");
+    logError("broker.call", {
+      broker: "unknown",
+      endpoint: "getEquityOrders",
+      error: e instanceof Error ? e.message : String(e)
+    });
     for (const row of stale) {
       audit("order_placement_uncertain", { proposalId: row.id, refId: row.refId, note: "Stale placing intent; broker unreachable for recovery — will retry." }, userId, connectedAccountId);
     }
@@ -2145,7 +2486,10 @@ export async function flagStalePlacingIntents(gateway: BrokerGateway, accountNum
         if (!alreadyBooked) {
           const recoveredExecutionMode = row.executionMode ?? "broker/live";
           const recoveredSource: FillSource = recoveredExecutionMode === "broker/live" ? "live" : "paper";
-          const existingAvgCost = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          const recoveredLiveBasis = p.stopPlan ? await liveBasisFor(p.symbol) : undefined;
+          // Only a positive broker averageCost overrides the fill-price basis: a 0 (position
+          // not priced yet) must fall back to the recovered fill price, not write a 0 basis.
+          const existingAvgCost = recoveredLiveBasis != null && recoveredLiveBasis > 0 ? recoveredLiveBasis : undefined;
           recordFillFromProposal({
             userId,
             connectedAccountId,

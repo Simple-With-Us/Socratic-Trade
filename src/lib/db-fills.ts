@@ -1,4 +1,5 @@
 // db-fills.ts — fill events, portfolio snapshots, excursions
+import "server-only";
 import crypto from "crypto";
 import { getDb } from "./db";
 import type {
@@ -134,6 +135,15 @@ export function insertPortfolioSnapshot(input: {
   return snapshot;
 }
 
+/** Forever retention (2026-10-15).  Scheduler hook returns 0; snapshots are never age-pruned. */
+/** Jay policy (2026-10-15): portfolio snapshot history is kept forever. */
+export function sweepPortfolioSnapshots(
+  _now: Date = new Date(),
+  _maxAgeDays: number = 90,
+  _batchLimit: number = 5_000
+): number {
+  return 0;
+}
 /**
  * Symbols with a non-zero position in the LATEST portfolio snapshot of every (user, account)
  * pair, restricted to snapshots recent enough to reflect a live account (default 7 days —
@@ -243,6 +253,62 @@ export function listPortfolioSnapshots(accountNumber: string, source?: FillSourc
   return rows.map(toPortfolioSnapshot);
 }
 
+/** Keep at most this many daily last-snapshots for the vs-S&P curve (~7 years of sessions). */
+export const DAILY_SNAPSHOT_DAY_CAP = 2500;
+
+/**
+ * One snapshot per calendar day (UTC date prefix of `created_at`), the last write that day,
+ * chronological. Used for the cash-flow-matched S&P comparison so every deposit/withdrawal
+ * day is a knot without the newest-100 cap dropping early history.
+ */
+export function listDailyPortfolioSnapshots(
+  accountNumber: string,
+  source?: FillSource,
+  userId: string = "local"
+): PortfolioSnapshot[] {
+  const rows = source
+    ? (getDb()
+        .prepare(
+          `SELECT * FROM (
+             SELECT p.*
+             FROM portfolio_snapshots p
+             INNER JOIN (
+               SELECT substr(created_at, 1, 10) AS d, MAX(created_at) AS max_created
+               FROM portfolio_snapshots
+               WHERE account_number = ? AND source = ? AND user_id = ?
+               GROUP BY substr(created_at, 1, 10)
+             ) last
+               ON p.created_at = last.max_created
+              AND p.account_number = ?
+              AND p.source = ?
+              AND p.user_id = ?
+             ORDER BY p.created_at DESC
+             LIMIT ?
+           ) newest ORDER BY created_at ASC`
+        )
+        .all(accountNumber, source, userId, accountNumber, source, userId, DAILY_SNAPSHOT_DAY_CAP) as RawPortfolioSnapshot[])
+    : (getDb()
+        .prepare(
+          `SELECT * FROM (
+             SELECT p.*
+             FROM portfolio_snapshots p
+             INNER JOIN (
+               SELECT substr(created_at, 1, 10) AS d, MAX(created_at) AS max_created
+               FROM portfolio_snapshots
+               WHERE account_number = ? AND user_id = ?
+               GROUP BY substr(created_at, 1, 10)
+             ) last
+               ON p.created_at = last.max_created
+              AND p.account_number = ?
+              AND p.user_id = ?
+             ORDER BY p.created_at DESC
+             LIMIT ?
+           ) newest ORDER BY created_at ASC`
+        )
+        .all(accountNumber, userId, accountNumber, userId, DAILY_SNAPSHOT_DAY_CAP) as RawPortfolioSnapshot[]);
+  return rows.map(toPortfolioSnapshot);
+}
+
 // ── Fill events ────────────────────────────────────────────────────────────────
 
 export function insertFillEvent(input: Omit<FillEvent, "id" | "filledAt"> & { id?: string; filledAt?: string; userId?: string }): FillEvent {
@@ -326,14 +392,62 @@ function isUniqueConstraintError(e: unknown): boolean {
   return typeof code === "string" && code.includes("SQLITE_CONSTRAINT");
 }
 
-export function listFillEvents(accountNumber: string, source?: FillSource, limit = 500, userId: string = "local"): FillEvent[] {
+/**
+ * The fill ledger for one account, oldest-first.
+ *
+ * `limit` is OPTIONAL and defaults to UNBOUNDED — the complete ledger. That default is the
+ * accounting-correct one and it is not negotiable for any caller that replays lots: FIFO lot
+ * matching (calculatePnl) is a STATEFUL walk from the first fill, so truncating the window at
+ * EITHER end corrupts it. Cutting the tail (the old `ORDER BY filled_at ASC LIMIT 500`) froze
+ * realized P&L, open lots, tax, win rate and model stats at the pre-cap state once an
+ * (account, source) passed the cap. Cutting the head is no better — it would start the replay
+ * mid-history, so exits of lots opened before the window would find no opening lot and their
+ * realized P&L would vanish instead. An account holds at most a few thousand rows and the read
+ * is indexed, so the whole ledger is the cheap answer as well as the right one.
+ *
+ * Pass a numeric `limit` ONLY for a display/context window that genuinely wants "the most recent
+ * N fills" and does no lot replay. Those get the NEWEST `limit` rows, returned in chronological
+ * order — the same newest-DESC-subquery pattern `listPortfolioSnapshots` above already uses.
+ *
+ * Every variant breaks `filled_at` ties on `rowid` (insertion order), and the windowed variants
+ * reverse that tiebreak in the inner DESC pass so the outer ASC pass restores it. This is load
+ * bearing, not tidiness: an entry and its partial exit booked in the SAME millisecond (one strategy
+ * run placing both legs) are indistinguishable by `filled_at` alone, and if the exit replays first
+ * the FIFO walk finds no lot to close and books the position at the wrong size.
+ *
+ * NOTE: The old bug where `LIMIT 500` was applied with `ORDER BY filled_at ASC` causing it
+ * to read the oldest fills has been fixed as of PR #2955.
+ */
+export function listFillEvents(accountNumber: string, source?: FillSource, limit?: number, userId: string = "local"): FillEvent[] {
+  const database = getDb();
+  const bounded = typeof limit === "number" && Number.isFinite(limit);
   const rows = source
-    ? (getDb()
-        .prepare("SELECT * FROM fill_events WHERE account_number = ? AND source = ? AND user_id = ? ORDER BY filled_at ASC LIMIT ?")
-        .all(accountNumber, source, userId, limit) as RawFillEvent[])
-    : (getDb()
-        .prepare("SELECT * FROM fill_events WHERE account_number = ? AND user_id = ? ORDER BY filled_at ASC LIMIT ?")
-        .all(accountNumber, userId, limit) as RawFillEvent[]);
+    ? bounded
+      ? (database
+          .prepare(
+            `SELECT * FROM (
+               SELECT *, rowid AS booked_seq FROM fill_events
+               WHERE account_number = ? AND source = ? AND user_id = ?
+               ORDER BY filled_at DESC, rowid DESC LIMIT ?
+             ) newest ORDER BY filled_at ASC, booked_seq ASC`
+          )
+          .all(accountNumber, source, userId, limit) as RawFillEvent[])
+      : (database
+          .prepare("SELECT * FROM fill_events WHERE account_number = ? AND source = ? AND user_id = ? ORDER BY filled_at ASC, rowid ASC")
+          .all(accountNumber, source, userId) as RawFillEvent[])
+    : bounded
+      ? (database
+          .prepare(
+            `SELECT * FROM (
+               SELECT *, rowid AS booked_seq FROM fill_events
+               WHERE account_number = ? AND user_id = ?
+               ORDER BY filled_at DESC, rowid DESC LIMIT ?
+             ) newest ORDER BY filled_at ASC, booked_seq ASC`
+          )
+          .all(accountNumber, userId, limit) as RawFillEvent[])
+      : (database
+          .prepare("SELECT * FROM fill_events WHERE account_number = ? AND user_id = ? ORDER BY filled_at ASC, rowid ASC")
+          .all(accountNumber, userId) as RawFillEvent[]);
   return rows.map(toFillEvent);
 }
 
@@ -342,6 +456,46 @@ export function listFillEventsByProposalId(proposalId: string, userId: string = 
   const rows = getDb()
     .prepare("SELECT * FROM fill_events WHERE proposal_id = ? AND user_id = ? ORDER BY filled_at ASC")
     .all(proposalId, userId) as RawFillEvent[];
+  return rows.map(toFillEvent);
+}
+
+/** Earliest fill in this account booked against one broker order id — any status, any proposal.
+ *  The dedupe key for broker-originated fill ingestion and proposal backfill (fill-reconciliation.ts):
+ *  if ANY lane already booked this physical order, nothing else may book it again. */
+export function findFillEventByBrokerOrderId(accountNumber: string, brokerOrderId: string, userId: string = "local"): FillEvent | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM fill_events
+       WHERE user_id = ? AND account_number = ? AND broker_order_id = ?
+       ORDER BY filled_at ASC, rowid ASC
+       LIMIT 1`
+    )
+    .get(userId, accountNumber, brokerOrderId) as RawFillEvent | undefined;
+  return row ? toFillEvent(row) : undefined;
+}
+
+/** Booked OPENING fills (buy/short) placed with a broker-native bracket whose exit legs have not
+ *  been settled yet (`raw.bracketLegs.settled` unset), oldest first.  The bracket's exit legs are
+ *  broker-held orders no app lane books, so fill-reconciliation.ts checks them per container. */
+export function listBracketOpeningFillsAwaitingLegs(accountNumber: string, userId: string = "local", limit = 100): FillEvent[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM fill_events
+       WHERE user_id = ?
+         AND account_number = ?
+         AND status IN ('filled', 'partially_filled')
+         AND side IN ('buy', 'short')
+         AND broker_order_id IS NOT NULL
+         AND broker_order_id != ''
+         AND broker_order_id != 'undefined'
+         AND (source = 'live' OR execution_mode IN ('broker/paper', 'broker/live'))
+         AND (json_extract(raw, '$.proposal.bracketStopLoss') IS NOT NULL
+              OR json_extract(raw, '$.proposal.bracketTakeProfit') IS NOT NULL)
+         AND COALESCE(json_extract(raw, '$.bracketLegs.settled'), 0) = 0
+       ORDER BY filled_at ASC, rowid ASC
+       LIMIT ?`
+    )
+    .all(userId, accountNumber, limit) as RawFillEvent[];
   return rows.map(toFillEvent);
 }
 

@@ -2,9 +2,14 @@
 
 /** Console UI primitives. Own design system — no imports from app/ui/*. */
 
-import { useState, useEffect, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { useState, useEffect, useLayoutEffect, useId, useRef, type CSSProperties, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { cx, fmtExact, timeAgo, EM_DASH } from "../lib/format";
+import { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 import { AnimatePresence, motion } from "motion/react";
+import { createPortal } from "react-dom";
+import { tooltipPosition } from "../lib/tooltip-position";
+
+export { isInteractiveTooltipTrigger } from "../lib/tooltip-trigger";
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
@@ -16,13 +21,17 @@ export function Card({
   className,
   padded = true,
   collapsible = false,
-  defaultOpen = true
+  defaultOpen = true,
+  stackAction = false
 }: {
   title?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
   padded?: boolean;
+  /** On narrow screens, put `action` on its own row under the title so a
+   *  cluster of buttons does not sit in a cramped side column. */
+  stackAction?: boolean;
   /** Render the card as a collapsible disclosure (native <details>) with the title as the
    *  summary and a chevron. Requires a title. Off by default so existing cards are unchanged. */
   collapsible?: boolean;
@@ -32,12 +41,12 @@ export function Card({
   if (collapsible && title) {
     return (
       <details className={cx("con-card con-disclosure", className)} open={defaultOpen}>
-        <summary className="focus:outline-none">
+        <summary>
           {/* Open: pt-3.5 pb-1 (tight bottom toward body). Collapsed: balanced
               py via .con-disclosure.con-card:not([open]) in console.css so
               one-line titles like "You're set" sit vertically centered. */}
           <div className="flex items-center gap-3 px-4 pt-3.5 pb-1">
-            <span className="con-card-title">{title}</span>
+            <h2 className="con-card-title">{title}</h2>
             {action && (
               <span className="ml-auto" onClick={(e) => e.preventDefault()}>{action}</span>
             )}
@@ -51,7 +60,14 @@ export function Card({
   return (
     <section className={cx("con-card", className)}>
       {(title || action) && (
-        <header className="flex items-center justify-between gap-3 px-4 pt-3.5 pb-1">
+        <header
+          className={cx(
+            "flex gap-3 px-4 pt-3.5 pb-1",
+            stackAction
+              ? "flex-col items-stretch sm:flex-row sm:items-center sm:justify-between"
+              : "items-center justify-between"
+          )}
+        >
           {title ? <h2 className="con-card-title">{title}</h2> : <span />}
           {action}
         </header>
@@ -185,7 +201,18 @@ export function Dot({ tone = "muted", pulse }: { tone?: keyof typeof TONE_VAR; p
 
 // ── Meter ────────────────────────────────────────────────────────────────────
 
-export function Meter({ value, max, className }: { value: number; max?: number; className?: string }) {
+export function Meter({
+  value,
+  max,
+  className,
+  label
+}: {
+  value: number;
+  max?: number;
+  className?: string;
+  /** Accessible name for the progressbar. Required for AT; the visible caption sits beside the bar. */
+  label?: string;
+}) {
   const hasMax = typeof max === "number" && Number.isFinite(max) && max > 0;
   const rawRatio = hasMax ? Math.max(0, value / max!) : 0;
   const ratio = Math.min(1, rawRatio);
@@ -199,6 +226,7 @@ export function Meter({ value, max, className }: { value: number; max?: number; 
     <div
       className={cx("con-meter", tone, className)}
       role="progressbar"
+      aria-label={label}
       aria-valuenow={value}
       aria-valuemax={hasMax ? max : undefined}
       aria-valuetext={breached ? `${overagePct}% over` : undefined}
@@ -329,21 +357,25 @@ export function Toggle({
   checked,
   onChange,
   disabled,
+  busy,
   label
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
-  label?: string;
+  /** In-flight write — keeps the optimistic checked value visible and marks the switch busy. */
+  busy?: boolean;
+  label: string;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-busy={busy === true}
       aria-label={label}
       disabled={disabled}
-      className="con-toggle"
+      className={cx("con-toggle", busy && "opacity-70")}
       onClick={() => onChange(!checked)}
     />
   );
@@ -377,11 +409,12 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             title={opt.title}
             onClick={() => onChange(opt.value)}
-            className={
+            className={cx(
+              "con-segmented-btn",
               active
                 ? "rounded px-2 py-1 text-[length:var(--con-fs-xs)] font-bold text-[color:var(--con-fg)] bg-[color:var(--con-surface)]"
                 : "rounded px-2 py-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
-            }
+            )}
           >
             {opt.label}
           </button>
@@ -445,6 +478,61 @@ export function Tooltip({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const openAtPointerDown = useRef(false);
+  const [position, setPosition] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = ref.current;
+    const tooltip = contentRef.current;
+    if (!trigger || !tooltip) return;
+    const update = () => {
+      const inherited = getComputedStyle(trigger);
+      // A body portal escapes clipping ancestors, but no longer inherits the console theme.
+      // Copy its computed tokens rather than assuming the default or changing global styles.
+      const tokens: Record<string, string> = {};
+      for (let index = 0; index < inherited.length; index++) {
+        const name = inherited.item(index);
+        if (name.startsWith("--con-") || name.startsWith("--brand-")) {
+          tokens[name] = inherited.getPropertyValue(name);
+        }
+      }
+      const next: CSSProperties = {
+        ...tokens,
+        fontFamily: inherited.fontFamily,
+        ...tooltipPosition(trigger.getBoundingClientRect(), { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+          { width: window.innerWidth, height: window.innerHeight }, align)
+      };
+      setPosition((previous) => previous && Object.keys(previous).length === Object.keys(next).length &&
+        Object.entries(next).every(([key, value]) => previous[key as keyof CSSProperties] === value) ? previous : next);
+    };
+    let frame = 0;
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; update(); });
+    };
+    update();
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", schedule, true);
+    const resize = new ResizeObserver(schedule);
+    resize.observe(trigger);
+    resize.observe(tooltip);
+    const theme = new MutationObserver(schedule);
+    const consoleRoot = trigger.closest(".console-root");
+    if (consoleRoot) theme.observe(consoleRoot, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    theme.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
+    const scheme = window.matchMedia("(prefers-color-scheme: dark)");
+    scheme.addEventListener("change", schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      scheme.removeEventListener("change", schedule);
+      resize.disconnect();
+      theme.disconnect();
+    };
+  }, [open, align, content]);
 
   useEffect(() => {
     if (!open) return;
@@ -468,43 +556,51 @@ export function Tooltip({
 
   if (!content) return <>{children}</>;
 
-  const alignClass =
-    align === "right"
-      ? "right-0 translate-x-0"
-      : align === "left"
-      ? "left-0 translate-x-0"
-      : "left-1/2 -translate-x-1/2";
+  const interactive = isInteractiveTooltipTrigger(children);
 
   return (
     <span
       ref={ref}
-      className={cx("group relative inline-flex cursor-pointer", className)}
+      className={cx(
+        "group relative inline-flex cursor-pointer",
+        !interactive &&
+          "rounded-[var(--con-radius-sm)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--con-accent)]",
+        className
+      )}
+      tabIndex={interactive ? undefined : 0}
+      aria-describedby={tooltipId}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
-      onClick={() => setOpen((prev) => !prev)}
+      onPointerDown={() => { openAtPointerDown.current = open; }}
+      onClick={(event) => setOpen(event.detail === 0 ? !open : !openAtPointerDown.current)}
       onFocus={() => setOpen(true)}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
       }}
     >
       {children}
-      <AnimatePresence>
+      <span id={tooltipId} className="sr-only">
+        {content}
+      </span>
+      {typeof document !== "undefined" && createPortal(<AnimatePresence>
         {open && (
           <motion.div
+            ref={contentRef}
+            style={position ?? { visibility: "hidden" }}
             initial={{ opacity: 0, y: 2, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 2, scale: 0.98 }}
             transition={{ duration: 0.15, ease: "easeOut" }}
             role="tooltip"
+            aria-hidden
             className={cx(
-              "pointer-events-none absolute bottom-full z-[100] mb-2 w-max max-w-xs rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line",
-              alignClass
+              "pointer-events-none fixed z-[1400] w-max max-w-[min(20rem,calc(100vw-1.5rem))] rounded-[var(--con-radius-sm)] border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] px-2.5 py-1.5 text-center text-[length:var(--con-fs-xs)] font-medium leading-snug text-[color:var(--con-fg)] shadow-[var(--con-shadow-lg)] whitespace-pre-line"
             )}
           >
             {content}
           </motion.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
     </span>
   );
 }

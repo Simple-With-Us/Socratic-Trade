@@ -68,7 +68,7 @@ describe("getRedTeamCriticFailureStats", () => {
     expect(stats.failures).toBe(3);
     expect(stats.failureRatePct).toBe(75);
     expect(stats.byKind).toEqual({ malformed_response: 2, timeout: 1 });
-    expect(stats.topFailure).toEqual({ model: "deepseek-chat", kind: "malformed_response", count: 2 });
+    expect(stats.topFailure).toEqual({ model: "deepseek-flash-latest", kind: "malformed_response", count: 2 });
   });
 
   it("returns a zero-rate result when no reviews were attempted", async () => {

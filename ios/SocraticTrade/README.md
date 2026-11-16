@@ -1,8 +1,9 @@
-# Socratic.Trade iOS
+# Socratic-Trade iOS
 
-Native, phone-first control surface for Socratic.Trade. The app presents five
-stable areas: Home, Proposals, Markets, Activity, and Insights
-(snapshot brief + attention items — not the web console Coach chat).
+Native, phone-first desk for Socratic-Trade. Pin Home, Proposals, Assets,
+Activity, Insights, Coach, Scan, Guardrails, or Results — More keeps every
+screen reachable. Insights stays a snapshot brief; Coach is the live
+`/api/chat` conversation.
 
 The backend remains authoritative. The app reads `/api/mobile/snapshot`, submits
 audited work through `/api/mobile/commands`, and listens to
@@ -37,7 +38,7 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO test
 ```
 
-The canonical application bundle identifier is `trade.socratic.app`. The
+The canonical application bundle identifier is `com.socratictrade.ios`. The
 project includes the Sign in with Apple entitlement and the `socratictrade` URL
 scheme. The app signs in directly with Apple's identity-token endpoint. Google
 and GitHub use `ASWebAuthenticationSession`, but the custom callback carries a
@@ -67,16 +68,11 @@ URL. Provider-side OAuth revocation remains a separate user action.
 
 Agents (and humans) ship device builds to TestFlight from the CLI:
 
-```bash
-# From repo root (agent worktree)
-bash scripts/ios-ship-testflight.sh
+## Ship (TestFlight)
 
-# IPA only
-bash scripts/ios-ship-testflight.sh --export-only
-```
+Do not archive from a Linux cloud seat or by restarting a Mac runner. GitHub-hosted
+`macos-latest` runs `.github/workflows/ios-ship.yml` (`gh workflow run ios-ship.yml`).
+The wrapper is `scripts/ios-ship-testflight.sh` -> in-repo `scripts/ios-fleet/`.
 
-Fleet driver (all three apps): `/Users/jay/apps/ios-fleet/README.md`.
-
-Requires team `CC8UTF7ATG` signing on the Mac, an App Store Connect app for
-`trade.socratic.app`, and either an Xcode-signed-in session or
-`~/.secrets/appstore-connect.env` (App Store Connect API key).
+Signing secrets live on the GitHub repo (same five names as Congress.Trade). Never
+mint a new App Store Connect key. Never print secret values.

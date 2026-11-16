@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { getTaxSummary, getWashSaleLockedSymbols, getWashSaleLockedSymbolsForUser, reconcileOpenLotsAgainstPositions } from "../src/lib/tax";
+import { getTaxSummary, getWashSaleLockedSymbols, getWashSaleLockedSymbolsForUser, overlayAccountTaxationType, realizedPnlNetOfEstimatedTax, reconcileOpenLotsAgainstPositions } from "../src/lib/tax";
 import type { FillEvent } from "../src/lib/types";
 
 beforeAll(() => {
@@ -17,8 +17,12 @@ function fill(input: Partial<FillEvent> & { id: string; side: "buy" | "sell"; qu
   return { proposalId: "p1", runId: "r1", source: "paper", status: "filled", raw: undefined, ...input };
 }
 
-describe("tax — T12 long-only for short/cover", () => {
-  it("excludes a short/cover round-trip from realized tax (long-only)", async () => {
+// SUPERSEDES the 2026-06-20 "T12 long-only" pin (docs/rollouts/2026-06-20-money-path-tranche-3-tests.md).
+// That pin characterized a long-only-era limitation — it never claimed excluding shorts was correct
+// tax treatment. Shorting shipped afterward (owner decision 2026-07-10), so a covered short is real
+// realized money and belongs in the figure.
+describe("tax — short/cover round trips are realized", () => {
+  it("counts a short/cover round-trip in short-term realized", async () => {
     const { insertFillEvent } = await import("../src/lib/db");
     const a = "TAX_SHORT_ONLY";
     const base = { proposalId: "p1", runId: "r1", source: "paper" as const, status: "filled", raw: undefined, accountNumber: a, symbol: "TSLA" };
@@ -27,7 +31,9 @@ describe("tax — T12 long-only for short/cover", () => {
     insertFillEvent({ ...base, id: "t12-s2", side: "cover", quantity: 1, price: 80, notional: 80, filledAt: daysAgo(10) });
 
     const summary = getTaxSummary(a, "paper", {}, undefined, NOW);
-    expect(summary.shortTermRealized).toBeCloseTo(0); // short/cover lots are not `long` → never taxed
+    // A covered short is ALWAYS short-term (IRC 1233 — the holding period runs from the property
+    // used to close it, bought at cover), so it never lands in the long-term bucket.
+    expect(summary.shortTermRealized).toBeCloseTo(20);
     expect(summary.longTermRealized).toBeCloseTo(0);
   });
 
@@ -120,6 +126,16 @@ describe("tax", () => {
     expect(tax.estimatedTaxLiability).toBeCloseTo(0);
     // IRA bypasses its own wash-sale lockout (a wash sale has no benefit inside the IRA).
     expect(tax.lockedSymbols).not.toContain("INTC");
+    // An open loser is still not a harvest candidate — the IRA cannot deduct the loss.
+    insertFillEvent(fill({ id: "i5", side: "buy", quantity: 1, price: 100, notional: 100, accountNumber: a, symbol: "NWG", filledAt: daysAgo(15) }));
+    const taxWithLoser = getTaxSummary(a, "paper", { NWG: 90 }, { taxationType: "roth_ira" }, NOW);
+    expect(taxWithLoser.harvestCandidates).toEqual([]);
+  });
+
+  it("overlays the connected-account taxationType over policy taxSettings", () => {
+    expect(overlayAccountTaxationType({ taxationType: "taxable" }, "roth_ira").taxationType).toBe("roth_ira");
+    expect(overlayAccountTaxationType({ taxationType: "roth_ira" }, undefined).taxationType).toBe("roth_ira");
+    expect(overlayAccountTaxationType(undefined, "traditional_ira").taxationType).toBe("traditional_ira");
   });
 
   it("locks a symbol across ALL accounts (incl. IRA) when the loss is realized in a TAXABLE account", async () => {
@@ -340,5 +356,19 @@ describe("tax — lot ledger vs live positions (#2548)", () => {
     const lot = tax.openLots.find((l) => l.symbol === "GHOST");
     expect(lot?.ledgerMismatch).toBeUndefined();
     expect(lot?.unrealizedGain).toBeCloseTo(10);
+  });
+});
+
+describe("realizedPnlNetOfEstimatedTax", () => {
+  it("subtracts estimated tax when subtractFromResults is on", () => {
+    expect(realizedPnlNetOfEstimatedTax(1000, 150, true)).toBe(850);
+  });
+
+  it("returns realized unchanged when subtractFromResults is off", () => {
+    expect(realizedPnlNetOfEstimatedTax(1000, 150, false)).toBe(1000);
+  });
+
+  it("returns undefined when realized is undefined", () => {
+    expect(realizedPnlNetOfEstimatedTax(undefined, 150, true)).toBeUndefined();
   });
 });

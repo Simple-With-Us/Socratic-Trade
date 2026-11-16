@@ -15,7 +15,7 @@ import {
 import { recordLlmUsage, extractLlmUsage, providerRequestIdFromPayload } from "./llm-usage";
 import { deriveExecutionState, fillSourceForExecutionMode, llmExecutionMode, llmFillSource, llmModeClarification, type ExecutionState } from "./execution-mode";
 import { policyUniverseSymbolCount } from "./index-universes";
-import { LLM_OUTPUT_TOKEN_CAPS, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
+import { LLM_OUTPUT_TOKEN_CAPS, interactiveLlmTimeoutMs, llmFetch, isModelRotationSentinel, resolveReviewerReasoningEffort } from "./llm-request";
 import { buildLlmRequestBody, llmAuthHeaders, extractLlmText, extractJsonPayload } from "./llm-call";
 import { resolveLlmEndpoint } from "./llm-provider";
 import { humanizeLlmError } from "./llm-errors";
@@ -41,6 +41,7 @@ import {
   type SectorStat,
   type ThesisStat
 } from "./performance";
+import { pickHeadlineAlpha } from "./outcome-horizons";
 import { getReflectionSummary } from "./post-mortem";
 import { retrieveLearnedContextDetailed } from "./learned-context/store";
 import { summarizeOpenAiRequest, summarizeOpenAiResponseText } from "./telemetry-sanitize";
@@ -331,7 +332,7 @@ export function applyMissedOpportunityNudge(
  * Returns undefined when no closed lots have a regime field.
  */
 function currentRegimeFromLots(accountNumber: string, source: "paper" | "live", userId: string): string | undefined {
-  const { closedLots } = calculatePnl(listFillEvents(accountNumber, source, 500, userId));
+  const { closedLots } = calculatePnl(listFillEvents(accountNumber, source, undefined, userId));
   // Lots are returned oldest-first; iterate in reverse for the most-recent stamped regime.
   for (let i = closedLots.length - 1; i >= 0; i--) {
     const r = closedLots[i].regime?.trim();
@@ -405,15 +406,19 @@ export async function proposeStrategyTuning(
   const performance = accountNumber
     ? getPerformanceSummary(accountNumber, {}, userId, evidenceCutoffDate
         ? {
-            liveFills: pitFills(listFillEvents(accountNumber, "live", 500, userId)),
-            paperFills: pitFills(listFillEvents(accountNumber, "paper", 500, userId))
+            liveFills: pitFills(listFillEvents(accountNumber, "live", undefined, userId)),
+            paperFills: pitFills(listFillEvents(accountNumber, "paper", undefined, userId))
           }
         : undefined)
     : undefined;
   const source = fillSourceForExecutionMode(executionState);
+  // The tuner's `recentFills` context window: the NEWEST 30, still oldest-first. Both branches
+  // must agree on that. A LEADING slice of an oldest-first ledger is the account's FIRST trades,
+  // which is what this fed the paid review before — weight nudges argued from the oldest history
+  // under a label that says "recent".
   const fills = accountNumber
     ? (evidenceCutoffDate
-        ? pitFills(listFillEvents(accountNumber, source, 500, userId)).slice(0, 30)
+        ? pitFills(listFillEvents(accountNumber, source, undefined, userId)).slice(-30)
         : listFillEvents(accountNumber, source, 30, userId))
     : [];
   const closedLotCount = accountNumber ? getClosedLotCount(accountNumber, source, userId) : 0;
@@ -520,16 +525,27 @@ export async function proposeStrategyTuning(
   try {
     const cases = listSocraticDecisionCases(userId, { limit: 10, connectedAccountId: accountId });
     decisionMemory = cases.length > 0
-      ? cases.map((c) => ({
-          ...(c.symbol ? { symbol: c.symbol } : {}),
-          action: c.action,
-          createdAt: c.createdAt,
-          thesis: c.thesis.length > 200 ? `${c.thesis.slice(0, 200)}…` : c.thesis,
-          ...(c.outcome
-            ? { outcome: `${c.outcome.status}${typeof c.outcome.returnPct === "number" ? ` ${c.outcome.returnPct.toFixed(2)}%` : ""}` }
-            : {}),
-          ...(c.lessons.length > 0 ? { lessons: c.lessons.slice(0, 3) } : {})
-        }))
+      ? cases.map((c) => {
+          // Headline SPY-excess figure, when a resolved horizon carried one — so the review can see
+          // decision quality (alpha) next to the raw return, whatever the grading mode. Never fabricated.
+          const alphaRow = c.outcome ? pickHeadlineAlpha(c.outcome.outcomes) : undefined;
+          const alphaSuffix =
+            alphaRow && typeof alphaRow.spyExcessPct === "number"
+              ? ` (vs SPY ${alphaRow.spyExcessPct >= 0 ? "+" : ""}${alphaRow.spyExcessPct}%)`
+              : "";
+          return {
+            ...(c.symbol ? { symbol: c.symbol } : {}),
+            action: c.action,
+            createdAt: c.createdAt,
+            thesis: c.thesis.length > 200 ? `${c.thesis.slice(0, 200)}…` : c.thesis,
+            ...(c.outcome
+              ? {
+                  outcome: `${c.outcome.status}${typeof c.outcome.returnPct === "number" ? ` ${c.outcome.returnPct.toFixed(2)}%` : ""}${alphaSuffix}`
+                }
+              : {}),
+            ...(c.lessons.length > 0 ? { lessons: c.lessons.slice(0, 3) } : {})
+          };
+        })
       : undefined;
   } catch {
     decisionMemory = undefined;
@@ -588,7 +604,7 @@ export async function proposeStrategyTuning(
     performance: compactPerformance(performance, executionState.mode !== "broker/live", policy.tuning?.useEntryRunAttribution ?? false),
     closedLotCount,
     minClosedLotsForWeightShift: minLotsForWeights,
-    recentFills: fills.slice(0, 20).map((fill) => compactFill(fill, executionState)),
+    recentFills: fills.slice(-20).map((fill) => compactFill(fill, executionState)),
     recentRuns: runs.map((run) => ({
       startedAt: run.startedAt,
       status: run.status,
@@ -830,14 +846,24 @@ function compactFill(fill: FillEvent, executionState: ExecutionState) {
   };
 }
 
-function compactMarketScan(scan?: MarketScan) {
-  if (!scan) return undefined;
+/** Exported for a focused unit test (test/strategy-tuning-compact-market-scan.test.ts) — the rest
+ *  of this module needs a full DB + LLM-mocked integration harness that a shape-guard regression
+ *  test does not. */
+export function compactMarketScan(scan?: MarketScan) {
+  // `scan` is typed MarketScan but actually arrives as `latestDecision.marketScan` — an unchecked
+  // cast of a `strategy_run` audit payload (see the `as LatestDecisionPayload` cast above). Since
+  // 2026-08-01 (audit-bounded-run.ts) every `strategy_run` row stores a `BoundedMarketScanSummary`
+  // (`{ omitted: true, source, generatedAt, scannedSymbols, returnedQuotes, candidateCount,
+  // topSymbols }`) instead of the full scan — it has NO `topCandidates` array, so
+  // `scan.topCandidates.slice(...)` below would throw. Guard on the field this function actually
+  // needs rather than trusting the static type.
+  if (!scan || !Array.isArray(scan.topCandidates)) return undefined;
   return {
     source: scan.source,
     generatedAt: scan.generatedAt,
     scannedSymbols: scan.scannedSymbols,
     returnedQuotes: scan.returnedQuotes,
-    warnings: scan.warnings,
+    warnings: Array.isArray(scan.warnings) ? scan.warnings : [],
     topCandidates: scan.topCandidates.slice(0, 10).map((quote, index) => ({
       rank: index + 1,
       symbol: quote.symbol,
@@ -992,7 +1018,10 @@ async function requestLlmTuning(
       const response = await llmFetch(url, {
         method: "POST",
         headers: llmAuthHeaders({ provider, key: openaiKey }),
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        // A thinking model gets 90s instead of 60s, capped under Cloudflare's ~100s edge budget
+        // because the browser awaits this request (POST /api/strategy/tune).
+        signal: AbortSignal.timeout(interactiveLlmTimeoutMs(model, reasoningEffortOverride ?? policyForResolution.llmReasoningEffort))
       });
 
       if (!response.ok) {

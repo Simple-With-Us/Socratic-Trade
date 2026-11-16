@@ -1,12 +1,13 @@
 import { listMobileCommands, mobileControlCatalog, mobileReadiness } from "@/lib/mobile-api";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  const user = resolveRequestUser(request);
+  const user = resolveRequestUserOrResponse(request);
+  if (user instanceof Response) return user;
   return NextResponse.json({
     currentUser: user,
     catalog: mobileControlCatalog(),

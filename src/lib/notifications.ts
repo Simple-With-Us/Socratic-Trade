@@ -79,6 +79,7 @@ function notificationDeliveryControl(options: SendNotificationOptions): Notifica
 }
 
 const CHANNEL_LABELS: Record<NotifyChannelId, string> = {
+  apns: "iPhone push",
   push: "ntfy.sh",
   pushover: "Pushover",
   webhook: "Webhook",
@@ -94,43 +95,123 @@ const DIRECT_NOTIFY_SKIP_SET: ReadonlySet<NotificationEventType> = new Set([
   "storage_warning"
 ]);
 
-// ── Repeat-notification suppression (block / pending_approval) ────────────────
-// A policy-blocked or escalated proposal notifies on EVERY strategy run that re-proposes the
-// same trade. While a condition persists (a stuck broker sell order holding all shares, a quote
-// provider outage tripping the staleness gate, ...) the same notification re-fires many times a
-// day — prod 2026-07-28..30: "Sell AAPL blocked (available 0)" 6+ times in 48h for ONE stuck
-// order, plus dozens of identical staleness_gate blocks/escalations. The block/escalation itself
-// is unchanged (still persisted as a run proposal and visible in Approvals); only the repeated
-// NOTIFICATION is suppressed for a cooldown window, keyed by (type, symbol, side, normalized
-// primary reason) — digits collapsed so a changing quote age or requested qty can't defeat it.
-const REPEAT_NOTIFICATION_DEDUP_TYPES: ReadonlySet<NotificationEventType> = new Set(["block", "pending_approval"]);
+// ── Repeat-notification suppression ───────────────────────────────────────────
+// Two windows, one store (notification_events status='sent' rows — never a second KV):
+//
+// 1. Situation dedup (block / pending_approval), default 6h via NOTIFICATION_REPEAT_DEDUP_MS.
+//    A policy-blocked or escalated proposal notifies on EVERY strategy run that re-proposes the
+//    same trade. Prod 2026-07-28..30: "Sell AAPL blocked (available 0)" 6+ times in 48h for ONE
+//    stuck order. The block itself stays persisted; only the repeated NOTIFICATION is suppressed.
+//    Fingerprint: (type, symbol, side, digit-normalized primary reason).
+//
+// 2. Alert repeat lock (price_alert / provider_degraded / budget_alert / kill_switch), default
+//    60s. Scheduler ticks every 60s; overlapping ticks, multi-instance races, and same-channel
+//    fallbacks can deliver the same alert more than once in a minute. Honor
+//    NOTIFICATION_REPEAT_DEDUP_MS when set (tests / ops) so there is one window knob.
+//    price_alert fingerprints by alert id (two AAPL rules must both work). Only status='sent'
+//    rows suppress; skipped/failed must not latch.
+const SITUATION_REPEAT_DEDUP_TYPES: ReadonlySet<NotificationEventType> = new Set(["block", "pending_approval"]);
+const ALERT_REPEAT_LOCK_TYPES: ReadonlySet<NotificationEventType> = new Set([
+  "price_alert",
+  "provider_degraded",
+  "budget_alert",
+  "kill_switch"
+]);
+const REPEAT_NOTIFICATION_DEDUP_TYPES: ReadonlySet<NotificationEventType> = new Set([
+  ...SITUATION_REPEAT_DEDUP_TYPES,
+  ...ALERT_REPEAT_LOCK_TYPES
+]);
 
-function repeatNotificationDedupMs(): number {
-  const raw = Number(process.env.NOTIFICATION_REPEAT_DEDUP_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 6 * 60 * 60_000; // 6h
+export const DEFAULT_ALERT_REPEAT_LOCK_MS = 60_000;
+
+function parsedPositiveMs(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function situationRepeatDedupMs(): number {
+  return parsedPositiveMs(process.env.NOTIFICATION_REPEAT_DEDUP_MS) ?? 6 * 60 * 60_000;
+}
+
+function alertRepeatLockMs(): number {
+  return parsedPositiveMs(process.env.NOTIFICATION_REPEAT_DEDUP_MS) ?? DEFAULT_ALERT_REPEAT_LOCK_MS;
+}
+
+function repeatWindowMs(type: NotificationEventType): number {
+  return ALERT_REPEAT_LOCK_TYPES.has(type) ? alertRepeatLockMs() : situationRepeatDedupMs();
 }
 
 function normalizeReasonForFingerprint(reason: string): string {
   return reason.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
-/** Stable identity of a block/escalation notification's SITUATION (not its run), or null when
- *  the payload doesn't carry enough structure to fingerprint safely (never dedup those). */
+function fingerprintStringField(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** Stable identity of a repeating notification, or null when the payload does not carry enough
+ *  structure to fingerprint safely (never dedup those). */
 export function repeatNotificationFingerprint(input: {
   type: NotificationEventType;
   payload: unknown;
+  title?: string;
 }): string | null {
   if (!REPEAT_NOTIFICATION_DEDUP_TYPES.has(input.type)) return null;
-  const payload = input.payload as {
-    proposal?: { symbol?: unknown; side?: unknown };
-    decision?: { reasons?: unknown };
-  } | null;
-  const symbol = typeof payload?.proposal?.symbol === "string" ? payload.proposal.symbol.toUpperCase() : "";
-  const side = typeof payload?.proposal?.side === "string" ? payload.proposal.side.toLowerCase() : "";
-  const reasons = Array.isArray(payload?.decision?.reasons) ? payload.decision.reasons : [];
-  const firstReason = typeof reasons[0] === "string" ? reasons[0] : "";
-  if (!symbol && !firstReason) return null;
-  return [input.type, symbol, side, normalizeReasonForFingerprint(firstReason)].join("|");
+  const payload = asRecord(input.payload);
+
+  if (SITUATION_REPEAT_DEDUP_TYPES.has(input.type)) {
+    const proposal = asRecord(payload.proposal);
+    const decision = asRecord(payload.decision);
+    const symbol = typeof proposal.symbol === "string" ? proposal.symbol.toUpperCase() : "";
+    const side = typeof proposal.side === "string" ? proposal.side.toLowerCase() : "";
+    const reasons = Array.isArray(decision.reasons) ? decision.reasons : [];
+    const firstReason = typeof reasons[0] === "string" ? reasons[0] : "";
+    if (!symbol && !firstReason) return null;
+    return [input.type, symbol, side, normalizeReasonForFingerprint(firstReason)].join("|");
+  }
+
+  if (input.type === "price_alert") {
+    const id = fingerprintStringField(asRecord(payload.alert).id);
+    return id ? `price_alert|${id}` : null;
+  }
+
+  if (input.type === "provider_degraded") {
+    const service =
+      fingerprintStringField(payload.service) ||
+      fingerprintStringField(payload.provider) ||
+      fingerprintStringField(payload.lane) ||
+      fingerprintStringField(payload.source);
+    const extra =
+      fingerprintStringField(payload.keySource) ||
+      fingerprintStringField(payload.operation) ||
+      fingerprintStringField(payload.step);
+    if (service) return ["provider_degraded", service.toLowerCase(), extra.toLowerCase()].join("|");
+    const title = typeof input.title === "string" ? normalizeReasonForFingerprint(input.title) : "";
+    return title ? `provider_degraded|${title}` : null;
+  }
+
+  if (input.type === "budget_alert") {
+    const provider = fingerprintStringField(payload.provider);
+    const operation = fingerprintStringField(payload.operation);
+    const limitName = fingerprintStringField(payload.limitName);
+    if (provider || limitName) {
+      return ["budget_alert", provider.toLowerCase(), operation.toLowerCase(), limitName.toLowerCase()].join("|");
+    }
+    const reason = fingerprintStringField(payload.reason);
+    if (reason) return ["budget_alert", "skip", normalizeReasonForFingerprint(reason)].join("|");
+    const title = typeof input.title === "string" ? normalizeReasonForFingerprint(input.title) : "";
+    return title ? `budget_alert|${title}` : null;
+  }
+
+  if (input.type === "kill_switch") {
+    const reason = fingerprintStringField(payload.reason) || fingerprintStringField(payload.summary);
+    if (reason) return ["kill_switch", normalizeReasonForFingerprint(reason)].join("|");
+    const title = typeof input.title === "string" ? normalizeReasonForFingerprint(input.title) : "";
+    return title ? `kill_switch|${title}` : null;
+  }
+
+  return null;
 }
 
 /** True when an IDENTICAL situation already produced a DELIVERED notification within the window.
@@ -146,16 +227,24 @@ function recentRepeatNotificationSent(
     const cutoff = new Date(Date.now() - cooldownMs).toISOString();
     const rows = getDb()
       .prepare(
-        `SELECT type, payload FROM notification_events
+        `SELECT type, title, payload FROM notification_events
          WHERE user_id = ? AND COALESCE(connected_account_id, '') = ?
            AND created_at > ? AND status = 'sent'
          ORDER BY rowid DESC LIMIT 200`
       )
-      .all(userId, connectedAccountId, cutoff) as Array<{ type: NotificationEventType; payload: string }>;
+      .all(userId, connectedAccountId, cutoff) as Array<{
+        type: NotificationEventType;
+        title: string;
+        payload: string;
+      }>;
     for (const row of rows) {
       if (!REPEAT_NOTIFICATION_DEDUP_TYPES.has(row.type)) continue;
       try {
-        const prior = repeatNotificationFingerprint({ type: row.type, payload: JSON.parse(row.payload) });
+        const prior = repeatNotificationFingerprint({
+          type: row.type,
+          payload: JSON.parse(row.payload),
+          title: row.title
+        });
         if (prior === fingerprint) return true;
       } catch {
         /* unparseable historical payload — skip it */
@@ -222,15 +311,14 @@ export async function sendNotification(
     return record(input, "skipped", webhookUrl, "Notification type is disabled.", userId, connectedAccountId);
   }
 
-  // Repeat suppression: the identical block/escalation situation already delivered within the
-  // cooldown — return an unrecorded "skipped" event (no notification_events row, no delivery)
-  // so the feed and push channels aren't re-spammed every strategy run. The underlying block
-  // remains fully persisted via the run-proposal path.
+  // Repeat suppression: the identical situation / alert already delivered within its window —
+  // return an unrecorded "skipped" event (no notification_events row, no delivery). Underlying
+  // blocks stay persisted via the run-proposal path; price-alert one-shot mark is unchanged.
   if (REPEAT_NOTIFICATION_DEDUP_TYPES.has(input.type)) {
-    const fingerprint = repeatNotificationFingerprint(input);
+    const fingerprint = repeatNotificationFingerprint({ ...input, title: input.title });
     if (
       fingerprint &&
-      recentRepeatNotificationSent(userId, connectedAccountId ?? "", fingerprint, repeatNotificationDedupMs())
+      recentRepeatNotificationSent(userId, connectedAccountId ?? "", fingerprint, repeatWindowMs(input.type))
     ) {
       assertNotificationActive(options);
       const event: NotificationEvent = {
@@ -326,6 +414,30 @@ export async function sendNotification(
   return event;
 }
 
+/** Exercise policy.notificationSettings.webhookUrl (Discord embeds / legacy JSON). Used by Send test. */
+export async function sendPolicyWebhookTest(
+  userId: string,
+  options: Pick<SendNotificationOptions, "fetcher" | "timeoutMs" | "resolveWebhookHost"> = {}
+): Promise<NotifyChannelResult | null> {
+  const webhookUrl = getPolicy(userId).notificationSettings.webhookUrl?.trim();
+  if (!webhookUrl) return null;
+  return sendLegacyWebhook(
+    {
+      type: "budget_alert",
+      title: "Test notification",
+      payload: {
+        provider: "Socratic-Trade",
+        recommendation: "If you received this, your policy webhook URL is working."
+      }
+    },
+    webhookUrl,
+    options.fetcher ?? fetch,
+    options.timeoutMs ?? 5000,
+    undefined,
+    options.resolveWebhookHost
+  );
+}
+
 async function sendLegacyWebhook(
   input: { type: NotificationEventType; title: string; payload: unknown },
   webhookUrl: string,
@@ -383,12 +495,17 @@ async function sendDirectNotification(
   } = {}
 ): Promise<NotifyChannelResult[]> {
   const basePrefs = options.notifyDeps?.prefs;
-  const prefs = options.skipWebhook
-    ? (() => {
-        const current = basePrefs ?? getNotifyPrefs(userId);
-        return { ...current, channels: current.channels.filter((channel) => channel !== "webhook") };
-      })()
-    : basePrefs;
+  const prefs = (() => {
+    const current = basePrefs ?? getNotifyPrefs(userId);
+    const seen = new Set<NotifyChannelId>();
+    const channels = current.channels.filter((channel) => {
+      if (seen.has(channel)) return false;
+      seen.add(channel);
+      return !(options.skipWebhook && channel === "webhook");
+    });
+    if (channels.length === current.channels.length && !options.skipWebhook && !basePrefs) return basePrefs;
+    return { ...current, channels };
+  })();
   const deps = guardedNotifyDeps(options.notifyDeps, options.assertActive, options.signal);
   return (options.notifyImpl ?? notify)(
     userId,
@@ -517,13 +634,16 @@ function directNotificationBody(input: { type: NotificationEventType; title: str
       return `${provider} hit ${limitName} during ${operation}.${usage}${recommendation}`;
     }
     case "risk_advisory": {
-      // Advisory guardrail breach (e.g. drawdown breaker in advisory mode): render the breach
-      // detail, not just the title. Nothing halted — the copy must keep that unambiguous.
+      // Advisory guardrail breach: render the breach detail, not just the title. risk_advisory
+      // covers both agent-originated advisories (e.g. the drawdown breaker in advisory mode) and
+      // owner-initiated actions (e.g. a manual order cancel that would leave dust below the
+      // broker minimum, app/api/orders/cancel) — the tail must read honestly for both, not just
+      // claim "the agent is still in control" when it was the owner acting.
       const reason = payload.reason ? String(payload.reason) : input.title;
       const dd = Number.isFinite(Number(payload.drawdownPct)) ? `\nDrawdown: ${Number(payload.drawdownPct).toFixed(2)}% from the equity high-water mark` : "";
       const eq = Number.isFinite(Number(payload.equity)) ? `\nEquity: $${Number(payload.equity).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
       const hwm = Number.isFinite(Number(payload.highWaterMark)) ? `\nHigh-water mark: $${Number(payload.highWaterMark).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-      return `${reason}${dd}${eq}${hwm}\nAdvisory only — no state change; the agent is still in control.`;
+      return `${reason}${dd}${eq}${hwm}\nAdvisory only — nothing was blocked or changed.`;
     }
     default:
       return input.title;
@@ -735,7 +855,7 @@ function formatDiscordPayload(input: {
     }
     case "risk_advisory": {
       color = 15105570; // Orange — advisory breach, NOT a halt (kill_switch stays red)
-      description = payload?.reason ?? "A risk guardrail threshold was breached (advisory — the agent is still in control).";
+      description = payload?.reason ?? "A risk guardrail threshold was breached (advisory — nothing was blocked or changed).";
       if (payload?.drawdownPct !== undefined) {
         fields.push({ name: "Drawdown", value: `${Number(payload.drawdownPct).toFixed(2)}% from HWM`, inline: true });
       }
@@ -856,6 +976,8 @@ export async function checkAndDispatchOptionAlerts(
     try {
       const event = await sendNotification(input, { userId, connectedAccountId });
       delivered = event.status === "sent";
+    } catch (err) {
+      console.warn(`[OptionAlerts] failed to deliver alert for ${key}:`, err);
     } finally {
       if (delivered) {
         sentAlerts.add(key);

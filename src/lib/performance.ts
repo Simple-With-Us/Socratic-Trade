@@ -1,6 +1,8 @@
-import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getPolicy, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
+import { clearStopPlans, deriveExitContractFromOpening, getMaturedSkippedCounterfactualByRunSymbol, getSkippedCounterfactualCoverage, insertFillEvent, insertPortfolioSnapshot, listAudit, listAuditByKind, listFillEvents, listMaturedSkippedCounterfactuals, listPortfolioSnapshots, listDailyPortfolioSnapshots, listRecentMaturedSkippedCounterfactuals, listSkippedCounterfactualsByStatus, peekPolicy, recordStopPlan, recordTakeProfitTrimBand, type SkippedCounterfactualCoverage } from "./db";
 import { applyExecutionCost, estimateExecutionCostBps, executionCostConfig } from "./execution-cost";
+import { canonicalModelId } from "./model-identity";
 import { normalizeSymbol } from "./money";
+import { marketDateOf } from "./market-calendar";
 import { aggregateSourceValue, type SourceValueObservation } from "./source-value";
 import type {
   CandidateEvidence,
@@ -45,6 +47,14 @@ export function returnSinceProposalPct(
 export interface ClosedLot {
   pnl: number;
   returnPct: number;
+  /**
+   * Shares closed by THIS match (a closing fill against one opening lot). A scaled-out position
+   * produces several ClosedLots against the same opening lot, so this is what tells a partial trim
+   * apart from a completed round trip — grading a lot on its first trim alone reads a stopped-out
+   * trade as a winner. Optional only so legacy/fixture lots without a size still typecheck;
+   * calculatePnl always sets it.
+   */
+  quantity?: number;
   symbol?: string;
   thesisTag?: string;
   regime?: string;
@@ -52,6 +62,8 @@ export interface ClosedLot {
   entryPrice?: number;
   entryAt?: string;
   exitAt?: string;
+  /** Same-window benchmark excess (%) when a daily close series was available; omitted otherwise. */
+  alphaPct?: number;
   /** Run that opened this lot — joins to the per-run `signal_snapshot` audit for efficacy analysis. */
   entryRunId?: string;
   /** Agent confidence (1–100) assigned to the opening proposal, for calibration analysis. */
@@ -71,6 +83,94 @@ export interface ClosedLot {
   /** Model that reviewed the ENTRY (reviewedByModel stamped on the opening proposal), for the
    * per-model realized-performance rollup behind the model pickers (src/lib/model-stats.ts). */
   reviewedByModel?: string;
+}
+
+/**
+ * Collapse every exit booked against ONE opening lot into the round trip it actually was.
+ *
+ * `exits` must all share the same opening lot (same symbol + `entryAt`); `entryQuantity` is the
+ * opening fill's size. Returns `undefined` while the position is still partly open — a scaled-out
+ * position produces one ClosedLot per trim, and treating the first as the result grades a trade
+ * before it is over (two profitable trims then a stopped-out remainder reads as a win).
+ *
+ * The aggregate's `returnPct` is capital-weighted over the closed size, so a small trim and a large
+ * remainder are never averaged as equals.
+ */
+export function aggregateRoundTrip(exits: ClosedLot[], entryQuantity: number): ClosedLot | undefined {
+  if (exits.length === 0) return undefined;
+  const sized = exits.filter((lot) => typeof lot.quantity === "number" && (lot.quantity as number) > 0);
+  const closedQuantity = sized.reduce((sum, lot) => sum + (lot.quantity as number), 0);
+  const fullyClosed =
+    sized.length === exits.length && entryQuantity > 0
+      ? closedQuantity >= entryQuantity - 1e-6
+      : exits.length === 1; // legacy lots carry no size: a lone exit is the whole lot
+  if (!fullyClosed) return undefined;
+
+  const last = exits[exits.length - 1];
+  if (exits.length === 1) return last;
+
+  const pnl = exits.reduce((sum, lot) => sum + lot.pnl, 0);
+  const entryPrice = last.entryPrice;
+  const returnPct =
+    entryPrice != null && entryPrice > 0 && closedQuantity > 0
+      ? (pnl / (entryPrice * closedQuantity)) * 100
+      : closedQuantity > 0
+        ? sized.reduce((sum, lot) => sum + lot.returnPct * (lot.quantity as number), 0) / closedQuantity
+        : exits.reduce((sum, lot) => sum + lot.returnPct, 0) / exits.length;
+
+  // `last` is the exit that finished the round trip, so its exitAt/mae/mfe are the terminal ones.
+  return { ...last, pnl, returnPct, quantity: closedQuantity };
+}
+
+/** Round-trip identity of one OPENING fill: symbol + the timestamp `calculatePnl` stamps onto
+ *  every exit it books against that lot. Deliberately the same pair, so grouping exits here lines
+ *  up with the FIFO match `calculatePnl` already performed — this never re-derives lot matching. */
+function roundTripKey(symbol: string | undefined, entryAt: string | undefined): string {
+  // A legacy lot with no symbol and no entryAt cannot be attributed to an opening fill at all;
+  // give it a stable singleton key so it forms its own group and is reported as incomplete
+  // rather than silently merged into some other position's round trip.
+  return `${symbol ? normalizeSymbol(symbol) : "?"}|${entryAt ?? ""}`;
+}
+
+/**
+ * Group FIFO `closedLots` into COMPLETED round trips (one per opening fill), via aggregateRoundTrip.
+ * `fills` supplies each opening's size (buy/short fills).  A still-partly-open position is counted
+ * in `incompleteRoundTrips`, never graded.  Shared by the ops round-trip stats and the console win
+ * rate so a scaled-out position counts as ONE trade everywhere.
+ */
+export function completedRoundTrips(
+  closedLots: ClosedLot[],
+  fills: FillEvent[]
+): { trips: Array<{ trip: ClosedLot; lots: ClosedLot[] }>; incompleteRoundTrips: number } {
+  const entrySize = new Map<string, number>();
+  for (const fill of fills) {
+    if (fill.side !== "buy" && fill.side !== "short") continue; // closing side
+    const key = roundTripKey(fill.symbol, fill.filledAt);
+    entrySize.set(key, (entrySize.get(key) ?? 0) + Number(fill.quantity));
+  }
+
+  const groups = new Map<string, ClosedLot[]>();
+  for (const lot of closedLots) {
+    const key = roundTripKey(lot.symbol, lot.entryAt);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(lot);
+    else groups.set(key, [lot]);
+  }
+
+  const trips: Array<{ trip: ClosedLot; lots: ClosedLot[] }> = [];
+  let incompleteRoundTrips = 0;
+  for (const [key, lots] of groups) {
+    // Terminal ordering matters: `aggregateRoundTrip` takes exitAt/mae/mfe from the LAST exit,
+    // so a group read out of order would stamp the wrong holding period.
+    lots.sort((a, b) => String(a.exitAt ?? "").localeCompare(String(b.exitAt ?? "")));
+    const trip = aggregateRoundTrip(lots, entrySize.get(key) ?? 0);
+    if (!trip) {
+      incompleteRoundTrips += 1;
+      continue;
+    }
+    trips.push({ trip, lots });
+  }
+  return { trips, incompleteRoundTrips };
 }
 
 /** Realized-outcome stats grouped by the thesis a position was opened under. */
@@ -100,6 +200,9 @@ export interface ThesisStat {
   winCount?: number;
   /** Count of lots with returnPct < 0. */
   lossCount?: number;
+  /** Mean same-window benchmark excess when at least one lot has alphaPct. */
+  avgAlphaPct?: number;
+  shrunkAvgAlphaPct?: number;
 }
 
 /** Realized-outcome stats grouped by the market regime a position was opened in. */
@@ -113,6 +216,8 @@ export interface RegimeStat {
   shrunkAvgReturnPct: number;
   avgDaysHeld?: number;
   shortTermPct?: number;
+  avgAlphaPct?: number;
+  shrunkAvgAlphaPct?: number;
 }
 
 /** An open (unclosed) tax lot with its entry date, for holding-period / tax analysis. */
@@ -122,6 +227,63 @@ export interface OpenLot {
   entryPrice: number;
   side: "long" | "short";
   entryAt?: string;
+}
+
+/**
+ * Mark-to-market unrealized P&L over already-computed `OpenLot`s (`calculatePnl`'s own
+ * `openLots`) and a freshly fetched price map, WITHOUT re-running `calculatePnl` — that would
+ * repeat the whole FIFO ledger walk for the same book just to apply prices the first pass did not
+ * have.  Mirrors `calculatePnl`'s own unrealized arithmetic exactly (long: qty * (mark - entry);
+ * short: qty * (entry - mark), with the short lot's signed quantity taken as a magnitude).  A
+ * symbol with no usable price is SKIPPED, never fabricated as a $0 mark, same as `calculatePnl`'s
+ * `if (!current) continue`.  A caller that must say which symbols were left unmarked diffs
+ * `openLotSymbols` against its price map.
+ */
+export function unrealizedFromOpenLots(openLots: OpenLot[], currentPrices: Record<string, number>): number {
+  let unrealized = 0;
+  for (const lot of openLots) {
+    const mark = currentPrices[normalizeSymbol(lot.symbol)];
+    if (typeof mark !== "number" || !(mark > 0)) continue;
+    const quantity = Math.abs(lot.quantity);
+    unrealized += lot.side === "short" ? quantity * (lot.entryPrice - mark) : quantity * (mark - lot.entryPrice);
+  }
+  return unrealized;
+}
+
+/** Distinct normalized symbols across `OpenLot`s — the set a quote fetch has to cover. */
+export function openLotSymbols(...books: OpenLot[][]): string[] {
+  const symbols = new Set<string>();
+  for (const book of books) for (const lot of book) symbols.add(normalizeSymbol(lot.symbol));
+  return Array.from(symbols);
+}
+
+/** Close on or immediately before `iso`. Bars must be chronological. */
+function closeOnOrBefore(bars: Array<{ date: string; close: number }>, iso?: string): number | undefined {
+  if (!iso || bars.length === 0) return undefined;
+  // Market (America/New_York) day, not the UTC date: an entry/exit after ~8 PM ET must not match
+  // the next session's close (ST-4589).
+  const day = marketDateOf(iso) ?? iso.slice(0, 10);
+  let found: number | undefined;
+  for (const bar of bars) {
+    if (bar.date <= day && Number.isFinite(bar.close) && bar.close > 0) found = bar.close;
+    if (bar.date > day) break;
+  }
+  return found;
+}
+
+/** Stamp alphaPct = lot.returnPct − benchmark raw % over the same entry→exit window. Never fabricates. */
+export function stampClosedLotAlpha(
+  lots: ClosedLot[],
+  benchBars: Array<{ date: string; close: number }>
+): ClosedLot[] {
+  return lots.map((lot) => {
+    const entry = closeOnOrBefore(benchBars, lot.entryAt);
+    const exit = closeOnOrBefore(benchBars, lot.exitAt);
+    if (entry == null || exit == null || entry <= 0) return lot;
+    const benchPct = ((exit - entry) / entry) * 100;
+    const signedBench = lot.side === "short" ? -benchPct : benchPct;
+    return { ...lot, alphaPct: Number((lot.returnPct - signedBench).toFixed(2)) };
+  });
 }
 
 export function recordPortfolioSnapshot(input: {
@@ -314,7 +476,7 @@ export function recordFillFromProposal(input: {
         // be), or `filterStopPlansByLiveBasis` discards the plan as stale on the very next run
         // (Codex review, PR #1371). No prior position (fresh open) reduces to `basePrice` unchanged.
         // Deliberately `basePrice`, NOT `price` — `price` is net of the paper execution-cost model
-        // (source: "paper" gets ~1bp of synthetic slippage deducted for learning/P&L purposes), but
+        // (source: "paper" gets the OOS 20 bps synthetic slippage deducted for learning/P&L), but
         // the BROKER's own reported `position.averageCost` reflects the raw fill, not our synthetic
         // cost deduction. Using the cost-adjusted `price` here made a paper fill's plan basis drift a
         // fraction of a cent from what the live-basis filter compares against next run, tripping its
@@ -406,12 +568,34 @@ export interface PrefetchedPnl {
   paper?: PnlResult;
 }
 
+/**
+ * A closing fill (or the tail of one) that found no opening lot in this app's ledger to close
+ * against. `fill_events` is deliberately NOT a complete record of the broker account — pre-app
+ * holdings, manual trades and MCP trades all exit through the broker without an opening row here
+ * (see netAccountingFillQuantity in db-fills.ts). Those exits realize real money that this app
+ * cannot compute a basis for, so they are BOOKED HERE instead of being dropped on the floor, and
+ * the count is surfaced next to Realized P&L rather than left as a silent gap.
+ */
+export interface UnmatchedClosingFill {
+  symbol: string;
+  side: OrderSide;
+  /** Shares that found no opening lot — the remainder after any partial FIFO match. */
+  quantity: number;
+  price: number;
+  filledAt: string;
+}
+
 export interface PnlResult {
   realized: number;
   unrealized: number;
   closedLots: ClosedLot[];
   openLots: OpenLot[];
   attribution: RunAttribution[];
+  /**
+   * Closing fills with no opening lot in this ledger. Realized P&L EXCLUDES them (there is no
+   * honest cost basis to compute one from) — they are reported so the number can say so.
+   */
+  unmatchedClosingFills: UnmatchedClosingFill[];
 }
 
 /** Resolve the fills for a single `FillSource`, preferring pre-fetched arrays when supplied. */
@@ -422,15 +606,16 @@ function fillsForSource(
   prefetched?: PrefetchedFills
 ): FillEvent[] {
   if (prefetched) {
-    if (source === "live") return prefetched.liveFills ?? listFillEvents(accountNumber, "live", 500, userId);
-    if (source === "paper") return prefetched.paperFills ?? listFillEvents(accountNumber, "paper", 500, userId);
+    if (source === "live") return prefetched.liveFills ?? listFillEvents(accountNumber, "live", undefined, userId);
+    if (source === "paper") return prefetched.paperFills ?? listFillEvents(accountNumber, "paper", undefined, userId);
     // No source filter: combine both pre-fetched arrays only when BOTH are present, so the result
-    // is identical to the unfiltered SELECT for the common (well under 500 rows per source) case.
+    // is identical to the unfiltered SELECT (both are complete per-source ledgers).
     if (prefetched.liveFills && prefetched.paperFills) {
       return [...prefetched.liveFills, ...prefetched.paperFills].sort((a, b) => a.filledAt.localeCompare(b.filledAt));
     }
   }
-  return listFillEvents(accountNumber, source, 500, userId);
+  // Unbounded: FIFO lot replay needs the COMPLETE ledger — see listFillEvents in db-fills.ts.
+  return listFillEvents(accountNumber, source, undefined, userId);
 }
 
 /** Prefer precomputed P&L for a single fill source; fall back to calculatePnl on fills. */
@@ -454,13 +639,13 @@ export function getPerformanceSummary(
   prefetched?: PrefetchedFills,
   prefetchedPnl?: PrefetchedPnl
 ): PerformanceSummary {
-  const liveFills = prefetched?.liveFills ?? listFillEvents(accountNumber, "live", 500, userId);
-  const paperFills = prefetched?.paperFills ?? listFillEvents(accountNumber, "paper", 500, userId);
+  const liveFills = prefetched?.liveFills ?? listFillEvents(accountNumber, "live", undefined, userId);
+  const paperFills = prefetched?.paperFills ?? listFillEvents(accountNumber, "paper", undefined, userId);
   const allFills = [...liveFills, ...paperFills].sort((a, b) => a.filledAt.localeCompare(b.filledAt));
   const livePnl = prefetchedPnl?.live ?? calculatePnl(liveFills, currentPrices);
   const paperPnl = prefetchedPnl?.paper ?? calculatePnl(paperFills, currentPrices);
-  const liveSnapshots = listPortfolioSnapshots(accountNumber, "live", 100, userId);
-  const paperSnapshots = listPortfolioSnapshots(accountNumber, "paper", 100, userId);
+  const liveSnapshots = listDailyPortfolioSnapshots(accountNumber, "live", userId);
+  const paperSnapshots = listDailyPortfolioSnapshots(accountNumber, "paper", userId);
 
   return {
     liveEquityCurve: liveSnapshots.map((snapshot) => ({
@@ -473,6 +658,12 @@ export function getPerformanceSummary(
       cash: snapshot.cash,
       positionsValue: snapshot.positionsValue
     })),
+    // No fabricated baseline: an account with no persisted portfolio snapshots yet has no real
+    // equity curve to show. A synthetic "$100 + realized P&L" curve used to stand in here, but
+    // that $100 is not real starting capital — it got rendered as money on the chart axis and
+    // could feed deriveDayPnl a fake baseline (a real live equity read minus a fake $100+realized
+    // "yesterday" reads as almost the whole account moving in a day). "Not enough history yet" is
+    // the honest state; the chart already renders that sentence for <2 points.
     paperEquityCurve:
       paperSnapshots.length > 0
         ? paperSnapshots.map((snapshot) => ({
@@ -482,15 +673,22 @@ export function getPerformanceSummary(
             cash: snapshot.cash,
             positionsValue: snapshot.positionsValue
           }))
-        : syntheticPaperCurve(paperFills),
+        : [],
     liveRealizedPnl: livePnl.realized,
     paperRealizedPnl: paperPnl.realized,
     liveUnrealizedPnl: livePnl.unrealized,
     paperUnrealizedPnl: paperPnl.unrealized,
     liveWinRate: winRate(livePnl.closedLots),
     paperWinRate: winRate(paperPnl.closedLots),
+    // ST-4589 B10: per completed ROUND TRIP (a scaled-out position is one trade, not one per trim).
+    ...roundTripWinRateFields("live", livePnl.closedLots, liveFills),
+    ...roundTripWinRateFields("paper", paperPnl.closedLots, paperFills),
     liveAverageReturnPct: averageReturn(livePnl.closedLots),
     paperAverageReturnPct: averageReturn(paperPnl.closedLots),
+    liveClosedLotCount: livePnl.closedLots.length,
+    paperClosedLotCount: paperPnl.closedLots.length,
+    liveUnmatchedClosingFills: livePnl.unmatchedClosingFills.length,
+    paperUnmatchedClosingFills: paperPnl.unmatchedClosingFills.length,
     attribution: combineAttribution(livePnl.attribution, paperPnl.attribution),
     fills: allFills.slice(-100)
   };
@@ -525,6 +723,7 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
     }>
   >();
   const closedLots: ClosedLot[] = [];
+  const unmatchedClosingFills: UnmatchedClosingFill[] = [];
   const attribution = new Map<string, RunAttribution>();
   let realized = 0;
 
@@ -561,7 +760,20 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
     const symbolLots = lots.get(symbol)!;
     while (remaining > 0) {
       const idx = symbolLots.findIndex((l) => l.side === wantSide);
-      if (idx === -1) break; // no matching open lot to close against
+      if (idx === -1) {
+        // No opening lot left to close against — a pre-app, manual or MCP position exiting through
+        // the broker. This used to `break` silently, so the exit simply vanished from the books.
+        // Book it as an unmatched close instead: realized P&L still excludes it (no honest basis
+        // exists), but the count is reported so the figure can disclose what it could not see.
+        unmatchedClosingFills.push({
+          symbol,
+          side: fill.side,
+          quantity: remaining,
+          price: fill.price,
+          filledAt: fill.filledAt
+        });
+        break;
+      }
       const lot = symbolLots[idx];
       const matched = Math.min(remaining, lot.quantity);
       const pnl = fill.side === "cover"
@@ -576,6 +788,7 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
       closedLots.push({
         pnl,
         returnPct,
+        quantity: matched,
         symbol,
         thesisTag: lot.thesisTag,
         regime: lot.regime,
@@ -629,7 +842,8 @@ export function calculatePnl(fills: FillEvent[], currentPrices: Record<string, n
     unrealized,
     closedLots,
     openLots,
-    attribution: Array.from(attribution.values()).sort((a, b) => a.runId.localeCompare(b.runId))
+    attribution: Array.from(attribution.values()).sort((a, b) => a.runId.localeCompare(b.runId)),
+    unmatchedClosingFills
   };
 }
 
@@ -645,11 +859,13 @@ export function getThesisScorecard(
   currentPrices: Record<string, number> = {},
   userId: string = "local",
   prefetched?: PrefetchedFills,
-  prefetchedPnl?: PrefetchedPnl
+  prefetchedPnl?: PrefetchedPnl,
+  /** Chronological benchmark (SPY) closes; when given, lots are alpha-stamped so avgAlphaPct fills. */
+  options: { benchBars?: Array<{ date: string; close: number }> } = {}
 ): ThesisStat[] {
   const { closedLots } = pnlForSource(accountNumber, source, currentPrices, userId, prefetched, prefetchedPnl);
   return aggregateClosedLots(
-    closedLots,
+    options.benchBars ? stampClosedLotAlpha(closedLots, options.benchBars) : closedLots,
     (lot) => (lot.thesisTag && lot.thesisTag.trim() ? lot.thesisTag.trim() : "Untagged"),
     userId
   ).map(({ key, ...rest }) => ({ thesisTag: key, ...rest }));
@@ -661,11 +877,13 @@ export function getRegimeScorecard(
   currentPrices: Record<string, number> = {},
   userId: string = "local",
   prefetched?: PrefetchedFills,
-  prefetchedPnl?: PrefetchedPnl
+  prefetchedPnl?: PrefetchedPnl,
+  /** Chronological benchmark (SPY) closes; when given, lots are alpha-stamped so avgAlphaPct fills. */
+  options: { benchBars?: Array<{ date: string; close: number }> } = {}
 ): RegimeStat[] {
   const { closedLots } = pnlForSource(accountNumber, source, currentPrices, userId, prefetched, prefetchedPnl);
   return aggregateClosedLots(
-    closedLots,
+    options.benchBars ? stampClosedLotAlpha(closedLots, options.benchBars) : closedLots,
     (lot) => (lot.regime && lot.regime.trim() ? lot.regime.trim() : "Unspecified"),
     userId
   ).map(({ key, ...rest }) => ({ regime: key, ...rest }));
@@ -682,6 +900,8 @@ export interface SectorStat {
   shrunkAvgReturnPct: number;
   avgDaysHeld?: number;
   shortTermPct?: number;
+  avgAlphaPct?: number;
+  shrunkAvgAlphaPct?: number;
 }
 
 export function getSectorScorecard(
@@ -1127,6 +1347,41 @@ export interface RedTeamVetoRecord {
   /** Realized % move since the veto, side-adjusted so positive = the veto avoided a loss / missed a gain
    *  is negative (mirrors returnSinceProposalPct's sign convention). */
   returnPct: number;
+  /** Configured counterfactual horizon in TRADING days — the pipeline's fixed 5-day window, which is
+   *  NOT the hold the book takes on the approved version of this trade. Read with `measuredHoldDays`. */
+  horizonDays?: number;
+  /** Realized length of THIS counterfactual's measurement window in calendar days (snapshotAt →
+   *  exitDate). The two horizon fields deliberately disagree; that disagreement is the disclosure. */
+  measuredHoldDays?: number;
+  /** Later repeat vetoes of this same scenario collapsed into this record (dedup rule in
+   *  `RED_TEAM_DEDUP_WINDOW_DAYS`). 0 for a scenario the Bear blocked once. */
+  duplicatesCollapsed?: number;
+}
+
+/**
+ * Horizon disclosure for the veto scorecard. The counterfactual pipeline measures a fixed
+ * 5-trading-day forward return while the trades the Bear vetoes are held far longer in the book, so
+ * "veto value-add" is NOT horizon-matched to realized hold performance. Both horizons are reported
+ * side by side (rather than the mismatch being inherited silently) — the 2026-09-25 review flagged
+ * exactly this: counterfactuals at 5 trading days against actual holds of roughly 3–12 days.
+ */
+export interface RedTeamHorizonDisclosure {
+  /** Median configured counterfactual horizon across scored scenarios, in TRADING days. */
+  counterfactualHorizonDays: number;
+  /** Median REALIZED length of the counterfactual measurement windows themselves, in calendar days. */
+  medianMeasuredHoldDays: number;
+  /** Median realized holding period of the APPROVED book, when the caller supplies it. Absent when
+   *  `getRedTeamEfficacy` is called without account context (the common case) — the honest reason
+   *  being that a user-wide veto rollup has no account to read closed lots for, and a NEW
+   *  user-scoped closed-lot read (src/lib/db-fills.ts) is required to fill it in. */
+  medianApprovedHoldDays?: number;
+  /** How many closed lots backed `medianApprovedHoldDays` (0 when it was not supplied). */
+  approvedHoldSampleSize?: number;
+  /** True only when the approved book's median hold is known AND within one counterfactual
+   *  calendar week of the measured window. Nothing here is "matched" by default. */
+  horizonMatched: boolean;
+  /** Owner-facing one-liner stating the mismatch, safe to render verbatim. */
+  disclosure: string;
 }
 
 /**
@@ -1140,6 +1395,12 @@ export interface RedTeamVetoRecord {
  * trade would have made money — the Bear's rejection MISSED a winner. Never gates anything; this is a
  * read-only scorecard for the approval-time debate prompt and the Results page (console wiring left for
  * the console lane — see docs/rollouts/2026-07-04-w1-learning-loops.md).
+ *
+ * The rates, mean and median below are computed over UNIQUE SCENARIOS (repeat vetoes of the same
+ * setup collapsed — see `RED_TEAM_DEDUP_WINDOW_DAYS`), not over raw audit rows. The raw counts
+ * (`totalVetoes` / `maturedVetoes` / `unresolvableVetoes`) are unchanged pipeline stats and keep their
+ * original meaning; the scenario denominators are the new `uniqueScenarios` /
+ * `maturedUniqueScenarios` / `medianReturnPct` / `verdict` fields.
  */
 export interface RedTeamEfficacy {
   /** Total Bear-veto audit events observed in the scanned window (matured or not). */
@@ -1153,33 +1414,183 @@ export interface RedTeamEfficacy {
   maturedCoveragePct: number;
   /** Human coverage disclosure, e.g. "4/6 vetoes resolved (66.7%) — 1 unresolvable; may be survivor-biased". */
   coverage: string;
+  // ── 2026-09-25 review ("re-score the Red Team honestly") ──────────────────────
+  // Every field below is optional in the TYPE but always present in the VALUE returned by
+  // getRedTeamEfficacy. They are optional only so the hand-built static fallbacks elsewhere keep
+  // compiling: src/lib/ops-performance.ts RED_TEAM_EFFICACY_UNAVAILABLE and the
+  // test/red-team-efficacy-ui.test.ts fixture are both full `RedTeamEfficacy` literals in files this
+  // change does not own. Promoting them to required means updating those two literals too — and the
+  // ops fallback SHOULD set `sampleSufficient: false` / `verdict: "insufficient-sample"` when it does,
+  // so a failed read can never be mistaken for a scored zero.
+  /** UNIQUE scenarios behind the scored numbers (totalVetoes minus repeat vetoes of the same setup).
+   *  This — not `totalVetoes` — is the sample size the rates, mean and median are computed over. The
+   *  2026-09-25 review counted 79 vetoes and 24 unique scenarios on the same account. */
+  uniqueScenarios?: number;
+  /** Raw vetoes that collapsed into an existing scenario cluster (totalVetoes − uniqueScenarios). */
+  duplicateVetoes?: number;
+  /** Matured vetoes that SURVIVED dedup — the denominator of vetoValueAddRate, survivorRiskHitRate,
+   *  avgReturnPct, medianReturnPct and every `byModel` row. */
+  maturedUniqueScenarios?: number;
+  /** Median counterfactual return (%) over matured unique scenarios. Reported next to the mean on
+   *  purpose: one +27.4% PYPL veto moved the mean from +0.19% to +1.16% and the median stayed at
+   *  +0.23% (2026-09-25 review). A mean alone is not a verdict on this scorecard. */
+  medianReturnPct?: number;
+  /** True once `maturedUniqueScenarios` reaches `minUniqueMaturedForVerdict`. Until then the numbers
+   *  are a running tally, not a judgement of the Red Team. */
+  sampleSufficient?: boolean;
+  /** The bar `sampleSufficient` is measured against (50 unique matured scenarios). */
+  minUniqueMaturedForVerdict?: number;
+  verdict?: "insufficient-sample" | "sufficient-sample";
+  /** Actual measurement horizon next to the approved book's holding period (see the interface). */
+  horizon?: RedTeamHorizonDisclosure;
   /** Share of MATURED vetoes where the counterfactual return was negative (the veto avoided a loser). */
   vetoValueAddRate: number;
   /** Share of MATURED vetoes where the counterfactual return was positive (the veto missed a winner —
    *  the survivor-risk the Bear itself introduced by rejecting a trade that would have worked). */
   survivorRiskHitRate: number;
-  /** Mean counterfactual return (%) across matured vetoes; negative is good (vetoes avoided losses). */
+  /** Mean counterfactual return (%) across matured UNIQUE scenarios; negative is good (vetoes avoided
+   *  losses). Kept for existing consumers, but never read alone — see `medianReturnPct`. */
   avgReturnPct: number;
-  /** Per red-team model breakdown (full scanned history; missing model is bucketed as "unattributed"). */
+  /** Per red-team model breakdown (full scanned history; missing model is bucketed as "unattributed").
+   *  Deduped like the top-level scores: `maturedVetoes` is this model's matured UNIQUE scenarios. */
   byModel: Array<{
     model: string;
     maturedVetoes: number;
     vetoValueAddRate: number;
     survivorRiskHitRate: number;
     avgReturnPct: number;
+    /** Median of the same set `avgReturnPct` averages — outlier-resistant companion. */
+    medianReturnPct?: number;
+    /** Repeat vetoes of the same scenario this model re-issued and that were collapsed away. */
+    duplicateVetoes?: number;
   }>;
-  /** The individual matured veto records, most recent counterfactual maturation first — bounded by `limit`. */
+  /** The individual matured veto records — DEDUPED, most recent counterfactual maturation first,
+   *  bounded by `limit`. Each record carries the number of repeat vetoes collapsed into it. */
   records: RedTeamVetoRecord[];
 }
 
+/**
+ * Deduplication window for repeat Red Team vetoes of one scenario, in CALENDAR days.
+ *
+ * WHY dedup at all: a `proposal_rejected_by_red_team` row is written per Bear veto, and the Bear
+ * re-lists the same name on every subsequent scan until the setup dies or the thesis expires. A
+ * setup it blocked six times is ONE decision point, not six independent pieces of evidence, and
+ * scoring it six times inflates the sample while letting a single outlier (one PYPL buy at +27.4%)
+ * carry the headline average — the exact 79-vetoes / 24-scenarios finding from the 2026-09-25 review.
+ *
+ * RULE: two vetoes are the same scenario when they share the same normalized SYMBOL and the same SIDE
+ * (a buy block and a short block on one name are different calls) and the later veto lands within
+ * this window of the previous veto of that pair. Seven calendar days is the calendar length of the
+ * counterfactual pipeline's own 5-trading-day horizon: a re-veto inside the same measurement window
+ * is the Bear re-litigating one decision, not a second one. Legacy audits with no `side` cluster by
+ * symbol alone (the writer has always been opening-scoped downstream).
+ *
+ * SURVIVOR: the EARLIEST veto in a cluster, keeping its own `(runId, symbol)` counterfactual — it is
+ * the decision that actually changed the outcome, and its row is the only one measured from the
+ * moment the Bear said no. Later re-vetoes are counted in `duplicateVetoes` and on the survivor
+ * record, never silently dropped.
+ */
+export const RED_TEAM_DEDUP_WINDOW_DAYS = 7;
+
+/**
+ * Unique matured scenarios required before the Red Team verdict is answerable, per the 2026-09-25
+ * review ("decide once each account has at least 50 unique matured vetoes"). Matches the console's
+ * existing SOLID gate (RED_TEAM_EFFICACY_SOLID_RESOLVED, app/console/lib/red-team-efficacy.ts) —
+ * but the console gate is fed RAW matured vetoes, repeats included, which is how a 24-scenario
+ * account could read as a 28-veto sample and look ready to judge.
+ */
+export const RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED = 50;
+
+/** Median of a numeric sample (mean of the two middles on an even count). Empty sample → 0, matching
+ *  every other aggregate in this file — callers gate on their own denominators, never on the number. */
+function medianOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Collapse repeat vetoes into unique scenarios (rule + survivor choice in RED_TEAM_DEDUP_WINDOW_DAYS).
+ * Every veto key gets an entry so the caller can tell a survivor from a collapsed repeat in one pass;
+ * `duplicates` is the cluster size seen from every member.
+ */
+function clusterVetoScenarios(
+  vetoes: Array<{ key: string; symbol: string; side?: string; createdAt: string }>
+): Map<string, { survivorKey: string; isSurvivor: boolean; duplicates: number }> {
+  const assignment = new Map<string, { survivorKey: string; isSurvivor: boolean; duplicates: number }>();
+  // Chronological, with a deterministic key tiebreak so an unparseable created_at cannot make the
+  // surviving scenario depend on Map insertion order.
+  const chronological = [...vetoes].sort((a, b) => {
+    const at = Date.parse(a.createdAt);
+    const bt = Date.parse(b.createdAt);
+    if (Number.isFinite(at) && Number.isFinite(bt) && at !== bt) return at - bt;
+    return a.key.localeCompare(b.key);
+  });
+  const lastSeenAt = new Map<string, number>();
+  const survivorOf = new Map<string, string>();
+  const duplicatesOf = new Map<string, number>();
+  const windowMs = RED_TEAM_DEDUP_WINDOW_DAYS * 86_400_000;
+
+  for (const veto of chronological) {
+    const clusterKey = `${veto.symbol}:${veto.side ?? "unspecified"}`;
+    const at = Date.parse(veto.createdAt);
+    const previousAt = lastSeenAt.get(clusterKey);
+    // An unparseable veto timestamp never collapses into a cluster — we cannot prove it is a repeat,
+    // and inventing the grouping would understate the sample.
+    const isRepeat = Number.isFinite(at) && previousAt !== undefined && at - previousAt <= windowMs;
+    const survivorKey = isRepeat ? (survivorOf.get(clusterKey) as string) : veto.key;
+    if (isRepeat) {
+      duplicatesOf.set(survivorKey, (duplicatesOf.get(survivorKey) ?? 0) + 1);
+    } else {
+      survivorOf.set(clusterKey, veto.key);
+    }
+    if (Number.isFinite(at)) lastSeenAt.set(clusterKey, at);
+    assignment.set(veto.key, {
+      survivorKey,
+      isSurvivor: survivorKey === veto.key,
+      duplicates: 0
+    });
+  }
+
+  // Second pass so every member (including repeats) reports the cluster's duplicate count.
+  for (const entry of assignment.values()) {
+    entry.duplicates = duplicatesOf.get(entry.survivorKey) ?? 0;
+  }
+  return assignment;
+}
+
+/**
+ * Default scan window for getRedTeamEfficacy's `proposal_rejected_by_red_team` audit-kind
+ * query. Raised from the original 500 (2026-09-18): once those audit kinds are exempted from
+ * the 90-day retention prune (src/lib/audit-prune.ts AUDIT_PRUNE_NEVER_PRUNED_KINDS), lifetime
+ * veto history accumulates without bound on any account with sustained Red Team activity, and
+ * the old cap silently truncated this rollup to the newest 500 vetoes — a second, independent
+ * ceiling on top of the prune bug. 5000 matches the ceiling already used elsewhere for
+ * audit-kind scans (src/lib/backtest.ts DEFAULT_AUDIT_LIMIT / boundedInteger max).
+ */
+export const RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT = 5000;
+
 export function getRedTeamEfficacy(
   userId: string = "local",
-  options: { auditLimit?: number; limit?: number; connectedAccountId?: string } = {}
+  options: {
+    auditLimit?: number;
+    limit?: number;
+    connectedAccountId?: string;
+    /**
+     * Median realized holding period (days) of the APPROVED book, plus how many closed lots backed
+     * it. Callers that already hold a `calculatePnl` result (dashboard, ops-performance) should pass
+     * it so the horizon disclosure can quantify the mismatch instead of merely naming it. A user-wide
+     * veto rollup has no account to read closed lots for, so this cannot be derived here.
+     */
+    approvedHoldMedianDays?: number;
+    approvedHoldSampleSize?: number;
+  } = {}
 ): RedTeamEfficacy {
-  const auditLimit = options.auditLimit ?? 500;
+  const auditLimit = options.auditLimit ?? RED_TEAM_EFFICACY_DEFAULT_AUDIT_LIMIT;
   const limit = options.limit ?? 50;
 
-  const vetoesByKey = new Map<string, { runId: string; symbol: string; side?: string; thesisTag?: string; reason?: string; model?: string }>();
+  const vetoesByKey = new Map<string, { runId: string; symbol: string; side?: string; thesisTag?: string; reason?: string; model?: string; createdAt: string }>();
   // Kind-scoped audit query (Codex review on PR #365): the LIMIT applies AFTER the kind
   // filter, so newer audit rows of other kinds can never push older Bear vetoes out of the
   // scanned window and zero the scorecard's history.
@@ -1193,25 +1604,46 @@ export function getRedTeamEfficacy(
     // (the writer has always been opening-scoped downstream).
     if (payload.side !== undefined && payload.side !== "buy" && payload.side !== "short") continue;
     const symbol = normalizeSymbol(payload.symbol);
-    vetoesByKey.set(`${payload.runId}:${symbol}`, {
+    const key = `${payload.runId}:${symbol}`;
+    // Newest payload fields still win (a re-audit of the same run/symbol carries the later reason),
+    // but the scenario's decision moment stays the EARLIEST row: that is when the Bear said no, and
+    // the dedup window counts from there.
+    const prior = vetoesByKey.get(key);
+    vetoesByKey.set(key, {
       runId: payload.runId,
       symbol,
       side: payload.side,
       thesisTag: payload.thesisTag,
       reason: payload.reason,
-      model: payload.model
+      model: payload.model,
+      createdAt: prior && prior.createdAt < event.createdAt ? prior.createdAt : event.createdAt
     });
   }
 
   const totalVetoes = vetoesByKey.size;
+  // One pass over the vetoes builds the scenario clusters (rule in RED_TEAM_DEDUP_WINDOW_DAYS). The
+  // assignment map tells a surviving scenario from a collapsed repeat without a second scan.
+  const scenarioOf = clusterVetoScenarios(
+    [...vetoesByKey.entries()].map(([key, veto]) => ({ key, symbol: veto.symbol, side: veto.side, createdAt: veto.createdAt }))
+  );
+  const uniqueScenarios = new Set([...scenarioOf.values()].map((entry) => entry.survivorKey)).size;
+
   // Keyed (runId, symbol) lookups rather than a return_pct-DESC top slice of all matured
   // rows: the top-return slice could drop exactly the low/negative-return vetoes (the
   // avoided losers) that vetoValueAddRate exists to count (Codex review on PR #365).
-  const maturedPairs: Array<{ record: RedTeamVetoRecord; maturedAt: string }> = [];
-  for (const veto of vetoesByKey.values()) {
+  const maturedPairs: Array<{ record: RedTeamVetoRecord; maturedAt: string; isSurvivor: boolean }> = [];
+  for (const [key, veto] of vetoesByKey.entries()) {
     const row = getMaturedSkippedCounterfactualByRunSymbol(userId, veto.runId, veto.symbol);
     if (!row || row.returnPct === undefined) continue;
     const returnPct = veto.side === "short" ? -row.returnPct : row.returnPct;
+    // Realized length of the counterfactual window this return was actually measured over. The
+    // configured horizon is in TRADING days and the measured window in CALENDAR days — they are kept
+    // apart so the horizon disclosure can show the pipeline is not measuring the book's real hold.
+    const windowStart = Date.parse(row.snapshotAt);
+    const windowEnd = Date.parse(row.exitDate ?? row.targetDate);
+    const measuredHoldDays = Number.isFinite(windowStart) && Number.isFinite(windowEnd) && windowEnd >= windowStart
+      ? Number(((windowEnd - windowStart) / 86_400_000).toFixed(1))
+      : undefined;
     maturedPairs.push({
       record: {
         runId: veto.runId,
@@ -1220,14 +1652,22 @@ export function getRedTeamEfficacy(
         thesisTag: veto.thesisTag,
         reason: veto.reason,
         model: veto.model,
-        returnPct
+        returnPct,
+        horizonDays: row.horizonDays,
+        ...(measuredHoldDays !== undefined ? { measuredHoldDays } : {}),
+        duplicatesCollapsed: scenarioOf.get(key)?.duplicates ?? 0
       },
-      maturedAt: row.updatedAt
+      maturedAt: row.updatedAt,
+      isSurvivor: scenarioOf.get(key)?.isSurvivor ?? true
     });
   }
   // Most recent counterfactual maturation first (the documented `records` ordering contract).
   maturedPairs.sort((a, b) => b.maturedAt.localeCompare(a.maturedAt));
-  const records: RedTeamVetoRecord[] = maturedPairs.map((pair) => pair.record);
+  const maturedVetoes = maturedPairs.length;
+  // Scoring set: matured vetoes that survived dedup. A collapsed repeat keeps its raw count in
+  // `maturedVetoes` (pipeline coverage) but never enters a rate, a mean or a median.
+  const scored = maturedPairs.filter((pair) => pair.isSurvivor).map((pair) => pair.record);
+  const records: RedTeamVetoRecord[] = scored;
 
   // Kill-survivorship (Wave-2 outcome engine): terminally-unresolvable counterfactuals
   // (delisted/renamed vetoed names) stay in the denominator and in the disclosure instead
@@ -1239,25 +1679,54 @@ export function getRedTeamEfficacy(
     }
   }
 
-  const maturedVetoes = records.length;
-  const valueAdds = records.filter((r) => r.returnPct < 0).length;
-  const survivorHits = records.filter((r) => r.returnPct > 0).length;
-  const avgReturnPct = maturedVetoes > 0 ? records.reduce((sum, r) => sum + r.returnPct, 0) / maturedVetoes : 0;
+  const maturedUniqueScenarios = scored.length;
+  const valueAdds = scored.filter((r) => r.returnPct < 0).length;
+  const survivorHits = scored.filter((r) => r.returnPct > 0).length;
+  const avgReturnPct = maturedUniqueScenarios > 0 ? scored.reduce((sum, r) => sum + r.returnPct, 0) / maturedUniqueScenarios : 0;
+  const medianReturnPct = medianOf(scored.map((r) => r.returnPct));
+  const sampleSufficient = maturedUniqueScenarios >= RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED;
 
   const byModelMap = new Map<string, RedTeamVetoRecord[]>();
   for (const record of records) {
-    const model = record.model?.trim() || "unattributed";
+    const model = canonicalModelId(record.model) || "unattributed";
     const bucket = byModelMap.get(model);
-    if (bucket) bucket.push(record);
-    else byModelMap.set(model, [record]);
+    if (bucket) bucket.push({ ...record, model });
+    else byModelMap.set(model, [{ ...record, model }]);
   }
+
+  // Horizon disclosure (2026-09-25 review: counterfactuals run a 5-trading-day window while the
+  // book holds these names for days-to-weeks, so veto value-add is not horizon-matched). Reported
+  // rather than assumed, and never silently "matched" — the approved-book leg is only filled in
+  // when a caller that holds closed lots supplies it.
+  const counterfactualHorizonDays = medianOf(
+    scored.map((r) => r.horizonDays).filter((days): days is number => typeof days === "number" && Number.isFinite(days))
+  );
+  const medianMeasuredHoldDays = medianOf(
+    scored.map((r) => r.measuredHoldDays).filter((days): days is number => typeof days === "number" && Number.isFinite(days))
+  );
+  const approvedHoldMedianDays = typeof options.approvedHoldMedianDays === "number" ? options.approvedHoldMedianDays : undefined;
+  const approvedHoldSampleSize = typeof options.approvedHoldSampleSize === "number" ? options.approvedHoldSampleSize : 0;
+  const horizonMatched =
+    approvedHoldMedianDays !== undefined && Math.abs(approvedHoldMedianDays - medianMeasuredHoldDays) <= RED_TEAM_DEDUP_WINDOW_DAYS;
+  const horizon: RedTeamHorizonDisclosure = {
+    counterfactualHorizonDays: Number(counterfactualHorizonDays.toFixed(1)),
+    medianMeasuredHoldDays: Number(medianMeasuredHoldDays.toFixed(1)),
+    ...(approvedHoldMedianDays !== undefined ? { medianApprovedHoldDays: Number(approvedHoldMedianDays.toFixed(1)) } : {}),
+    approvedHoldSampleSize,
+    horizonMatched,
+    disclosure: horizonDisclosureText(counterfactualHorizonDays, medianMeasuredHoldDays, approvedHoldMedianDays, approvedHoldSampleSize, horizonMatched)
+  };
 
   const resolvedDenominator = maturedVetoes + unresolvableVetoes;
   const coverage =
     totalVetoes > 0
       ? `${maturedVetoes}/${totalVetoes} vetoes resolved (${Number(((maturedVetoes / totalVetoes) * 100).toFixed(1))}%)${
           unresolvableVetoes > 0 ? ` — ${unresolvableVetoes} unresolvable; may be survivor-biased` : ""
-        }${totalVetoes - resolvedDenominator > 0 ? `; ${totalVetoes - resolvedDenominator} still maturing` : ""}`
+        }${totalVetoes - resolvedDenominator > 0 ? `; ${totalVetoes - resolvedDenominator} still maturing` : ""}${
+          totalVetoes - uniqueScenarios > 0
+            ? `; scored on ${maturedUniqueScenarios} unique scenario${maturedUniqueScenarios === 1 ? "" : "s"} (${totalVetoes - uniqueScenarios} repeat veto${totalVetoes - uniqueScenarios === 1 ? "" : "es"} collapsed)`
+            : ""
+        }`
       : "no vetoes observed";
 
   return {
@@ -1266,8 +1735,16 @@ export function getRedTeamEfficacy(
     unresolvableVetoes,
     maturedCoveragePct: totalVetoes > 0 ? Number(((maturedVetoes / totalVetoes) * 100).toFixed(1)) : 0,
     coverage,
-    vetoValueAddRate: maturedVetoes > 0 ? Number(((valueAdds / maturedVetoes) * 100).toFixed(1)) : 0,
-    survivorRiskHitRate: maturedVetoes > 0 ? Number(((survivorHits / maturedVetoes) * 100).toFixed(1)) : 0,
+    uniqueScenarios,
+    duplicateVetoes: totalVetoes - uniqueScenarios,
+    maturedUniqueScenarios,
+    medianReturnPct: Number(medianReturnPct.toFixed(2)),
+    sampleSufficient,
+    minUniqueMaturedForVerdict: RED_TEAM_EFFICACY_MIN_UNIQUE_MATURED,
+    verdict: sampleSufficient ? "sufficient-sample" : "insufficient-sample",
+    horizon,
+    vetoValueAddRate: maturedUniqueScenarios > 0 ? Number(((valueAdds / maturedUniqueScenarios) * 100).toFixed(1)) : 0,
+    survivorRiskHitRate: maturedUniqueScenarios > 0 ? Number(((survivorHits / maturedUniqueScenarios) * 100).toFixed(1)) : 0,
     avgReturnPct: Number(avgReturnPct.toFixed(2)),
     byModel: Array.from(byModelMap.entries()).map(([model, modelRecords]) => {
       const modelValueAdds = modelRecords.filter((r) => r.returnPct < 0).length;
@@ -1278,11 +1755,32 @@ export function getRedTeamEfficacy(
         maturedVetoes: modelRecords.length,
         vetoValueAddRate: Number(((modelValueAdds / modelRecords.length) * 100).toFixed(1)),
         survivorRiskHitRate: Number(((modelSurvivorHits / modelRecords.length) * 100).toFixed(1)),
-        avgReturnPct: Number(modelAvg.toFixed(2))
+        avgReturnPct: Number(modelAvg.toFixed(2)),
+        medianReturnPct: Number(medianOf(modelRecords.map((r) => r.returnPct)).toFixed(2)),
+        duplicateVetoes: modelRecords.reduce((sum, r) => sum + (r.duplicatesCollapsed ?? 0), 0)
       };
     }),
     records: records.slice(0, limit)
   };
+}
+
+/** Owner-facing horizon sentence. Two legibilities, never one number: the window the counterfactual
+ *  pipeline actually measured, and the hold the approved book actually takes. */
+function horizonDisclosureText(
+  counterfactualHorizonDays: number,
+  medianMeasuredHoldDays: number,
+  approvedHoldMedianDays: number | undefined,
+  approvedHoldSampleSize: number,
+  horizonMatched: boolean
+): string {
+  const window = `Counterfactual returns measure a ${Number(counterfactualHorizonDays.toFixed(1))}-trading-day forward window, realized over a median of ${Number(medianMeasuredHoldDays.toFixed(1))} calendar days.`;
+  if (approvedHoldMedianDays === undefined) {
+    return `${window} The holding period of the approved trades this Red Team vetoes was not supplied at this call site, so the horizon mismatch cannot be quantified here — treat every return below as NOT horizon-matched.`;
+  }
+  const book = `The approved book holds those trades a median of ${Number(approvedHoldMedianDays.toFixed(1))} days over ${approvedHoldSampleSize} closed lot${approvedHoldSampleSize === 1 ? "" : "s"}.`;
+  return horizonMatched
+    ? `${window} ${book} The two windows are within a week, so veto value-add is approximately horizon-matched.`
+    : `${window} ${book} The two windows differ by more than a week, so veto value-add is NOT horizon-matched to realized hold performance.`;
 }
 
 /**
@@ -1296,7 +1794,10 @@ export function getMissedOpportunityCoverage(userId: string = "local", connected
   return getSkippedCounterfactualCoverage(userId, connectedAccountId);
 }
 
-/** One matured Red Team veto joined to its post-veto counterfactual return. */
+/** One matured Red Team veto joined to its post-veto counterfactual return.
+ *  DUPLICATE of the block above `RedTeamEfficacy` (TypeScript declaration-merges the two, so the
+ *  type is the union either way). Left in place rather than deleted in the 2026-09-25 scoring work to
+ *  keep that change to the scorecard only — add any new field to the CANONICAL block above. */
 export interface RedTeamVetoRecord {
   runId: string;
   symbol: string;
@@ -1446,10 +1947,14 @@ export function getOpenLots(
  */
 const SHRINK_PRIOR = 5;
 
-/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default. */
+/** Shrinkage prior, overridable via policy.tuning.shrinkPrior (0 = no shrinkage); else the default.
+ *  Reads through `peekPolicy`, not `getPolicy`: this runs inside read-only scorecards (including the
+ *  token-gated ops performance GET), and `getPolicy` seeds an account_strategy_state row the first
+ *  time it touches an account that has none.  `peekPolicy` returns the same effective policy without
+ *  persisting it. */
 function resolveShrinkPrior(userId: string = "local"): number {
   try {
-    const v = getPolicy(userId).tuning?.shrinkPrior;
+    const v = peekPolicy(userId).tuning?.shrinkPrior;
     return typeof v === "number" && v >= 0 ? v : SHRINK_PRIOR;
   } catch {
     return SHRINK_PRIOR;
@@ -1497,12 +2002,15 @@ function aggregateClosedLots(
     lossReturnAbsSum: number;
     lossCount: number;
     downsideSqSum: number;
+    alphaSum: number;
+    alphaCount: number;
   }>();
   for (const lot of closedLots) {
     const key = keyFn(lot);
     const cur = byKey.get(key) ?? {
       pnl: 0, returnSum: 0, wins: 0, trades: 0, daysHeldSum: 0, daysHeldCount: 0, shortTermCount: 0,
-      winReturnSum: 0, winCount: 0, lossReturnAbsSum: 0, lossCount: 0, downsideSqSum: 0
+      winReturnSum: 0, winCount: 0, lossReturnAbsSum: 0, lossCount: 0, downsideSqSum: 0,
+      alphaSum: 0, alphaCount: 0
     };
     cur.pnl += lot.pnl;
     cur.returnSum += lot.returnPct;
@@ -1530,6 +2038,10 @@ function aggregateClosedLots(
     }
     const downsideClamped = Math.min(lot.returnPct, 0);
     cur.downsideSqSum += downsideClamped * downsideClamped;
+    if (typeof lot.alphaPct === "number" && Number.isFinite(lot.alphaPct)) {
+      cur.alphaSum += lot.alphaPct;
+      cur.alphaCount += 1;
+    }
     byKey.set(key, cur);
   }
   return Array.from(byKey.entries())
@@ -1550,7 +2062,9 @@ function aggregateClosedLots(
       avgLossPct: s.lossCount > 0 ? Number((s.lossReturnAbsSum / s.lossCount).toFixed(2)) : undefined,
       downsideDeviationPct: s.trades > 0 ? Number(Math.sqrt(s.downsideSqSum / s.trades).toFixed(2)) : undefined,
       winCount: s.trades > 0 ? s.winCount : undefined,
-      lossCount: s.trades > 0 ? s.lossCount : undefined
+      lossCount: s.trades > 0 ? s.lossCount : undefined,
+      avgAlphaPct: s.alphaCount > 0 ? Number((s.alphaSum / s.alphaCount).toFixed(2)) : undefined,
+      shrunkAvgAlphaPct: s.alphaCount > 0 ? Number((s.alphaSum / (s.alphaCount + prior)).toFixed(2)) : undefined
     }))
     .sort((a, b) => b.totalPnl - a.totalPnl);
 }
@@ -1590,8 +2104,8 @@ function thesisMetaFromFill(fill: FillEvent): { thesisTag?: string; regime?: str
     confidence: typeof p.confidenceScore === "number" ? p.confidenceScore : undefined,
     sector,
     dominantFactor,
-    entryModel: typeof p.proposedByModel === "string" && p.proposedByModel ? p.proposedByModel : undefined,
-    reviewedByModel: typeof p.reviewedByModel === "string" && p.reviewedByModel ? p.reviewedByModel : undefined
+    entryModel: typeof p.proposedByModel === "string" && p.proposedByModel ? canonicalModelId(p.proposedByModel) || undefined : undefined,
+    reviewedByModel: typeof p.reviewedByModel === "string" && p.reviewedByModel ? canonicalModelId(p.reviewedByModel) || undefined : undefined
   };
 }
 
@@ -1607,16 +2121,6 @@ function isAccountingFill(fill: FillEvent): boolean {
   // type narrowing to "broker/paper" | "broker/live", so it's compared as a plain string here.
   const legacyMode = fill.executionMode as string | undefined;
   return !fill.brokerOrderId && (legacyMode === undefined || legacyMode === "test/local");
-}
-
-function syntheticPaperCurve(fills: FillEvent[]) {
-  const accountingFills = fills
-    .filter(isAccountingFill)
-    .sort((a, b) => a.filledAt.localeCompare(b.filledAt));
-  return accountingFills.map((fill, index) => {
-    const realized = calculatePnl(accountingFills.slice(0, index + 1)).realized;
-    return { timestamp: fill.filledAt, equity: 100 + realized, source: "paper" as const };
-  });
 }
 
 function addAttribution(map: Map<string, RunAttribution>, fill: FillEvent, realizedPnl: number): void {
@@ -1661,6 +2165,20 @@ function combineAttribution(...groups: RunAttribution[][]): RunAttribution[] {
 function winRate(lots: ClosedLot[]): number {
   if (lots.length === 0) return 0;
   return (lots.filter((lot) => lot.pnl > 0).length / lots.length) * 100;
+}
+
+/** Round-trip win rate + count for one ledger. The rate is omitted (never a fabricated 0) when
+ *  no round trip has completed yet. */
+function roundTripWinRateFields(
+  side: "live" | "paper",
+  closedLots: ClosedLot[],
+  fills: FillEvent[]
+): Pick<PerformanceSummary, "liveRoundTripWinRate" | "liveRoundTripCount" | "paperRoundTripWinRate" | "paperRoundTripCount"> {
+  const trips = completedRoundTrips(closedLots, fills).trips.map(({ trip }) => trip);
+  const rate = trips.length > 0 ? winRate(trips) : undefined;
+  return side === "live"
+    ? { liveRoundTripCount: trips.length, ...(rate !== undefined ? { liveRoundTripWinRate: rate } : {}) }
+    : { paperRoundTripCount: trips.length, ...(rate !== undefined ? { paperRoundTripWinRate: rate } : {}) };
 }
 
 /**

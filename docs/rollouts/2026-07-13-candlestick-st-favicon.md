@@ -46,3 +46,7 @@ committed.
 
 - Optional: single-candle T stem (currently ~2 columns) if a crisper T is wanted;
   tune letter spacing.
+
+**2026-08-17 update:** issue #2731 uses the later iOS App Icon offset ST (S higher
+than T), cropped tight with a transparent canvas, as the website favicon only.
+See `docs/rollouts/2026-08-17-favicon-crop-st.md`.

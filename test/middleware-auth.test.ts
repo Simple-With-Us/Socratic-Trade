@@ -474,6 +474,30 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("FAIL CLOSED: DB_BOOTSTRAP=live + auth unconfigured → 401 (no PRIMARY fallback)", async () => {
+    vi.stubEnv("DB_BOOTSTRAP", "live");
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/dashboard");
+    const res = await middleware(req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-middleware-request-x-authenticated-user-email")).toBeNull();
+  });
+
+  it("FAIL CLOSED: DB_BOOTSTRAP=live + auth unconfigured → redirect to /login for pages", async () => {
+    vi.stubEnv("DB_BOOTSTRAP", "live");
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "");
+    vi.stubEnv("AUTH_SECRET", "");
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/console");
+    const res = await middleware(req);
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/login");
+  });
+
   // ── Test 4: authConfigured=false → PRIMARY fallback (dev/test) ───────────────
   it("no auth env (authConfigured=false) → PRIMARY_EMAIL fallback (dev/test behavior)", async () => {
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "");
@@ -528,6 +552,15 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
     expect(res.status).toBe(200);
   });
 
+  it("public path /api/live passes with no identity and no auth configured", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "");
+    const middleware = await loadMiddleware();
+    const req = makeRequest("/api/live");
+    const res = await middleware(req);
+    expect(res.status).toBe(200);
+  });
+
   it("one-time mobile auth exchange reaches its verifier gate without an existing session", async () => {
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
     vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
@@ -578,17 +611,34 @@ describe("middleware — fail-closed arming (Phase-11 M6)", () => {
     expect(res.headers.get("x-middleware-request-x-user-id")).toBeNull();
   });
 
-  it("crawler metadata files (robots/sitemap/manifest) are public even when auth is armed", async () => {
+  it("crawler metadata files (robots/sitemap) are public even when auth is armed", async () => {
     // A robots.txt that 307s to /login parses as "no rules" to crawlers, so
     // every robots/noai directive silently dies. Regression for the live gap
-    // found 2026-07-11: production auth-gated all three metadata routes.
+    // found 2026-07-11: production auth-gated these metadata routes.
     vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
     vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
     const middleware = await loadMiddleware();
-    for (const path of ["/robots.txt", "/sitemap.xml", "/manifest.webmanifest"]) {
+    for (const path of ["/robots.txt", "/sitemap.xml"]) {
       const res = await middleware(makeRequest(path));
       expect(res.status, `${path} must not require auth`).toBe(200);
     }
+  });
+
+  it("retired PWA manifest is 410 (not an auth redirect) when auth is armed", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    const res = await middleware(makeRequest("/manifest.webmanifest"));
+    expect(res.status).toBe(410);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("PWA kill-switch worker stays public so leftover installs can update", async () => {
+    vi.stubEnv("CF_ACCESS_TRUST_EMAIL_HEADER", "1");
+    vi.stubEnv("AUTH_SECRET", "test-secret-at-least-32-bytes-long!!");
+    const middleware = await loadMiddleware();
+    const res = await middleware(makeRequest("/sw.js"));
+    expect(res.status, "/sw.js must not require auth").toBe(200);
   });
 
   it("Auth.js callback paths are public so provider sign-in can complete", async () => {

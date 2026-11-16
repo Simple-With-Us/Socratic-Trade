@@ -41,7 +41,7 @@ function fixtureArticle(overrides: {
         country: "us",
         type: "equity",
         industry: "Technology",
-        match_score: 12.3,
+        match_score: 55, // healthy real-world match (docs samples run ~12-82); normalizes to 0.55, clear of the 0.35 default gate
         sentiment_score: overrides.sentimentScore,
         highlights: [
           { highlight: "synthetic highlight", sentiment: overrides.sentimentScore, highlighted_in: "title" }
@@ -58,6 +58,8 @@ describe("Marketaux enrichment provider", () => {
   const originalNegTtl = process.env.MARKETAUX_NEGATIVE_CACHE_TTL_MS;
   const originalBudget = process.env.MARKETAUX_DAILY_REQUEST_BUDGET;
   const originalGroupSize = process.env.MARKETAUX_SYMBOLS_PER_REQUEST;
+  const originalRelevanceFilter = process.env.NEWS_RELEVANCE_FILTER;
+  const originalRelevanceMinScore = process.env.NEWS_RELEVANCE_MIN_SCORE;
 
   beforeEach(async () => {
     delete process.env.MARKETAUX_API_KEY;
@@ -65,6 +67,8 @@ describe("Marketaux enrichment provider", () => {
     delete process.env.MARKETAUX_NEGATIVE_CACHE_TTL_MS;
     delete process.env.MARKETAUX_DAILY_REQUEST_BUDGET;
     delete process.env.MARKETAUX_SYMBOLS_PER_REQUEST;
+    delete process.env.NEWS_RELEVANCE_FILTER;
+    delete process.env.NEWS_RELEVANCE_MIN_SCORE;
     const { clearMarketauxCache, resetMarketauxDailyBudget } = await import("../src/lib/marketaux-provider");
     clearMarketauxCache();
     resetMarketauxDailyBudget();
@@ -82,6 +86,10 @@ describe("Marketaux enrichment provider", () => {
     else delete process.env.MARKETAUX_DAILY_REQUEST_BUDGET;
     if (originalGroupSize) process.env.MARKETAUX_SYMBOLS_PER_REQUEST = originalGroupSize;
     else delete process.env.MARKETAUX_SYMBOLS_PER_REQUEST;
+    if (originalRelevanceFilter) process.env.NEWS_RELEVANCE_FILTER = originalRelevanceFilter;
+    else delete process.env.NEWS_RELEVANCE_FILTER;
+    if (originalRelevanceMinScore) process.env.NEWS_RELEVANCE_MIN_SCORE = originalRelevanceMinScore;
+    else delete process.env.NEWS_RELEVANCE_MIN_SCORE;
     const { clearMarketauxCache, resetMarketauxDailyBudget } = await import("../src/lib/marketaux-provider");
     clearMarketauxCache();
     resetMarketauxDailyBudget();
@@ -98,6 +106,12 @@ describe("Marketaux enrichment provider", () => {
     expect(resolveMarketauxApiKey()).toBeUndefined();
     delete process.env.MARKETAUX_API_KEY;
     expect(resolveMarketauxApiKey()).toBeUndefined();
+  });
+
+  it("resolveMarketauxApiKey(userId) falls back to the env key when no stored user key exists", async () => {
+    const { resolveMarketauxApiKey } = await import("../src/lib/marketaux-provider");
+    process.env.MARKETAUX_API_KEY = "env-key-123";
+    expect(resolveMarketauxApiKey("user-without-stored-key")).toBe("env-key-123");
   });
 
   // ── Parsing helpers (fixture payloads matching the live-verified response shape) ────────────
@@ -173,6 +187,63 @@ describe("Marketaux enrichment provider", () => {
     const out = aggregateMarketauxBySymbol(articles, ["AAPL"]);
     // Only 3 distinct titles exist across the 8 articles, well under the 5-per-symbol cap.
     expect(out.AAPL.headlines).toEqual(["Headline number 0", "Headline number 1", "Headline number 2"]);
+  });
+
+  // ── match_score relevance gating (NEWS_RELEVANCE_FILTER / NEWS_RELEVANCE_MIN_SCORE) ────────
+
+  it("with the filter ON (default), an entity's match_score below the threshold drops BOTH its headline and its sentiment contribution", async () => {
+    const { aggregateMarketauxBySymbol } = await import("../src/lib/marketaux-provider");
+    // match_score is normalized /100 onto the knob's 0..1 scale (real docs examples run ~12-82),
+    // so the fixture's match_score: 55 -> 0.55; a 0.9 threshold exercises a genuine drop.
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.9";
+    const articles = [fixtureArticle({ title: "Weakly matched mention", symbol: "AAPL", sentimentScore: 0.5 })];
+    const out = aggregateMarketauxBySymbol(articles, ["AAPL"]);
+    expect(out.AAPL).toEqual({}); // dropped entirely, never a fabricated partial row
+  });
+
+  it("with the filter ON (default), an entity's match_score at/above the threshold passes through normally", async () => {
+    const { aggregateMarketauxBySymbol } = await import("../src/lib/marketaux-provider");
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.1"; // well below the fixture's normalized 0.55
+    const articles = [fixtureArticle({ title: "Strongly matched mention", symbol: "AAPL", sentimentScore: 0.5 })];
+    const out = aggregateMarketauxBySymbol(articles, ["AAPL"]);
+    expect(out.AAPL.headlines).toEqual(["Strongly matched mention"]);
+    expect(out.AAPL.sentiment).toBeDefined();
+  });
+
+  it("an entity with NO match_score at all passes through even with the filter ON — never drop data the provider didn't score", async () => {
+    const { aggregateMarketauxBySymbol } = await import("../src/lib/marketaux-provider");
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail almost anything WITH a score
+    const articles = [
+      {
+        title: "Unscored entity mention",
+        entities: [{ symbol: "AAPL", sentiment_score: 0.4 }] // no match_score field
+      }
+    ];
+    const out = aggregateMarketauxBySymbol(articles, ["AAPL"]);
+    expect(out.AAPL.headlines).toEqual(["Unscored entity mention"]);
+    expect(out.AAPL.sentiment).toBe(70); // 50 + 0.4*50
+  });
+
+  it("fires onDropped exactly once per dropped entity, never for unscored or relevant entities", async () => {
+    const { aggregateMarketauxBySymbol } = await import("../src/lib/marketaux-provider");
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.9"; // above the fixture's normalized 0.55
+    const articles = [
+      fixtureArticle({ title: "Below threshold", symbol: "AAPL", sentimentScore: 0.5 }), // 55 -> 0.55 < 0.9 -> dropped
+      { title: "Unscored", entities: [{ symbol: "AAPL", sentiment_score: 0.1 }] } // no match_score -> passes
+    ];
+    let dropped = 0;
+    aggregateMarketauxBySymbol(articles, ["AAPL"], () => { dropped++; });
+    expect(dropped).toBe(1);
+  });
+
+  it("with the filter OFF, a below-threshold match_score no longer drops the entity", async () => {
+    const { aggregateMarketauxBySymbol } = await import("../src/lib/marketaux-provider");
+    process.env.NEWS_RELEVANCE_FILTER = "0";
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail the fixture's normalized 0.55 if the filter were on
+    const articles = [fixtureArticle({ title: "Weakly matched mention", symbol: "AAPL", sentimentScore: 0.5 })];
+    const out = aggregateMarketauxBySymbol(articles, ["AAPL"]);
+    expect(out.AAPL.headlines).toEqual(["Weakly matched mention"]);
+    expect(out.AAPL.sentiment).toBeDefined();
   });
 
   // ── Provider enrich() behavior: fetch wiring, batching, caching, fail-open ──────────────────
@@ -263,6 +334,19 @@ describe("Marketaux enrichment provider", () => {
     expect(filled).toBe(1);
     const empty = [out.AAPL, out.MSFT].filter((d) => Object.keys(d).length === 0).length;
     expect(empty).toBe(1);
+  });
+
+  it("scopes the daily budget per resolved API key so one key cannot exhaust another key's day", async () => {
+    process.env.MARKETAUX_DAILY_REQUEST_BUDGET = "1";
+    process.env.MARKETAUX_SYMBOLS_PER_REQUEST = "1";
+    stubNewsEndpoint((symbols) => ({ data: [fixtureArticle({ title: "news", symbol: symbols[0], sentimentScore: 0.2 })] }));
+    const { MarketauxEnrichmentProvider } = await import("../src/lib/marketaux-provider");
+    const first = new MarketauxEnrichmentProvider("user-a-key");
+    const second = new MarketauxEnrichmentProvider("user-b-key");
+    await first.enrich(["AAPL", "MSFT"]); // spends user-a-key's whole daily budget of 1
+    const out = await second.enrich(["ORCL"]);
+    // Pre-fix the process-wide counter left ORCL unfilled here; per-key counters keep it independent.
+    expect(out.ORCL.headlines).toBeDefined();
   });
 
   // ── Cascade integration: a produced value actually flows through takeScalar with attribution ──

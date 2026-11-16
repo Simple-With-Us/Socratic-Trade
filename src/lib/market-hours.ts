@@ -32,7 +32,12 @@ export function currentMarketSession(now = new Date()): MarketSession {
 
   const PRE_OPEN = 4 * 60;       // 04:00
   const OPEN = 9 * 60 + 30;      // 09:30
-  const CLOSE = 16 * 60;         // 16:00
+  const closeEt = getMarketCloseEt({
+    year: parseInt(parts.year, 10),
+    month: parseInt(parts.month, 10),
+    day: parseInt(parts.day, 10)
+  });
+  const CLOSE = closeEt.hour * 60 + closeEt.minute;
   const POST_CLOSE = 20 * 60;    // 20:00
 
   if (totalMinutes >= OPEN && totalMinutes < CLOSE) return "regular";
@@ -60,27 +65,50 @@ export function isRunAllowedNow(runDuringExtendedHours: boolean, now = new Date(
 // needing exact session boundaries must use the ET session classifier above instead.
 
 function localDateKey(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  // Use ET rather than the server's local timezone (which is usually UTC in prod).
+  // A late Friday evening in NY is early Saturday morning in UTC, which date.getDay()
+  // would incorrectly flag as a weekend.
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const getPart = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${getPart("year")}-${getPart("month")}-${getPart("day")}`;
 }
 
-/** True when `date`'s local calendar day is a US equity trading day: not a weekend, and not one
+/** True when `date`'s ET calendar day is a US equity trading day: not a weekend, and not one
  *  of the fixed-calendar holidays from getMarketHolidays. */
 export function isTradingDay(date: Date): boolean {
-  const day = date.getDay();
-  if (day === 0 || day === 6) return false;
-  return !getMarketHolidays(date.getFullYear()).has(localDateKey(date));
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short"
+  });
+  const wd = formatter.format(date);
+  if (wd === "Sun" || wd === "Sat") return false;
+  
+  // extract ET year
+  const yearFormatter = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric" });
+  const year = parseInt(yearFormatter.format(date), 10);
+  
+  return !getMarketHolidays(year).has(localDateKey(date));
 }
 
-/** Walks from `date`'s local calendar day, one day at a time in `direction` (+1 forward, -1
+/** Walks from `date`'s ET calendar day, one day at a time in `direction` (+1 forward, -1
  *  backward), until it lands on a trading day. Bounded to 10 iterations — comfortably more than
  *  any real holiday cluster — so a bug here can never spin into an infinite loop. */
 function adjacentTradingDayStart(date: Date, direction: 1 | -1): Date {
-  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const parts = etDateParts(date);
+  let current = parts;
   for (let i = 0; i < 10; i++) {
-    d.setDate(d.getDate() + direction);
-    if (isTradingDay(d)) return d;
+    current = addEtCalendarDays(current, direction);
+    if (isEtCalendarTradingDay(current)) {
+      return new Date(etWallClockToUtcMs(current, 0, 0));
+    }
   }
-  return d;
+  return new Date(etWallClockToUtcMs(current, 0, 0));
 }
 
 /** Local-midnight start of the most recent trading day strictly BEFORE `now`'s calendar date —
@@ -151,6 +179,40 @@ export function getMarketHolidays(year: number): Set<string> {
   holidays.add(getObservedHoliday(year, 11, 25).toISOString().split("T")[0]);
 
   return holidays;
+}
+
+export interface EarlyCloseTime {
+  hour: number;
+  minute: number;
+}
+
+/** US equity early-close days (1:00 PM ET) for a calendar year. */
+export function getEarlyCloses(year: number): Map<string, EarlyCloseTime> {
+  const closes = new Map<string, EarlyCloseTime>();
+  const halfDay: EarlyCloseTime = { hour: 13, minute: 0 };
+  const holidays = getMarketHolidays(year);
+
+  const thanksgiving = getNthWeekdayOfMonth(year, 10, 4, 4);
+  const dayAfterThanksgiving = new Date(thanksgiving);
+  dayAfterThanksgiving.setUTCDate(dayAfterThanksgiving.getUTCDate() + 1);
+  const dayAfterThanksgivingKey = dayAfterThanksgiving.toISOString().split("T")[0];
+  if (!holidays.has(dayAfterThanksgivingKey)) {
+    closes.set(dayAfterThanksgivingKey, halfDay);
+  }
+
+  const christmasEveKey = `${year}-12-24`;
+  const christmasEveDow = new Date(Date.UTC(year, 11, 24)).getUTCDay();
+  if (christmasEveDow >= 1 && christmasEveDow <= 5 && !holidays.has(christmasEveKey)) {
+    closes.set(christmasEveKey, halfDay);
+  }
+
+  const july3Key = `${year}-07-03`;
+  const july3Dow = new Date(Date.UTC(year, 6, 3)).getUTCDay();
+  if (july3Dow >= 1 && july3Dow <= 5 && !holidays.has(july3Key)) {
+    closes.set(july3Key, halfDay);
+  }
+
+  return closes;
 }
 
 function getNthWeekdayOfMonth(year: number, month: number, weekday: number, n: number): Date {
@@ -262,22 +324,63 @@ function etWallClockToUtcMs(parts: EtDateParts, hour: number, minute: number): n
 
 const MARKET_OPEN_HOUR_ET = 9;
 const MARKET_OPEN_MINUTE_ET = 30;
+const MARKET_CLOSE_HOUR_ET = 16;
+const MARKET_CLOSE_MINUTE_ET = 0;
 
-/** The next US equity market-open instant strictly after `nowMs`, walking forward through ET
- *  calendar days. Bounded to 10 iterations, same bound as adjacentTradingDayStart above — a real
- *  holiday cluster never gets close to that, so a bug here can't spin into an infinite loop. */
-function nextMarketOpenStrictlyAfterMs(nowMs: number): number {
+function etDateKey(parts: EtDateParts): string {
+  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function getMarketCloseEt(parts: EtDateParts): EarlyCloseTime {
+  const early = getEarlyCloses(parts.year).get(etDateKey(parts));
+  return early ?? { hour: MARKET_CLOSE_HOUR_ET, minute: MARKET_CLOSE_MINUTE_ET };
+}
+
+function marketCloseUtcMs(parts: EtDateParts): number {
+  const close = getMarketCloseEt(parts);
+  return etWallClockToUtcMs(parts, close.hour, close.minute);
+}
+
+/** Latest ET trading-session date (YYYY-MM-DD) whose EOD bar should be present in cache. */
+export function latestCompletedTradingSessionEtKey(nowMs: number = Date.now()): string {
+  const today = etDateParts(new Date(nowMs));
+  if (isEtCalendarTradingDay(today) && nowMs >= marketCloseUtcMs(today)) {
+    return etDateKey(today);
+  }
+
+  let parts = today;
+  for (let i = 0; i < 10; i++) {
+    parts = addEtCalendarDays(parts, -1);
+    if (isEtCalendarTradingDay(parts)) {
+      return etDateKey(parts);
+    }
+  }
+  return etDateKey(parts);
+}
+
+/** The next US equity session-open instant strictly after `nowMs`.  Regular hours open at
+ *  9:30 ET; extended-hours accounts open at 4:00 ET.  Walks ET calendar days, bounded to 10
+ *  iterations — the same bound as adjacentTradingDayStart — so a holiday-cluster bug cannot
+ *  spin forever. */
+export function nextSessionOpenMs(nowMs: number, runDuringExtendedHours = false): number {
+  const openHour = runDuringExtendedHours ? 4 : MARKET_OPEN_HOUR_ET;
+  const openMinute = runDuringExtendedHours ? 0 : MARKET_OPEN_MINUTE_ET;
   let parts = etDateParts(new Date(nowMs));
   for (let i = 0; i < 10; i++) {
     if (isEtCalendarTradingDay(parts)) {
-      const openMs = etWallClockToUtcMs(parts, MARKET_OPEN_HOUR_ET, MARKET_OPEN_MINUTE_ET);
+      const openMs = etWallClockToUtcMs(parts, openHour, openMinute);
       if (openMs > nowMs) return openMs;
     }
     parts = addEtCalendarDays(parts, 1);
   }
   // Unreachable in practice (getMarketHolidays never clusters 10 consecutive non-trading days) —
   // fall back to whatever calendar day the loop ended on rather than looping forever.
-  return etWallClockToUtcMs(parts, MARKET_OPEN_HOUR_ET, MARKET_OPEN_MINUTE_ET);
+  return etWallClockToUtcMs(parts, openHour, openMinute);
+}
+
+/** The next US equity market-open instant strictly after `nowMs` (regular 9:30 ET). */
+function nextMarketOpenStrictlyAfterMs(nowMs: number): number {
+  return nextSessionOpenMs(nowMs, false);
 }
 
 /** True when `nowMs` is already inside, or about to enter, a weekend/holiday closed stretch —
@@ -288,6 +391,7 @@ function nextMarketOpenStrictlyAfterMs(nowMs: number): number {
 function isWeekendOrHolidayClosureAhead(nowMs: number): boolean {
   const today = etDateParts(new Date(nowMs));
   if (!isEtCalendarTradingDay(today)) return true;
+  if (nowMs < marketCloseUtcMs(today)) return false;
   return !isEtCalendarTradingDay(addEtCalendarDays(today, 1));
 }
 
@@ -328,4 +432,70 @@ function getGoodFriday(year: number): Date {
   const easter = new Date(Date.UTC(year, month, day));
   easter.setUTCDate(easter.getUTCDate() - 2);
   return easter;
+}
+
+export interface BrokerMarketHoursInfo {
+  preMarket: string | null;
+  regularHours: string;
+  afterHours: string | null;
+  scanHoursHint: string;
+  orderHoursHint: string;
+  syntheticStopHoursHint: string;
+}
+
+/**
+ * Returns human-readable market hours and extended-hours hints for a given broker.
+ */
+export function getBrokerMarketHours(broker?: string): BrokerMarketHoursInfo {
+  switch (broker) {
+    case "robinhood":
+      return {
+        preMarket: "7:00 AM – 9:30 AM ET",
+        regularHours: "9:30 AM – 4:00 PM ET",
+        afterHours: "4:00 PM – 8:00 PM ET",
+        scanHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET",
+        orderHoursHint: "Robinhood pre-market 7:00 AM – 9:30 AM ET, after-hours 4:00 PM – 8:00 PM ET (overnight 8:00 PM – 4:00 AM ET for supported symbols)",
+        syntheticStopHoursHint: "pre-market 7:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET"
+      };
+    case "tradier":
+      return {
+        preMarket: "7:00 AM – 9:30 AM ET",
+        regularHours: "9:30 AM – 4:00 PM ET",
+        afterHours: "4:00 PM – 8:00 PM ET",
+        scanHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET",
+        orderHoursHint: "Tradier pre-market 7:00 AM – 9:30 AM ET, after-hours 4:00 PM – 8:00 PM ET",
+        syntheticStopHoursHint: "pre-market 7:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET"
+      };
+    case "public":
+      return {
+        preMarket: "8:00 AM – 9:30 AM ET",
+        regularHours: "9:30 AM – 4:00 PM ET",
+        afterHours: "4:00 PM – 8:00 PM ET",
+        scanHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET",
+        orderHoursHint: "Public pre-market 8:00 AM – 9:30 AM ET, after-hours 4:00 PM – 8:00 PM ET",
+        syntheticStopHoursHint: "pre-market 8:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET"
+      };
+    case "etoro":
+      return {
+        preMarket: null,
+        regularHours: "9:30 AM – 4:00 PM ET",
+        afterHours: null,
+        scanHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET",
+        orderHoursHint: "Regular market hours only (9:30 AM – 4:00 PM ET; eToro does not support extended-hours trading)",
+        syntheticStopHoursHint: "regular market hours only (9:30 AM – 4:00 PM ET)"
+      };
+    case "alpaca":
+    case "alpaca-mcp":
+    case "webull":
+    case "test":
+    default:
+      return {
+        preMarket: "4:00 AM – 9:30 AM ET",
+        regularHours: "9:30 AM – 4:00 PM ET",
+        afterHours: "4:00 PM – 8:00 PM ET",
+        scanHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET",
+        orderHoursHint: "pre-market 4:00 AM – 9:30 AM ET, after-hours 4:00 PM – 8:00 PM ET",
+        syntheticStopHoursHint: "pre-market 4:00 AM – 9:30 AM ET and after-hours 4:00 PM – 8:00 PM ET"
+      };
+  }
 }

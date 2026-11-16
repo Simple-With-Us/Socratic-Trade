@@ -10,19 +10,26 @@ AUDIT="${OPS_SNAPSHOT_AUDIT:-40}"
 # Opt-in broker order-list breakdown (live vs listed vs done_for_day). Off by default —
 # getEquityOrders can paginate large Alpaca histories and slow the snapshot.
 ORDERS="${OPS_SNAPSHOT_ORDERS:-}"
+# Opt-in per-working-order role classification (protective stop, bracket leg, app-tracked
+# entry/exit, external, ...) with a one-sentence whyResting. Implies ORDERS=1. Off by default
+# for the same reason as ORDERS.
+ORDERS_DETAIL="${OPS_SNAPSHOT_ORDERS_DETAIL:-}"
 OUT="${OPS_SNAPSHOT_OUT:-}"
 
-TOKEN="${OPS_DIAGNOSTIC_TOKEN:-${ADMIN_REINDEX_TOKEN:-}}"
+TOKEN="${OPS_DIAGNOSTIC_TOKEN:-}"
 if [ -z "$TOKEN" ]; then
   echo "error: OPS_DIAGNOSTIC_TOKEN is not set." >&2
   echo "Add it in Cursor Dashboard -> Cloud Agents -> Secrets (Runtime Secret)." >&2
-  echo "Use the same value on trading-live and restart pm2 trading." >&2
+  echo "Use the same value on production (Infisical). ADMIN_REINDEX_TOKEN is not a fallback." >&2
   exit 1
 fi
 
 URL="${HOST}/api/ops/snapshot?runs=${RUNS}&audit=${AUDIT}"
 if [ "${ORDERS}" = "1" ] || [ "${ORDERS}" = "true" ]; then
   URL="${URL}&orders=1"
+fi
+if [ "${ORDERS_DETAIL}" = "1" ] || [ "${ORDERS_DETAIL}" = "true" ]; then
+  URL="${URL}&ordersDetail=1"
 fi
 echo "==> GET ${URL}" >&2
 

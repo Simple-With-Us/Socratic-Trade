@@ -22,10 +22,12 @@ import { AlertTriangle, Loader2, RotateCcw, Send, Sparkles, Trash2 } from "lucid
 import type { ChatDraft } from "@/lib/chat/types";
 import type { LlmReasoningEffort } from "@/lib/types";
 import { humanizeLlmError } from "@/lib/llm-errors";
-import { ALL_LLM_REASONING_EFFORTS, normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-request";
+import { catalogEntryFor } from "@/lib/llm-model-catalog";
+import { ALL_LLM_REASONING_EFFORTS, normalizeReasoningEffortForModel, reasoningCapabilityForModel } from "@/lib/llm-reasoning";
 import { reasoningAdviceForModel, recommendedReasoningEffortForModel } from "@/lib/model-reasoning-recommendations";
 import { deriveReality } from "../lib/derive";
 import { cx, fmtExact } from "../lib/format";
+import { redirectToLogin } from "../lib/api";
 import { useConsoleData } from "../lib/useConsoleData";
 import { ModelBadge } from "../ui/provider-logo";
 import { Chip, Select, TextInput, Tooltip } from "../ui/primitives";
@@ -81,6 +83,26 @@ interface LiveReply {
   model?: string;
 }
 
+type ChatProviderStatus = Partial<Record<string, boolean>>;
+
+/** Credential service the selected model will actually use: OpenRouter first when connected,
+ *  otherwise the native provider.  Meta and catalog entries without a native transport always
+ *  require OpenRouter, matching modelCredentialService / llmForModel on the server. */
+export function chatCredentialServiceForModel(model: string, providerStatus: ChatProviderStatus): string {
+  const nativeProvider = providerForModel(model);
+  if (/^openrouter\//i.test(model.trim()) || nativeProvider === "meta" || catalogEntryFor(model)?.openRouterOnly === true) {
+    return "openrouter";
+  }
+  return providerStatus.openrouter === true ? "openrouter" : nativeProvider;
+}
+
+/** Fail open while status is absent or partial; the API remains the authoritative credential gate. */
+export function chatModelHasCredential(model: string, providerStatus: ChatProviderStatus): boolean {
+  if (Object.keys(providerStatus).length === 0) return true;
+  if (providerStatus.openrouter === undefined) return true;
+  return providerStatus[chatCredentialServiceForModel(model, providerStatus)] !== false;
+}
+
 /** Router-matched suggested prompts (co-versioned with the chat orchestrator's
  *  intent classifier so a chip never dead-ends). */
 const SUGGESTIONS: Array<{ category: string; prompt: string }> = [
@@ -115,11 +137,12 @@ export function AssistantChat() {
   const [historyState, setHistoryState] = useState<"loading" | "ready" | "failed">("loading");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [inFlightClientTurnId, setInFlightClientTurnId] = useState<string | null>(null);
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<LlmReasoningEffort>("medium");
   /** Per-provider key availability ({} until loaded — treated as available so
    *  the gate never flashes before the check resolves). */
-  const [providerStatus, setProviderStatus] = useState<Partial<Record<string, boolean>>>({});
+  const [providerStatus, setProviderStatus] = useState<ChatProviderStatus>({});
   /** True when the availability check itself failed, so "no 'no key' badges" means
    *  "we couldn't check" rather than "every provider has a key". */
   const [statusUnknown, setStatusUnknown] = useState(false);
@@ -252,9 +275,10 @@ export function AssistantChat() {
 
   // ── Gate: does the SELECTED model's provider have a usable key? ────────────
   const modelUnselected = !model;
-  const provider = modelUnselected ? "mock" : providerForModel(model);
+  const provider = providerForModel(model || "");
+  const credentialService = chatCredentialServiceForModel(model || "", providerStatus);
   const statusLoaded = Object.keys(providerStatus).length > 0;
-  const keyMissing = provider !== "mock" && statusLoaded && providerStatus[provider] === false;
+  const keyMissing = modelUnselected || !chatModelHasCredential(model, providerStatus);
   const customPending = model === CUSTOM_MODEL_VALUE;
 
   const send = useCallback(
@@ -262,7 +286,7 @@ export function AssistantChat() {
       const text = (override ?? input).trim();
       if (!text || sending || clearing || keyMissing) return;
       if (modelUnselected) {
-        toast.push("warn", "Choose a model", "Coach has no hidden model default. Pick the model you want to answer.");
+        toast.push("warn", "Choose a model", "Coach has no hidden model default.  Pick the model you want to answer.");
         return;
       }
       if (customPending) {
@@ -284,6 +308,7 @@ export function AssistantChat() {
           : [...m, { id: userId, role: "user", text, at: new Date().toISOString() }]
       );
       setSending(true);
+      setInFlightClientTurnId(clientTurnId);
       try {
         // clientTurnId is the retry-safety rail: the server records the user turn
         // BEFORE calling the provider, and dedupes on this id — so a Retry gets a
@@ -301,6 +326,10 @@ export function AssistantChat() {
               : {})
           })
         });
+        if (res.status === 401) {
+          redirectToLogin();
+          throw new Error("Session expired.");
+        }
         if (!res.ok) throw new Error(await apiErrorMessage(res, "Chat request failed"));
         const reply = (await res.json()) as LiveReply;
         // If the user cleared the conversation while this was in flight, drop
@@ -325,6 +354,7 @@ export function AssistantChat() {
         toast.push("neg", "Message not answered", message);
       } finally {
         setSending(false);
+        setInFlightClientTurnId(null);
       }
     },
     [input, sending, clearing, keyMissing, customPending, modelUnselected, model, reasoningEffort, toast]
@@ -351,7 +381,7 @@ export function AssistantChat() {
       toast.push(
         "info",
         "Conversation cleared",
-        "Your whole assistant transcript was deleted — it is one conversation shared across all your accounts. Staged proposals are untouched."
+        "Your whole assistant transcript was deleted — it is one conversation shared across all your accounts.  Staged proposals are untouched."
       );
     } catch {
       toast.push("neg", "Could not clear", "The transcript is unchanged — try again.");
@@ -410,7 +440,7 @@ export function AssistantChat() {
                 placeholder="model id, e.g. gpt-5.6-terra"
                 className="con-mono"
                 style={{ padding: "3px 8px", fontSize: "var(--con-fs-xs)" }}
-                title="Type any model id your provider serves. It is routed by name: claude-* to Anthropic, grok-* to xAI, gemini-* to Gemini, mistral-* to Mistral, deepseek-* to DeepSeek, anything else to OpenAI."
+                title="Type any model id your provider serves.  It is routed by name: claude-* to Anthropic, grok-* to xAI, gemini-* to Gemini, mistral-* to Mistral, deepseek-* to DeepSeek, anything else to OpenAI."
                 onChange={(e) => pickModel(e.target.value.trim() || CUSTOM_MODEL_VALUE)}
               />
             </div>
@@ -425,23 +455,26 @@ export function AssistantChat() {
               style={{ padding: "3px 8px", fontSize: "var(--con-fs-xs)" }}
               title={
                 statusUnknown
-                  ? "Which AI model answers. $ signs are relative cost within the provider. Key availability could NOT be checked right now, so no model is marked 'no key' — a provider without a key will fail on send."
-                  : "Which AI model answers. $ signs are relative cost within the provider. 'no key' means that provider has no key in Settings; Mock is a deterministic offline model that needs no key."
+                  ? "Which AI model answers. $ signs are relative cost within the provider.  Key availability could NOT be checked right now, so no model is marked 'no key' — a provider without a key will fail on send."
+                  : "Which AI model answers.  $ signs are relative cost within the provider.  'no key' means that provider has no key in Connections."
               }
               aria-label="Chat model"
             >
               <option value="" disabled>Choose a model…</option>
               {MODEL_GROUPS.map((g) => {
-                const noKey = g.provider !== "offline" && statusLoaded && providerStatus[g.provider] === false;
+                const noKey = statusLoaded && g.options.every((o) => !chatModelHasCredential(o.value, providerStatus));
                 return (
                   <optgroup key={g.provider} label={`${g.label}${noKey ? " — no key" : ""}`}>
-                    {g.options.map((o) => (
-                      <option key={o.value} value={o.value} disabled={noKey}>
-                        {o.label}
-                        {o.tier ? ` (${o.tier})` : ""}
-                        {noKey ? " — no key" : ""}
-                      </option>
-                    ))}
+                    {g.options.map((o) => {
+                      const optionNoKey = statusLoaded && !chatModelHasCredential(o.value, providerStatus);
+                      return (
+                        <option key={o.value} value={o.value} disabled={optionNoKey}>
+                          {o.label}
+                          {o.tier ? ` (${o.tier})` : ""}
+                          {optionNoKey ? " — no key" : ""}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 );
               })}
@@ -451,7 +484,7 @@ export function AssistantChat() {
             content={
               sending
                 ? "Wait for the current reply to finish — clearing mid-reply could orphan it in the saved history."
-                : "Deletes your ENTIRE saved assistant conversation — one transcript shared across all your accounts, not just the one selected. Staged proposals, orders, and positions are untouched. Click twice to confirm."
+                : "Deletes your ENTIRE saved assistant conversation — one transcript shared across all your accounts, not just the one selected.  Staged proposals, orders, and positions are untouched.  Click twice to confirm."
             }>
             <button
               type="button"
@@ -549,14 +582,7 @@ export function AssistantChat() {
               </Tooltip>
               {m.role === "assistant" && m.model && (
                 <div className="mt-0.5 px-1 text-[length:var(--con-fs-2xs)] text-[color:var(--con-faint)]">
-                  {m.model.trim().toLowerCase() === "mock" ? (
-                    // No vendor logo for the offline mock — that would fake a provider.
-                    <Tooltip content="The deterministic offline model produced this answer — no LLM provider was called.">
-                      <span>mock</span>
-                    </Tooltip>
-                  ) : (
-                    <ModelBadge modelId={m.model} size="sm" className="font-normal" title="The model that produced this answer." />
-                  )}
+                  <ModelBadge modelId={m.model} size="sm" className="font-normal" title="The model that produced this answer." />
                 </div>
               )}
               {m.failed && (
@@ -587,13 +613,13 @@ export function AssistantChat() {
         {keyMissing && (
           <p className="mb-2 flex flex-wrap items-center gap-1.5 rounded-control border border-[color:var(--con-warn-border)] bg-[color:var(--con-warn-soft)] px-3 py-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-warn)]">
             <AlertTriangle size={13} aria-hidden />
-            No {providerDisplayName(provider)} key is connected — this model can&apos;t answer.
+            No {credentialService === "openrouter" ? "OpenRouter" : providerDisplayName(provider)} key is connected — this model can&apos;t answer.
             <Link
-              href="/console/settings"
+              href="/console/connections#api-keys"
               className="font-semibold underline decoration-dotted"
-              title="Open Settings to connect an LLM provider key."
+              title="Open Connections to configure an LLM provider API key."
             >
-              Connect one in Settings
+              Connect one in Connections
             </Link>
             or pick a different model above.
           </p>
@@ -617,7 +643,7 @@ export function AssistantChat() {
             disabled={keyMissing}
             className="con-textarea flex-1 leading-normal"
             style={{ resize: "none", minHeight: "2.25rem", maxHeight: "9rem" }}
-            title="Your message to the assistant. Enter sends; Shift+Enter adds a line break."
+            title="Your message to the assistant.  Enter sends; Shift+Enter adds a line break."
             aria-label="Message the assistant"
           />
           <Tooltip
@@ -638,12 +664,28 @@ export function AssistantChat() {
               <Send size={14} aria-hidden /> Send
             </button>
           </Tooltip>
+          {sending && inFlightClientTurnId ? (
+            <button
+              type="button"
+              className="con-btn h-9 shrink-0"
+              title="Cancel this turn.  In-flight work is kept as a partial reply."
+              onClick={() => {
+                void fetch("/api/chat/cancel", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ clientTurnId: inFlightClientTurnId })
+                });
+              }}
+            >
+              Cancel
+            </button>
+          ) : null}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[length:var(--con-fs-2xs)] text-[color:var(--con-faint)]">
           <Tooltip
-            content="The assistant reads real quotes and your real account data. When it can't know something, it says so instead of inventing a number.">
+            content="The assistant reads real quotes and your real account data.  When it can't know something, it says so instead of inventing a number.">
             <span>
-              Answers use live data and your account. Orders come back as drafts — nothing places without your approval.
+              Answers use live data and your account.  Orders come back as drafts — nothing places without your approval.
             </span>
           </Tooltip>
           <span className="hidden sm:inline">Enter to send · Shift+Enter for a line break</span>

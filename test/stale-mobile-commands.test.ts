@@ -189,15 +189,17 @@ describe("markStaleRunningMobileCommands", () => {
     // Before the sweep this is the permanent-block state: deletion counts 'queued'/'running'
     // commands and waits for them to drain, and a stranded row never drains.
     expect(getAccountDeletionBlockers(userId).activeMobileCommands).toBe(1);
-    const runningBefore = mobileCommandBacklog().running;
+    const runningBefore = mobileCommandBacklog(userId).running;
 
     markStaleRunningMobileCommands(Date.now() + 2 * STALE_THRESHOLD_MS);
 
     expect((await commandRow(id)).status).toBe("failed");
     expect(getAccountDeletionBlockers(userId).activeMobileCommands).toBe(0);
-    // The permanently-wrong backlog gauge comes back down. Measured as a delta because the shared
-    // test DB may hold other users' rows that this far-future sweep also legitimately repairs.
-    expect(mobileCommandBacklog().running).toBeLessThan(runningBefore);
+    // The permanently-wrong backlog gauge comes back down for THIS user (api-contract-web-ios:api-10 —
+    // mobileCommandBacklog is now scoped by user_id, so this no longer needs to tolerate other users'
+    // rows via a delta; it is asserted as a hard zero).
+    expect(runningBefore).toBe(1);
+    expect(mobileCommandBacklog(userId).running).toBe(0);
   });
 
   // Regression for the race the sweep introduces: finishCommand used to UPDATE with no status

@@ -64,6 +64,18 @@ export function sma(values: number[], len: number): number | undefined {
   return sum / len;
 }
 
+/**
+ * Rate of change over `period` bars, in percent: (last / last-N − 1) × 100.
+ * Needs period+1 closes.  Undefined when the lookback close is missing or not positive.
+ */
+export function rocPct(values: number[], period: number): number | undefined {
+  if (!Number.isInteger(period) || period <= 0 || values.length <= period) return undefined;
+  const current = values[values.length - 1];
+  const prior = values[values.length - 1 - period];
+  if (!Number.isFinite(current) || !Number.isFinite(prior) || prior <= 0) return undefined;
+  return ((current / prior) - 1) * 100;
+}
+
 /** True range for one bar given the prior close: max(H−L, |H−prevClose|, |L−prevClose|). */
 export function trueRange(high: number, low: number, prevClose: number): number {
   return Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));

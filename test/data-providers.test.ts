@@ -10,8 +10,8 @@ import {
   analystScoreFromCounts,
   analystScoreFromMean,
   apiKeyFingerprint,
-  callsPerSymbol,
   getEnrichmentProvider,
+  isLatchingEnrichmentTransportError,
   isTransientError,
   labelFromAnalystScore,
   mockEnrichmentProvider,
@@ -24,12 +24,11 @@ import {
   type EnrichmentContext,
   type SymbolEnrichment
 } from "../src/lib/data-providers";
-import { admitProviderRequests, resetProviderQuotaState } from "../src/lib/provider-rate-limit";
-import { resetApiCircuitBreaker } from "../src/lib/api-circuit-breaker";
 import { getServiceHealthLog } from "../src/lib/db-health";
 import { arbitrateFieldObservation } from "../src/lib/evidence-facts";
 import { deleteUserApiKey, migrateLocalEnvCredentials, upsertUserApiKey, LOCAL_USER } from "../src/lib/db-api-keys";
 import { __resetAlphaVantageDailyBudgetForTests, __resetKeyPoolRegistryForTests } from "../src/lib/alpha-vantage-key-pool";
+import { clearProviderFieldCacheForTests } from "../src/lib/provider-field-cache";
 
 /** Suppresses a provider's own `/calendar/earnings`-style daysToEarnings fallback fetch (Finnhub,
  *  Alpha Vantage) by marking the field already-covered upstream — keeps pre-existing exact
@@ -53,6 +52,10 @@ beforeAll(() => {
   // without this, Finnhub/Alpha Vantage/Yahoo calls here would inherit real-world spacing (real
   // 400ms-1.2s waits per request) since the pacer is unaware it's under test.
   process.env.PROVIDER_RATE_LIMIT_DISABLED = "1";
+});
+
+beforeEach(() => {
+  clearProviderFieldCacheForTests();
 });
 
 describe("market enrichment provider", () => {
@@ -291,8 +294,7 @@ describe("enrichment cache consent gate", () => {
 
     const userA = `cg-priv-a-${randomUUID()}`;
     const userB = `cg-priv-b-${randomUUID()}`;
-    // Explicit decline required: pool consent defaults ON (owner 2026-08-05). Without this,
-    // user-keyed writes go to pool and any default-consent reader can see them.
+    // Unset users no longer silently share.  Explicit decline keeps user-keyed writes private.
     setDataPoolConsent(userA, false);
     setDataPoolConsent(userB, false);
     // userA has their own API key; userB does NOT have an API key
@@ -864,7 +866,7 @@ describe("enrichment cache consent gate", () => {
   });
 });
 
-describe("Finnhub & FMP Cache Poisoning Protection", () => {
+describe("Finnhub Cache Poisoning Protection", () => {
   it("prevents cache writes on Finnhub when a transient error occurs", async () => {
     const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
@@ -910,116 +912,89 @@ describe("Finnhub & FMP Cache Poisoning Protection", () => {
     expect(res2.AAPL).toEqual({ companyName: "Apple" });
     expect(fetchCount).toBe(5);
   });
+});
 
-  it.skip("prevents cache writes on FMP when a transient error occurs [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
+// NEWS_RELEVANCE_FILTER / NEWS_RELEVANCE_MIN_SCORE gating of Finnhub's /company-news headlines.
+// Finnhub's endpoint is already scoped to the symbol server-side but carries no native per-
+// headline relevance score, so this applies news-relevance.ts's headline-text rubric directly —
+// see the section comment above newsRelevanceFilterEnabled (data-providers.ts).
+describe("Finnhub company-news relevance gating", () => {
+  const originalFilter = process.env.NEWS_RELEVANCE_FILTER;
+  const originalMinScore = process.env.NEWS_RELEVANCE_MIN_SCORE;
 
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) {
-        return new Response("Gateway Timeout", { status: 504 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({});
-    // 4 sub-calls: ratios-ttm, grades-consensus, profile, insider-trading/search.
-    expect(fetchCount).toBe(4);
-
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual({});
-    expect(fetchCount).toBe(8);
+  beforeEach(() => {
+    delete process.env.NEWS_RELEVANCE_FILTER;
+    delete process.env.NEWS_RELEVANCE_MIN_SCORE;
   });
 
-  it.skip("logs core FMP failures while suppressing an unentitled optional insider endpoint [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { getDb } = await import("../src/lib/db");
-    clearEnrichmentCache();
-    getDb().prepare("DELETE FROM api_health_log WHERE service = ?").run("fmp");
-
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("profile")) {
-        return new Response("server error", { status: 500 });
-      }
-      if (url.includes("insider-trading")) {
-        return new Response("premium endpoint", { status: 402 });
-      }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("test-key");
-    await provider.enrich(["AAPL"]);
-
-    const rows = getDb()
-      .prepare("SELECT ok, error_text FROM api_health_log WHERE service = ? ORDER BY ts")
-      .all("fmp") as Array<{ ok: number; error_text: string | null }>;
-    expect(rows.some((row) => row.ok === 0 && row.error_text === "HTTP 500")).toBe(true);
-    expect(rows.some((row) => row.error_text === "HTTP 403")).toBe(false);
+  afterEach(() => {
+    if (originalFilter) process.env.NEWS_RELEVANCE_FILTER = originalFilter;
+    else delete process.env.NEWS_RELEVANCE_FILTER;
+    if (originalMinScore) process.env.NEWS_RELEVANCE_MIN_SCORE = originalMinScore;
+    else delete process.env.NEWS_RELEVANCE_MIN_SCORE;
   });
 
-  it.skip("caches normally on FMP when all queries succeed [retired: no direct FMP]", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+  it("with the filter ON (default), drops an irrelevant headline that mentions neither the ticker nor the company name", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
     clearEnrichmentCache();
 
-    let fetchCount = 0;
-    const requested: Array<{ url: string; init?: RequestInit }> = [];
-    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-      fetchCount++;
-      requested.push({ url, init });
-      if (url.includes("ratios-ttm")) {
-        return new Response(JSON.stringify([{
-          priceToEarningsRatioTTM: "25.5",
-          priceToBookRatioTTM: "8.2",
-          debtToEquityRatioTTM: "1.4",
-          returnOnEquityTTM: "0.31",
-          returnOnAssetsTTM: "0.12",
-          grossProfitMarginTTM: "0.46",
-          dividendYieldTTM: "0.004"
-        }]));
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "AAPL reports record quarterly revenue" },
+          { headline: "Regional bakery chain opens new downtown location" }
+        ]));
       }
-      if (url.includes("/profile")) {
-        return new Response(JSON.stringify([{
-          companyName: "Apple Inc.",
-          sector: "Technology",
-          industry: "Consumer Electronics",
-          beta: 1.2,
-          price: 200,
-          lastDividend: 1,
-          range: "150-250"
-        }]));
-      }
-      return new Response(JSON.stringify([]));
+      return new Response(JSON.stringify({}));
     });
 
-    const provider = new FmpEnrichmentProvider("test-key");
-    const res1 = await provider.enrich(["AAPL"]);
-    expect(res1.AAPL).toEqual({
-      peRatio: 25.5,
-      pbRatio: 8.2,
-      debtToEquity: 1.4,
-      returnOnEquity: 31,
-      returnOnAssets: 12,
-      grossProfitMargin: 46,
-      companyName: "Apple Inc.",
-      sector: "Technology",
-      industry: "Consumer Electronics",
-      beta: 1.2,
-      dividendYield: 0.5,
-      fiftyTwoWeekHigh: 250,
-      fiftyTwoWeekLow: 150
-    });
-    // 4 sub-calls: ratios-ttm, grades-consensus, profile, insider-trading/search.
-    expect(fetchCount).toBe(4);
-    expect(requested.every(({ url }) => !url.includes("test-key"))).toBe(true);
-    expect(requested.every(({ init }) => new Headers(init?.headers).get("apikey") === "test-key")).toBe(true);
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toEqual(["AAPL reports record quarterly revenue"]);
+  });
 
-    const res2 = await provider.enrich(["AAPL"]);
-    expect(res2.AAPL).toEqual(res1.AAPL);
-    expect(fetchCount).toBe(4);
+  it("with the filter OFF, keeps every headline Finnhub returned (pre-filter byte-identical behavior)", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_FILTER = "0";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "AAPL reports record quarterly revenue" },
+          { headline: "Regional bakery chain opens new downtown location" }
+        ]));
+      }
+      return new Response(JSON.stringify({}));
+    });
+
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toEqual([
+      "AAPL reports record quarterly revenue",
+      "Regional bakery chain opens new downtown location"
+    ]);
+  });
+
+  it("an ambiguous company name (Apple) with no finance-event term is dropped even though Finnhub scoped the article to this symbol", async () => {
+    const { FinnhubEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("profile2")) return new Response(JSON.stringify({ name: "Apple Inc." }));
+      if (url.includes("company-news")) {
+        return new Response(JSON.stringify([
+          { headline: "She picked up an apple from the fruit stand on her walk" }
+        ]));
+      }
+      return new Response(JSON.stringify({}));
+    });
+
+    const provider = new FinnhubEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"], skipDaysToEarningsCalendar("AAPL"));
+    expect(res.AAPL?.headlines).toBeUndefined(); // zero surviving headlines -> no coverage, never fabricated
   });
 });
 
@@ -1246,162 +1221,6 @@ describe("Finnhub /calendar/earnings — daysToEarnings fallback (2026-08-02)", 
       const res = await provider.enrich(["AAPL"]);
       expect(res.AAPL?.daysToEarnings).toBeUndefined();
     });
-  });
-});
-
-describe.skip("callsPerSymbol('fmp', …) — per-symbol request accounting", () => {
-  it("counts 2 unconditional (profile+insider) + ratios/consensus/targets one-for-one", () => {
-    // Nothing skipped, targets off → profile + insider + ratios-ttm + grades-consensus = 4.
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: false })).toBe(4);
-    expect(callsPerSymbol("fmp")).toBe(4);               // undefined flags are falsy → same as all-false
-    expect(callsPerSymbol("fmp", {})).toBe(4);
-    // + price-target-consensus when wantTargets → 5 (the full worst case).
-    expect(callsPerSymbol("fmp", { skipPe: false, skipConsensus: false, wantTargets: true })).toBe(5);
-    // skipPe drops ratios-ttm.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: false, wantTargets: true })).toBe(4);
-    // skipPe + skipConsensus, targets off → only the 2 unconditional calls.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: false })).toBe(2);
-    // skipPe + skipConsensus, targets on → 2 unconditional + price-target = 3.
-    expect(callsPerSymbol("fmp", { skipPe: true, skipConsensus: true, wantTargets: true })).toBe(3);
-  });
-});
-
-describe.skip("FMP request quota — defer / refund / breaker / cache-hit / per-credential", () => {
-  const QUOTA_ENV = ["PROVIDER_QUOTA_FMP_PER_MIN", "PROVIDER_QUOTA_FMP_PER_DAY", "FMP_PRICE_TARGETS_ENABLED"];
-  beforeEach(() => {
-    for (const k of QUOTA_ENV) delete process.env[k];
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    resetProviderQuotaState();
-  });
-  afterEach(() => {
-    for (const k of QUOTA_ENV) delete process.env[k];
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    resetProviderQuotaState();
-    resetApiCircuitBreaker();
-  });
-
-  // ratios-ttm returns a P/E so a fetched symbol yields non-empty, cacheable data; every other
-  // sub-call returns []. Each fetched symbol therefore costs 4 requests (targets off by default).
-  function stubPeFetch(): () => number {
-    let fetchCount = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      fetchCount++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
-    });
-    return () => fetchCount;
-  }
-
-  it("fetches only the affordable best-first prefix, defers the tail as {} (uncached), and refunds the sub-symbol remainder", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "9"; // 9 requests; each symbol costs 4 → 2 whole symbols fit, 1 left over
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("q-key");
-    const res = await provider.enrich(["AAPL", "MSFT", "GOOG"]);
-    // admit min(12, 9) = 9. Greedy: AAPL(4)→rem5, MSFT(4)→rem1, GOOG(4) doesn't fit → deferred.
-    expect(res.AAPL).toEqual({ peRatio: 20 });
-    expect(res.MSFT).toEqual({ peRatio: 20 });
-    expect(res.GOOG).toEqual({}); // deferred this scan, NOT queried
-    expect(count()).toBe(8);      // exactly 2 symbols × 4 sub-calls
-    // The 8 dispatched were recorded; the 1-request remainder was refunded → 1 headroom remains this minute.
-    expect(admitProviderRequests("fmp", await apiKeyFingerprint("q-key"), 100)).toBe(1);
-
-    // GOOG was deferred, never fetched → it must NOT have been cached. A fresh-budget rescan fetches it.
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    resetProviderQuotaState();
-    const res2 = await provider.enrich(["GOOG"]);
-    expect(count()).toBe(12);     // +4: GOOG actually fetched (not served from cache)
-    expect(res2.GOOG).toEqual({ peRatio: 20 });
-  });
-
-  it("refunds a breaker-skipped symbol's cost and does not cache it", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    const { getDb } = await import("../src/lib/db");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // room for exactly one symbol per minute
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "0";
-    process.env.API_CIRCUIT_BREAKER_BACKOFF_MS = "60000";
-    resetApiCircuitBreaker();
-    getDb().prepare("DELETE FROM api_health_log WHERE service = 'fmp'").run();
-    const seedFailure = getDb().prepare(`
-      INSERT INTO api_health_log (id, service, ts, ok, latency_ms, error_text, key_source, user_id)
-      VALUES (?, 'fmp', ?, 0, 1, 'synthetic breaker seed', 'env', 'local')
-    `);
-    for (let index = 0; index < 5; index++) {
-      seedFailure.run(randomUUID(), new Date(Date.now() - index * 1_000).toISOString());
-    }
-    let okCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      okCalls++;
-      if (url.includes("ratios-ttm")) return new Response(JSON.stringify([{ priceToEarningsRatioTTM: "20" }]));
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("brk-key");
-    const res = await provider.enrich(["ZZZ"]);
-    expect(res.ZZZ).toEqual({}); // all sub-calls CircuitOpenError → breaker-skipped
-
-    // If the cost were NOT refunded, the 4/min budget would be spent and this rescan would defer ZZZ
-    // as {} with zero fetches; if ZZZ had been cached, the rescan would serve {} from cache. Either
-    // failure mode yields no fetch. Getting real data back proves BOTH the refund and the no-cache.
-    getDb().prepare("DELETE FROM api_health_log WHERE service = 'fmp'").run();
-    resetApiCircuitBreaker();
-    const res2 = await provider.enrich(["ZZZ"]);
-    expect(res2.ZZZ).toEqual({ peRatio: 20 });
-    expect(okCalls).toBe(4);
-    process.env.API_CIRCUIT_BREAKER_DISABLED = "1";
-    delete process.env.API_CIRCUIT_BREAKER_BACKOFF_MS;
-  });
-
-  it("does not spend the quota on a cache hit", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4";
-    const count = stubPeFetch();
-
-    const provider = new FmpEnrichmentProvider("cache-key");
-    await provider.enrich(["IBM"]); // fetches + caches, spends 4
-    expect(count()).toBe(4);
-
-    resetProviderQuotaState(); // clear the budget so any NEW spend on the rescan is detectable
-    const res2 = await provider.enrich(["IBM"]);
-    expect(count()).toBe(4);    // served from cache — no fetch
-    expect(res2.IBM).toEqual({ peRatio: 20 });
-    // The cache hit reserved nothing, so the whole fresh window is still available.
-    expect(admitProviderRequests("fmp", await apiKeyFingerprint("cache-key"), 4)).toBe(4);
-  });
-
-  it("keeps a separate quota lane per credential (one key's spend never gates another)", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "4"; // each lane funds exactly one symbol/min
-    const count = stubPeFetch();
-
-    const provA = new FmpEnrichmentProvider("iso-A");
-    const provB = new FmpEnrichmentProvider("iso-B");
-    await provA.enrich(["AAPL"]); // spends lane A's whole minute
-    const resB = await provB.enrich(["MSFT"]); // lane B is untouched → still fetches
-    expect(resB.MSFT).toEqual({ peRatio: 20 });
-    expect(count()).toBe(8); // 4 (A) + 4 (B); a shared lane would have deferred B → only 4
-  });
-
-  it("retries:0 — a 429 does not emit a second (uncounted) call on any sub-endpoint", async () => {
-    const { FmpEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
-    clearEnrichmentCache();
-    process.env.PROVIDER_QUOTA_FMP_PER_MIN = "290";
-    let ratiosCalls = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("ratios-ttm")) { ratiosCalls++; return new Response("rate limited", { status: 429 }); }
-      return new Response(JSON.stringify([]));
-    });
-
-    const provider = new FmpEnrichmentProvider("retry-key");
-    await provider.enrich(["AAPL"]);
-    expect(ratiosCalls).toBe(1); // exactly one attempt — the built-in 429 retry (default 1) is disabled
   });
 });
 
@@ -1771,6 +1590,128 @@ describe("Alpha Vantage Warning Detection", () => {
   });
 });
 
+// NEWS_RELEVANCE_FILTER / NEWS_RELEVANCE_MIN_SCORE gating of AV's NEWS_SENTIMENT feed — see the
+// section comment above alphaVantageItemIsRelevant (data-providers.ts) for the never-drop-
+// unscored-data contract this mirrors from marketaux-provider.ts's match_score gating.
+describe("Alpha Vantage NEWS_SENTIMENT relevance gating (relevance_score)", () => {
+  const originalFilter = process.env.NEWS_RELEVANCE_FILTER;
+  const originalMinScore = process.env.NEWS_RELEVANCE_MIN_SCORE;
+
+  beforeEach(() => {
+    __resetAlphaVantageDailyBudgetForTests();
+    __resetKeyPoolRegistryForTests();
+    delete process.env.NEWS_RELEVANCE_FILTER;
+    delete process.env.NEWS_RELEVANCE_MIN_SCORE;
+  });
+
+  afterEach(() => {
+    if (originalFilter) process.env.NEWS_RELEVANCE_FILTER = originalFilter;
+    else delete process.env.NEWS_RELEVANCE_FILTER;
+    if (originalMinScore) process.env.NEWS_RELEVANCE_MIN_SCORE = originalMinScore;
+    else delete process.env.NEWS_RELEVANCE_MIN_SCORE;
+  });
+
+  function feedResponse(items: Array<{ title: string; relevanceScore?: string; sentimentScore?: string }>) {
+    return new Response(JSON.stringify({
+      feed: items.map((it) => ({
+        title: it.title,
+        ticker_sentiment: [
+          {
+            ticker: "AAPL",
+            ...(it.sentimentScore !== undefined && { ticker_sentiment_score: it.sentimentScore }),
+            ...(it.relevanceScore !== undefined && { relevance_score: it.relevanceScore })
+          }
+        ]
+      }))
+    }));
+  }
+
+  it("with the filter ON (default), an item below the relevance threshold is dropped from BOTH headlines and the sentiment average", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL barely mentioned in roundup", relevanceScore: "0.1", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL).toEqual({}); // dropped entirely — never a fabricated partial row
+  });
+
+  it("with the filter ON (default), an item at/above the relevance threshold passes through normally", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL reports record quarterly revenue", relevanceScore: "0.9", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL reports record quarterly revenue"]);
+    expect(res.AAPL?.sentiment).toBe(100);
+  });
+
+  it("an item with NO relevance_score at all passes through even with the filter ON — never drop data AV didn't score", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail almost anything WITH a score
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL unscored mention", sentimentScore: "0.2" }]); // no relevance_score field
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL unscored mention"]);
+    expect(res.AAPL?.sentiment).toBe(70); // 50 + 0.2*100
+  });
+
+  it("with the filter OFF, a below-threshold relevance_score no longer drops the item", async () => {
+    const { AlphaVantageEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    process.env.NEWS_RELEVANCE_FILTER = "0";
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.99"; // would fail the 0.1 relevance_score if filter were on
+
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("function=EARNINGS_CALENDAR")) {
+        return new Response("symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n");
+      }
+      return feedResponse([{ title: "AAPL barely mentioned in roundup", relevanceScore: "0.1", sentimentScore: "0.5" }]);
+    });
+
+    const provider = new AlphaVantageEnrichmentProvider("test-key");
+    const res = await provider.enrich(["AAPL"]);
+    expect(res.AAPL?.headlines).toEqual(["AAPL barely mentioned in roundup"]);
+    expect(res.AAPL?.sentiment).toBe(100);
+  });
+
+  it("parseAlphaVantageNewsSentiment (RapidAPI failover lane) applies the same relevance gating", async () => {
+    const { parseAlphaVantageNewsSentiment } = await import("../src/lib/data-providers");
+    process.env.NEWS_RELEVANCE_MIN_SCORE = "0.35";
+    const payload = {
+      feed: [
+        { title: "Relevant AAPL headline", ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.5", relevance_score: "0.9" }] },
+        { title: "Barely-relevant AAPL mention", ticker_sentiment: [{ ticker: "AAPL", ticker_sentiment_score: "0.5", relevance_score: "0.05" }] }
+      ]
+    };
+    const parsed = parseAlphaVantageNewsSentiment(payload, "AAPL");
+    expect(parsed.headlines).toEqual(["Relevant AAPL headline"]);
+  });
+});
+
 describe("Yahoo Finance provider — cookie/crumb handshake retry", () => {
   // Isolate Yahoo: clear every other enrichment key so the cascade cannot fill PE from
   // Fintech/Finnhub/FMP/etc. when Yahoo handshake fails (CI runners often have keys in env).
@@ -1989,6 +1930,34 @@ describe("parseRobinhoodFundamentals", () => {
 });
 
 describe("parseAlpacaSnapshot", () => {
+  it("stamps the delayed-tape metadata onto the parsed snapshot", () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` tape carries a
+    // documented ~900s delay.  Without this metadata the ~900s-old print is
+    // treated as a realtime-stale observation downstream.
+    const result = parseAlpacaSnapshot(
+      { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } },
+      {
+        expectedDelaySec: 900,
+        delayToleranceSec: 120,
+        venuePriceAuthoritative: true,
+        fetchedAt: "2026-11-05T20:00:00.000Z"
+      }
+    );
+    expect(result.expectedDelaySec).toBe(900);
+    expect(result.delayToleranceSec).toBe(120);
+    expect(result.venuePriceAuthoritative).toBe(true);
+    // The retrieval stamp travels with the tape so it ages by fetch time.
+    expect(result.fetchedAt).toBe("2026-11-05T20:00:00.000Z");
+  });
+
+  it("leaves a realtime snapshot without any tape metadata", () => {
+    const result = parseAlpacaSnapshot({ latestTrade: { p: 195.5 } });
+    expect(result.expectedDelaySec).toBeUndefined();
+    expect(result.delayToleranceSec).toBeUndefined();
+    expect(result.venuePriceAuthoritative).toBeUndefined();
+    expect(result.fetchedAt).toBeUndefined();
+  });
+
   it("maps a full snapshot to the correct SymbolEnrichment fields", () => {
     const snap = {
       latestTrade: { p: 205.75 },
@@ -2037,16 +2006,17 @@ describe("parseAlpacaSnapshot", () => {
     expect(negVw).not.toHaveProperty("vwap");
   });
 
-  it("falls back to dailyBar.c for price when latestTrade is absent", () => {
+  it("uses the two-sided mid when latestTrade is absent and ignores the daily bar close", () => {
     const snap = {
       latestQuote: { bp: 100.00, ap: 100.10 },
-      dailyBar: { c: 100.05, v: 500_000 },
+      dailyBar: { c: 90, v: 500_000 },
       prevDailyBar: { c: 98.00 }
     };
     const result = parseAlpacaSnapshot(snap);
     expect(result.price).toBe(100.05);
-    // (100.05 - 98.00) / 98.00 * 100 ≈ 2.09%
-    expect(result.intradayChangePct).toBeCloseTo(2.09, 1);
+    expect(result.price).not.toBe(90);
+    // Change still uses the daily bar close as the session reference: (90 - 98) / 98.
+    expect(result.intradayChangePct).toBeCloseTo(-8.16, 1);
   });
 
   it("omits bid/ask when they are absent or zero", () => {
@@ -2094,13 +2064,22 @@ describe("parseAlpacaSnapshot", () => {
       expect(result.asOf).toBe("2026-07-04T14:30:00Z");
     });
 
-    it("stamps asOf from dailyBar.t when latestTrade is absent and dailyBar.c wins the price", () => {
+    it("stamps asOf from the quote time when the mid wins, not the daily bar time", () => {
       const result = parseAlpacaSnapshot({
-        latestQuote: { bp: 100.00, ap: 100.10 },
-        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" }
+        latestQuote: { bp: 100.00, ap: 100.10, t: "2026-07-04T14:30:00Z" },
+        dailyBar: { c: 90, v: 500_000, t: "2026-07-04T20:00:00Z" }
       });
       expect(result.price).toBe(100.05);
-      expect(result.asOf).toBe("2026-07-04T20:00:00Z");
+      expect(result.asOf).toBe("2026-07-04T14:30:00Z");
+    });
+
+    it("omits price and asOf when the snapshot only has a daily or previous close", () => {
+      const result = parseAlpacaSnapshot({
+        dailyBar: { c: 100.05, v: 500_000, t: "2026-07-04T20:00:00Z" },
+        prevDailyBar: { c: 98 }
+      });
+      expect(result.price).toBeUndefined();
+      expect(result.asOf).toBeUndefined();
     });
 
     it("omits asOf when no timestamp backs the winning price field (never guesses)", () => {
@@ -2226,6 +2205,130 @@ describe("AlpacaSnapshotEnrichmentProvider", () => {
     const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
     await provider.enrich(["AAPL"]);
     expect(capturedUrl).toContain("feed=iex");
+  });
+
+  it("requests delayed_sip when the provider carries the ACCOUNT-SCOPED paper feed", async () => {
+    // The global env var stays on its default: the delayed tape is an ACCOUNT
+    // decision, never a process-wide flip.
+    const previousFeed = process.env.ALPACA_DATA_FEED;
+    delete process.env.ALPACA_DATA_FEED;
+    let capturedUrl = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      capturedUrl = url;
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    try {
+      const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+        feed: "delayed_sip",
+        cacheIdentity: "ap-paper:delayed_sip"
+      });
+      await provider.enrich(["AAPL"]);
+
+      expect(capturedUrl).toContain("feed=delayed_sip");
+      expect(capturedUrl).not.toContain("feed=iex");
+    } finally {
+      // Restore the mutated env var even when an assertion above throws.
+      if (previousFeed === undefined) delete process.env.ALPACA_DATA_FEED;
+      else process.env.ALPACA_DATA_FEED = previousFeed;
+    }
+  });
+
+  it("stamps the DELAYED-TAPE metadata on a delayed_sip snapshot", async () => {
+    // The scan must be able to age a ~900s-old print with the delayed-tape
+    // rules instead of the realtime-stale bar, so the tape metadata travels
+    // with the observation.
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+  });
+
+  it("does NOT stamp delayed-tape metadata on a realtime (iex) snapshot", async () => {
+    vi.stubGlobal("fetch", async () => {
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.price).toBe(195.5);
+    expect(result.AAPL?.expectedDelaySec).toBeUndefined();
+    expect(result.AAPL?.delayToleranceSec).toBeUndefined();
+    expect(result.AAPL?.venuePriceAuthoritative).toBeUndefined();
+  });
+
+  it("stamps the delayed-tape metadata onto the enriched snapshot", async () => {
+    // Kody review on PR #5005: the account-scoped `delayed_sip` provider must
+    // hand the tape metadata (and the retrieval stamp) to the consumer, so a
+    // ~900s-old print is aged by the delayed-tape rules.
+    vi.stubGlobal("fetch", async () =>
+      new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: 195.5, t: "2026-11-05T19:45:00.000Z" } }
+        })
+      )
+    );
+
+    const provider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const result = await provider.enrich(["AAPL"]);
+
+    expect(result.AAPL?.expectedDelaySec).toBe(900);
+    expect(result.AAPL?.delayToleranceSec).toBe(120);
+    expect(result.AAPL?.venuePriceAuthoritative).toBe(true);
+    expect(typeof result.AAPL?.fetchedAt).toBe("string");
+  });
+
+  it("keeps the delayed tape in its own cache entry (no cross-feed contamination)", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return new Response(
+        JSON.stringify({
+          AAPL: { latestTrade: { p: urls.length === 1 ? 195.5 : 201.25 }, latestQuote: { bp: 195.4, ap: 195.6 } }
+        })
+      );
+    });
+
+    // First read: the live/iex tape.
+    const iexProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env");
+    const iex = await iexProvider.enrich(["AAPL"]);
+    expect(iex.AAPL?.price).toBe(195.5);
+    expect(urls[0]).toContain("feed=iex");
+
+    // Second read: the Alpaca PAPER delayed tape.  It must NOT be served from
+    // the iex cache entry — its cache identity differs.
+    const delayedProvider = new AlpacaSnapshotEnrichmentProvider("k", "s", "env", "local", {
+      feed: "delayed_sip",
+      cacheIdentity: "ap-paper:delayed_sip"
+    });
+    const delayed = await delayedProvider.enrich(["AAPL"]);
+    expect(delayed.AAPL?.price).toBe(201.25);
+    expect(urls[1]).toContain("feed=delayed_sip");
   });
 
   it("fetches the snapshots endpoint with correct headers and maps fields", async () => {
@@ -2714,6 +2817,17 @@ describe("CascadingEnrichmentProvider evidence receipts and arbitration", () => 
     expect(failedResult.AAPL.fieldObservations?.peRatio?.status).toBe("failed");
   });
 
+  it("derives marketCap from SEC XBRL shares times live price when cap is missing", async () => {
+    const cascade = new CascadingEnrichmentProvider([
+      stub("yahoo-finance", { AAPL: { price: 200 } }),
+      stub("sec-xbrl", { AAPL: { sharesOutstanding: 1_000_000 } })
+    ]);
+    const result = await cascade.enrich(["AAPL"]);
+    expect(result.AAPL.marketCap).toBe(200_000_000);
+    expect(result.AAPL.sources?.marketCap).toBe("sec-xbrl");
+    expect(result.AAPL.sources?.sharesOutstanding).toBe("sec-xbrl");
+  });
+
   it("preserves explicit field timestamps and upstream source metadata", async () => {
     const cascade = new CascadingEnrichmentProvider([
       stub("redistributor", {
@@ -2905,6 +3019,89 @@ describe("enrichment short-circuit (App A coverage hint → paid providers skip 
     expect(out.AAA.analystBySource && Object.keys(out.AAA.analystBySource).sort()).toEqual(["fmp", "yahoo-finance"]);
   });
 
+  it("does not fail the free wave when congress.trade 404s", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 404");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 12 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(12);
+  });
+
+  it("does not latch gather when congress.trade 502s on the free-first wave", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 502");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 18 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(18);
+  });
+
+  it("does not latch gather when congress.trade 502s on the legacy short-circuit path", async () => {
+    process.env[FLAG] = "on";
+    process.env[READS] = "on";
+    process.env[FREE_FIRST] = "0";
+    const cascade = new CascadingEnrichmentProvider([
+      {
+        name: "congress.trade",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          throw new Error("HTTP 502");
+        }
+      },
+      {
+        name: "yahoo-finance",
+        configured: true,
+        costTier: "free",
+        async enrich() {
+          return { AAA: { peRatio: 19 } };
+        }
+      }
+    ]);
+    const out = await cascade.enrich(["AAA"]);
+    expect(out.AAA.peRatio).toBe(19);
+  });
+
+  it("treats 502/429/timeout as latching and 404 as a miss", () => {
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 502"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 429"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("The operation was aborted due to timeout"))).toBe(true);
+    expect(isLatchingEnrichmentTransportError(new Error("HTTP 404"))).toBe(false);
+  });
+
   it("passes NO coverage hint when the flag is OFF (default)", async () => {
     process.env[READS] = "on"; // reads on, short-circuit off
     // Free-first also injects coveredFields for paid waves — disable it here so this test
@@ -3026,6 +3223,22 @@ describe("short-interest second source (Massive) — cross-check + disagreement 
     const res = await provider.enrich(["NONE"]);
     expect(res.NONE).toEqual({});
   });
+
+  it("MassiveEnrichmentProvider stops remaining symbols after the first 429", async () => {
+    const { MassiveEnrichmentProvider, clearEnrichmentCache } = await import("../src/lib/data-providers");
+    clearEnrichmentCache();
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls += 1;
+      return new Response("rate limited", { status: 429 });
+    });
+    const provider = new MassiveEnrichmentProvider("massive-key", "env");
+    const symbols = Array.from({ length: 20 }, (_, i) => `M${i}`);
+    const res = await provider.enrich(symbols);
+    expect(res.M0).toEqual({});
+    expect(res.M19).toEqual({});
+    expect(calls).toBeLessThan(20);
+  });
 });
 
 describe("enrichment symbol budget covers the full scan candidate set (starvation regression)", () => {
@@ -3130,14 +3343,52 @@ describe("FMP / Quiver direct access retired (owner 2026-08-04)", () => {
     delete process.env.QUIVER_API_KEY;
     delete process.env.CONGRESS_TRADE_FUNDAMENTALS_ENABLED;
   });
+});
 
-  it("FmpEnrichmentProvider.enrich is a no-op and never fetches", async () => {
-    const { FmpEnrichmentProvider } = await import("../src/lib/data-providers");
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    const provider = new FmpEnrichmentProvider("test-key");
-    await expect(provider.enrich(["AAPL"])).resolves.toEqual({});
-    expect(fetchSpy).not.toHaveBeenCalled();
+// ── Alpaca credential guard (Kody review on PR #5005) ───────────────────────
+// The connected-account lookup that decides the account-scoped tape may only
+// run when the Alpaca snapshot provider is actually registered.  Without the
+// guard, every scan — including one with no Alpaca credentials at all — paid
+// for a connected-account DB read on a path that has no snapshot provider.
+
+describe("getEnrichmentProvider — Alpaca credential guard", () => {
+  it("does NOT read the connected account when the Alpaca snapshot credentials are absent", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi
+      .spyOn(db, "resolveAlpacaMarketData")
+      .mockReturnValue({ source: "env" } as never);
+    const connectedSpy = vi.spyOn(db, "getConnectedAccount");
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).not.toHaveBeenCalled();
+      expect(activeSpy).not.toHaveBeenCalled();
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
+  });
+
+  it("reads the connected account when the Alpaca snapshot credentials ARE present", async () => {
+    const db = await import("../src/lib/db");
+    const resolveSpy = vi.spyOn(db, "resolveAlpacaMarketData").mockReturnValue({
+      apiKey: "k",
+      secretKey: "s",
+      source: "env"
+    } as never);
+    const connectedSpy = vi
+      .spyOn(db, "getConnectedAccount")
+      .mockReturnValue({ id: "ap-paper", broker: "alpaca", environment: "paper" } as never);
+    const activeSpy = vi.spyOn(db, "getActiveConnectedAccount");
+    try {
+      getEnrichmentProvider("local", { connectedAccountId: "ap-paper" });
+      expect(connectedSpy).toHaveBeenCalledWith("ap-paper", "local");
+    } finally {
+      resolveSpy.mockRestore();
+      connectedSpy.mockRestore();
+      activeSpy.mockRestore();
+    }
   });
 });
 

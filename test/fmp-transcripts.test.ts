@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   refundProviderRequests: vi.fn(),
   withProviderLimit: vi.fn(async (_provider: string, work: () => Promise<unknown>) => work()),
   hasIngestTextBudget: vi.fn(() => true),
+  hasPineconeWriteBudget: vi.fn(() => true),
   storeDocument: vi.fn(),
   getCurrentVectorProviderAuthority: vi.fn(),
   managedVectorLedgerAuthority: vi.fn(),
@@ -64,6 +65,7 @@ vi.mock("../src/lib/data-providers", async (importOriginal) => {
 
 vi.mock("../src/lib/vector-db", () => ({
   hasIngestTextBudget: mocks.hasIngestTextBudget,
+  hasPineconeWriteBudget: mocks.hasPineconeWriteBudget,
   storeDocument: async (...args: unknown[]) => {
     const result = await mocks.storeDocument(...args);
     return result?.documentComplete === true
@@ -121,6 +123,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   mocks.admitProviderRequests.mockReturnValue(1);
   mocks.hasIngestTextBudget.mockReturnValue(true);
+  mocks.hasPineconeWriteBudget.mockReturnValue(true);
   mocks.getCurrentVectorProviderAuthority.mockResolvedValue("test-current-authority");
   mocks.managedVectorLedgerAuthority.mockReturnValue("ledger:v1:test-current-authority");
   mocks.vectorTenantScope.mockReturnValue("shared:operator");
@@ -150,6 +153,16 @@ beforeEach(async () => {
 afterEach(() => {
   delete process.env.WEB_SOURCE_FMP_TRANSCRIPTS;
   delete process.env.FMP_TRANSCRIPT_STORAGE_RIGHTS_CONFIRMED;
+});
+
+describe("fmpTranscriptCapThisVisit", () => {
+  it("takes only the latest until it is stored, then deepens high-interest names only", async () => {
+    const { fmpTranscriptCapThisVisit } = await import("../src/lib/web-sources/fmp-transcripts");
+    expect(fmpTranscriptCapThisVisit({ latestStored: false, highInterest: false, maxPerSymbol: 2 })).toBe(1);
+    expect(fmpTranscriptCapThisVisit({ latestStored: false, highInterest: true, maxPerSymbol: 2 })).toBe(1);
+    expect(fmpTranscriptCapThisVisit({ latestStored: true, highInterest: true, maxPerSymbol: 2 })).toBe(2);
+    expect(fmpTranscriptCapThisVisit({ latestStored: true, highInterest: false, maxPerSymbol: 2 })).toBe(0);
+  });
 });
 
 describe("FMP transcript contracts", () => {

@@ -63,22 +63,35 @@
 // this cycle purely from that ceiling, not from a bug. That is fine: an unmatched symbol simply
 // gets `{}` (no fabricated headline/sentiment), same fail-open contract as every other field here.
 // A conservative self-contained daily request counter (MARKETAUX_DAILY_REQUEST_BUDGET, default 80,
-// resetting on UTC date rollover) keeps this provider well under the real 100/day ceiling even
+// resetting on UTC date rollover, keyed per resolved API key so one user's per-user key cannot
+// spend another key's allowance) keeps this provider well under the real 100/day ceiling even
 // across many scan cycles in one day; once exhausted, remaining symbols are simply left unfilled
 // for the rest of the day rather than risking a 402/429 that would also count against provider
 // health. This provider NEVER throws out of enrich() — every sub-fetch is caught independently and
 // a failed group just leaves its symbols unfilled (short negative-TTL cache so it retries soon).
 
+import "server-only";
+
+import { createHash } from "node:crypto";
+
 import type { MarketEnrichmentProvider, SymbolEnrichment } from "./data-providers";
 import { fetchWithRetry } from "./data-providers";
+import { audit, resolveApiKeyWithSource } from "./db";
 import { normalizeSymbol } from "./money";
+import { resolveSourceBool, resolveSourceNumber } from "./source-settings";
 
 const MARKETAUX_BASE_URL = "https://api.marketaux.com/v1";
 
-/** The sole registration gate: trimmed MARKETAUX_API_KEY, or undefined when unset/blank. */
-export function resolveMarketauxApiKey(): string | undefined {
-  const key = (process.env.MARKETAUX_API_KEY ?? "").trim();
-  return key || undefined;
+/**
+ * Registration gate, environment-first per the approved-source rule: MARKETAUX_API_KEY env
+ * is validated before any stored credential, and the shared resolver (per-user stored key
+ * when userId given → local-user stored key) runs only when the env field is empty.
+ * Blank/whitespace counts as unset.
+ */
+export function resolveMarketauxApiKey(userId?: string): string | undefined {
+  const envKey = process.env.MARKETAUX_API_KEY?.trim();
+  if (envKey) return envKey;
+  return resolveApiKeyWithSource("marketaux", userId).key;
 }
 
 // Positive cache floor: news moves faster than Quiver's slow-moving filings, but the free plan's
@@ -144,6 +157,12 @@ const HEADLINES_PER_SYMBOL = 5;
 interface MarketauxEntity {
   symbol?: unknown;
   sentiment_score?: unknown;
+  // Documented (live-verified 2026-08-12, marketaux.com/documentation) as "the overall strength
+  // of the matching for the identified entity" — NOT the 0..1 scale its name might suggest; real
+  // example values from the docs' own live response samples run ~12-82, no documented upper
+  // bound. marketauxEntityIsRelevant() normalizes it /100 (clamped to 0..1) before comparing
+  // against NEWS_RELEVANCE_MIN_SCORE, so the shared 0-1 knob gates all providers on one scale.
+  match_score?: unknown;
 }
 
 interface MarketauxArticle {
@@ -170,17 +189,40 @@ export function mapMarketauxSentiment(score: number): number {
   return Math.max(0, Math.min(100, Math.round(scaled)));
 }
 
+/** True unless the filter is on AND this entity's own match_score parses AND that value is below
+ *  minScore. An entity Marketaux never scored (field absent/unparseable) always passes through —
+ *  never drop data the provider didn't itself flag as a weak match.
+ *
+ *  match_score is normalized onto the knob's 0..1 scale by dividing by 100 (observed range
+ *  ~12-82, no documented upper bound — values above 100 clamp to 1). Without this the shared
+ *  NEWS_RELEVANCE_MIN_SCORE (0-1) could never exclude anything: every real-world score already
+ *  exceeded 1, so the gate was inert at any UI-settable threshold. */
+function marketauxEntityIsRelevant(entity: MarketauxEntity, filterEnabled: boolean, minScore: number): boolean {
+  if (!filterEnabled) return true;
+  const raw = entity.match_score;
+  const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : undefined;
+  if (value === undefined || !Number.isFinite(value)) return true;
+  const normalized = Math.max(0, Math.min(1, value / 100));
+  return normalized >= minScore;
+}
+
 /** Groups a batch of articles' matching entities by symbol, producing at most one SymbolEnrichment
- *  per requested symbol. A symbol with no matching entity in any article gets `{}` (never a
- *  fabricated headline or sentiment). `sentiment` is the mean of every matching entity's
- *  sentiment_score across the whole batch, mapped through mapMarketauxSentiment(). */
+ *  per requested symbol. A symbol with no matching (and, when the relevance filter is on,
+ *  sufficiently relevant) entity in any article gets `{}` (never a fabricated headline or
+ *  sentiment). `sentiment` is the mean of every matching entity's sentiment_score across the
+ *  whole batch, mapped through mapMarketauxSentiment(). `onDropped`, when given, fires once per
+ *  entity dropped for low match_score — the caller's aggregate counter for observability; never
+ *  called on the common (unscored or relevant) path. */
 export function aggregateMarketauxBySymbol(
   articles: MarketauxArticle[],
-  symbols: string[]
+  symbols: string[],
+  onDropped?: (symbol: string) => void
 ): Record<string, SymbolEnrichment> {
   const wanted = new Set(symbols);
   const headlinesBySymbol = new Map<string, string[]>();
   const sentimentAccBySymbol = new Map<string, { sum: number; count: number }>();
+  const filterEnabled = resolveSourceBool("NEWS_RELEVANCE_FILTER");
+  const minScore = resolveSourceNumber("NEWS_RELEVANCE_MIN_SCORE");
 
   for (const article of articles) {
     const title = typeof article.title === "string" ? article.title.trim() : "";
@@ -190,6 +232,13 @@ export function aggregateMarketauxBySymbol(
       const entity = rawEntity as MarketauxEntity;
       const symbol = typeof entity.symbol === "string" ? entity.symbol.trim().toUpperCase() : "";
       if (!symbol || !wanted.has(symbol)) continue;
+
+      // Below-threshold match_score drops BOTH the headline and the sentiment contribution for
+      // this entity — a weak match shouldn't half-count toward either.
+      if (!marketauxEntityIsRelevant(entity, filterEnabled, minScore)) {
+        onDropped?.(symbol);
+        continue;
+      }
 
       if (title) {
         const list = headlinesBySymbol.get(symbol) ?? [];
@@ -227,11 +276,15 @@ export function clearMarketauxCache(): void {
   marketauxCache.clear();
 }
 
-let dailyBudgetState = { day: "", used: 0 };
+// One counter per resolved API key: per-user keys are multi-tenant, so a single process-wide
+// counter would let one user's scans exhaust every other key's day. The map key is a truncated
+// digest, never the raw credential. Keys not yet known to the caller (legacy call paths) share
+// the empty-id bucket.
+let dailyBudgetByKey = new Map<string, { day: string; used: number }>();
 
-/** Test helper: reset the daily request-budget counter between runs. */
+/** Test helper: reset the daily request-budget counters between runs. */
 export function resetMarketauxDailyBudget(): void {
-  dailyBudgetState = { day: "", used: 0 };
+  dailyBudgetByKey = new Map();
 }
 
 function utcDateKey(now: number): string {
@@ -242,11 +295,20 @@ function utcDateKey(now: number): string {
  *  exhausted for the UTC day. Self-contained — deliberately NOT wired into the shared
  *  provider-rate-limit.ts registry (that file is owned by a separate integration pass); mirrors
  *  quiver-provider.ts's posture of a fully standalone, dormant-until-configured file. */
-export function tryReserveMarketauxDailyRequest(now: number): boolean {
-  const key = utcDateKey(now);
-  if (dailyBudgetState.day !== key) dailyBudgetState = { day: key, used: 0 };
-  if (dailyBudgetState.used >= marketauxDailyBudget()) return false;
-  dailyBudgetState.used += 1;
+export function tryReserveMarketauxDailyRequest(now: number, apiKey = ""): boolean {
+  const day = utcDateKey(now);
+  const id = apiKey ? createHash("sha256").update(apiKey).digest("hex").slice(0, 16) : "";
+  const state = dailyBudgetByKey.get(id) ?? { day: "", used: 0 };
+  if (state.day !== day) {
+    state.day = day;
+    state.used = 0;
+  }
+  if (state.used >= marketauxDailyBudget()) {
+    dailyBudgetByKey.set(id, state);
+    return false;
+  }
+  state.used += 1;
+  dailyBudgetByKey.set(id, state);
   return true;
 }
 
@@ -280,11 +342,15 @@ export class MarketauxEnrichmentProvider implements MarketEnrichmentProvider {
     const groups: string[][] = [];
     for (let i = 0; i < misses.length; i += groupSize) groups.push(misses.slice(i, i + groupSize));
 
+    // Aggregate-only counter for the whole enrich() call (never per-headline) — see the audit()
+    // call after the loop below.
+    let droppedForRelevance = 0;
+
     for (let i = 0; i < groups.length; i += CONCURRENCY) {
       const chunk = groups.slice(i, i + CONCURRENCY);
       await Promise.all(
         chunk.map(async (group) => {
-          if (!tryReserveMarketauxDailyRequest(now)) {
+          if (!tryReserveMarketauxDailyRequest(now, this.apiKey)) {
             // Daily budget exhausted — leave this group unfilled for the rest of the day rather
             // than risking a 402/429. Not cached (no expiresAt written) so the very next symbol
             // pass (tomorrow, or once other groups' TTLs expire) retries normally.
@@ -293,7 +359,7 @@ export class MarketauxEnrichmentProvider implements MarketEnrichmentProvider {
           }
           try {
             const articles = await this.fetchArticles(group);
-            const bySymbol = aggregateMarketauxBySymbol(articles, group);
+            const bySymbol = aggregateMarketauxBySymbol(articles, group, () => { droppedForRelevance++; });
             for (const symbol of group) {
               const data = bySymbol[symbol] ?? {};
               marketauxCache.set(symbol, { expiresAt: now + marketauxTtlMs(), data });
@@ -308,6 +374,14 @@ export class MarketauxEnrichmentProvider implements MarketEnrichmentProvider {
           }
         })
       );
+    }
+
+    // Single bounded audit row for the whole call, never per-headline — only written when the
+    // filter actually dropped something this run (audit_events is a hash-chained log; a prior
+    // production incident from an unbounded per-event audit payload is documented in
+    // audit-bounded-run.ts, so this stays a small aggregate, not a row per drop).
+    if (droppedForRelevance > 0) {
+      audit("news_relevance.dropped", { provider: this.name, droppedCount: droppedForRelevance, minScore: resolveSourceNumber("NEWS_RELEVANCE_MIN_SCORE") }, "local");
     }
 
     return result;

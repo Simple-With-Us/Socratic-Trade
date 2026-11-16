@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ListFilter, ShieldAlert } from "lucide-react";
-import type { PendingProposal } from "@/lib/types";
-import { deriveStateInfo, activeConnectedAccount } from "../lib/derive";
+import type { ExecutionMode, PendingProposal } from "@/lib/types";
+import { deriveReality, deriveStateInfo, activeConnectedAccount } from "../lib/derive";
 import { useConsoleData } from "../lib/useConsoleData";
 import { bulkApproveProposals, LiveConfirmationRequiredError, rejectProposal, type ApproveResult } from "../lib/api";
 import { fmtMoney, SENTENCE_GAP } from "../lib/format";
@@ -13,6 +14,7 @@ import { ApprovalCard } from "../components/approval-card";
 import { AlertCenter } from "../components/alert-center";
 import { Card, Chip, Btn, Select, TextInput } from "../ui/primitives";
 import { Sheet } from "../ui/sheet";
+import { SymbolButton } from "../ui/symbol-drilldown";
 import {
   approvalEstimatedNotional,
   approvalIsLive,
@@ -25,6 +27,7 @@ import {
 } from "./triage";
 import { useToast } from "../ui/toast";
 import { destinationLabel } from "../components/nav";
+import { proposalElementId, readProposalQuery, scrollDeepLinkTarget } from "../lib/deep-link-focus";
 
 const SIDE_OPTIONS: Array<{ value: ApprovalSideFilter; label: string }> = [
   { value: "all", label: "all ideas" },
@@ -49,6 +52,15 @@ const BULK_APPROVE_MAX_REQUESTS = 20;
 
 
 export default function ApprovalsPage() {
+  return (
+    <Suspense fallback={null}>
+      <ApprovalsPageInner />
+    </Suspense>
+  );
+}
+
+function ApprovalsPageInner() {
+  const searchParams = useSearchParams();
   const { snapshot, refresh } = useConsoleData();
   const toast = useToast();
   const [query, setQuery] = useState("");
@@ -58,12 +70,15 @@ export default function ApprovalsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState<"approve" | "reject" | null>(null);
   const [liveApproveBatch, setLiveApproveBatch] = useState<PendingProposal[] | null>(null);
+  const [bulkExpectedText, setBulkExpectedText] = useState<string | null>(null);
+  const [bulkServerReasons, setBulkServerReasons] = useState<string[]>([]);
   // The reject-count this arm was raised for, or null when disarmed. If the
   // selection changes underneath an armed button (filter change, checkbox
   // toggle), rejectArmedEffective below falls false on its own — no effect
   // needed to keep it in sync, and no ref read during render.
   const [rejectArmedCount, setRejectArmedCount] = useState<number | null>(null);
   const rejectArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentMode = snapshot ? deriveReality(snapshot).mode : undefined;
   const pending = useMemo(() => snapshot?.pendingProposals ?? [], [snapshot]);
   const pendingIdSet = useMemo(() => new Set(pending.map((proposal) => proposal.id)), [pending]);
   const effectiveSelectedIds = useMemo(() => {
@@ -74,12 +89,24 @@ export default function ApprovalsPage() {
     return next;
   }, [selectedIds, pendingIdSet]);
   const filtered = useMemo(
-    () => triagePendingProposals(pending, { query, side, reality, sort }),
-    [pending, query, side, reality, sort]
+    () => triagePendingProposals(pending, { query, side, reality, sort }, currentMode),
+    [pending, query, side, reality, sort, currentMode]
   );
+  const focusedId = readProposalQuery(searchParams.get("proposal"));
+  const focusedProposal = focusedId ? pending.find((proposal) => proposal.id === focusedId) : undefined;
+  const visible = useMemo(() => {
+    if (!focusedProposal) return filtered;
+    if (filtered.some((proposal) => proposal.id === focusedProposal.id)) return filtered;
+    return [focusedProposal, ...filtered];
+  }, [filtered, focusedProposal]);
+
+  useEffect(() => {
+    if (!focusedId) return;
+    scrollDeepLinkTarget([proposalElementId(focusedId)]);
+  }, [focusedId, visible]);
   const visibleIdSet = useMemo(() => new Set(filtered.map((proposal) => proposal.id)), [filtered]);
-  const summary = useMemo(() => summarizePendingProposals(filtered), [filtered]);
-  const selection = useMemo(() => summarizeBulkSelection(filtered, effectiveSelectedIds), [filtered, effectiveSelectedIds]);
+  const summary = useMemo(() => summarizePendingProposals(filtered, currentMode), [filtered, currentMode]);
+  const selection = useMemo(() => summarizeBulkSelection(filtered, effectiveSelectedIds, currentMode), [filtered, effectiveSelectedIds, currentMode]);
   const bulkApproveOverLimit = selection.approveCount > BULK_APPROVE_MAX_REQUESTS;
   const state = snapshot ? deriveStateInfo(snapshot.policy) : null;
   const stopped = snapshot?.policy.systemState === "halted";
@@ -164,19 +191,28 @@ export default function ApprovalsPage() {
       resetSelection();
       const detailParts = [`${blocked} blocked on re-check`, failed > 0 ? `${failed} failed` : undefined].filter(Boolean);
       const detail = [...detailParts, ...failureDetails.slice(0, 3)].join(" · ");
-      toast.push(
-        failed > 0 ? "warn" : "pos",
-        `Approved ${placed} proposal${placed === 1 ? "" : "s"}`,
-        detail || undefined
-      );
+      if (placed > 0) {
+        toast.push(
+          failed > 0 ? "warn" : "pos",
+          `Approved ${placed} proposal${placed === 1 ? "" : "s"}`,
+          detail || undefined
+        );
+      } else {
+        toast.push(
+          "warn",
+          failed > 0 ? "Approval batch failed" : "Blocked at approval time",
+          detail || "No approvals were placed."
+        );
+      }
     } catch (error) {
+      if (error instanceof LiveConfirmationRequiredError) {
+        setLiveApproveBatch(selected);
+        setBulkExpectedText(error.expectedText);
+        setBulkServerReasons(error.reasons);
+        return;
+      }
       failed += selected.length;
-      const reasons =
-        error instanceof LiveConfirmationRequiredError
-          ? error.reasons.join("; ")
-          : error instanceof Error
-            ? error.message
-            : "request failed";
+      const reasons = error instanceof Error ? error.message : "request failed";
       toast.push("warn", "Approval batch failed", reasons || "No approvals were submitted.");
     } finally {
       setBulkBusy(null);
@@ -190,7 +226,7 @@ export default function ApprovalsPage() {
       toast.push("warn", "Too many approvals selected", `Select ${BULK_APPROVE_MAX_REQUESTS} or fewer proposals per batch to stay inside the order rate limit.`);
       return;
     }
-    if (requiresTypedLiveApproval && selected.some(approvalIsLive)) {
+    if (requiresTypedLiveApproval && selected.some((proposal) => approvalIsLive(proposal, currentMode))) {
       setLiveApproveBatch(selected);
       return;
     }
@@ -205,6 +241,8 @@ export default function ApprovalsPage() {
 
   const closeLiveApproveBatch = useCallback(() => {
     setLiveApproveBatch(null);
+    setBulkExpectedText(null);
+    setBulkServerReasons([]);
   }, []);
 
   const runBulkReject = async () => {
@@ -362,7 +400,7 @@ export default function ApprovalsPage() {
                         : "Approves selected proposals one by one through the existing server path."
                   }
                 >
-                  {bulkBusy === "approve" ? "approving..." : `approve selected (${selection.approveCount})`}
+                  {bulkBusy === "approve" ? "Approving..." : `Approve Selected (${selection.approveCount})`}
                 </Btn>
                 <Btn
                   variant="dangerOutline"
@@ -374,10 +412,10 @@ export default function ApprovalsPage() {
                       ? "The system is stopped, so rejection actions are refused."
                       : rejectArmedEffective
                         ? "Click again to reject — rejects each selected proposal through the existing server path."
-                        : "Rejects each selected proposal through the existing server path. Click once to arm, then again to confirm."
+                        : "Rejects each selected proposal through the existing server path.  Click once to arm, then again to confirm."
                   }
                 >
-                  {bulkBusy === "reject" ? "rejecting..." : rejectArmedEffective ? `reject ${selection.rejectCount}? confirm` : `reject selected (${selection.rejectCount})`}
+                  {bulkBusy === "reject" ? "Rejecting..." : rejectArmedEffective ? `Reject ${selection.rejectCount}?${SENTENCE_GAP}Confirm` : `Reject Selected (${selection.rejectCount})`}
                 </Btn>
               </div>
             </div>
@@ -389,13 +427,13 @@ export default function ApprovalsPage() {
           <Card>
             <p className="text-[length:var(--con-fs-sm)] text-[color:var(--con-warn)]">
               <strong>The system is stopped.</strong> The server refuses approving or rejecting proposals while stopped —
-              start it (or switch to Close-only) from the Stopped button in the top bar first. Run once can still create
+              start it (or switch to Exit-only) from the Stopped button in the top bar first. Run Once can still create
               proposals.
             </p>
           </Card>
         )}
 
-        {filtered.length === 0 ? (
+        {visible.length === 0 ? (
           <Card>
             <div className="py-8 text-center">
               {pending.length === 0 ? (
@@ -406,7 +444,7 @@ export default function ApprovalsPage() {
                       names the lightning glyph it renders as. */}
                   <p className="mt-1 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
                     When a run stages a trade that needs your approval, it shows up here.{SENTENCE_GAP}
-                    Need a cycle now? Use <strong className="font-semibold text-[color:var(--con-fg)]">Run once</strong>{" "}
+                    Need a cycle now? Use <strong className="font-semibold text-[color:var(--con-fg)]">Run Once</strong>{" "}
                     — the <span aria-hidden>⚡</span> lightning button in the
                     top bar
                     {stopped ? (
@@ -431,7 +469,7 @@ export default function ApprovalsPage() {
           </Card>
         ) : (
           <div className="flex flex-col gap-3">
-            {filtered.map((proposal) => (
+            {visible.map((proposal) => (
               <div key={proposal.id} className="flex gap-3">
                 <label className="pt-4">
                   <input
@@ -443,7 +481,7 @@ export default function ApprovalsPage() {
                   />
                 </label>
                 <div className="min-w-0 flex-1">
-                  <ApprovalCard pending={proposal} />
+                  <ApprovalCard pending={proposal} focused={proposal.id === focusedId} />
                 </div>
               </div>
             ))}
@@ -462,7 +500,7 @@ export default function ApprovalsPage() {
             <div className="flex items-start gap-2 text-[length:var(--con-fs-sm)] text-[color:var(--con-muted)]">
               <ShieldAlert size={15} className="mt-0.5 shrink-0 text-[color:var(--con-warn)]" />
               <p>
-                Bulk approve now supports LIVE proposals with one batch typed phrase. Each selected order still goes
+                Bulk approve now supports LIVE proposals with one batch typed phrase.  Each selected order still goes
                 through the existing per-proposal server approval path and can block independently.
               </p>
             </div>
@@ -479,7 +517,10 @@ export default function ApprovalsPage() {
       <BulkLiveApproveSheet
         open={liveApproveBatch !== null}
         proposals={liveApproveBatch ?? []}
+        currentMode={currentMode}
         busy={bulkBusy === "approve"}
+        serverExpected={bulkExpectedText}
+        serverReasons={bulkServerReasons}
         onClose={closeLiveApproveBatch}
         onSubmit={(typedText) => void submitLiveApproveBatch(typedText)}
       />
@@ -499,20 +540,26 @@ function bulkLiveApprovalText(live: PendingProposal[]): string {
 function BulkLiveApproveSheet({
   open,
   proposals,
+  currentMode,
   busy,
+  serverExpected,
+  serverReasons,
   onClose,
   onSubmit
 }: {
   open: boolean;
   proposals: PendingProposal[];
+  currentMode?: ExecutionMode;
   busy: boolean;
+  serverExpected: string | null;
+  serverReasons: string[];
   onClose: () => void;
   onSubmit: (typedText: string) => void;
 }) {
   const [typed, setTyped] = useState("");
-  const live = useMemo(() => proposals.filter(approvalIsLive), [proposals]);
+  const live = useMemo(() => proposals.filter((proposal) => approvalIsLive(proposal, currentMode)), [proposals, currentMode]);
   const paperCount = proposals.length - live.length;
-  const expectedText = bulkLiveApprovalText(live);
+  const expectedText = serverExpected ?? bulkLiveApprovalText(live);
   const matches = typed.trim().toUpperCase() === expectedText;
   const liveNotional = live.reduce((sum, proposal) => sum + approvalEstimatedNotional(proposal), 0);
 
@@ -538,17 +585,29 @@ function BulkLiveApproveSheet({
           {paperCount > 0 ? ` · plus ${paperCount} paper proposal${paperCount === 1 ? "" : "s"}` : ""}
         </p>
         <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
-          The server re-checks each proposal separately at approval time. If one row blocks or expires, the other rows keep
+          The server re-checks each proposal separately at approval time.  If one row blocks or expires, the other rows keep
           their own result.
         </p>
       </div>
+
+      {serverReasons.length > 0 && (
+        <div className="mb-3 rounded-control border border-[color:var(--con-warn-border)] p-3 text-[length:var(--con-fs-xs)]">
+          <div className="font-semibold text-[color:var(--con-warn)]">The server refused the confirmation:</div>
+          <ul className="mt-1 list-disc pl-4 text-[color:var(--con-muted)]">
+            {serverReasons.map((reason, i) => (
+              <li key={i}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="mb-3 max-h-48 overflow-auto rounded-control border border-[color:var(--con-line)]">
         {live.map((proposal) => (
           <div key={proposal.id} className="flex items-center justify-between gap-3 border-b border-[color:var(--con-line)] px-3 py-2 last:border-b-0">
             <div>
               <div className="font-semibold">
-                {proposal.proposal.side.toUpperCase()} {proposal.proposal.symbol}
+                {proposal.proposal.side.toUpperCase()}{" "}
+                <SymbolButton symbol={proposal.proposal.symbol} className="text-inherit" />
               </div>
               <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
                 {proposal.accountNumber ? `account ...${proposal.accountNumber.slice(-4)}` : "active live account"}
@@ -575,14 +634,14 @@ function BulkLiveApproveSheet({
         className="con-mono"
       />
       <p className="mt-1 text-[length:var(--con-fs-xs)] text-[color:var(--con-faint)]">
-        This is one batch confirmation. The app still submits every proposal through the existing approval endpoint.
+        This is one batch confirmation.  The app still submits every proposal through the existing approval endpoint.
       </p>
 
       <div className="mt-4 flex justify-end gap-2">
         <Btn variant="ghost" onClick={close} disabled={busy}>
           Cancel
         </Btn>
-        <Btn variant="primary" disabled={!matches || busy || live.length === 0} onClick={submit}>
+        <Btn variant="primary" disabled={!matches || busy || (live.length === 0 && !serverExpected)} onClick={submit}>
           {busy ? "Approving..." : "Approve live batch"}
         </Btn>
       </div>

@@ -7,7 +7,7 @@ import { fillMissingQuotesWithClose } from "../src/lib/alpaca";
 import type { BrokerQuote } from "../src/lib/types";
 
 describe("fillMissingQuotesWithClose", () => {
-  it("fills only symbols the broker left unpriced (missing or <=0), tagged as delayed", async () => {
+  it("fills only symbols the broker left unpriced (missing or <=0), tagged as session close", async () => {
     const quotes: Record<string, BrokerQuote> = {
       AAPL: { symbol: "AAPL", price: 200, provider: "alpaca" },
       XOM: { symbol: "XOM", price: 0, provider: "alpaca" } // 0 = unpriced (closed market / IEX)
@@ -20,8 +20,15 @@ describe("fillMissingQuotesWithClose", () => {
     });
     expect(fetched.sort()).toEqual(["LYB", "XOM"]); // AAPL already priced → never fetched
     expect(quotes.AAPL.price).toBe(200); // untouched
-    expect(quotes.XOM).toMatchObject({ price: 110.5, provider: "yahoo-finance-delayed", asOf: "2026-06-24" });
-    expect(quotes.LYB).toMatchObject({ price: 95.25, provider: "yahoo-finance-delayed" });
+    expect(quotes.XOM).toMatchObject({
+      price: 110.5,
+      provider: "session-close",
+      asOf: "2026-06-24"
+    });
+    expect(quotes.XOM.delayedFallback).toBeUndefined();
+    expect(quotes.LYB).toMatchObject({ price: 95.25, provider: "session-close" });
+    expect(quotes.LYB.delayedFallback).toBeUndefined();
+    expect(quotes.XOM.fetchedAt).toBeTruthy();
   });
 
   it("leaves a symbol unpriced when the fallback returns nothing or a non-positive price", async () => {

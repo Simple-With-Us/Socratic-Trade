@@ -37,6 +37,7 @@ import {
   FundamentalRowSchema,
   AnalystRowSchema,
   TradeEventRowSchema,
+  SHARE_PAYLOAD_SCHEMA_VERSION,
 } from "@jaywedgeworth22/congress-trading-shared";
 import {
   assertOperationLeaseOwnership,
@@ -46,18 +47,287 @@ import {
   type OperationLeaseAware,
   type OperationLeaseClaim
 } from "./operation-lease";
-import { audit, getInternalSetting, getPolicy, listUsers, listWatchlistSymbols, setInternalSetting } from "./db";
+import { createHash } from "crypto";
+import {
+  audit,
+  deleteInternalSetting,
+  getInternalSetting,
+  getPolicy,
+  listUsers,
+  listWatchlistSymbols,
+  setInternalSetting
+} from "./db";
+import { HEALTH_TRANSIENT_FAILURE_PREFIX, logApiHealth } from "./db-health";
+import { isTransientNetworkError } from "./network-errors";
 import { createDurableMap } from "./durable-state";
 import { fetchDailyOHLC, toBusinessDay } from "./history";
+import { latestCompletedTradingSessionEtKey } from "./market-hours";
 import { INDEX_UNIVERSES, symbolsForPolicyUniverse } from "./index-universes";
 import type { OHLCBar } from "./indicators";
 import { fetchGroupedDailyBarsRange } from "./market-signals/massive-s3";
+import { marketQuoteSummariesFromFieldStore } from "./db-fundamentals";
 import { normalizeSymbol } from "./money";
+import { serverKnobBool } from "./server-knobs";
 import type { MarketQuote, MarketScan } from "./types";
 import { getFinraDataset, getInsiderDataset, getInsiderSignals, getShortVolumeSignals } from "./web-sources";
+import { fetchNasdaqScreenerResponse } from "./nasdaq-screener-fetch";
+import { logWarn, recordCongressStalePriceWithheld } from "./sentry-metrics";
+import { readOptionalSchemaVersionField } from "./schema-version";
+import { z, type ZodType } from "zod";
+
+/** Passthrough row schemas so validated outbound rows keep forward-compat / App-B-only fields. */
+const ShareSecurityRefRowSchema: ZodType<CongressRef> =
+  SecurityRefInputSchema.passthrough() as ZodType<CongressRef>;
+const SharePriceSeriesRowSchema: ZodType<PriceSeries> = PriceSeriesSchema.passthrough();
+const SharePriceCloseRowSchema: ZodType<PriceClose> = PriceCloseSchema.passthrough();
+const ShareInsiderRowSchema: ZodType<InsiderRow> = InsiderRowSchema.passthrough();
+const ShareShortVolumeRowSchema: ZodType<ShortVolumeRow> = ShortVolumeRowSchema.passthrough();
+const ShareFundamentalRowSchema: ZodType<FundamentalRow> = FundamentalRowSchema.passthrough();
+const ShareAnalystRowSchema: ZodType<AnalystRow> = AnalystRowSchema.passthrough();
+const ShareTradeEventRowSchema = TradeEventRowSchema.passthrough();
+
+/** Strict upstream import response from App A (HTTP 2xx body). */
+const CongressImportResponseSchema = z
+  .object({
+    ok: z.boolean().optional(),
+    errors: z.array(z.unknown()).optional(),
+    summary: z
+      .object({
+        errors: z.array(z.unknown()).optional(),
+      })
+      .optional(),
+  })
+  .catchall(z.unknown());
+
+export type CongressImportResponse = z.infer<typeof CongressImportResponseSchema>;
 const DEFAULT_BASE_URL = "https://congress.trade";
 const DEFAULT_TIMEOUT_MS = 30_000; // App A upserts + recomputes per-trade perf anchors per call — give it room
 const LAST_DAILY_RUN_KEY = "congress-share:lastDailyRunDate";
+const LAST_TOKEN_PROBE_KEY = "congress-share:lastTokenProbeTs";
+
+/** Minimum interval between scheduled token probes — matches the auth breaker cooldown so
+ *  a probe fires roughly once per breaker window even on long-running instances. */
+const TOKEN_PROBE_INTERVAL_MS = 6 * 60 * 60_000; // 6h
+
+/**
+ * Auth circuit-breaker (prod incident 2026-09-07): HTTP 401/403 from App A means the shared
+ * bearer token is wrong on one side — a PERMANENT condition until an operator rotates/resyncs it,
+ * not a transient blip. Before this breaker, every caller kept retrying at its normal cadence
+ * forever: the scan-hook throttle is rolled back on ANY failure (so the very next scan re-POSTs),
+ * and the nightly batch's own 60-minute failure backoff (isCongressDailyShareDue) still let a
+ * single "due" run fan out into a dozen-plus chunked POSTs (refs/spx/insider/shortVolume/prices
+ * are independent bounded requests — see the chunking note above runCongressDailyShareUnlocked's
+ * payload loop), each one failing the same way. That combination produced 3,096 identical
+ * `[congress-share] import failed: HTTP 401` log lines over nine days
+ * (2026-08-29 through 2026-09-07) with no Sentry capture, no health signal, and no brake.
+ *
+ * This breaker is keyed ONE way for the whole module — every caller funnels through
+ * `shareWithCongressTrade`, so tripping it here stops the scan-hook, the in-flight nightly-batch
+ * loop's REMAINING chunks, and the next nightly run alike, without touching any of their own
+ * separate gating. A non-auth failure (5xx/timeout/network) does NOT trip it.  Repeated HTTP 500
+ * and network failures are held by the separate in-memory upstream breaker below.
+ */
+const AUTH_BREAKER_KEY = "congress-share:authBreaker";
+
+interface CongressAuthBreakerState {
+  /** Epoch ms the breaker stays tripped until; a fresh real attempt is allowed once now >= this. */
+  untilMs: number;
+  /** The HTTP-error text from the real 401/403 that tripped the breaker, replayed into the health
+   *  log (see below) for every call the breaker silently absorbs, so the failure stays diagnosable
+   *  without a live retry. */
+  lastError: string;
+  /** Non-secret fingerprint (sha256 prefix) of the CONGRESS_TRADE_TOKEN that tripped the breaker.
+   *  An operator resyncing the token before the cooldown elapses is exactly the recovery action
+   *  this breaker exists to wait for — without this, the durable breaker state has no identity
+   *  for the token that failed, so a resynced token still sits blocked for the rest of the
+   *  cooldown (a container restart does not help either: the settings DB is persistent). */
+  tokenFingerprint: string;
+  /** Epoch ms until which the single half-open probe (see claimCongressAuthBreakerProbe below)
+   *  is claimed by an in-flight caller. Self-expires (bounded by the request timeout) if the
+   *  claiming caller crashes without clearing or re-tripping the breaker. */
+  probeClaimedUntilMs?: number;
+}
+
+function authBreakerCooldownMs(): number {
+  const v = Number(process.env.CONGRESS_SHARE_AUTH_BREAKER_COOLDOWN_MS ?? 6 * 60 * 60_000); // 6h default
+  return Number.isFinite(v) && v > 0 ? v : 6 * 60 * 60_000;
+}
+
+/** How long a claimed half-open probe blocks other callers — bounded by the same timeout the
+ *  probe's own fetch is bounded by, so a crashed/hung probe cannot wedge the claim forever. */
+function authProbeClaimWindowMs(): number {
+  return Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+}
+
+/** Non-secret token fingerprint (length-independent, no value ever printed) — same method used
+ *  to diagnose the 2026-09-07 token-drift incident: sha256 prefix only. */
+function fingerprintCongressToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+function readCongressAuthBreakerState(): CongressAuthBreakerState | undefined {
+  try {
+    return getInternalSetting<CongressAuthBreakerState>(AUTH_BREAKER_KEY);
+  } catch {
+    return undefined; // fail open — never let breaker-state reads block a legitimate send
+  }
+}
+
+/** The breaker state, but ignoring (and eagerly clearing) an entry keyed to a DIFFERENT token
+ *  than the one currently configured. Handles the operator-resync recovery path: without this,
+ *  a breaker tripped by the old broken token keeps blocking the newly-resynced good token for
+ *  the rest of the cooldown, and a container restart does not help since the settings DB (where
+ *  the breaker lives) is persistent. */
+function activeCongressAuthBreakerState(token: string | undefined): CongressAuthBreakerState | undefined {
+  const state = readCongressAuthBreakerState();
+  if (!state) return undefined;
+  if (!token || state.tokenFingerprint !== fingerprintCongressToken(token)) {
+    clearCongressAuthBreaker();
+    return undefined;
+  }
+  return state;
+}
+
+/** True while a prior HTTP 401/403 has the breaker tripped (cooldown not yet elapsed) for the
+ *  CURRENTLY configured token. A breaker tripped by a since-resynced token is treated as cleared. */
+export function isCongressAuthBreakerTripped(now: number = Date.now()): boolean {
+  const state = activeCongressAuthBreakerState(congressTradeToken());
+  return state !== undefined && now < state.untilMs;
+}
+
+function tripCongressAuthBreaker(now: number, errorText: string, token: string): void {
+  try {
+    setInternalSetting(AUTH_BREAKER_KEY, {
+      untilMs: now + authBreakerCooldownMs(),
+      lastError: errorText,
+      tokenFingerprint: fingerprintCongressToken(token)
+    });
+  } catch {
+    // best-effort; a failed write just means the next call probes sooner than intended
+  }
+}
+
+/** Atomically claims the single half-open probe slot once the cooldown has elapsed, so
+ *  overlapping callers (scan-hook + nightly batch) don't each treat the expired cooldown as
+ *  their own independent probe and recreate a burst of 401/403 requests. The read-then-write
+ *  below has no `await` between them, so it is atomic against any other same-process caller
+ *  reaching this same half-open window concurrently. Returns false when another caller already
+ *  holds the claim. */
+function claimCongressAuthBreakerProbe(now: number, state: CongressAuthBreakerState): boolean {
+  try {
+    const fresh = readCongressAuthBreakerState() ?? state;
+    if (fresh.probeClaimedUntilMs !== undefined && now < fresh.probeClaimedUntilMs) return false;
+    setInternalSetting(AUTH_BREAKER_KEY, { ...fresh, probeClaimedUntilMs: now + authProbeClaimWindowMs() });
+    return true;
+  } catch {
+    return true; // fail open — never let breaker bookkeeping block a legitimate probe
+  }
+}
+
+function clearCongressAuthBreaker(): void {
+  try {
+    deleteInternalSetting(AUTH_BREAKER_KEY);
+  } catch {
+    // best-effort
+  }
+}
+
+/** Test seam: reset the auth breaker between tests (mirrors resetCongressRefThrottle below). */
+export function resetCongressAuthBreakerForTests(): void {
+  clearCongressAuthBreaker();
+}
+
+/**
+ * Upstream circuit for App A HTTP 500 / network failures.  Separate from the auth breaker:
+ * a 401 still means a bad token, and a 5xx must not open that durable 6h gate.  This one is
+ * in-memory.  Threshold counts exhausted operations (a retried POST is one failure), default 3,
+ * then a 10 minute cooldown.  While cooling, import POSTs and the token probe skip the network
+ * with no health replay.  The nightly run returns before OHLC.  Price-needs 500s do not count.
+ */
+const DEFAULT_UPSTREAM_BREAKER_FAILURES = 3;
+const DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS = 10 * 60_000;
+
+interface CongressUpstreamBreakerState {
+  consecutive: number;
+  open: boolean;
+  openUntil: number;
+  probeInFlight: boolean;
+  probeClaimedUntilMs?: number;
+}
+
+let congressUpstreamBreaker: CongressUpstreamBreakerState = {
+  consecutive: 0,
+  open: false,
+  openUntil: 0,
+  probeInFlight: false
+};
+
+function upstreamProbeClaimWindowMs(): number {
+  return Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+}
+
+function upstreamBreakerFailures(): number {
+  const v = Number(process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_FAILURES ?? DEFAULT_UPSTREAM_BREAKER_FAILURES);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_UPSTREAM_BREAKER_FAILURES;
+}
+
+function upstreamBreakerCooldownMs(): number {
+  const v = Number(process.env.CONGRESS_SHARE_UPSTREAM_BREAKER_COOLDOWN_MS ?? DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_UPSTREAM_BREAKER_COOLDOWN_MS;
+}
+
+/** True only while the upstream breaker is cooling.  Half-open is not tripped. */
+export function isCongressUpstreamBreakerTripped(now: number = Date.now()): boolean {
+  return congressUpstreamBreaker.open && now < congressUpstreamBreaker.openUntil;
+}
+
+export function resetCongressUpstreamBreakerForTests(): void {
+  congressUpstreamBreaker = { consecutive: 0, open: false, openUntil: 0, probeInFlight: false, probeClaimedUntilMs: undefined };
+}
+
+/**
+ * True when this caller must not hit App A.  After the cooldown, exactly one caller is the
+ * half-open probe.  Price-needs must not call this — a read must not steal that probe.
+ */
+function congressUpstreamShouldSkip(now: number = Date.now()): boolean {
+  const state = congressUpstreamBreaker;
+  if (!state.open) return false;
+  if (now < state.openUntil) return true;
+  if (state.probeInFlight) {
+    if (state.probeClaimedUntilMs !== undefined && now >= state.probeClaimedUntilMs) {
+      state.probeInFlight = false;
+      state.probeClaimedUntilMs = undefined;
+    } else {
+      return true;
+    }
+  }
+  state.probeInFlight = true;
+  state.probeClaimedUntilMs = now + upstreamProbeClaimWindowMs();
+  return false;
+}
+
+/** `ok` means App A answered with HTTP < 500 (including 401).  The auth breaker is separate. */
+function noteCongressUpstream(ok: boolean, now: number = Date.now()): void {
+  const state = congressUpstreamBreaker;
+  state.probeInFlight = false;
+  state.probeClaimedUntilMs = undefined;
+  if (ok) {
+    state.consecutive = 0;
+    state.open = false;
+    state.openUntil = 0;
+    return;
+  }
+  state.consecutive += 1;
+  if (state.consecutive < upstreamBreakerFailures()) return;
+  const wasAlreadyOpen = state.open && state.openUntil > 0;
+  state.open = true;
+  state.openUntil = now + upstreamBreakerCooldownMs();
+  if (!wasAlreadyOpen) {
+    console.warn(
+      `[congress-share] upstream circuit open after ${state.consecutive} consecutive HTTP 500/network failures; cooling down ${upstreamBreakerCooldownMs()}ms.  Further calls are skipped until the cooldown elapses.`
+    );
+  }
+}
 
 /**
  * Module-level single-flight for the nightly batch (P2.4 / activity-feed audit §1.4).
@@ -114,12 +384,12 @@ export function isCongressShareAutoEnabled(): boolean {
 }
 
 /**
- * Whether to include fundamentals[]/analyst[] in the scan-hook push. Held OFF by default: App A's #46
- * tables don't exist until its migration runs, and pushing those rows earlier just errors them on App A
- * (the rest of the import is unaffected). Flip this on only after App A confirms #46 is applied.
+ * Whether to include fundamentals[]/analyst[] in the data pushed to App A (Congress.Trade).
+ * Defaults to ON via the CONGRESS_SHARE_FUNDAMENTALS_ENABLED server knob now that App A's
+ * fundamentals_eod and analyst_consensus tables are live.
  */
 export function congressFundamentalsShareEnabled(): boolean {
-  return flagOn(process.env.CONGRESS_SHARE_FUNDAMENTALS_ENABLED);
+  return serverKnobBool("CONGRESS_SHARE_FUNDAMENTALS_ENABLED");
 }
 
 function maxDailyTickers(): number {
@@ -140,8 +410,55 @@ function priceNeedsLimit(): number {
   return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), 2000) : 500;
 }
 
+/** Max pages of App A's price-needs export read per run (each page is `priceNeedsLimit()` tickers). */
+function priceNeedsMaxPages(): number {
+  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_MAX_PAGES ?? 2);
+  return Number.isFinite(v) && v >= 1 ? Math.min(Math.floor(v), 10) : 2;
+}
+
+/**
+ * Cap on App A needs per run.  Needs go first in the share universe, so an unbounded read could
+ * fill the whole 2000-ticker cap and crowd out every monitored symbol, and would multiply the
+ * provider cascade and usage-monitor load per night.  The rotating cursor below spreads a larger
+ * backlog across nights instead.
+ */
+function priceNeedsTotalCap(): number {
+  const v = Number(process.env.CONGRESS_SHARE_PRICE_NEEDS_TOTAL_CAP ?? 1000);
+  return Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), maxDailyTickers()) : 1000;
+}
+
+/** Where the previous run stopped reading App A's keyset-ordered needs, so the next run resumes there. */
+const PRICE_NEEDS_CURSOR_KEY = "congress-share:priceNeedsCursor";
+
+/** Trust-boundary schema for one page of App A's price-needs export.  Rows are validated one by
+ *  one by the reader below (a bad row is dropped, not the page); only the envelope is strict. */
+const PriceNeedsPageSchema = z
+  .object({
+    tickers: z.array(z.unknown()).default([]),
+    spx: z
+      .object({
+        oldestTradeDate: z.string().nullable().optional(),
+        needsHistoryBefore: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+    summary: z.record(z.string(), z.number()).optional(),
+    pagination: z
+      .object({ nextCursor: z.string().nullable().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 /** App A export path for tickers still lacking history for congressional performance. */
 const PRICE_NEEDS_PATH = "/api/export/price-needs";
+/**
+ * Auth probe path.  `GET /api/export/price-needs?limit=0` is not cheap: App A rewrites a
+ * non-positive limit to 500 and always runs unbounded summary SQL.  An uncaught D1/CPU error
+ * from that handler is HTTP 500, which is what painted congress-share down.  Capabilities is
+ * the same INGEST_TOKEN check and does not scan D1.
+ */
+const CAPABILITIES_PATH = "/api/export/capabilities";
 
 export interface CongressPriceNeedTicker {
   ticker: string;
@@ -157,6 +474,8 @@ export interface CongressPriceNeedsResponse {
     needsHistoryBefore?: string | null;
   };
   summary?: Record<string, number>;
+  /** Keyset position after the last page read (null when the listing was exhausted). */
+  nextCursor?: string | null;
 }
 
 /**
@@ -166,12 +485,127 @@ export interface CongressPriceNeedsResponse {
  */
 export async function fetchCongressPriceNeeds(
   limit: number = priceNeedsLimit(),
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  startCursor: string | null = null
 ): Promise<CongressPriceNeedsResponse> {
   const empty: CongressPriceNeedsResponse = { tickers: [] };
   const token = congressTradeToken();
   if (!token) return empty;
-  const url = `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=${encodeURIComponent(String(limit))}`;
+  // Do not count this read toward the upstream breaker, and do not take the half-open probe.
+  // A price-needs 500 must not block imports that might still succeed.  Skip only while cooling.
+  if (isCongressUpstreamBreakerTripped()) return empty;
+  const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
+  const maxPages = priceNeedsMaxPages();
+  const cap = priceNeedsTotalCap();
+  const tickers: CongressPriceNeedTicker[] = [];
+  const seen = new Set<string>();
+  let spx: CongressPriceNeedsResponse["spx"];
+  let summary: CongressPriceNeedsResponse["summary"];
+  const resumeFrom = startCursor && startCursor.trim() ? startCursor.trim().toUpperCase() : null;
+  let cursor: string | null = resumeFrom;
+  let wrapped = false;
+  let nextCursor: string | null = null;
+  // App A pages this export by ticker (keyset, alphabetical).  Reading only the first page meant
+  // the same first `limit` tickers were requested every night: any that ST could not price (stale
+  // tail, mutual-fund NAV not out yet) or that never clear (never-priced names) stayed at the head
+  // and starved everything after them.  Resume where the last run stopped and wrap around once the
+  // listing ends, so a backlog larger than one night's budget is covered over successive nights.
+  for (let page = 0; page < maxPages; page += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const url =
+        `${congressTradeBaseUrl()}${PRICE_NEEDS_PATH}?limit=${encodeURIComponent(String(limit))}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+      const res = await fetchImpl(url, {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+        signal: controller.signal,
+        cache: "no-store"
+      });
+      if (!res.ok) {
+        console.error(`[congress-share] price-needs failed: HTTP ${res.status}`);
+        break;
+      }
+      const parsed = PriceNeedsPageSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        console.error("[congress-share] price-needs response failed schema validation; ignoring this page");
+        break;
+      }
+      const body = parsed.data;
+      if (page === 0) {
+        spx = body.spx;
+        summary = body.summary;
+      }
+      let reachedStop = false;
+      for (const raw of body.tickers) {
+        const t = raw as Record<string, unknown> | null;
+        if (!t || typeof t.ticker !== "string" || !t.ticker.trim()) continue;
+        const ticker = normalizeSymbol(t.ticker);
+        if (!ticker) continue;
+        // Wrapped around: stop once we are back past where this lap began.
+        if (wrapped && resumeFrom && ticker > resumeFrom) {
+          reachedStop = true;
+          break;
+        }
+        if (seen.has(ticker)) continue;
+        seen.add(ticker);
+        tickers.push({
+          ticker,
+          oldestTradeDate: typeof t.oldestTradeDate === "string" ? t.oldestTradeDate : undefined,
+          needsDeepHistory: t.needsDeepHistory === true,
+          reasons: Array.isArray(t.reasons) ? t.reasons.map(String) : undefined
+        });
+        if (tickers.length >= cap) break;
+      }
+      const next = body.pagination?.nextCursor;
+      const pageNext = typeof next === "string" && next.trim() && next !== cursor ? next : null;
+      if (reachedStop) {
+        nextCursor = null; // a full lap is done; the next run starts from the head again
+        break;
+      }
+      if (tickers.length >= cap) {
+        // Resume right after the last ticker taken, not at the page end, so none are skipped.
+        nextCursor = tickers[tickers.length - 1]!.ticker;
+        break;
+      }
+      if (!pageNext) {
+        if (resumeFrom && !wrapped) {
+          wrapped = true;
+          cursor = null;
+          nextCursor = null;
+          continue;
+        }
+        nextCursor = null;
+        break;
+      }
+      cursor = pageNext;
+      nextCursor = pageNext;
+    } catch (err) {
+      console.error("[congress-share] price-needs error:", err instanceof Error ? err.message : err);
+      break; // keep the pages already read; a later page failing must not discard them
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { tickers, spx, summary, nextCursor };
+}
+
+/**
+ * Lightweight congress-share auth probe. GET CAPABILITIES_PATH with the configured
+ * CONGRESS_TRADE_TOKEN.  On 401/403, logs via logApiHealth with an explicit operator
+ * remediation hint and trips the auth circuit breaker so subsequent batch runs are gated
+ * immediately.  On success, clears the auth breaker and logs ok.  A 404 means an older App A
+ * has no capabilities route: the server answered, so it is not an upstream failure and it
+ * does not write a health row.  Never throws — always fire-and-forget safe.
+ */
+export async function probeCongressShareToken(
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  const token = congressTradeToken();
+  if (!token) return; // no token configured — nothing to probe
+  if (congressUpstreamShouldSkip()) return;
+  const url = `${congressTradeBaseUrl()}${CAPABILITIES_PATH}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -182,33 +616,80 @@ export async function fetchCongressPriceNeeds(
       signal: controller.signal,
       cache: "no-store"
     });
-    if (!res.ok) {
-      console.error(`[congress-share] price-needs failed: HTTP ${res.status}`);
-      return empty;
+    if (res.status === 401 || res.status === 403) {
+      noteCongressUpstream(true);
+      const text = await res.text().catch(() => "");
+      const base = `HTTP ${res.status} ${text.slice(0, 200)}`.trim();
+      const errorText =
+        `${base} — token mismatch: resync CONGRESS_TRADE_TOKEN in ST Infisical prod ` +
+        `to match INGEST_TOKEN / ADMIN_TOKEN in CT Infisical prod`;
+      console.error(`[congress-share] token probe auth failure: ${errorText}`);
+      tripCongressAuthBreaker(Date.now(), errorText, token);
+      logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+      return;
     }
-    const body = (await res.json()) as CongressPriceNeedsResponse;
-    const tickers = Array.isArray(body?.tickers)
-      ? body.tickers
-          .filter((t) => t && typeof t.ticker === "string" && t.ticker.trim())
-          .map((t) => ({
-            ticker: normalizeSymbol(t.ticker),
-            oldestTradeDate: typeof t.oldestTradeDate === "string" ? t.oldestTradeDate : undefined,
-            needsDeepHistory: t.needsDeepHistory === true,
-            reasons: Array.isArray(t.reasons) ? t.reasons.map(String) : undefined
-          }))
-          .filter((t) => Boolean(t.ticker))
-      : [];
-    return {
-      tickers,
-      spx: body?.spx,
-      summary: body?.summary
-    };
+    if (res.status === 404) {
+      noteCongressUpstream(true);
+      console.warn(
+        "[congress-share] token probe: /api/export/capabilities returned 404.  Older App A has no capabilities route.  Auth was not rejected."
+      );
+      return;
+    }
+    if (!res.ok) {
+      // Non-auth failure (5xx, etc.): log as transient; do not trip the auth breaker.
+      noteCongressUpstream(false);
+      const text = await res.text().catch(() => "");
+      const errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}HTTP ${res.status} ${text.slice(0, 200)}`.trim();
+      console.warn(`[congress-share] token probe non-auth failure: ${errorText}`);
+      logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+      return;
+    }
+    noteCongressUpstream(true);
+    clearCongressAuthBreaker();
+    logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
   } catch (err) {
-    console.error("[congress-share] price-needs error:", err instanceof Error ? err.message : err);
-    return empty;
+    noteCongressUpstream(false);
+    const error = err instanceof Error ? err.message : String(err);
+    const isTransient = isTransientNetworkError(err);
+    const errorText = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
+    console.warn(`[congress-share] token probe error: ${error}`);
+    logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Always probe at boot, even when the previous process probed moments ago.
+ * Claim the same six-hour marker the scheduler reads before awaiting network,
+ * so its first tick cannot duplicate this request. */
+export async function probeCongressShareTokenOnStartup(now: number = Date.now()): Promise<void> {
+  if (!congressTradeToken()) return;
+  try {
+    setInternalSetting(LAST_TOKEN_PROBE_KEY, now);
+  } catch {
+    // A broken marker must not suppress the boot-time auth check.
+  }
+  await probeCongressShareToken();
+}
+
+/**
+ * Run the congress-share token probe if the probe interval has elapsed since the last run.
+ * Intended for the scheduler tick — returns {status:"skipped"} when the window hasn't elapsed
+ * so the task journal records a benign skip rather than a gap. Never throws.
+ */
+export async function probeCongressShareTokenIfDue(now: number = Date.now()): Promise<{ status: "ok" | "skipped" }> {
+  if (!congressTradeToken()) return { status: "skipped" };
+  try {
+    const last = getInternalSetting<number>(LAST_TOKEN_PROBE_KEY);
+    if (last !== undefined && now - last < TOKEN_PROBE_INTERVAL_MS) {
+      return { status: "skipped" };
+    }
+    setInternalSetting(LAST_TOKEN_PROBE_KEY, now);
+  } catch {
+    // fail open — if the marker read/write fails, run the probe anyway
+  }
+  await probeCongressShareToken();
+  return { status: "ok" };
 }
 
 /**
@@ -276,6 +757,20 @@ export type CongressShortVol = ShortVolumeRow;
 export type CongressFundamental = FundamentalRow;
 export type CongressAnalyst = AnalystRow;
 
+/** Outbound EOD close guard — shared `PriceCloseSchema` accepts any finite number; CT has no inbound plausibility check. */
+const CongressSharePriceCloseSchema = PriceCloseSchema.extend({
+  close: z.number().finite().positive(),
+});
+
+const CongressSharePriceSeriesSchema = PriceSeriesSchema.extend({
+  closes: z.array(CongressSharePriceCloseSchema),
+  // Shared schema is `nullAsUndefined(z.number())` — allow null/omit, reject 0/-1/NaN.
+  currentPrice: z.preprocess(
+    (value) => (value === null ? undefined : value),
+    z.number().finite().positive().optional(),
+  ),
+});
+
 /**
  * Outbound share payload. Same wire shape as shared `SharePayload`; `refs` may
  * use the local optional-field builder (`CongressRef`) before schema validation
@@ -283,6 +778,8 @@ export type CongressAnalyst = AnalystRow;
  */
 export type CongressSharePayload = Omit<SharePayload, "refs"> & {
   refs?: CongressRef[];
+  /** Optional envelope field from a future shared-package schemaVersion (tolerant reader). */
+  schemaVersion?: string | number;
 };
 
 export interface CongressShareResult {
@@ -292,6 +789,13 @@ export interface CongressShareResult {
   status?: number;
   response?: unknown;
   error?: string;
+  /** Per-dataset schema-invalid row counts dropped before POST (outbound share only). */
+  dropped?: Record<string, number>;
+  /** Per-dataset aggregated Zod issue keys for dropped rows. */
+  droppedReasons?: Record<string, Record<string, number>>;
+  droppedTotal?: number;
+  /** Optional envelope field from a future shared-package schemaVersion (tolerant reader). */
+  schemaVersion?: string | number;
   /** Counts actually transmitted across all POSTs in this call. */
   sent: {
     refs: number;
@@ -302,6 +806,7 @@ export interface CongressShareResult {
     shortVolume: number;
     fundamentals: number;
     analyst: number;
+    trades?: number;
   };
 }
 
@@ -369,10 +874,21 @@ function numOrUndef(v: unknown): number | undefined {
  * Returns null when the quote carries no fundamental values (nothing worth sending). App A saves App B's
  * FMP quota by accepting these — App B already fetched them during the scan.
  */
-export function marketQuoteToFundamentals(
-  q: Pick<MarketQuote, "symbol" | "peRatio" | "eps" | "beta" | "dividendYield" | "fiftyTwoWeekHigh" | "fiftyTwoWeekLow" | "fcfYield" | "debtToEquity" | "epsGrowth">,
-  date: string
-): CongressFundamental | null {
+type CongressFundamentalMapperInput = Pick<
+  MarketQuote,
+  | "symbol"
+  | "peRatio"
+  | "eps"
+  | "beta"
+  | "dividendYield"
+  | "fiftyTwoWeekHigh"
+  | "fiftyTwoWeekLow"
+  | "fcfYield"
+  | "debtToEquity"
+  | "epsGrowth"
+>;
+
+export function marketQuoteToFundamentals(q: CongressFundamentalMapperInput, date: string): CongressFundamental | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const row: CongressFundamental = { ticker, date };
@@ -394,10 +910,21 @@ export function marketQuoteToFundamentals(
  * rating counts App B holds. Numeric price targets are included only when the opt-in FMP price-target
  * provider populated them on the quote (FMP_PRICE_TARGETS_ENABLED); otherwise omitted (App A fills null).
  */
-export function marketQuoteToAnalyst(
-  q: Pick<MarketQuote, "symbol" | "analystRating" | "analystBySource" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian">,
-  date: string
-): CongressAnalyst | null {
+type CongressAnalystMapperInput = Pick<
+  MarketQuote,
+  "symbol" | "analystRating" | "targetMean" | "targetHigh" | "targetLow" | "targetMedian"
+> & {
+  analystBySource?: Record<
+    string,
+    {
+      score?: number;
+      label?: string;
+      counts?: { strongBuy?: number; buy?: number; hold?: number; sell?: number; strongSell?: number };
+    }
+  >;
+};
+
+export function marketQuoteToAnalyst(q: CongressAnalystMapperInput, date: string): CongressAnalyst | null {
   const ticker = canonicalMarketDataSymbol(q.symbol); // renames only; drops acquired tickers
   if (!ticker) return null;
   const counts = { strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0 };
@@ -427,14 +954,29 @@ export function marketQuoteToAnalyst(
   return row;
 }
 
-/** Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars). */
+/**
+ * Convert OHLC bars to deduped, date-sorted {date, close, volume?} closes (drops invalid bars).
+ *
+ * Two guards here exist because App A (Congress.Trade) performs NO validation of its own on the
+ * values it receives, and it uses them for customer-facing analytics:
+ *
+ *  1. `close <= 0` is rejected. The previous check was `Number.isFinite` only, so a zero or negative
+ *     close from any of the L1-L9 provider tiers would flow into App A's `price_eod` table and into
+ *     per-trade P&L with nothing rejecting it anywhere on the path.
+ *  2. A date in the future is rejected. App A derives a ticker's latest price date from `MAX(date)`,
+ *     so one future-dated row marks the whole ticker fresh and silently suppresses its own staleness
+ *     watchdog. A future date is always a provider or clock bug, never real data.
+ */
 export function ohlcBarsToCloses(bars: OHLCBar[] | null | undefined): CongressClose[] {
   if (!bars || bars.length === 0) return [];
+  // `toBusinessDay` is UTC-based, so compare against the same clock rather than a local date.
+  const todayUtc = new Date().toISOString().slice(0, 10);
   const byDate = new Map<string, CongressClose>();
   for (const bar of bars) {
     const date = toBusinessDay(bar.time);
     const close = bar.close;
-    if (!date || typeof close !== "number" || !Number.isFinite(close)) continue;
+    if (!date || typeof close !== "number" || !Number.isFinite(close) || close <= 0) continue;
+    if (date > todayUtc) continue; // never let a future date mark a ticker fresh downstream
     const entry: CongressClose = { date, close };
     if (typeof bar.volume === "number" && Number.isFinite(bar.volume)) entry.volume = bar.volume;
     byDate.set(date, entry); // later bar for a given date wins
@@ -450,6 +992,21 @@ export function ohlcBarsToPriceEntry(symbol: string, bars: OHLCBar[] | null | un
   if (closes.length === 0) return null;
   const newest = closes[closes.length - 1]; // closes are ascending
   return { ticker, closes, currentPrice: newest.close, currentPriceDate: newest.date };
+}
+
+/**
+ * True when the newest close (last, because callers pass ascending closes) is the latest
+ * completed US equity session or later.  A date behind that session is a stale tail.
+ * Congress.Trade has no provenance field on PriceSeries, so a stale series must not be
+ * sent as if it were current.
+ */
+export function closesCoverLatestSession(
+  closes: readonly { date: string }[],
+  nowMs: number
+): boolean {
+  const newest = closes.length > 0 ? closes[closes.length - 1] : undefined;
+  if (!newest?.date) return false;
+  return newest.date >= latestCompletedTradingSessionEtKey(nowMs);
 }
 
 // ── Insider / short-volume import builders (App B's highest-fit datasets for App A) ──
@@ -510,6 +1067,100 @@ export function buildShortVolumeImport(): CongressShortVol[] {
   return out.slice(0, maxDailyTickers());
 }
 
+const CongressShareAnalystCountsSchema = z.object({
+  strongBuy: z.number().finite().optional(),
+  buy: z.number().finite().optional(),
+  hold: z.number().finite().optional(),
+  sell: z.number().finite().optional(),
+  strongSell: z.number().finite().optional(),
+});
+
+// .passthrough(): per-source analyst rows may carry provider metadata the mapper ignores;
+// stripping unknown keys would drop valid rows that still have usable counts.
+const CongressShareAnalystDetailSchema = z
+  .object({
+    score: z.number().finite().optional(),
+    label: z.string().optional(),
+    counts: CongressShareAnalystCountsSchema.optional(),
+  })
+  .passthrough();
+
+/** Narrow Zod gate for symbol_field_latest rows before congress-share mappers (outbound rows still hit Share*RowSchema). */
+export const FieldStoreCongressShareQuoteSchema = z
+  .object({
+    symbol: z.string().min(1),
+    peRatio: z.number().finite().optional(),
+    eps: z.number().finite().optional(),
+    beta: z.number().finite().optional(),
+    dividendYield: z.number().finite().optional(),
+    fiftyTwoWeekHigh: z.number().finite().optional(),
+    fiftyTwoWeekLow: z.number().finite().optional(),
+    fcfYield: z.number().finite().optional(),
+    debtToEquity: z.number().finite().optional(),
+    epsGrowth: z.number().finite().optional(),
+    analystRating: z.string().optional(),
+    analystBySource: z.record(z.string(), CongressShareAnalystDetailSchema).optional(),
+    targetMean: z.number().finite().optional(),
+    targetHigh: z.number().finite().optional(),
+    targetLow: z.number().finite().optional(),
+    targetMedian: z.number().finite().optional(),
+  })
+  // Keep analystBySource and other field-store keys the mappers read via .passthrough().
+  .passthrough();
+
+type FieldStoreCongressShareQuote = z.infer<typeof FieldStoreCongressShareQuoteSchema>;
+
+/**
+ * Build fundamentals + analyst rows for App A from the durable `symbol_field_latest` store.
+ * Used by the scheduled nightly batch so CT's fundamentals_eod / analyst_consensus streams stay
+ * fresh even when the after-scan hook only forwards a throttled subset of scan candidates.
+ */
+export function buildFundamentalsAndAnalystImport(
+  symbols: string[],
+  date: string
+): {
+  fundamentals: CongressFundamental[];
+  analyst: CongressAnalyst[];
+  fieldStoreParseDropped: number;
+  fieldStoreParseSampleIssues: string[];
+} {
+  const empty = { fundamentals: [], analyst: [], fieldStoreParseDropped: 0, fieldStoreParseSampleIssues: [] };
+  if (!congressFundamentalsShareEnabled() || symbols.length === 0) {
+    return empty;
+  }
+  const summaries = marketQuoteSummariesFromFieldStore(symbols);
+  const fundamentals: CongressFundamental[] = [];
+  const analyst: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  const fieldStoreParseSampleIssues: string[] = [];
+  for (const quote of Object.values(summaries)) {
+    const parsed = FieldStoreCongressShareQuoteSchema.safeParse(quote);
+    if (!parsed.success) {
+      fieldStoreParseDropped++;
+      if (fieldStoreParseSampleIssues.length < 3) {
+        const sym = typeof quote.symbol === "string" ? quote.symbol : "?";
+        const issue = parsed.error.issues[0];
+        fieldStoreParseSampleIssues.push(
+          `${sym}: ${issue?.path.join(".") || "(root)"} ${issue?.message ?? "invalid"}`
+        );
+      }
+      continue;
+    }
+    const q: FieldStoreCongressShareQuote = parsed.data;
+    const f = marketQuoteToFundamentals(q, date);
+    if (f) fundamentals.push(f);
+    const a = marketQuoteToAnalyst(q, date);
+    if (a) analyst.push(a);
+  }
+  if (fieldStoreParseDropped > 0) {
+    console.warn(
+      `[congress-share] field-store Zod gate dropped ${fieldStoreParseDropped} symbol(s) before fundamentals/analyst export`,
+      fieldStoreParseSampleIssues.length ? { sampleIssues: fieldStoreParseSampleIssues } : undefined
+    );
+  }
+  return { fundamentals, analyst, fieldStoreParseDropped, fieldStoreParseSampleIssues };
+}
+
 // ── Low-level POST ─────────────────────────────────────────────────────────────
 
 function countCloses(payload: CongressSharePayload): number {
@@ -518,46 +1169,261 @@ function countCloses(payload: CongressSharePayload): number {
   return n;
 }
 
-/** Minimal shape of a shared Zod row schema (avoids importing `z` just for the parameter type). */
-type RowSchema = { safeParse: (value: unknown) => { success: boolean } };
+export type ShareRowsDropReport = {
+  payload: CongressSharePayload;
+  dropped: Record<string, number>;
+  droppedReasons: Record<string, Record<string, number>>;
+  droppedTotal: number;
+};
+
+function formatZodIssuePath(path: PropertyKey[]): string {
+  if (path.length === 0) return "(root)";
+  const out: string[] = [];
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      if (out.length === 0) {
+        out.push("[]");
+        continue;
+      }
+      const last = out[out.length - 1];
+      if (!last.endsWith("[]")) {
+        out[out.length - 1] = `${last}[]`;
+      }
+      continue;
+    }
+    out.push(String(segment));
+  }
+  return out.join(".");
+}
+
+function zodIssueLabel(issue: { path: PropertyKey[]; code: string }): string {
+  return `${formatZodIssuePath(issue.path)}:${issue.code}`;
+}
+
+function readOptionalSchemaVersion(payload: CongressSharePayload): string | number | undefined {
+  return readOptionalSchemaVersionField(payload.schemaVersion);
+}
+
+async function reportCongressShareRowsDropped(details: {
+  dropped: Record<string, number>;
+  droppedReasons: Record<string, Record<string, number>>;
+  droppedTotal: number;
+  schemaVersion?: string | number;
+}): Promise<void> {
+  const { dropped, droppedReasons, droppedTotal, schemaVersion } = details;
+  const droppedText = JSON.stringify({ dropped, droppedReasons, schemaVersion });
+  console.warn(`[congress-share] dropped schema-invalid rows before send: ${droppedText}`);
+  audit("congress_share_rows_dropped", {
+    dropped,
+    droppedReasons,
+    droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion } : {})
+  });
+  logWarn("[congress-share] schema-invalid rows dropped before send", {
+    dropped: JSON.stringify(dropped),
+    droppedReasons: JSON.stringify(droppedReasons),
+    droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion: String(schemaVersion) } : {})
+  });
+}
+
+function shareDropReceipt(report: ShareRowsDropReport, schemaVersion?: string | number) {
+  if (report.droppedTotal <= 0) {
+    return schemaVersion !== undefined ? { schemaVersion } : {};
+  }
+  return {
+    dropped: report.dropped,
+    droppedReasons: report.droppedReasons,
+    droppedTotal: report.droppedTotal,
+    ...(schemaVersion !== undefined ? { schemaVersion } : {})
+  };
+}
 
 /**
  * Validate each dataset's rows against the shared row schemas and DROP any that fail, so malformed
  * data never reaches App A's import endpoint. Validation is PER-ROW (not whole-payload) so one bad
  * row never suppresses the valid rows in the same dataset — and it filters, rather than logs-and-sends
- * as the old code did. Rows that pass are returned verbatim (App A's importer accepts the extra
- * CongressRef fields the strict schema strips, so we never narrow a valid row's payload).
- * Returns the filtered payload plus a per-dataset dropped-row count for observability.
+ * as the old code did. Rows that pass are returned as Zod-validated `parsed.data` (passthrough schemas
+ * keep forward-compat fields) so only validated shapes cross the trust boundary.
+ * Returns the filtered payload plus per-dataset dropped counts and aggregated Zod issue reasons.
  */
-export function dropInvalidShareRows(
-  payload: CongressSharePayload,
-): { payload: CongressSharePayload; dropped: Record<string, number> } {
+export function dropInvalidShareRows(payload: CongressSharePayload): ShareRowsDropReport {
   const dropped: Record<string, number> = {};
-  const filterRows = <T>(rows: T[] | undefined, schema: RowSchema, key: string): T[] | undefined => {
+  const droppedReasons: Record<string, Record<string, number>> = {};
+  const filterRows = <T>(rows: T[] | undefined, schema: ZodType<T>, key: string): T[] | undefined => {
     if (!rows || rows.length === 0) return rows;
     const valid: T[] = [];
     let bad = 0;
     for (const row of rows) {
-      if (schema.safeParse(row).success) valid.push(row);
-      else bad++;
+      const parsed = schema.safeParse(row);
+      if (parsed.success) {
+        valid.push(parsed.data);
+        continue;
+      }
+      bad++;
+      const bucket = droppedReasons[key] ?? {};
+      for (const issue of parsed.error.issues) {
+        const label = zodIssueLabel(issue);
+        bucket[label] = (bucket[label] ?? 0) + 1;
+      }
+      droppedReasons[key] = bucket;
     }
     if (bad > 0) dropped[key] = bad;
     return valid;
   };
-  return {
-    payload: {
-      ...payload,
-      refs: filterRows(payload.refs, SecurityRefInputSchema, "refs"),
-      prices: filterRows(payload.prices, PriceSeriesSchema, "prices"),
-      spx: filterRows(payload.spx, PriceCloseSchema, "spx"),
-      insider: filterRows(payload.insider, InsiderRowSchema, "insider"),
-      shortVolume: filterRows(payload.shortVolume, ShortVolumeRowSchema, "shortVolume"),
-      fundamentals: filterRows(payload.fundamentals, FundamentalRowSchema, "fundamentals"),
-      analyst: filterRows(payload.analyst, AnalystRowSchema, "analyst"),
-      trades: filterRows(payload.trades, TradeEventRowSchema, "trades"),
-    },
-    dropped,
+  const clean: CongressSharePayload = {
+    ...payload,
+    refs: filterRows(payload.refs, ShareSecurityRefRowSchema, "refs"),
+    prices: filterRows(payload.prices, CongressSharePriceSeriesSchema, "prices"),
+    spx: filterRows(payload.spx, CongressSharePriceCloseSchema, "spx"),
+    insider: filterRows(payload.insider, ShareInsiderRowSchema, "insider"),
+    shortVolume: filterRows(payload.shortVolume, ShareShortVolumeRowSchema, "shortVolume"),
+    fundamentals: filterRows(payload.fundamentals, ShareFundamentalRowSchema, "fundamentals"),
+    analyst: filterRows(payload.analyst, ShareAnalystRowSchema, "analyst"),
+    trades: filterRows(payload.trades, ShareTradeEventRowSchema, "trades"),
   };
+  const droppedTotal = Object.values(dropped).reduce((a, b) => a + b, 0);
+  return { payload: clean, dropped, droppedReasons, droppedTotal };
+}
+
+/**
+ * Optional wire envelope version on outbound import POST bodies (App A ignores unknown keys).
+ *
+ * @deprecated Use the shared `SHARE_PAYLOAD_SCHEMA_VERSION` from
+ * `@jaywedgeworth22/congress-trading-shared` (v2.9.0, ST-3853).  This alias is kept only so
+ * existing imports keep compiling; it is a plain re-export of the shared contract value.
+ * App A (congress.trade) resolves the received version with `resolveSharePayloadSchemaVersion`
+ * and warns on unsupported versions without rejecting the payload.
+ */
+export const CONGRESS_SHARE_PAYLOAD_SCHEMA_VERSION = SHARE_PAYLOAD_SCHEMA_VERSION;
+
+/** Per-dataset accepted tallies from App A's `POST /api/admin/securities/import` 2xx body. */
+export interface CongressImportAcceptedCounts {
+  refs: number;
+  spxRows: number;
+  pricedTickers: number;
+  priceRows: number;
+  insiderRows: number;
+  shortVolumeRows: number;
+  fundamentalsRows: number;
+  analystRows: number;
+}
+
+export type CongressShareSentCounts = CongressShareResult["sent"] & { trades?: number };
+
+const MISSING_ACCEPTED_COUNTS_REASON =
+  "import response missing per-dataset accepted counts (expected refs, spxRows, pricedTickers, priceRows, insiderRows, shortVolumeRows, fundamentalsRows, analystRows)";
+
+/**
+ * Strict accepted-count receipt from App A's import 2xx JSON.
+ * Unknown keys fail this schema.  The parser strips them first: a real body also
+ * carries envelope fields (`ok`, `errors`, `perfTickers`, `tradesRows`), and those
+ * must not turn a valid tally into a shortfall.
+ */
+export const ImportedReceiptSchema = z
+  .object({
+    refs: z.number().int().nonnegative(),
+    spxRows: z.number().int().nonnegative(),
+    pricedTickers: z.number().int().nonnegative(),
+    priceRows: z.number().int().nonnegative(),
+    insiderRows: z.number().int().nonnegative(),
+    shortVolumeRows: z.number().int().nonnegative(),
+    fundamentalsRows: z.number().int().nonnegative(),
+    analystRows: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** Optional `tradesRows` on the same body.  Not one of the eight required tallies. */
+const TradesRowsReceiptSchema = z.object({
+  tradesRows: z.number().int().nonnegative(),
+});
+
+/** Parse App A's per-dataset accepted counts out of a 2xx import JSON body. */
+export function parseCongressImportAcceptedCounts(
+  response: unknown,
+): { ok: true; counts: CongressImportAcceptedCounts } | { ok: false; reason: string } {
+  const parsed = ImportedReceiptSchema.strip().safeParse(response);
+  if (!parsed.success) {
+    if (response === undefined || response === null || typeof response !== "object") {
+      return { ok: false, reason: "import response body was empty or unparseable" };
+    }
+    return { ok: false, reason: MISSING_ACCEPTED_COUNTS_REASON };
+  }
+  return { ok: true, counts: parsed.data };
+}
+
+/**
+ * Compare what we sent on this POST to what App A reports it accepted. Returns "" when every
+ * non-zero sent dataset has a matching accepted tally with accepted >= sent.
+ */
+export function congressImportAcceptedReceiptError(
+  sent: CongressShareSentCounts,
+  response: unknown,
+): string {
+  const parsed = parseCongressImportAcceptedCounts(response);
+  if (!parsed.ok) return parsed.reason;
+  const { counts } = parsed;
+  const gaps: string[] = [];
+
+  const check = (label: string, sentN: number, acceptedN: number) => {
+    if (sentN <= 0) return;
+    if (acceptedN < sentN) gaps.push(`${label}: sent=${sentN} accepted=${acceptedN}`);
+  };
+
+  check("refs", sent.refs, counts.refs);
+  check("spx", sent.spx, counts.spxRows);
+  check("prices", sent.prices, counts.pricedTickers);
+  // `countCloses` (sent.closes) includes SPX rows. App A reports those under `spxRows`;
+  // `priceRows` is only per-ticker price_eod closes. Comparing the sum to `priceRows`
+  // fails every SPX-only nightly POST (priceRows stays 0).
+  check("closes", Math.max(0, sent.closes - sent.spx), counts.priceRows);
+  check("insider", sent.insider, counts.insiderRows);
+  check("shortVolume", sent.shortVolume, counts.shortVolumeRows);
+  check("fundamentals", sent.fundamentals, counts.fundamentalsRows);
+  check("analyst", sent.analyst, counts.analystRows);
+
+  const tradesSent = sent.trades ?? 0;
+  if (tradesSent > 0) {
+    const tradesParsed = TradesRowsReceiptSchema.safeParse(response);
+    const tradesAccepted = tradesParsed.success ? tradesParsed.data.tradesRows : undefined;
+    if (tradesAccepted === undefined) {
+      gaps.push(
+        `trades: sent=${tradesSent} but App A import response has no tradesRows receipt (not implemented on App A)`,
+      );
+    } else if (tradesAccepted < tradesSent) {
+      gaps.push(`trades: sent=${tradesSent} accepted=${tradesAccepted}`);
+    }
+  }
+
+  if (gaps.length === 0) return "";
+  return `App A accepted fewer rows than sent — ${gaps.join("; ")}`;
+}
+
+/**
+ * Read App A's verdict out of a 2xx import response.
+ *
+ * App A returns `{ ok, errors[], <dataset>Rows, ... }` with HTTP 200, so `ok:false` and a populated
+ * `errors[]` mean rows were rejected. Per-dataset accepted tallies are checked separately via
+ * `congressImportAcceptedReceiptError`. Returns "" when the body reports a clean import, and a short
+ * diagnostic otherwise. A body we cannot parse is treated as a FAILURE, not a pass: an unreadable 200
+ * is exactly the case where the daily marker must not advance on faith.
+ */
+function congressImportBodyError(response: unknown): string {
+  if (response === undefined || response === null) {
+    return "import response body was empty or unparseable";
+  }
+  if (typeof response !== "object") return `unexpected import response body of type ${typeof response}`;
+  const body = response as { ok?: unknown; errors?: unknown; summary?: { errors?: unknown } };
+  const errors = Array.isArray(body.errors)
+    ? body.errors
+    : Array.isArray(body.summary?.errors)
+      ? body.summary.errors
+      : [];
+  if (body.ok === false || errors.length > 0) {
+    const first = errors.length > 0 ? JSON.stringify(errors[0]).slice(0, 200) : "no detail";
+    return `App A reported ok=${String(body.ok)} with ${errors.length} error(s); first: ${first}`;
+  }
+  return "";
 }
 
 /**
@@ -567,10 +1433,27 @@ export function dropInvalidShareRows(
 export async function shareWithCongressTrade(payload: CongressSharePayload): Promise<CongressShareResult> {
   // Drop schema-invalid rows BEFORE building the payload so malformed data never reaches App A;
   // `sent` (and the empty check) then reflect only what is actually transmitted.
-  const { payload: clean, dropped } = dropInvalidShareRows(payload);
-  if (Object.keys(dropped).length > 0) {
-    console.warn("[congress-share] dropped schema-invalid rows before send:", dropped);
+  const dropReport = dropInvalidShareRows(payload);
+  const { payload: clean } = dropReport;
+  const schemaVersion = readOptionalSchemaVersion(payload);
+  if (schemaVersion !== undefined) {
+    console.info(`[congress-share] outbound payload schemaVersion=${String(schemaVersion)}`);
   }
+  if (dropReport.droppedTotal > 0) {
+    // Schema drift between the two apps is silent by construction here: a row that stops matching
+    // the shared schema is filtered out and the POST still succeeds, so coverage shrinks with no
+    // error anywhere. App A also runs a STRICT schema (non-null `sentiment`/`buyFilings`/`owners`/
+    // `ratio` on insider + short-volume rows), so a null we emit fails safeParse on OUR side first
+    // and never reaches them at all. Surface it so a silent coverage regression becomes visible.
+    //
+    // Deliberately an `audit()` row and NOT `logApiHealth`. The health store counts CONSECUTIVE
+    // failures per service to drive a "5 consecutive failures" alert, so writing an `ok: true`
+    // record here would interleave between two genuine `ok: false` request failures and reset that
+    // counter — masking a real outage. This is a payload-quality signal, not a transport outcome,
+    // so it belongs in the audit trail where it cannot touch alert state.
+    await reportCongressShareRowsDropped({ ...dropReport, schemaVersion });
+  }
+  const dropMeta = shareDropReceipt(dropReport, schemaVersion);
   const sent = {
     refs: clean.refs?.length ?? 0,
     spx: clean.spx?.length ?? 0,
@@ -583,51 +1466,197 @@ export async function shareWithCongressTrade(payload: CongressSharePayload): Pro
     trades: clean.trades?.length ?? 0
   };
   const token = congressTradeToken();
-  if (!token) return { ok: false, skipped: true, reason: "no-token", sent };
-  const total = sent.refs + sent.spx + sent.prices + sent.insider + sent.shortVolume + sent.fundamentals + sent.analyst;
+  if (!token) return { ...dropMeta, ok: false, skipped: true, reason: "no-token", sent };
+  // Trades are a real dataset on the shared payload. Leaving them out of this sum made a
+  // trades-only body `skipped: true` ("empty") so the daily marker could advance without a POST.
+  // Include them so the body is sent and the receipt check below can fail it honestly.
+  const total =
+    sent.refs +
+    sent.spx +
+    sent.prices +
+    sent.insider +
+    sent.shortVolume +
+    sent.fundamentals +
+    sent.analyst +
+    (sent.trades ?? 0);
   if (total === 0) {
     // Distinguish a genuinely-empty input (nothing to send → legitimate skip) from a payload whose
     // rows were ALL rejected by the shared schema. The latter is a real failure: counting it as a
     // skip would let the daily-run marker advance and silently swallow schema/API drift until the
     // next day. Returning skipped:false makes runCongressDailyShare count it in failedPosts.
-    if (Object.keys(dropped).length > 0) {
-      return { ok: false, skipped: false, reason: "all-rows-dropped", sent };
+    if (dropReport.droppedTotal > 0) {
+      return { ...dropMeta, ok: false, skipped: false, reason: "all-rows-dropped", sent };
     }
-    return { ok: false, skipped: true, reason: "empty", sent };
+    return { ...dropMeta, ok: false, skipped: true, reason: "empty", sent };
+  }
+
+  const now = Date.now();
+  const breakerState = activeCongressAuthBreakerState(token);
+  if (breakerState && now < breakerState.untilMs) {
+    // Auth breaker open: a recent real 401/403 means the token is broken until an operator fixes
+    // it — skip the network call entirely (no fetch) rather than hammering App A again. Every
+    // caller (scan-hook + nightly batch, including the REST of an in-flight batch's chunk loop)
+    // shares this one check, so tripping it once silences the whole storm. Still replay the
+    // cached failure into the health store (no console.error — that already fired for the real
+    // attempt) so the "5 consecutive failures" Sentry/health-degraded threshold (logApiHealth ->
+    // alertConnectionFailure, same mechanism "roic"/"congress.trade" already use) is reached at
+    // the caller's NORMAL cadence instead of only once per cooldown window.
+    logApiHealth({
+      service: "congress-share",
+      ok: false,
+      errorText: `${breakerState.lastError} [auth breaker cooldown active; not re-sent]`,
+      keySource: "env"
+    });
+    return { ...dropMeta, ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
+  }
+  if (breakerState) {
+    // Cooldown elapsed: half-open. Exactly one caller may send the real probe; any other caller
+    // reaching this same instant (scan-hook firing while the nightly batch is also mid-run, etc.)
+    // absorbs instead of independently treating the expired cooldown as its own single probe —
+    // otherwise concurrent callers recreate a burst of 401/403 requests every cooldown boundary.
+    if (!claimCongressAuthBreakerProbe(now, breakerState)) {
+      logApiHealth({
+        service: "congress-share",
+        ok: false,
+        errorText: `${breakerState.lastError} [auth breaker half-open probe already in flight; not re-sent]`,
+        keySource: "env"
+      });
+      return { ...dropMeta, ok: false, skipped: false, reason: "auth-breaker-tripped", sent };
+    }
+  }
+
+  if (congressUpstreamShouldSkip(now)) {
+    return { ...dropMeta, ok: false, skipped: false, reason: "upstream-breaker", sent };
   }
 
   const url = `${congressTradeBaseUrl()}${API_PATHS.ADMIN_SECURITIES_IMPORT}`;
   const timeoutMs = Number(process.env.CONGRESS_SHARE_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const maxAttempts = 3;
+  // One POST, including its retries, is one upstream operation.  `undefined` until the call
+  // is finished so a retry `continue` does not count.
+  let upstreamOutcome: boolean | undefined;
+
   try {
-    // Stamp our origin so the counterpart never echoes our own rows back to us (no-echo-loop guard).
-    const body = { ...clean, origin: clean.origin ?? APP_B_ORIGIN_TAG };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      cache: "no-store"
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`[congress-share] import failed: HTTP ${res.status} ${text.slice(0, 300)}`);
-      return { ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      // Stamp our origin so the counterpart never echoes our own rows back to us (no-echo-loop guard).
+      const body = {
+        ...clean,
+        origin: clean.origin ?? APP_B_ORIGIN_TAG,
+        schemaVersion: SHARE_PAYLOAD_SCHEMA_VERSION,
+      };
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        cache: "no-store"
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const isAuthFailure = res.status === 401 || res.status === 403;
+        const baseError = `HTTP ${res.status} ${text.slice(0, 300)}`;
+        const errorText = isAuthFailure
+          ? `${baseError} — token mismatch: resync CONGRESS_TRADE_TOKEN in ST Infisical prod ` +
+            `to match INGEST_TOKEN / ADMIN_TOKEN in CT Infisical prod`
+          : baseError;
+        if (isAuthFailure) {
+          upstreamOutcome = true;
+          console.error(`[congress-share] import failed: ${errorText}`);
+          tripCongressAuthBreaker(now, errorText, token);
+          logApiHealth({ service: "congress-share", ok: false, errorText, keySource: "env" });
+          return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
+        }
+        // Downstream 5xx errors (e.g. transient D1 overload): retry with backoff before hard failure.
+        if (res.status >= 500 && attempt < maxAttempts) {
+          const delay = process.env.NODE_ENV === "test" ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+          console.warn(`[congress-share] import got HTTP ${res.status}; retrying attempt ${attempt + 1}/${maxAttempts} in ${delay}ms`);
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        upstreamOutcome = res.status < 500;
+        console.error(`[congress-share] import failed: ${errorText}`);
+        // Surface failure to health store: prefix 5xx as transient to allow escalation window.
+        const formattedError = res.status >= 500 ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}` : errorText;
+        logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
+        return { ...dropMeta, ok: false, status: res.status, error: text.slice(0, 500) || `HTTP ${res.status}`, sent };
+      }
+      upstreamOutcome = true;
+      const responseRaw = await res.json().catch(() => undefined);
+      clearCongressAuthBreaker(); // a successful call proves the token is good again
+      if (responseRaw === undefined) {
+        const bodyErrorText = "import response body was empty or unparseable";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        // Contract/payload-quality signal, NOT a transport outcome: writing this to the
+        // logApiHealth lane would interleave hard failure rows and mask (or fake) a real
+        // "5 consecutive failures" alert for a POST that actually succeeded. Audit only.
+        audit("congress_share_import_body_rejected", { reason: "empty_or_unparseable", status: res.status });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const parsedResponse = CongressImportResponseSchema.safeParse(responseRaw);
+      if (!parsedResponse.success) {
+        const bodyErrorText = "import response body failed schema validation";
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        audit("congress_share_import_body_rejected", { reason: "schema_validation", status: res.status });
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const response = parsedResponse.data;
+      // App A answers HTTP 200 even when it rejected rows: its import handler returns
+      // `{ ok: summary.errors.length === 0, ...summary }`, so `ok:false` and a populated `errors[]`
+      // arrive on a 2xx. Treating transport success as delivery success is how a partial import
+      // becomes indistinguishable from a clean one, and how the nightly marker advances over rows
+      // App A never wrote. Read the body's verdict, not just the status line.
+      const bodyErrorText = congressImportBodyError(response);
+      if (bodyErrorText) {
+        console.error(`[congress-share] import rejected rows despite HTTP ${res.status}: ${bodyErrorText}`);
+        logApiHealth({ service: "congress-share", ok: false, errorText: bodyErrorText, keySource: "env" });
+        // `ok:false` (NOT `skipped`) so the daily run counts this in failedPosts and retries rather
+        // than advancing the marker over an import App A only partly accepted.
+        return { ...dropMeta, ok: false, status: res.status, error: bodyErrorText, sent };
+      }
+      const receiptErrorText = congressImportAcceptedReceiptError(sent, response);
+      if (receiptErrorText) {
+        console.error(`[congress-share] import consumption shortfall despite HTTP ${res.status}: ${receiptErrorText}`);
+        audit("congress_share_import_receipt_shortfall", { sent, receiptErrorText, response });
+        logApiHealth({ service: "congress-share", ok: false, errorText: receiptErrorText, keySource: "env" });
+        return { ...dropMeta, ok: false, status: res.status, error: receiptErrorText, sent };
+      }
+      logApiHealth({ service: "congress-share", ok: true, keySource: "env" });
+      return { ...dropMeta, ok: true, status: res.status, response, sent };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      if (attempt < maxAttempts && isTransientNetworkError(err)) {
+        const delay = process.env.NODE_ENV === "test" ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+        console.warn(`[congress-share] import transient error: ${error}; retrying attempt ${attempt + 1}/${maxAttempts} in ${delay}ms`);
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      upstreamOutcome = false;
+      // Include payload sizes so a timeout/abort points at which dataset was too big.
+      console.error(
+        `[congress-share] import error: ${error} ` +
+          `(refs=${sent.refs} spx=${sent.spx} prices=${sent.prices} closes=${sent.closes} ` +
+          `insider=${sent.insider} shortVolume=${sent.shortVolume} fundamentals=${sent.fundamentals} analyst=${sent.analyst})`
+      );
+      const isTransient = isTransientNetworkError(err);
+      const formattedError = isTransient ? `${HEALTH_TRANSIENT_FAILURE_PREFIX}${error}` : error;
+      logApiHealth({ service: "congress-share", ok: false, errorText: formattedError, keySource: "env" });
+      return { ...dropMeta, ok: false, error, sent };
+    } finally {
+      clearTimeout(timer);
     }
-    const response = await res.json().catch(() => undefined);
-    return { ok: true, status: res.status, response, sent };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    // Include payload sizes so a timeout/abort points at which dataset was too big.
-    console.error(
-      `[congress-share] import error: ${error} ` +
-        `(refs=${sent.refs} spx=${sent.spx} prices=${sent.prices} closes=${sent.closes} ` +
-        `insider=${sent.insider} shortVolume=${sent.shortVolume} fundamentals=${sent.fundamentals} analyst=${sent.analyst})`
-    );
-    return { ok: false, error, sent };
+  }
+  upstreamOutcome = false;
+  return { ...dropMeta, ok: false, error: "max-attempts-exceeded", sent };
   } finally {
-    clearTimeout(timer);
+    if (upstreamOutcome !== undefined) {
+      noteCongressUpstream(upstreamOutcome);
+    } else if (congressUpstreamBreaker.probeInFlight) {
+      congressUpstreamBreaker.probeInFlight = false;
+      congressUpstreamBreaker.probeClaimedUntilMs = undefined;
+    }
   }
 }
 
@@ -832,6 +1861,13 @@ export interface RunCongressDailyShareOptions {
    * The scheduled nightly path always merges a page of needs even when this is false.
    */
   fromAppANeeds?: boolean;
+  /**
+   * Price-only pass (the stale catch-up): send just SPX + the supplied symbols' closes, skipping the
+   * screener refs and fundamentals/analyst datasets the nightly run already delivered.
+   */
+  priceOnly?: boolean;
+  /** Symbols to send with full history even though this run read no App A needs (the catch-up). */
+  deepSymbols?: string[];
   /** Opaque durable claim supplied by the outer admin guard; background callers omit it. */
   operationLeaseClaim?: OperationLeaseClaim;
 }
@@ -848,7 +1884,30 @@ export interface CongressDailyShareSummary {
   shortVolRows: number;
   posts: number;
   failedPosts: number;
-  sent: { spx: number; prices: number; closes: number; insider: number; shortVolume: number };
+  sent: {
+    spx: number;
+    prices: number;
+    closes: number;
+    insider: number;
+    shortVolume: number;
+    fundamentals: number;
+    analyst: number;
+  };
+  fundamentalsRows?: number;
+  analystRows?: number;
+  /** Symbols dropped by FieldStoreCongressShareQuoteSchema before fundamentals/analyst POSTs. */
+  fieldStoreParseDropped?: number;
+  fieldStoreParseSampleIssues?: string[];
+  /** Tickers whose newest close was behind the latest completed session and were not pushed. */
+  stalePricesWithheld?: number;
+  /** The withheld tickers themselves (canonical), so a later catch-up pass can retry exactly them. */
+  staleTickers?: string[];
+  /** True when the S&P series was withheld for the same reason. */
+  staleSpxWithheld?: boolean;
+  /** Aggregated schema-invalid row drops across all POSTs in this run. */
+  rowsDropped?: Record<string, number>;
+  rowsDroppedReasons?: Record<string, Record<string, number>>;
+  rowsDroppedTotal?: number;
   responses?: unknown[];
 }
 
@@ -871,11 +1930,14 @@ export async function runCongressDailyShare(
     const now = options.now ?? Date.now();
     const empty = {
       tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-      posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+      posts: 0, failedPosts: 0,
+      sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
     };
     if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
 
-    const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
+    // A price-only pass is never the scheduled run, even with an empty symbol list (SPX only).
+    const customUniverse =
+      (Array.isArray(options.symbols) && options.symbols.length > 0) || options.priceOnly === true;
     if (!options.force && !customUniverse && !isCongressDailyShareDue(now)) {
       return { ok: false, skipped: true, reason: "not-due", ...empty };
     }
@@ -909,14 +1971,8 @@ export async function runCongressDailyShare(
 }
 
 async function fetchNasdaqScreenerRefs(): Promise<CongressRef[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=8000&offset=0", {
-      cache: "no-store",
-      signal: controller.signal,
-      headers: { accept: "application/json", "user-agent": "Mozilla/5.0" }
-    });
+    const response = await fetchNasdaqScreenerResponse("congress-nasdaq-screener");
     if (!response.ok) return [];
     const payload = await response.json();
     const rows = Array.isArray(payload?.data?.table?.rows) ? payload.data.table.rows : [];
@@ -951,8 +2007,6 @@ async function fetchNasdaqScreenerRefs(): Promise<CongressRef[]> {
   } catch (err) {
     console.error("[congress-share] failed to fetch screener refs:", err);
     return [];
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -964,10 +2018,12 @@ async function runCongressDailyShareUnlocked(
   const now = options.now ?? Date.now();
   const empty = {
     tickers: 0, priced: 0, spxRows: 0, insiderRows: 0, shortVolRows: 0,
-    posts: 0, failedPosts: 0, sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 }
+    posts: 0, failedPosts: 0,
+    sent: { spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 }
   };
   if (!congressTradeToken()) return { ok: false, skipped: true, reason: "no-token", ...empty };
-  const customUniverse = Array.isArray(options.symbols) && options.symbols.length > 0;
+  const customUniverse =
+    (Array.isArray(options.symbols) && options.symbols.length > 0) || options.priceOnly === true;
   // Recheck after durable acquisition: another process may have completed and advanced the daily
   // marker after this caller's cheap pre-check but before it won the lease.
   if (!options.force && !customUniverse && !isCongressDailyShareDue(now)) {
@@ -975,24 +2031,59 @@ async function runCongressDailyShareUnlocked(
   }
   assertOperationLeaseOwnership(operationLeaseClaim);
 
+  // Gate the ENTIRE collection phase on the auth breaker (P2 fix 2026-09-07), not just the final
+  // shareWithCongressTrade POSTs below: fetchCongressPriceNeeds (itself an authenticated request
+  // to App A), the SPX/per-ticker OHLC fetches, and the screener refs fetch previously all still
+  // ran every time the nightly job was due — hourly, for the whole 6h cooldown — only to have
+  // every resulting POST rejected locally by the breaker check inside shareWithCongressTrade. A
+  // breaker keyed to a since-resynced token is already treated as cleared (see
+  // activeCongressAuthBreakerState), so this cannot block recovery once the token is fixed.
+  if (isCongressAuthBreakerTripped(now)) {
+    logApiHealth({
+      service: "congress-share",
+      ok: false,
+      errorText: "auth breaker cooldown active; skipped nightly collection entirely",
+      keySource: "env"
+    });
+    return { ok: false, skipped: false, reason: "auth-breaker-tripped", ...empty };
+  }
+  // Same gate for a dead App A.  Do not spend the OHLC collection, and do not write a health
+  // row on every hourly skip — the call that opened the breaker already logged.
+  if (isCongressUpstreamBreakerTripped(now)) {
+    return { ok: false, skipped: false, reason: "upstream-breaker", ...empty };
+  }
+
   // Congressional price-needs from App A: always consulted on scheduled runs so performance
   // gaps drain; also when admin passes fromAppANeeds. Soft-fails to empty.
   const shouldFetchNeeds = options.fromAppANeeds === true || !customUniverse;
   let needsResp: CongressPriceNeedsResponse = { tickers: [] };
   if (shouldFetchNeeds) {
     throwIfOperationLeaseCancelled(operationLeaseSignal);
-    needsResp = await fetchCongressPriceNeeds(priceNeedsLimit());
+    // Resume where the previous run stopped reading App A's keyset-ordered needs (wrapping around),
+    // so a backlog bigger than one night's cap, or names that never clear, cannot starve the rest.
+    const resumeCursor = getInternalSetting<string>(PRICE_NEEDS_CURSOR_KEY) ?? null;
+    needsResp = await fetchCongressPriceNeeds(priceNeedsLimit(), fetch, resumeCursor);
+    if (needsResp.tickers.length > 0) {
+      try {
+        if (needsResp.nextCursor) setInternalSetting(PRICE_NEEDS_CURSOR_KEY, needsResp.nextCursor);
+        else deleteInternalSetting(PRICE_NEEDS_CURSOR_KEY);
+      } catch {
+        /* best-effort: worst case the next run starts from the head again */
+      }
+    }
   }
   const needTickers = needsResp.tickers.map((t) => t.ticker).filter(Boolean);
-  // Full history for App A-flagged deep needs (old trades) and when fullHistory is on.
-  const deepNeedSet = new Set(
-    needsResp.tickers.filter((t) => t.needsDeepHistory === true).map((t) => t.ticker)
-  );
+  // Full history for App A-flagged deep needs (old trades) and when fullHistory is on.  A catch-up
+  // pass has no needs read of its own, so it is handed the deep subset it must keep honoring.
+  const deepNeedSet = new Set([
+    ...needsResp.tickers.filter((t) => t.needsDeepHistory === true).map((t) => t.ticker),
+    ...(options.deepSymbols ?? []).map((symbol) => normalizeSymbol(symbol)).filter(Boolean),
+  ]);
 
   let universe: string[];
   if (customUniverse && !options.fromAppANeeds) {
     // Admin targeted symbols only — do not merge App A needs (caller is explicit).
-    universe = Array.from(new Set(options.symbols!.map(normalizeSymbol).filter(Boolean))).slice(
+    universe = Array.from(new Set((options.symbols ?? []).map(normalizeSymbol).filter(Boolean))).slice(
       0,
       maxDailyTickers()
     );
@@ -1015,15 +2106,26 @@ async function runCongressDailyShareUnlocked(
 
   // S&P-500 daily closes (^GSPC) — sent once per day regardless of the ticker universe.
   // Full history when App A reports SPX gaps before oldest congressional trade, or fullHistory flag.
+  // A tail behind the latest completed session is withheld: App A treats a successful import as fresh.
   let spx: CongressClose[] = [];
+  let staleSpxWithheld = false;
   throwIfOperationLeaseCancelled(operationLeaseSignal);
   try {
-    spx = ohlcBarsToCloses(await fetchDailyOHLC("^GSPC", now));
-    const spxCap =
-      options.fullHistory || needsResp.spx?.needsHistoryBefore
-        ? Number.POSITIVE_INFINITY
-        : maxClosesPerTicker();
-    if (spx.length > spxCap) spx = spx.slice(-spxCap);
+    const spxAll = ohlcBarsToCloses(
+      options.priceOnly === true
+        ? await fetchDailyOHLC("^GSPC", now, undefined, { bypassMemoryCache: true })
+        : await fetchDailyOHLC("^GSPC", now)
+    );
+    if (spxAll.length > 0 && !closesCoverLatestSession(spxAll, now)) {
+      staleSpxWithheld = true;
+    } else {
+      spx = spxAll;
+      const spxCap =
+        options.fullHistory || needsResp.spx?.needsHistoryBefore
+          ? Number.POSITIVE_INFINITY
+          : maxClosesPerTicker();
+      if (spx.length > spxCap) spx = spx.slice(-spxCap);
+    }
   } catch (err) {
     console.error("[congress-share] SPX fetch failed:", err);
   }
@@ -1040,12 +2142,38 @@ async function runCongressDailyShareUnlocked(
     if (entry.closes.length > maxCloses) entry.closes = entry.closes.slice(-maxCloses);
     return entry;
   };
+  const staleTickers: string[] = [];
+  const seenStale = new Set<string>();
+  const noteStale = (ticker: string): void => {
+    if (seenStale.has(ticker)) return;
+    seenStale.add(ticker);
+    staleTickers.push(ticker);
+  };
+  // Flat-file tails that missed the session stay here until the live cascade replaces them.
+  const staleFlatFile = new Map<string, string>();
+  const freshEntry = (symbol: string, bars: OHLCBar[] | null | undefined): CongressPrice | null => {
+    const raw = ohlcBarsToPriceEntry(symbol, bars);
+    if (!raw) return null;
+    if (!closesCoverLatestSession(raw.closes, now)) {
+      noteStale(raw.ticker);
+      return null;
+    }
+    staleFlatFile.delete(symbol);
+    return capCloses(raw);
+  };
   const perTicker = async (symbols: string[]): Promise<CongressPrice[]> =>
     (
       await mapPool(symbols, concurrency, async (symbol) => {
         throwIfOperationLeaseCancelled(operationLeaseSignal);
         try {
-          return capCloses(ohlcBarsToPriceEntry(symbol, await fetchDailyOHLC(symbol, now)));
+          // The catch-up retries tickers whose stale tail sits in the in-process cache (until the
+          // next open, over a weekend), so it must bypass that cache or it never asks a provider.
+          return freshEntry(
+            symbol,
+            options.priceOnly === true
+              ? await fetchDailyOHLC(symbol, now, undefined, { bypassMemoryCache: true })
+              : await fetchDailyOHLC(symbol, now)
+          );
         } catch {
           return null;
         }
@@ -1056,6 +2184,7 @@ async function runCongressDailyShareUnlocked(
   if (options.flatFile) {
     // Bulk path: one pass over the flat files for the whole universe, then per-ticker fallback for misses
     // (or when flat-file download isn't granted, in which case the whole universe falls back).
+    // A stale flat-file tail is a miss: the live cascade may still reach the latest session.
     const years = Number(process.env.MASSIVE_FLATFILE_BACKFILL_YEARS ?? 5) || 5;
     const toISO = toBusinessDay(now) ?? new Date(now).toISOString().slice(0, 10);
     const fromISO = new Date(now - years * 365 * 86_400_000).toISOString().slice(0, 10);
@@ -1070,11 +2199,19 @@ async function runCongressDailyShareUnlocked(
     const missing: string[] = [];
     for (const symbol of universe) {
       const bars = seriesBySymbol.get(symbol);
-      const entry = bars && bars.length ? capCloses(ohlcBarsToPriceEntry(symbol, bars)) : null;
+      const raw = bars && bars.length ? ohlcBarsToPriceEntry(symbol, bars) : null;
+      const entry = raw && closesCoverLatestSession(raw.closes, now) ? capCloses(raw) : null;
       if (entry) entries.push(entry);
-      else missing.push(symbol);
+      else {
+        if (raw) staleFlatFile.set(symbol, raw.ticker);
+        missing.push(symbol);
+      }
     }
     priceEntries = [...entries, ...(await perTicker(missing))];
+    for (const [symbol, ticker] of staleFlatFile) {
+      if (!priceEntries.some((entry) => entry.ticker === ticker)) noteStale(ticker);
+      staleFlatFile.delete(symbol);
+    }
   } else {
     priceEntries = await perTicker(universe);
   }
@@ -1083,9 +2220,41 @@ async function runCongressDailyShareUnlocked(
   // Skip on targeted custom/needs-only runs so a performance backfill stays price-focused.
   const insider = advancesDailyMarker ? buildInsiderImport() : [];
   const shortVolume = advancesDailyMarker ? buildShortVolumeImport() : [];
-  
+  const shareDate = utcDate(now);
+  const pushFundamentalsAnalyst =
+    options.priceOnly !== true &&
+    (advancesDailyMarker || (customUniverse && options.fromAppANeeds !== true));
+  let fundamentalsImport: CongressFundamental[] = [];
+  let analystImport: CongressAnalyst[] = [];
+  let fieldStoreParseDropped = 0;
+  let fieldStoreParseSampleIssues: string[] = [];
+  if (pushFundamentalsAnalyst) {
+    const built = buildFundamentalsAndAnalystImport(universe, shareDate);
+    fundamentalsImport = built.fundamentals;
+    analystImport = built.analyst;
+    fieldStoreParseDropped = built.fieldStoreParseDropped;
+    fieldStoreParseSampleIssues = built.fieldStoreParseSampleIssues;
+  }
+
   // Push company refs for the full public screener
-  const refs = await fetchNasdaqScreenerRefs();
+  const refs = options.priceOnly === true ? [] : await fetchNasdaqScreenerRefs();
+
+  const stalePricesWithheld = staleTickers.length;
+  if (stalePricesWithheld > 0 || staleSpxWithheld) {
+    const session = latestCompletedTradingSessionEtKey(now);
+    audit("congress_share_stale_price_withheld", {
+      session,
+      prices: stalePricesWithheld,
+      sample: staleTickers.slice(0, 8),
+      spx: staleSpxWithheld
+    });
+    logWarn("[congress-share] withheld stale EOD series", {
+      session,
+      prices: stalePricesWithheld,
+      spx: staleSpxWithheld
+    });
+    recordCongressStalePriceWithheld("push", stalePricesWithheld + (staleSpxWithheld ? 1 : 0));
+  }
 
   // Send each dataset as its OWN bounded POST(s) rather than one bundled megabatch: App A's per-call
   // work (upserts + per-trade perf recompute) made big combined payloads exceed the timeout, and a
@@ -1095,17 +2264,37 @@ async function runCongressDailyShareUnlocked(
   for (const rows of rowChunks(refs, MAX_REFS_PER_POST)) payloads.push({ refs: rows });
   for (const rows of rowChunks(insider)) payloads.push({ insider: rows });
   for (const rows of rowChunks(shortVolume)) payloads.push({ shortVolume: rows });
+  // Prices before fundamentals/analyst: the loop shares one upstream breaker; a 5xx streak on
+  // fundamentals/analyst must not skip price chunks or block the daily marker.
   for (const prices of chunkPrices(priceEntries)) payloads.push({ prices });
+  for (const rows of rowChunks(fundamentalsImport)) payloads.push({ fundamentals: rows });
+  for (const rows of rowChunks(analystImport)) payloads.push({ analyst: rows });
 
   const responses: unknown[] = [];
   let posts = 0;
   let failedPosts = 0;
-  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0 };
+  const sent = { refs: 0, spx: 0, prices: 0, closes: 0, insider: 0, shortVolume: 0, fundamentals: 0, analyst: 0 };
+  const rowsDropped: Record<string, number> = {};
+  const rowsDroppedReasons: Record<string, Record<string, number>> = {};
+  let rowsDroppedTotal = 0;
   for (const payload of payloads) {
     assertOperationLeaseOwnership(operationLeaseClaim);
     const result = await shareWithCongressTrade(payload);
     throwIfOperationLeaseCancelled(operationLeaseSignal);
     posts++;
+    if (result.droppedTotal && result.droppedTotal > 0) {
+      rowsDroppedTotal += result.droppedTotal;
+      for (const [stream, count] of Object.entries(result.dropped ?? {})) {
+        rowsDropped[stream] = (rowsDropped[stream] ?? 0) + count;
+      }
+      for (const [stream, reasons] of Object.entries(result.droppedReasons ?? {})) {
+        const bucket = rowsDroppedReasons[stream] ?? {};
+        for (const [reason, count] of Object.entries(reasons)) {
+          bucket[reason] = (bucket[reason] ?? 0) + count;
+        }
+        rowsDroppedReasons[stream] = bucket;
+      }
+    }
     if (result.ok) {
       responses.push(result.response);
       sent.refs += result.sent.refs ?? 0;
@@ -1114,6 +2303,8 @@ async function runCongressDailyShareUnlocked(
       sent.closes += result.sent.closes;
       sent.insider += result.sent.insider;
       sent.shortVolume += result.sent.shortVolume;
+      sent.fundamentals += result.sent.fundamentals;
+      sent.analyst += result.sent.analyst;
     } else if (!result.skipped) {
       failedPosts++;
     }
@@ -1143,11 +2334,57 @@ async function runCongressDailyShareUnlocked(
     spxRows: spx.length,
     insiderRows: insider.length,
     shortVolRows: shortVolume.length,
+    fundamentalsRows: fundamentalsImport.length,
+    analystRows: analystImport.length,
+    ...(fieldStoreParseDropped > 0
+      ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+      : {}),
     posts,
     failedPosts,
     sent,
+    ...(stalePricesWithheld > 0 ? { stalePricesWithheld, staleTickers: [...staleTickers] } : {}),
+    ...(staleSpxWithheld ? { staleSpxWithheld } : {}),
+    ...(rowsDroppedTotal > 0
+      ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal }
+      : {}),
     responses
   };
+  // Remember what was withheld so a catch-up can retry it the same evening instead of waiting a
+  // full UTC day.  The scheduled run (advancesDailyMarker) starts a fresh cycle; a catch-up pass
+  // continues the existing one.  Only a successful or fully-withheld run changes the state.
+  if (ok || posts === 0) {
+    if (advancesDailyMarker) {
+      recordStaleCatchup(
+        now,
+        {
+          tickers: staleTickers,
+          deep: staleTickers.filter((ticker) => deepNeedSet.has(ticker)),
+          spx: staleSpxWithheld
+        },
+        false
+      );
+    } else if (options.priceOnly === true) {
+      // Keep every ticker that was NOT actually delivered fresh, not only those re-observed as
+      // stale: a ticker whose refetch threw or came back with no bars is neither sent nor noted
+      // stale, and dropping it here would end its retries after one transient provider error.
+      const delivered = new Set(priceEntries.map((entry) => entry.ticker));
+      const remaining = (options.symbols ?? [])
+        .map((symbol) => normalizeSymbol(symbol))
+        .filter((symbol) => {
+          const canonical = canonicalMarketDataSymbol(symbol);
+          return Boolean(canonical) && !delivered.has(canonical as string);
+        });
+      recordStaleCatchup(
+        now,
+        {
+          tickers: remaining,
+          deep: remaining.filter((ticker) => deepNeedSet.has(ticker)),
+          spx: staleSpxWithheld
+        },
+        true
+      );
+    }
+  }
   try {
     audit("congress_share_daily", {
       ok: summary.ok,
@@ -1158,9 +2395,17 @@ async function runCongressDailyShareUnlocked(
       spxRows: summary.spxRows,
       insiderRows: summary.insiderRows,
       shortVolRows: summary.shortVolRows,
+      fundamentalsRows: summary.fundamentalsRows,
+      analystRows: summary.analystRows,
+      ...(fieldStoreParseDropped > 0
+        ? { fieldStoreParseDropped, fieldStoreParseSampleIssues }
+        : {}),
       posts,
       failedPosts,
       sent,
+      ...(stalePricesWithheld > 0 ? { stalePricesWithheld } : {}),
+      ...(staleSpxWithheld ? { staleSpxWithheld } : {}),
+      ...(rowsDroppedTotal > 0 ? { rowsDropped, rowsDroppedReasons, rowsDroppedTotal } : {}),
       custom: customUniverse,
       fromAppANeeds: options.fromAppANeeds === true,
       needsCount: needTickers.length
@@ -1169,6 +2414,161 @@ async function runCongressDailyShareUnlocked(
     // audit is best-effort
   }
   return summary;
+}
+
+// ── Same-session stale-price catch-up ───────────────────────────────────────────
+
+const STALE_CATCHUP_KEY = "congress-share:staleCatchup";
+
+interface StaleCatchupState {
+  /** Latest completed ET session the withheld tails were short of. */
+  session: string;
+  tickers: string[];
+  /** The subset of `tickers` App A flagged needsDeepHistory (retried with full history). */
+  deep: string[];
+  /** The S&P-500 series was withheld stale (it is retried even when no ticker was). */
+  spx: boolean;
+  /** Catch-up passes already started for this cycle (counted before the pass runs). */
+  attempts: number;
+  lastAttemptMs: number;
+}
+
+/** What is still owed to App A; the next catch-up pass sends exactly this. */
+interface StaleCatchupPending {
+  tickers: readonly string[];
+  deep?: readonly string[];
+  spx?: boolean;
+}
+
+/** Bound on one pass: the nightly stale set can be large, and every pass re-walks the provider cascade. */
+function staleCatchupMaxTickers(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_MAX_TICKERS ?? 500);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 500;
+}
+
+function staleCatchupMaxAttempts(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_MAX_ATTEMPTS ?? 4);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 4;
+}
+
+function staleCatchupIntervalMs(): number {
+  const v = Number(process.env.CONGRESS_SHARE_CATCHUP_INTERVAL_MS ?? 2 * 60 * 60_000);
+  return Number.isFinite(v) && v > 0 ? v : 2 * 60 * 60_000;
+}
+
+export function getStaleCatchupState(): StaleCatchupState | null {
+  const raw = getInternalSetting<StaleCatchupState>(STALE_CATCHUP_KEY);
+  if (
+    !raw ||
+    typeof raw.session !== "string" ||
+    !Array.isArray(raw.tickers) ||
+    !Number.isFinite(raw.attempts) ||
+    !Number.isFinite(raw.lastAttemptMs)
+  ) {
+    return null;
+  }
+  const spx = raw.spx === true;
+  if (raw.tickers.length === 0 && !spx) return null;
+  return { ...raw, spx, deep: Array.isArray(raw.deep) ? raw.deep : [] };
+}
+
+/**
+ * The nightly run withholds any ticker whose newest close is behind the latest completed session
+ * (mutual-fund NAVs and thin names post their bar hours after the close), then advances the
+ * once-per-UTC-day marker — so those tickers waited a whole day and were re-withheld the next
+ * night.  Persist them so `runCongressStaleCatchupIfDue` can retry exactly that set later.
+ * `continuing` keeps the attempt count of the cycle in progress; otherwise a fresh cycle starts.
+ */
+export function recordStaleCatchup(now: number, pending: StaleCatchupPending, continuing: boolean): void {
+  try {
+    const spx = pending.spx === true;
+    if (pending.tickers.length === 0 && !spx) {
+      deleteInternalSetting(STALE_CATCHUP_KEY);
+      return;
+    }
+    const prior = continuing ? getStaleCatchupState() : null;
+    const tickers = Array.from(new Set(pending.tickers)).slice(0, staleCatchupMaxTickers());
+    const kept = new Set(tickers);
+    const state: StaleCatchupState = {
+      session: latestCompletedTradingSessionEtKey(now),
+      tickers,
+      deep: Array.from(new Set(pending.deep ?? [])).filter((ticker) => kept.has(ticker)),
+      spx,
+      attempts: prior?.attempts ?? 0,
+      lastAttemptMs: now
+    };
+    setInternalSetting(STALE_CATCHUP_KEY, state);
+  } catch {
+    /* best-effort: the next nightly run rebuilds the list */
+  }
+}
+
+/** Pure: is a catch-up pass due?  Needs a pending list for the current session, retries left, and the interval elapsed. */
+export function isCongressStaleCatchupDue(now: number): boolean {
+  const state = getStaleCatchupState();
+  if (!state) return false;
+  // A newer session completed: the next nightly run owns it.  Drop the old list.
+  if (state.session !== latestCompletedTradingSessionEtKey(now)) return false;
+  if (state.attempts >= staleCatchupMaxAttempts()) return false;
+  // No check against the daily marker: the list only exists because a scheduled run recorded it
+  // for this session, and the marker's UTC date rolls over at about 7 PM ET, in the middle of the
+  // evening window this retry exists for.  A later scheduled run simply rebuilds the list.
+  return now - state.lastAttemptMs >= staleCatchupIntervalMs();
+}
+
+let staleCatchupInFlight: Promise<CongressDailyShareSummary | null> | null = null;
+
+/**
+ * Scheduler entry point: re-send, price-only, the tickers the nightly run withheld as stale, a few
+ * times (default 4, two hours apart) until their bars arrive.  Bounded: the attempt is counted
+ * before the pass starts, so a failing pass can never retry on every scheduler tick.
+ */
+export async function runCongressStaleCatchupIfDue(
+  now: number = Date.now()
+): Promise<CongressDailyShareSummary | null> {
+  try {
+    if (!isCongressShareAutoEnabled()) return null;
+    if (!isCongressStaleCatchupDue(now)) return null;
+    if (staleCatchupInFlight) return staleCatchupInFlight;
+    // runCongressDailyShare coalesces onto any run already in flight and ignores this pass's symbols,
+    // so do not start (or spend an attempt) while the nightly or an admin run is active.
+    if (activeDailySharePromise) return null;
+    const state = getStaleCatchupState();
+    if (!state) return null;
+    // Count the attempt before the pass so a throwing pass can never retry on every scheduler tick;
+    // refund it below if the pass turns out not to have run (lease busy).
+    setInternalSetting(STALE_CATCHUP_KEY, { ...state, attempts: state.attempts + 1, lastAttemptMs: now });
+    const run = runCongressDailyShare({
+      now,
+      symbols: state.tickers,
+      deepSymbols: state.deep,
+      priceOnly: true
+    })
+      .then((result) => {
+        if ("skipped" in result && result.skipped) {
+          try {
+            const current = getStaleCatchupState();
+            if (current) setInternalSetting(STALE_CATCHUP_KEY, { ...current, attempts: state.attempts });
+          } catch {
+            /* best-effort refund */
+          }
+          return null;
+        }
+        return result as CongressDailyShareSummary;
+      })
+      .catch((err) => {
+        console.error("[congress-share] stale catch-up error:", err);
+        return null;
+      })
+      .finally(() => {
+        staleCatchupInFlight = null;
+      });
+    staleCatchupInFlight = run;
+    return run;
+  } catch (err) {
+    console.error("[congress-share] stale catch-up error:", err);
+    return null;
+  }
 }
 
 /**

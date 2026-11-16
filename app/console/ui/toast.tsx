@@ -35,8 +35,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((kind: ToastKind, title: string, detail?: string) => {
     const id = nextId.current++;
     setToasts((prev) => [...prev.slice(-3), { id, kind, title, detail }]);
-    const ttl = kind === "neg" ? 9000 : 6000;
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), ttl);
+    if (kind !== "neg") {
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 6000);
+    }
   }, []);
 
   const api = useMemo<ToastApi>(() => ({ push }), [push]);
@@ -44,9 +45,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={api}>
       {children}
-      <div className="con-toasts" role="status" aria-live="polite">
+      <div className="con-toasts">
         {toasts.map((t) => (
-          <div key={t.id} className={cx("con-toast", KIND_CLASS[t.kind])}>
+          <div
+            key={t.id}
+            className={cx("con-toast", KIND_CLASS[t.kind])}
+            role={t.kind === "neg" ? "alert" : "status"}
+            aria-live={t.kind === "neg" ? "assertive" : "polite"}
+          >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="font-semibold">{t.title}</div>
@@ -55,7 +61,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               <button
                 type="button"
                 aria-label="Dismiss"
-                className="text-[color:var(--con-faint)] hover:text-[color:var(--con-fg)]"
+                className="con-icon-btn con-toast-dismiss shrink-0"
                 onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
               >
                 ×

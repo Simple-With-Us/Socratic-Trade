@@ -118,6 +118,54 @@ describe("mobile command gateway", () => {
     expect(getPolicy(userId, accountId).maxDailyPctOfNav).toBeUndefined();
   });
 
+  it("builds a mobile control brief from current readiness and command state", async () => {
+    const { buildMobileBrief, mobileReadiness, queueMobileCommand } = await import("../src/lib/mobile-api");
+    const userId = `mobile-brief-${randomUUID()}`;
+
+    queueMobileCommand({
+      userId,
+      commandType: "watchlist.add",
+      payload: { symbol: "MSFT" }
+    });
+
+    const brief = buildMobileBrief({
+      readiness: mobileReadiness(userId),
+      portfolio: { totalMarketValue: 12345, buyingPower: 6789 },
+      pendingProposals: [{ executionMode: "broker/live" }],
+      positions: [{ symbol: "MSFT" }],
+      alerts: [{ status: "armed" }, { status: "triggered" }],
+      recentCommands: [{ status: "failed" }],
+      marketSession: { label: "Closed", isOpen: false },
+      generatedAt: "2026-07-22T00:00:00.000Z"
+    });
+
+    expect(brief.headline).toContain("Setup needed");
+    expect(brief.summary).toContain("Closed market");
+    expect(brief.summary).toContain("1 active alert.");
+    expect(brief.items.find((item) => item.label === "Queue")).toMatchObject({ value: "1 queued / 0 running", tone: "warn" });
+    expect(brief.items.find((item) => item.label === "Recent failures")).toMatchObject({ value: "1", tone: "danger" });
+    expect(brief.generatedAt).toBe("2026-07-22T00:00:00.000Z");
+  });
+
+  it("labels session tokens, counts unstamped live approvals and flags partial data in the brief", async () => {
+    const { buildMobileBrief, mobileReadiness } = await import("../src/lib/mobile-api");
+    const base = { readiness: mobileReadiness(`mobile-brief-${randomUUID()}`), generatedAt: "2026-07-22T00:00:00.000Z" };
+
+    expect(buildMobileBrief({ ...base, marketSession: "regular" }).summary).toContain("Open market");
+    expect(buildMobileBrief({ ...base, marketSession: "pre" }).summary).toContain("Pre-market market");
+    expect(buildMobileBrief({ ...base, marketSession: null }).summary).toContain("- market");
+
+    const unstampedLive = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/live" });
+    const unstampedPaper = buildMobileBrief({ ...base, pendingProposals: [{ executionMode: null }], currentMode: "broker/paper" });
+    if (!unstampedLive.headline.startsWith("Setup needed")) {
+      expect(unstampedLive.headline).toContain("(1 live)");
+      expect(unstampedPaper.headline).not.toContain("live");
+    }
+
+    expect(buildMobileBrief({ ...base, partialData: true }).summary).toContain("counts may be incomplete");
+    expect(buildMobileBrief({ ...base }).summary).not.toContain("counts may be incomplete");
+  });
+
   it("keeps command reads scoped to the authenticated user", async () => {
     const { queueMobileCommand, getMobileCommand, listMobileCommands } = await import("../src/lib/mobile-api");
     const owner = `owner-${randomUUID()}`;
@@ -207,5 +255,36 @@ describe("mobile account deletion", () => {
       .prepare("SELECT id FROM account_deletion_requests WHERE user_id = ?")
       .get(user.userId);
     expect(requestRow).toBeUndefined();
+  });
+});
+
+describe("serializeMobileNotifications", () => {
+  it("strips payload and webhook URL from Activity rows", async () => {
+    const { serializeMobileNotifications } = await import("../src/lib/mobile-api");
+    const rows = serializeMobileNotifications([
+      {
+        id: "n-1",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        type: "run_failed",
+        title: "Strategy run failed",
+        status: "sent",
+        webhookUrl: "https://hooks.example/secret",
+        payload: { runId: "run-1", reason: "llm" },
+        connectedAccountId: "acct-1"
+      }
+    ]);
+    expect(rows).toEqual([
+      {
+        id: "n-1",
+        type: "run_failed",
+        title: "Strategy run failed",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        status: "sent",
+        acknowledgedAt: null,
+        connectedAccountId: "acct-1"
+      }
+    ]);
+    expect(rows[0]).not.toHaveProperty("payload");
+    expect(rows[0]).not.toHaveProperty("webhookUrl");
   });
 });

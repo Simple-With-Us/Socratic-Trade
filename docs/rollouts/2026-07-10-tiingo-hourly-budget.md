@@ -57,5 +57,5 @@ remainder); `TIINGO_DROP_NEWS` drops the news call (3→2 req/symbol).
 - `TIINGO_DROP_NEWS=1` — set to cover ~25 symbols/hour instead of ~16 (trading
   Tiingo sentiment for more price/meta coverage).
 - congress.trade 403 (both API + SSE) is a SEPARATE, still-open owner action:
-  whitelist the new box IP 135.181.192.190 on the congress.trade Cloudflare zone
+  whitelist the new box IP <HETZNER_OLD_IP_RETIRED> on the congress.trade Cloudflare zone
   (agents are permission-blocked there). See the Hetzner migration rollout note.

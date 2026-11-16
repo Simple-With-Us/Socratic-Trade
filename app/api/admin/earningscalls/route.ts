@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import {
@@ -33,6 +34,8 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "earningscalls", "read");
+  if (limited) return limited;
 
   return NextResponse.json({
     ok: true,
@@ -72,12 +75,20 @@ export async function POST(request: Request) {
   }
 
   if (action === "clear-entitlement-block") {
-    // No provider spend, no lease contention risk — a plain settings write.
+    // A settings write. Its own bucket cannot spend or block the probe/burst job budget.
+    const limited = enforceAdminIngestRateLimit(request, "earningscalls-entitlement", "job");
+    if (limited) return limited;
     const state = clearEarningsCallsEntitlementBlock();
     return NextResponse.json({ ok: true, entitlement: state });
   }
 
+  const blocked = previewAdminIngestRateLimit(request, "earningscalls", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "earningscalls", async (claim) => {
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "earningscalls", "job");
+    if (limited) return limited;
     try {
       if (action === "burst") {
         const armed = armEarningsCallsBurst(maxTranscripts ?? earningsCallsBurstMaxTranscripts());

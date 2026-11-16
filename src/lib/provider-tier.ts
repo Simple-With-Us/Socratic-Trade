@@ -2,9 +2,11 @@
 //
 // We raise the Massive client rate limit to 100/min on the assumption of a paid (unlimited) plan.
 // If that subscription ever lapses back to free (5/min), the app would 429-storm. This nightly
-// watchdog probes each market-data key's actual tier, and on a CONFIDENT "free" detection it (a)
-// notifies the operator and (b) auto-clamps the Massive limiter to the free-safe 5/min so the app
-// degrades gracefully instead of hammering. It restores the high limit once it sees paid again.
+// watchdog probes each market-data key's actual tier.  A confident "free" detection still
+// auto-clamps the Massive limiter to the free-safe 5/min so the app does not 429-storm, then
+// restores the high limit once it sees paid again.  Operator alerts and
+// `dataProvidersDegraded` fire only when the probe disagrees with the Settings plan (or the
+// provider is not working) — a deliberate downgrade that matches the configured tier is healthy.
 //
 // Neither Massive (Polygon) nor FMP exposes a "what plan am I on" endpoint, so we use cheap
 // capability probes (~2 calls each, well within any tier). The classifier is biased toward "unknown"
@@ -13,6 +15,7 @@
 import { audit, getInternalSetting, resolveApiKey, setInternalSetting } from "./db";
 import { massiveApiBase } from "./market-signals/massive";
 import { sendNotification } from "./notifications";
+import { lookupRegisteredPlanTier, massivePlanAllowsDeepHistory } from "./provider-tier-plan";
 
 export type ProviderTier = "paid" | "free" | "unknown";
 
@@ -58,6 +61,76 @@ export function providerTierStatusKey(userId: string): string {
 export function lastCheckKey(userId: string): string {
   return `providerTier:lastCheckAt:${userId}`;
 }
+
+export type DataProviderHonestyCause = "ok" | "tier_mismatch" | "probe_failure";
+
+export interface DataProviderHonesty {
+  degraded: boolean;
+  cause: DataProviderHonestyCause;
+  detail: string;
+}
+
+function observedMassiveCapped(entry: ProviderTierEntry): boolean {
+  return (
+    entry.signal === "history_cap_blocked" ||
+    entry.signal === "history_cap_empty" ||
+    entry.signal === "rate_limited_429" ||
+    entry.tier === "free"
+  );
+}
+
+/**
+ * Honesty rule for `checks.dataProvidersDegraded`.
+ *
+ * Degrade only when (a) the paid/expected plan is not what the probe sees, or
+ * (b) the provider is not working.  A deliberate Settings downgrade to free or
+ * a lower paid SKU that matches the configured plan is healthy.  Massive
+ * `history_cap_blocked` on a ~2.5y window is expected on Stocks Basic.
+ */
+export function evaluateDataProviderHonesty(
+  provider: "massive" | "fmp",
+  observed: ProviderTierEntry | undefined,
+  configuredPlan?: string | null
+): DataProviderHonesty {
+  if (!observed) {
+    return { degraded: false, cause: "ok", detail: "no probe result" };
+  }
+  if (observed.signal === "no_key") {
+    return { degraded: false, cause: "ok", detail: observed.reason };
+  }
+  // FMP direct access is retired — a leftover persisted row must not paint health red.
+  if (provider === "fmp") {
+    return { degraded: false, cause: "ok", detail: "FMP direct access retired" };
+  }
+  if (observed.signal === "probe_error") {
+    return {
+      degraded: true,
+      cause: "probe_failure",
+      detail: observed.reason || "provider probe failed"
+    };
+  }
+  if (massivePlanAllowsDeepHistory(configuredPlan) && observedMassiveCapped(observed)) {
+    return {
+      degraded: true,
+      cause: "tier_mismatch",
+      detail:
+        observed.reason ||
+        `configured ${configuredPlan} should allow a ~2.5-year history window, but the probe saw ${observed.tier}`
+    };
+  }
+  return { degraded: false, cause: "ok", detail: observed.reason };
+}
+
+/** True when any probed provider is broken or below the plan that was paid for. */
+export function isDataProvidersDegraded(
+  tiers: ProviderTierStatus,
+  configuredPlans: Partial<Record<"massive" | "fmp", string | null | undefined>> = {}
+): boolean {
+  return (["massive", "fmp"] as const).some((provider) =>
+    evaluateDataProviderHonesty(provider, tiers[provider], configuredPlans[provider]).degraded
+  );
+}
+
 const DEFAULT_INTERVAL_HOURS = 24;
 const PROBE_TIMEOUT_MS = 8000;
 const DAY_MS = 86_400_000;
@@ -155,7 +228,7 @@ export async function probeFmpTier(
   if (!key) return { tier: "unknown", reason: "FMP direct access retired (use Congress.Trade)", signal: "no_key" };
   return {
     tier: "unknown",
-    reason: "FMP direct access retired in Socratic.Trade — no probe issued",
+    reason: "FMP direct access retired in Socratic-Trade — no probe issued",
     signal: "no_key"
   };
 }
@@ -180,17 +253,17 @@ export async function runProviderTierCheck(opts: { userId?: string; now?: number
   setInternalSetting(providerTierStatusKey(userId), next);
   audit("provider_tier_check", { massive: next.massive, fmp: next.fmp }, userId);
 
-  // Alert on a subscription LAPSE or CHANGE (either direction), via the in-app feed AND the
-  // multi-channel dispatcher (push/webhook/EMAIL/SMS per the user's notify prefs). Skip transitions
-  // to/from "unknown" (transient probe blips) and skip the first-ever "paid" detection (not news).
+  // Alert only when the probe disagrees with the configured/paid plan (or recovers from that).
+  // A deliberate Settings downgrade that matches the probe is healthy — not a lapse.
   for (const provider of ["massive", "fmp"] as const) {
     const cur = next[provider];
     if (!cur) continue;
     const prevTier = prev[provider]?.tier;
-    const msg = tierChangeMessage(provider, prevTier, cur.tier, cur.reason);
+    const configuredPlan = lookupRegisteredPlanTier(provider) ?? null;
+    const msg = tierChangeMessage(provider, prevTier, cur, configuredPlan);
     if (!msg) continue;
     await sendNotification(
-      { type: "provider_degraded", title: msg.title, payload: { provider, fromTier: prevTier ?? "unknown", toTier: cur.tier, reason: cur.reason, detectedAt: nowIso } },
+      { type: "provider_degraded", title: msg.title, payload: { provider, fromTier: prevTier ?? "unknown", toTier: cur.tier, configuredPlan, reason: cur.reason, detectedAt: nowIso } },
       { userId, directBody: msg.body }
     ).catch(() => {});
   }
@@ -198,30 +271,50 @@ export async function runProviderTierCheck(opts: { userId?: string; now?: number
 }
 
 /** Build the alert text for a tier transition, or null when it isn't worth alerting. */
-function tierChangeMessage(
+export function tierChangeMessage(
   provider: "massive" | "fmp",
   prevTier: ProviderTier | undefined,
-  curTier: ProviderTier,
-  reason: string
+  cur: Pick<ProviderTierEntry, "tier" | "reason" | "signal">,
+  configuredPlan?: string | null
 ): { title: string; body: string } | null {
-  if (curTier === "unknown") return null;            // transient probe failure — don't alert
-  if (curTier === prevTier) return null;             // no change
-  if (prevTier === undefined && curTier === "paid") return null; // first run, all good — not news
+  const honesty = evaluateDataProviderHonesty(provider, { ...cur, at: "" }, configuredPlan);
+  const prevLooksCapped = prevTier === "free";
   const name = provider === "massive" ? "Massive (Polygon)" : "FMP";
-  if (curTier === "free") {
+
+  if (honesty.cause === "probe_failure") {
+    // Transient unknown without a previous healthy read is not news; a working key that
+    // stops answering is.
+    if (prevTier === undefined) return null;
+    return {
+      title: `⚠️ ${name} data provider is not working`,
+      body: `The ${name} probe failed.  The provider is not answering at the configured plan.\n\nDetection: ${cur.reason}`
+    };
+  }
+
+  if (honesty.degraded && honesty.cause === "tier_mismatch") {
+    if (prevTier === cur.tier) return null;
     const action = provider === "massive"
       ? "Massive's rate limit was auto-clamped to the free-safe 5/min to avoid 429 errors."
       : "FMP enrichment will degrade to the free 250-calls/day budget.";
     return {
-      title: `⚠️ ${name} data subscription appears to have LAPSED (now FREE tier)`,
-      body: `The ${name} API key is responding like a free-tier key — your paid subscription may have lapsed or been downgraded.\n\nDetection: ${reason}\n\n${action}\n\nCheck your ${provider} billing/plan and confirm the key.`
+      title: `⚠️ ${name} is not working at the paid ${configuredPlan} plan`,
+      body: `The ${name} API key is responding below the configured ${configuredPlan} plan.  The paid subscription may have lapsed or the key may be on the wrong tier.\n\nDetection: ${cur.reason}\n\n${action}\n\nCheck your ${provider} billing/plan and confirm the key.`
     };
   }
-  // curTier === "paid"
-  return {
-    title: `✅ ${name} data subscription is back on a PAID tier`,
-    body: `The ${name} API key is now responding like a paid-tier key (${reason}). Full limits restored.`
-  };
+
+  // Recovery: configured paid plan now matches the probe after a capped/failed read.
+  if (
+    !honesty.degraded &&
+    cur.tier === "paid" &&
+    prevLooksCapped &&
+    massivePlanAllowsDeepHistory(configuredPlan)
+  ) {
+    return {
+      title: `✅ ${name} data subscription is back on a PAID tier`,
+      body: `The ${name} API key is now responding like a paid-tier key (${cur.reason}).  Full limits restored.`
+    };
+  }
+  return null;
 }
 
 /** True roughly between 1am–6am US/Eastern, so the nightly check runs overnight (low-activity). */

@@ -6,39 +6,23 @@
  *  than no trap at all — a half-trap strands keyboard users: (1) move focus into the
  *  dialog when it opens, (2) cycle Tab / Shift+Tab inside it, (3) close on Escape when
  *  the surface is dismissible, and (4) put focus back on the element that opened it.
- *  `useFocusTrap` does all four; `SymbolDrawerHost`, `ConsentGate`, and `CommandPalette`
- *  use it.
+ *  `useFocusTrap` does all four; `Sheet`, nav `TabsSheet`, the scan Columns popover,
+ *  `SymbolDrawerHost`, `ConsentGate`, and `CommandPalette` all use it.
  *
- *  WHY THIS IS NOT JUST A COPY OF THE `Sheet` TRAP (app/console/ui/sheet.tsx:77-140):
- *  that trap is written as if it were the only one on the page, and it isn't. It installs
- *  a document-level `focusin` sentry that yanks any focus landing outside the sheet back
- *  into the sheet, with no notion of which surface is on top. The surfaces here provably
- *  stack on top of a sheet — an `EvidenceCard` inside a `<Sheet>` renders `SymbolButton`s
- *  that open the symbol drawer, and the palette's Cmd+K listener is unconditional — so a
- *  naive copy would put two sentries in a tug-of-war that the OLDER (lower) surface wins,
- *  leaving the surface on top unreachable by keyboard.
+ *  Surfaces stack (an `EvidenceCard` inside a `<Sheet>` opens the symbol drawer; Cmd+K
+ *  can open the palette over either). Only the TOPMOST trap acts: traps register on a
+ *  module-level stack in mount order, and a trap that is no longer on top ignores Tab,
+ *  Escape, and focus policing. Escape therefore closes only the surface the user is
+ *  looking at (#2561).
  *
- *  Two rules make this hook coexist with that sentry, and both matter:
- *
- *  - Only the TOPMOST trap acts. Traps register on a module-level stack in mount order;
- *    a trap that is no longer on top ignores Tab and stops policing focus, so two of
- *    these traps never fight each other.
- *  - The sentry re-focuses the last element THIS trap deliberately focused, not
- *    `focusables[0]`. Handlers run in registration order, so when a sheet sits underneath
- *    us its handlers act first on every Tab and every focus move; ours runs afterwards and
- *    corrects the result. Correcting back to `focusables[0]` would pin focus to the first
- *    element forever (Tab would never advance); correcting back to where we last put focus
- *    makes the correction invisible and keeps cycling intact.
+ *  The sentry re-focuses the last element THIS trap deliberately focused, not
+ *  `focusables[0]`. Handlers run in registration order, so a lower surface that still
+ *  has a leftover listener cannot pin focus to the first element forever.
  *
  *  Nothing here calls `stopPropagation`. Swallowing keydown/focusin at the window would
  *  also swallow it for React's delegated `onKeyDown`/`onFocus` handlers inside the dialog
  *  (React attaches those at the root container, below `window` in the propagation path),
- *  which breaks widgets the dialog contains. Running last and correcting is enough.
- *
- *  Follow-up (needs files outside this change's scope): `Sheet` and nav's `TabsSheet`
- *  should adopt this hook too. Once they do, the stack alone decides who owns focus, the
- *  correction dance below becomes dead weight, and Escape can be consumed by the topmost
- *  surface only (today Escape on a stacked surface also closes the sheet beneath it). */
+ *  which breaks widgets the dialog contains. Running last and correcting is enough. */
 
 import { useEffect, useRef, type RefObject } from "react";
 
@@ -137,8 +121,8 @@ export function useFocusTrap<T extends HTMLElement>(
   // Callers pass an inline arrow (`() => setOpen(false)`) that is a new reference every
   // render, so a dependency on it would re-run the effect on every parent re-render —
   // including on each keystroke in a text field inside the dialog — and re-focus the first
-  // focusable, yanking the caret out of the input. That regression is documented at
-  // sheet.tsx:66-75; the effect below depends only on `active`.
+  // focusable, yanking the caret out of the input. Sheet hit that when its trap depended
+  // on `onClose`; the effect below depends only on `active`.
   const optionsRef = useRef(options);
   useEffect(() => {
     optionsRef.current = options;

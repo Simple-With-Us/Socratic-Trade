@@ -35,6 +35,7 @@
 
 import { audit, getInternalSetting, setInternalSetting } from "./db";
 import { alertStorageWarning } from "./db-health";
+import { isPineconeTrialActive, pineconeTrialState } from "./pinecone-trial-window";
 
 /** Internal-settings key holding `{ month: "YYYY-MM", units, updatedAt }` for the current month. */
 export const PINECONE_MONTH_WU_KEY = "pinecone:monthWriteUnits";
@@ -83,12 +84,24 @@ export function pineconeMonthWindow(nowMs: number = Date.now()): PineconeMonthWi
  * Monthly write-unit budget from PINECONE_MONTHLY_WU_BUDGET. Returns 0 when unset, empty,
  * non-numeric, or <= 0 — and 0 means the throttle is OFF (accounting still runs).
  */
-export function pineconeMonthlyWuBudget(): number {
+export function pineconeMonthlyWuBudget(nowMs: number = Date.now()): number {
+  // During the remaining trial window, honor an explicit monthly budget (owner 5M
+  // Builder week).  0 stays off.  After the calendar, the trial-window snap to
+  // free-tier 1.6M wins even if Infisical still holds 5M.
+  if (isPineconeTrialActive(nowMs)) {
+    const raw = process.env.PINECONE_MONTHLY_WU_BUDGET;
+    if (raw == null || String(raw).trim() === "") return 0;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 5_000_000) return 0;
+    return Math.floor(parsed);
+  }
   const raw = process.env.PINECONE_MONTHLY_WU_BUDGET;
-  if (raw == null || String(raw).trim() === "") return 0;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
-  return Math.floor(parsed);
+  let configured = 0;
+  if (raw != null && String(raw).trim() !== "") {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) configured = Math.floor(parsed);
+  }
+  return pineconeTrialState(nowMs).effectiveMonthlyWriteUnits || configured;
 }
 
 interface MonthCounterRow {
@@ -208,7 +221,7 @@ export function assessPineconeWuPace(input: { mtd: number; budget: number; now: 
 export function pineconeWuPaceState(nowMs: number = Date.now()): PineconeWuPaceAssessment {
   return assessPineconeWuPace({
     mtd: pineconeMonthToDateWriteUnits(nowMs),
-    budget: pineconeMonthlyWuBudget(),
+    budget: pineconeMonthlyWuBudget(nowMs),
     now: nowMs
   });
 }
@@ -286,7 +299,7 @@ export async function pineconeBackfillPaceGate(
   nowMs: number = Date.now()
 ): Promise<PineconePaceGateResult> {
   try {
-    const budget = pineconeMonthlyWuBudget();
+    const budget = pineconeMonthlyWuBudget(nowMs);
     // Cheap exit before any DB read: budget off, or a lane this guard never touches.
     if (budget <= 0 || lane !== "backfill") {
       return {

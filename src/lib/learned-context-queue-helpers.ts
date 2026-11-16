@@ -3,6 +3,12 @@
  * No React, no I/O — pure functions so they can be unit-tested.
  */
 
+import {
+  buildStrategyDirectiveBlock,
+  containDirectiveValue,
+  directiveProvenanceLabel
+} from "./learned-context/directive-block";
+
 export type PendingTier = "risk" | "strategy-directive";
 
 /** Maps a pending tier to the Chip tone used in the UI. */
@@ -19,14 +25,27 @@ export function tierLabel(tier: PendingTier): string {
  * Formats the attributed AI-LEARNED block that approval will append to the
  * strategy prompt for a 'strategy-directive' item.
  *
+ * This is a PREVIEW the owner approves against, so it must be byte-identical to what the server
+ * actually merges. Both sides call the same pure builder in learned-context/directive-block.ts:
+ * the provenance line and, for non-owner-authored text, the containment pass are applied here too.
+ * Always pass the row's `source`/`origin`; an unknown source is labelled as such and contained,
+ * because "we could not tell where this came from" is never a reason to grant it owner trust.
+ *
  * @param id  - The pending item ID (used as the block identifier).
- * @param date - ISO date string (createdAt); only the date portion is shown.
+ * @param date - ISO date string; only the date portion is shown.
  * @param value - The directive text.
+ * @param source - The pending row's source (decides owner-authored vs contained).
+ * @param origin - The pending row's origin, shown in the provenance line.
  */
-export function formatStrategyDirectiveBlock(id: string, date: string, value: string): string {
-  // Trim to a safe date prefix (YYYY-MM-DD) if the string is ISO-formatted.
-  const datePart = date.length >= 10 ? date.slice(0, 10) : date;
-  return `<!-- AI-LEARNED ${id} ${datePart} -->\n${value}\n<!-- /AI-LEARNED -->`;
+export function formatStrategyDirectiveBlock(
+  id: string,
+  date: string,
+  value: string,
+  source?: string | null,
+  origin?: string | null
+): string {
+  const contained = containDirectiveValue(value, source);
+  return buildStrategyDirectiveBlock(id, contained.value, date, directiveProvenanceLabel(source, origin));
 }
 
 /**

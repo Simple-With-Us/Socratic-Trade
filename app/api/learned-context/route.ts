@@ -1,5 +1,5 @@
 import { listLearnedContext } from "@/lib/db";
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 // pending queue. Read-only browse surface for the "what has the AI learned so far" list; mutation
 // happens only via DELETE /api/learned-context/[id].
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json(listLearnedContext(userId));
 }

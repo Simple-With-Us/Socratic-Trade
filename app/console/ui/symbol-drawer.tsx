@@ -1,8 +1,9 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { useFocusTrap } from "./focus-trap";
+import { useOverlay } from "./use-overlay";
 
 interface SymbolDrawerContent {
   title: ReactNode;
@@ -56,10 +57,12 @@ export function useSymbolDrawer() {
 
 function SymbolDrawerHost({ content, onClose }: { content: SymbolDrawerContent; onClose: () => void }) {
   const drawerRef = useRef<HTMLElement>(null);
+  const overlayId = useId();
   // The host only mounts while a drawer is open, so the trap is active for its whole life:
   // focus moves in on mount, Tab stays inside, Escape closes, and unmount hands focus back
   // to the SymbolButton that opened it.
   useFocusTrap(drawerRef, true, { onEscape: onClose });
+  useOverlay(overlayId, true, onClose);
 
   return (
     <>
@@ -77,7 +80,7 @@ function SymbolDrawerHost({ content, onClose }: { content: SymbolDrawerContent; 
           <button
             type="button"
             aria-label="Close"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control text-[color:var(--con-faint)] transition-colors hover:bg-[color:var(--con-surface-2)] hover:text-[color:var(--con-fg)]"
+            className="con-icon-btn h-8 w-8 shrink-0"
             onClick={onClose}
           >
             <X size={18} />

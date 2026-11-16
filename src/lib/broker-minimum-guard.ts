@@ -53,14 +53,22 @@ const FULL_POSITION_QTY_EPSILON = 1e-6;
  * True when `order` is a sell/cover whose `quantity` matches the caller-supplied
  * `positionQuantity` (the account's currently held quantity for this symbol) within
  * FULL_POSITION_QTY_EPSILON — i.e. an order that closes the ENTIRE position rather than a partial
- * trim. Robinhood explicitly permits liquidating a whole fractional position regardless of its
- * dollar value (that's how "dust" positions get cleaned up), and its own `order_checks` pre-flight
- * does not flag those — so this exemption only ever applies to our OWN defensive notional-floor
- * fallback below, never overrides an actual `review.preflightBlock` signal from the broker.
+ * trim.
+ *
+ * CORRECTED 2026-09-25 (board 687a5fb4, lane G3): this used to also EXEMPT a matching order from
+ * describeBrokerMinimumOrderBlock's own notional-floor fallback, on the assumption that "Robinhood
+ * permits liquidating a whole fractional position regardless of its dollar value." Production
+ * evidence on the live Robinhood "Agentic" account contradicts that: 11 `placing_failed` rejections
+ * for "Fractional orders must be at least $1" and 8 for "Dollar-based orders must be at least $1" —
+ * Robinhood's floor is unconditional, including for a full-position exit. Nothing in this codebase's
+ * MCP usage (toMcpOrder/reviewEquityOrder in robinhood.ts) documents or exercises a special
+ * sub-$1-full-exit path, so there is no verified way to place one. The exemption is REMOVED from
+ * describeBrokerMinimumOrderBlock; `isFullPositionExit` now exists only to tell
+ * `planBrokerMinimumBump` when a sell/cover is ALREADY at the full held position (nothing left to
+ * bump TO), so it can decline immediately instead of proposing a same-size no-op "bump".
  *
  * Both `side` and `positionQuantity` are optional on the order shape: existing call sites that
- * don't supply them simply never match here, preserving today's blocking behavior unchanged until
- * a caller threads the position quantity through.
+ * don't supply them simply never match here.
  */
 function isFullPositionExit(order: { quantity?: number; side?: OrderSide; positionQuantity?: number }): boolean {
   if (order.side !== "sell" && order.side !== "cover") return false;
@@ -79,10 +87,13 @@ function isFullPositionExit(order: { quantity?: number; side?: OrderSide; positi
  * fallback for a fractional/dollar-based order whose reviewed notional is itself under the known
  * per-broker floor. Returns undefined for anything else — this must never flag a legitimate order.
  *
- * EXEMPTION: a sell/cover that closes the entire position (`order.quantity` == `order.positionQuantity`,
- * epsilon tolerance) is never blocked by the notional-floor fallback — see `isFullPositionExit`'s
- * doc comment. A genuinely sub-minimum PARTIAL trim (quantity less than the held position) is
- * unaffected and still blocked exactly as before.
+ * NO EXEMPTION for a full-position exit (removed 2026-09-25, board 687a5fb4, lane G3): production
+ * evidence shows Robinhood rejects a sub-$1 order at placement regardless of whether it closes the
+ * entire position — see `isFullPositionExit`'s doc comment for the evidence and root cause. A
+ * full-position exit under the floor is blocked exactly like a partial trim; callers that support
+ * `brokerMinimumHandling: "bump"` still get a chance to raise a PARTIAL trim toward (and, if
+ * needed, up to) the full position first — see `planBrokerMinimumBump` — before this block fires
+ * on the re-reviewed size.
  */
 export function describeBrokerMinimumOrderBlock(
   review: ReviewedOrder,
@@ -97,12 +108,107 @@ export function describeBrokerMinimumOrderBlock(
     minNotional !== undefined &&
     review.estimatedNotional > 0 &&
     review.estimatedNotional < minNotional &&
-    isFractionalOrDollarBased(order) &&
-    !isFullPositionExit(order)
+    isFractionalOrDollarBased(order)
   ) {
     return `Order notional $${review.estimatedNotional.toFixed(2)} is below the broker's $${minNotional.toFixed(2)} minimum order size and would be rejected.`;
   }
   return undefined;
+}
+
+/**
+ * The broker's own refusal wording for an order below its minimum size, matched tolerantly:
+ * "Fractional orders must be at least $1", "Dollar-based orders must be at least $1", and any
+ * sibling with the same shape.  The text arrives inside a placement error whose envelope varies
+ * ("... response had no order id: {"text":"API error 400: {...}"}", or an MCP isError string), so
+ * only the sentence itself is matched.
+ */
+const BROKER_MINIMUM_PLACEMENT_PATTERN = /\b((?:[a-z-]+\s+)?orders?\s+must\s+be\s+at\s+least\s+\$\s*\d+(?:\.\d+)?)/i;
+
+/**
+ * Placement-time BACKSTOP for the pre-flight guard above.  The pre-flight reads Robinhood's own
+ * `review_equity_order` verdict, but a price move between review and placement (or a review that
+ * carries no alert) can still let a sub-minimum order reach `place_equity_order`.  Robinhood's
+ * refusal then surfaces as a "response had no order id" error that is not an HTTP status, so the
+ * generic classifiers call it uncertain: the row sits in `placing` behind a protected
+ * "verify with broker" alert and is later swept to `placing_failed` (how the 22 production rows
+ * arose).  A refusal that NAMES the minimum is deterministic, so callers book it as a blocked
+ * below-minimum row, exactly like the pre-flight skip.  Returns undefined for any other error.
+ */
+export function detectBrokerMinimumPlacementError(message: string): string | undefined {
+  const match = BROKER_MINIMUM_PLACEMENT_PATTERN.exec(message);
+  if (!match) return undefined;
+  return `The broker rejected this order at placement for being below its minimum order size (${match[1].replace(/\s+/g, " ")}).  Nothing was placed.`;
+}
+
+const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Returns a human-readable ADVISORY when cancelling a partially-filled entry order (buy/short)
+ * would leave the already-filled portion stranded below the broker's minimum order notional —
+ * dust the owner may not be able to exit as a standalone order later (oss-lessons r2, freqtrade).
+ *
+ * ADVISORY ONLY: the caller must execute the cancel unconditionally regardless of this return
+ * value — cancel is the operator's emergency lever and this must never block or delay it. Returns
+ * undefined for anything that isn't this specific shape:
+ *  - exit sides (sell/cover) — cancelling an exit never CREATES a new position fragment;
+ *  - whole-share orders (`isFractionalOrDollarBased` false) — a broker's fractional/dollar-based
+ *    floor doesn't apply to whole-share sizing;
+ *  - nothing filled yet, or `remaining` (quantity - filledQuantity) isn't positive — either the
+ *    order hasn't started filling or there's nothing left for the cancel to interrupt;
+ *  - the resulting position quantity is unknown, or is materially larger than the filled quantity
+ *    (epsilon-compared magnitudes, mirroring isFullPositionExit) — that's scaling INTO an existing
+ *    larger holding, not creating a new dust fragment;
+ *  - no known per-broker floor, or no usable price to value the filled portion (`averagePrice`
+ *    when the broker has reported one, else the caller-supplied `currentPrice` fallback).
+ */
+export function describeCancelDustRisk(
+  order: {
+    side?: OrderSide;
+    quantity?: number;
+    dollarAmount?: number;
+    filledQuantity?: number;
+    averagePrice?: number;
+    /** Current market price fallback for orders the broker hasn't reported an averagePrice for
+     *  yet — no `review` is available at cancel time to source a price from. */
+    currentPrice?: number;
+    symbol?: string;
+  },
+  positionQuantity: number | undefined,
+  activeBroker: TradingPolicy["activeBroker"]
+): string | undefined {
+  if (order.side !== "buy" && order.side !== "short") return undefined;
+  if (!isFractionalOrDollarBased(order)) return undefined;
+
+  const filledQuantity = order.filledQuantity ?? 0;
+  if (!(filledQuantity > 0)) return undefined;
+
+  const price = order.averagePrice ?? order.currentPrice;
+  if (price == null || !(price > 0)) return undefined;
+  const filledNotional = filledQuantity * price;
+
+  // Remaining-to-fill: share-sized orders compare quantities; dollar-sized orders (quantity
+  // undefined) compare the ordered notional against what has filled.  Without the dollar branch,
+  // `(quantity ?? 0) - filled` went negative and the advisory silently never fired for the order
+  // type most likely to strand fractional dust.
+  const remaining =
+    order.quantity !== undefined
+      ? order.quantity - filledQuantity
+      : order.dollarAmount !== undefined
+        ? (order.dollarAmount - filledNotional) / price
+        : 0;
+  if (!(remaining > FULL_POSITION_QTY_EPSILON)) return undefined;
+
+  if (positionQuantity == null) return undefined;
+  // Short positions are stored with NEGATIVE quantities — compare magnitudes (isFullPositionExit).
+  if (Math.abs(Math.abs(positionQuantity) - filledQuantity) > FULL_POSITION_QTY_EPSILON) return undefined;
+
+  const minNotional = brokerMinOrderNotional(activeBroker);
+  if (minNotional === undefined) return undefined;
+  if (!(filledNotional > 0) || filledNotional >= minNotional) return undefined;
+
+  const symbol = order.symbol ?? "this symbol";
+  return `Cancelling now will leave ${round6(filledQuantity)} sh (~$${round2(filledNotional).toFixed(2)}) of ${symbol} already filled — below the broker's $${minNotional.toFixed(2)} minimum order size and may be stranded as unsellable dust.`;
 }
 
 /** Result of planning a bump-to-floor: the sizing patch to apply to the order, plus the
@@ -123,9 +229,6 @@ export interface BrokerMinimumBumpPlan {
 // than exactly on it and lose the race to a one-tick move.
 const BUMP_QTY_CUSHION = 1.005;
 
-const round6 = (n: number) => Math.round(n * 1e6) / 1e6;
-const round2 = (n: number) => Math.round(n * 100) / 100;
-
 // A reviewed notional this small is more likely a broker-estimate artifact than a real price
 // signal (e.g. Robinhood's review parse falls back through several raw fields). Refuse to use it
 // as the price oracle for quantity scaling — the scale factor minNotional/from would be unbounded.
@@ -145,11 +248,14 @@ const MIN_TRUSTED_REVIEW_NOTIONAL = 0.05;
  *    the account's authority (autoRevertOnCapBreach), which the app must never self-inflict;
  *  - quantity scaling whose price oracle (the reviewed notional) is too small to trust;
  *  - SELL/COVER orders whose held position is unknown (no safe way to bound the bump).
- * A sell/cover bump is capped at the FULL held position: brokers permit liquidating an entire
- * fractional position regardless of its dollar value (see isFullPositionExit), so "needs more
- * than held" degrades to a whole-position exit rather than an unfillable order. Dollar-based
- * exits are CONVERTED to a quantity order priced off the position's market value (the production
- * AAPL trim case is a dollar-based sell — declining those would leave the motivating loop alive).
+ * A sell/cover bump is capped at the FULL held position, so "needs more than held" degrades to a
+ * whole-position exit rather than an unfillable order.  That exit is NOT exempt from the floor
+ * (describeBrokerMinimumOrderBlock has no full-exit exemption — see isFullPositionExit, corrected
+ * 2026-09-25), so the degrade happens only when the whole position itself clears the minimum; a
+ * position worth less than the floor declines here (audit 2026-09-29) instead of returning a plan
+ * the post-bump re-review is guaranteed to block.  Dollar-based exits are CONVERTED to a quantity
+ * order priced off the position's market value (the production AAPL trim case is a dollar-based
+ * sell — declining those would leave the motivating loop alive).
  * positionQuantity may be negative for short positions (cover): magnitudes are used throughout.
  */
 export function planBrokerMinimumBump(
@@ -196,11 +302,22 @@ export function planBrokerMinimumBump(
     const heldQty = order.positionQuantity != null ? Math.abs(order.positionQuantity) : undefined;
     if (heldQty === undefined || !(heldQty > 0)) return undefined;
 
+    // Already sized to the FULL held position: there is nothing left to bump TO. Robinhood's floor
+    // is unconditional (describeBrokerMinimumOrderBlock no longer exempts a full-position exit), so
+    // an order already at the whole position that's still under the floor cannot be resized any
+    // further — decline immediately instead of returning a same-size "bump" that would re-review
+    // and get blocked anyway one round trip later.
+    if (isFullPositionExit(order)) return undefined;
+
     if (order.quantity != null && order.quantity > 0) {
       if (from < MIN_TRUSTED_REVIEW_NOTIONAL) return undefined;
       const impliedPrice = from / order.quantity;
       const needed = (order.quantity * minNotional * BUMP_QTY_CUSHION) / from;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Degrade to a whole-position exit ONLY when the whole position itself clears the floor.
+        // There is no full-exit exemption (see describeBrokerMinimumOrderBlock), so a whole position
+        // under the floor is a guaranteed post-bump block: decline now and take the skip path.
+        if (heldQty * impliedPrice < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldQty * impliedPrice) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };
@@ -215,6 +332,8 @@ export function planBrokerMinimumBump(
       if (!(impliedPrice > 0) || heldValue < MIN_TRUSTED_REVIEW_NOTIONAL) return undefined;
       const needed = (minNotional * BUMP_QTY_CUSHION) / impliedPrice;
       if (needed >= heldQty - FULL_POSITION_QTY_EPSILON) {
+        // Same rule as the quantity branch: a whole position under the floor cannot be bumped over it.
+        if (heldValue < minNotional) return undefined;
         return { patch: { quantity: heldQty, dollarAmount: undefined }, fromNotional: from, toNotional: round2(heldValue) };
       }
       return { patch: { quantity: round6(needed), dollarAmount: undefined }, fromNotional: from, toNotional: round2(needed * impliedPrice) };
@@ -241,6 +360,26 @@ export function shouldAlertBrokerMinimumOrderBlock(userId: string, accountNumber
   const key = `${SUB_MINIMUM_ALERT_COOLDOWN_PREFIX}:${userId}:${accountNumber}:${symbol}`;
   const last = getInternalSetting<string>(key);
   if (last && Date.now() - Date.parse(last) < SUB_MINIMUM_ALERT_COOLDOWN_MS) return false;
+  setInternalSetting(key, new Date().toISOString());
+  return true;
+}
+
+const CANCEL_DUST_ALERT_COOLDOWN_PREFIX = "cancelDustRiskAlertSent";
+// Same rationale as SUB_MINIMUM_ALERT_COOLDOWN_MS: a dust-producing cancel is a one-off event to
+// surface, not a recurring condition worth re-alerting on every subsequent cancel of the same
+// symbol within the window.
+const CANCEL_DUST_ALERT_COOLDOWN_MS = 24 * 60 * 60_000; // 24 hours
+
+/**
+ * Cooldown-gated: returns true (and marks the cooldown) at most once per (user, accountNumber,
+ * symbol) per `CANCEL_DUST_ALERT_COOLDOWN_MS` window — same pattern as
+ * shouldAlertBrokerMinimumOrderBlock. Callers must still execute the cancel unconditionally
+ * regardless of this return value; it only gates whether an outward alert fires for this cancel.
+ */
+export function shouldAlertCancelDustRisk(userId: string, accountNumber: string, symbol: string): boolean {
+  const key = `${CANCEL_DUST_ALERT_COOLDOWN_PREFIX}:${userId}:${accountNumber}:${symbol}`;
+  const last = getInternalSetting<string>(key);
+  if (last && Date.now() - Date.parse(last) < CANCEL_DUST_ALERT_COOLDOWN_MS) return false;
   setInternalSetting(key, new Date().toISOString());
   return true;
 }

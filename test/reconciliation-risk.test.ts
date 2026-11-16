@@ -907,7 +907,7 @@ describe("generateProactiveRiskProposals", () => {
     expect(proposals[0].rationale).toContain("short stop-loss");
   });
 
-  it("does not manage a short position when short selling is disabled", () => {
+  it("emits a COVER to protect an existing breached short even when short selling is disabled", () => {
     const policy: TradingPolicy = {
       ...DEFAULT_POLICY,
       shortSellingEnabled: false,
@@ -915,7 +915,10 @@ describe("generateProactiveRiskProposals", () => {
     };
     const positions = [{ symbol: "TSLA", quantity: -5, averageCost: 100, marketValue: -550 }];
     const proposals = generateProactiveRiskProposals(positions, { TSLA: 110 }, policy);
-    expect(proposals).toHaveLength(0);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].side).toBe("cover");
+    expect(proposals[0].quantity).toBe(5);
+    expect(proposals[0].rationale).toContain("short stop-loss");
   });
 });
 

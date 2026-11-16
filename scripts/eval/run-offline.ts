@@ -225,7 +225,7 @@ const PROVIDER_MODELS: Array<{ provider: string; model: string; envKey: string }
   { provider: "openai", model: "gpt-5.4-nano", envKey: "OPENAI_API_KEY" },
   { provider: "anthropic", model: "claude-haiku-4-5", envKey: "ANTHROPIC_API_KEY" },
   { provider: "xai", model: "grok-4.3", envKey: "XAI_API_KEY" },
-  { provider: "gemini", model: "gemini-2.5-flash", envKey: "GEMINI_API_KEY" },
+  { provider: "gemini", model: "gemini-3.7-flash", envKey: "GEMINI_API_KEY" },
   { provider: "mistral", model: "ministral-3b-latest", envKey: "MISTRAL_API_KEY" },
   { provider: "deepseek", model: "deepseek-chat", envKey: "DEEPSEEK_API_KEY" },
 ];

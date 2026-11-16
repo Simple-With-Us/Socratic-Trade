@@ -53,7 +53,10 @@ vi.mock("voyageai", () => ({
 vi.mock("../src/lib/db", () => ({
   resolveApiKey: mocks.resolveApiKey,
   audit: mocks.audit,
-  setInternalSetting: vi.fn()
+  setInternalSetting: vi.fn(),
+  getDb: () => ({
+    prepare: () => ({ get: () => undefined })
+  })
 }));
 
 beforeEach(() => {

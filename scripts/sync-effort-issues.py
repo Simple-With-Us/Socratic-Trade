@@ -108,6 +108,24 @@ trip GitHub's *secondary* rate limit: the API 403s with "secondary rate limit
     is idempotent and board-driven, so the next scheduled/triggered run picks
     up exactly where this one stopped; a red workflow run for an expected
     partial pass would be noise.
+  - The same budget covers a transient HTTP 5xx, and a bare 429, on an
+    idempotent method (GET/HEAD/PUT/PATCH/DELETE).  A 500 with an empty `{}`
+    body is an edge/proxy fault, not a validation error — GitHub's real API
+    errors include a `message` — and one of those used to abort a run of
+    hundreds of serial PATCHes.  POST is not replayed for a 5xx: the create
+    may already have landed.  502/503/504 stay on this budget for every
+    method, which is the older gateway path.  A 4xx other than a rate-limit
+    403/429 is returned immediately.
+
+Transport failures
+------------------
+Rate-limit handling only sees requests that produced an HTTP *response*.  A
+connection that dies below that layer — TLS handshake rejected, DNS blip,
+socket reset, a body cut short mid-read — raises out of `http_request` and used
+to kill the whole run.  These are retried separately, with bounded exponential
+backoff, for *idempotent* methods only; see TRANSPORT_RETRY_METHODS for why a
+POST is deliberately never replayed.  An HTTP 500 is not a transport failure:
+`http_request` returns it, and `GitHubClient._request` decides the retry.
 
 Local testing: export GITHUB_TOKEN and GITHUB_REPOSITORY yourself, then run
 `python3 scripts/sync-effort-issues.py [--dry-run]`.
@@ -117,6 +135,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -141,6 +160,25 @@ RATE_LIMIT_RETRY_BUDGET_SECONDS = 300.0
 # Backoff for rate-limited requests when the server sends no Retry-After.
 RATE_LIMIT_BACKOFF_BASE_SECONDS = 15.0
 RATE_LIMIT_BACKOFF_MAX_SECONDS = 120.0
+
+# Transport-level (not HTTP-level) retries. A failure below the HTTP layer never
+# produces a status code, so it bypasses the rate-limit retry in
+# GitHubClient._request entirely and used to abort the whole sync. Seen in the
+# wild: an SSL handshake rejected with "CERTIFICATE_VERIFY_FAILED: self-signed
+# certificate" reaching api.github.com (2026-08-12), and a truncated response
+# body raising http.client.IncompleteRead out of resp.read() *after* a 200 —
+# listing every issue with state=all pulls hundreds of KB across pages, so one
+# mid-body disconnect was enough to fail the run.
+#
+# Only *idempotent* methods are retried. A POST that created an issue but whose
+# response body was truncated has already mutated the repo — replaying it would
+# file a duplicate issue, which is worse than the failure we are fixing. POSTs
+# therefore surface the transport error and let the next scheduled run reconcile
+# (creation is keyed off the board, so a re-run is self-healing).
+TRANSPORT_RETRY_METHODS = frozenset({"GET", "HEAD", "PUT", "PATCH", "DELETE"})
+TRANSPORT_RETRY_ATTEMPTS = 4
+TRANSPORT_BACKOFF_BASE_SECONDS = 2.0
+TRANSPORT_BACKOFF_MAX_SECONDS = 15.0
 
 MIRROR_LABEL = "effort-board"
 STATE_LABELS = {
@@ -291,21 +329,53 @@ def http_request(
     req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if data is not None:
         req.add_header("Content-Type", "application/json")
-    try:
-        # Explicit socket timeout: the default (None) lets a stalled connection
-        # hang the job forever, squatting the single socratic-ci runner and
-        # blocking the whole CI queue (seen twice on 2026-07-29, both runs
-        # had to be cancelled manually after 10+ min stuck in this call).
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
+
+    retryable = method.upper() in TRANSPORT_RETRY_METHODS
+    attempt = 0
+    while True:
         try:
-            parsed = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            parsed = {"message": raw.decode("utf-8", errors="replace")}
-        return e.code, parsed, dict(e.headers or {})
+            # Explicit socket timeout: the default (None) lets a stalled connection
+            # hang the job forever, squatting the single socratic-ci runner and
+            # blocking the whole CI queue (seen twice on 2026-07-29, both runs
+            # had to be cancelled manually after 10+ min stuck in this call).
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return resp.status, (json.loads(raw) if raw else {}), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            # A real HTTP response, not a transport failure. Return it so
+            # GitHubClient._request can apply its rate-limit backoff. Note this
+            # must stay ahead of URLError below — HTTPError subclasses it.
+            raw = e.read()
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = {"message": raw.decode("utf-8", errors="replace")}
+            return e.code, parsed, dict(e.headers or {})
+        except (
+            http.client.IncompleteRead,
+            http.client.HTTPException,
+            urllib.error.URLError,
+            ConnectionError,
+            TimeoutError,
+            json.JSONDecodeError,
+        ) as e:
+            # json.JSONDecodeError lands here because a body that was cut short
+            # without tripping IncompleteRead still fails to parse — same root
+            # cause, same remedy.
+            attempt += 1
+            if not retryable or attempt >= TRANSPORT_RETRY_ATTEMPTS:
+                raise
+            wait = min(
+                TRANSPORT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                TRANSPORT_BACKOFF_MAX_SECONDS,
+            )
+            print(
+                f"transport error on {method} {url} "
+                f"({type(e).__name__}: {e}) — retrying in {wait:.0f}s "
+                f"(attempt {attempt}/{TRANSPORT_RETRY_ATTEMPTS - 1})",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
 
 
 class RateLimitBudgetExhausted(Exception):
@@ -316,6 +386,9 @@ def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) ->
     # 502/503/504 are transient gateway/timeouts (seen as GitHub "couldn't respond
     # in time" 504s during large board syncs). Treat them like rate limits so the
     # bounded retry budget can absorb a blip instead of failing the whole run.
+    # 500 is intentionally not in this set: a 500 is retried only for idempotent
+    # methods, in _should_retry_response.  Replaying a POST 500 can duplicate an
+    # issue whose create landed before the edge returned `{}`.
     if status in (502, 503, 504):
         return True
     if status not in (403, 429):
@@ -328,6 +401,25 @@ def _rate_limited(status: int, payload: dict | list, headers: dict[str, str]) ->
         or "couldn't respond" in message
         or _retry_after_seconds(headers) is not None
     )
+
+
+def _should_retry_response(
+    method: str, status: int, payload: dict | list, headers: dict[str, str]
+) -> bool:
+    """Whether GitHubClient._request should spend rate-limit budget on this response.
+
+    502/503/504 and a real rate-limit 403/429 retry for every method, matching
+    the older gateway path.  Any other 5xx, and a bare 429 whose body has no
+    rate-limit message, retries only when the method is idempotent.  Other
+    4xx responses are final.
+    """
+    if _rate_limited(status, payload, headers):
+        return True
+    if method.upper() not in TRANSPORT_RETRY_METHODS:
+        return False
+    if status == 429:
+        return True
+    return 500 <= status <= 599
 
 
 def _retry_after_seconds(headers: dict[str, str]) -> float | None:
@@ -352,7 +444,7 @@ class GitHubClient:
         attempt = 0
         while True:
             status, payload, headers = http_request(method, url, self.token, body)
-            if not _rate_limited(status, payload, headers):
+            if not _should_retry_response(method, status, payload, headers):
                 return status, payload
             attempt += 1
             wait = _retry_after_seconds(headers)

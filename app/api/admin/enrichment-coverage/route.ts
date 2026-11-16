@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/admin";
-import { getLastEnrichmentCoverageReport } from "@/lib/enrichment-coverage";
+import {
+  listEnrichmentCoverageRunHistory,
+  resolveEnrichmentCoverageReport
+} from "@/lib/db-enrichment-coverage";
 
 export const dynamic = "force-dynamic";
 
@@ -18,19 +21,27 @@ export async function GET(request: Request) {
   const denied = requireAdmin(request);
   if (denied) return denied;
 
-  const report = getLastEnrichmentCoverageReport();
+  const url = new URL(request.url);
+  const historyLimit = Number.parseInt(url.searchParams.get("historyLimit") ?? "20", 10);
+
+  const report = resolveEnrichmentCoverageReport();
   if (!report) {
     return NextResponse.json({
       ok: true,
       available: false,
       message:
-        "No enrichment coverage report yet. Run a Market Scan or strategy cycle first; the cascade stores the latest field fill/source/missing summary in memory."
+        "No enrichment coverage report yet. Run a Market Scan or strategy cycle first; the cascade persists field fill/source/missing summaries after each enrich run."
     });
   }
+
+  const history = listEnrichmentCoverageRunHistory(
+    Number.isFinite(historyLimit) ? historyLimit : 20
+  );
 
   return NextResponse.json({
     ok: true,
     available: true,
-    report
+    report,
+    history
   });
 }

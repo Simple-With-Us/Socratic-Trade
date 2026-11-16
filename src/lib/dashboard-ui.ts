@@ -1,6 +1,8 @@
 import type { EnrichmentSources, EquityPosition, MarketQuote, NotificationEvent, NotificationEventType, NotificationStatus, OrderSide } from "./types";
 import type { SymbolMeta } from "./dashboard-feed";
+import { SUPPORTED_INDEX_UNIVERSES, indexUniverseLabel } from "./index-universes";
 import { formatQuantity } from "./money";
+import { notificationFailureDetail } from "./strategy-run-failure";
 
 export interface EnrichedPosition extends EquityPosition {
   costBasis: number;
@@ -17,29 +19,26 @@ export interface NotificationDisplayItem {
   companyName?: string;
 }
 
+/** Scan source tags are `${IndexUniverse}-universe` (market.ts).  Keys are
+ *  lowercased because `normalizeSourceKey` never re-hyphenates camelCase ids.
+ *  Labels come from `indexUniverseLabel` so every slug — not just sp500 —
+ *  prints `S&P 500 Universe` / `Nasdaq Composite Universe`, never the id. */
+const INDEX_UNIVERSE_SOURCE_LABELS: Record<string, string> = Object.fromEntries(
+  SUPPORTED_INDEX_UNIVERSES.map((id) => [`${id.toLowerCase()}-universe`, `${indexUniverseLabel(id)} Universe`])
+);
+
 const SOURCE_LABELS: Record<string, string> = {
+  ...INDEX_UNIVERSE_SOURCE_LABELS,
   finnhub: "Finnhub",
   fmp: "FMP",
   "yahoo-finance": "Yahoo Finance",
   "yahoo-finance-delayed": "Yahoo Finance Delayed",
   "yahoo-finance-delayed-quotes": "Yahoo Finance Delayed Quotes",
+  "yahoo-finance-batch": "Yahoo Finance Batch",
+  "yahoo-finance-single": "Yahoo Finance Single",
   "yahoo-finance-synthetic": "Yahoo Finance Synthetic",
   "nasdaq-delayed-screener": "NASDAQ Delayed Screener",
   "nasdaq-delayed-screener-universe": "NASDAQ Delayed Screener Universe",
-  "sp500-universe": "S&P 500 Universe",
-  "sp100-universe": "S&P 100 Universe",
-  "nasdaq100-universe": "NASDAQ 100 Universe",
-  // The dynamic-universe source tags below are built in market.ts as `${universe}-universe`
-  // straight from the IndexUniverse config id — for the three camelCase compound ids
-  // (nasdaqComposite, nyseComposite, ftWilshire5000) that produces e.g. "nasdaqComposite-
-  // universe", which normalizeSourceKey only lowercases (never re-hyphenates) to
-  // "nasdaqcomposite-universe". A key with a hyphen between the words never matched, so these
-  // fell through to titleizeSource's raw-string fallback and rendered as "Nasdaqcomposite
-  // Universe" / "Nysecomposite Universe" / (unlabeled) "Ftwilshire5000 Universe". Keys here MUST
-  // match the id's own casing verbatim, not "properly" kebab-cased.
-  "nasdaqcomposite-universe": "NASDAQ Composite Universe",
-  "nysecomposite-universe": "NYSE Composite Universe",
-  "ftwilshire5000-universe": "FT Wilshire 5000 Universe",
   "alpaca-quotes": "Alpaca Quotes",
   "alpaca-snapshot": "Alpaca Snapshot",
   "alpaca-news": "Alpaca News",
@@ -339,13 +338,14 @@ export function feedStatusLabel(raw?: string | null): string {
 export const NOTIFICATION_EVENT_TYPE_LABELS: Record<NotificationEventType, string> = {
   fill: "Order filled",
   block: "Trade blocked",
-  run_failed: "Run failed",
+  run_failed: "Strategy Run Failed",
   pending_approval: "Awaiting your approval",
   kill_switch: "Kill switch",
   price_alert: "Price alert",
   proposal_withdrawn: "Proposal withdrawn",
   limit_order_stale: "Stale limit order",
   provider_degraded: "Data provider degraded",
+  liveness_warning: "Liveness warning",
   budget_alert: "Budget alert",
   learning_review: "Learning review",
   deterministic_bear_veto: "Vetoed by Bear risk",
@@ -356,9 +356,13 @@ export const NOTIFICATION_EVENT_TYPE_LABELS: Record<NotificationEventType, strin
   storage_warning: "Storage warning",
   autonomy_halted_on_boot: "Autonomy halted on boot",
   option_alert: "Option alert",
-  earningscalls_entitlement_blocked: "EarningsCalls plan entitlement blocked",
+  earningscalls_entitlement_blocked: "EarningsCalls.dev plan entitlement blocked",
+  roic_status_advisory: "ROIC.ai program status",
   risk_advisory: "Risk advisory",
-  protective_exit_failing: "Protective exit failing"
+  protective_exit_failing: "Protective exit failing",
+  signal_health: "Signal health drift",
+  lookahead_leak: "Lookahead leak suspected",
+  watchlist_digest: "Daily watchlist digest"
 };
 
 export function notificationTypeLabel(type?: string | null): string {
@@ -451,6 +455,12 @@ function notificationDetail(event: NotificationEvent): string {
     const reason = stringValue(payload.reason) || stringValue(payload.detail);
     return reason ? `Audit logged: ${reason}` : "Advisory audit logged";
   }
+  const failure = notificationFailureDetail({
+    type: event.type,
+    payload: event.payload,
+    title: event.title
+  });
+  if (failure) return failure;
   const prefix = notificationStatusLabel(event.status);
   const reason = notificationReason(event.error);
   return reason ? `${prefix} - ${reason}` : prefix;
@@ -497,10 +507,46 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** Tokens that look like a ticker (all-caps 1-10 chars) but are actually system identifiers
+ *  that should never be linked to a symbol drilldown drawer.  `symbolFromTitle` skips every
+ *  match in this set so an alert titled "Usage limit hit: openrouter RAG ingest hit daily
+ *  cap" no longer surfaces a "RAG" symbol button that opens a phantom SymbolDrilldown for
+ *  the AI feature.  Includes LLM/data-provider names that share the casing pattern of real
+ *  tickers (RAG, FMP, VOYAGE, OPENROUTER, ALPACA, TRADIER) and common infra acronyms
+ *  (API, DB, CPU, GPU, MCP, LLM, HTTP, URL, SQL, SSH, TLS, VPN, CDN, AWS, GCP, AZ).
+ *  Exported so the alerts console can render a non-clickable Chip for the same set
+ *  (alert-center.tsx: renderSymbolChip). */
+export const SYSTEM_SYMBOLS: ReadonlySet<string> = new Set([
+  // The AI feature itself (Retrieval-Augmented Generation) — surfaced as "RAG" in alerts.
+  "RAG",
+  // Data + AI provider / service names
+  "FMP", "ALPACA", "ALPAC", "TRADIER", "POLYGON", "VOYAGE", "OPENROUTER",
+  "OPENAI", "ANTHROPIC", "GEMINI", "COHERE", "MISTRAL", "DEEPSEEK",
+  // Infra acronyms that would otherwise be rendered as if they were tickers
+  "API", "DB", "CPU", "GPU", "RAM", "MCP", "LLM", "HTTP", "HTTPS",
+  "URL", "URI", "SQL", "SSH", "TLS", "SSL", "VPN", "CDN", "AWS", "GCP", "AZ"
+]);
+
+/** True when `value` is a system identifier that must never be treated as a tradable symbol.
+ *  Returns false for undefined / empty / lowercase / numeric input. */
+export function isSystemSymbol(value: string | undefined | null): value is string {
+  if (!value) return false;
+  const upper = value.trim().toUpperCase();
+  if (!upper) return false;
+  return SYSTEM_SYMBOLS.has(upper);
+}
+
 function symbolFromTitle(title?: string): string | undefined {
   if (!title) return undefined;
-  const match = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/);
-  return match?.[0];
+  // Pull every all-caps token 1-10 chars and pick the first one that isn't a known system
+  // identifier.  A naive single-match regex used to swallow "RAG" from the RAG-ingest alert
+  // title and route the user into a phantom SymbolDrilldown for the AI feature.
+  const matches = title.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/g);
+  if (!matches) return undefined;
+  for (const candidate of matches) {
+    if (!isSystemSymbol(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 function normalizeSymbol(symbol?: string): string | undefined {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { listIngestedAccessions } from "@/lib/db";
 import { refreshFilingBodies } from "@/lib/web-sources/sec-filings";
 import { getVectorStoreStats } from "@/lib/vector-db";
+import { enforceAdminIngestRateLimit, previewAdminIngestRateLimit } from "@/lib/admin-ingest-rate-limit";
 import { requireAdmin } from "@/lib/auth/admin";
 import { withAdminOperationGuard } from "@/lib/admin-operation-guard";
 import { getOperationLeaseBusy } from "@/lib/operation-lease";
@@ -21,6 +22,8 @@ export async function GET(request: Request) {
   // excluded by provenance, and this stronger gate also rejects a genuinely verified email alone.
   const denied = requireAdmin(request, { requireTokenInProd: true });
   if (denied) return denied;
+  const limited = enforceAdminIngestRateLimit(request, "reindex-10k", "read");
+  if (limited) return limited;
   const recent = listIngestedAccessions(50);
   const stats = await getVectorStoreStats();
   return NextResponse.json({ ok: true, ingestedAccessions: recent, vectorStore: stats });
@@ -65,7 +68,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "Provide { symbols: string[], limit?: number, clearCache?: boolean } or { all: true } in the request body." }, { status: 400 });
   }
 
+  const blocked = previewAdminIngestRateLimit(request, "reindex-10k", "job");
+  if (blocked) return blocked;
+
   return withAdminOperationGuard(request, "reindex-10k", async (operationLeaseClaim) => {
+    // Record the hit only after the lease claim succeeds, so a 409 duplicate is free.
+    const limited = enforceAdminIngestRateLimit(request, "reindex-10k", "job");
+    if (limited) return limited;
     if (clearCache) {
       const { getDb } = await import("@/lib/db");
 

@@ -1,12 +1,13 @@
 /**
- * Kalshi event-market data client — DORMANT PLUMBING (nothing imports this yet).
+ * Kalshi event-market data client.  Prompt injection lives in kalshi-macro.ts;
+ * event-contract trading (live kill switch default OFF) lives in kalshi-trading.ts.
  *
  * Package K1 of the Kalshi integration design (see
  * docs/rollouts/2026-07-12-kalshi-data-fetcher.md): a self-contained, flag-gated fetcher for
  * Kalshi's CFTC-regulated event-contract markets, exposing normalized event-probability signals
  * (`getKalshiEventSignals`) intended for LATER strategist injection as macro/regime evidence.
  * Wave 2 wires it into strategy.ts / market-signals; this module deliberately imports nothing
- * from the app (only node:crypto) so it stays inert until then.
+ * from the app (only bare `crypto`) so it stays inert until then.
  *
  * Configuration (all via env; absent => module inert, every surface fails soft):
  *   - KALSHI_ENV             "demo" | "prod" — selects the base URL. REQUIRED to enable the module.
@@ -36,7 +37,14 @@
  * Subaccounts (1-63) are institution-gated and ignored entirely here.
  */
 
-import crypto from "node:crypto";
+// Bare specifier (not "node:crypto") on purpose: this module is reachable from
+// strategy.ts -> scheduler.ts, which Next also compiles into the client/edge
+// bundles. A `node:`-scheme request is handled by webpack's scheme plugin BEFORE
+// resolve.alias runs, so the config's `"node:crypto": false` alias cannot
+// neutralize it there and the build fails with `UnhandledSchemeError`. Bare
+// `crypto` goes through resolve.fallback, where next.config.mjs maps it to
+// `false` for non-server bundles (and to the real builtin on the server).
+import crypto from "crypto";
 
 // ---------------------------------------------------------------------------
 // Configuration

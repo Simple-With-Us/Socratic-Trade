@@ -19,8 +19,12 @@ import type { OHLCBar } from "./indicators";
 import { clearMcpOAuthTokens, getMcpAccessToken } from "./mcp-oauth";
 import { logApiHealth } from "./db-health";
 import { normalizeSymbol } from "./money";
-import { isShortIntent } from "./broker-side";
+import { mergeAccountCapabilities } from "./venue-contract";
+import { normalizeVenueOrder } from "./venue-normalization";
+import { isLiveOrderState, isShortIntent } from "./broker-side";
+import { brokerAbortSignal, scopeBrokerOrders } from "./inflight-deadline";
 import { getOpenLots, getPerformanceSummary } from "./performance";
+import { providerObservationIso, selectObservedQuotePrice } from "./quote-observation";
 import { fetchYahooFinanceQuote, fetchYahooFinanceQuotesBatch } from "./yahoo-finance";
 import { messageFromUnknownError, recordRecoverableIssue } from "./recoverable-issue";
 
@@ -31,6 +35,117 @@ const TEST_SIM_STARTING_CASH = (() => {
 
 export const ROBINHOOD_TRADING_MCP_URL = "https://agent.robinhood.com/mcp/trading";
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26";
+
+/**
+ * Live Roth `9d71dda4` (2026-08-19): gather sent the full 250-name universe in
+ * one `get_equity_quotes` and Robinhood rejected `too many symbols (max 10,
+ * got 250)`.  The whole batch died, so cascade never priced through Robinhood
+ * and Manual Run once sat llm=0 until `stalled_no_progress`.  Keep the
+ * universe; chunk the request.
+ */
+export const ROBINHOOD_EQUITY_SYMBOL_CHUNK = 10;
+const ROBINHOOD_SYMBOL_CHUNK_CONCURRENCY = 4;
+
+export function chunkRobinhoodSymbols(
+  symbols: string[],
+  size: number = ROBINHOOD_EQUITY_SYMBOL_CHUNK
+): string[][] {
+  const unique = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
+  const chunks: string[][] = [];
+  const n = Math.max(1, size);
+  for (let i = 0; i < unique.length; i += n) chunks.push(unique.slice(i, i + n));
+  return chunks;
+}
+
+async function mapRobinhoodSymbolChunks<T extends Record<string, unknown>>(
+  symbols: string[],
+  mapper: (chunk: string[]) => Promise<T>
+): Promise<T> {
+  const chunks = chunkRobinhoodSymbols(symbols);
+  const merged = {} as T;
+  const concurrency = ROBINHOOD_SYMBOL_CHUNK_CONCURRENCY;
+  for (let i = 0; i < chunks.length; i += concurrency) {
+    const wave = chunks.slice(i, i + concurrency);
+    const parts = await Promise.all(wave.map((chunk) => mapper(chunk)));
+    for (const part of parts) Object.assign(merged, part);
+  }
+  return merged;
+}
+
+export function parseRobinhoodQuotes(raw: Record<string, unknown> | unknown): Record<string, BrokerQuote> {
+  const root = raw as Record<string, unknown> | undefined;
+  const entries = Array.isArray(root?.results)
+    ? root!.results
+    : Array.isArray(root?.quotes)
+      ? root!.quotes
+      : Array.isArray(raw)
+        ? raw
+        : [];
+  return Object.fromEntries(
+    (entries as Array<Record<string, unknown>>).map((item) => {
+      const q = (item.quote ?? item) as Record<string, unknown>;
+      const symbol = normalizeSymbol(String(q.symbol ?? item.symbol));
+      const prevClose = optionalNumber(q.previous_close ?? q.adjusted_previous_close);
+      const bidSize = optionalNumber(q.bid_size);
+      const askSize = optionalNumber(q.ask_size);
+      const volume = optionalNumber(q.volume);
+      const selected = selectObservedQuotePrice({
+        last: q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price,
+        bid: q.bid_price ?? q.bid,
+        ask: q.ask_price ?? q.ask
+      });
+      const asOf = providerObservationIso(
+        selected.basis === "last"
+          ? q.venue_last_trade_time ?? q.as_of ?? item.as_of
+          : selected.basis === "mid"
+            ? q.venue_quote_time ?? q.as_of ?? item.as_of
+            : undefined
+      );
+      return [
+        symbol,
+        {
+          symbol,
+          ...(selected.price !== undefined ? { price: selected.price } : {}),
+          bid: optionalNumber(q.bid_price ?? q.bid),
+          ask: optionalNumber(q.ask_price ?? q.ask),
+          ...(asOf ? { asOf } : {}),
+          provider: "robinhood",
+          ...(prevClose !== undefined && prevClose > 0 ? { prevClose } : {}),
+          ...(bidSize !== undefined && bidSize > 0 ? { bidSize } : {}),
+          ...(askSize !== undefined && askSize > 0 ? { askSize } : {}),
+          ...(volume !== undefined && volume > 0 ? { volume } : {})
+        } satisfies BrokerQuote
+      ];
+    })
+  );
+}
+
+function parseRobinhoodTradability(
+  raw: Record<string, unknown>
+): Record<string, { tradable: boolean; fractional: boolean; reason?: string }> {
+  const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
+  return Object.fromEntries(
+    (entries as Array<Record<string, unknown>>).map((item) => {
+      const symbol = normalizeSymbol(String(item.symbol));
+      const active = item.state ? item.state === "active" : true;
+      const tradable = Boolean(item.tradeable ?? item.tradable ?? item.is_tradable ?? true) && active;
+      const fractional =
+        item.fractional_tradability !== undefined
+          ? item.fractional_tradability === "tradable"
+          : Boolean(item.fractional ?? item.fractional_tradable);
+      return [
+        symbol,
+        {
+          tradable,
+          fractional,
+          reason: tradable
+            ? (item.reason ? String(item.reason) : undefined)
+            : String(item.reason ?? `${symbol} is ${String(item.state ?? "not tradable")}.`)
+        }
+      ];
+    })
+  );
+}
 
 export interface RobinhoodMcpHealth {
   adapter: "mcp";
@@ -211,18 +326,18 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
         : rawBrokerageType.includes("ira") || rawBrokerageType.includes("traditional") ? "traditional_ira"
         : "brokerage";
 
-      const capabilities: AccountCapabilities = {
+      const capabilities: AccountCapabilities = mergeAccountCapabilities("robinhood", {
         equityTrading: true,
-        // Robinhood MCP does not support short selling. The MCP's review_equity_order
-        // docs explicitly state "no short sells". Hardcoded false regardless of account type.
+        // Live MCP place/review side enum is buy|sell only — no short/cover.
         shortSelling: false,
         optionsTrading,
         optionsLevel: optionsTrading ? optionsLevel : undefined,
+        optionsOrders: false,
         futuresTrading: false,
         cryptoTrading: false,
         marginEnabled,
         accountType
-      };
+      });
 
       return {
         accountNumber: String(item.account_number ?? item.accountNumber),
@@ -328,10 +443,10 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     }).filter((p) => p.underlyingSymbol && p.expirationDate && p.quantity !== 0);
   }
 
-  async getEquityOrders(accountNumber: string): Promise<EquityOrder[]> {
+  async getEquityOrders(accountNumber: string, options?: import("./types").GetEquityOrdersOptions): Promise<EquityOrder[]> {
     const raw = await this.callTool("get_equity_orders", { account_number: accountNumber });
     const orders = extractRobinhoodOrderCollection(raw);
-    return orders.map((item: Record<string, unknown>) => ({
+    const mapped = orders.map((item: Record<string, unknown>) => ({
       id: String(item.id ?? item.order_id),
       symbol: normalizeSymbol(String(item.symbol)),
       side: item.side as OrderSide,
@@ -350,77 +465,51 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
       clientOrderId: optionalString(item.ref_id ?? item.client_order_id ?? item.clientOrderId),
       placedAgent: optionalString(item.placed_agent ?? item.placedAgent)
     }));
+    return scopeBrokerOrders(mapped, options, (state) => isLiveOrderState(state));
   }
 
   async getEquityQuotes(accountNumber: string, symbols: string[]): Promise<Record<string, BrokerQuote>> {
-    try {
-      const raw = await this.callTool("get_equity_quotes", {
-        symbols: symbols.map(normalizeSymbol)
-      }) as Record<string, unknown>;
-      const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw?.quotes) ? raw.quotes : Array.isArray(raw) ? raw : [];
-      return Object.fromEntries(
-        entries.map((item: Record<string, unknown>) => {
-          // Robinhood nests the live quote under `quote` and pairs it with `close`.
-          const q = (item.quote ?? item) as Record<string, unknown>;
-          const symbol = normalizeSymbol(String(q.symbol ?? item.symbol));
-          return [
-            symbol,
-            {
-              symbol,
-              price: optionalNumber(q.last_trade_price ?? q.last_non_reg_trade_price ?? q.price ?? q.last_price),
-              bid: optionalNumber(q.bid_price ?? q.bid),
-              ask: optionalNumber(q.ask_price ?? q.ask),
-              asOf: optionalString(q.venue_last_trade_time ?? q.as_of ?? item.as_of),
-              provider: "robinhood"
-            } satisfies BrokerQuote
-          ];
-        })
-      );
-    } catch (error) {
-      recordRecoverableIssue({
-        source: "broker",
-        operation: "robinhood.getEquityQuotes",
-        message: messageFromUnknownError(error),
-        fallback: "Returning no Robinhood quotes; downstream logic may use another quote source or omit prices.",
-        userId: this.userId,
-        broker: "robinhood",
-        accountNumber,
-        details: { symbols: symbols.map(normalizeSymbol) }
-      });
-      return {};
-    }
+    return mapRobinhoodSymbolChunks(symbols, async (chunk) => {
+      try {
+        const raw = (await this.callTool("get_equity_quotes", { symbols: chunk })) as Record<string, unknown>;
+        return parseRobinhoodQuotes(raw);
+      } catch (error) {
+        recordRecoverableIssue({
+          source: "broker",
+          operation: "robinhood.getEquityQuotes",
+          message: messageFromUnknownError(error),
+          fallback: "Returning no Robinhood quotes for this chunk; other chunks and later cascade sources still run.",
+          userId: this.userId,
+          broker: "robinhood",
+          accountNumber,
+          details: { symbols: chunk, chunkSize: chunk.length, maxSymbols: ROBINHOOD_EQUITY_SYMBOL_CHUNK }
+        });
+        return {};
+      }
+    });
   }
 
   async getEquityTradability(accountNumber: string, symbols: string[]) {
-    const raw = await this.callTool("get_equity_tradability", {
-      account_number: accountNumber,
-      symbols: symbols.map(normalizeSymbol)
-    }) as Record<string, unknown>;
-    const entries = Array.isArray(raw?.results) ? raw.results : Array.isArray(raw) ? raw : [];
-    return Object.fromEntries(
-      entries.map((item: Record<string, unknown>) => {
-        const symbol = normalizeSymbol(String(item.symbol));
-        const active = item.state ? item.state === "active" : true;
-        // Robinhood spells the flag `tradeable`; fractional is a string enum ("tradable").
-        const tradable = Boolean(item.tradeable ?? item.tradable ?? item.is_tradable ?? true) && active;
-        const fractional =
-          item.fractional_tradability !== undefined
-            ? item.fractional_tradability === "tradable"
-            : Boolean(item.fractional ?? item.fractional_tradable);
-        return [
-          symbol,
-          {
-            tradable,
-            fractional,
-            reason: tradable ? (item.reason ? String(item.reason) : undefined) : String(item.reason ?? `${symbol} is ${String(item.state ?? "not tradable")}.`)
-          }
-        ];
-      })
-    );
+    return mapRobinhoodSymbolChunks(symbols, async (chunk) => {
+      try {
+        const raw = (await this.callTool("get_equity_tradability", {
+          account_number: accountNumber,
+          symbols: chunk
+        })) as Record<string, unknown>;
+        return parseRobinhoodTradability(raw);
+      } catch {
+        return {};
+      }
+    });
   }
 
   async reviewEquityOrder(input: EquityOrderInput): Promise<ReviewedOrder> {
-    const raw = await this.callTool("review_equity_order", toMcpOrder(input)) as Record<string, unknown>;
+    // Review the SAME order placeEquityOrder will send.  The fractional/extended-hours limit ->
+    // regular-hours market coercion lives in normalizeVenueOrder (not toMcpOrder), so without this
+    // a fractional limit buy is reviewed as a limit (cost estimate and order checks) but placed as
+    // a market order.  audit:false -- placement writes the single normalization receipt.
+    const reviewInput = normalizeVenueOrder(input, "robinhood", this.userId, { audit: false });
+    const raw = await this.callTool("review_equity_order", toMcpOrder(reviewInput)) as Record<string, unknown>;
     // Robinhood's own pre-flight review already tells us when an order is a guaranteed reject (e.g.
     // the sub-$1 minimum) via `order_checks`, not the top-level `alerts` array read below — surface
     // it as a structured signal so callers can skip a doomed order instead of placing (and
@@ -444,7 +533,8 @@ class HttpMcpRobinhoodGateway implements BrokerGateway {
     };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const raw = await this.callTool("place_equity_order", { ...toMcpOrder(input), ref_id: input.refId }) as Record<string, unknown>;
     const orderId = raw.id ?? raw.order_id;
     // A response with no order id can't be tracked or reconciled against Robinhood's real order
@@ -573,7 +663,7 @@ export async function callRobinhoodMcpMethod(userId: string, method: string, par
     method: "POST",
     // Bound every Robinhood MCP call (incl. place_equity_order) so a hung connection can't block
     // the order path / strategy run indefinitely.
-    signal: AbortSignal.timeout(30_000),
+    signal: brokerAbortSignal(),
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -765,11 +855,12 @@ class TestBrokerGateway implements BrokerGateway {
       agenticAllowed: true,
       capabilities: {
         equityTrading: true,
-        shortSelling: false,
-        optionsTrading: false,
+        shortSelling: true,
+        optionsTrading: true,
+        optionsOrders: true,
         futuresTrading: false,
         cryptoTrading: false,
-        marginEnabled: false,
+        marginEnabled: true,
         accountType: "brokerage"
       }
     }];
@@ -840,11 +931,8 @@ class TestBrokerGateway implements BrokerGateway {
               bid: yf.bid,
               ask: yf.ask,
               volume: yf.volume > 0 ? yf.volume : undefined,
-              asOf: yf.asOf || new Date().toISOString(),
+              ...(yf.asOf ? { asOf: yf.asOf } : {}),
               provider: "yahoo-finance",
-              // Carry the synthetic-spread flags so a price-derived Yahoo batch spread isn't relabeled
-              // as a real quoted spread when merged (mergeQuoteData / hasRealAsk). Side-specific flags
-              // preserve the REAL side of a one-sided quote; syntheticSpread stays = both, for back-compat.
               ...(yf.syntheticBid ? { syntheticBid: true } : {}),
               ...(yf.syntheticAsk ? { syntheticAsk: true } : {}),
               ...(yf.syntheticSpread ? { syntheticSpread: true } : {})
@@ -882,7 +970,6 @@ class TestBrokerGateway implements BrokerGateway {
           provider: "test"
         };
       } else {
-        // Fall back to a default simulated price rather than crashing the client's position display
         result[symbol] = {
           symbol,
           price: 100,
@@ -908,15 +995,23 @@ class TestBrokerGateway implements BrokerGateway {
     return { estimatedNotional: input.dollarAmount ?? (input.quantity ?? 0) * estPrice, alerts: [], raw: { test: true } };
   }
 
-  async placeEquityOrder(input: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+  async placeEquityOrder(rawInput: EquityOrderInput & { refId: string }): Promise<ExecutedOrder> {
+    const input = normalizeVenueOrder(rawInput, "robinhood", this.userId) as typeof rawInput;
     const quotes = await this.getEquityQuotes(input.accountNumber, [input.symbol]);
     const price = quotes[normalizeSymbol(input.symbol)]?.price ?? 100;
     const estPrice = input.limitPrice ?? input.stopPrice ?? price;
-    const quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let quantity = input.quantity ?? (input.dollarAmount ? input.dollarAmount / estPrice : undefined);
+    let state = "filled";
+    if (input.symbol === "REJECT") {
+      throw new Error("Simulated rejection for REJECT symbol");
+    } else if (input.symbol === "PARTIAL") {
+      state = "partially_filled";
+      quantity = quantity ? quantity / 2 : undefined;
+    }
     return {
       orderId: `test-${input.refId}`,
       refId: input.refId,
-      state: "filled",
+      state,
       filledQuantity: quantity,
       averagePrice: estPrice,
       raw: { test: true }
@@ -924,6 +1019,30 @@ class TestBrokerGateway implements BrokerGateway {
   }
 
   async cancelEquityOrder(_accountNumber: string, orderId: string): Promise<ExecutedOrder> {
+    return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { test: true } };
+  }
+
+  async placeOptionOrder(input: {
+    accountNumber: string;
+    occSymbol: string;
+    intent: "buy_to_open" | "sell_to_close" | "buy_to_close" | "sell_to_open";
+    quantity: number;
+    type: "market" | "limit";
+    limitPrice?: number;
+    timeInForce?: import("./types").TimeInForce;
+    refId: string;
+  }): Promise<ExecutedOrder> {
+    return {
+      orderId: `test-opt-${input.refId}`,
+      refId: input.refId,
+      state: "filled",
+      filledQuantity: input.quantity,
+      averagePrice: input.limitPrice ?? 2.5,
+      raw: { test: true }
+    };
+  }
+
+  async cancelOptionOrder(_accountNumber: string, orderId: string): Promise<ExecutedOrder> {
     return { orderId, refId: crypto.randomUUID(), state: "cancel_requested", raw: { test: true } };
   }
 }
@@ -963,6 +1082,13 @@ export function toMcpOrder(input: EquityOrderInput): Record<string, unknown> {
   //   - EXITS (sell): a limit/take-profit exit must rest at its requested price or be rejected upstream;
   //     silently turning it into market would liquidate immediately.
   //   - Whole-share orders (integer quantity >= 1): preserved as-is so marketable-limit entries work.
+  //
+  // This is the same coercion `normalizeVenueOrder()` performs for the audited
+  // entry-point call in `placeEquityOrder()`; we keep it inline here too so direct
+  // callers (tests, the `reviewEquityOrder()` pre-flight, anything that bypasses
+  // the gateway) get the same shape the broker will eventually receive. The two
+  // paths are idempotent — calling normalizeVenueOrder first and then toMcpOrder
+  // is a no-op the second time.
   const wholeShare = input.quantity != null && Number.isInteger(input.quantity) && input.quantity >= 1;
   const fractional =
     !wholeShare && ((input.dollarAmount != null && input.dollarAmount > 0) || (input.quantity != null && input.quantity > 0));
@@ -1004,12 +1130,23 @@ export function robinhoodMcpDataEnabled(): boolean {
  * a missing userId used to silently resolve the operator's ('local') broker token for
  * every tenant (cross-user credential leak). Background/shared callers that have no
  * user in scope must NOT call this at all (see `fetchDailyOHLC`, which omits the
- * private broker tier when no userId is provided). When `ROBINHOOD_MCP_AUTH_TOKEN`
- * is set the per-user lookup is bypassed anyway.
+ * private broker tier when no userId is provided).  `ROBINHOOD_MCP_AUTH_TOKEN` is a
+ * boot seed into the operator (`local`) stored row, not a live getMcpAccessToken
+ * bypass.  Peer intraday may pass userId `local` only after APP_B_INGEST_TOKEN.
  */
 export async function fetchRobinhoodHistoricals(
   symbol: string,
-  opts: { interval?: string; span?: string; userId: string }
+  opts: {
+    interval?: string;
+    span?: string;
+    userId: string;
+    /** Explicit RFC3339 window. When given, `startTime` wins over the `span` shorthand and
+     *  `endTime` bounds the far end — required for INTRADAY reads, where "5 years back until
+     *  now" would blow past the row cap long before reaching the minute of interest. */
+    startTime?: string;
+    endTime?: string;
+    bounds?: string;
+  }
 ): Promise<OHLCBar[] | null> {
   if (!robinhoodMcpDataEnabled()) return null;
   const sym = normalizeSymbol(symbol);
@@ -1018,16 +1155,35 @@ export async function fetchRobinhoodHistoricals(
   try {
     const raw = await callRobinhoodMcpTool(userId, "get_equity_historicals", {
       symbols: [sym],
-      symbol: sym,
+      start_time: opts.startTime ?? robinhoodHistoricalsStartTime(opts.span ?? "5year"),
+      ...(opts.endTime ? { end_time: opts.endTime } : {}),
       interval: opts.interval ?? "day",
-      span: opts.span ?? "5year",
-      bounds: "regular"
+      bounds: opts.bounds ?? "regular"
     });
     const bars = parseRobinhoodHistoricals(raw, sym);
-    return bars.length >= 2 ? bars : null;
+    // The >=2 floor exists so a single stale print cannot satisfy the DAILY cascade. An explicit
+    // intraday window is a different question ("what traded between 14:40 and 15:40"), where one
+    // bar is a legitimate answer for a thin name — so only apply the floor to span-style reads.
+    const minBars = opts.startTime ? 1 : 2;
+    return bars.length >= minBars ? bars : null;
   } catch {
     return null;
   }
+}
+
+/** Convert the legacy `span` knob (e.g. `5year`) into the RFC3339 `start_time` the live MCP requires. */
+export function robinhoodHistoricalsStartTime(span: string, nowMs = Date.now()): string {
+  const raw = String(span || "5year").trim().toLowerCase();
+  const match = raw.match(/^(\d+)?(year|month|week|day)s?$/);
+  const count = match?.[1] ? Number(match[1]) : 1;
+  const unit = match?.[2] ?? "year";
+  const dayMs = 24 * 60 * 60 * 1000;
+  const ms =
+    unit === "year" ? count * 365.25 * dayMs
+    : unit === "month" ? count * 30 * dayMs
+    : unit === "week" ? count * 7 * dayMs
+    : count * dayMs;
+  return new Date(nowMs - ms).toISOString();
 }
 
 /** Defensive parser for Robinhood historicals — tolerates several envelope shapes. */
@@ -1075,26 +1231,34 @@ export function parseRobinhoodHistoricals(raw: unknown, symbol: string): OHLCBar
  * the request-scoped identity. There is deliberately no `DEV_USER_ID` default: a missing
  * userId used to silently resolve the operator's ('local') broker token for every tenant
  * (cross-user credential leak). Enrichment callers with no user in scope must fail closed
- * rather than borrow 'local' (see `RobinhoodEnrichmentProvider`). When
- * `ROBINHOOD_MCP_AUTH_TOKEN` is set the per-user lookup is bypassed anyway.
+ * rather than borrow 'local' (see `RobinhoodEnrichmentProvider`).  There is no
+ * env-token bypass of getMcpAccessToken.
  */
 export async function fetchRobinhoodFundamentals(symbols: string[], userId: string): Promise<Record<string, Record<string, unknown>>> {
   if (!robinhoodMcpDataEnabled()) return {};
   const wanted = Array.from(new Set(symbols.map(normalizeSymbol).filter(Boolean)));
   if (wanted.length === 0) return {};
-  try {
-    const raw = await callRobinhoodMcpTool(userId, "get_equity_fundamentals", { symbols: wanted });
-    const root = raw as Record<string, unknown> | undefined;
-    const rows = Array.isArray(root?.results) ? root!.results : Array.isArray(root?.fundamentals) ? root!.fundamentals : Array.isArray(raw) ? (raw as unknown[]) : [];
-    const out: Record<string, Record<string, unknown>> = {};
-    for (const row of rows as Array<Record<string, unknown>>) {
-      const sym = normalizeSymbol(String(row.symbol ?? row.ticker ?? ""));
-      if (sym) out[sym] = row;
+  return mapRobinhoodSymbolChunks(wanted, async (chunk) => {
+    try {
+      const raw = await callRobinhoodMcpTool(userId, "get_equity_fundamentals", { symbols: chunk });
+      const root = raw as Record<string, unknown> | undefined;
+      const rows = Array.isArray(root?.results)
+        ? root!.results
+        : Array.isArray(root?.fundamentals)
+          ? root!.fundamentals
+          : Array.isArray(raw)
+            ? (raw as unknown[])
+            : [];
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const row of rows as Array<Record<string, unknown>>) {
+        const sym = normalizeSymbol(String(row.symbol ?? row.ticker ?? ""));
+        if (sym) out[sym] = row;
+      }
+      return out;
+    } catch {
+      return {};
     }
-    return out;
-  } catch {
-    return {};
-  }
+  });
 }
 
 /**
@@ -1115,21 +1279,18 @@ export async function fetchRobinhoodOptionChain(
   const sym = normalizeSymbol(symbol);
   if (!sym || !userId) return null;
   try {
-    // `underlying_symbol` is the argument the Robinhood MCP option tools expect (the chat orchestrator's
-    // caller uses it too). `symbol`/`symbols` are sent alongside for tolerance across MCP server variants;
-    // a server that requires `underlying_symbol` would otherwise throw and yield no metrics.
+    // Live MCP schemas are additionalProperties:false. get_option_chains accepts only
+    // ids / underlying_symbol; get_option_instruments wants chain_symbol (not symbol/symbols).
+    // Sending both shapes used to 400 the whole lane: unexpected additional properties
+    // ["symbol" "symbols"] — Pushover/Sentry SOCRATIC-TRADE-K / GH #2576.
     const chains = await callRobinhoodMcpTool(userId, "get_option_chains", {
-      underlying_symbol: sym,
-      symbol: sym,
-      symbols: [sym]
+      underlying_symbol: sym
     });
     let instruments: unknown = undefined;
     try {
       instruments = await callRobinhoodMcpTool(userId, "get_option_instruments", {
-        underlying_symbol: sym,
-        symbol: sym,
-        symbols: [sym],
-        ...(opts.expiration ? { expiration_date: opts.expiration } : {}),
+        chain_symbol: sym,
+        ...(opts.expiration ? { expiration_dates: opts.expiration } : {}),
         ...(opts.type ? { type: opts.type } : {})
       });
     } catch {

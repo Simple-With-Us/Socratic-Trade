@@ -105,7 +105,7 @@ export function isLiveExitOrder(order: EquityOrder, positionSide: "long" | "shor
 
 // The broker-reported order-class families that mean "this leg is one half of a bracket/OCO pair,
 // not a standalone order" (Alpaca `order_class`). Case-insensitive match against EquityOrder.orderClass.
-const BRACKET_ORDER_CLASSES = new Set(["bracket", "oco", "oto"]);
+const BRACKET_ORDER_CLASSES = new Set(["bracket", "oco", "oto", "otoco"]);
 
 export function isBracketOrderClass(orderClass: string | undefined): boolean {
   return typeof orderClass === "string" && BRACKET_ORDER_CLASSES.has(orderClass.trim().toLowerCase());

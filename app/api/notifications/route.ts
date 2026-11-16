@@ -1,4 +1,4 @@
-import { resolveRequestUserId } from "@/lib/request-user";
+import { resolveRequestUserIdOrResponse } from "@/lib/request-user";
 import { getNotifyPrefs, setNotifyPrefs } from "@/lib/db";
 import { describeChannels, loadUserNotifyConfig } from "@/lib/notify";
 import { NextResponse } from "next/server";
@@ -6,7 +6,8 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const userId = resolveRequestUserId(request);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   // Availability reflects the user's OWN stored channel credentials as well as
   // server env — per-user Pushover/Twilio creds (Settings → Delivery) make a
   // channel available even when the server operator configured nothing.
@@ -25,8 +26,10 @@ export async function POST(request: Request) {
     twilioAccountSid?: unknown;
     twilioAuthToken?: unknown;
     twilioFrom?: unknown;
+    watchlistDigestEnabled?: unknown;
     userId?: unknown;
   };
-  const userId = resolveRequestUserId(request, body);
+  const userId = resolveRequestUserIdOrResponse(request);
+  if (userId instanceof Response) return userId;
   return NextResponse.json({ prefs: setNotifyPrefs(userId, body) });
 }

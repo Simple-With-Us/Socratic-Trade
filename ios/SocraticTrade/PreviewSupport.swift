@@ -56,6 +56,10 @@ enum PreviewFixtures {
       "connectedAccounts":[{"id":"account-1","label":"Primary Brokerage","broker":"robinhood","environment":"live","accountNumber":"••4812","isActive":true}],
       "watchlist":[{"symbol":"TSLA","addedAt":"2026-07-20T15:00:00.000Z"},{"symbol":"META","addedAt":"2026-07-20T15:05:00.000Z"}],
       "alerts":[{"id":"alert-1","symbol":"NVDA","op":">","price":190,"note":"Breakout level","status":"armed","createdAt":"2026-07-20T15:10:00.000Z"}],
+      "notifications":[
+        {"id":"note-1","createdAt":"2026-07-21T17:18:00.000Z","type":"pending_approval","title":"Buy MSFT Awaiting Approval","body":"Sent","read":false,"connectedAccountId":"account-1","accountLabel":"Primary Brokerage"},
+        {"id":"note-2","createdAt":"2026-07-21T16:40:00.000Z","type":"fill","title":"Bought AAPL","body":"Sent","read":true,"connectedAccountId":"account-1","accountLabel":"Primary Brokerage"}
+      ],
       "recentCommands":[{"id":"command-1","commandType":"strategy.run_once","status":"succeeded","createdAt":"2026-07-21T17:15:00.000Z","updatedAt":"2026-07-21T17:16:00.000Z"}]
     }
     """#

@@ -11,11 +11,34 @@
  * (the cascade imports this module after merge).
  */
 
+/**
+ * QuiverQuant direct-access carrier fields (lane retired 2026-08-04; provider never registered).
+ * Excluded from coverage percentages so the admin board is not pinned at zero on dormant fields.
+ */
+export const COVERAGE_RETIRED_LANE_FIELDS = [
+  "congressTradesQuiver",
+  "insiderTradesQuiver",
+  "govContractsQuiver",
+  "lobbyingQuiver",
+  "patentsQuiver"
+] as const;
+
+export type CoverageRetiredLaneField = (typeof COVERAGE_RETIRED_LANE_FIELDS)[number];
+
+const COVERAGE_RETIRED_LANE_FIELD_SET = new Set<string>(COVERAGE_RETIRED_LANE_FIELDS);
+
 /** Scalar fields we track for "did the cascade fill this?" reporting. */
 export const COVERAGE_TRACKED_FIELDS = [
   "price",
   "bid",
   "ask",
+  "bidSize",
+  "askSize",
+  "prevClose",
+  "open",
+  "high",
+  "low",
+  "netChange",
   "intradayChangePct",
   "vwap",
   "asOf",
@@ -25,6 +48,8 @@ export const COVERAGE_TRACKED_FIELDS = [
   "sector",
   "industry",
   "volume",
+  "marketCap",
+  "sharesOutstanding",
   "dividendYield",
   "eps",
   "companyName",
@@ -50,15 +75,13 @@ export const COVERAGE_TRACKED_FIELDS = [
   "returnOnAssets",
   "revenueGrowth",
   "freeCashFlowYield",
-  "grossProfitMargin",
-  "congressTradesQuiver",
-  "insiderTradesQuiver",
-  "govContractsQuiver",
-  "lobbyingQuiver",
-  "patentsQuiver"
+  "grossProfitMargin"
 ] as const;
 
 export type CoverageTrackedField = (typeof COVERAGE_TRACKED_FIELDS)[number];
+
+/** Near-the-money IV and put/call ratio — specialty options fields (Cboe / Alpaca / Tradier / Robinhood). */
+export const COVERAGE_OPTIONS_METRICS_FIELDS: readonly CoverageTrackedField[] = ["nearTheMoneyIv", "putCallRatio"];
 
 /**
  * Core fields that free/keyless + RapidAPI failover are expected to cover for a useful scan.
@@ -101,6 +124,116 @@ export const COVERAGE_GAP_FIELDS: readonly string[] = [
   "headlines"
 ];
 
+/**
+ * Scan-useful fields that justify Wave B (keyed non-scarce) spend.  The gate
+ * drops quote microstructure (bid/ask/vwap/asOf), news (headlines/sentiment —
+ * Alpaca Wave A owns those), and specialty (insiderSentiment, epsGrowth,
+ * leverage, ROA/ROE, FCF, institution %) so Yahoo filling the scan core does
+ * not force Finnhub/ROIC on every symbol.  Insider gaps stay Wave C.
+ * Keep COVERAGE_GAP_FIELDS for reports.
+ */
+export const WAVE_B_GAP_FIELDS: readonly string[] = [
+  "price",
+  "intradayChangePct",
+  "peRatio",
+  "analystRating",
+  "sector",
+  "industry",
+  "volume",
+  "dividendYield",
+  "eps",
+  "companyName",
+  "pbRatio",
+  "shortPercentOfFloat",
+  "beta",
+  "fiftyTwoWeekHigh",
+  "fiftyTwoWeekLow",
+  "daysToEarnings"
+];
+
+/** RapidAPI last-resort must not spend quota on news.  Alpaca (Wave A) + Finnhub (Wave B) own that. */
+const SCARCE_EXCLUDE_FIELDS = new Set(["headlines", "sentiment"]);
+
+/** Price-family + profile fields that justify a SteadyAPI / YH-15 quote or modules call. */
+export const STEADY_API_USEFUL_FIELDS: readonly string[] = ["price", "volume", "sector", "industry"];
+
+/** AV RapidAPI OVERVIEW spend is justified by these core fund fields, not epsGrowth alone. */
+export const AV_RAPIDAPI_OVERVIEW_CORE_FIELDS: readonly string[] = [
+  "peRatio",
+  "dividendYield",
+  "eps",
+  "sector",
+  "industry",
+  "pbRatio",
+  "beta",
+  "fiftyTwoWeekHigh",
+  "fiftyTwoWeekLow"
+];
+
+const WAVE_B_GAP_FIELD_SET = new Set<string>(WAVE_B_GAP_FIELDS);
+
+/**
+ * Narrow field subset that justifies dispatching a scarce Wave C provider.
+ * Full `suppliesFields` is too wide (52w, companyName, epsGrowth, targets) and
+ * burns RapidAPI quote-only calls after Yahoo already filled the scan core.
+ */
+export function scarceProviderUsefulFields(
+  providerName: string,
+  suppliesFields: readonly string[]
+): readonly string[] {
+  const supply = new Set(suppliesFields);
+  const pick = (keys: readonly string[]): string[] => keys.filter((key) => supply.has(key));
+  if (
+    providerName === "mboum-finance" ||
+    providerName === "yahoo-finance15" ||
+    providerName === "yh-finance-apidojo"
+  ) {
+    return pick(STEADY_API_USEFUL_FIELDS);
+  }
+  if (providerName === "alpha-vantage-rapidapi") {
+    return pick(AV_RAPIDAPI_OVERVIEW_CORE_FIELDS);
+  }
+  if (providerName === "filingapi") {
+    // Insiders RapidAPI already owns insiderSentiment; do not double-spend the
+    // FilingAPI trial key on the same gap.
+    return pick(["companyName", "sector", "industry", "daysToEarnings"]);
+  }
+  if (providerName === "marketaux") {
+    // News specialist, not a RapidAPI quote last-resort.
+    return pick(["headlines", "sentiment"]);
+  }
+  const useful = suppliesFields.filter(
+    (field) => WAVE_B_GAP_FIELD_SET.has(field) && !SCARCE_EXCLUDE_FIELDS.has(field)
+  );
+  return useful.length > 0 ? useful : suppliesFields.filter((field) => !SCARCE_EXCLUDE_FIELDS.has(field));
+}
+
+/** True when a scarce provider can still add a scan-useful field for this symbol. */
+export function scarceProviderHasUsefulGap(
+  providerName: string,
+  suppliesFields: readonly string[],
+  filled: ReadonlySet<string>
+): boolean {
+  const useful = scarceProviderUsefulFields(providerName, suppliesFields);
+  if (useful.length === 0) return false;
+  return useful.some((field) => !filled.has(field));
+}
+
+/**
+ * Wave B paid providers still fire when ANY of suppliesFields is empty, including
+ * bid/ask/vwap.  Intersect with WAVE_B_GAP_FIELDS so Finnhub does not run a quote
+ * just because microstructure is missing on a symbol that already has a scan-core gap
+ * (e.g. daysToEarnings).  Providers that declare no suppliesFields stay ungated.
+ */
+export function paidProviderHasUsefulWaveBGap(
+  suppliesFields: readonly string[],
+  filled: ReadonlySet<string>
+): boolean {
+  const useful = suppliesFields.filter((field) => WAVE_B_GAP_FIELD_SET.has(field));
+  if (useful.length === 0) return false;
+  return useful.some((field) => !filled.has(field));
+}
+
 export interface EnrichmentFieldCoverage {
   field: string;
   filledCount: number;
@@ -123,6 +256,11 @@ export interface EnrichmentProviderFailureSummary {
 export interface EnrichmentCoverageReport {
   asOf: string;
   symbolCount: number;
+  /**
+   * Carrier fields excluded from fill scoring and the admin table (direct vendor retired;
+   * no registered producer). Documented for API consumers; not shown as 0% gaps.
+   */
+  retiredLaneFields?: readonly CoverageRetiredLaneField[];
   /** Fields with at least one fill opportunity, sorted by fillRate desc then name. */
   fields: EnrichmentFieldCoverage[];
   /** Fields with fillRate === 0 across the whole batch. */
@@ -155,12 +293,69 @@ function recordField(record: EnrichmentCoverageRecord | undefined, field: string
 
 let lastCoverageReport: EnrichmentCoverageReport | null = null;
 
+// The coverage persist is scheduled as a fire-and-forget dynamic import, and
+// persistEnrichmentCoverageReport resolves the database it writes to when the write lands,
+// not when it was scheduled.  A test file that restores DATABASE_URL while that write is still
+// in flight therefore has the write land in the database the worker is pointing at by then,
+// which is the shared one.  These handles let such a file wait for the pending write before it
+// restores anything.
+//
+// The handles live on globalThis because a test file can call vi.resetModules(), which replaces
+// this module's instance and would otherwise orphan a promise that is still pending.
+interface PendingPersistHost {
+  __socraticPendingCoveragePersists?: Set<Promise<void>>;
+}
+
+function pendingPersists(): Set<Promise<void>> {
+  const host = globalThis as unknown as PendingPersistHost;
+  if (!host.__socraticPendingCoveragePersists) {
+    host.__socraticPendingCoveragePersists = new Set<Promise<void>>();
+  }
+  return host.__socraticPendingCoveragePersists;
+}
+
 export function getLastEnrichmentCoverageReport(): EnrichmentCoverageReport | null {
   return lastCoverageReport;
 }
 
 export function setLastEnrichmentCoverageReport(report: EnrichmentCoverageReport | null): void {
   lastCoverageReport = report;
+  if (!report) return;
+  const handles = pendingPersists();
+  const pending: Promise<void> = import("./db-enrichment-coverage")
+    .then((mod) => {
+      // persistEnrichmentCoverageReport is synchronous.  It resolves the database, opens the
+      // handle and writes the rows inside a better-sqlite3 transaction, and returns void, so
+      // the write has landed by the time this callback returns and the tracked promise settles
+      // only after it.  The asynchronous part is the dynamic import above, and that is what
+      // makes the tracked promise worth awaiting: the module resolves the database only when
+      // the write lands, which is why a teardown that restores DATABASE_URL before this
+      // promise settles hands the write to the wrong database.
+      mod.persistEnrichmentCoverageReport(report);
+    })
+    .catch(() => {
+      // Best-effort durability — never break a cascade run (tests may omit DB).
+    });
+  handles.add(pending);
+  void pending.then(() => {
+    handles.delete(pending);
+  });
+}
+
+/** Test helper — waits for every coverage persist that is still in flight.
+ *
+ *  The persist is scheduled as a fire-and-forget dynamic import, so it can still be pending
+ *  when the calling file's teardown runs.  A file that restores DATABASE_URL before the write
+ *  lands would have the write land in the shared database instead of its own.  Call this
+ *  before restoring, while the file's own database is still the target.
+ */
+export async function __awaitPendingEnrichmentCoveragePersist(): Promise<void> {
+  // The loop covers a persist that schedules another one while it settles.
+  while (true) {
+    const handles = [...pendingPersists()];
+    if (handles.length === 0) return;
+    await Promise.all(handles);
+  }
 }
 
 /** Test helper — clears the in-memory last-report slot. */
@@ -173,6 +368,34 @@ export function isFilledEnrichmentValue(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "string") return value.trim().length > 0;
   return true;
+}
+
+/**
+ * Strip retired-lane rows from a coverage report (e.g. durable rows written before ST-3854).
+ * Idempotent for reports already built without those fields.
+ */
+export function sanitizeEnrichmentCoverageReport(
+  report: EnrichmentCoverageReport
+): EnrichmentCoverageReport {
+  const fields = report.fields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f.field));
+  const missingFields = report.missingFields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f));
+  const partialFields = report.partialFields.filter((f) => !COVERAGE_RETIRED_LANE_FIELD_SET.has(f));
+  const retiredLaneFields = report.retiredLaneFields ?? [...COVERAGE_RETIRED_LANE_FIELDS];
+  if (
+    fields.length === report.fields.length &&
+    missingFields.length === report.missingFields.length &&
+    partialFields.length === report.partialFields.length &&
+    report.retiredLaneFields
+  ) {
+    return report;
+  }
+  return {
+    ...report,
+    fields,
+    missingFields,
+    partialFields,
+    retiredLaneFields
+  };
 }
 
 function mostFrequent(counts: Record<string, number>): string | null {
@@ -289,6 +512,7 @@ export function buildEnrichmentCoverageReport(
   const report: EnrichmentCoverageReport = {
     asOf,
     symbolCount: totalSymbols,
+    retiredLaneFields: [...COVERAGE_RETIRED_LANE_FIELDS],
     fields,
     missingFields: missingFields.sort(),
     partialFields: partialFields.sort(),
@@ -297,7 +521,7 @@ export function buildEnrichmentCoverageReport(
     contributingSources: [...contributingSources],
     headlines
   };
-  lastCoverageReport = report;
+  setLastEnrichmentCoverageReport(report);
   return report;
 }
 
@@ -318,6 +542,10 @@ export function collectFilledFields(
       }
       if (!isFilledEnrichmentValue(value)) continue;
       filled.add(key);
+      // Yahoo writes recommendationMean as analystBySource, not analystRating.
+      // Treating them as the same scan-core fill stops Wave B on every symbol.
+      if (key === "analystBySource") filled.add("analystRating");
+      if (key === "analystRating") filled.add("analystBySource");
     }
   }
   return filled;

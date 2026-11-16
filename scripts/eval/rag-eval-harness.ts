@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { getDb } from "../../src/lib/db";
-import { retrieveFusedContext } from "../../src/lib/rag/search-fusion";
+import { retrieveContextDetailed } from "../../src/lib/vector-db";
+import { resolveRetrievalAsOf } from "../../src/lib/rag/retrieval-asof";
 
 interface GoldenSetItem {
   id: string;
@@ -51,13 +52,22 @@ export async function runEvaluationHarness() {
     }
     evaluated++;
 
-    // Retrieve top 50 fused context results
-    const results = await retrieveFusedContext(item.query, symbol, 50);
+    // Production path only.  Search-fusion is research/eval-only and must not be the
+    // merge-gate retriever — Green/Red/chat call retrieveContextDetailed.
+    const results = await retrieveContextDetailed(item.query, symbol, 50, "local", {
+      asOf: resolveRetrievalAsOf(),
+      strictAsOf: true,
+      applyDefaultFloors: true
+    });
 
     let rank = -1;
     for (let i = 0; i < results.length; i++) {
-      const textMatches = results[i].text.toLowerCase().includes(item.expected_text_snippet.toLowerCase());
-      const accMatches = results[i].accession === item.expected_accession;
+      const chunk = results[i]!;
+      const textMatches = chunk.text.toLowerCase().includes(item.expected_text_snippet.toLowerCase());
+      const accession =
+        (typeof chunk.metadata?.accession === "string" && chunk.metadata.accession) ||
+        (chunk.id.includes(item.expected_accession) ? item.expected_accession : "");
+      const accMatches = accession === item.expected_accession;
       if (textMatches && accMatches) {
         rank = i + 1; // 1-indexed rank
         break;

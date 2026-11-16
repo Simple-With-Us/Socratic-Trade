@@ -154,4 +154,20 @@ describe("interactive scan single-flight", () => {
     expect(marketScanQuotesFromAudit({ marketScan: { quotesBySymbol: quotes } }, fridayRun, mondayMorning)).toBe(quotes);
     expect(marketScanQuotesFromAudit({ marketScan: { quotesBySymbol: quotes } }, fridayRun, tuesdayMorning)).toBeUndefined();
   });
+
+  it("keeps valid seed rows when one quote in a large map is malformed", () => {
+    const quotes = {
+      AAPL: { symbol: "AAPL", price: 91, score: 44 },
+      BAD: { symbol: "BAD", price: "x", score: 1 },
+      MSFT: { symbol: "MSFT", price: 400, score: 50 }
+    };
+    const recent = "2026-07-15T00:00:00.000Z";
+    const now = Date.parse("2026-07-15T00:00:01.000Z");
+    const kept = marketScanQuotesFromAudit({ marketScan: { quotesBySymbol: quotes } }, recent, now);
+    expect(kept).toEqual({
+      AAPL: quotes.AAPL,
+      MSFT: quotes.MSFT
+    });
+    expect(kept).not.toBe(quotes);
+  });
 });

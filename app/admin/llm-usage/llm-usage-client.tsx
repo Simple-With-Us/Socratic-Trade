@@ -20,6 +20,12 @@ interface UsageRow {
   completionTokens: number;
   totalTokens: number;
   costUsd: number;
+  /** Portion of costUsd taken from the transport's own billed amount (OpenRouter `usage.cost`). */
+  billedCostUsd: number;
+  /** Portion of costUsd derived from the app's price table — an estimate, labelled as one. */
+  estimatedCostUsd: number;
+  billedCalls: number;
+  estimatedCalls: number;
   connectedAccountId: string | null;
   broker: string | null;
   environment: string | null;
@@ -33,6 +39,8 @@ interface UsageData {
   sinceDays: number;
   operatorFallbackEnabled: boolean;
   totalCostUsd: number;
+  billedCostUsd: number;
+  estimatedCostUsd: number;
   operatorFundedCostUsd: number;
   operatorFundedTenants: string[];
   rows: UsageRow[];
@@ -72,6 +80,44 @@ function providerLabel(provider: string): string {
 
 function userLabel(userId: string): string {
   return userId === "local" ? "Primary User" : userId;
+}
+
+/**
+ * How a cost figure was arrived at, for one row or one rollup.  "billed" means the number came
+ * from the transport's own charge for that call; "estimated" means it was priced from the app's
+ * model price table.  Never present a mixture as one authoritative number — say it is mixed.
+ */
+type CostBasis = "billed" | "estimated" | "mixed" | "none";
+
+function costBasisOf(billedCalls: number, estimatedCalls: number): CostBasis {
+  if (billedCalls > 0 && estimatedCalls > 0) return "mixed";
+  if (billedCalls > 0) return "billed";
+  if (estimatedCalls > 0) return "estimated";
+  return "none";
+}
+
+const COST_BASIS_LABEL: Record<CostBasis, string> = {
+  billed: "billed",
+  estimated: "estimated",
+  mixed: "part billed",
+  none: ""
+};
+
+const COST_BASIS_TITLE: Record<CostBasis, string> = {
+  billed: "Charged amount reported by OpenRouter for these calls.",
+  estimated: "Estimated from the app's model price table.  Not a billed amount.",
+  mixed: "Some calls report a charged amount; the rest are priced from the app's model price table.",
+  none: ""
+};
+
+/** Small inline provenance tag.  Renders nothing when there is no cost to qualify. */
+function CostBasisTag({ basis }: { basis: CostBasis }) {
+  if (basis === "none") return null;
+  return (
+    <span className="con-chip" title={COST_BASIS_TITLE[basis]}>
+      {COST_BASIS_LABEL[basis]}
+    </span>
+  );
 }
 
 function keySourceLabel(source: string): string {
@@ -148,6 +194,10 @@ function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
   const totalCalls = rows.reduce((s, r) => s + r.calls, 0);
   const totalIn = rows.reduce((s, r) => s + r.promptTokens, 0);
   const totalOut = rows.reduce((s, r) => s + r.completionTokens, 0);
+  const groupBasis = costBasisOf(
+    rows.reduce((s, r) => s + r.billedCalls, 0),
+    rows.reduce((s, r) => s + r.estimatedCalls, 0)
+  );
 
   return (
     <Card>
@@ -162,7 +212,10 @@ function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
         </div>
         <div className="shrink-0 text-right">
           <div className="con-num text-lg font-semibold">{fmtTotalCost(totalCost)}</div>
-          <div className="text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">{totalCalls} call{totalCalls !== 1 ? "s" : ""}</div>
+          <div className="flex items-center justify-end gap-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]">
+            <span>{totalCalls} call{totalCalls !== 1 ? "s" : ""}</span>
+            <CostBasisTag basis={groupBasis} />
+          </div>
         </div>
       </div>
 
@@ -191,7 +244,13 @@ function UsageGroupCard({ groupRows: rows }: { groupRows: UsageRow[] }) {
               <div className="con-mono flex items-center gap-3 text-[color:var(--con-muted)]">
                 <span title="prompt tokens">{fmtTokens(r.promptTokens)}↑</span>
                 <span title="completion tokens">{fmtTokens(r.completionTokens)}↓</span>
-                <span className="text-[color:var(--con-fg)]">{fmtCost(r.costUsd)}</span>
+                <span
+                  className="text-[color:var(--con-fg)]"
+                  title={COST_BASIS_TITLE[costBasisOf(r.billedCalls, r.estimatedCalls)]}
+                >
+                  {fmtCost(r.costUsd)}
+                  {costBasisOf(r.billedCalls, r.estimatedCalls) === "billed" ? "" : "*"}
+                </span>
               </div>
             </div>
           ))}
@@ -213,7 +272,7 @@ function ModelBreakdownCard({ models }: { models: ModelUsageAggregate[] }) {
       </div>
       <p className="mb-3 text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-faint)]">
         Calls for the same model are combined here whether they were routed through OpenRouter or sent
-        directly to the provider. The breakdown shows each route so earlier direct-provider usage stays visible.
+        directly to the provider.  The breakdown shows each route so earlier direct-provider usage stays visible.
       </p>
       <div className="space-y-1">
         {models.map((m) => {
@@ -337,6 +396,14 @@ export function LlmUsageClient({
   const filteredFailoverCost = filteredRows.filter((r) => r.keySource === "operator").reduce((s, r) => s + r.costUsd, 0);
   const filteredCalls = filteredRows.reduce((s, r) => s + r.calls, 0);
   const filteredTokens = filteredRows.reduce((s, r) => s + r.totalTokens, 0);
+  // Cost provenance for the headline tile.  A total that mixes charged amounts with price-table
+  // estimates must say so — the two are not the same kind of number and the estimate can drift
+  // from real spend without limit.
+  const filteredBilledCost = filteredRows.reduce((s, r) => s + r.billedCostUsd, 0);
+  const filteredEstimatedCost = filteredRows.reduce((s, r) => s + r.estimatedCostUsd, 0);
+  const filteredBilledCalls = filteredRows.reduce((s, r) => s + r.billedCalls, 0);
+  const filteredEstimatedCalls = filteredRows.reduce((s, r) => s + r.estimatedCalls, 0);
+  const filteredBasis = costBasisOf(filteredBilledCalls, filteredEstimatedCalls);
 
   return (
     <div className="space-y-6">
@@ -398,7 +465,17 @@ export function LlmUsageClient({
               <Stat
                 label="Total cost"
                 value={fmtTotalCost(filteredTotalCost)}
-                sub={accountFilter === "all" ? `last ${days}d` : `filtered · ${days}d`}
+                sub={
+                  filteredBasis === "mixed"
+                    ? `${fmtTotalCost(filteredBilledCost)} billed + ${fmtTotalCost(filteredEstimatedCost)} estimated`
+                    : filteredBasis === "estimated"
+                      ? `estimated · ${accountFilter === "all" ? `last ${days}d` : `filtered · ${days}d`}`
+                      : filteredBasis === "billed"
+                        ? `billed · ${accountFilter === "all" ? `last ${days}d` : `filtered · ${days}d`}`
+                        : accountFilter === "all"
+                          ? `last ${days}d`
+                          : `filtered · ${days}d`
+                }
               />
             </div>
             <div className="con-tile">
@@ -435,6 +512,16 @@ export function LlmUsageClient({
               {groupList.map((rows, i) => (
                 <UsageGroupCard key={i} groupRows={rows} />
               ))}
+            </div>
+          )}
+
+          {filteredEstimatedCalls > 0 && (
+            <div className="con-tile text-[length:var(--con-fs-xs)] leading-relaxed text-[color:var(--con-muted)]">
+              An asterisk marks a cost this app priced from its own model price table rather than a
+              charge the provider reported.  OpenRouter returns the amount it charged on every
+              response, so those lines are the real figure; direct-provider calls and calls recorded
+              before cost reporting was stored are priced from the table and can drift from the
+              provider&rsquo;s invoice.
             </div>
           )}
 

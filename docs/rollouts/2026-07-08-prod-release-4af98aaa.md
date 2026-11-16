@@ -27,7 +27,7 @@ stays OFF.
 ## Mechanics / verification
 
 - Pre-checks: app `running:healthy`, no running/queued deployments (box builds
-  serialize, `concurrent_builds=1`); deploy announced on #agent-sync first.
+  serialize, `concurrent_builds=1`); deploy announced on #ag***-s**c first.
 - Trigger: `POST /api/v1/deploy?uuid=m1os7ijf31bg3fanil152e4b` → deployment
   `rjskkyzxfhg698gmu9b0x0yb`; polled to `finished`.
 - Verified: deployment record commit = `4af98aaa` (== `origin/main` HEAD), app
