@@ -8,7 +8,7 @@
 // the generated pbxproj, the profile map, and the entitlements to each other,
 // and drive ship-testflight.sh against a stub xcodebuild to prove manual mode
 // never asks Xcode's provisioning service for anything.
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,7 +23,7 @@ const entitlements = read("ios/SocraticTrade/SocraticTrade.entitlements");
 const profileMap = JSON.parse(read("ios/appstore-profiles.json")) as Record<string, string>;
 const workflow = read(".github/workflows/ios-ship.yml");
 const installer = read("scripts/ios-install-appstore-profiles.sh");
-const PROFILE = "Socratic Trade App Store (API)";
+const PROFILE = "Socratic Trade App Store (API) 2";
 
 /** Build-settings blocks of the app target's XCBuildConfigurations, keyed by name. */
 function appTargetConfigs(): Record<string, string> {
@@ -114,9 +114,9 @@ describe("Socratic Trade manual Release signing: config agreement", () => {
     expect(installer).not.toMatch(/\bprint\([^)]*profileContent/);
   });
 
-  it("points asc-api at the handoff file only when ASC_SECRETS_ENV is unset", () => {
-    expect(installer).toContain('ASC_SECRETS_ENV:-');
-    expect(installer).toContain('export ASC_SECRETS_ENV="${HOME}/.secrets/appstore-connect.env"');
+  it("never points asc-api at a ~/.secrets handoff file (AFC-359)", () => {
+    expect(installer).not.toContain("ASC_SECRETS_ENV");
+    expect(installer).not.toContain(".secrets");
   });
 });
 
@@ -164,13 +164,92 @@ exit 99
 `,
   );
   chmodSync(join(bin, "xcodebuild"), 0o755);
+  // ASC API stub via IOS_FLEET_NODE only — do not shadow real `node` on PATH.
+  // Bare node must stay real so load_secrets can run asc-key.mjs validate.
+  const ascNode = join(bin, "asc-node-stub");
+  const ascStubLines = [
+    "#!/usr/bin/env bash",
+    'cmd=""',
+    'for a in "$@"; do',
+    '  case "$a" in',
+    '    */asc-api.mjs) cmd="asc-api" ;;',
+    "    latest-marketing-patch|build-floor|released-store-version|next-shared-build|plan-release-build|platform-build-max)",
+    '      if [[ "$cmd" == "asc-api" ]]; then cmd="${cmd}:${a}"; fi',
+    "      ;;",
+    "  esac",
+    "done",
+    'case "$cmd" in',
+    '  asc-api:latest-marketing-patch) printf \'%s\\n\' "${FAKE_ASC_PATCH:-0}"; exit 0 ;;',
+    "  asc-api:released-store-version)",
+    '    [[ "${FAKE_RELEASED:-}" == "fail" ]] && exit 2',
+    '    printf \'%s\\n\' "${FAKE_RELEASED:-}"',
+    "    exit 0",
+    "    ;;",
+    "  asc-api:next-shared-build|asc-api:plan-release-build)",
+    '    [[ -n "${FAKE_SHARED:-}" ]] || exit 2',
+    '    printf \'%s\\n\' "${FAKE_SHARED}"',
+    "    exit 0",
+    "    ;;",
+    "  asc-api:platform-build-max)",
+    '    [[ "${FAKE_PLATFORM_MAX:-}" == "fail" ]] && exit 2',
+    '    printf \'%s\\n\' "${FAKE_PLATFORM_MAX:-0}"',
+    "    exit 0",
+    "    ;;",
+    '  asc-api:build-floor) printf \'%s\\n\' "${FAKE_ASC_FLOOR:-0}"; exit 0 ;;',
+    "esac",
+    "exit 2",
+    "",
+  ];
+  writeFileSync(ascNode, ascStubLines.join("\n"));
+  chmodSync(ascNode, 0o755);
+  writeFileSync(join(bin, "fleet-secrets"), "#!/usr/bin/env bash\nexit 3\n");
+  chmodSync(join(bin, "fleet-secrets"), 0o755);
+  // Ephemeral EC P-256 key so asc-key.mjs validate accepts ASC_KEY_P8.
+  const ascKeyP8 = execFileSync(
+    "openssl",
+    ["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"],
+    { encoding: "utf8" },
+  );
   const installerStub = join(root, "install-stub.sh");
   writeFileSync(installerStub, `#!/usr/bin/env bash\nprintf 'INSTALL map=%s\\n' "$IOS_APPSTORE_PROFILES_MAP" >>"${log}"\n`);
   chmodSync(installerStub, 0o755);
-  return { root, bin, home, state, fakeRepo, log, installerStub };
+  return { root, bin, home, state, fakeRepo, log, installerStub, ascNode, ascKeyP8 };
 }
 
+const ABSOLUTE_APPLE_TOOL = /\/(?:[^\s"']+\/)*(?:xcodebuild|xcrun|security|codesign)\b/;
+
+describe("manual-signing harness absolute-tool guard", () => {
+  it.each([
+    "$(/usr/bin/xcodebuild)",
+    "test -x /usr/bin/codesign;",
+    "/usr/bin/security",
+    "/usr/bin/security\n",
+    "'/usr/bin/xcrun' altool",
+    "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version"
+  ])("refuses shell delimiter and end-of-input form %s without execution", (source) => {
+    expect(source).toMatch(ABSOLUTE_APPLE_TOOL);
+  });
+});
+
 function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) {
+  const nodeDir = resolve(process.execPath, "..");
+  // Absolute calls bypass shell functions. Refuse to run this harness if the
+  // production script gains one rather than falling back to a real Apple tool.
+  const script = read("scripts/ios-fleet/ship-testflight.sh");
+  expect(script).not.toMatch(ABSOLUTE_APPLE_TOOL);
+  // A function beats ship-testflight.sh's system-first PATH. Fail closed for all
+  // other signing/upload tools, even when a future production path calls one.
+  const guard = join(sb.root, "bash-guard.sh");
+  const stub = JSON.stringify(join(sb.bin, "xcodebuild"));
+  writeFileSync(guard, [
+    `xcodebuild() { printf 'STUB_XCODEBUILD\\n' >&2; ${stub} "$@"; }`,
+    'xcrun() { echo "REFUSED_TEST_REAL_TOOL:xcrun" >&2; return 97; }',
+    'security() { echo "REFUSED_TEST_REAL_TOOL:security" >&2; return 97; }',
+    'codesign() { echo "REFUSED_TEST_REAL_TOOL:codesign" >&2; return 97; }',
+    'curl() { echo "REFUSED_TEST_NETWORK:curl" >&2; return 97; }',
+    'export -f xcodebuild xcrun security codesign curl',
+    '',
+  ].join("\n"));
   const res = spawnSync(
     "bash",
     [
@@ -183,11 +262,22 @@ function ship(sb: ReturnType<typeof sandbox>, extraEnv: Record<string, string>) 
       encoding: "utf8",
       env: {
         NODE_ENV: "test",
+        BASH_ENV: guard,
         HOME: sb.home,
-        PATH: `${sb.bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        PATH: `${sb.bin}:${nodeDir}:/usr/bin:/bin:/usr/sbin:/sbin`,
         TMPDIR: join(sb.root, "tmp"),
         IOS_FLEET_STATE_DIR: sb.state,
         IOS_INSTALL_PROFILES_SCRIPT: sb.installerStub,
+        IOS_FLEET_NODE: sb.ascNode,
+        FLEET_SECRETS: join(sb.bin, "fleet-secrets"),
+        ASC_KEY_ID: "fakekeyid",
+        ASC_ISSUER_ID: "fakeissuerid",
+        ASC_KEY_P8: sb.ascKeyP8,
+        // Empty released train + shared merge-timestamp build for apps.json fixedMarketingVersion 0.1.0.
+        FAKE_RELEASED: "",
+        FAKE_SHARED: "202610290000",
+        FAKE_ASC_PATCH: "0",
+        FAKE_ASC_FLOOR: "0",
         ...extraEnv,
       },
       timeout: 60_000,
@@ -203,6 +293,7 @@ describe("ship-testflight.sh manual signing (stub xcodebuild)", () => {
     const r = ship(sb, {});
     expect(r.status, r.out).toBe(0);
     expect(r.out).toContain("manual App Store signing");
+    expect(r.out).toContain("STUB_XCODEBUILD");
     expect(r.log).toContain(`INSTALL map=${join(sb.fakeRepo, "ios/appstore-profiles.json")}`);
     const archive = r.log.split("\n").find((l) => l.startsWith("CALL archive")) ?? "";
     expect(archive).toContain("-configuration Release");
@@ -224,6 +315,7 @@ describe("ship-testflight.sh manual signing (stub xcodebuild)", () => {
     const sb = sandbox("auto", { withMap: true });
     const r = ship(sb, { IOS_MANUAL_SIGN: "0" });
     expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("STUB_XCODEBUILD");
     expect(r.log).not.toContain("INSTALL ");
     const archive = r.log.split("\n").find((l) => l.startsWith("CALL archive")) ?? "";
     expect(archive).toContain("-allowProvisioningUpdates");

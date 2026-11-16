@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 // Regression (#3138 restart sweep, P1 money path).  The immediate pre-boot arm of
 // `markStaleRunningRuns` ("started_at < processBootCutoff") selects EVERY run that started before
@@ -21,6 +21,18 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 beforeAll(() => {
   process.env.DATABASE_URL = `file:${join(tmpdir(), `agentic-adoption-grace-${randomUUID()}.db`)}`;
+});
+
+beforeEach(async () => {
+  // These cases assert lease behaviour with the restart arm already eligible.  A fresh vitest
+  // worker is still inside the boot grace, which would hide the expired-lease sweep.
+  const { RESTART_SWEEP_BOOT_GRACE_MS, setProcessStartedAtMsForTests } = await import("../src/lib/db-execution");
+  setProcessStartedAtMsForTests(Date.now() - RESTART_SWEEP_BOOT_GRACE_MS - 60_000);
+});
+
+afterEach(async () => {
+  const { setProcessStartedAtMsForTests } = await import("../src/lib/db-execution");
+  setProcessStartedAtMsForTests(null);
 });
 
 const STALE_THRESHOLD_MS = 30 * 60_000; // matches db-execution.ts's STALE_RUN_THRESHOLD_MS

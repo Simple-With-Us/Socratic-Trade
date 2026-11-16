@@ -168,7 +168,7 @@ async function seedTestAccountAndPolicy(overrides: Record<string, unknown> = {})
     ...DEFAULT_POLICY,
     systemState: "active",
     // 2026-09-18 catalog cleanup: gpt-4o was removed. Use the premium curated row that exercises
-    // the same downgrade chain (gpt-6-astra -> gpt-5.6-sol).
+    // the same downgrade chain (gpt-6-astra -> gpt-6.1-sol).
     llmModel: "openai/gpt-6-astra",
     // Explicit Red model (no-defaults world: it never falls back to Green, and every risk-adding
     // opening is reviewed — the stubs answer it with an approve verdict).
@@ -257,8 +257,8 @@ describe("usage-budget Phase 2: enforcement ON + downgrade", () => {
     );
 
     // 2026-09-18 catalog cleanup: gpt-4o / gpt-mini-latest / gpt-5.6-terra were removed from
-    // the curated catalog. The downgrade chain for the remaining OpenAI rows ends at gpt-5.6-luna
-    // (no cheaper OpenAI tier exists). Use gpt-6-astra (premium) → gpt-5.6-sol (mid-tier) to
+    // the curated catalog. The downgrade chain for the remaining OpenAI rows ends at gpt-6-luna
+    // (no cheaper OpenAI tier exists). Use gpt-6-astra (premium) → gpt-6.1-sol (mid-tier) to
     // exercise the enforcement-and-downgrade path; the test still proves the policy-override
     // threading (Bull and Bear both serve the downgraded model) without depending on a row that
     // was removed from the curated catalog.
@@ -274,20 +274,20 @@ describe("usage-budget Phase 2: enforcement ON + downgrade", () => {
     const payload = enforcedAudits[0].payload as { action?: string; before?: { llmModel?: string }; after?: { llmModel?: string } };
     expect(payload.action).toBe("downgrade");
     expect(payload.before?.llmModel).toBe("openai/gpt-6-astra");
-    expect(payload.after?.llmModel).toBe("openai/gpt-5.6-sol");
+    expect(payload.after?.llmModel).toBe("openai/gpt-6.1-sol");
 
     // The model actually used for the Bull call was the downgraded one (OpenRouter wire slug).
-    // 2026-09-18: gpt-5.6-sol is a catalog hit — its openRouterSlug is 'openai/gpt-5.6-sol'
+    // 2026-09-18: gpt-6.1-sol is a catalog hit — its openRouterSlug is 'openai/gpt-6.1-sol'
     // (no tilde). Tilde is reserved for openRouterOnly entries that must be force-routed;
-    // gpt-5.6-sol is reachable on OpenAI's native API too, so the wire field has no tilde.
-    expect(bullModelUsed).toBe("openai/gpt-5.6-sol");
+    // gpt-6.1-sol is reachable on OpenAI's native API too, so the wire field has no tilde.
+    expect(bullModelUsed).toBe("openai/gpt-6.1-sol");
     // Finding 6: the Bear (Red Team) request also carried the downgraded model.
-    expect(redTeamModelUsed).toBe("openai/gpt-5.6-sol");
+    expect(redTeamModelUsed).toBe("openai/gpt-6.1-sol");
 
     // The persisted proposal reflects the served (downgraded) model.
     const proposals = listRecentProposals("TEST", 100, "local");
     const aaplProposal = proposals.find((p) => p.proposal.symbol === "AAPL");
-    expect(aaplProposal?.proposal.proposedByModel).toBe("openai/gpt-5.6-sol");
+    expect(aaplProposal?.proposal.proposedByModel).toBe("openai/gpt-6.1-sol");
 
     // The downgrade was NOT persisted — the saved policy still has the owner's original model.
     const savedPolicy = getPolicy("local");
@@ -314,7 +314,7 @@ describe("usage-budget Phase 2: enforcement ON + downgrade", () => {
     );
 
     // 2026-09-18 catalog cleanup: gpt-4o was removed. Use gpt-6-astra (premium) which downgrades
-    // to gpt-5.6-sol when over budget — the same downgrade path the old test exercised.
+    // to gpt-6.1-sol when over budget — the same downgrade path the old test exercised.
     await seedTestAccountAndPolicy({
       llmModel: "openai/gpt-6-astra",
       redTeamLlmModel: "openai/gpt-6-astra",
@@ -356,9 +356,9 @@ describe("usage-budget Phase 2: enforcement ON + skip", () => {
       "fetch",
       makeFetchStub({
         redTeamVerdict: { verdict: "approve", reason: "n/a" },
-        // gpt-5.6-luna is now the cheapest OpenAI tier in CHEAPER_MODEL -> skip, not downgrade.
+        // gpt-6-luna is now the cheapest OpenAI tier in CHEAPER_MODEL -> skip, not downgrade.
         // 2026-09-18: gpt-5.4-nano was removed from the curated catalog; the cheapest remaining
-        // OpenAI row is gpt-5.6-luna (which is itself the chain terminal).
+        // OpenAI row is gpt-6-luna (which is itself the chain terminal).
         budgetProviders: [{ name: "openrouter", status: "exceeded", spentUsd: 150, monthlyBudgetUsd: 100 }],
         onOpenAiBody: () => {
           openAiCalled = true;
@@ -366,7 +366,7 @@ describe("usage-budget Phase 2: enforcement ON + skip", () => {
       })
     );
 
-    await seedTestAccountAndPolicy({ llmModel: "openai/gpt-5.6-luna" });
+    await seedTestAccountAndPolicy({ llmModel: "openai/gpt-6-luna" });
     const { runStrategyOnce } = await import("../src/lib/strategy");
     const { listAudit, listFillEvents, listNotificationEvents } = await import("../src/lib/db");
 

@@ -111,7 +111,7 @@ prefer a low-activity window.
    key is gone everywhere.  Pick one:
    - **Normal case:** once step 6's `--verify` passes clean, delete `data/app.db.pre-rotation-*.bak`
      (the live DB under the new key is now the good copy) — *then* retire the old key value from
-     the secrets manager history, `.env` backups, and `~/.secrets`.
+     the secrets manager history and `.env` backups.
    - **If you want to keep that backup** (e.g. as an extra offline recovery point beyond the normal
      Litestream/B2 history): do not fully retire the old key.  Keep it recorded — labeled with the
      backup's filename/date — in the secrets manager's history so that specific artifact stays

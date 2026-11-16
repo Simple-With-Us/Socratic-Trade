@@ -108,6 +108,12 @@ describe("Marketaux enrichment provider", () => {
     expect(resolveMarketauxApiKey()).toBeUndefined();
   });
 
+  it("resolveMarketauxApiKey(userId) falls back to the env key when no stored user key exists", async () => {
+    const { resolveMarketauxApiKey } = await import("../src/lib/marketaux-provider");
+    process.env.MARKETAUX_API_KEY = "env-key-123";
+    expect(resolveMarketauxApiKey("user-without-stored-key")).toBe("env-key-123");
+  });
+
   // ── Parsing helpers (fixture payloads matching the live-verified response shape) ────────────
 
   it("extractMarketauxArticles accepts the documented { data: [...] } envelope and tolerates malformed payloads", async () => {
@@ -328,6 +334,19 @@ describe("Marketaux enrichment provider", () => {
     expect(filled).toBe(1);
     const empty = [out.AAPL, out.MSFT].filter((d) => Object.keys(d).length === 0).length;
     expect(empty).toBe(1);
+  });
+
+  it("scopes the daily budget per resolved API key so one key cannot exhaust another key's day", async () => {
+    process.env.MARKETAUX_DAILY_REQUEST_BUDGET = "1";
+    process.env.MARKETAUX_SYMBOLS_PER_REQUEST = "1";
+    stubNewsEndpoint((symbols) => ({ data: [fixtureArticle({ title: "news", symbol: symbols[0], sentimentScore: 0.2 })] }));
+    const { MarketauxEnrichmentProvider } = await import("../src/lib/marketaux-provider");
+    const first = new MarketauxEnrichmentProvider("user-a-key");
+    const second = new MarketauxEnrichmentProvider("user-b-key");
+    await first.enrich(["AAPL", "MSFT"]); // spends user-a-key's whole daily budget of 1
+    const out = await second.enrich(["ORCL"]);
+    // Pre-fix the process-wide counter left ORCL unfilled here; per-key counters keep it independent.
+    expect(out.ORCL.headlines).toBeDefined();
   });
 
   // ── Cascade integration: a produced value actually flows through takeScalar with attribution ──

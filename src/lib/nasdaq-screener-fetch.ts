@@ -1,4 +1,6 @@
 import { fetchWithRetry } from "./data-providers";
+import { resolveDataSourceProxy } from "./data-source-fetch";
+import { isProxyLegError, warnProxyFallback } from "./proxy-fetch";
 import { withProviderLimit } from "./provider-rate-limit";
 import { BROWSER_UA } from "./web-sources/http";
 
@@ -43,6 +45,20 @@ function errorFromSignal(signal: AbortSignal, fallback: string): Error {
   return signal.reason instanceof Error ? signal.reason : new Error(fallback);
 }
 
+/**
+ * True when a failed proxied screener run is worth one final direct-egress
+ * attempt: the upstream leg timed out or aborted (its own 15s budget, or a
+ * transport abort while the parent scan is still alive) or the proxy leg
+ * itself failed. Anything else — circuit-open, caller abort, non-abort
+ * transport errors that are not proxy-leg failures — must not trigger extra
+ * egress. (HTTP errors are responses, not throws, and never reach here.)
+ */
+function isDirectFallbackWorthwhile(error: unknown): boolean {
+  if (error instanceof Error && error.message === NASDAQ_SCREENER_TIMEOUT_MESSAGE) return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  return isProxyLegError(error);
+}
+
 /** Parent deadline aborts the in-flight headers.  It does not retry: the scan budget is gone. */
 function bindParentSignal(controller: AbortController, signal: AbortSignal | undefined): () => void {
   if (!signal) return () => {};
@@ -71,9 +87,19 @@ export async function fetchNasdaqScreenerResponse(
     }
     const controller = new AbortController();
     const unlink = bindParentSignal(controller, parent);
-    const timeout = setTimeout(() => {
-      controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
-    }, NASDAQ_SCREENER_TIMEOUT_MS);
+    const attemptStart = Date.now();
+    const fireTimeout = () => controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
+    let timeout = setTimeout(fireTimeout, NASDAQ_SCREENER_TIMEOUT_MS);
+    // The 15s budget covers the upstream leg, not time queued for a proxy-gate
+    // slot: priority (below) makes the wait ~0 in practice, and any measured
+    // wait pushes the deadline out by exactly that much — equivalent to arming
+    // the timer at slot acquisition.
+    const onProxyQueueWait = (waitMs: number) => {
+      if (!(waitMs > 0) || controller.signal.aborted) return;
+      clearTimeout(timeout);
+      const elapsed = Date.now() - attemptStart;
+      timeout = setTimeout(fireTimeout, Math.max(0, NASDAQ_SCREENER_TIMEOUT_MS - elapsed + waitMs));
+    };
     try {
       // fetch() resolves when headers arrive.  Clear the timer here so the
       // 8000-row JSON body cannot be aborted by the 15s header budget.  The
@@ -86,7 +112,7 @@ export async function fetchNasdaqScreenerResponse(
             signal: controller.signal,
             headers: { ...NASDAQ_SCREENER_HEADERS }
           },
-          { service, retries: 1 }
+          { service, retries: 1, proxyPriority: true, onProxyQueueWait }
         ),
         url
       );
@@ -99,12 +125,57 @@ export async function fetchNasdaqScreenerResponse(
       if (parent?.aborted) {
         throw errorFromSignal(parent, "Nasdaq screener aborted.");
       }
-      if (!isScreenerTimeout(error, reason) || attempt === NASDAQ_SCREENER_ATTEMPTS - 1) {
+      if (!isScreenerTimeout(error, reason)) {
         throw lastError;
       }
+      // Last proxied attempt: fall out of the loop to the final direct-egress
+      // attempt below instead of throwing here.
+      if (attempt === NASDAQ_SCREENER_ATTEMPTS - 1) break;
     } finally {
       clearTimeout(timeout);
       unlink();
+    }
+  }
+  // Both proxied attempts failed.  One final direct-egress attempt (screener
+  // only, same 15s bound) — prod 2026-11-09 showed the proxy path timing out
+  // while direct egress answered.  Never when the parent scan is gone, never
+  // when there was no proxy to fall back from, and never under fail_closed.
+  if (!parent?.aborted && isDirectFallbackWorthwhile(lastError)) {
+    const resolution = resolveDataSourceProxy();
+    if (resolution.proxyUrl && resolution.failureMode !== "fail_closed") {
+      warnProxyFallback(resolution.proxyUrl, lastError);
+      const controller = new AbortController();
+      const unlink = bindParentSignal(controller, parent);
+      const timeout = setTimeout(() => {
+        controller.abort(new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE));
+      }, NASDAQ_SCREENER_TIMEOUT_MS);
+      try {
+        const response = await withProviderLimit(service, () =>
+          fetchWithRetry(
+            url,
+            {
+              cache: "no-store",
+              signal: controller.signal,
+              headers: { ...NASDAQ_SCREENER_HEADERS }
+            },
+            { service, retries: 1, bypassProxy: true }
+          ),
+          url
+        );
+        clearTimeout(timeout);
+        unlink();
+        return response;
+      } catch (error) {
+        const reason = controller.signal.reason;
+        lastError = reason instanceof Error ? reason : error;
+        if (parent?.aborted) {
+          throw errorFromSignal(parent, "Nasdaq screener aborted.");
+        }
+        throw lastError;
+      } finally {
+        clearTimeout(timeout);
+        unlink();
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(NASDAQ_SCREENER_TIMEOUT_MESSAGE);

@@ -16,7 +16,7 @@ Optional coordination variables:
 - `SLACK_CHANNEL_ID=C0BEZDJDNKV`
 - `SLACK_PROJECT=Socratic-Trade`
 - `SLACK_AGENT_NAME=Codex`
-- `AGENT_SYNC_TOKEN`
+- `AG***_S**C_TOKEN`
 
 Secret-category variables are available only during setup and are removed before the agent phase. Setup scripts therefore validate presence but do not persist secrets into dotfiles.
 

@@ -47,7 +47,11 @@ enum SentryTelemetry {
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = 2.0
             options.enableCaptureFailedRequests = true
-            options.failedRequestStatusCodes = [HttpStatusCodeRange(min: 500, max: 599)]
+            // 502/503/504 are retried on idempotent reads and reported manually when exhausted.
+            options.failedRequestStatusCodes = [
+                HttpStatusCodeRange(min: 500, max: 501),
+                HttpStatusCodeRange(min: 505, max: 599),
+            ]
             options.attachScreenshot = false
             options.attachViewHierarchy = false
             options.sendDefaultPii = false
@@ -57,6 +61,9 @@ enum SentryTelemetry {
             options.sessionReplay.maskAllImages = true
             started = true
             options.beforeSend = { event in
+                if shouldDropAutomaticHTTPClientError(event) {
+                    return nil
+                }
                 if let request = event.request, let url = request.url {
                     var sanitized = url
                     for param in ["symbol", "proposal", "account", "token", "key", "secret"] {
@@ -70,6 +77,45 @@ enum SentryTelemetry {
                 }
                 return event
             }
+        }
+    }
+
+    /// Filters sentry-cocoa automatic `HTTPClientError` events for transient gateway codes.
+    static func shouldDropAutomaticHTTPClientError(_ event: Event) -> Bool {
+        guard let status = httpClientErrorStatusCode(from: event) else { return false }
+        return !MobileAPIHTTPRetryPolicy.shouldReportAutomaticFailedRequest(statusCode: status)
+    }
+
+    static func httpClientErrorStatusCode(from event: Event) -> Int? {
+        let mechanisms = event.exceptions?.compactMap(\.mechanism) ?? []
+        guard mechanisms.contains(where: { $0.type == "HTTPClientError" }) else { return nil }
+        if let tag = event.tags?["http.status_code"], let value = Int(tag) {
+            return value
+        }
+        if let context = event.context?["response"] as? [String: Any],
+           let value = context["status_code"] as? Int {
+            return value
+        }
+        if let value = event.exceptions?.first?.mechanism?.data?["status_code"] as? Int {
+            return value
+        }
+        return nil
+    }
+
+    /// Exhausted GET retry for an HTTP status (502/503/504 or other server errors).
+    static func captureHTTPServerFailure(statusCode: Int, endpoint: String) {
+        guard started else { return }
+        let path = sanitizedEndpoint(endpoint)
+        let status = String(statusCode)
+        let error = NSError(
+            domain: "com.socratictrade.ios.mobile-api",
+            code: statusCode,
+            userInfo: [NSLocalizedDescriptionKey: "HTTP \(statusCode) \(path)"]
+        )
+        SentrySDK.capture(error: error) { scope in
+            scope.setTag(value: status, key: "http_status_code")
+            scope.setExtra(value: path, key: "endpoint")
+            scope.setFingerprint(["mobile-api", path, status])
         }
     }
 

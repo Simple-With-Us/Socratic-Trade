@@ -11,6 +11,8 @@ import {
 import { intentionalOffHealthReason, isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { isFilingApiAuthErrorText } from "./filingapi-auth-classify";
 import { isTransientNetworkErrorText } from "./network-errors";
+import { isRagEmbedProviderTimeoutText, RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE } from "./rag/embed-resilience";
+import { isStrategyRagRetrievalTimeoutText } from "./rag-retrieval-deadline";
 
 // `stoppedWorking` is set for a few distinct reasons (see getServiceHealthSummaries). This one is the
 // "5 consecutive failures" condition — the only one strong enough to act on automatically (e.g. the
@@ -28,13 +30,61 @@ export const HEALTH_REASON_CONSECUTIVE_FAILURES = "Last 5 consecutive calls all 
 export const HEALTH_SOFT_FAILURE_PREFIX = "[expected-limit] ";
 
 /**
+ * Prefix for a caller-side strategy RAG deadline. It is not an expected quota and not a
+ * provider outage, and it must not paint the lane STOPPED.
+ */
+export const HEALTH_CALLER_TIMEOUT_PREFIX = "[caller-timeout] ";
+
+/**
+ * A provider wait that expired, as it shows up in `error_text`.
+ *
+ * These are transport-class blips (ST-3079): they still count toward the hard streak so a
+ * lane that keeps timing out escalates after `HEALTH_TRANSIENT_ESCALATION_MS`, but a single
+ * burst must not page. Named shapes only — a bare caller-budget abort ("This operation was
+ * aborted", or the message-only "The operation was aborted due to timeout" that
+ * `AbortSignal.timeout()` budgets such as brokerAbortSignal produce) stays an expected limit,
+ * and a provider status (HTTP or the embed/rerank "API failed …: <status>" form) stays hard
+ * even when the body mentions a timeout. Strategy RAG deadlines keep the caller-timeout class. Ingest embed
+ * provider timeouts (ST-4607, message "embed provider timed out") keep the timeout class
+ * even when describeNetworkError also prefixes TimeoutError or AbortError.
+ *
+ * Deliberately not folded into `isTransientNetworkError` in network-errors.ts. That helper
+ * also decides whether a fetch is retried, and widening it would change quote, scan, and
+ * order retries.
+ */
+const PROVIDER_TIMEOUT_HEALTH_TEXT =
+  /\b(?:AbortError|TimeoutError|HeadersTimeoutError|BodyTimeoutError)\b|\bUND_ERR_(?:HEADERS|BODY)_TIMEOUT\b|\b(?:headers|body) timeout error\b|\btimed out waiting for\b|\bbroker call timed out\b/i;
+
+export function isProviderTimeoutHealthText(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  if (isStrategyRagRetrievalTimeoutText(errorText)) return false;
+  if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return false;
+  // ST-4607: ingest embed slowness is a timeout, not a transport blip. describeNetworkError
+  // flattens `TimeoutError embed provider timed out`, which would otherwise match below.
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return false;
+  // The provider answered. 401/403/5xx stay hard even if the body says "timed out".
+  if (/\bHTTP\s+[1-5]\d\d\b/i.test(errorText)) return false;
+  // Same guard as isTransientNetworkErrorText: `Embedding API failed …: ${status} ${body}`
+  // carries the status without an "HTTP" prefix.
+  if (/\b(?:Embedding|Rerank)\s+API\s+failed\b[^:\n]{0,120}:\s*[1-5]\d\d\b/i.test(errorText)) return false;
+  return PROVIDER_TIMEOUT_HEALTH_TEXT.test(errorText);
+}
+
+/**
  * True when an api_health_log failure row is a soft/expected limit (rate limit, daily cap, …).
  * Matches both the explicit prefix logApiHealth stamps for `soft: true`, and common free-text
  * shapes from older rows / call sites that forget the flag but still say "HTTP 429".
  */
 export function isSoftHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
+  if (errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) return true;
+  if (isStrategyRagRetrievalTimeoutText(errorText)) return true;
+  if (errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)) return true;
+  // An explicit soft stamp wins. Rows already persisted as `[expected-limit] …` (fetchWithRetry
+  // marks every AbortError/TimeoutError soft) must not turn hard and trip the breaker.
   if (errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) return true;
+  // A named provider timeout must stay on the transient streak so it can escalate.
+  if (isProviderTimeoutHealthText(errorText)) return false;
   // Legacy / free-text shapes that should never hard-STOP a lane on their own.
   return (
     /\bHTTP 429\b/i.test(errorText) ||
@@ -45,13 +95,16 @@ export function isSoftHealthFailure(errorText: string | null | undefined): boole
     /\b25\/day cap\b/i.test(errorText) ||
     /\b25 requests per day\b/i.test(errorText) ||
     /\bproactive daily call budget\b/i.test(errorText) ||
-    // Caller-budget / AbortController cancellations.  GET /api/quote aborts the
-    // enrichment cascade at 6s; nasdaq-calendar's per-day fetch aborts at 8s.
-    // Those are expected and must not mint "<service> connection failed".
+    // Caller-budget cancellations whose text does not name a timeout. fetchWithRetry stores
+    // the message, not the error name. nasdaq-calendar's per-day fetch aborts at 8s with
+    // "This operation was aborted"; an AbortSignal.timeout() budget stores "The operation
+    // was aborted due to timeout". GET /api/quote's 6s cascade aborts with its own reasons
+    // (quote-cascade-budget.ts "cascade budget elapsed", route.ts "yahoo floor ready"), which
+    // isAbortOrTimeoutError does not recognize, so they are matched here.
     /\bthis operation was aborted\b/i.test(errorText) ||
     /\bthe operation was aborted\b/i.test(errorText) ||
-    /\bAbortError\b/i.test(errorText) ||
-    /\bTimeoutError\b/i.test(errorText)
+    /\bcascade budget elapsed\b/i.test(errorText) ||
+    /\byahoo floor ready\b/i.test(errorText)
   );
 }
 
@@ -82,6 +135,14 @@ export const HEALTH_TRANSIENT_FAILURE_PREFIX = "[transient-network] ";
 export function isTransientHealthFailure(errorText: string | null | undefined): boolean {
   if (!errorText) return false;
   if (errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) return true;
+  if (
+    isStrategyRagRetrievalTimeoutText(errorText)
+    || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)
+    || errorText.includes(RAG_EMBED_PROVIDER_TIMEOUT_MESSAGE)
+  ) {
+    return false;
+  }
+  if (isProviderTimeoutHealthText(errorText)) return true;
   if (isSoftHealthFailure(errorText)) return false;
   return isTransientNetworkErrorText(errorText);
 }
@@ -92,6 +153,13 @@ export function isTransientHealthFailure(errorText: string | null | undefined): 
  */
 export function connectionHealthFailureClass(errorText: string | null | undefined): string | null {
   if (!errorText) return null;
+  if (
+    isStrategyRagRetrievalTimeoutText(errorText)
+    || isRagEmbedProviderTimeoutText(errorText)
+    || errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)
+  ) {
+    return "timeout";
+  }
   if (isDependencyDbContentionMessage(errorText)) return HEALTH_FAILURE_CLASS_DEPENDENCY_DB;
   if (isLocalDbFaultMessage(errorText)) return "local-db-contention";
   if (isTransientHealthFailure(errorText)) return "transient-network";
@@ -473,8 +541,23 @@ let apiHealthFlushTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function healthErrorTextForLog(opts: ApiHealthLogOpts): string | null {
   let errorText = opts.errorText ?? null;
+  if (!opts.ok && errorText && isStrategyRagRetrievalTimeoutText(errorText)) {
+    if (!errorText.startsWith(HEALTH_CALLER_TIMEOUT_PREFIX)) {
+      errorText = `${HEALTH_CALLER_TIMEOUT_PREFIX}${errorText}`;
+    }
+    return errorText;
+  }
   const filingApiAuthSoft =
     opts.service === "filingapi" && !opts.ok && isFilingApiAuthErrorText(errorText);
+  // Named provider timeouts win over a caller's `soft: true`. fetchWithRetry sets that flag
+  // for every AbortError/TimeoutError, including a headers timeout whose message names the
+  // error. A bare "This operation was aborted" does not match and stays an expected limit.
+  if (!opts.ok && errorText && isProviderTimeoutHealthText(errorText)) {
+    if (!errorText.startsWith(HEALTH_TRANSIENT_FAILURE_PREFIX)) {
+      errorText = `${HEALTH_TRANSIENT_FAILURE_PREFIX}${errorText}`;
+    }
+    return errorText;
+  }
   if (!opts.ok && errorText && (opts.soft || filingApiAuthSoft || isSoftHealthFailure(errorText))) {
     if (!errorText.startsWith(HEALTH_SOFT_FAILURE_PREFIX)) {
       errorText = `${HEALTH_SOFT_FAILURE_PREFIX}${errorText}`;
@@ -985,15 +1068,15 @@ async function captureHealthSentryMessage(
   level: "warning" | "error",
   message: string,
   context: Record<string, string | number | boolean | null | undefined>
-): Promise<void> {
-  if (!process.env.SENTRY_DSN) return;
+): Promise<boolean> {
+  if (!process.env.SENTRY_DSN) return false;
   try {
     const mod = (await import("@sentry/nextjs")) as typeof import("@sentry/nextjs") & {
       default?: typeof import("@sentry/nextjs");
     };
     const captureMessage = mod.captureMessage ?? mod.default?.captureMessage;
     const withScope = mod.withScope ?? mod.default?.withScope;
-    if (typeof captureMessage !== "function" || typeof withScope !== "function") return;
+    if (typeof captureMessage !== "function" || typeof withScope !== "function") return false;
     withScope((scope) => {
       scope.setLevel(level);
       scope.setTag("component", "api-health");
@@ -1018,9 +1101,21 @@ async function captureHealthSentryMessage(
       scope.setContext("api-health", context);
       captureMessage(message);
     });
+    return true;
   } catch {
     // Observability must not affect trading control flow.
+    return false;
   }
+}
+
+function livenessWarningSentryService(warningType: string): string {
+  if (warningType.startsWith("run_failure")) {
+    return "run-failure-watchdog";
+  }
+  if (warningType.startsWith("scheduler")) {
+    return "scheduler";
+  }
+  return "trading-liveness";
 }
 
 /**
@@ -1269,48 +1364,315 @@ export async function alertStorageWarning(warningType: string, message: string):
 }
 
 const LIVENESS_ALERT_COOLDOWN_PREFIX = "livenessAlertSent";
-const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000; // 15 mins for liveness since it's more critical, or maybe 12 hours? Let's use 1 hour.
+const LIVENESS_ALERT_COOLDOWN_MS = 15 * 60_000;
+const LIVENESS_SENTRY_COOLDOWN_MS = 60 * 60_000;
+const LIVENESS_SENTRY_SIGNATURE_PREFIX = "livenessSentrySignature";
+const LIVENESS_SENTRY_SENT_PREFIX = "livenessSentrySentAt";
 // Episode tracking for escalation: a degradation nobody acts on must get LOUDER,
-// not just repeat.  `livenessDegradedSince:<type>` marks when the current episode
-// began; `livenessEscalatedAt:<type>` marks the last escalation ping.
+// not just repeat.  Per-account types store `livenessDegradedSince:<type>:<accountKey>`;
+// fleet-global types keep `livenessDegradedSince:<type>`.  `livenessEscalatedAt:<type>`
+// is still one row per warning type (Sentry fingerprint + escalation cadence).
 const LIVENESS_DEGRADED_SINCE_PREFIX = "livenessDegradedSince";
 const LIVENESS_ESCALATED_AT_PREFIX = "livenessEscalatedAt";
+
+const PER_ACCOUNT_LIVENESS_WARNING_TYPES = new Set([
+  "run_failure_streak",
+  "run_failure_streak_halted",
+  "trading_liveness_degraded"
+]);
+
+export type LivenessWarningAccountRef = {
+  accountKey: string;
+  accountLabel?: string;
+};
+
+export type LivenessWarningContext = {
+  account?: LivenessWarningAccountRef;
+  accounts?: LivenessWarningAccountRef[];
+  stateSignature?: string;
+};
+
+type StoredLivenessEpisode = string | { since: string; label?: string };
+
+export function evaluateLivenessSentryCapture(input: {
+  stateSignature: string;
+  previousSignature: string | undefined;
+  lastSentAtIso: string | undefined;
+  dueForEscalation: boolean;
+  nowMs?: number;
+}): boolean {
+  const now = input.nowMs ?? Date.now();
+  if (input.previousSignature !== input.stateSignature) {
+    return true;
+  }
+  if (input.dueForEscalation) {
+    return true;
+  }
+  if (!input.lastSentAtIso || Number.isNaN(Date.parse(input.lastSentAtIso))) {
+    return true;
+  }
+  return now - Date.parse(input.lastSentAtIso) >= LIVENESS_SENTRY_COOLDOWN_MS;
+}
 
 function livenessEscalationHours(): number {
   const raw = Number(process.env.ST_LIVENESS_ESCALATION_HOURS ?? 4);
   return Number.isFinite(raw) && raw > 0 ? raw : 4;
 }
 
-export async function alertLivenessWarning(warningType: string, message: string): Promise<void> {
-  try {
-    const key = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
-    const { getInternalSetting, setInternalSetting, audit } = await import("./db");
-    const last = getInternalSetting<string>(key);
-    if (last && Date.now() - Date.parse(last) < LIVENESS_ALERT_COOLDOWN_MS) return;
-    setInternalSetting(key, new Date().toISOString());
+function isPerAccountLivenessWarningType(warningType: string): boolean {
+  return PER_ACCOUNT_LIVENESS_WARNING_TYPES.has(warningType);
+}
 
-    // Track the episode start so a persistent degradation escalates.  First
-    // alert of an episode stamps it; recovery clears it via clearLivenessWarning.
-    const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
-    let sinceIso = getInternalSetting<string>(sinceKey);
-    if (!sinceIso || Number.isNaN(Date.parse(sinceIso))) {
-      sinceIso = new Date().toISOString();
-      setInternalSetting(sinceKey, sinceIso);
+function resolveLivenessWarningArg(
+  contextOrSignature?: LivenessWarningContext | string
+): { accounts: LivenessWarningAccountRef[]; stateSignature?: string } {
+  if (contextOrSignature === undefined) {
+    return { accounts: [] };
+  }
+  if (typeof contextOrSignature === "string") {
+    return { accounts: [], stateSignature: contextOrSignature };
+  }
+  return {
+    accounts: normalizeLivenessWarningAccounts(contextOrSignature),
+    stateSignature: contextOrSignature.stateSignature
+  };
+}
+
+function livenessAccountSinceKey(warningType: string, accountKey: string): string {
+  return `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}:${accountKey}`;
+}
+
+function livenessAccountSincePrefix(warningType: string): string {
+  return `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}:`;
+}
+
+function readLivenessEpisodeSince(stored: unknown): string | undefined {
+  if (typeof stored === "string" && !Number.isNaN(Date.parse(stored))) return stored;
+  if (stored && typeof stored === "object" && "since" in stored) {
+    const since = (stored as { since: string }).since;
+    if (typeof since === "string" && !Number.isNaN(Date.parse(since))) return since;
+  }
+  return undefined;
+}
+
+function readLivenessEpisodeLabel(stored: unknown): string | undefined {
+  if (stored && typeof stored === "object" && "label" in stored) {
+    const label = (stored as { label?: string }).label;
+    return typeof label === "string" && label.length > 0 ? label : undefined;
+  }
+  return undefined;
+}
+
+function normalizeLivenessWarningAccounts(context: LivenessWarningContext): LivenessWarningAccountRef[] {
+  if (context.account) return [context.account];
+  if (context.accounts) return context.accounts;
+  return [];
+}
+
+function discardLegacyGlobalLivenessEpisode(
+  warningType: string,
+  getInternalSetting: (key: string) => unknown,
+  deleteInternalSetting: (key: string) => void
+): void {
+  if (!isPerAccountLivenessWarningType(warningType)) return;
+  const legacyKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+  if (getInternalSetting(legacyKey) !== undefined) {
+    // Pre-ST-4603 clocks were fleet-wide: drop them so a new account does not
+    // inherit another account's age and page immediately after upgrade.
+    deleteInternalSetting(legacyKey);
+  }
+}
+
+function touchLivenessAccountEpisode(
+  warningType: string,
+  account: LivenessWarningAccountRef,
+  nowIso: string,
+  getInternalSetting: (key: string) => unknown,
+  setInternalSetting: (key: string, value: unknown) => void,
+  deleteInternalSetting: (key: string) => void
+): void {
+  discardLegacyGlobalLivenessEpisode(warningType, getInternalSetting, deleteInternalSetting);
+  const key = livenessAccountSinceKey(warningType, account.accountKey);
+  const existing = getInternalSetting(key);
+  const existingSince = readLivenessEpisodeSince(existing);
+  if (!existingSince) {
+    const value: StoredLivenessEpisode = account.accountLabel
+      ? { since: nowIso, label: account.accountLabel }
+      : nowIso;
+    setInternalSetting(key, value);
+    return;
+  }
+  if (account.accountLabel && readLivenessEpisodeLabel(existing) !== account.accountLabel) {
+    setInternalSetting(key, { since: existingSince, label: account.accountLabel });
+  }
+}
+
+type OldestLivenessAccountEpisode = {
+  accountKey: string;
+  accountLabel?: string;
+  sinceIso: string;
+  degradedHours: number;
+};
+
+function oldestOpenLivenessAccountEpisode(
+  warningType: string,
+  nowMs: number,
+  getInternalSetting: (key: string) => unknown,
+  listInternalSettingKeysByPrefix: (prefix: string) => string[],
+  deleteInternalSetting: (key: string) => void
+): OldestLivenessAccountEpisode | null {
+  discardLegacyGlobalLivenessEpisode(warningType, getInternalSetting, deleteInternalSetting);
+  const prefix = livenessAccountSincePrefix(warningType);
+  const keys = listInternalSettingKeysByPrefix(prefix);
+  let oldest: OldestLivenessAccountEpisode | null = null;
+  for (const key of keys) {
+    const stored = getInternalSetting(key);
+    const sinceIso = readLivenessEpisodeSince(stored);
+    if (!sinceIso) continue;
+    const sinceMs = Date.parse(sinceIso);
+    if (Number.isNaN(sinceMs)) continue;
+    const accountKey = key.slice(prefix.length);
+    const candidate: OldestLivenessAccountEpisode = {
+      accountKey,
+      accountLabel: readLivenessEpisodeLabel(stored),
+      sinceIso,
+      degradedHours: (nowMs - sinceMs) / 3_600_000
+    };
+    if (!oldest || sinceMs < Date.parse(oldest.sinceIso)) {
+      oldest = candidate;
     }
-    const degradedHours = (Date.now() - Date.parse(sinceIso)) / 3_600_000;
+  }
+  return oldest;
+}
+
+/**
+ * Drop per-account episode rows that are no longer degraded (health / watchdog
+ * reconciliation).  Does not clear fleet-wide `livenessEscalatedAt`.
+ */
+export async function reconcileLivenessAccountEpisodes(
+  warningType: string,
+  activeAccountKeys: string[]
+): Promise<void> {
+  if (!isPerAccountLivenessWarningType(warningType)) return;
+  try {
+    const { getInternalSetting, deleteInternalSetting, listInternalSettingKeysByPrefix } =
+      await import("./db");
+    discardLegacyGlobalLivenessEpisode(warningType, getInternalSetting, deleteInternalSetting);
+    const active = new Set(activeAccountKeys);
+    const prefix = livenessAccountSincePrefix(warningType);
+    for (const key of listInternalSettingKeysByPrefix(prefix)) {
+      const accountKey = key.slice(prefix.length);
+      if (!active.has(accountKey)) {
+        deleteInternalSetting(key);
+      }
+    }
+  } catch {
+    // never throw on warnings
+  }
+}
+
+export async function alertLivenessWarning(
+  warningType: string,
+  message: string,
+  contextOrSignature?: LivenessWarningContext | string
+): Promise<void> {
+  try {
+    const adminCooldownKey = `${LIVENESS_ALERT_COOLDOWN_PREFIX}:${warningType}`;
+    const sentrySignatureKey = `${LIVENESS_SENTRY_SIGNATURE_PREFIX}:${warningType}`;
+    const sentrySentKey = `${LIVENESS_SENTRY_SENT_PREFIX}:${warningType}`;
+    const {
+      getInternalSetting,
+      setInternalSetting,
+      deleteInternalSetting,
+      listInternalSettingKeysByPrefix,
+      audit
+    } = await import("./db");
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const { accounts, stateSignature } = resolveLivenessWarningArg(contextOrSignature);
+    const effectiveSignature = stateSignature ?? warningType;
+
+    if (isPerAccountLivenessWarningType(warningType)) {
+      for (const account of accounts) {
+        touchLivenessAccountEpisode(
+          warningType,
+          account,
+          nowIso,
+          getInternalSetting,
+          setInternalSetting,
+          deleteInternalSetting
+        );
+      }
+    }
+
+    let degradedHours = 0;
+    let escalationSubjectLabel: string | undefined;
+    if (isPerAccountLivenessWarningType(warningType)) {
+      const oldest =
+        accounts.length > 0
+          ? oldestOpenLivenessAccountEpisode(
+              warningType,
+              nowMs,
+              getInternalSetting,
+              listInternalSettingKeysByPrefix,
+              deleteInternalSetting
+            )
+          : null;
+      if (oldest) {
+        degradedHours = oldest.degradedHours;
+        escalationSubjectLabel = oldest.accountLabel ?? oldest.accountKey;
+      } else {
+        const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+        let sinceIso = readLivenessEpisodeSince(getInternalSetting(sinceKey));
+        if (!sinceIso) {
+          sinceIso = nowIso;
+          setInternalSetting(sinceKey, sinceIso);
+        }
+        degradedHours = (nowMs - Date.parse(sinceIso)) / 3_600_000;
+      }
+    } else {
+      const sinceKey = `${LIVENESS_DEGRADED_SINCE_PREFIX}:${warningType}`;
+      let sinceIso = readLivenessEpisodeSince(getInternalSetting(sinceKey));
+      if (!sinceIso) {
+        sinceIso = nowIso;
+        setInternalSetting(sinceKey, sinceIso);
+      }
+      degradedHours = (nowMs - Date.parse(sinceIso)) / 3_600_000;
+    }
+
     const escalationHours = livenessEscalationHours();
-    // Escalate at most once per escalation window: loud on crossing, then the
-    // regular 15-min cadence resumes until the next window boundary.
     const escalatedAtKey = `${LIVENESS_ESCALATED_AT_PREFIX}:${warningType}`;
     const escalatedAt = getInternalSetting<string>(escalatedAtKey);
     const escalatedAtMs = escalatedAt ? Date.parse(escalatedAt) : NaN;
     const dueForEscalation =
       degradedHours >= escalationHours &&
-      (Number.isNaN(escalatedAtMs) || Date.now() - escalatedAtMs >= escalationHours * 3_600_000);
+      (Number.isNaN(escalatedAtMs) || nowMs - escalatedAtMs >= escalationHours * 3_600_000);
 
+    const shouldCaptureSentry = evaluateLivenessSentryCapture({
+      stateSignature: effectiveSignature,
+      previousSignature: getInternalSetting<string>(sentrySignatureKey),
+      lastSentAtIso: getInternalSetting<string>(sentrySentKey),
+      dueForEscalation
+    });
+
+    const lastAdminSent = getInternalSetting<string>(adminCooldownKey);
+    const lastAdminMs = lastAdminSent ? Date.parse(lastAdminSent) : NaN;
+    const adminDue =
+      dueForEscalation ||
+      !lastAdminSent ||
+      Number.isNaN(lastAdminMs) ||
+      nowMs - lastAdminMs >= LIVENESS_ALERT_COOLDOWN_MS;
+
+    if (!shouldCaptureSentry && !adminDue) {
+      return;
+    }
+
+    const typeLabel = warningType.replace(/_/g, " ");
     const title = dueForEscalation
-      ? `ESCALATED Liveness: ${warningType.replace(/_/g, " ")} still degraded after ${Math.floor(degradedHours)}h`
-      : `Liveness Warning: ${warningType.replace(/_/g, " ")}`;
+      ? escalationSubjectLabel
+        ? `ESCALATED Liveness: ${typeLabel} — ${escalationSubjectLabel} still degraded after ${Math.floor(degradedHours)}h`
+        : `ESCALATED Liveness: ${typeLabel} still degraded after ${Math.floor(degradedHours)}h`
+      : `Liveness Warning: ${typeLabel}`;
     const body = dueForEscalation
       ? `${message}\n\nThis condition has persisted for ${degradedHours.toFixed(1)} hours without recovery. Trading may be silently stalled; human intervention is needed.`
       : message;
@@ -1318,35 +1680,43 @@ export async function alertLivenessWarning(warningType: string, message: string)
       warningType,
       message,
       degradedHours: Math.round(degradedHours * 10) / 10,
-      escalated: dueForEscalation
+      escalated: dueForEscalation,
+      sentryStateSignature: effectiveSignature,
+      ...(escalationSubjectLabel ? { accountLabel: escalationSubjectLabel } : {})
     };
 
-    audit("liveness_warning_alert", payload, "local");
-
-    // Page via Sentry at error level (the level PagerDuty routes on) with a
-    // stable fingerprint per warning type, so a degradation that nobody acts on
-    // keeps paging instead of sitting in a notification nobody reads.  The
-    // 2026-09-30 incident had tradingLivenessDegraded=true for ~5 days with no
-    // escalation; this path is the in-app backstop for exactly that.
-    await captureHealthSentryMessage("error", `${title}: ${message}`, {
-      service: "trading-liveness",
-      failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
-      warningType,
-      degradedHours: Math.round(degradedHours * 10) / 10,
-      escalated: dueForEscalation
-    });
-
-    if (dueForEscalation) {
-      setInternalSetting(escalatedAtKey, new Date().toISOString());
+    const sentryService = livenessWarningSentryService(warningType);
+    if (shouldCaptureSentry) {
+      const sentryMessage = dueForEscalation ? `${title} (escalated)` : title;
+      const captured = await captureHealthSentryMessage("error", sentryMessage, {
+        service: sentryService,
+        failureClass: dueForEscalation ? "escalated-persistent" : "persistent-degradation",
+        warningType,
+        degradedHours: Math.round(degradedHours * 10) / 10,
+        escalated: dueForEscalation,
+        stateSignature: effectiveSignature,
+        ...(escalationSubjectLabel ? { accountLabel: escalationSubjectLabel } : {})
+      });
+      if (captured) {
+        setInternalSetting(sentrySignatureKey, effectiveSignature);
+        setInternalSetting(sentrySentKey, new Date().toISOString());
+      }
     }
 
-    await deliverSystemAlertToAdmins({
-      type: "liveness_warning",
-      title,
-      body,
-      payload,
-      kind: "liveness_warning"
-    });
+    if (adminDue) {
+      setInternalSetting(adminCooldownKey, nowIso);
+      if (dueForEscalation) {
+        setInternalSetting(escalatedAtKey, nowIso);
+      }
+      audit("liveness_warning_alert", payload, "local");
+      await deliverSystemAlertToAdmins({
+        type: "liveness_warning",
+        title,
+        body,
+        payload,
+        kind: "liveness_warning"
+      });
+    }
   } catch {
     // never throw on warnings
   }
@@ -1356,14 +1726,53 @@ export async function alertLivenessWarning(warningType: string, message: string)
  * Clear a liveness episode's escalation state once the condition recovers, so
  * the next episode starts its clock fresh instead of escalating immediately.
  * Call from the healthy branch wherever alertLivenessWarning is raised.
+ *
+ * Per-account warning types accept an optional `accountKey` to clear one
+ * account without resetting others still in the episode.
  */
-export async function clearLivenessWarning(warningType: string): Promise<boolean> {
+export async function clearLivenessWarning(
+  warningType: string,
+  accountKey?: string
+): Promise<boolean> {
   try {
-    const { getInternalSetting, deleteInternalSetting } = await import("./db");
-    // The public health endpoint calls this on every healthy hit: only touch
-    // the settings table when an episode actually left state behind.
+    const { getInternalSetting, deleteInternalSetting, listInternalSettingKeysByPrefix } =
+      await import("./db");
     let cleared = false;
-    for (const prefix of [LIVENESS_DEGRADED_SINCE_PREFIX, LIVENESS_ESCALATED_AT_PREFIX]) {
+    if (isPerAccountLivenessWarningType(warningType)) {
+      discardLegacyGlobalLivenessEpisode(warningType, getInternalSetting, deleteInternalSetting);
+      if (accountKey) {
+        const key = livenessAccountSinceKey(warningType, accountKey);
+        if (getInternalSetting(key) !== undefined) {
+          deleteInternalSetting(key);
+          cleared = true;
+        }
+        return cleared;
+      }
+      const prefix = livenessAccountSincePrefix(warningType);
+      for (const key of listInternalSettingKeysByPrefix(prefix)) {
+        deleteInternalSetting(key);
+        cleared = true;
+      }
+      for (const episodePrefix of [
+        LIVENESS_ESCALATED_AT_PREFIX,
+        LIVENESS_SENTRY_SIGNATURE_PREFIX,
+        LIVENESS_SENTRY_SENT_PREFIX,
+        LIVENESS_DEGRADED_SINCE_PREFIX
+      ]) {
+        const key = `${episodePrefix}:${warningType}`;
+        if (getInternalSetting<string>(key) !== undefined) {
+          deleteInternalSetting(key);
+          cleared = true;
+        }
+      }
+      return cleared;
+    }
+    for (const prefix of [
+      LIVENESS_DEGRADED_SINCE_PREFIX,
+      LIVENESS_ESCALATED_AT_PREFIX,
+      LIVENESS_SENTRY_SIGNATURE_PREFIX,
+      LIVENESS_SENTRY_SENT_PREFIX
+    ]) {
       const key = `${prefix}:${warningType}`;
       if (getInternalSetting<string>(key) !== undefined) {
         deleteInternalSetting(key);

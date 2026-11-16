@@ -111,7 +111,9 @@ export async function fetchAlternativeEmbedding(texts: string[], userId: string 
           model,
           userId,
           provider,
-          useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", raw)
+          useSiliconFlow ? undefined : providerRequestIdFromPayload("openrouter", raw),
+          undefined,
+          false
         );
         const groupVectors = (res.data ?? []).map((d) => d.embedding);
         if (groupVectors.length !== group.length) {

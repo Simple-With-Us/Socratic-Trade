@@ -24,7 +24,7 @@ Files:
 ## 3. Decisions & Trade-offs
 
 - Merged remote `5626f59f` strict `SecuritiesImportPayloadSchema` at the import trust boundary (HTTP 400 on invalid payload); outbound share still uses per-row drop with loud reporting.
-- `/defer` on retroactive `#agent-sync` claim post from this cloud seat (cannot authenticate owner's Slack bot here); effort row updated with `repo:` prefix per fleet format.
+- `/defer` on retroactive `#ag***-s**c` claim post from this cloud seat (cannot authenticate owner's Slack bot here); effort row updated with `repo:` prefix per fleet format.
 
 ## 4. Verification State
 

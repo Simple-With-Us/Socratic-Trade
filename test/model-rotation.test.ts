@@ -151,7 +151,8 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
   it("excludes only the expensive models from automatic rotation, keeping them in the curated picker", async () => {
     const { MODEL_ROTATION_POOL } = await import("../src/lib/model-rotation");
     const { CURATED_LLM_MODEL_IDS } = await import("../app/ui/llm-model-catalog");
-    const excluded = ["gpt-6-astra-pro", "claude-opus-latest", "claude-fable-latest"];
+    // Cost exclusions plus the Code CLI-only rows: all rotate only when explicitly ticked.
+    const excluded = ["claude-opus-latest", "claude-fable-latest", "muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"];
     for (const model of excluded) {
       expect(MODEL_ROTATION_POOL).not.toContain(model);
       expect(CURATED_LLM_MODEL_IDS).toContain(model);
@@ -159,7 +160,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     // Keep-in-sync check: rotation is the curated catalog minus exactly these exclusions.
     expect(new Set(MODEL_ROTATION_POOL)).toEqual(new Set(CURATED_LLM_MODEL_IDS.filter((id) => !excluded.includes(id))));
     expect(MODEL_ROTATION_POOL).toContain("gpt-6-astra");
-    expect(MODEL_ROTATION_POOL).toContain("gpt-5.6-sol");
+    expect(MODEL_ROTATION_POOL).toContain("gpt-6.1-sol");
     expect(MODEL_ROTATION_POOL).toContain("grok-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-small-latest");
     expect(MODEL_ROTATION_POOL).toContain("mistral-medium-latest");
@@ -183,7 +184,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(safe).not.toContain("claude-opus-latest");
     expect(safe).not.toContain("gpt-6-astra-pro");
     expect(safe).toContain("gpt-6-astra");
-    expect(safe).toContain("gpt-5.6-sol");
+    expect(safe).toContain("gpt-6.1-sol");
     expect(safe).toContain("gemini-flash-latest");
     expect(safe.length).toBe(MODEL_ROTATION_POOL.length);
   });
@@ -194,13 +195,13 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
       "openai/gpt-6-astra",
       "anthropic/claude-haiku-4.5",
       "google/gemini-3.7-flash",
-      "deepseek/deepseek-v4-flash-0731",
+      "deepseek/deepseek-v4.1-flash-1017",
       "mistralai/mistral-small-2603",
-      "openai/gpt-5.6-luna",
+      "openai/gpt-6-luna",
       "anthropic/claude-sonnet-4.6",
       "google/gemini-3.5-flash-lite",
       "x-ai/grok-4.5",
-      "openai/gpt-5.6-sol",
+      "openai/gpt-6.1-sol",
       "anthropic/claude-opus-4.6",
       "google/gemini-3.1-pro-preview",
       "deepseek/deepseek-v4-pro-0813",
@@ -215,7 +216,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(result.pool).toContain("mistral-small-latest");
     expect(result.pool).toContain("grok-latest");
     expect(result.pool).toContain("gpt-6-astra");
-    expect(result.pool).toContain("gpt-5.6-sol");
+    expect(result.pool).toContain("gpt-6.1-sol");
     expect(result.pool).not.toContain("kimi-latest");
     expect(result.pool).not.toContain("claude-fable-latest");
   });
@@ -232,7 +233,7 @@ describe("MODEL_ROTATION_POOL (curated catalog minus exclusions)", () => {
     expect(result.emptiedByAllowlist).toBe(true);
     expect(result.pool.length).toBe(MODEL_ROTATION_POOL.length);
     expect(result.pool).toContain("gpt-6-astra");
-    expect(result.pool).toContain("gpt-5.6-sol");
+    expect(result.pool).toContain("gpt-6.1-sol");
     expect(result.pool).toContain("kimi-latest");
     expect(result.pool).not.toContain("claude-fable-latest");
     expect(result.pool).not.toContain("claude-opus-latest");
@@ -253,7 +254,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     
     // GPT and Claude models should be kept (in pool) since openai/anthropic keys are active
     expect(pool).toContain("gpt-6-astra");
-    expect(pool).toContain("gpt-5.6-sol");
+    expect(pool).toContain("gpt-6.1-sol");
     expect(pool).not.toContain("claude-opus-latest");
     
     // Gemini and DeepSeek models should be skipped since gemini/deepseek keys are missing
@@ -274,7 +275,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     expect(result.availabilityError).toBe("http_429");
     expect(result.pool.length).toBeGreaterThan(0);
     expect(result.pool).toContain("gpt-6-astra");
-    expect(result.pool).toContain("gpt-5.6-sol");
+    expect(result.pool).toContain("gpt-6.1-sol");
   });
 
   it("keeps a non-empty pool when a live /models/user list has versioned ids and no *-latest aliases", async () => {
@@ -296,7 +297,7 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
               { id: "mistralai/mistral-small-2603" },
               { id: "x-ai/grok-4.5" },
               { id: "openai/gpt-6-astra" },
-              { id: "openai/gpt-5.6-sol" }
+              { id: "openai/gpt-6.1-sol" }
             ]
           }),
           { status: 200, headers: { "content-type": "application/json" } }
@@ -315,6 +316,50 @@ describe("eligibleRotationPool (credential-missing skip)", () => {
     expect(result.pool).not.toContain("claude-fable-latest");
     vi.unstubAllGlobals();
     clearOpenRouterUserModelAvailabilityCache();
+  });
+});
+
+describe("eligibleRotationPool (Code CLI-only models, ST-4589)", () => {
+  it("admits Code CLI-only models only while the user's Meta route is a ready Code CLI route", async () => {
+    noEnvKeys();
+    const { upsertUserApiKey, setUserSetting } = await import("../src/lib/db");
+    const { eligibleRotationPool, planRotationImplicitFallbacks } = await import("../src/lib/model-rotation");
+    const cliOnly = ["muse-wonder-1.0-contributor", "muse-wonder-full-1.0-contributor"];
+    upsertUserApiKey("local", "openrouter", "sk-test-openrouter", "test");
+    // OpenRouter route (the default): never eligible, even with an OpenRouter key.
+    const off = await eligibleRotationPool("local", cliOnly);
+    for (const model of cliOnly) {
+      expect(off.pool).not.toContain(model);
+      expect(off.skipped).toContain(model);
+    }
+    // ...so an implicit failover chain built from that pool can never land on one.
+    const chain = planRotationImplicitFallbacks({ greenRotationPool: off.pool, greenPick: off.pool[0], greenPrimary: off.pool[0] });
+    for (const model of cliOnly) expect(chain.green).not.toContain(model);
+    // Code CLI selected AND ready for this owner: eligible.
+    vi.stubEnv("PRIMARY_USER_EMAIL", "owner@example.com");
+    vi.stubEnv("CODE_CLI_ENABLED", "true");
+    vi.stubEnv("CODE_CLI_OWNER_EMAIL", "owner@example.com");
+    vi.stubEnv("CODE_CLI_OWNER_USER_ID", "local");
+    vi.stubEnv("CODE_CLI_BROKER_URL", "https://broker.internal/generate");
+    vi.stubEnv("CODE_CLI_BROKER_TOKEN", "test-broker-token");
+    setUserSetting("local", "llm_route_meta", "code-cli");
+    // Glimmer is a RETIRED row now (owner 2026-11-05), so it only reaches rotation as a stored
+    // candidate; it also has no Code CLI adapter.  While Meta is on Code CLI it is refused as
+    // UNAVAILABLE (so a fallback loop skips it) and never enters the pool, a pick, or a failover chain.
+    const on = await eligibleRotationPool("local", [...cliOnly, "muse-glimmer-30b"]);
+    for (const model of cliOnly) expect(on.pool).toContain(model);
+    const { resolveLlmEndpoint, LlmModelUnavailableError } = await import("../src/lib/llm-provider");
+    expect(() => resolveLlmEndpoint({ llmModel: "muse-glimmer-30b" }, "local")).toThrow(LlmModelUnavailableError);
+    expect(on.pool).not.toContain("muse-glimmer-30b");
+    expect(on.skipped).toContain("muse-glimmer-30b");
+    expect(on.pool).toContain("muse-spark-1.3-contributor");
+    const onChain = planRotationImplicitFallbacks({ greenRotationPool: on.pool, greenPick: on.pool[0], greenPrimary: on.pool[0] });
+    expect(onChain.green).not.toContain("muse-glimmer-30b");
+    // Selected but not ready: excluded again.
+    vi.stubEnv("CODE_CLI_ENABLED", "false");
+    const notReady = await eligibleRotationPool("local", cliOnly);
+    for (const model of cliOnly) expect(notReady.pool).not.toContain(model);
+    setUserSetting("local", "llm_route_meta", "openrouter");
   });
 });
 
@@ -375,7 +420,7 @@ describe("resolveModelRotationForRun", () => {
     const firstPick = greenFirstPickPool(pool);
     const n = firstPick.length;
     expect(n).toBeGreaterThanOrEqual(3);
-    expect(firstPick[0]).not.toBe("gpt-5.6-sol");
+    expect(firstPick[0]).not.toBe("gpt-6.1-sol");
     // An r on the uniform/weighted boundary: with all-zero stats (uniform weight 2, total 2n) it
     // lands in firstPick[0]'s slice (r * 2n < 2 for n >= 3); once firstPick[0] carries the only
     // committed pick (weight 1, total 2n - 1) the same r clears that halved slice
@@ -871,6 +916,234 @@ describe("rotation review round: cross-seat exclusion, per-user 403 cooldown, re
     } finally {
       clearOpenRouterModelCooldowns();
     }
+  });
+});
+
+describe("owner rotation selection (ST-4589: llmRotationModels / redTeamRotationModels)", () => {
+  type PickAudit = {
+    runId: string;
+    seat: string;
+    model: string;
+    selection?: string[];
+    selectionPoolSize?: number;
+    selectionFallback?: boolean;
+  };
+  async function pickAudits(userId: string, runId: string): Promise<PickAudit[]> {
+    const { getDb } = await import("../src/lib/db");
+    return (
+      getDb()
+        .prepare("SELECT payload FROM audit_events WHERE kind = 'model_rotation_pick' AND user_id = ?")
+        .all(userId) as Array<{ payload: string }>
+    )
+      .map((row) => JSON.parse(row.payload) as PickAudit)
+      .filter((row) => row.runId === runId);
+  }
+  /** A user whose OpenRouter key resolves every catalog model (availability is not checked in tests). */
+  async function openRouterUser(prefix: string): Promise<string> {
+    noEnvKeys();
+    const userId = `${prefix}-${randomUUID()}`;
+    const { upsertUserApiKey } = await import("../src/lib/db");
+    upsertUserApiKey(userId, "openrouter", "sk-test-openrouter", "test");
+    return userId;
+  }
+
+  it("restricts the Green pick to the selected models and records the selection on the audit", async () => {
+    const userId = await openRouterUser("rot-sel-green");
+    const { resolveModelRotationForRun, eligibleRotationPool, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { pool } = await eligibleRotationPool(userId);
+    expect(pool.length).toBeGreaterThanOrEqual(4);
+    const selection = [pool[1]!, pool[3]!];
+    const random = mulberry32(11);
+    for (let i = 0; i < 10; i++) {
+      const runId = randomUUID();
+      const out = await resolveModelRotationForRun({
+        userId,
+        accountId: "acct-sel",
+        runId,
+        policy: { llmModel: LLM_MODEL_ROTATION_SENTINEL, llmRotationModels: selection },
+        random
+      });
+      expect(selection).toContain(out.llmModel);
+      expect(out.greenRotationPool).toEqual(selection);
+      expect(out.greenRotationBackupPool).toEqual(pool);
+      out.commit();
+      const [audit] = await pickAudits(userId, runId);
+      expect(audit).toMatchObject({ seat: "green", selection, selectionPoolSize: 2, selectionFallback: false });
+    }
+  });
+
+  it("keeps a model a pin weighted to 0 out of the backup failover pool too (not just the seat pool)", async () => {
+    const userId = await openRouterUser("rot-sel-pin-zero");
+    const { resolveModelRotationForRun, eligibleRotationPool, planRotationImplicitFallbacks, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { pool } = await eligibleRotationPool(userId);
+    const selection = [pool[1]!, pool[3]!, pool[4]!];
+    const zeroed = pool[3]!;
+    const out = await resolveModelRotationForRun({
+      userId,
+      accountId: "acct-sel-pin-zero",
+      runId: randomUUID(),
+      policy: { llmModel: LLM_MODEL_ROTATION_SENTINEL, llmRotationModels: selection, rotationPin: { weights: { [zeroed]: 0 }, label: "zero-one" } },
+      random: () => 0
+    });
+    expect(out.greenRotationPool).not.toContain(zeroed);
+    expect(out.greenRotationBackupPool).toBeDefined();
+    expect(out.greenRotationBackupPool).not.toContain(zeroed);
+    const chain = planRotationImplicitFallbacks({
+      userId,
+      greenRotationPool: out.greenRotationPool,
+      greenRotationBackupPool: out.greenRotationBackupPool,
+      greenPick: out.llmModel,
+      greenPrimary: out.llmModel
+    });
+    expect(chain.green).not.toContain(zeroed);
+  });
+
+  it("canonicalises stored spellings and honours a ticked model that is excluded from the default pool", async () => {
+    const userId = await openRouterUser("rot-sel-excluded");
+    const { resolveModelRotationForRun, MODEL_ROTATION_POOL, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { ROTATION_EXCLUDED_DISPLAY_SLUGS, openRouterSlugFor } = await import("../src/lib/llm-model-catalog");
+    const excluded = ROTATION_EXCLUDED_DISPLAY_SLUGS[0];
+    if (!excluded) return; // nothing excluded in this catalog: nothing to prove
+    expect(MODEL_ROTATION_POOL).not.toContain(excluded);
+    const out = await resolveModelRotationForRun({
+      userId,
+      accountId: "acct-sel-excl",
+      runId: randomUUID(),
+      // Stored as the OpenRouter wire slug: rotation maps it back to the display slug.
+      policy: { llmModel: LLM_MODEL_ROTATION_SENTINEL, llmRotationModels: [openRouterSlugFor(excluded)] },
+      random: () => 0
+    });
+    expect(out.llmModel).toBe(excluded);
+    // The exclusion still holds for everyone who did not tick it: the backup chain pool is the default pool.
+    expect(out.greenRotationBackupPool).not.toContain(excluded);
+  });
+
+  it("an all-ineligible or all-custom selection falls back to the whole pool with selectionFallback on the audit", async () => {
+    noEnvKeys();
+    const userId = `rot-sel-fallback-${randomUUID()}`;
+    const { upsertUserApiKey } = await import("../src/lib/db");
+    const { resolveModelRotationForRun, eligibleRotationPool, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { LLM_MODEL_CATALOG } = await import("../src/lib/llm-model-catalog");
+    upsertUserApiKey(userId, "openai", "sk-test", "test");
+    const { pool } = await eligibleRotationPool(userId);
+    expect(pool.length).toBeGreaterThan(0);
+    const unkeyed = LLM_MODEL_CATALOG.map((row) => row.displaySlug).filter((slug) => !pool.includes(slug) && /^(claude|gemini|mistral|deepseek)/.test(slug));
+    expect(unkeyed.length).toBeGreaterThan(0);
+    for (const selection of [unkeyed.slice(0, 2), ["my-custom/model-id"]]) {
+      const runId = randomUUID();
+      const out = await resolveModelRotationForRun({
+        userId,
+        accountId: "acct-sel-fb",
+        runId,
+        policy: { llmModel: LLM_MODEL_ROTATION_SENTINEL, llmRotationModels: selection },
+        random: () => 0
+      });
+      expect(pool).toContain(out.llmModel);
+      expect(out.greenRotationPool).toEqual(pool);
+      expect(out.greenRotationBackupPool).toBeUndefined();
+      out.commit();
+      const [audit] = await pickAudits(userId, runId);
+      expect(audit).toMatchObject({ seat: "green", selectionPoolSize: 0, selectionFallback: true });
+    }
+  });
+
+  it("an empty selection is byte-identical to no selection (no receipts on the audit)", async () => {
+    const userId = await openRouterUser("rot-sel-empty");
+    const { resolveModelRotationForRun, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const runId = randomUUID();
+    const out = await resolveModelRotationForRun({
+      userId,
+      accountId: "acct-sel-empty",
+      runId,
+      policy: { llmModel: LLM_MODEL_ROTATION_SENTINEL, llmRotationModels: [] },
+      random: () => 0
+    });
+    expect(out.greenRotationBackupPool).toBeUndefined();
+    out.commit();
+    const [audit] = await pickAudits(userId, runId);
+    expect(audit).not.toHaveProperty("selection");
+    expect(audit).not.toHaveProperty("selectionFallback");
+  });
+
+  it("each seat rotates over its own selection, and Red never serves Green's pick while its selection has another option", async () => {
+    const userId = await openRouterUser("rot-sel-both");
+    const { resolveModelRotationForRun, eligibleRotationPool, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { pool } = await eligibleRotationPool(userId);
+    const green = [pool[0]!, pool[1]!];
+    const red = [pool[1]!, pool[2]!];
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const out = await resolveModelRotationForRun({
+        userId,
+        accountId: "acct-sel-both",
+        runId: randomUUID(),
+        policy: {
+          llmModel: LLM_MODEL_ROTATION_SENTINEL,
+          redTeamLlmModel: LLM_MODEL_ROTATION_SENTINEL,
+          llmRotationModels: green,
+          redTeamRotationModels: red
+        },
+        random: mulberry32(seed)
+      });
+      expect(green).toContain(out.llmModel);
+      expect(red).toContain(out.redTeamLlmModel);
+      expect(out.redTeamLlmModel).not.toBe(out.llmModel);
+      expect(out.redRotationPool).toEqual(red.filter((model) => model !== out.llmModel));
+    }
+  });
+
+  it("mirrors the 1-model edge: a Red selection holding only Green's pick serves that model rather than failing", async () => {
+    const userId = await openRouterUser("rot-sel-edge");
+    const { resolveModelRotationForRun, eligibleRotationPool, LLM_MODEL_ROTATION_SENTINEL } = await import("../src/lib/model-rotation");
+    const { pool } = await eligibleRotationPool(userId);
+    const only = pool[0]!;
+    const out = await resolveModelRotationForRun({
+      userId,
+      accountId: "acct-sel-edge",
+      runId: randomUUID(),
+      policy: {
+        llmModel: LLM_MODEL_ROTATION_SENTINEL,
+        redTeamLlmModel: LLM_MODEL_ROTATION_SENTINEL,
+        llmRotationModels: [only],
+        redTeamRotationModels: [only]
+      },
+      random: () => 0
+    });
+    expect(out.llmModel).toBe(only);
+    expect(out.redTeamLlmModel).toBe(only);
+  });
+
+  it("planRotationImplicitFallbacks tries the selected models first, then the default chain, within the cap", async () => {
+    const { planRotationImplicitFallbacks, MODEL_ROTATION_POOL, ROTATION_IMPLICIT_GREEN_FAILOVERS, clearOpenRouterModelCooldowns } =
+      await import("../src/lib/model-rotation");
+    clearOpenRouterModelCooldowns();
+    const pool = [...MODEL_ROTATION_POOL];
+    expect(pool.length).toBeGreaterThanOrEqual(5);
+    // Selected models deliberately taken from the END of the pool so "selected first" cannot be
+    // an accident of the default ordering.
+    const selected = pool.slice(-3);
+    const planned = planRotationImplicitFallbacks({
+      userId: "local",
+      greenRotationPool: selected,
+      greenRotationBackupPool: pool,
+      greenPick: selected[0],
+      greenPrimary: selected[0],
+      redPrimary: pool[0]
+    });
+    expect(planned.green.slice(0, 2).sort()).toEqual(selected.slice(1).sort());
+    expect(planned.green).not.toContain(selected[0]);
+    expect(planned.green).not.toContain(pool[0]);
+    expect(new Set(planned.green).size).toBe(planned.green.length);
+    expect(planned.green.length).toBeLessThanOrEqual(ROTATION_IMPLICIT_GREEN_FAILOVERS);
+    expect(planned.green.length).toBe(Math.min(ROTATION_IMPLICIT_GREEN_FAILOVERS, pool.length - 2));
+    // Owner-configured fallbacks still win unchanged.
+    const explicit = planRotationImplicitFallbacks({
+      userId: "local",
+      greenRotationPool: selected,
+      greenRotationBackupPool: pool,
+      greenPick: selected[0],
+      explicitGreenFallbacks: ["x"]
+    });
+    expect(explicit.green).toEqual([]);
   });
 });
 

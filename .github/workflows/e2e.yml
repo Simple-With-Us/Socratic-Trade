@@ -134,7 +134,7 @@ jobs:
           actor="${{ github.actor }}"
           if printf '%s' "$actor" | grep -Eq '\[bot\]$'; then
             case "$actor" in
-              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]')
+              'cursor[bot]'|'dependabot[bot]'|'renovate[bot]'|'sentry[bot]'|'codex[bot]'|'chatgpt-codex-connector[bot]'|'kody-ai[bot]'|'claude[bot]'|'github-actions[bot]'|swu-*'[bot]')
                 echo "Trusted same-repo bot: $actor"
                 ;;
               *)
@@ -151,7 +151,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.classify.outputs.docs-only != 'true'
         with:
-          node-version: 24
+          node-version: 26
       # Long-lived socratic-ci workspaces have lost the tree between checkout and
       # npm install when a concurrent job's clean step overlapped (ENOENT package.json
       # on the 2026-07-26 scheduled smoke). Same re-checkout boundary as ci.yml
@@ -204,7 +204,10 @@ jobs:
             ${{ runner.os }}-nextjs-
       - name: Run smoke tests
         if: needs.classify.outputs.docs-only != 'true' && inputs.update-visual-baselines != true
-        run: npm run test:e2e
+        run: |
+          npm run test:e2e
+          export PLAYWRIGHT_AUTH_SECRET="$(openssl rand -hex 32)"
+          npm run test:e2e:admin
       # Baseline regeneration lives in CI (not on a dev laptop/VM) because the
       # committed PNGs must match the CI browser + production build byte for byte:
       # local runs use a different Chromium build, different system fonts, and

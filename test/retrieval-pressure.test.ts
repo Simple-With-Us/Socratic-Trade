@@ -92,4 +92,14 @@ describe("retrieval pressure", () => {
     expect(countsTowardRetrievalBackoff(new Error("strategy RAG retrieval timed out"))).toBe(true);
     expect(countsTowardRetrievalBackoff(new Error("embedding credential is missing"))).toBe(false);
   });
+
+  it("does not treat a provider timeout message as our retrieval deadline", () => {
+    expect(countsTowardRetrievalBackoff(new Error("HTTP 504 Gateway Timeout"))).toBe(false);
+    const abort = new Error("The operation was aborted");
+    abort.name = "AbortError";
+    expect(countsTowardRetrievalBackoff(abort)).toBe(true);
+    const deadline = new Error("ignored");
+    (deadline as { __deadlineTimeout?: boolean }).__deadlineTimeout = true;
+    expect(countsTowardRetrievalBackoff(deadline)).toBe(true);
+  });
 });

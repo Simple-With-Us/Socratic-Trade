@@ -1,5 +1,5 @@
 import { ACCOUNT_DELETE_PHRASE, getAccountDeletionPreview } from "@/lib/account-deletion";
-import { resolveRequestUser } from "@/lib/request-user";
+import { resolveRequestUserOrResponse } from "@/lib/request-user";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +25,8 @@ function mobileDeletionRequest(user: { userId: string; email?: string }) {
 }
 
 export async function GET(request: Request) {
-  const user = resolveRequestUser(request);
+  const user = resolveRequestUserOrResponse(request);
+  if (user instanceof Response) return user;
   return NextResponse.json({ deletionRequest: mobileDeletionRequest(user) });
 }
 

@@ -31,7 +31,7 @@ those fixes.
 | Usage-Monitor | `gh api` on `main` | 2026-08-17 ~14:18Z |
 | congress-trading-shared | `gh api` on `main` + tags | tag `v2.5.2` (2026-08-11) |
 | DealDex | `gh api` on `main` | 2026-08-17 ~20:03Z |
-| ai-fleet-coordinator | `gh api` on `main` | `fleet-apps.json`, `AGENT-SYNC.md`, `EFFORT-LOG-PROTOCOL.md`, `docs/MAC-LOCAL-PROCESSES.md` |
+| ai-fleet-coordinator | `gh api` on `main` | `fleet-apps.json`, `AG***-S**C.md`, `EFFORT-LOG-PROTOCOL.md`, `docs/MAC-LOCAL-PROCESSES.md` |
 
 GitHub MCP was unavailable in this session.  `gh` (read-only) was the peer-repo
 path.  Secrets were not opened.  Production Infisical / Coolify values are
@@ -51,7 +51,7 @@ tree all claim CTS `v2.5.2`, and ST's order path does not require CT or UM.
 ## 3. Architecture map
 
 ```
-                    #agent-sync  +  per-app effort boards
+                    #ag***-s**c  +  per-app effort boards
                     (FLEET protocol; not a runtime bus)
                                     |
         +---------------------------+---------------------------+
@@ -169,7 +169,7 @@ from `checks.dependencies` (2026-08-17 FilingAPI retirement).
 
 **CT `/api/health` is an UptimeRobot target** and now publishes Infisical
 source status (names/counts, never values) after the 2026-08-16
-`AGENT_SYNC_*` rotation (`docs/rollouts/2026-08-16-health-infisical-shared.md`
+`AG***_S**C_*` rotation (`docs/rollouts/2026-08-16-health-infisical-shared.md`
 in CT).  A Coolify container gap still 403s at the Cloudflare edge; that is
 not an app bug, but it **is** a shared-host deploy coupling (see 4.7).
 
@@ -267,7 +267,7 @@ email when Pushover can deliver.  That closed the 2026-08-13
 R2 fleet alerts pick a **subject-app** Pushover token
 (`PUSHOVER_ST_API_TOKEN` / `PUSHOVER_CT_API_TOKEN` /
 `PUSHOVER_USAGE_API_TOKEN`) so the phone logo matches the account, not the
-sender process (`src/lib/r2-usage.ts`).  AGENT-SYNC records the inverse bug:
+sender process (`src/lib/r2-usage.ts`).  AG***-S**C records the inverse bug:
 tokens lived only in the peer Infisical project, so ST sent a CT digest with
 the wrong logo.  Cross-app keys must be **copied into the consuming app's
 Infisical project**, not read from `~/.secrets` at runtime.
@@ -315,7 +315,7 @@ fourth contender.
 
 ### 4.8 Secrets and account identity — P1
 
-**Cloudflare is four accounts, not one.**  AGENT-SYNC: Congress.Trade,
+**Cloudflare is four accounts, not one.**  AG***-S**C: Congress.Trade,
 SocraticTrade.com, Usage.Jays.Services, plus a legacy zero-zone "jay"
 account.  At least four login emails.  `/user/tokens/verify` 401s on
 account-owned tokens by design.  Agents keep declaring live tokens dead.
@@ -323,10 +323,10 @@ ST `r2-usage.ts` monitors three R2 free tiers (`st` / `ct` / `um`) with
 phased GraphQL so peer checks do not stampede.
 
 **Infisical merge order is a rotation trap.**  Shared project loads first;
-app project shadows.  CT 2026-08-16 deleted `AGENT_SYNC_*` from ST and CT
+app project shadows.  CT 2026-08-16 deleted `AG***_S**C_*` from ST and CT
 **app** projects so the shared project is the only copy.  `ADMIN_TOKEN` stayed
 on CT app (correct — it is CT admin auth).  UM was **not** given
-`AGENT_SYNC_*`.  The next rotation that writes a fleet key into an app
+`AG***_S**C_*`.  The next rotation that writes a fleet key into an app
 project will recreate the three-project chore.
 
 **Token names that look interchangeable and are not:**
@@ -358,7 +358,7 @@ From FLEET `docs/MAC-LOCAL-PROCESSES.md` (inventory 2026-08-16):
 | `mac-xcode26-usage` | Always-on GH runner | UM TestFlight / iOS CI |
 | pm2 `scout` + `senate-relay` + `senate-tunnel` | Always-on | **CT Senate ingest** (product) |
 | pm2 `vision-worker` | Always-on | CT scanned-PTR |
-| pm2 `agent-sync-push` | Always-on | Slack fan-out for all seats |
+| pm2 `ag***-s**c-push` | Always-on | Slack fan-out for all seats |
 | `xcode-health` | Always-on | operator visibility |
 
 ST **trading** does not need the Mac.  CT **Senate discovery** still does
@@ -424,12 +424,12 @@ infrastructure-independent.**  CT's Senate path is not Mac-independent.
 | Fundamentals cascade | **ST** | enable CT fundamentals without an owner flag |
 | Daily OHLC SoR for the peer bridge | **ST** (`skipAppATier`) | CT treating Massive as primary once peer is healthy |
 | Massive 100/min split | **UM knobs + ST reserve + CT last-resort** | second Massive key (owner: never mint keys) |
-| Infisical fleet keys (`AGENT_SYNC_*`) | **shared project only** | copy into app projects |
+| Infisical fleet keys (`AG***_S**C_*`) | **shared project only** | copy into app projects |
 | Coolify deploy webhook HMAC | **per-app Infisical** | share one secret across apps |
 | Mac senate-relay / scout | **CT + FLEET MAC list** | hairpin public scout URL from the box |
 | ios-fleet scripts | **FLEET untracked + per-repo sha256** | hand-edit without `--update` pin |
 | DealDex product | **DD** | mix keys into ST/CT/UM Infisical |
-| Effort boards / #agent-sync | **FLEET protocol** | treat Slack as a lock |
+| Effort boards / #ag***-s**c | **FLEET protocol** | treat Slack as a lock |
 
 ## 7. Prioritized portfolio fixes
 

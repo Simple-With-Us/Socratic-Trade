@@ -1,3 +1,4 @@
+import { listOpenApiCircuitBreakers, type OpenCircuitBreaker } from "./api-circuit-breaker";
 import { autonomyAuthorityWord, autonomyStatusLabel } from "./autonomy-labels";
 import { getInternalSetting } from "./db-settings";
 import { describeAutonomyHaltCause, effectiveAutoResumeOnBoot, type AutonomyHaltCause } from "./autonomy-halt-cause";
@@ -8,7 +9,13 @@ import { isIntentionalOffHealthService } from "./retired-direct-vendors";
 import { getTaskJournalSummary } from "./db-task-journal";
 import { userHasAnyLlmCredential } from "./db-api-keys";
 import { resolveLlmEndpoint } from "./llm-provider";
-import { computeAccountTradingLiveness } from "./trading-liveness";
+import {
+  computeAccountTradingLiveness,
+  countLeadingFailedRuns,
+  loadRecentFinishedRuns,
+  runFailureRearmCutoff
+} from "./trading-liveness";
+import { readRunFailureWatchState } from "./run-failure-watchdog";
 import { loadLatestEnrichmentCoverageReport } from "./db-enrichment-coverage";
 import { getLastEnrichmentCoverageReport } from "./enrichment-coverage";
 import { opsMarketScanRecordSummary, type OpsMarketScanRecordSummary } from "./market-scan-freshness";
@@ -116,6 +123,11 @@ export interface OpsAccountSnapshot {
    *  restart with autoResumeOnBoot off, the drawdown breaker, an auto-pause whose resume marker is
    *  gone, or no record.  Only the first lifts by itself.  null for every other state. */
   haltCause: AutonomyHaltCause | null;
+  /** Run-failure watchdog durable state (alert/backoff/halt ladder).  null when never observed. */
+  runFailureWatch: OpsRunFailureWatchSnapshot | null;
+  /** Leading failed finished runs from `strategy_runs`, even when the account is halted — ops-only
+   *  visibility for monitoring (does not change liveness/health semantics). */
+  recentConsecutiveFailedRuns: number | null;
   /** Present when `?orders=1` — broker order-list breakdown for open-vs-history diagnosis. */
   orders?: OpsOrderListSummary | null;
   /** Present when `?ordersDetail=1` — per-working-order role classification (see
@@ -132,6 +144,49 @@ export interface OpsOrderListSummary {
   doneForDayCount: number;
   topStates: Array<{ state: string; count: number }>;
   error?: string;
+}
+
+export interface OpsRunFailureWatchSnapshot {
+  consecutiveFailures: number;
+  lastAlertedStreak: number;
+  backoffUntil: string | null;
+  watchdogHalted: boolean;
+}
+
+/**
+ * Post-re-arm failed-run streak for an account liveness skips (not active).  Uses the same
+ *  re-arm cutoff as liveness and `/api/health`, so a re-armed account does not show its
+ *  pre-re-arm failures here.
+ */
+function recentConsecutiveFailedRuns(userId: string, connectedAccountId: string): number | null {
+  try {
+    return countLeadingFailedRuns(
+      loadRecentFinishedRuns(userId, connectedAccountId),
+      runFailureRearmCutoff(userId, connectedAccountId)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function opsRunFailureWatchSnapshot(
+  userId: string,
+  connectedAccountId: string
+): OpsRunFailureWatchSnapshot | null {
+  // Diagnostics must never fail the snapshot: an unreadable watchdog row reads as null instead
+  // of throwing into the per-account catch, which would drop every other health field.
+  try {
+    const state = readRunFailureWatchState(userId, connectedAccountId);
+    if (!state) return null;
+    return {
+      consecutiveFailures: state.consecutiveFailures,
+      lastAlertedStreak: state.lastAlertedStreak,
+      backoffUntil: state.backoffUntil,
+      watchdogHalted: state.halted
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface OpsStrategyRunRow {
@@ -255,6 +310,8 @@ export interface OpsSnapshot {
     };
   };
   users: OpsUserSnapshot[];
+  /** Open API circuit breakers (paid-quote 429/402 holds and consecutive-failure lanes). */
+  quoteProviderBreakers?: OpenCircuitBreaker[];
 }
 
 function accountLabelById(userId: string): Map<string, string> {
@@ -524,7 +581,10 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           lastCompletedRunAgeSeconds: liveness?.lastCompletedRunAgeSeconds ?? null,
           consecutiveFailedRuns: liveness?.consecutiveFailedRuns ?? null,
           tradingLivenessDegraded: liveness?.degraded ?? null,
-          haltCause: safeHaltCause(userId, account.id, policy.accountNumber, policy.systemState)
+          haltCause: safeHaltCause(userId, account.id, policy.accountNumber, policy.systemState),
+          runFailureWatch: opsRunFailureWatchSnapshot(userId, account.id),
+          recentConsecutiveFailedRuns:
+            liveness?.consecutiveFailedRuns ?? recentConsecutiveFailedRuns(userId, account.id)
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -550,7 +610,9 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
           lastCompletedRunAgeSeconds: null,
           consecutiveFailedRuns: null,
           tradingLivenessDegraded: null,
-          haltCause: null
+          haltCause: null,
+          runFailureWatch: null,
+          recentConsecutiveFailedRuns: null
         };
       }
     });
@@ -728,6 +790,7 @@ export async function buildOpsSnapshot(input: BuildOpsSnapshotInput = {}): Promi
     roicArchive,
     taskJournal,
     pineconeIngest,
+    quoteProviderBreakers: listOpenApiCircuitBreakers(),
     users
   };
 }

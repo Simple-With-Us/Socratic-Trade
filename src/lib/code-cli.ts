@@ -1,10 +1,64 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { isPrimaryEmail, userIdForEmail } from "./auth/identity";
 
 /** Private, text-only broker contract. This module never reads CLI credentials or spawns a process. */
 export const CODE_CLI_PREFIX = "code-cli://";
 export type CodeCliService = "meta" | "minimax";
+
+/** A capability the route never enables: the field must be absent, null or false. */
+const Disabled = z.union([z.undefined(), z.null(), z.literal(false)]).optional();
+
+const CodeCliMessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant"]),
+  content: z.string(),
+  tool_calls: Disabled,
+  function_call: Disabled
+});
+
+/** Inbound OpenAI-style body.  Deliberately not .strict(): ST callers also send sampling fields such
+ *  as temperature (red-team.ts), which must not fail the call.  Also deliberately not .passthrough():
+ *  Zod's default strip drops unknown keys from the parsed data, so caller-controlled fields such as
+ *  cwd, sessionId or api_key are gone before the broker payload is rebuilt from an allowlist below. */
+const CodeCliRequestSchema = z.object({
+  model: z.string().optional(),
+  messages: z.array(z.unknown()).min(1).max(100),
+  stream: Disabled,
+  tools: Disabled,
+  functions: Disabled,
+  max_tokens: z.number().nullish(),
+  max_completion_tokens: z.number().nullish(),
+  response_format: z.unknown().optional(),
+  /** Set by ST's own request builder (llm-request.ts withLlmRequestBounds).  Anything outside the
+   *  ladder is dropped rather than failing the call. */
+  reasoning_effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).nullish().catch(undefined)
+});
+
+/** Opt-in switch for forwarding `reasoningEffort` to the broker (default off). */
+export function codeCliReasoningEffortEnabled(): boolean {
+  const raw = process.env.CODE_CLI_REASONING_EFFORT?.trim().toLowerCase();
+  return raw === "true" || raw === "1";
+}
+
+type BrokerReasoningEffort ="minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** The effort forwarded to the broker.  MiniMax and Muse cannot turn thinking off ("none" is a
+ *  provider 400), so "none" is never forwarded; contributor models never get "max" (Meta:
+ *  "not available with muse-spark-1.3-contributor"), so it clamps to "xhigh". */
+export function codeCliBrokerReasoningEffort(model: string, effort: string | null | undefined): BrokerReasoningEffort | undefined {
+  if (!effort || effort === "none") return undefined;
+  if (effort === "max" && /-contributor$/i.test(model)) return "xhigh";
+  return effort as BrokerReasoningEffort;
+}
+
+/** Broker response contract v1 (docs/llm/code-cli-broker.md).  Only text and finishReason are
+ *  forwarded into the completion ST builds below, so any other broker field is dropped here. */
+const CodeCliBrokerResponseSchema = z.object({
+  version: z.literal(1),
+  text: z.string().refine((text) => text.trim().length > 0),
+  finishReason: z.enum(["stop", "length"])
+});
 
 export function codeCliOwner(userId: string | undefined): boolean {
   const owner = process.env.CODE_CLI_OWNER_USER_ID?.trim();
@@ -38,30 +92,31 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
   }
   if (init.method !== "POST" || typeof init.body !== "string") throw new Error("Code CLI requires a text request");
   if (Buffer.byteLength(init.body, "utf8") > 1_000_000) throw new Error("Code CLI request exceeds text limit");
-  let body: Record<string, unknown>;
-  try { body = JSON.parse(init.body) as Record<string, unknown>; } catch { throw new Error("Code CLI requires a JSON request body"); }
-  const messages = body.messages;
-  if (body.stream || body.tools || body.functions || !Array.isArray(messages) || !messages.length || messages.length > 100) {
-    throw new Error("Code CLI is text-only: streaming and tools are disabled");
-  }
-  for (const message of messages) {
-    if (!message || typeof message !== "object" || !["system", "user", "assistant"].includes(message.role)
-      || typeof message.content !== "string" || message.tool_calls || message.function_call) {
-      throw new Error("Code CLI accepts only plain text messages");
-    }
-  }
-  const model = typeof body.model === "string" ? body.model : "";
-  if (!(service === "meta" ? /^muse-spark-/i.test(model) : /^minimax-/i.test(model))) {
+  let raw: unknown;
+  try { raw = JSON.parse(init.body); } catch { throw new Error("Code CLI requires a JSON request body"); }
+  const parsedBody = CodeCliRequestSchema.safeParse(raw);
+  if (!parsedBody.success) throw new Error("Code CLI is text-only: streaming and tools are disabled");
+  const body = parsedBody.data;
+  const parsedMessages = z.array(CodeCliMessageSchema).safeParse(body.messages);
+  if (!parsedMessages.success) throw new Error("Code CLI accepts only plain text messages");
+  const messages = parsedMessages.data;
+  const model = body.model ?? "";
+  if (!(service === "meta" ? /^muse-(?:spark|wonder)-/i.test(model) : /^minimax-/i.test(model))) {
     throw new Error("Model is not supported by this Code CLI adapter");
   }
   // Explicit reconstruction: no caller headers, API keys, tools, paths or extra body fields cross.
+  // `reasoningEffort` is a newer, optional contract field.  A broker that rejects unknown fields
+  // would fail every call (and there is no API fallback), so it is sent only once the operator
+  // confirms the broker honours it (CODE_CLI_REASONING_EFFORT=true).  Off: the body is unchanged.
+  const reasoningEffort = codeCliReasoningEffortEnabled() ? codeCliBrokerReasoningEffort(model, body.reasoning_effort) : undefined;
   const response = await fetch(process.env.CODE_CLI_BROKER_URL!, {
     method: "POST", redirect: "error", signal: init.signal ?? AbortSignal.timeout(150_000),
     headers: { "content-type": "application/json", authorization: `Bearer ${process.env.CODE_CLI_BROKER_TOKEN}` },
     body: JSON.stringify({ version: 1, requestId: randomUUID(), ownerUserId: userId, adapter: service === "meta" ? "muse" : "minimax",
       model, messages: messages.map(({ role, content }) => ({ role, content })),
       maxOutputTokens: Math.min(16000, Math.max(1, Number(body.max_tokens ?? body.max_completion_tokens) || 1500)),
-      responseFormat: body.response_format, capabilities: { tools: false, terminal: false, files: false, mcp: false } })
+      responseFormat: body.response_format, ...(reasoningEffort ? { reasoningEffort } : {}),
+      capabilities: { tools: false, terminal: false, files: false, mcp: false } })
   });
   // Never forward broker error bodies or session/credential metadata into model telemetry.
   if (!response.ok) throw new Error(`Code CLI broker failed (${response.status}); no API fallback`);
@@ -78,9 +133,10 @@ export async function fetchCodeCli(url: string, init: RequestInit): Promise<Resp
     }
   } finally { reader.releaseLock(); }
   const responseText = Buffer.concat(chunks).toString("utf8");
-  let result: { version?: unknown; text?: unknown; finishReason?: unknown };
-  try { result = JSON.parse(responseText); } catch { throw new Error("Invalid Code CLI broker response"); }
-  if (result.version !== 1 || typeof result.text !== "string" || !result.text.trim()
-    || !["stop", "length"].includes(String(result.finishReason))) throw new Error("Invalid Code CLI broker response");
+  let rawResult: unknown;
+  try { rawResult = JSON.parse(responseText); } catch { throw new Error("Invalid Code CLI broker response"); }
+  const parsedResult = CodeCliBrokerResponseSchema.safeParse(rawResult);
+  if (!parsedResult.success) throw new Error("Invalid Code CLI broker response");
+  const result = parsedResult.data;
   return Response.json({ choices: [{ message: { role: "assistant", content: result.text }, finish_reason: result.finishReason }] });
 }

@@ -69,10 +69,10 @@ ship_one() {
   bash "${FLEET_DIR}/ship-testflight.sh" "$key" --repo-root "$root" "${EXTRA_ARGS[@]}"
 }
 
-ship_one socratic IOS_SOCRATIC_ROOT "~/apps/trading-grok-ios-tf"
-ship_one congress IOS_CONGRESS_ROOT "~/apps/congress-grok-ios-tf"
-ship_one usage IOS_USAGE_ROOT "~/apps/usage-grok-ios-tf"
+ship_one socratic IOS_SOCRATIC_ROOT "${HOME}/apps/trading-grok-ios-tf"
+ship_one congress IOS_CONGRESS_ROOT "${HOME}/apps/congress-grok-ios-tf"
+ship_one usage IOS_USAGE_ROOT "${HOME}/apps/usage-grok-ios-tf"
 # usage-local was registered in apps.json and shipped by ship-now-gui.sh, but this
 # entry point silently skipped it -- "ship all" shipped three of four.
-ship_one usage-local IOS_USAGE_LOCAL_ROOT "~/apps/usage-grok-tf-runner"
+ship_one usage-local IOS_USAGE_LOCAL_ROOT "${HOME}/apps/usage-grok-tf-runner"
 echo "========== all done =========="

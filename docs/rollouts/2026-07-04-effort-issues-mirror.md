@@ -42,7 +42,7 @@
 ## Why
 
 - The owner wanted phone-visible notifications and an aggregated cross-repo view of active/planned
-  work without changing the underlying coordination mechanism (the markdown boards + `#agent-sync`).
+  work without changing the underlying coordination mechanism (the markdown boards + `#ag***-s**c`).
   GitHub Issues assignment already pushes mobile notifications for free; a read-only mirror gets
   that benefit without risking the boards ever becoming a write target for multiple concurrent
   agents (which would reintroduce exactly the merge-conflict/coordination problems the board system

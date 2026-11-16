@@ -82,12 +82,29 @@ Request: authenticated `POST` to the configured endpoint, JSON only. It contains
 - `messages`: at most 100 plain-text `system | user | assistant` messages.
 - `maxOutputTokens`: bounded to 1..16000.
 - Optional `responseFormat` containing the existing structured-output request.
+- Optional `reasoningEffort`: one of `minimal | low | medium | high | xhigh | max`
+  (added 2026-11-04, ST-4589).  The broker must honour it by passing it to the
+  adapter as that CLI's reasoning-effort setting, and must never substitute the
+  CLI's own default when the field is present.  ST never sends `none` (MiniMax
+  and Muse reject it) and never sends `max` for a model id ending in
+  `-contributor` (Meta: max is "not available" for contributor models); ST clamps
+  that to `xhigh` before sending, and the broker must refuse rather than forward
+  a `max` for a contributor model if one ever arrives.  The field is absent for a
+  model with no documented effort setting (today the retired MiniMax-M3); the broker then
+  sends none.  When enabled, ST always sends it for MiniMax-M3.1-Flash, whose provider
+  default is `max`.  **Off by default:** ST sends this field only when the
+  app environment sets `CODE_CLI_REASONING_EFFORT=true` (or `1`).  Without it
+  the request body is byte-identical to the original v1 contract, so a broker
+  that rejects unknown fields keeps working.  Enable it only after the deployed
+  broker is confirmed to accept and honour `reasoningEffort`; until then the
+  CLI runs at its own default effort (MiniMax-M3.1-Flash: `max`).
 - `capabilities: {tools:false, terminal:false, files:false, mcp:false}`.
 
 ST reconstructs this allowlist instead of forwarding the HTTP body or headers.
 It rejects tool messages, tool declarations, function calls, streaming and
 multimodal contents. Input and response text are limited to 1 MB. Request
-cancellation is forwarded with an independent 60-second cap. The broker must
+cancellation and the caller deadline are forwarded unchanged; a call with no
+signal gets a 150-second bound.  The broker must
 terminate the CLI session and its process group on cancellation or timeout,
 clean up the workspace on every exit, limit request/response bytes while
 streaming, and enforce one in-flight generation per owner across all ST replicas
@@ -121,6 +138,6 @@ exhaustion, adapter crash, timeout/cancellation and workspace cleanup. Verify
 those controls from the broker's actual sandbox, not a self-reported response.
 
 
-## Review hardening (October16)
+## Review hardening (October 16)
 
-The credential-bearing module is marked server-only. Browser reasoning controls use the pure llm-reasoning module, not the HTTP transport. The broker request preserves the caller abort signal; without one it has a150s bound, matching the strategy reasoning allowance rather than truncating at60s. Only the known unavailable broker configuration error is skipped during API-primary fallback planning; other resolution errors propagate. No paid fallback is added to a CLI-primary request.
+The credential-bearing module is marked server-only. Browser reasoning controls use the pure llm-reasoning module, not the HTTP transport. The broker request preserves the caller abort signal; without one it has a 150s bound, matching the strategy reasoning allowance rather than truncating at 60s. Only the known unavailable broker configuration error is skipped during API-primary fallback planning; other resolution errors propagate. No paid fallback is added to a CLI-primary request.

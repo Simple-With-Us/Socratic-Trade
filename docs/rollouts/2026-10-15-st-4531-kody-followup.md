@@ -8,7 +8,7 @@ PR #4696 merged with Kody `CHANGES_REQUESTED` threads still open and `docs/rollo
 
 - `docs/rollouts/2026-10-15-st-4531-retire-slack-callers.md` — remove conflict markers; annotate verification commands; note merge on `main`.
 - `test/github-actions-infisical-zulip-ops.test.ts` — assert Zulip fetch uses `infisical-secrets-safe.sh get` only (rule 49).
-- `test/agent-sync-fleet-post.test.ts` — assert `agent-sync post` flag wiring and path typo guard.
+- `test/ag***-s**c-fleet-post.test.ts` — assert `ag***-s**c post` flag wiring and path typo guard.
 - `STATUS.md` — dedupe ST-4531 snapshot.
 
 ## Decisions & Trade-offs
@@ -36,6 +36,6 @@ The earlier `npm test  # -> ok` annotation was inaccurate and is corrected here.
 - Merged `origin/main` at `e539ec4c` with a merge commit; no textual conflicts.  The PR diff remains five paths, and the rollout file contains no conflict markers.
 - `npm run lint` — passed with 0 errors and 866 warnings.
 - `npx tsc --noEmit` — passed.
-- `npx vitest run test/github-actions-infisical-zulip-ops.test.ts test/agent-sync-fleet-post.test.ts` — passed, 3 tests.
+- `npx vitest run test/github-actions-infisical-zulip-ops.test.ts test/ag***-s**c-fleet-post.test.ts` — passed, 3 tests.
 - `npm run build` — passed.  Next reported existing Edge-runtime dependency warnings and missing `ENCRYPTION_KEY` notices during static generation.
 - `npm ci` — passed; npm reported 9 audit vulnerabilities and withheld 5 dependency install scripts under npm's install-script policy.

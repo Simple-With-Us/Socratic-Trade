@@ -188,7 +188,7 @@ MODE="${DB_BOOTSTRAP:-fresh}"
 # mechanism: the event loop pins for 40-140s chunks during RTH, wedging the
 # server while the process stays alive.)
 # The watchdog below is the missing actor: same /api/live probe, same curl
-# flags as the HEALTHCHECK; after LIVENESS_WATCHDOG_FAILURES consecutive
+# flags as the HEALTHCHECK; after LIVENESS_WATCHDOG_FAILURES accumulated
 # failures it kills the app process so Docker's restart=unless-stopped
 # restarts the container.  The boot autonomy interlock then halts trading (the
 # SAFE direction when the server cannot serve), the boot ledger records the
@@ -236,8 +236,9 @@ LIVENESS_WATCHDOG_LOG="$DATA_DIR/liveness-watchdog.log"
 # Arming discipline: failures are not counted until the server has answered at
 # least once (boot grace) OR the boot grace period expires -- a server that
 # cannot serve /api/live LIVENESS_WATCHDOG_BOOT_GRACE_S after process start is
-# broken, and one success resets the consecutive-failure count so transient
-# stalls (the 40-140s RTH chunks) ride out without a kill.
+# broken. A success only decays the failure count by one (never resets it):
+# repeated 40-140s RTH pins separated by single brief successes must still
+# accumulate toward a kill instead of flapping the watchdog forever.
 liveness_watchdog_loop() {
   local app_pid="$1"
   local failures=0
@@ -247,7 +248,7 @@ liveness_watchdog_loop() {
     sleep "$LIVENESS_WATCHDOG_INTERVAL"
     elapsed=$((elapsed + LIVENESS_WATCHDOG_INTERVAL))
     if curl -fsS --max-time 14 --connect-timeout 2 http://127.0.0.1:4000/api/live >/dev/null 2>&1; then
-      failures=0
+      if [ "$failures" -gt 0 ]; then failures=$((failures - 1)); fi
       armed=1
     else
       if [ "$armed" -eq 0 ] && [ "$elapsed" -lt "$LIVENESS_WATCHDOG_BOOT_GRACE_S" ]; then
@@ -255,9 +256,9 @@ liveness_watchdog_loop() {
       fi
       armed=1
       failures=$((failures + 1))
-      log "liveness watchdog: /api/live probe failed ${failures}/${LIVENESS_WATCHDOG_FAILURES} consecutive"
+      log "liveness watchdog: /api/live probe failed ${failures}/${LIVENESS_WATCHDOG_FAILURES} accumulated"
       if [ "$failures" -ge "$LIVENESS_WATCHDOG_FAILURES" ]; then
-        log "LIVENESS-WATCHDOG: /api/live failed ${failures} consecutive probes - killing app pid ${app_pid} for container restart"
+        log "LIVENESS-WATCHDOG: /api/live failed ${failures} accumulated probes - killing app pid ${app_pid} for container restart"
         printf '%s liveness-watchdog kill pid=%s after %s failed /api/live probes\n' \
           "$(date -u +%FT%TZ)" "$app_pid" "$failures" >> "$LIVENESS_WATCHDOG_LOG" 2>/dev/null || true
         kill -TERM "$app_pid" 2>/dev/null || true

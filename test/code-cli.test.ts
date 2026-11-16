@@ -30,19 +30,20 @@ describe("Code CLI private text-only contract", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it.each([{tools: []}, {functions: []}, {stream: true}, {messages:[{role:"tool",content:"x"}]},
-    {messages:[{role:"user",content:[{type:"image_url"}]}]}, {model:"gpt-5"}])("rejects agent/multimodal or unrelated model input %j", async extra => {
+    {messages:[{role:"user",content:[{type:"image_url"}]}]}, {model:"gpt-5"}, {messages:[]},
+    {messages:[{role:"assistant",content:"x",tool_calls:[{}]}]}, {stream:"yes"}, {max_tokens:"many"}])("rejects agent/multimodal or unrelated model input %j", async extra => {
     configured(); const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
     await expect(fetchCodeCli(codeCliUrl("minimax", owner), request(extra))).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
   });
   it("reconstructs broker payload without provider keys, paths, session IDs or extra fields", async () => {
     configured(); const fetcher = vi.fn().mockResolvedValue(Response.json({version:1,text:"answer",finishReason:"stop"})); vi.stubGlobal("fetch", fetcher);
-    const res = await fetchCodeCli(codeCliUrl("minimax", owner), request({cwd:"/root",sessionId:"reuse-other-user",api_key:"secret",max_tokens:90000}));
+    const res = await fetchCodeCli(codeCliUrl("minimax", owner), request({cwd:"/root",sessionId:"reuse-other-user",api_key:"secret",max_tokens:90000,temperature:0.7,stream:false}));
     const [url, init] = fetcher.mock.calls[0]; expect(url).toBe("https://broker.internal/generate");
     expect(init.redirect).toBe("error"); expect(init.headers.authorization).toBe("Bearer test-broker-token");
     const payload=JSON.parse(init.body); expect(payload.maxOutputTokens).toBe(16000);
     expect(payload.capabilities).toEqual({tools:false,terminal:false,files:false,mcp:false});
-    expect(payload).not.toHaveProperty("cwd"); expect(payload).not.toHaveProperty("sessionId");
+    expect(payload).not.toHaveProperty("cwd"); expect(payload).not.toHaveProperty("sessionId"); expect(payload).not.toHaveProperty("temperature");
     expect(JSON.stringify(init)).not.toContain("API-KEY-MUST-NOT-LEAK"); expect(JSON.stringify(payload)).not.toContain("secret");
     expect((await res.json()).choices[0].message.content).toBe("answer");
   });

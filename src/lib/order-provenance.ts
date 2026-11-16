@@ -82,14 +82,23 @@ function hasTrackedAppOrderIntent(
  * UUID is not enough — the owner UI mints those too.
  */
 export function isAppPlacedBrokerOrder(
-  order: Pick<EquityOrder, "clientOrderId" | "id">,
+  order: Pick<EquityOrder, "clientOrderId" | "id" | "parentClientOrderId">,
   lookup?: AppPlacedLookup
 ): boolean {
   if (isAppMintedClientOrderPrefix(order.clientOrderId)) return true;
   const ref = typeof order.clientOrderId === "string" ? order.clientOrderId.trim() : "";
-  if (!ref || !lookup) return false;
+  if (ref && lookup) {
+    try {
+      if (hasTrackedAppOrderIntent(ref, lookup.userId, lookup.accountNumber, order.id)) return true;
+    } catch {
+      // fall through to parent tag
+    }
+  }
+  const parentRef = typeof order.parentClientOrderId === "string" ? order.parentClientOrderId.trim() : "";
+  if (!parentRef || !lookup) return false;
+  if (isAppMintedClientOrderPrefix(parentRef)) return true;
   try {
-    return hasTrackedAppOrderIntent(ref, lookup.userId, lookup.accountNumber, order.id);
+    return hasTrackedAppOrderIntent(parentRef, lookup.userId, lookup.accountNumber);
   } catch {
     return false;
   }

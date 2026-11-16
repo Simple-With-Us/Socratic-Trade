@@ -69,7 +69,8 @@ run_case() {
   local name="$1" expect_rc="$2"
   shift 2
   rm -f "$STATE_PATH"
-  export STUB_DOCKER_PS_ID= STUB_DOCKER_RESTART_COUNT=0 STUB_DOCKER_STATUS=running STUB_DOCKER_EXIT=0
+  export STUB_DOCKER_PS_ID='' STUB_DOCKER_RESTART_COUNT=0 STUB_DOCKER_STATUS=running STUB_DOCKER_EXIT=0
+  # shellcheck disable=SC2294  # harness runs dynamic per-case stub exports
   eval "$@"
   # Do not enable errexit here. The harness is `set -uo pipefail` only; a leaked
   # `set -e` aborts later cases before the summary line.

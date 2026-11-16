@@ -62,46 +62,71 @@ describe("serving-thread sqlite stalls mapped from 2026-10-05 profiles", () => {
     expect(ticks).toBeGreaterThan(0);
   });
 
-  it("pruneTaskJournal no-op stays under 100ms when a full scan of the same rows does not", async () => {
+  it("pruneTaskJournal is a retention no-op that never deletes an aged row", async () => {
+    // Jay's policy (2026-10-15) keeps task journal rows forever, so
+    // pruneTaskJournal() returns 0 without issuing a DELETE.  This test used
+    // to insert 2,000,000 rows and assert that the no-op stayed under 100ms
+    // while a full unindexed scan of the same rows did not.
+    //
+    // That shape could not fail: a function that returns a constant reads
+    // nothing, so the wall-clock half of the assertion was decided by the
+    // machine and not by the code.  It cost about 60 seconds of inserts to
+    // say so, and the 60s vitest timeout fired on PR #4720 and on PR #4701 —
+    // neither of which has this file in its diff — and again on unrelated
+    // branches whenever the host was loaded.  A required gate reddening on an
+    // unrelated pull request is the failure mode this file has been causing.
+    //
+    // The serving-thread stall of 2026-10-05 that this file was written for
+    // came from the DELETE that the retention policy removed, so the
+    // wall-clock half of the guard has no subject left.  The invariant that
+    // still holds, and can still fail, is that the hook never deletes — not
+    // even a row that the old 24h skipped-row policy would have aged out.
+    // That is what is asserted here, on a thousand aged rows, in
+    // milliseconds.
+    //
+    // The counts are scoped to this test's own rows rather than to the whole
+    // task_journal table.  The suite shares one SQLite database, so a global
+    // COUNT(*) can move under an unrelated writer and fail this guard for a
+    // reason that has nothing to do with the hook.  Both counts are also
+    // bracketed by a control assertion on the aged fixture, so a missing
+    // fixture cannot make them match on an empty table.
+    //
+    // The rest of the guard lives where it belongs: the source-level
+    // no-DELETE check is in test/forever-retention-no-age-delete.test.ts,
+    // the keep-all-rows contract is in test/task-journal.test.ts, and the
+    // scheduler still calling the hook is in
+    // test/scheduler-tick-reentrancy.test.ts.
     const { getDb, pruneTaskJournal } = await import("../src/lib/db");
     const db = getDb();
     const insert = db.prepare(
       "INSERT INTO task_journal (id, task_name, status, started_at) VALUES (?, 'stall-probe', 'skipped', ?)"
     );
-    const recent = new Date().toISOString();
-    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const aged = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     let n = 0;
-    const add = (count: number, startedAt: string) => {
-      db.transaction(() => {
-        for (let i = 0; i < count; i += 1) {
-          insert.run(`stall-${n}`, startedAt);
-          n += 1;
-        }
-      })();
-    };
-    add(3, old);
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const scan = db.prepare(
-      "SELECT COUNT(*) AS c FROM task_journal NOT INDEXED WHERE status = 'skipped' AND started_at < ?"
+    db.transaction(() => {
+      for (let i = 0; i < 1_000; i += 1) {
+        insert.run(`stall-${n}`, aged);
+        n += 1;
+      }
+    })();
+    const countProbeRows = db.prepare(
+      "SELECT COUNT(*) AS c FROM task_journal WHERE task_name = 'stall-probe'"
     );
-    // Fixed row count, one scan.  Stopping at the first sample over 100ms made
-    // a 4x ratio fail (116ms scan, 66ms prune).  Chasing 400ms then exceeded
-    // the 60s test timeout.  Two million recent rows keep the unindexed scan
-    // slow and the indexed prune on the three old rows fast.
-    const targetRows = 2_000_000;
-    while (n < targetRows) {
-      add(50_000, recent);
-    }
-    const scanMs = elapsed(() => {
-      scan.get(cutoff);
-    });
-    expect(scanMs).toBeGreaterThanOrEqual(100);
-    const pruned = { n: 0 };
-    const pruneMs = elapsed(() => {
-      pruned.n = pruneTaskJournal();
-    });
-    expect(pruned.n).toBe(0);
-    expect(pruneMs).toBeLessThan(100);
+    const countAgedProbeRows = db.prepare(
+      "SELECT COUNT(*) AS c FROM task_journal WHERE task_name = 'stall-probe' AND started_at = ?"
+    );
+    const before = countProbeRows.get() as { c: number };
+    const agedBefore = countAgedProbeRows.get(aged) as { c: number };
+    // Control: the fixture this guard reads has to be there.  Without it both
+    // counts could sit at zero, match, and let the guard pass on an empty
+    // table without the hook ever being exercised.
+    expect(before.c).toBeGreaterThanOrEqual(1_000);
+    expect(agedBefore.c).toBeGreaterThanOrEqual(1_000);
+    expect(pruneTaskJournal()).toBe(0);
+    const after = countProbeRows.get() as { c: number };
+    const agedAfter = countAgedProbeRows.get(aged) as { c: number };
+    expect(agedAfter.c).toBe(agedBefore.c);
+    expect(after.c).toBe(before.c);
   });
 
   it("transcript coverage does not read every content blob", async () => {

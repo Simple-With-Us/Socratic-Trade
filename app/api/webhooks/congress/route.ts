@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { audit } from "@/lib/db";
-import { applyCongressEvent, applyCongressEvents, type CongressEvent } from "@/lib/congress-trade-events";
+import { applyCongressEvent, applyCongressEvents } from "@/lib/congress-trade-events";
 import {
   buildCongressPushBatchReceipt,
   buildCongressPushReceipt,
@@ -103,7 +103,7 @@ export async function POST(req: Request) {
       });
       return NextResponse.json(receipt, { status: receipt.consumed ? 200 : 422 });
     }
-    const result = applyCongressEvent(body as CongressEvent);
+    const result = applyCongressEvent(body);
     const receipt = buildCongressPushReceipt(result, resolveCongressEventId(body));
     logApiHealth({
       service: "congress.trade:webhook",

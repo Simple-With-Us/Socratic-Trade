@@ -144,7 +144,7 @@ struct ResultsView: View {
                         .font(.appCaption)
                         .foregroundStyle(pnlColor(dollarExcess))
                     }
-                    Text("Same deposits and withdrawals as this account, applied at each day's cutoff.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
+                    Text("Same deposits and withdrawals as this account, counted from the start of the day they land.  The dashed line is what those dollars would be in \(benchmark.benchmarkSymbol).")
                         .font(.appCaption2)
                         .foregroundStyle(.secondary)
                     if let accountSeries = benchmark.accountEquitySeries,

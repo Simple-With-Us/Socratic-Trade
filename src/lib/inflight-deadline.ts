@@ -41,6 +41,10 @@ export const BROKER_ORDER_PAGE_CAP = 50;
 export const BROKER_ORDER_LIST_CAP = 500;
 /** Symbols per broker quote request.  One unbounded ticker list has been rejected in production. */
 export const BROKER_QUOTE_SYMBOL_CAP = 25;
+/** Parallel empty-universe broker quote chunks (scan recovery). */
+export const BROKER_UNIVERSE_RECOVERY_CONCURRENCY = 4;
+/** Dedicated ceiling inside interactive scan budget — broker fill must not consume the whole 35s lane. */
+export const BROKER_UNIVERSE_RECOVERY_BUDGET_MS = 12_000;
 /**
  * Strategy-run broker snapshot ceiling.  Above the 30s lane deadline so a read that is
  * still inside its own budget can finish, and still short enough that a hung socket

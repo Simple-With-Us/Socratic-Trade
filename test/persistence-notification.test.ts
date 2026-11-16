@@ -339,8 +339,8 @@ describe("persistence and notifications", () => {
       const result = await runStrategyOnce();
       expect(result.status).toBe("failed");
       // gpt-5.5 is a reasoning model, so the strategy call gets the reasoning-class-aware timeout
-      // (150s) rather than the base 60s — the message reports the actual bound that elapsed.
-      expect(result.summary).toContain("Green Team proposal timed out after 150s using OpenRouter gpt-5.5");
+      // (360s) rather than the base 60s — the message reports the actual bound that elapsed.
+      expect(result.summary).toContain("Green Team proposal timed out after 360s using OpenRouter gpt-5.5");
       expect(result.llmSteps).toMatchObject([
         {
           step: "bull",
@@ -664,12 +664,13 @@ describe("persistence and notifications", () => {
       accountNumber: "PA-URL-TEST",
       label: "Custom Alpaca",
       apiKey: "PK-KEY",
-      baseUrl: "https://custom-alpaca-endpoint.com/v2/",
+      apiSecret: "SK-SECRET",
+      baseUrl: "https://paper-api.alpaca.markets/v2/",
       isActive: true
     });
 
     const gateway1 = getAlpacaGateway(userId);
-    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://custom-alpaca-endpoint.com");
+    expect(((gateway1 as any).alpaca).configuration.baseUrl).toBe("https://paper-api.alpaca.markets");
   });
 
   it("does not fall back to generic Alpaca keys for a selected connected account with missing credentials", async () => {

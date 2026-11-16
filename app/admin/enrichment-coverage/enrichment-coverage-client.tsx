@@ -68,6 +68,14 @@ export function EnrichmentCoverageClient() {
           Last cascade run: which data points filled, which source won (or won most often), and which
           fields the free/keyless + RapidAPI + paid cascade still could not provide.
         </p>
+        {report?.retiredLaneFields && report.retiredLaneFields.length > 0 ? (
+          <p
+            className="mt-2 text-[length:var(--con-fs-xs)] text-[color:var(--con-muted)]"
+            data-testid="enrichment-coverage-retired-lanes"
+          >
+            Retired direct-vendor lanes (not scored): {report.retiredLaneFields.join(", ")}.
+          </p>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap items-center gap-3">

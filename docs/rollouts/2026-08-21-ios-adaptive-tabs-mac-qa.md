@@ -36,7 +36,7 @@ Do not redo B/C/D.  Do not change auto-fill (E) or knobs (F).  Do not hand-edit
 project.pbxproj.  Do not mint keys.  Do not TestFlight / HOTFIX / bounce Coolify.
 Do not rebase or force-push anyone else's branch.
 
-Claim on Slack #agent-sync (C0BEZDJDNKV) before you start.  Git email must be
+Claim on Slack #ag***-s**c (C0BEZDJDNKV) before you start.  Git email must be
 12656028+jaywedgeworth22@users.noreply.github.com.
 
 ## 0. Why you, not Cursor

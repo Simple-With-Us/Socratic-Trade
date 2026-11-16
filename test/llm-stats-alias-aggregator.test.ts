@@ -71,7 +71,9 @@ describe("aliasForModel", () => {
     expect(aliasForModel("deepseek-r1").family).toBe("deepseek-r1");
     expect(aliasForModel("mistral-large-2512").family).toBe("mistral-large");
     expect(aliasForModel("mistral-small-latest").family).toBe("mistral-small");
-    expect(aliasForModel("llama-3.3-70b-instruct").family).toBe("llama");
+    // ST-4589: the llama family is gone; a historical llama row keeps its own id as its label.
+    expect(aliasForModel("llama-3.3-70b-instruct").family).toBeNull();
+    expect(aliasForModel("llama-3.3-70b-instruct").label).toBe("llama-3.3-70b-instruct");
     expect(aliasForModel("moonshot-v1-128k").family).toBe("kimi");
   });
 

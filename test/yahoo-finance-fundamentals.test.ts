@@ -68,8 +68,15 @@ describe("yahooFundamentalsFromRecord", () => {
 describe("fetchYahooFinanceQuotesBatch prevClose", () => {
   it("leaves prevClose undefined when regularMarketPreviousClose is omitted — never substitutes price", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response(
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("fc.yahoo.com")) {
+        return new Response("", { status: 200, headers: { "set-cookie": "A3=d=sess; Path=/" } });
+      }
+      if (url.includes("/v1/test/getcrumb")) {
+        return new Response("testcrumb", { status: 200 });
+      }
+      return new Response(
         JSON.stringify({
           quoteResponse: {
             result: [
@@ -80,13 +87,13 @@ describe("fetchYahooFinanceQuotesBatch prevClose", () => {
                 ask: 190.1,
                 regularMarketVolume: 1_000_000,
                 regularMarketTime: 1_723_579_200
-                // deliberately omit regularMarketPreviousClose
               }
             ]
           }
         }),
         { status: 200, headers: { "content-type": "application/json" } }
-      )) as typeof fetch;
+      );
+    }) as typeof fetch;
     try {
       const { fetchYahooFinanceQuotesBatch } = await import("../src/lib/yahoo-finance");
       const result = await fetchYahooFinanceQuotesBatch(["AAPL"]);

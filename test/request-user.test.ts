@@ -26,3 +26,16 @@ describe("resolveRequestUserId (post-auth)", () => {
     expect(resolveRequestUserId(req, { userId: "victim" })).toBe(DEFAULT_REQUEST_USER_ID);
   });
 });
+
+describe("authErrorResponse status mapping (ST-4610)", () => {
+  it("maps tagged session/account-generation errors to their client status and rethrows the rest", async () => {
+    const { authErrorResponse } = await import("../src/lib/request-user");
+    const stale = authErrorResponse(Object.assign(new Error("This session predates account deletion; sign in again."), { status: 401 }));
+    expect(stale?.status).toBe(401);
+    const generation = authErrorResponse(Object.assign(new Error("Authenticated account generation is stale."), { status: 409 }));
+    expect(generation?.status).toBe(409);
+    expect(authErrorResponse(new Error("Session revoked or expired."))?.status).toBe(401);
+    expect(authErrorResponse(new Error("Account identity generation changed during sign-in."))).toBeNull();
+    expect(authErrorResponse(Object.assign(new Error("db down"), { status: 500 }))).toBeNull();
+  });
+});

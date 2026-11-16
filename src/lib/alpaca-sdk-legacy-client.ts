@@ -1,8 +1,52 @@
 import { Alpaca } from "@alpacahq/alpaca-trade-api";
 import type { AlpacaClientOptions } from "@alpacahq/alpaca-trade-api";
+import { z } from "zod";
 import { ALPACA_BROKER_IO_DEADLINE_MS } from "./inflight-deadline";
+import type { AlpacaMarketDataFeed } from "./alpaca-paper-quotes";
 
 type AlpacaInstance = InstanceType<typeof Alpaca>;
+
+export const AlpacaLatestTradeSchema = z.object({
+  p: z.number().optional(),
+  t: z.union([z.string(), z.number(), z.date()]).optional()
+});
+export type AlpacaLatestTrade = z.infer<typeof AlpacaLatestTradeSchema>;
+
+export const AlpacaLatestTradesResponseSchema = z.object({
+  trades: z.record(z.string(), z.unknown()).optional()
+});
+export type AlpacaLatestTradesResponse = z.infer<typeof AlpacaLatestTradesResponseSchema>;
+
+/**
+ * A single `stockLatestQuotes` row.
+ *
+ * NON-STRICT on purpose: Alpaca's quote payload carries vendor fields we do not
+ * model here (`bp`/`ap`/`bs`/`as`, plus anything the vendor adds later) and the
+ * legacy mapper forwards them verbatim.  Validation must never strip or reject
+ * a row because of a field we do not know about — it only pins the fields we DO
+ * read (the observation timestamp `t`).
+ */
+export const AlpacaLatestQuoteSchema = z
+  .object({
+    t: z.union([z.string(), z.number(), z.date()]).optional()
+  })
+  .passthrough();
+export type AlpacaLatestQuote = z.infer<typeof AlpacaLatestQuoteSchema>;
+
+/**
+ * The `stockLatestQuotes` response envelope.  `quotes` is a symbol → row map;
+ * each row is validated individually so one malformed symbol cannot discard a
+ * whole batch.
+ */
+export const AlpacaLatestQuotesResponseSchema = z.object({
+  quotes: z.record(z.string(), z.unknown()).optional()
+});
+export type AlpacaLatestQuotesResponse = z.infer<typeof AlpacaLatestQuotesResponseSchema>;
+
+function alpacaTradeTimestamp(value: AlpacaLatestTrade["t"]): string | number | undefined {
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
 
 /** v3-style constructor options used by {@link AlpacaBrokerGateway}. */
 export type LegacyAlpacaConstructorOptions = {
@@ -33,7 +77,19 @@ export type LegacyAlpacaRestClient = {
     after?: string;
     until?: string;
   }): Promise<Record<string, unknown>[]>;
-  getLatestQuotes(symbols: string[]): Promise<Record<string, Record<string, unknown>>>;
+  /**
+   * `feed` selects the market-data tape.  Omitted → the SDK default (iex).
+   * The connected Alpaca PAPER account passes `delayed_sip` (see
+   * `alpaca-paper-quotes.ts`); every other account omits it.
+   */
+  getLatestQuotes(
+    symbols: string[],
+    options?: { feed?: AlpacaMarketDataFeed }
+  ): Promise<Record<string, Record<string, unknown>>>;
+  getLatestTrades?(
+    symbols: string[],
+    options?: { feed?: AlpacaMarketDataFeed }
+  ): Promise<Record<string, Record<string, unknown>>>;
   getAsset(symbol: string): Promise<Record<string, unknown>>;
   createOrder(options: Record<string, unknown>): Promise<Record<string, unknown>>;
   cancelOrder(orderId: string): Promise<void>;
@@ -159,7 +215,14 @@ type V5AlpacaSdk = {
   };
   marketData: {
     stocks: {
-      stockLatestQuotes: (req: { symbols: string }) => Promise<{ quotes?: Record<string, unknown> }>;
+      stockLatestQuotes: (req: {
+        symbols: string;
+        feed?: AlpacaMarketDataFeed;
+      }) => Promise<{ quotes?: Record<string, unknown> }>;
+      stockLatestTrades: (req: {
+        symbols: string;
+        feed?: AlpacaMarketDataFeed;
+      }) => Promise<{ trades?: Record<string, unknown> }>;
     };
   };
 };
@@ -201,15 +264,48 @@ export function createLegacyAlpacaRestClient(
       });
       return orders.map((o) => toLegacyAlpacaRecord(o));
     },
-    async getLatestQuotes(symbols) {
+    async getLatestQuotes(symbols, options) {
       if (symbols.length === 0) return {};
-      const resp = await stocks.stockLatestQuotes({ symbols: symbols.join(",") });
+      const resp = await stocks.stockLatestQuotes({
+        symbols: symbols.join(","),
+        ...(options?.feed ? { feed: options.feed } : {})
+      });
+      // VALIDATE BEFORE USE.  The raw SDK response is untrusted vendor data:
+      // `resp.quotes` may be missing, null, or not a map at all.  A malformed
+      // envelope yields NO quotes (fail closed) instead of a TypeError or a
+      // half-parsed book.
+      const parsed = AlpacaLatestQuotesResponseSchema.safeParse(resp);
+      if (!parsed.success) return {};
+      const book: AlpacaLatestQuotesResponse = parsed.data;
       const legacy: Record<string, Record<string, unknown>> = {};
-      for (const [sym, quote] of Object.entries(resp.quotes ?? {})) {
-        const q = quote as unknown as Record<string, unknown>;
+      for (const [sym, raw] of Object.entries(book.quotes ?? {})) {
+        const quote = AlpacaLatestQuoteSchema.safeParse(raw);
+        if (!quote.success) continue;
+        const q = quote.data as Record<string, unknown>;
         legacy[sym] = {
           ...q,
           t: q.t instanceof Date ? q.t.toISOString() : q.t
+        };
+      }
+      return legacy;
+    },
+    async getLatestTrades(symbols, options) {
+      if (symbols.length === 0) return {};
+      const resp = await stocks.stockLatestTrades({
+        symbols: symbols.join(","),
+        ...(options?.feed ? { feed: options.feed } : {})
+      });
+      const parsed = AlpacaLatestTradesResponseSchema.safeParse(resp);
+      if (!parsed.success) return {};
+      const book: AlpacaLatestTradesResponse = parsed.data;
+      const legacy: Record<string, Record<string, unknown>> = {};
+      for (const [sym, raw] of Object.entries(book.trades ?? {})) {
+        const trade = AlpacaLatestTradeSchema.safeParse(raw);
+        if (!trade.success) continue;
+        const row: AlpacaLatestTrade = trade.data;
+        legacy[sym] = {
+          p: row.p,
+          t: alpacaTradeTimestamp(row.t)
         };
       }
       return legacy;

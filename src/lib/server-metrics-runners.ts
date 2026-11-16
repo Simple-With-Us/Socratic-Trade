@@ -11,7 +11,7 @@ import type {
  * Congress.Trade, Congress-Trading-Shared and API-Usage-Monitor, which this endpoint has never
  * queried and therefore could neither confirm nor refute.
  */
-export const ACTION_RUNNER_REPO = "jaywedgeworth22/Socratic-Trade";
+export const ACTION_RUNNER_REPO = "Simple-With-Us/Socratic-Trade";
 
 const RUNNER_REQUEST_TIMEOUT_MS = 5_000;
 

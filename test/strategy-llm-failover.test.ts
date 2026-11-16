@@ -354,7 +354,7 @@ it("Code CLI primary never advances to a configured paid API fallback", async ()
   await setup(true);
   const {getPolicy,setPolicy,setUserSetting}=await import("../src/lib/db");
   setUserSetting("local","llm_route_minimax","code-cli");
-  setPolicy({...getPolicy(),llmModel:"minimax-m3",llmFallbackModels:["openrouter/google/gemini-2.5-flash"]});
+  setPolicy({...getPolicy(),llmModel:"minimax-m3.1-flash",llmFallbackModels:["openrouter/google/gemini-2.5-flash"]});
   const paidCalls: string[]=[];let brokerCalls=0;
   vi.stubGlobal("fetch",async(url:string|URL|Request)=>{
     const href=String(url);

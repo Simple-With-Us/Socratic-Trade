@@ -14,9 +14,9 @@
  *  Sub-sections live in sibling modules (delivery/danger/help/sharing/
  *  learning-review / llm-budget) with their fetch helpers in ./lib. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 import type { NotificationEventType } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPES } from "@/lib/types";
 import { NOTIFICATION_EVENT_TYPE_LABELS } from "@/lib/dashboard-ui";
@@ -30,6 +30,7 @@ import { CONSOLE_FONT_OPTIONS, useConsoleFont } from "../lib/useConsoleFont";
 import { CONSOLE_TEXT_BOX_FONT_OPTIONS, useConsoleTextBoxFont } from "../lib/useConsoleTextBoxFont";
 import { useTickerLogoDisplay } from "../lib/useTickerLogoDisplay";
 import type { TickerLogoDisplay } from "@/lib/ticker-logos";
+import { SENTENCE_GAP } from "../lib/format";
 import { useToast } from "../ui/toast";
 import { Card, Chip, Field, RawNumInput, Toggle } from "../ui/primitives";
 import { SaveStatus } from "../ui/save-status";
@@ -56,10 +57,10 @@ const SETTINGS_TOC: ReadonlyArray<{ id: string; label: string }> = [
   { id: "delivery", label: "Delivery" },
   { id: "sharing", label: "Sharing" },
   { id: "legal", label: "Legal" },
-  { id: "learning-review", label: "Learning review" },
-  { id: "llm-budget", label: "AI budget" },
-  { id: "scan-shape", label: "Scan shape" },
-  { id: "data-sources", label: "Data sources" },
+  { id: "learning-review", label: "Learning Review" },
+  { id: "llm-budget", label: "AI Budget" },
+  { id: "scan-shape", label: "Scan Shape" },
+  { id: "data-sources", label: "Data Sources" },
   { id: "confirmation", label: "Confirmation" },
   { id: "boot", label: "Boot" },
   { id: "you", label: "Account" },
@@ -80,12 +81,12 @@ const SECTION_SCROLL_MT = "scroll-mt-36";
  *  production UI. */
 const EVENT_HINT: Record<NotificationEventType, string> = {
   fill: "an order filled",
-  block: "the policy gate blocked an order",
+  block: "a trading rule blocked an order",
   run_failed: "a strategy run failed",
   pending_approval: "a trade is waiting for you",
-  kill_switch: "a circuit breaker fired",
+  kill_switch: "trading stopped on a safety limit",
   price_alert: "a price alert triggered",
-  proposal_withdrawn: "the strategist took an idea back",
+  proposal_withdrawn: "a trade idea was withdrawn",
   limit_order_stale: "a limit order has been working too long",
   provider_degraded: "a data provider is failing",
   liveness_warning: "the trading liveness check degraded",
@@ -117,6 +118,9 @@ const EVENT_HINT: Record<NotificationEventType, string> = {
  *  Sticks under the console topbar (measured) so chips stay reachable while
  *  scrolling; mobile overflow-x scrolls the chip row. No policy writes. */
 function SettingsToc() {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
   // Seed from hash on first client paint so deep links highlight without an effect.
   const [activeId, setActiveId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
@@ -124,6 +128,30 @@ function SettingsToc() {
     return SETTINGS_TOC.some((s) => s.id === hash) ? hash : null;
   });
   const [topOffset, setTopOffset] = useState(0);
+
+  // The chip row hides its scrollbar. The More sections control sits beside
+  // the row, and it stays mounted while the row overflows so the width does
+  // not jump when the user reaches the end. Its -my-1.5 keeps the 44px target
+  // inside the strip the section observer sizes as 48px.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const measure = () => {
+      const extra = el.scrollWidth - el.clientWidth;
+      setOverflows(extra > 2);
+      setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+    };
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      ro?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
 
   // Stick just below the console topbar (RealityBanner + ChromeBar + mobile
   // freshness). Measure live so desktop/mobile chrome heights both work.
@@ -184,25 +212,41 @@ function SettingsToc() {
       className="sticky z-30 -mx-4 border-b border-[color:var(--con-line)] bg-[color:var(--con-bg)]/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-[color:var(--con-bg)]/85 lg:-mx-6 lg:px-6"
       style={{ top: topOffset }}
     >
-      <div className="flex gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {SETTINGS_TOC.map((item) => {
-          const isActive = activeId === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => jump(item.id)}
-              aria-current={isActive ? "true" : undefined}
-              className={`shrink-0 rounded-full border px-2.5 py-1 text-[length:var(--con-fs-xs)] font-semibold transition-colors ${
-                isActive
-                  ? "border-[color:var(--con-accent)] bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
-                  : "border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] text-[color:var(--con-muted)] hover:border-[color:var(--con-accent-border)] hover:text-[color:var(--con-fg)]"
-              }`}
-            >
-              {item.label}
-            </button>
-          );
-        })}
+      <div className="flex items-center gap-1.5">
+        <div
+          ref={scrollerRef}
+          className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {SETTINGS_TOC.map((item) => {
+            const isActive = activeId === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => jump(item.id)}
+                aria-current={isActive ? "true" : undefined}
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-[length:var(--con-fs-xs)] font-semibold transition-colors ${
+                  isActive
+                    ? "border-[color:var(--con-accent)] bg-[color:var(--con-accent-soft)] text-[color:var(--con-accent)]"
+                    : "border-[color:var(--con-line-strong)] bg-[color:var(--con-surface-2)] text-[color:var(--con-muted)] hover:border-[color:var(--con-accent-border)] hover:text-[color:var(--con-fg)]"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+        {overflows ? (
+          <button
+            type="button"
+            className="-my-1.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[color:var(--con-line-strong)] bg-[color:var(--con-surface)] text-[color:var(--con-fg)] shadow-sm disabled:opacity-40"
+            aria-label="More sections"
+            disabled={!canScrollRight}
+            onClick={() => scrollerRef.current?.scrollBy({ left: 160, behavior: "smooth" })}
+          >
+            <ChevronRight size={18} aria-hidden />
+          </button>
+        ) : null}
       </div>
     </nav>
   );
@@ -684,6 +728,43 @@ function BootBehaviorCard() {
 
 // ── You ──────────────────────────────────────────────────────────────────────
 
+function SignOutEverywhereButton() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (
+      !window.confirm(
+        `Sign out everywhere?${SENTENCE_GAP}This ends every active session, including the iOS app.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/auth/sessions/revoke-all", { method: "POST" });
+      if (!res.ok) throw new Error(`Request failed (${res.status}).`);
+      window.location.href = "/login";
+    } catch (err) {
+      toast.push("neg", "Could not sign out everywhere", err instanceof Error ? err.message : undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="con-btn con-btn-outline"
+      disabled={busy}
+      onClick={() => void run()}
+      title="Revoke every server session for this account, then return to sign in."
+    >
+      Sign out everywhere
+    </button>
+  );
+}
+
 function YouCard() {
   const { snapshot } = useConsoleData();
   if (!snapshot?.currentUser) return null;
@@ -706,13 +787,16 @@ function YouCard() {
           </span>
         )}
       </div>
+      <div className="mt-3">
+        <SignOutEverywhereButton />
+      </div>
     </Card>
   );
 }
 
 // ── All accounts: Data sources + per-user feature knobs ──────────────────────
 
-const GROUP_ORDER = ["fmp", "sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
+const GROUP_ORDER = ["sec", "web_sources", "transcripts", "rag", "enrichment"] as const;
 
 /** Decides what a "Data sources" number row's blur should persist, given the
  *  raw text just typed and the row's last committed value. Returns null when

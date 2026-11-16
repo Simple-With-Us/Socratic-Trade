@@ -8,7 +8,7 @@
  *  light and dark themes. Static frame for prefers-reduced-motion. */
 
 import { useEffect, useRef } from "react";
-import { sampleWordmark, buildTickerUnits, drawTicker, WORDMARK_AR, type Wordmark, type TickerUnit } from "./candle-ticker";
+import { sampleWordmark, buildTickerUnits, drawTicker, WORDMARK_AR, type Wordmark, type TickerUnit } from "../../ui/brand/candle-ticker";
 
 let CACHED: { wm: Wordmark; units: TickerUnit[] } | null = null;
 function model() {
